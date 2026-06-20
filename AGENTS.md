@@ -4,6 +4,49 @@
 
 This project is a **new programming language, built from scratch in Rust** — a persistent, reactive runtime with a real type system, deployable to any surface (CLI, web, desktop) as a single binary.
 
+The canonical design lives in `docs/resources/` (positioning, architecture, syntax, implementation plan, cross-reference). The implementation overview is in `ARCHITECTURE.md`. The work tracker is `plans/` (start at `plans/roadmap.md`).
+
+> [!NOTE]
+> **Current milestone: M0 (walking skeleton)** — a tree-walking interpreter for a growing subset of the language. Crate prefix `lang-` and binary name `lang` are placeholders pending the real language name.
+
+## The compilation pipeline (M0)
+
+```
+source ─► lang-lexer ─► tokens ─► lang-parser ─► AST (lang-ast) ─► lang-eval ─► RunResult
+                                   (lang-diagnostics renders every stage's typed Diagnostics)
+```
+
+Each stage is its own crate with explicit input/output types and no hidden shared mutable state, so a change is local to one crate and verifiable by that crate's tests.
+
+## Crate map (M0) — where each change goes
+
+| Crate | What it does (in → out) |
+|---|---|
+| `lang-span` | Spans/source map (shared vocabulary). |
+| `lang-diagnostics` | The one error catalog (`DiagnosticCode`, stable `E0xxx`) + the single `ariadne` renderer. Add a new diagnostic here. |
+| `lang-ast` | AST node types (pure data, every node carries a `Span`) + `SyntaxKind`. Add a new node here. |
+| `lang-lexer` | Source → tokens (`logos`). |
+| `lang-parser` | Tokens → AST (`chumsky`, error recovery). |
+| `lang-eval` | AST → `RunResult` via `trait Backend`. Add evaluation behavior here. |
+| `lang-builtins` | The M0 prelude. |
+| `lang-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`). |
+| `lang-cli` | The `lang` binary (`run`/`repl`/`test`). |
+
+Deferred to later milestones (do **not** stub now): `checker`, `bytecode`, `vm`, `gc`, `runtime`, `server`, `lsp`, `stdlib`, and `salsa` integration.
+
+## The new-feature template (the standard shape of a change)
+
+A language feature is added as a **vertical slice** in this order — see `plans/m0/` for per-feature task files:
+
+1. **Grammar / AST** — token(s) in `lang-lexer`, node(s) in `lang-ast`, production in `lang-parser` (keep surface sugar as its own AST node).
+2. **Checker rule** — n/a in M0 (no type checker yet; arrives in M1).
+3. **Bytecode** — n/a in M0 (tree-walker only; the VM arrives in M1).
+4. **Eval op** — evaluation in `lang-eval`.
+5. **Conformance cases** — `tests/conformance/**.lang` with `// expect:` headers, including negative/error cases.
+6. **Snapshot update** — `insta` snapshots (tokens / AST / rendered diagnostics), reviewed, never blind-accepted.
+
+**The iron rule: every feature or fix lands with a conformance corpus entry.** Prefer vertical-slice tasks ("implement `~` end-to-end") over diffuse refactors — a slice's done-condition is "its conformance cases pass."
+
 ## Naming
 
 - Files: `snake_case.rs`
