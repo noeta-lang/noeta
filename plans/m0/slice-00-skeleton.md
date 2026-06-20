@@ -1,6 +1,6 @@
 # Slice 0 — Skeleton + diagnostics spine + hairline end-to-end + harness
 
-Status: todo
+Status: done
 
 ## Goal
 A hairline-thin but complete pipeline — source → tokens → AST → tree-walk → stdout — runs `echo "hello"`, and the test harness exists.
@@ -10,12 +10,24 @@ A hairline-thin but complete pipeline — source → tokens → AST → tree-wal
 - Out: every language feature beyond `echo "literal"` (later slices).
 
 ## Checklist (vertical slice)
-- [ ] Grammar / AST: string literal, `echo` statement, program node — each carries a `Span`.
-- [ ] Checker rule: n/a (no checker in M0).
-- [ ] Bytecode: n/a (tree-walker only).
-- [ ] Eval op: `TreeWalkBackend` evaluates `echo`, returns `RunResult { stdout, exit_code, diagnostics }`.
-- [ ] Conformance cases: `tests/conformance/hello.lang` (`// expect: stdout "hello"` / `// expect: exit 0`).
-- [ ] Snapshots: token stream + AST for `hello.lang`.
+- [x] Grammar / AST: string literal, `echo` statement, program node — each carries a `Span`.
+- [x] Checker rule: n/a (no checker in M0).
+- [x] Bytecode: n/a (tree-walker only).
+- [x] Eval op: `TreeWalkBackend` evaluates `echo`, returns `RunResult { stdout, exit_code, diagnostics }`.
+- [x] Conformance cases: `tests/conformance/hello.lang` + `tests/conformance/lexer/unterminated_string.lang` (negative case).
+- [x] Snapshots: token stream (`lang-lexer`) + AST (`lang-parser`).
+
+## Outcome
+Workspace bootstrapped (9 crates, strict DAG, `unsafe` forbidden workspace-wide). The
+hairline pipeline runs `echo "hello"` end to end. Harness lands with `// expect:` header
+parsing, JSON/`--file`/`--stage` modes, the `Backend`/`RunResult` differential seam, and a
+`cargo test` corpus gate. 25 tests green; fmt/clippy clean; zero warnings.
+
+Notes for later slices:
+- The parser is hand-written (recursive descent) behind `parse()`, not `chumsky` — a
+  deliberate, reversible choice recorded in `crates/lang-parser/README.md` and `ARCHITECTURE.md`.
+- Conformance `error CODE at L:C` positions are **absolute in the file**, so header
+  comment lines shift line numbers.
 
 ## Notes / traps
 - Diagnostics centralized from the first error; stable `E0xxx`; rendered in one place.

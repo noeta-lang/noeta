@@ -1,0 +1,19 @@
+[package]
+name = "lang-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lang-span = { workspace = true }
+lang-diagnostics = { workspace = true }
+lang-ast = { workspace = true }
+lang-builtins = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+
+[lints]
+workspace = true

@@ -1,0 +1,5 @@
+// A lexing error is reported with a stable code at a precise position.
+// Positions are absolute in the file, so the `echo` here is on line 5.
+// expect: error E0002 at 5:6
+// expect: exit 1
+echo "oops;

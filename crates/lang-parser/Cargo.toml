@@ -1,0 +1,20 @@
+[package]
+name = "lang-parser"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lang-span = { workspace = true }
+lang-diagnostics = { workspace = true }
+lang-ast = { workspace = true }
+lang-lexer = { workspace = true }
+
+[dev-dependencies]
+insta = { workspace = true }
+proptest = { workspace = true }
+
+[lints]
+workspace = true

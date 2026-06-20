@@ -1,0 +1,39 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.0.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/nsrosenqvist/lang"
+rust-version = "1.95"
+
+[workspace.dependencies]
+# Internal crates (path deps; the M0 pipeline DAG)
+lang-span = { path = "crates/lang-span" }
+lang-diagnostics = { path = "crates/lang-diagnostics" }
+lang-ast = { path = "crates/lang-ast" }
+lang-lexer = { path = "crates/lang-lexer" }
+lang-parser = { path = "crates/lang-parser" }
+lang-builtins = { path = "crates/lang-builtins" }
+lang-eval = { path = "crates/lang-eval" }
+lang-conformance = { path = "crates/lang-conformance" }
+
+# External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
+logos = "0.16"
+ariadne = "0.6"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+insta = "1"
+proptest = "1"
+
+[workspace.lints.rust]
+# Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may
+# need it (the M1 `vm` NaN-boxing and `gc`) will override this locally.
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }

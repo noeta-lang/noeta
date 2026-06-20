@@ -1,0 +1,8 @@
+---
+source: crates/lang-parser/src/lib.rs
+assertion_line: 150
+expression: parsed.program.to_pretty_string()
+---
+(program @0..10
+  (echo @0..10
+    (str "hi" @5..9)))

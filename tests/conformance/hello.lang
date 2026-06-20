@@ -1,0 +1,4 @@
+// The canonical walking-skeleton case: the pipeline runs end to end.
+// expect: stdout "hello"
+// expect: exit 0
+echo "hello";
