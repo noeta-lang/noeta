@@ -198,6 +198,18 @@ pub enum Expr {
         name_span: Span,
         span: Span,
     },
+    /// An interpolated string: `"Hello {name}"` becomes a sequence of literal and
+    /// embedded-expression parts. A string with no holes stays a plain [`Expr::Str`].
+    Interp { parts: Vec<StrPart>, span: Span },
+}
+
+/// One part of an interpolated string.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StrPart {
+    /// Literal text (already unescaped).
+    Literal(String),
+    /// An embedded `{expr}` hole.
+    Hole(Expr),
 }
 
 impl Expr {
@@ -215,7 +227,8 @@ impl Expr {
             | Expr::Pipeline { span, .. }
             | Expr::List { span, .. }
             | Expr::Map { span, .. }
-            | Expr::Member { span, .. } => *span,
+            | Expr::Member { span, .. }
+            | Expr::Interp { span, .. } => *span,
         }
     }
 }

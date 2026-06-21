@@ -5,7 +5,7 @@
 //! span regression shows up directly in a snapshot diff. It is also the printer the
 //! parse→print→parse property test (Slice 9) builds on.
 
-use crate::{Expr, FnDecl, ForPattern, Param, Program, Stmt};
+use crate::{Expr, FnDecl, ForPattern, Param, Program, Stmt, StrPart};
 use lang_span::Span;
 
 /// Render an AST node to the canonical pretty form.
@@ -260,6 +260,25 @@ impl Pretty for Expr {
             } => {
                 out.push_str(&format!("(member {name} {}\n", span(*s)));
                 receiver.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Interp { parts, span: s } => {
+                out.push_str(&format!("(interp {}", span(*s)));
+                for part in parts {
+                    out.push('\n');
+                    match part {
+                        StrPart::Literal(text) => {
+                            indent(out, level + 1);
+                            out.push_str(&format!("(lit {text:?})"));
+                        }
+                        StrPart::Hole(expr) => {
+                            indent(out, level + 1);
+                            out.push_str("(hole\n");
+                            expr.pretty(out, level + 2);
+                            out.push(')');
+                        }
+                    }
+                }
                 out.push(')');
             }
         }

@@ -1,0 +1,9 @@
+// String interpolation, with an embedded expression and escaped literal braces.
+// expect: stdout "Hello Niro"
+// expect: stdout "sum is 7"
+// expect: stdout "{not a hole}"
+// expect: exit 0
+name = "Niro";
+echo "Hello {name}";
+echo "sum is {1 + 2 * 3}";
+echo "{{not a hole}}";

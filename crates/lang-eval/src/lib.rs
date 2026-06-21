@@ -12,7 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Program, Stmt, UnaryOp};
+use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Program, Stmt, StrPart, UnaryOp};
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -511,6 +511,16 @@ impl Interpreter {
                     format!("no field `{name}` (method calls need `()`)"),
                 ))
             }
+            Expr::Interp { parts, .. } => {
+                let mut out = String::new();
+                for part in parts {
+                    match part {
+                        StrPart::Literal(text) => out.push_str(text),
+                        StrPart::Hole(expr) => out.push_str(&self.eval_expr(expr)?.display()),
+                    }
+                }
+                Ok(Value::Str(out))
+            }
         }
     }
 
@@ -907,6 +917,25 @@ mod tests {
                 .stdout,
             "120\n"
         );
+    }
+
+    #[test]
+    fn string_interpolation() {
+        assert_eq!(
+            run("name = \"Niro\"; echo \"Hello {name}\";").stdout,
+            "Hello Niro\n"
+        );
+        assert_eq!(run("echo \"sum is {1 + 2 * 3}\";").stdout, "sum is 7\n");
+        assert_eq!(
+            run("id = 1; echo \"Order #{id} ready\";").stdout,
+            "Order #1 ready\n"
+        );
+    }
+
+    #[test]
+    fn interpolation_escapes_and_literal_braces() {
+        assert_eq!(run("echo \"a\\tb\";").stdout, "a\tb\n");
+        assert_eq!(run("echo \"{{literal}}\";").stdout, "{literal}\n");
     }
 
     #[test]

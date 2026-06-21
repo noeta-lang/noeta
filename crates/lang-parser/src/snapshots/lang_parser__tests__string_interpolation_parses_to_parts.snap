@@ -1,0 +1,15 @@
+---
+source: crates/lang-parser/src/lib.rs
+assertion_line: 869
+expression: "pretty(\"echo \\\"Order #{id} by {user.name}\\\";\")"
+---
+(program @0..34
+  (echo @0..34
+    (interp @5..33
+      (lit "Order #")
+      (hole
+        (ident id @14..16))
+      (lit " by ")
+      (hole
+        (member name @22..31
+          (ident user @22..26))))))

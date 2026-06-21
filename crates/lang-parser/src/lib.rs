@@ -9,10 +9,37 @@
 //!
 //! M0 scope grows one vertical slice at a time.
 
-use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt, TypeRef, UnaryOp};
+use lang_ast::{
+    BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt, StrPart, TypeRef, UnaryOp,
+};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
-use lang_lexer::{Token, TokenKind};
-use lang_span::{Source, Span};
+use lang_lexer::{Token, TokenKind, lex};
+use lang_span::{Source, SourceId, Span};
+
+/// Shift a span produced against a substring back to its absolute source position.
+fn shift(span: Span, by: u32) -> Span {
+    Span::new(span.start + by, span.end + by)
+}
+
+/// Find the byte offset of the `}` that closes a hole opened at `start`, tracking brace
+/// depth so nested braces (e.g. a map literal inside the hole) are handled. Returns the
+/// end of the string if unterminated.
+fn find_hole_end(inner: &str, start: usize) -> usize {
+    let mut depth = 1usize;
+    for (offset, c) in inner[start..].char_indices() {
+        match c {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return start + offset;
+                }
+            }
+            _ => {}
+        }
+    }
+    inner.len()
+}
 
 /// The result of parsing: the (possibly partial) AST and any parse diagnostics.
 /// Parsing is error-tolerant: it always returns a tree, recovering past errors.
@@ -493,10 +520,7 @@ impl Parser<'_> {
             }
             TokenKind::StringLit => {
                 self.advance();
-                Some(Expr::Str {
-                    value: self.string_value(token.span),
-                    span: token.span,
-                })
+                Some(self.parse_string_literal(token.span))
             }
             TokenKind::TrueKw => {
                 self.advance();
@@ -593,14 +617,115 @@ impl Parser<'_> {
         self.source.slice(span).to_string()
     }
 
-    /// Strip the surrounding quotes from a string-literal token's source text.
-    /// (No escape processing yet; that arrives with interpolation in Slice 4.)
-    fn string_value(&self, span: Span) -> String {
+    /// Turn a string-literal token into an [`Expr`]: a plain [`Expr::Str`] if it has no
+    /// `{...}` holes, or an [`Expr::Interp`] if it does. Backslash escapes (`\n`, `\t`,
+    /// `\"`, `\\`, `\{`, `\}`) are processed, and `{{`/`}}` produce literal braces.
+    fn parse_string_literal(&mut self, span: Span) -> Expr {
         let raw = self.source.slice(span);
-        raw.strip_prefix('"')
+        // Strip the surrounding quotes; `base` is the absolute offset of the content.
+        let inner = raw
+            .strip_prefix('"')
             .and_then(|r| r.strip_suffix('"'))
-            .unwrap_or(raw)
-            .to_string()
+            .unwrap_or(raw);
+        let base = span.start + 1;
+
+        let mut parts: Vec<StrPart> = Vec::new();
+        let mut literal = String::new();
+        let mut chars = inner.char_indices().peekable();
+
+        while let Some((offset, c)) = chars.next() {
+            match c {
+                '\\' => {
+                    let escaped = match chars.next() {
+                        Some((_, 'n')) => '\n',
+                        Some((_, 't')) => '\t',
+                        Some((_, '"')) => '"',
+                        Some((_, '\\')) => '\\',
+                        Some((_, '{')) => '{',
+                        Some((_, '}')) => '}',
+                        Some((_, other)) => other,
+                        None => '\\',
+                    };
+                    literal.push(escaped);
+                }
+                '{' if chars.peek().map(|(_, c)| *c) == Some('{') => {
+                    chars.next();
+                    literal.push('{');
+                }
+                '}' if chars.peek().map(|(_, c)| *c) == Some('}') => {
+                    chars.next();
+                    literal.push('}');
+                }
+                '{' => {
+                    if !literal.is_empty() {
+                        parts.push(StrPart::Literal(std::mem::take(&mut literal)));
+                    }
+                    // The hole content begins right after this `{`.
+                    let hole_start = offset + 1;
+                    let hole_end = find_hole_end(inner, hole_start);
+                    let hole_text = &inner[hole_start..hole_end];
+                    let expr = self.parse_hole(hole_text, base + hole_start as u32);
+                    parts.push(StrPart::Hole(expr));
+                    // Advance the iterator past the hole (and its closing `}`).
+                    while let Some((i, _)) = chars.peek().copied() {
+                        if i >= hole_end {
+                            break;
+                        }
+                        chars.next();
+                    }
+                    if chars.peek().map(|(i, _)| *i) == Some(hole_end) {
+                        chars.next(); // consume the closing `}`
+                    }
+                }
+                other => literal.push(other),
+            }
+        }
+
+        if parts.is_empty() {
+            return Expr::Str {
+                value: literal,
+                span,
+            };
+        }
+        if !literal.is_empty() {
+            parts.push(StrPart::Literal(literal));
+        }
+        Expr::Interp { parts, span }
+    }
+
+    /// Parse a single interpolation hole's expression. The hole text is lexed and parsed
+    /// with token spans shifted to their absolute position in the source, so diagnostics
+    /// and snapshots point at the real location.
+    fn parse_hole(&mut self, text: &str, abs_offset: u32) -> Expr {
+        let temp = Source::new(SourceId::FIRST, "<interp>", text);
+        let lexed = lex(&temp);
+        let shifted: Vec<Token> = lexed
+            .tokens
+            .iter()
+            .map(|t| Token {
+                kind: t.kind,
+                span: shift(t.span, abs_offset),
+            })
+            .collect();
+        for diag in lexed.diagnostics {
+            let mut diag = diag;
+            diag.span = shift(diag.span, abs_offset);
+            self.diagnostics.push(diag);
+        }
+
+        // Sub-parse against the *main* source so span-based slicing stays valid.
+        let mut sub = Parser {
+            source: self.source,
+            tokens: &shifted,
+            pos: 0,
+            diagnostics: Vec::new(),
+        };
+        let expr = sub.parse_expr().unwrap_or(Expr::Str {
+            value: String::new(),
+            span: Span::empty_at(abs_offset),
+        });
+        self.diagnostics.append(&mut sub.diagnostics);
+        expr
     }
 
     fn int_value(&mut self, span: Span) -> i64 {
@@ -752,6 +877,12 @@ mod tests {
         insta::assert_snapshot!(pretty(
             "for (i, x) in [10, 20].enumerate() { if i == 0 { echo x; } else { echo {\"k\": x}; } }"
         ));
+    }
+
+    #[test]
+    fn string_interpolation_parses_to_parts() {
+        // A hole's inner expression carries absolute source spans.
+        insta::assert_snapshot!(pretty("echo \"Order #{id} by {user.name}\";"));
     }
 
     #[test]

@@ -90,6 +90,7 @@ pub enum SyntaxKind {
     ListExpr,
     MapExpr,
     MemberExpr,
+    InterpExpr,
 }
 
 impl SyntaxKind {
@@ -118,6 +119,7 @@ impl SyntaxKind {
                 | SyntaxKind::ListExpr
                 | SyntaxKind::MapExpr
                 | SyntaxKind::MemberExpr
+                | SyntaxKind::InterpExpr
         )
     }
 }

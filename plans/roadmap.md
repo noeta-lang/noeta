@@ -23,7 +23,7 @@ Each links to its file in `m0/`. Pick the lowest-numbered `todo`.
 | 1 | [Bindings, literals, arithmetic, `~` concat](m0/slice-01-bindings.md) | done |
 | 2 | [Functions, closures, calls, pipeline `\|>`](m0/slice-02-functions.md) | done |
 | 3 | [Control flow + collections](m0/slice-03-control-flow.md) | done |
-| 4 | [String interpolation](m0/slice-04-interpolation.md) | todo |
+| 4 | [String interpolation](m0/slice-04-interpolation.md) | done |
 | 5 | [`match` + enums](m0/slice-05-match-enums.md) | todo |
 | 6 | [Records & classes](m0/slice-06-records-classes.md) | todo |
 | 7 | [`Result`/`Option`/`?`](m0/slice-07-result-option.md) | todo |
