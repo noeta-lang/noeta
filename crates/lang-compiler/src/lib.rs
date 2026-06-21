@@ -1,10 +1,12 @@
 //! The bytecode compiler: AST → [`Module`].
 //!
-//! M1.2 lowers the literal/binding/arithmetic core (M1.0) plus **functions**: `fn`
-//! declarations, calls, arrow closures, the `|>` pipeline, `return`, and the `if`/`else`
-//! statement (needed for recursion). Anything outside the supported subset returns
-//! [`Unsupported`]; the differential harness skips those, so coverage climbs slice by slice
-//! while every compiled program is asserted identical to the M0 tree-walker.
+//! The supported subset grows slice by slice: the literal/binding/arithmetic core (M1.0),
+//! **functions** (`fn` declarations, calls, arrow closures, the `|>` pipeline, `return`, and
+//! `if`/`else` — M1.2), and **collections** (`[...]`/`{...}` literals, `for`-iteration, the
+//! `len`/`map`/`filter`/`sum` builtins, `.count()`/`.enumerate()`, and string interpolation —
+//! M1.3). Anything outside the supported subset returns [`Unsupported`]; the differential
+//! harness skips those, so coverage climbs slice by slice while every compiled program is
+//! asserted identical to the M0 tree-walker.
 //!
 //! ## The two-level scope model
 //!
@@ -28,7 +30,7 @@
 
 use std::collections::HashMap;
 
-use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt};
+use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt, StrPart};
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{BoolSide, Builtin, Chunk, Const, Method, Module, Op, Reg};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
@@ -640,6 +642,30 @@ impl<'m> FnCompiler<'m> {
                     dst,
                     entries: pairs.into_boxed_slice(),
                 });
+            }
+            Expr::Interp { parts, span } => {
+                // Build the string by concatenating each part's display form, mirroring the
+                // tree-walker: literal text verbatim, a `{expr}` hole via its `display`. `~`
+                // concatenation already produces exactly that, so fold the parts with it.
+                let empty = self.add_const(Const::Str(String::new()));
+                self.code.push(Op::LoadConst { dst, k: empty });
+                for part in parts {
+                    let r = self.alloc_reg();
+                    match part {
+                        StrPart::Literal(text) => {
+                            let k = self.add_const(Const::Str(text.clone()));
+                            self.code.push(Op::LoadConst { dst: r, k });
+                        }
+                        StrPart::Hole(expr) => self.expr(expr, r)?,
+                    }
+                    self.code.push(Op::Binary {
+                        op: BinaryOp::Concat,
+                        dst,
+                        a: dst,
+                        b: r,
+                        span: *span,
+                    });
+                }
             }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,

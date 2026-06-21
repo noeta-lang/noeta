@@ -889,6 +889,13 @@ mod tests {
     }
 
     #[test]
+    fn string_interpolation_concatenates_display_forms() {
+        let r = run("name = \"Niro\";\necho \"Hello {name}\";\necho \"sum is {1 + 2 * 3}\";\n");
+        assert_eq!(r.stdout, "Hello Niro\nsum is 7\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn list_literals_display_with_repr() {
         let r = run("echo [1, 2, 3];\necho [\"a\", \"b\"];\necho [];\n");
         assert_eq!(r.stdout, "[1, 2, 3]\n[\"a\", \"b\"]\n[]\n");
