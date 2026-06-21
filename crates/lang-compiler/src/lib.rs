@@ -37,7 +37,9 @@ use lang_ast::{
     BinaryOp, Expr, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program, Stmt, StrPart,
 };
 use lang_builtins::PRELUDE_NAMES;
-use lang_bytecode::{BoolSide, Builtin, Chunk, Const, MethodEntry, Module, Op, Reg};
+use lang_bytecode::{
+    AttributeRecord, BoolSide, Builtin, Chunk, Const, MethodEntry, Module, Op, Reg,
+};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
@@ -75,6 +77,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         destructors: Vec::new(),
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
+        manifest: Vec::new(),
         types: HashMap::new(),
     };
     module.register_types(program);
@@ -95,6 +98,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         destructors: module.destructors,
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
+        manifest: module.manifest,
     })
 }
 
@@ -127,10 +131,22 @@ struct ModuleCompiler {
     destructors: Vec<(String, u32)>,
     comparable_derives: Vec<String>,
     tojson_derives: Vec<String>,
+    manifest: Vec<AttributeRecord>,
     types: HashMap<String, TypeInfo>,
 }
 
 impl ModuleCompiler {
+    /// Record a declaration's `#[...]` data attributes into the build manifest, in source order.
+    fn record_attributes(&mut self, type_name: &str, attrs: &[lang_ast::Attribute]) {
+        for attr in attrs {
+            self.manifest.push(AttributeRecord {
+                type_name: type_name.to_string(),
+                name: attr.name.clone(),
+                args: attr.args.iter().map(|(arg, _)| arg.clone()).collect(),
+            });
+        }
+    }
+
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
@@ -144,6 +160,7 @@ impl ModuleCompiler {
                     if lang_ast::derives_trait(&decl.derives, "ToJson") {
                         self.tojson_derives.push(decl.name.clone());
                     }
+                    self.record_attributes(&decl.name, &decl.attrs);
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Record { fields });
                 }
@@ -179,6 +196,7 @@ impl ModuleCompiler {
                         self.protos.push(Chunk::placeholder());
                         self.destructors.push((decl.name.clone(), proto));
                     }
+                    self.record_attributes(&decl.name, &decl.attrs);
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Class { fields, fns });
                 }
@@ -193,6 +211,7 @@ impl ModuleCompiler {
                             )
                         })
                         .collect();
+                    self.record_attributes(&decl.name, &decl.attrs);
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Enum { variants });
                 }

@@ -2278,6 +2278,28 @@ mod tests {
     }
 
     #[test]
+    fn attribute_manifest_records_decorations() {
+        // `#[...]` data attributes (with identifier args) are collected into the queryable
+        // build manifest, in source order, keyed by the decorated type.
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "#[Entity]\n#[Route(login, post)]\nclass Account {\n  id: int\n  fn new(id: int): Account { return Account { id: id }; }\n}\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        let attrs: Vec<_> = module.attributes_for("Account").collect();
+        assert_eq!(attrs.len(), 2);
+        assert_eq!(attrs[0].name, "Entity");
+        assert!(attrs[0].args.is_empty());
+        assert_eq!(attrs[1].name, "Route");
+        assert_eq!(attrs[1].args, vec!["login".to_string(), "post".to_string()]);
+        // A type with no attributes has no manifest entries.
+        assert_eq!(module.attributes_for("Missing").count(), 0);
+    }
+
+    #[test]
     fn disassembly_of_a_recursive_function_is_stable() {
         let source = Source::new(
             SourceId::FIRST,

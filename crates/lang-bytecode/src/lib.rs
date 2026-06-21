@@ -423,6 +423,19 @@ pub struct MethodEntry {
     pub proto: u32,
 }
 
+/// One `#[Name(args...)]` data attribute attached to a declaration, recorded in the build
+/// manifest. Attributes carry no codegen meaning (code generation is `@derive`) and the runtime
+/// ignores them; tooling queries them through the compiled module (see [`Module::attributes_for`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AttributeRecord {
+    /// The decorated declaration's type name.
+    pub type_name: String,
+    /// The attribute's name (e.g. `Route`).
+    pub name: String,
+    /// The identifier arguments inside the parentheses; empty for a bare `#[Marker]`.
+    pub args: Vec<String>,
+}
+
 /// A compiled module: the prototype table plus the object-model side tables. `protos[0]` is
 /// the top-level program; the rest are functions, closures, and methods, referenced by
 /// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
@@ -443,12 +456,27 @@ pub struct Module {
     /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
     /// synthesizes a structural JSON serializer for `o.to_json()`.
     pub tojson_derives: Vec<String>,
+    /// The attribute manifest: every `#[...]` data attribute attached to a declaration, in source
+    /// order. A build artifact for tooling (the runtime ignores attributes), queryable through the
+    /// compiled module and so through the `bytecode` salsa query.
+    pub manifest: Vec<AttributeRecord>,
 }
 
 impl Module {
     /// The top-level program prototype (always present).
     pub fn main(&self) -> &Chunk {
         &self.protos[0]
+    }
+
+    /// The data attributes (`#[...]`) attached to `type_name`, in source order — the manifest
+    /// query tooling uses to discover, e.g., every type tagged `#[Entity]`.
+    pub fn attributes_for<'a>(
+        &'a self,
+        type_name: &str,
+    ) -> impl Iterator<Item = &'a AttributeRecord> {
+        self.manifest
+            .iter()
+            .filter(move |a| a.type_name == type_name)
     }
 
     /// Render the whole module as stable disassembly: the shape and method tables (when
