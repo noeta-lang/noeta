@@ -1,0 +1,6 @@
+// A `mut` binding can be reassigned.
+// expect: stdout "5"
+// expect: exit 0
+mut total = 0;
+total = total + 5;
+echo total;

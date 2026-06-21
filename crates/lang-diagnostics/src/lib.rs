@@ -25,9 +25,28 @@ pub enum DiagnosticCode {
     UnexpectedEndOfInput,
     /// A name was referenced that does not resolve to anything in scope.
     UnknownName,
+    /// Assignment to an immutable binding (one not declared `mut`).
+    ImmutableAssignment,
+    /// An operator was applied to operand types it does not support.
+    TypeMismatch,
+    /// Integer division or remainder by zero.
+    DivisionByZero,
 }
 
 impl DiagnosticCode {
+    /// Every code, for exhaustive iteration (e.g. validating header references).
+    /// Append new variants here as well as in [`DiagnosticCode::code`].
+    pub const ALL: &'static [DiagnosticCode] = &[
+        DiagnosticCode::UnexpectedCharacter,
+        DiagnosticCode::UnterminatedString,
+        DiagnosticCode::UnexpectedToken,
+        DiagnosticCode::UnexpectedEndOfInput,
+        DiagnosticCode::UnknownName,
+        DiagnosticCode::ImmutableAssignment,
+        DiagnosticCode::TypeMismatch,
+        DiagnosticCode::DivisionByZero,
+    ];
+
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
     /// in rendered output. Keep these assignments append-only and permanent.
     pub fn code(self) -> &'static str {
@@ -37,20 +56,19 @@ impl DiagnosticCode {
             DiagnosticCode::UnexpectedToken => "E0003",
             DiagnosticCode::UnexpectedEndOfInput => "E0004",
             DiagnosticCode::UnknownName => "E0005",
+            DiagnosticCode::ImmutableAssignment => "E0006",
+            DiagnosticCode::TypeMismatch => "E0007",
+            DiagnosticCode::DivisionByZero => "E0008",
         }
     }
 
     /// Parse a wire code (`"E0001"`) back into its variant. Lets the conformance
     /// runner validate that an `// expect: error E0001 ...` header names a real code.
     pub fn from_code(code: &str) -> Option<DiagnosticCode> {
-        const ALL: &[DiagnosticCode] = &[
-            DiagnosticCode::UnexpectedCharacter,
-            DiagnosticCode::UnterminatedString,
-            DiagnosticCode::UnexpectedToken,
-            DiagnosticCode::UnexpectedEndOfInput,
-            DiagnosticCode::UnknownName,
-        ];
-        ALL.iter().copied().find(|c| c.code() == code)
+        DiagnosticCode::ALL
+            .iter()
+            .copied()
+            .find(|c| c.code() == code)
     }
 }
 

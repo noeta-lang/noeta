@@ -4,37 +4,148 @@
 //! spanned [`Token`]s and surfaces lex errors as typed [`Diagnostic`]s through the
 //! central catalog. The parser consumes [`Lexed`]; it never re-lexes.
 //!
-//! M0 scope is tiny (`echo`, string literals, `;`); it grows one slice at a time.
+//! M0 scope grows one vertical slice at a time.
 
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::{Source, Span};
 use logos::Logos;
 
 /// The lexical category of a token. Declarative `logos` definitions keep the lexer
-/// fast and the token set legible. Whitespace is skipped (reserved for the CST later).
+/// fast and the token set legible. `logos` resolves overlaps by longest match (so `==`
+/// beats `=`) and gives literal `#[token]`s priority over regexes (so `mut` is a
+/// keyword, not an identifier). Whitespace and line comments are skipped.
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq)]
 #[logos(skip r"[ \t\r\n]+")]
-// whitespace
 // Line comments (the conformance `// expect:` headers are these). `allow_greedy`
 // acknowledges the `[^\n]*` tail; it stops at the newline, so it is bounded per line.
 #[logos(skip(r"//[^\n]*", allow_greedy = true))]
 pub enum TokenKind {
+    // Keywords
     #[token("echo")]
     EchoKw,
-    #[token(";")]
-    Semicolon,
+    #[token("mut")]
+    MutKw,
+    #[token("true")]
+    TrueKw,
+    #[token("false")]
+    FalseKw,
+
+    // Literals and names
     /// A double-quoted string literal, quotes included. No escapes yet (Slice 4).
     #[regex(r#""[^"]*""#)]
     StringLit,
+    #[regex(r"[0-9]+\.[0-9]+")]
+    FloatLit,
+    #[regex(r"[0-9]+")]
+    IntLit,
+    #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
+    Ident,
+
+    // Punctuation and operators
+    #[token(";")]
+    Semicolon,
+    #[token("(")]
+    LParen,
+    #[token(")")]
+    RParen,
+    #[token("==")]
+    EqEq,
+    #[token("!=")]
+    NotEq,
+    #[token("<=")]
+    LtEq,
+    #[token(">=")]
+    GtEq,
+    #[token("&&")]
+    AmpAmp,
+    #[token("||")]
+    PipePipe,
+    #[token("=")]
+    Eq,
+    #[token("<")]
+    Lt,
+    #[token(">")]
+    Gt,
+    #[token("+")]
+    Plus,
+    #[token("-")]
+    Minus,
+    #[token("*")]
+    Star,
+    #[token("/")]
+    Slash,
+    #[token("%")]
+    Percent,
+    #[token("~")]
+    Tilde,
+    #[token("!")]
+    Bang,
 }
 
 impl TokenKind {
-    /// A short, stable label used in token-stream snapshots and diagnostics.
+    /// A short, stable symbolic name used in token-stream snapshots.
     pub fn label(self) -> &'static str {
         match self {
             TokenKind::EchoKw => "EchoKw",
-            TokenKind::Semicolon => "Semicolon",
+            TokenKind::MutKw => "MutKw",
+            TokenKind::TrueKw => "TrueKw",
+            TokenKind::FalseKw => "FalseKw",
             TokenKind::StringLit => "StringLit",
+            TokenKind::FloatLit => "FloatLit",
+            TokenKind::IntLit => "IntLit",
+            TokenKind::Ident => "Ident",
+            TokenKind::Semicolon => "Semicolon",
+            TokenKind::LParen => "LParen",
+            TokenKind::RParen => "RParen",
+            TokenKind::EqEq => "EqEq",
+            TokenKind::NotEq => "NotEq",
+            TokenKind::LtEq => "LtEq",
+            TokenKind::GtEq => "GtEq",
+            TokenKind::AmpAmp => "AmpAmp",
+            TokenKind::PipePipe => "PipePipe",
+            TokenKind::Eq => "Eq",
+            TokenKind::Lt => "Lt",
+            TokenKind::Gt => "Gt",
+            TokenKind::Plus => "Plus",
+            TokenKind::Minus => "Minus",
+            TokenKind::Star => "Star",
+            TokenKind::Slash => "Slash",
+            TokenKind::Percent => "Percent",
+            TokenKind::Tilde => "Tilde",
+            TokenKind::Bang => "Bang",
+        }
+    }
+
+    /// A human-facing form used in diagnostics ("expected `;`, found ...").
+    pub fn describe(self) -> &'static str {
+        match self {
+            TokenKind::EchoKw => "`echo`",
+            TokenKind::MutKw => "`mut`",
+            TokenKind::TrueKw => "`true`",
+            TokenKind::FalseKw => "`false`",
+            TokenKind::StringLit => "a string literal",
+            TokenKind::FloatLit => "a float literal",
+            TokenKind::IntLit => "an integer literal",
+            TokenKind::Ident => "an identifier",
+            TokenKind::Semicolon => "`;`",
+            TokenKind::LParen => "`(`",
+            TokenKind::RParen => "`)`",
+            TokenKind::EqEq => "`==`",
+            TokenKind::NotEq => "`!=`",
+            TokenKind::LtEq => "`<=`",
+            TokenKind::GtEq => "`>=`",
+            TokenKind::AmpAmp => "`&&`",
+            TokenKind::PipePipe => "`||`",
+            TokenKind::Eq => "`=`",
+            TokenKind::Lt => "`<`",
+            TokenKind::Gt => "`>`",
+            TokenKind::Plus => "`+`",
+            TokenKind::Minus => "`-`",
+            TokenKind::Star => "`*`",
+            TokenKind::Slash => "`/`",
+            TokenKind::Percent => "`%`",
+            TokenKind::Tilde => "`~`",
+            TokenKind::Bang => "`!`",
         }
     }
 }

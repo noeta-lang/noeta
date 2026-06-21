@@ -301,6 +301,8 @@ dependencies = [
  "lang-ast",
  "lang-builtins",
  "lang-diagnostics",
+ "lang-lexer",
+ "lang-parser",
  "lang-span",
 ]
 

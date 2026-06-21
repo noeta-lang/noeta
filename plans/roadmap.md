@@ -20,7 +20,7 @@ Each links to its file in `m0/`. Pick the lowest-numbered `todo`.
 | # | Slice | Status |
 |---|---|---|
 | 0 | [Skeleton + diagnostics spine + hairline end-to-end + harness](m0/slice-00-skeleton.md) | done |
-| 1 | [Bindings, literals, arithmetic, `~` concat](m0/slice-01-bindings.md) | todo |
+| 1 | [Bindings, literals, arithmetic, `~` concat](m0/slice-01-bindings.md) | done |
 | 2 | [Functions, closures, calls, pipeline `\|>`](m0/slice-02-functions.md) | todo |
 | 3 | [Control flow + collections](m0/slice-03-control-flow.md) | todo |
 | 4 | [String interpolation](m0/slice-04-interpolation.md) | todo |

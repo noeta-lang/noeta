@@ -1,0 +1,6 @@
+// Comparison and short-circuiting logical operators.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+echo 1 < 2 && 3 >= 3;
+echo !true || 2 == 1;

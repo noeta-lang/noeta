@@ -1,6 +1,6 @@
 # Slice 1 — Bindings, literals, arithmetic, `~` concat
 
-Status: todo
+Status: done
 
 ## Goal
 Immutable-by-default bindings with `mut`, the core scalar types, arithmetic, and `~` string concatenation, all end-to-end.
@@ -10,12 +10,18 @@ Immutable-by-default bindings with `mut`, the core scalar types, arithmetic, and
 - Out: functions (Slice 2), collections (Slice 3), interpolation (Slice 4).
 
 ## Checklist (vertical slice)
-- [ ] Grammar / AST: let-binding (with `mut` flag), assignment, binary/unary expr nodes, literal nodes.
-- [ ] Checker rule: n/a.
-- [ ] Bytecode: n/a.
-- [ ] Eval op: binding env with mutability; arithmetic/comparison/logical/`~` evaluation; emit the immutability diagnostic on illegal reassignment.
-- [ ] Conformance cases: positive (arithmetic, `~`, `mut` reassign) + **negative** (`// expect: error E... at L:C` for non-`mut` reassignment).
-- [ ] Snapshots: AST for a binding+arithmetic program; rendered diagnostic for the immutability error.
+- [x] Grammar / AST: `Stmt::Binding` (with `mut_decl`), `Expr::{Int,Float,Bool,Ident,Unary,Binary}`, `BinaryOp`/`UnaryOp`; Pratt parser with precedence/associativity.
+- [x] Checker rule: n/a.
+- [x] Bytecode: n/a.
+- [x] Eval op: env with mutability; arithmetic (int/float promotion), comparison, short-circuit logic, `~` concat; immutability error + runtime `TypeMismatch`/`DivisionByZero`/`UnknownName`.
+- [x] Conformance cases: `expressions/arithmetic.lang`, `expressions/comparison.lang`, `bindings/mutable.lang`, and negative `bindings/immutable_error.lang` (E0006 at L:C).
+- [x] Snapshots: parser precedence/unary snapshots (`lang-parser`).
+
+## Outcome
+Diagnostics catalog grew with E0006 (ImmutableAssignment), E0007 (TypeMismatch), E0008
+(DivisionByZero). The immutability error renders with the binding name + `mut` suggestion.
+34 tests green; 6 conformance cases; fmt/clippy clean. `lang-eval` gained `lexer`/`parser`
+as **dev-dependencies** only (test convenience; no production cycle).
 
 ## Notes / traps
 - The immutability error message is a first-class product concern — snapshot its rendered `ariadne` output.

@@ -4,7 +4,7 @@
 //! M2 LSP and formatter) is not built yet. Defining it now keeps the parser's
 //! concrete-syntax decisions recoverable rather than discarded. The `rowan::Language`
 //! impl that binds this to a green tree is added when the CST lands; until then this
-//! is just a stable, exhaustive enum that grows alongside the grammar.
+//! is a stable, exhaustive enum that grows alongside the grammar.
 
 /// Every distinct token and node kind. `#[repr(u16)]` so it can later be the raw
 /// kind of a `rowan` green node with no conversion layer.
@@ -12,39 +12,68 @@
 #[repr(u16)]
 #[non_exhaustive]
 pub enum SyntaxKind {
-    // --- Tokens ---
-    /// `echo` keyword.
+    // --- Keyword tokens ---
     EchoKw,
-    /// A string literal, including its quotes.
+    MutKw,
+    TrueKw,
+    FalseKw,
+
+    // --- Literal / name tokens ---
     StringLit,
-    /// `;`
+    IntLit,
+    FloatLit,
+    Ident,
+
+    // --- Punctuation / operator tokens ---
     Semicolon,
-    /// Inter-token whitespace (skipped by the lexer; reserved for the CST).
+    Eq,
+    EqEq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    Plus,
+    Minus,
+    Star,
+    Slash,
+    Percent,
+    Tilde,
+    AmpAmp,
+    PipePipe,
+    Bang,
+    LParen,
+    RParen,
+
+    // --- Trivia / sentinels ---
     Whitespace,
-    /// A run of characters the lexer could not tokenize.
+    Comment,
     Error,
-    /// End of input.
     Eof,
 
     // --- Nodes ---
-    /// The root node.
     Program,
-    /// An `echo` statement.
     EchoStmt,
-    /// A string-literal expression.
-    StringExpr,
+    BindingStmt,
+    LiteralExpr,
+    IdentExpr,
+    UnaryExpr,
+    BinaryExpr,
+    ParenExpr,
 }
 
 impl SyntaxKind {
     pub fn is_token(self) -> bool {
-        matches!(
+        !matches!(
             self,
-            SyntaxKind::EchoKw
-                | SyntaxKind::StringLit
-                | SyntaxKind::Semicolon
-                | SyntaxKind::Whitespace
-                | SyntaxKind::Error
-                | SyntaxKind::Eof
+            SyntaxKind::Program
+                | SyntaxKind::EchoStmt
+                | SyntaxKind::BindingStmt
+                | SyntaxKind::LiteralExpr
+                | SyntaxKind::IdentExpr
+                | SyntaxKind::UnaryExpr
+                | SyntaxKind::BinaryExpr
+                | SyntaxKind::ParenExpr
         )
     }
 }

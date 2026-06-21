@@ -1,0 +1,6 @@
+// Arithmetic precedence and `~` concatenation.
+// expect: stdout "7"
+// expect: stdout "users/42/profile"
+// expect: exit 0
+echo 1 + 2 * 3;
+echo "users/" ~ 42 ~ "/profile";

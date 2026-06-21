@@ -50,16 +50,62 @@ impl Pretty for Stmt {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Stmt::Binding {
+                mut_decl,
+                name,
+                value,
+                span: s,
+                ..
+            } => {
+                indent(out, level);
+                let kw = if *mut_decl { "binding-mut" } else { "binding" };
+                out.push_str(&format!("({kw} {name} {}\n", span(*s)));
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
         }
     }
 }
 
 impl Pretty for Expr {
     fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
         match self {
             Expr::Str { value, span: s } => {
-                indent(out, level);
                 out.push_str(&format!("(str {:?} {})", value, span(*s)));
+            }
+            Expr::Int { value, span: s } => {
+                out.push_str(&format!("(int {value} {})", span(*s)));
+            }
+            Expr::Float { value, span: s } => {
+                out.push_str(&format!("(float {value} {})", span(*s)));
+            }
+            Expr::Bool { value, span: s } => {
+                out.push_str(&format!("(bool {value} {})", span(*s)));
+            }
+            Expr::Ident { name, span: s } => {
+                out.push_str(&format!("(ident {name} {})", span(*s)));
+            }
+            Expr::Unary {
+                op,
+                operand,
+                span: s,
+            } => {
+                out.push_str(&format!("(unary {:?} {}\n", op.symbol(), span(*s)));
+                operand.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Binary {
+                op,
+                lhs,
+                rhs,
+                span: s,
+            } => {
+                out.push_str(&format!("(binary {:?} {}\n", op.symbol(), span(*s)));
+                lhs.pretty(out, level + 1);
+                out.push('\n');
+                rhs.pretty(out, level + 1);
+                out.push(')');
             }
         }
     }

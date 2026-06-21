@@ -13,6 +13,10 @@ lang-ast = { workspace = true }
 lang-builtins = { workspace = true }
 
 [dev-dependencies]
+# Front-end crates, for end-to-end convenience in unit tests only (no production
+# dependency — the lexer/parser do not depend on the evaluator).
+lang-lexer = { workspace = true }
+lang-parser = { workspace = true }
 insta = { workspace = true }
 
 [lints]
