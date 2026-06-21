@@ -24,9 +24,11 @@ use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId};
 
+mod differential;
 mod expectation;
 mod report;
 
+pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
 pub use report::{CaseResult, CaseStatus, Report};
 
@@ -198,7 +200,7 @@ pub fn run_corpus(root: &std::path::Path, only: Option<&std::path::Path>, stage:
     report
 }
 
-fn collect_lang_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+pub(crate) fn collect_lang_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };

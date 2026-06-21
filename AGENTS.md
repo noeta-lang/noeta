@@ -9,12 +9,16 @@ The canonical design lives in `docs/resources/` (positioning, architecture, synt
 > [!NOTE]
 > **Current milestone: M1 (real language core)** — replacing the tree-walker with a register-based bytecode VM over NaN-boxed values, a shape-based object model, refcount+cycle GC, and a salsa-based type checker. M0 (the tree-walking interpreter) is complete and **retained as the differential oracle** (`TreeWalkBackend`), against which the new `VmBackend` is asserted identical. See `plans/roadmap.md` for the M1 slice sequence. Crate prefix `lang-` and binary name `lang` are placeholders pending the real language name.
 
-## The compilation pipeline (M0)
+## The compilation pipeline
 
 ```
-source ─► lang-lexer ─► tokens ─► lang-parser ─► AST (lang-ast) ─► lang-eval ─► RunResult
+                                                  ┌─► lang-eval ─────────────► RunResult   (M0 tree-walker, the oracle)
+source ─► lang-lexer ─► tokens ─► lang-parser ─► AST (lang-ast) ─┤
+                                                  └─► lang-compiler ─► Chunk ─► lang-vm ─► RunResult   (M1 VM)
                                    (lang-diagnostics renders every stage's typed Diagnostics)
 ```
+
+Both backends implement `lang-backend::Backend`. The conformance harness runs a program through both and asserts identical `RunResult`s — the **differential oracle** (`lang test --differential`). The tree-walker is frozen as the reference; the VM must reproduce it. While the VM compiles only a growing subset, programs it can't lower yet are *skipped* (a climbing coverage %), never failed.
 
 Each stage is its own crate with explicit input/output types and no hidden shared mutable state, so a change is local to one crate and verifiable by that crate's tests.
 
@@ -27,12 +31,18 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `lang-ast` | AST node types (pure data, every node carries a `Span`) + `SyntaxKind`. Add a new node here. |
 | `lang-lexer` | Source → tokens (`logos`). |
 | `lang-parser` | Tokens → AST (`chumsky`, error recovery). |
-| `lang-eval` | AST → `RunResult` via `trait Backend`. Add evaluation behavior here. |
-| `lang-builtins` | The M0 prelude. |
-| `lang-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`). |
+| `lang-backend` | The `Backend` trait + `RunResult` — the seam both runtimes implement. |
+| `lang-eval` | AST → `RunResult` (M0 tree-walker, retained as the **differential oracle**). |
+| `lang-value` | The M1 NaN-boxed `Value` + operator semantics. **The one crate with `unsafe`** (miri-gated). |
+| `lang-gc` | Refcount/`__destruct` GC policy over `lang-value`. |
+| `lang-bytecode` | The register IR: `Op`, `Chunk`, disassembler (pure data). |
+| `lang-compiler` | AST → `Chunk` (returns `Unsupported` outside the VM's current subset). |
+| `lang-vm` | `Chunk` → `RunResult` (M1 register VM, `VmBackend`). Add VM behavior here. |
+| `lang-builtins` | The prelude. |
+| `lang-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`, `--differential`). |
 | `lang-cli` | The `lang` binary (`run`/`repl`/`test`). |
 
-Deferred to later milestones (do **not** stub now): `checker`, `bytecode`, `vm`, `gc`, `runtime`, `server`, `lsp`, `stdlib`, and `salsa` integration.
+In progress (M1, see `plans/m1/`): the type checker (`lang-check`/`lang-types`), the salsa query graph (`lang-db`), and the layered stdlib (`lang-stdlib`). Deferred to later milestones (do **not** stub now): `runtime`, `server`, `lsp`.
 
 ## The new-feature template (the standard shape of a change)
 

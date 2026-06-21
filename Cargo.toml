@@ -10,14 +10,21 @@ repository = "https://github.com/nsrosenqvist/lang"
 rust-version = "1.95"
 
 [workspace.dependencies]
-# Internal crates (path deps; the M0 pipeline DAG)
+# Internal crates (path deps; the pipeline DAG)
 lang-span = { path = "crates/lang-span" }
 lang-diagnostics = { path = "crates/lang-diagnostics" }
 lang-ast = { path = "crates/lang-ast" }
 lang-lexer = { path = "crates/lang-lexer" }
 lang-parser = { path = "crates/lang-parser" }
 lang-builtins = { path = "crates/lang-builtins" }
+lang-backend = { path = "crates/lang-backend" }
 lang-eval = { path = "crates/lang-eval" }
+# M1 runtime crates (NaN-boxed values → register bytecode VM)
+lang-value = { path = "crates/lang-value" }
+lang-gc = { path = "crates/lang-gc" }
+lang-bytecode = { path = "crates/lang-bytecode" }
+lang-compiler = { path = "crates/lang-compiler" }
+lang-vm = { path = "crates/lang-vm" }
 lang-conformance = { path = "crates/lang-conformance" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)

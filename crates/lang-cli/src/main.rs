@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use lang_conformance::{Stage, run_corpus};
+use lang_conformance::{Stage, run_corpus, run_differential};
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Backend, Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::lex;
@@ -44,6 +44,11 @@ enum Command {
         /// Run only through this pipeline stage: `lexer`, `parser`, or `eval`.
         #[arg(long, value_name = "STAGE")]
         stage: Option<String>,
+        /// Cross-check the M1 bytecode VM against the M0 tree-walker (the differential
+        /// oracle) instead of running expectations. Programs the VM cannot compile yet are
+        /// skipped; any divergence on a compiled program fails.
+        #[arg(long)]
+        differential: bool,
         /// The corpus root directory.
         #[arg(long, default_value = "tests/conformance")]
         dir: PathBuf,
@@ -58,8 +63,15 @@ fn main() -> ExitCode {
             json,
             file,
             stage,
+            differential,
             dir,
-        } => cmd_test(json, file.as_deref(), stage.as_deref(), &dir),
+        } => {
+            if differential {
+                cmd_differential(file.as_deref(), &dir)
+            } else {
+                cmd_test(json, file.as_deref(), stage.as_deref(), &dir)
+            }
+        }
     }
 }
 
@@ -235,6 +247,19 @@ fn cmd_test(
     }
 
     if report.all_passed() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Run the differential oracle over the corpus: the M1 VM cross-checked against the M0
+/// tree-walker. Exits non-zero only on a genuine divergence (skipped/unsupported programs
+/// do not fail).
+fn cmd_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
+    let report = run_differential(dir, file);
+    print!("{}", report.to_human());
+    if report.ok() {
         ExitCode::SUCCESS
     } else {
         ExitCode::FAILURE

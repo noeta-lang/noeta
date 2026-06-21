@@ -1,0 +1,23 @@
+[package]
+name = "lang-value"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lang-ast = { workspace = true }
+lang-diagnostics = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+# This crate deliberately does NOT inherit the workspace lint table: it is one of the
+# few crates allowed `unsafe` (the NaN-box pointer round-trip and heap-header access).
+# It re-states the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

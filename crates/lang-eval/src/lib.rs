@@ -24,28 +24,10 @@ mod ops;
 mod value;
 pub use value::Value;
 
-/// The observable outcome of running a program: everything it wrote to stdout, its
-/// process exit code, and any runtime diagnostics it produced. This is the unit the
-/// conformance harness compares and the unit two backends are checked to agree on.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RunResult {
-    pub stdout: String,
-    pub exit_code: i32,
-    pub diagnostics: Vec<Diagnostic>,
-}
-
-impl RunResult {
-    /// Whether the run produced no error-severity diagnostics.
-    pub fn is_ok(&self) -> bool {
-        self.exit_code == 0
-    }
-}
-
-/// An execution backend. M0 ships exactly one (`TreeWalkBackend`); M1 adds the
-/// bytecode VM as a second, and they are cross-checked against this contract.
-pub trait Backend {
-    fn run(&self, program: &Program) -> RunResult;
-}
+// The `Backend`/`RunResult` seam moved into its own crate in M1 so the tree-walker and the
+// bytecode VM are siblings (neither depends on the other). Re-exported here so existing
+// `lang_eval::{Backend, RunResult}` users keep working.
+pub use lang_backend::{Backend, RunResult};
 
 /// The default seed for the deterministic id source, so output is reproducible.
 const DEFAULT_SEED: u64 = 1;

@@ -1,5 +1,5 @@
 [package]
-name = "lang-eval"
+name = "lang-vm"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -7,19 +7,19 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
-lang-span = { workspace = true }
-lang-diagnostics = { workspace = true }
 lang-ast = { workspace = true }
-lang-builtins = { workspace = true }
+lang-diagnostics = { workspace = true }
 lang-backend = { workspace = true }
+lang-bytecode = { workspace = true }
+lang-compiler = { workspace = true }
+lang-value = { workspace = true }
+lang-gc = { workspace = true }
 
 [dev-dependencies]
-# Front-end crates, for end-to-end convenience in unit tests only (no production
-# dependency — the lexer/parser do not depend on the evaluator).
 lang-lexer = { workspace = true }
 lang-parser = { workspace = true }
+lang-span = { workspace = true }
 insta = { workspace = true }
-proptest = { workspace = true }
 
 [lints]
 workspace = true

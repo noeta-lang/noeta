@@ -359,10 +359,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "lang-backend"
+version = "0.0.0"
+dependencies = [
+ "lang-ast",
+ "lang-diagnostics",
+]
+
+[[package]]
 name = "lang-builtins"
 version = "0.0.0"
 dependencies = [
  "lang-ast",
+ "lang-span",
+]
+
+[[package]]
+name = "lang-bytecode"
+version = "0.0.0"
+dependencies = [
+ "lang-ast",
+ "lang-diagnostics",
  "lang-span",
 ]
 
@@ -383,15 +400,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "lang-compiler"
+version = "0.0.0"
+dependencies = [
+ "lang-ast",
+ "lang-builtins",
+ "lang-bytecode",
+ "lang-diagnostics",
+ "lang-span",
+]
+
+[[package]]
 name = "lang-conformance"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lang-backend",
  "lang-diagnostics",
  "lang-eval",
  "lang-lexer",
  "lang-parser",
  "lang-span",
+ "lang-vm",
  "serde",
  "serde_json",
 ]
@@ -411,12 +441,20 @@ version = "0.0.0"
 dependencies = [
  "insta",
  "lang-ast",
+ "lang-backend",
  "lang-builtins",
  "lang-diagnostics",
  "lang-lexer",
  "lang-parser",
  "lang-span",
  "proptest",
+]
+
+[[package]]
+name = "lang-gc"
+version = "0.0.0"
+dependencies = [
+ "lang-value",
 ]
 
 [[package]]
@@ -447,6 +485,32 @@ name = "lang-span"
 version = "0.0.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "lang-value"
+version = "0.0.0"
+dependencies = [
+ "lang-ast",
+ "lang-diagnostics",
+ "proptest",
+]
+
+[[package]]
+name = "lang-vm"
+version = "0.0.0"
+dependencies = [
+ "insta",
+ "lang-ast",
+ "lang-backend",
+ "lang-bytecode",
+ "lang-compiler",
+ "lang-diagnostics",
+ "lang-gc",
+ "lang-lexer",
+ "lang-parser",
+ "lang-span",
+ "lang-value",
 ]
 
 [[package]]

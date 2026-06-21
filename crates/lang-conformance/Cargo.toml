@@ -11,7 +11,9 @@ lang-span = { workspace = true }
 lang-diagnostics = { workspace = true }
 lang-lexer = { workspace = true }
 lang-parser = { workspace = true }
+lang-backend = { workspace = true }
 lang-eval = { workspace = true }
+lang-vm = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

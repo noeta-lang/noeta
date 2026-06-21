@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use lang_conformance::{Stage, run_corpus};
+use lang_conformance::{Stage, run_corpus, run_differential};
 
 fn corpus_root() -> PathBuf {
     // crates/lang-conformance → workspace root → tests/conformance
@@ -43,6 +43,28 @@ fn conformance_corpus_passes() {
     assert!(
         report.all_passed(),
         "conformance failures:\n{}",
+        report.to_human()
+    );
+}
+
+#[test]
+fn differential_backends_agree() {
+    // The differential oracle: every program the M1 VM can compile must produce a byte-for-
+    // byte identical `RunResult` to the M0 tree-walker. Programs outside the VM's current
+    // subset are skipped (not failed); this is the climbing coverage gate for Thrust A.
+    let report = run_differential(&corpus_root(), None);
+    // Print coverage so the agent loop can watch it climb slice by slice.
+    eprintln!("{}", report.to_human());
+    assert!(
+        report.ok(),
+        "the VM diverged from the tree-walker:\n{}",
+        report.to_human()
+    );
+    // M1.0 establishes the spine on the smallest subset; later slices raise this floor until
+    // it reaches 100%. Guard against an accidental coverage collapse.
+    assert!(
+        report.supported() >= 5,
+        "expected the VM to compile at least the M1.0 subset, got:\n{}",
         report.to_human()
     );
 }
