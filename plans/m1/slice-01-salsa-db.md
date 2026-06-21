@@ -2,6 +2,8 @@
 
 Status: todo
 
+> **Sequencing note (M1.0 retro):** the VM compile path is a single `compile(program)` call, so wrapping it in a salsa query later is ~one line of rework — the "avoid re-threading" risk this slice front-loads is cheap to satisfy just-in-time. To keep momentum on oracle-verified coverage (and avoid pulling in a heavyweight dependency for zero behavior change), this plumbing is **deferred to land immediately before the checker (M1.7)**, where it first earns its keep. The runtime feature slices (M1.2 functions, M1.3 collections, …) proceed first.
+
 ## Goal
 Thread the compile pipeline through a salsa query graph **before** the checker needs it, so later slices edit a graph rather than rewrite a straight-line pipeline.
 
