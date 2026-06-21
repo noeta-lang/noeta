@@ -380,6 +380,7 @@ version = "0.0.0"
 dependencies = [
  "lang-ast",
  "lang-diagnostics",
+ "lang-object",
  "lang-span",
 ]
 
@@ -407,6 +408,7 @@ dependencies = [
  "lang-builtins",
  "lang-bytecode",
  "lang-diagnostics",
+ "lang-object",
  "lang-span",
 ]
 
@@ -468,6 +470,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lang-object"
+version = "0.0.0"
+
+[[package]]
 name = "lang-parser"
 version = "0.0.0"
 dependencies = [
@@ -493,6 +499,7 @@ version = "0.0.0"
 dependencies = [
  "lang-ast",
  "lang-diagnostics",
+ "lang-object",
  "proptest",
 ]
 
@@ -508,6 +515,7 @@ dependencies = [
  "lang-diagnostics",
  "lang-gc",
  "lang-lexer",
+ "lang-object",
  "lang-parser",
  "lang-span",
  "lang-value",

@@ -20,6 +20,7 @@ lang-builtins = { path = "crates/lang-builtins" }
 lang-backend = { path = "crates/lang-backend" }
 lang-eval = { path = "crates/lang-eval" }
 # M1 runtime crates (NaN-boxed values → register bytecode VM)
+lang-object = { path = "crates/lang-object" }
 lang-value = { path = "crates/lang-value" }
 lang-gc = { path = "crates/lang-gc" }
 lang-bytecode = { path = "crates/lang-bytecode" }

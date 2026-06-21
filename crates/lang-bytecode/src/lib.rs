@@ -10,6 +10,7 @@ use std::fmt::Write as _;
 
 use lang_ast::{BinaryOp, UnaryOp};
 use lang_diagnostics::Diagnostic;
+use lang_object::Shape;
 use lang_span::Span;
 
 /// A register index. M1.0's allocator is monotonic (one register per value, no reuse); a
@@ -54,31 +55,6 @@ impl Builtin {
             "map" => Some(Builtin::Map),
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
-            _ => None,
-        }
-    }
-}
-
-/// A zero-argument builtin method dispatched on a receiver (`xs.count()`, `xs.enumerate()`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Method {
-    Count,
-    Enumerate,
-}
-
-impl Method {
-    pub fn name(self) -> &'static str {
-        match self {
-            Method::Count => "count",
-            Method::Enumerate => "enumerate",
-        }
-    }
-
-    /// The method a name refers to, if it is one this slice implements.
-    pub fn from_name(name: &str) -> Option<Method> {
-        match name {
-            "count" => Some(Method::Count),
-            "enumerate" => Some(Method::Enumerate),
             _ => None,
         }
     }
@@ -147,12 +123,55 @@ pub enum Op {
         args: Box<[Reg]>,
         span: Span,
     },
-    /// `dst = recv.method()` — a zero-argument builtin method (`count`/`enumerate`). May
-    /// raise E0005 ("no method `<name>` on <type>") at `span`.
+    /// `dst = recv.method(args...)` — a runtime-dispatched method call (mirroring the M0
+    /// tree-walker's `call_method`). On an object, `method` resolves through the module's
+    /// instance-method table by the receiver's type name and pushes a call frame `[recv,
+    /// args...]`; on a list/map/string, `count`/`enumerate` are the built-in zero-arg methods
+    /// computed inline. An unresolved method raises E0005, an arity/type misuse E0007, at
+    /// `span`.
     CallMethod {
         dst: Reg,
         recv: Reg,
-        method: Method,
+        method: String,
+        args: Box<[Reg]>,
+        span: Span,
+    },
+    /// `dst = Type { named..., ..spread }` — construct a declared record/class instance whose
+    /// layout is `shapes[shape]`. `named` gives each provided field's slot index and value
+    /// register; `spread` (if present) is a base object every still-unset declared slot is
+    /// copied from. A declared slot left unset by both raises E0009 ("missing field(s) ...")
+    /// at `span`.
+    MakeRecord {
+        dst: Reg,
+        shape: u32,
+        named: Box<[(u16, Reg)]>,
+        spread: Option<Reg>,
+        span: Span,
+    },
+    /// `dst = Type { key: value, ..spread }` for an **opaque** `use`-imported type, whose
+    /// real field set is unknown until the literal supplies it. The runtime object's shape is
+    /// built from the (spread ∪ named) keys in sorted order — matching the M0 tree-walker's
+    /// `BTreeMap`-ordered field bag — with no missing/unknown-field checks.
+    MakeOpaque {
+        dst: Reg,
+        type_name: String,
+        keys: Box<[(String, Reg)]>,
+        spread: Option<Reg>,
+    },
+    /// `dst = <enum variant>` — construct the `(enum, variant)` value whose shape is
+    /// `shapes[shape]`, carrying `args` as the variant's positional data (empty for a no-data
+    /// variant). Each argument is retained into the value.
+    MakeEnum {
+        dst: Reg,
+        shape: u32,
+        args: Box<[Reg]>,
+    },
+    /// `dst = obj.field` — load an object field by name (resolved through the receiver's
+    /// shape). A receiver that is not an object, or lacks the field, raises E0005 at `span`.
+    LoadField {
+        dst: Reg,
+        obj: Reg,
+        field: String,
         span: Span,
     },
     /// `dst = callee(args...)`. Pushes a new call frame; the callee must be a closure whose
@@ -257,11 +276,25 @@ impl Chunk {
     }
 }
 
-/// A compiled module: the prototype table. `protos[0]` is the top-level program; the rest
-/// are functions and closures, referenced by `MakeClosure`/`Call` via their index.
+/// One entry in a module's instance-method dispatch table: a class's method, keyed by the
+/// `(type_name, method)` pair the VM looks it up by, resolving to the method's prototype.
+#[derive(Debug, Clone)]
+pub struct MethodEntry {
+    pub type_name: String,
+    pub method: String,
+    pub proto: u32,
+}
+
+/// A compiled module: the prototype table plus the object-model side tables. `protos[0]` is
+/// the top-level program; the rest are functions, closures, and methods, referenced by
+/// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
+/// (referenced by index from `MakeRecord`/`MakeEnum`); `methods` is the instance-method
+/// dispatch table.
 #[derive(Debug, Clone)]
 pub struct Module {
     pub protos: Vec<Chunk>,
+    pub shapes: Vec<Shape>,
+    pub methods: Vec<MethodEntry>,
 }
 
 impl Module {
@@ -270,10 +303,36 @@ impl Module {
         &self.protos[0]
     }
 
-    /// Render the whole module as stable disassembly: the top-level program followed by each
-    /// numbered function prototype.
+    /// Render the whole module as stable disassembly: the shape and method tables (when
+    /// present), then the top-level program followed by each numbered function prototype.
     pub fn disassemble(&self) -> String {
         let mut out = String::new();
+        if !self.shapes.is_empty() {
+            out.push_str("shapes:\n");
+            for (i, shape) in self.shapes.iter().enumerate() {
+                let _ = match &shape.variant {
+                    Some(variant) => writeln!(
+                        out,
+                        "  s{i} = enum {}.{variant}({})",
+                        shape.name,
+                        shape.fields.join(", ")
+                    ),
+                    None => writeln!(
+                        out,
+                        "  s{i} = {:?} {}{{{}}}",
+                        shape.kind,
+                        shape.name,
+                        shape.fields.join(", ")
+                    ),
+                };
+            }
+        }
+        if !self.methods.is_empty() {
+            out.push_str("methods:\n");
+            for m in &self.methods {
+                let _ = writeln!(out, "  {}.{} -> proto {}", m.type_name, m.method, m.proto);
+            }
+        }
         for (i, proto) in self.protos.iter().enumerate() {
             if i == 0 {
                 out.push_str("=== main ===\n");
@@ -329,8 +388,56 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             )
         }
         Op::CallMethod {
-            dst, recv, method, ..
-        } => format!("CallMethod  r{dst} <- r{recv}.{}()", method.name()),
+            dst,
+            recv,
+            method,
+            args,
+            ..
+        } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "CallMethod  r{dst} <- r{recv}.{method}({})",
+                args.join(", ")
+            )
+        }
+        Op::MakeRecord {
+            dst,
+            shape,
+            named,
+            spread,
+            ..
+        } => {
+            let mut parts: Vec<String> = named
+                .iter()
+                .map(|(slot, r)| format!("s{slot}=r{r}"))
+                .collect();
+            if let Some(base) = spread {
+                parts.push(format!("..r{base}"));
+            }
+            format!(
+                "MakeRecord  r{dst} <- shape s{shape} {{{}}}",
+                parts.join(", ")
+            )
+        }
+        Op::MakeOpaque {
+            dst,
+            type_name,
+            keys,
+            spread,
+        } => {
+            let mut parts: Vec<String> = keys.iter().map(|(k, r)| format!("{k:?}=r{r}")).collect();
+            if let Some(base) = spread {
+                parts.push(format!("..r{base}"));
+            }
+            format!("MakeOpaque  r{dst} <- {type_name} {{{}}}", parts.join(", "))
+        }
+        Op::MakeEnum { dst, shape, args } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!("MakeEnum    r{dst} <- shape s{shape}({})", args.join(", "))
+        }
+        Op::LoadField {
+            dst, obj, field, ..
+        } => format!("LoadField   r{dst} <- r{obj}.{field}"),
         Op::Call {
             dst, callee, args, ..
         } => {

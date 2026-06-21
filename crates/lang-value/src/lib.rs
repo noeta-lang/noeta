@@ -26,6 +26,9 @@ mod ops;
 pub use ops::{OpError, apply_binary, apply_unary};
 
 use std::collections::BTreeMap;
+use std::rc::Rc;
+
+use lang_object::Shape;
 
 use heap::Payload;
 
@@ -106,6 +109,18 @@ impl Value {
     /// with [`Value::list`], the map takes ownership of one reference to each value.
     pub fn map(entries: BTreeMap<String, Value>) -> Value {
         heap::alloc(Payload::Map(entries))
+    }
+
+    /// A heap object (refcount 1): a record/class/opaque instance laying out `slots` in the
+    /// `shape`'s field order. The object takes ownership of one reference to each slot value.
+    pub fn object(shape: Rc<Shape>, slots: Vec<Value>) -> Value {
+        heap::alloc(Payload::Object { shape, slots })
+    }
+
+    /// A heap enum value (refcount 1): a `(enum, variant)` instance carrying the variant's
+    /// positional `data`. The value takes ownership of one reference to each data element.
+    pub fn enum_value(shape: Rc<Shape>, data: Vec<Value>) -> Value {
+        heap::alloc(Payload::Enum { shape, data })
     }
 
     // --- Classification ---
@@ -261,6 +276,66 @@ impl Value {
         }
     }
 
+    /// Whether this is a shaped object (record/class/opaque instance).
+    pub fn is_object(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Object { .. }))
+    }
+
+    /// Whether this is an enum value.
+    pub fn is_enum(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Enum { .. }))
+    }
+
+    /// A clone of this value's shape handle, if it is an object or enum.
+    pub fn shape(self) -> Option<Rc<Shape>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Object { shape, .. } | Payload::Enum { shape, .. } => Some(shape.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The value of object field `name`, if this is an object with that field. The returned
+    /// value shares the object's reference (it is *not* retained); the caller must retain it
+    /// before storing it as an independent owner.
+    pub fn field(self, name: &str) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Object { shape, slots } => shape.slot_of(name).map(|i| slots[i]),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The object's slot values in shape order, if this is an object. Shares references.
+    pub fn slots(self) -> Option<Vec<Value>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Object { slots, .. } => Some(slots.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The enum variant's positional data, if this is an enum value. Shares references.
+    pub fn enum_data(self) -> Option<Vec<Value>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Enum { data, .. } => Some(data.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     // --- Display (mirrors the M0 tree-walker's `Value::display`) ---
 
     /// The display form used by `echo` and `~` concatenation.
@@ -289,6 +364,36 @@ impl Value {
                         .map(|(k, v)| format!("{k:?}: {}", v.repr()))
                         .collect();
                     format!("{{{}}}", parts.join(", "))
+                }
+                // `Type {field: repr, ...}` in slot (declared) order — M0's `ObjectValue`.
+                Payload::Object { shape, slots } => {
+                    let parts: Vec<String> = shape
+                        .fields
+                        .iter()
+                        .zip(slots)
+                        .map(|(name, v)| format!("{name}: {}", v.repr()))
+                        .collect();
+                    format!("{} {{{}}}", shape.name, parts.join(", "))
+                }
+                // `Ok(x)`/`none` for built-in Result/Option, else `Type.Variant(data...)`;
+                // a no-data variant is just the head. Data renders with `display` (unquoted),
+                // matching M0's `EnumValue::display`.
+                Payload::Enum { shape, data } => {
+                    let head = if shape.builtin_result_option {
+                        shape.variant.clone().unwrap_or_default()
+                    } else {
+                        format!(
+                            "{}.{}",
+                            shape.name,
+                            shape.variant.clone().unwrap_or_default()
+                        )
+                    };
+                    if data.is_empty() {
+                        head
+                    } else {
+                        let parts: Vec<String> = data.iter().map(|v| v.display()).collect();
+                        format!("{head}({})", parts.join(", "))
+                    }
                 }
             })
         } else {
@@ -324,6 +429,10 @@ impl Value {
                 "list"
             } else if self.is_map() {
                 "map"
+            } else if self.is_object() {
+                "object"
+            } else if self.is_enum() {
+                "enum"
             } else {
                 "string"
             }
@@ -376,6 +485,13 @@ impl std::fmt::Debug for Value {
             write!(f, "List(len={})", self.list_len().unwrap())
         } else if self.is_map() {
             write!(f, "Map(len={})", self.map_len().unwrap())
+        } else if self.is_object() || self.is_enum() {
+            // Shallow: name the shape rather than recursing into slots.
+            let shape = self.shape().unwrap();
+            match &shape.variant {
+                Some(variant) => write!(f, "Enum({}.{variant})", shape.name),
+                None => write!(f, "Object({})", shape.name),
+            }
         } else if self.is_pointer() {
             write!(f, "Str({:?})", self.as_string().unwrap_or_default())
         } else {
@@ -397,6 +513,7 @@ fn format_float(f: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lang_object::ShapeKind;
     use proptest::prelude::*;
 
     #[test]
@@ -523,6 +640,58 @@ mod tests {
         list.free();
         assert!(map.dec_ref());
         map.free();
+    }
+
+    #[test]
+    fn objects_display_in_slot_order_and_free_their_slots() {
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Record,
+            "Item",
+            vec!["price".into(), "qty".into()],
+        ));
+        let obj = Value::object(shape.clone(), vec![Value::float(2.5), Value::int(4)]);
+        assert_eq!(obj.type_name(), "object");
+        assert_eq!(obj.display(), "Item {price: 2.5, qty: 4}");
+        assert_eq!(obj.field("price").unwrap().as_float(), Some(2.5));
+        assert!(obj.field("missing").is_none());
+        // Same shape handle (the `Rc`) is shared, not copied per-instance.
+        let obj2 = Value::object(shape.clone(), vec![Value::float(2.5), Value::int(4)]);
+        assert!(Rc::ptr_eq(&obj.shape().unwrap(), &obj2.shape().unwrap()));
+        // Structural equality (M0 parity): same type + equal fields.
+        assert!(
+            apply_binary(lang_ast::BinaryOp::Eq, obj, obj2)
+                .unwrap()
+                .as_bool()
+                == Some(true)
+        );
+        for v in [obj, obj2] {
+            assert!(v.dec_ref());
+            v.free();
+        }
+    }
+
+    #[test]
+    fn enum_values_display_and_compare() {
+        let pending = Rc::new(Shape::enum_variant("Status", "Pending", vec![], false));
+        let a = Value::enum_value(pending.clone(), vec![]);
+        assert_eq!(a.type_name(), "enum");
+        assert_eq!(a.display(), "Status.Pending");
+        let b = Value::enum_value(pending.clone(), vec![]);
+        assert!(
+            apply_binary(lang_ast::BinaryOp::Eq, a, b)
+                .unwrap()
+                .as_bool()
+                == Some(true)
+        );
+
+        // A built-in Result variant displays bare, with its data unquoted.
+        let err = Rc::new(Shape::enum_variant("Result", "Err", vec!["0".into()], true));
+        let e = Value::enum_value(err, vec![Value::string("boom")]);
+        assert_eq!(e.display(), "Err(boom)");
+        for v in [a, b, e] {
+            assert!(v.dec_ref());
+            v.free();
+        }
     }
 
     #[test]

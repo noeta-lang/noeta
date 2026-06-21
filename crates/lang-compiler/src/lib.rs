@@ -28,12 +28,13 @@
 //! oracle compares full `RunResult`s. Registers are allocated monotonically (one per value,
 //! no reuse) — simple and obviously correct.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
-use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt, StrPart};
+use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, ObjectLit, Param, Program, Stmt, StrPart};
 use lang_builtins::PRELUDE_NAMES;
-use lang_bytecode::{BoolSide, Builtin, Chunk, Const, Method, Module, Op, Reg};
+use lang_bytecode::{BoolSide, Builtin, Chunk, Const, MethodEntry, Module, Op, Reg};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
+use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
 
 /// Why a program could not be lowered to bytecode yet — a node outside the current subset.
@@ -56,12 +57,22 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
 }
 
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.
+///
+/// Three passes: (1) register every top-level type so forward references resolve and shapes
+/// exist before any body is compiled; (2) compile each class method/associated function into
+/// its reserved prototype; (3) compile the top-level program. Splitting (1) from (3) mirrors
+/// the tree-walker, whose type declarations are all evaluated before the driver code runs.
 pub fn compile(program: &Program) -> Result<Module, Unsupported> {
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
+        shapes: Vec::new(),
+        methods: Vec::new(),
+        types: HashMap::new(),
     };
+    module.register_types(program);
+    module.compile_methods(program)?;
     let main = {
-        let mut fc = FnCompiler::new(&mut module, true);
+        let mut fc = FnCompiler::new(&mut module, true, None);
         for stmt in &program.stmts {
             fc.stmt(stmt)?;
         }
@@ -71,19 +82,130 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
     module.protos[0] = main;
     Ok(Module {
         protos: module.protos,
+        shapes: module.shapes,
+        methods: module.methods,
     })
 }
 
-/// Accumulates the prototype table across the recursive compilation of nested functions.
+/// What a top-level type name denotes, with the layout/dispatch data the compiler needs to
+/// lower object literals, member access, method calls, and enum construction.
+enum TypeInfo {
+    /// A structural record (`type X = {...}`): declared field order.
+    Record { fields: Vec<String> },
+    /// A class: declared field order plus each `fn`'s reserved prototype index (a class `fn`
+    /// is callable both as an associated function `X.f(...)` and as an instance method
+    /// `obj.f(...)`, so one prototype serves both — see [`ModuleCompiler::compile_methods`]).
+    Class {
+        fields: Vec<String>,
+        fns: HashMap<String, u32>,
+    },
+    /// An enum: each variant's positional data-field names.
+    Enum {
+        variants: HashMap<String, Vec<String>>,
+    },
+    /// A `use`-imported stub whose real field set is unknown until a literal supplies it.
+    Opaque,
+}
+
+/// Accumulates the prototype table, the shape/method side tables, and the top-level type
+/// environment across compilation.
 struct ModuleCompiler {
     protos: Vec<Chunk>,
+    shapes: Vec<Shape>,
+    methods: Vec<MethodEntry>,
+    types: HashMap<String, TypeInfo>,
 }
 
 impl ModuleCompiler {
-    /// Compile one `fn`/closure body into a fresh prototype and return its index.
-    fn add_function(&mut self, params: &[Param], body: Body<'_>) -> Result<u32, Unsupported> {
-        let mut fc = FnCompiler::new(self, false);
-        // Parameters occupy registers `0..num_params` in the (single) param scope.
+    /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
+    /// can resolve them, and reserve a placeholder prototype for each class `fn`.
+    fn register_types(&mut self, program: &Program) {
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Record(decl) => {
+                    let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
+                    self.types
+                        .insert(decl.name.clone(), TypeInfo::Record { fields });
+                }
+                Stmt::Class(decl) => {
+                    let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
+                    let mut fns = HashMap::new();
+                    for method in &decl.methods {
+                        let proto = self.protos.len() as u32;
+                        self.protos.push(Chunk::placeholder());
+                        fns.insert(method.name.clone(), proto);
+                        self.methods.push(MethodEntry {
+                            type_name: decl.name.clone(),
+                            method: method.name.clone(),
+                            proto,
+                        });
+                    }
+                    self.types
+                        .insert(decl.name.clone(), TypeInfo::Class { fields, fns });
+                }
+                Stmt::Enum(decl) => {
+                    let variants = decl
+                        .variants
+                        .iter()
+                        .map(|v| {
+                            (
+                                v.name.clone(),
+                                v.fields.iter().map(|f| f.name.clone()).collect(),
+                            )
+                        })
+                        .collect();
+                    self.types
+                        .insert(decl.name.clone(), TypeInfo::Enum { variants });
+                }
+                Stmt::Use { names, .. } => {
+                    for imported in names {
+                        self.types.insert(imported.name.clone(), TypeInfo::Opaque);
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Pass 2: compile each class `fn` body into its reserved prototype. Methods see all
+    /// registered types (forward references work) and run with the receiver in register 0,
+    /// the declared parameters in registers `1..`, and field names resolving to the receiver.
+    fn compile_methods(&mut self, program: &Program) -> Result<(), Unsupported> {
+        for stmt in &program.stmts {
+            let Stmt::Class(decl) = stmt else { continue };
+            let field_set: HashSet<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
+            for method in &decl.methods {
+                let TypeInfo::Class { fns, .. } = &self.types[&decl.name] else {
+                    unreachable!("a class registered as non-class");
+                };
+                let proto = fns[&method.name];
+                let chunk = self.compile_fn_body(
+                    &method.params,
+                    Body::Block(&method.body),
+                    Some(MethodCtx {
+                        fields: field_set.clone(),
+                    }),
+                )?;
+                self.protos[proto as usize] = chunk;
+            }
+        }
+        Ok(())
+    }
+
+    /// Compile one function/closure/method body into a [`Chunk`]. A `method` context reserves
+    /// register 0 for the receiver (`self`) and resolves the class's field names against it.
+    fn compile_fn_body(
+        &mut self,
+        params: &[Param],
+        body: Body<'_>,
+        method: Option<MethodCtx>,
+    ) -> Result<Chunk, Unsupported> {
+        let is_method = method.is_some();
+        let mut fc = FnCompiler::new(self, false, method);
+        // A method reserves register 0 for the receiver; ordinary functions do not.
+        if is_method {
+            fc.alloc_reg();
+        }
         fc.scopes.push(HashMap::new());
         for param in params {
             let reg = fc.alloc_reg();
@@ -109,12 +231,34 @@ impl ModuleCompiler {
         }
         // A block body that falls off the end implicitly returns unit (M0's `exec_fn_body`).
         fc.code.push(Op::Halt);
-        let num_params = params.len() as u16;
-        let chunk = fc.into_chunk(num_params);
+        let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
+        Ok(fc.into_chunk(num_params))
+    }
+
+    /// Compile a top-level `fn`/closure body into a fresh prototype and return its index.
+    fn add_function(&mut self, params: &[Param], body: Body<'_>) -> Result<u32, Unsupported> {
+        let chunk = self.compile_fn_body(params, body, None)?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
     }
+
+    /// Intern a shape, returning its index in the shape table (equal shapes share an index, so
+    /// equal-built aggregates share one runtime shape — the declared-order determinism the
+    /// object model guarantees).
+    fn intern_shape(&mut self, shape: Shape) -> u32 {
+        if let Some(i) = self.shapes.iter().position(|s| *s == shape) {
+            return i as u32;
+        }
+        let idx = self.shapes.len() as u32;
+        self.shapes.push(shape);
+        idx
+    }
+}
+
+/// The method-compilation context: the field names that resolve to the receiver in register 0.
+struct MethodCtx {
+    fields: HashSet<String>,
 }
 
 /// A function body: a statement block (`fn`) or a single arrow expression (closure).
@@ -135,6 +279,8 @@ struct FnCompiler<'m> {
     globals: HashMap<String, GlobalInfo>,
     next_reg: u16,
     is_main: bool,
+    /// When compiling a class method, the receiver's field names (resolved against register 0).
+    method: Option<MethodCtx>,
 }
 
 #[derive(Clone, Copy)]
@@ -152,6 +298,10 @@ struct GlobalInfo {
 enum Resolved {
     /// A frame-local register.
     Local(Reg),
+    /// The method receiver (`self`) — register 0 in a method body.
+    SelfRecv,
+    /// A field of the method receiver, loaded via `LoadField` from register 0.
+    Field,
     /// A global, read via `LoadGlobal` (the name may or may not exist at runtime).
     Global,
     /// A prelude value/builtin — not yet modeled by the VM, so the program is skipped.
@@ -159,7 +309,11 @@ enum Resolved {
 }
 
 impl<'m> FnCompiler<'m> {
-    fn new(module: &'m mut ModuleCompiler, is_main: bool) -> FnCompiler<'m> {
+    fn new(
+        module: &'m mut ModuleCompiler,
+        is_main: bool,
+        method: Option<MethodCtx>,
+    ) -> FnCompiler<'m> {
         FnCompiler {
             module,
             code: Vec::new(),
@@ -169,6 +323,7 @@ impl<'m> FnCompiler<'m> {
             globals: HashMap::new(),
             next_reg: 0,
             is_main,
+            method,
         }
     }
 
@@ -216,6 +371,17 @@ impl<'m> FnCompiler<'m> {
     fn resolve(&self, name: &str) -> Resolved {
         if let Some(var) = self.lookup_local(name) {
             return Resolved::Local(var.reg);
+        }
+        // Inside a method, `self` and the class's fields resolve against the receiver. Locals
+        // (parameters) are checked first, so a parameter shadows a same-named field — matching
+        // the tree-walker, which binds fields, then `self`, then parameters (last wins).
+        if let Some(ctx) = &self.method {
+            if name == "self" {
+                return Resolved::SelfRecv;
+            }
+            if ctx.fields.contains(name) {
+                return Resolved::Field;
+            }
         }
         if self.is_main && self.globals.contains_key(name) {
             return Resolved::Global;
@@ -272,7 +438,14 @@ impl<'m> FnCompiler<'m> {
                 let t = self.alloc_reg();
                 self.expr(expr, t)
             }
-            _ => unsupported("statement outside the VM subset"),
+            // Type declarations are registered in the pre-pass and class methods compiled
+            // separately; as statements they emit no code (the tree-walker likewise just
+            // records them in scope). `namespace` is a no-op; `use` registers opaque stubs.
+            Stmt::Record(_)
+            | Stmt::Class(_)
+            | Stmt::Enum(_)
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. } => Ok(()),
         }
     }
 
@@ -597,6 +770,13 @@ impl<'m> FnCompiler<'m> {
             }
             Expr::Ident { name, span } => match self.resolve(name) {
                 Resolved::Local(reg) => self.code.push(Op::Move { dst, src: reg }),
+                Resolved::SelfRecv => self.code.push(Op::Move { dst, src: 0 }),
+                Resolved::Field => self.code.push(Op::LoadField {
+                    dst,
+                    obj: 0,
+                    field: name.clone(),
+                    span: *span,
+                }),
                 Resolved::Global => self.code.push(Op::LoadGlobal {
                     dst,
                     name: name.clone(),
@@ -667,6 +847,13 @@ impl<'m> FnCompiler<'m> {
                     });
                 }
             }
+            Expr::Object(lit) => self.object_literal(lit, dst)?,
+            Expr::Member {
+                receiver,
+                name,
+                span,
+                ..
+            } => self.member(receiver, name, dst, *span)?,
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {
@@ -712,23 +899,40 @@ impl<'m> FnCompiler<'m> {
         span: Span,
     ) -> Result<(), Unsupported> {
         if let Expr::Member { receiver, name, .. } = callee {
-            // A zero-argument builtin method (`xs.count()`, `xs.enumerate()`). Anything else
-            // (user methods, arguments, pipeline-into-method) awaits the object model.
-            if prepend.is_none()
-                && args.is_empty()
-                && let Some(method) = Method::from_name(name)
+            // `Type.something(args)` where `Type` is a known type name: an enum-variant
+            // construction or an associated-function call, both resolved here at compile time.
+            if let Expr::Ident {
+                name: type_name, ..
+            } = &**receiver
             {
-                let recv = self.alloc_reg();
-                self.expr(receiver, recv)?;
-                self.code.push(Op::CallMethod {
-                    dst,
-                    recv,
-                    method,
-                    span,
-                });
-                return Ok(());
+                if let Some(TypeInfo::Enum { .. }) = self.module.types.get(type_name) {
+                    return self.make_enum(type_name, name, args, prepend, dst, span);
+                }
+                if let Some(TypeInfo::Class { fns, .. }) = self.module.types.get(type_name)
+                    && let Some(&proto) = fns.get(name)
+                {
+                    return self.call_associated(proto, args, prepend, dst, span);
+                }
             }
-            return unsupported("method call");
+            // Otherwise the receiver is a value: a runtime-dispatched method call (a user
+            // instance method, or a `count`/`enumerate` built-in — the VM decides).
+            let recv = self.alloc_reg();
+            self.expr(receiver, recv)?;
+            let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
+            arg_regs.extend(prepend);
+            for arg in args {
+                let r = self.alloc_reg();
+                self.expr(arg, r)?;
+                arg_regs.push(r);
+            }
+            self.code.push(Op::CallMethod {
+                dst,
+                recv,
+                method: name.clone(),
+                args: arg_regs.into_boxed_slice(),
+                span,
+            });
+            return Ok(());
         }
         // A prelude collection builtin called directly by name (`len(x)`, `xs |> map(f)`).
         // A user binding of the same name shadows the builtin (resolved as an ordinary call).
@@ -782,7 +986,8 @@ impl<'m> FnCompiler<'m> {
         self.expr(left, left_reg)?;
         match right {
             Expr::Call { callee, args, .. } => self.call(callee, args, Some(left_reg), dst, span),
-            Expr::Member { .. } => unsupported("pipeline into a method call"),
+            // `x |> obj.m` is `obj.m(x)` — thread the piped value as the sole argument.
+            Expr::Member { .. } => self.call(right, &[], Some(left_reg), dst, span),
             _ => {
                 // `x |> f` — call the value of `right` with the single threaded argument.
                 let callee_reg = self.alloc_reg();
@@ -796,6 +1001,228 @@ impl<'m> FnCompiler<'m> {
                 Ok(())
             }
         }
+    }
+
+    /// `Type { field: value, ..spread }` — construct a record/class/opaque instance, or raise
+    /// the tree-walker's runtime error for an unknown type.
+    fn object_literal(&mut self, lit: &ObjectLit, dst: Reg) -> Result<(), Unsupported> {
+        match self.module.types.get(&lit.type_name) {
+            Some(TypeInfo::Record { fields }) => {
+                let fields = fields.clone();
+                self.make_record(lit, ShapeKind::Record, fields, dst)
+            }
+            Some(TypeInfo::Class { fields, .. }) => {
+                let fields = fields.clone();
+                self.make_record(lit, ShapeKind::Class, fields, dst)
+            }
+            Some(TypeInfo::Opaque) => self.make_opaque(lit, dst),
+            Some(TypeInfo::Enum { .. }) => unsupported("enum type used as a record literal"),
+            None => {
+                // The tree-walker looks the type up first and errors before touching fields.
+                let idx = self.add_diag(unknown_type_diag(&lit.type_name, lit.type_name_span));
+                self.code.push(Op::Raise { idx });
+                Ok(())
+            }
+        }
+    }
+
+    /// Construct a declared record/class instance. Field initializers are checked and
+    /// evaluated in source order (after the spread), reproducing the tree-walker's timing; the
+    /// full-initialization guarantee (E0009) is enforced at runtime by `MakeRecord`.
+    fn make_record(
+        &mut self,
+        lit: &ObjectLit,
+        kind: ShapeKind,
+        fields: Vec<String>,
+        dst: Reg,
+    ) -> Result<(), Unsupported> {
+        let shape =
+            self.module
+                .intern_shape(Shape::object(kind, lit.type_name.clone(), fields.clone()));
+        let spread = self.spread_reg(lit)?;
+        let mut named: Vec<(u16, Reg)> = Vec::with_capacity(lit.fields.len());
+        for init in &lit.fields {
+            let Some(slot) = fields.iter().position(|f| f == &init.name) else {
+                // An unknown field errors before its value is evaluated (tree-walker timing).
+                let idx = self.add_diag(unknown_field_diag(
+                    &lit.type_name,
+                    &init.name,
+                    init.name_span,
+                ));
+                self.code.push(Op::Raise { idx });
+                return Ok(());
+            };
+            let r = self.alloc_reg();
+            self.expr(&init.value, r)?;
+            named.push((slot as u16, r));
+        }
+        self.code.push(Op::MakeRecord {
+            dst,
+            shape,
+            named: named.into_boxed_slice(),
+            spread,
+            span: lit.span,
+        });
+        Ok(())
+    }
+
+    /// Construct an opaque (`use`-imported) instance: any fields are accepted, the runtime
+    /// builds a sorted-key shape, and there are no field checks.
+    fn make_opaque(&mut self, lit: &ObjectLit, dst: Reg) -> Result<(), Unsupported> {
+        let spread = self.spread_reg(lit)?;
+        let mut keys: Vec<(String, Reg)> = Vec::with_capacity(lit.fields.len());
+        for init in &lit.fields {
+            let r = self.alloc_reg();
+            self.expr(&init.value, r)?;
+            keys.push((init.name.clone(), r));
+        }
+        self.code.push(Op::MakeOpaque {
+            dst,
+            type_name: lit.type_name.clone(),
+            keys: keys.into_boxed_slice(),
+            spread,
+        });
+        Ok(())
+    }
+
+    /// Evaluate an object literal's `..spread` base into a register, if present.
+    fn spread_reg(&mut self, lit: &ObjectLit) -> Result<Option<Reg>, Unsupported> {
+        match &lit.spread {
+            Some(spread) => {
+                let r = self.alloc_reg();
+                self.expr(spread, r)?;
+                Ok(Some(r))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// Bare member access: a no-data enum variant (`Status.Pending`) or a field load.
+    fn member(
+        &mut self,
+        receiver: &Expr,
+        name: &str,
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        if let Expr::Ident {
+            name: type_name, ..
+        } = receiver
+        {
+            enum Member {
+                EmptyVariant,
+                Unsupported(&'static str),
+                FieldAccess,
+            }
+            let kind = match self.module.types.get(type_name) {
+                Some(TypeInfo::Enum { variants }) => match variants.get(name) {
+                    Some(fields) if fields.is_empty() => Member::EmptyVariant,
+                    Some(_) => Member::Unsupported("data-carrying variant used without arguments"),
+                    None => Member::Unsupported("unknown enum variant"),
+                },
+                Some(_) => Member::Unsupported("type member used as a value"),
+                None => Member::FieldAccess,
+            };
+            match kind {
+                Member::EmptyVariant => {
+                    let shape = self.module.intern_shape(Shape::enum_variant(
+                        type_name.clone(),
+                        name.to_string(),
+                        Vec::new(),
+                        false,
+                    ));
+                    self.code.push(Op::MakeEnum {
+                        dst,
+                        shape,
+                        args: Box::new([]),
+                    });
+                    return Ok(());
+                }
+                Member::Unsupported(reason) => return unsupported(reason),
+                Member::FieldAccess => {}
+            }
+        }
+        let obj = self.alloc_reg();
+        self.expr(receiver, obj)?;
+        self.code.push(Op::LoadField {
+            dst,
+            obj,
+            field: name.to_string(),
+            span,
+        });
+        Ok(())
+    }
+
+    /// Construct an enum variant carrying data (`OrderError.NegativePrice(i)`), optionally with
+    /// a pipeline-threaded leading value.
+    fn make_enum(
+        &mut self,
+        type_name: &str,
+        variant: &str,
+        args: &[Expr],
+        prepend: Option<Reg>,
+        dst: Reg,
+        _span: Span,
+    ) -> Result<(), Unsupported> {
+        let fields = match self.module.types.get(type_name) {
+            Some(TypeInfo::Enum { variants }) => match variants.get(variant) {
+                Some(fields) => fields.clone(),
+                None => return unsupported("unknown enum variant"),
+            },
+            _ => unreachable!("make_enum is only reached for enum types"),
+        };
+        let shape = self.module.intern_shape(Shape::enum_variant(
+            type_name.to_string(),
+            variant.to_string(),
+            fields,
+            false,
+        ));
+        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
+        arg_regs.extend(prepend);
+        for arg in args {
+            let r = self.alloc_reg();
+            self.expr(arg, r)?;
+            arg_regs.push(r);
+        }
+        self.code.push(Op::MakeEnum {
+            dst,
+            shape,
+            args: arg_regs.into_boxed_slice(),
+        });
+        Ok(())
+    }
+
+    /// Call an associated function `Type.f(args)`. The method prototype reserves register 0
+    /// for `self`; an associated call has no receiver, so unit is passed there (the tree-walker
+    /// binds no `self` for a type-receiver call).
+    fn call_associated(
+        &mut self,
+        proto: u32,
+        args: &[Expr],
+        prepend: Option<Reg>,
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let self_reg = self.alloc_reg();
+        let k = self.add_const(Const::Unit);
+        self.code.push(Op::LoadConst { dst: self_reg, k });
+        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 2);
+        arg_regs.push(self_reg);
+        arg_regs.extend(prepend);
+        for arg in args {
+            let r = self.alloc_reg();
+            self.expr(arg, r)?;
+            arg_regs.push(r);
+        }
+        let callee = self.alloc_reg();
+        self.code.push(Op::MakeClosure { dst: callee, proto });
+        self.code.push(Op::Call {
+            dst,
+            callee,
+            args: arg_regs.into_boxed_slice(),
+            span,
+        });
+        Ok(())
     }
 
     /// Lower `a && b` / `a || b` to branches, matching the tree-walker's `eval_logical`:
@@ -851,4 +1278,24 @@ fn immutable_diag(name: &str, span: Span) -> Diagnostic {
     .with_help(format!(
         "declare it with `mut {name} = ...` to allow reassignment"
     ))
+}
+
+/// `cannot find type `T` in this scope` — an object literal naming an undeclared type
+/// (mirrors the tree-walker's `eval_object` type lookup).
+fn unknown_type_diag(name: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticCode::UnknownName,
+        span,
+        format!("cannot find type `{name}` in this scope"),
+    )
+}
+
+/// `type `T` has no field `f`` — an object literal initializing a field the type does not
+/// declare (mirrors the tree-walker's `has_field` check).
+fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticCode::UnknownName,
+        span,
+        format!("type `{type_name}` has no field `{field}`"),
+    )
 }

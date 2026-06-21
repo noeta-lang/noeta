@@ -15,6 +15,7 @@ lang-compiler = { workspace = true }
 lang-value = { workspace = true }
 lang-gc = { workspace = true }
 lang-span = { workspace = true }
+lang-object = { workspace = true }
 
 [dev-dependencies]
 lang-lexer = { workspace = true }

@@ -1,0 +1,39 @@
+---
+source: crates/lang-vm/src/lib.rs
+expression: module.disassemble()
+---
+shapes:
+  s0 = Class Order{id, status}
+  s1 = enum Status.Pending()
+methods:
+  Order.new -> proto 1
+  Order.tag -> proto 2
+=== main ===
+params: 0, registers: 6
+constants:
+  k0 = unit
+  k1 = 7
+code:
+    0  LoadConst   r1 <- k0
+    1  LoadConst   r2 <- k1
+    2  MakeClosure r3 <- proto 1
+    3  Call        r0 <- r3(r1, r2)
+    4  StoreGlobal "o" <- r0
+    5  LoadGlobal  r5 <- "o"
+    6  CallMethod  r4 <- r5.tag()
+    7  Echo        r4
+    8  Halt
+=== proto 1 ===
+params: 2, registers: 5
+code:
+    0  Move        r3 <- r1
+    1  MakeEnum    r4 <- shape s1()
+    2  MakeRecord  r2 <- shape s0 {s0=r3, s1=r4}
+    3  Return      r2
+    4  Halt
+=== proto 2 ===
+params: 1, registers: 2
+code:
+    0  LoadField   r1 <- r0.id
+    1  Return      r1
+    2  Halt

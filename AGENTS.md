@@ -33,9 +33,10 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `lang-parser` | Tokens → AST (`chumsky`, error recovery). |
 | `lang-backend` | The `Backend` trait + `RunResult` — the seam both runtimes implement. |
 | `lang-eval` | AST → `RunResult` (M0 tree-walker, retained as the **differential oracle**). |
-| `lang-value` | The M1 NaN-boxed `Value` + operator semantics. **The one crate with `unsafe`** (miri-gated). |
+| `lang-object` | Shapes (hidden classes): `Shape`/`ShapeKind`, the flat-slot layout descriptor for records/classes/enums. Pure data; sits *below* `lang-value` (which holds `Rc<Shape>`). |
+| `lang-value` | The M1 NaN-boxed `Value` + operator semantics; heap strings, closures, lists/maps, and shaped objects/enums. **The one crate with `unsafe`** (miri-gated). |
 | `lang-gc` | Refcount/`__destruct` GC policy over `lang-value`. |
-| `lang-bytecode` | The register IR: `Op`, `Chunk` (a function prototype), `Module` (the proto table), disassembler (pure data). |
+| `lang-bytecode` | The register IR: `Op`, `Chunk` (a function prototype), `Module` (the proto table + shape/method tables), disassembler (pure data). |
 | `lang-compiler` | AST → `Module` (returns `Unsupported` outside the VM's current subset). |
 | `lang-vm` | `Module` → `RunResult` (M1 frame-based register VM, `VmBackend`). Add VM behavior here. |
 | `lang-builtins` | The prelude. |

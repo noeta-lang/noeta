@@ -12,6 +12,7 @@ lang-span = { workspace = true }
 lang-diagnostics = { workspace = true }
 lang-bytecode = { workspace = true }
 lang-builtins = { workspace = true }
+lang-object = { workspace = true }
 
 [lints]
 workspace = true

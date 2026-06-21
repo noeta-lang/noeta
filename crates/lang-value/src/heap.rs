@@ -11,6 +11,9 @@
 
 use std::collections::BTreeMap;
 use std::ptr;
+use std::rc::Rc;
+
+use lang_object::Shape;
 
 use crate::Value;
 
@@ -40,12 +43,19 @@ struct ObjHeader {
 /// `String`s, not values). When the collection is freed those owned references are released
 /// first (see [`free`]), so dropping a list of strings frees the strings too. `BTreeMap`
 /// gives the map deterministic, sorted-key iteration, matching the M0 tree-walker exactly.
+/// `Object` and `Enum` are the M1.4 shaped aggregates. Each pairs a shared [`Shape`] handle
+/// (the layout — same shape for same-built aggregates, so identity is a cheap `Rc` pointer
+/// comparison) with a flat slot array it **owns one reference to each of**. An `Object`'s slots
+/// are its field values in the shape's declared order; an `Enum`'s slots are its variant's
+/// positional data. Freeing either releases its slots first (see [`free`]).
 pub(crate) enum Payload {
     Str(String),
     Int(i64),
     Closure(u32),
     List(Vec<Value>),
     Map(BTreeMap<String, Value>),
+    Object { shape: Rc<Shape>, slots: Vec<Value> },
+    Enum { shape: Rc<Shape>, data: Vec<Value> },
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
@@ -103,7 +113,9 @@ pub(crate) fn free(value: Value) {
     // owner exists), and it is freed exactly once.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
     match &boxed.payload {
-        Payload::List(items) => {
+        Payload::List(items)
+        | Payload::Object { slots: items, .. }
+        | Payload::Enum { data: items, .. } => {
             for &element in items {
                 release_child(element);
             }

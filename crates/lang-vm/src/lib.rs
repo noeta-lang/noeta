@@ -32,13 +32,15 @@
 //! recursion over the shared `globals`/`stdout`/`diagnostics`.
 
 use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
 
 use lang_ast::Program;
 use lang_backend::{Backend, RunResult};
-use lang_bytecode::{BoolSide, Builtin, Const, Method, Module, Op};
+use lang_bytecode::{BoolSide, Builtin, Const, Module, Op};
 use lang_compiler::{Unsupported, compile};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_gc::{release, retain};
+use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
 use lang_value::{Value, apply_binary, apply_unary};
 
@@ -81,10 +83,15 @@ struct Frame {
 struct Abort;
 
 /// One program's worth of execution state, shared across every (possibly re-entrant) frame
-/// stack: the compiled module, the by-name global environment, captured stdout, and the
-/// diagnostics recorded so far.
+/// stack: the compiled module, the shared shape handles and instance-method table, the by-name
+/// global environment, captured stdout, and the diagnostics recorded so far.
 struct Vm<'m> {
     module: &'m Module,
+    /// One shared `Rc<Shape>` per shape-table entry — cloned into every value of that shape,
+    /// so equal-built aggregates point at one shape (identity is a pointer comparison).
+    shapes: Vec<Rc<Shape>>,
+    /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
+    methods: HashMap<(String, String), u32>,
     globals: HashMap<String, Value>,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
@@ -92,8 +99,15 @@ struct Vm<'m> {
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.
 fn execute(module: &Module) -> RunResult {
+    let methods = module
+        .methods
+        .iter()
+        .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
+        .collect();
     let mut vm = Vm {
         module,
+        shapes: module.shapes.iter().cloned().map(Rc::new).collect(),
+        methods,
         globals: HashMap::new(),
         stdout: String::new(),
         diagnostics: Vec::new(),
@@ -322,16 +336,63 @@ impl<'m> Vm<'m> {
                     dst,
                     recv,
                     method,
+                    args,
                     span,
                 } => {
                     let v = frames[top].regs[*recv as usize];
-                    let result = match method {
-                        Method::Count => v
-                            .list_len()
+                    // An object dispatches to a user method through the type's method table;
+                    // anything else falls to the built-in `count`/`enumerate` methods.
+                    if v.is_object() {
+                        let type_name = v.shape().unwrap().name.clone();
+                        let Some(&proto) = self.methods.get(&(type_name.clone(), method.clone()))
+                        else {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!("type `{type_name}` has no method `{method}`"),
+                            ));
+                        };
+                        let chunk = &module.protos[proto as usize];
+                        // The prototype takes the receiver in register 0 and the user arguments
+                        // after it, so its declared arity is one more than the supplied args.
+                        if args.len() + 1 != chunk.num_params as usize {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "this method takes {} argument(s) but {} were supplied",
+                                    chunk.num_params - 1,
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                        retain(v);
+                        new_regs[0] = v;
+                        for (i, &arg_reg) in args.iter().enumerate() {
+                            let a = frames[top].regs[arg_reg as usize];
+                            retain(a);
+                            new_regs[i + 1] = a;
+                        }
+                        frames[top].pc += 1;
+                        frames.push(Frame {
+                            proto,
+                            regs: new_regs,
+                            pc: 0,
+                            ret_dst: *dst,
+                        });
+                        continue;
+                    }
+                    // Built-in zero-argument methods on lists/maps/strings.
+                    let result = if !args.is_empty() {
+                        None
+                    } else if method == "count" {
+                        v.list_len()
                             .or_else(|| v.map_len())
                             .or_else(|| v.as_string().map(|s| s.chars().count()))
-                            .map(|n| Value::int(n as i64)),
-                        Method::Enumerate => v.list_items().map(|items| {
+                            .map(|n| Value::int(n as i64))
+                    } else if method == "enumerate" {
+                        v.list_items().map(|items| {
                             let pairs = items
                                 .iter()
                                 .enumerate()
@@ -341,18 +402,163 @@ impl<'m> Vm<'m> {
                                 })
                                 .collect();
                             Value::list(pairs)
-                        }),
+                        })
+                    } else {
+                        None
                     };
                     match result {
                         Some(value) => {
                             set_reg(&mut frames[top].regs, *dst, value);
                             frames[top].pc += 1;
                         }
+                        None if !args.is_empty()
+                            && (method == "count" || method == "enumerate") =>
+                        {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("method `{method}` takes no arguments"),
+                            ));
+                        }
                         None => {
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
                                 *span,
-                                format!("no method `{}` on {}", method.name(), v.type_name()),
+                                format!("no method `{method}` on {}", v.type_name()),
+                            ));
+                        }
+                    }
+                }
+                Op::MakeRecord {
+                    dst,
+                    shape,
+                    named,
+                    spread,
+                    span,
+                } => {
+                    let shape = self.shapes[*shape as usize].clone();
+                    let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
+                    // `..base` fills declared slots the base provides; named initializers then
+                    // override. A slot left unset by both is a missing-field error (E0009).
+                    if let Some(base_reg) = spread {
+                        let base = frames[top].regs[*base_reg as usize];
+                        for (i, field) in shape.fields.iter().enumerate() {
+                            if let Some(value) = base.field(field) {
+                                retain(value);
+                                slots[i] = Some(value);
+                            }
+                        }
+                    }
+                    for (slot, reg) in named.iter() {
+                        let value = frames[top].regs[*reg as usize];
+                        retain(value);
+                        if let Some(old) = slots[*slot as usize].replace(value) {
+                            release(old);
+                        }
+                    }
+                    let missing: Vec<&str> = shape
+                        .fields
+                        .iter()
+                        .zip(&slots)
+                        .filter(|(_, slot)| slot.is_none())
+                        .map(|(name, _)| name.as_str())
+                        .collect();
+                    if !missing.is_empty() {
+                        for slot in slots.into_iter().flatten() {
+                            release(slot);
+                        }
+                        let list = missing
+                            .iter()
+                            .map(|name| format!("`{name}`"))
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        return Err(self.error(
+                            DiagnosticCode::MissingField,
+                            *span,
+                            format!(
+                                "missing field(s) {list} in `{}` literal — every field must be set",
+                                shape.name
+                            ),
+                        ));
+                    }
+                    let slots = slots.into_iter().map(Option::unwrap).collect();
+                    set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
+                    frames[top].pc += 1;
+                }
+                Op::MakeOpaque {
+                    dst,
+                    type_name,
+                    keys,
+                    spread,
+                } => {
+                    // An opaque object's shape is built from its (spread ∪ named) keys in sorted
+                    // order, so its display matches the tree-walker's `BTreeMap` field bag.
+                    let mut bag: BTreeMap<String, Value> = BTreeMap::new();
+                    if let Some(base_reg) = spread
+                        && let Some(base) = frames[top].regs[*base_reg as usize].shape()
+                    {
+                        let base_val = frames[top].regs[*base_reg as usize];
+                        for (i, field) in base.fields.iter().enumerate() {
+                            let value = base_val.slots().unwrap()[i];
+                            retain(value);
+                            if let Some(old) = bag.insert(field.clone(), value) {
+                                release(old);
+                            }
+                        }
+                    }
+                    for (key, reg) in keys.iter() {
+                        let value = frames[top].regs[*reg as usize];
+                        retain(value);
+                        if let Some(old) = bag.insert(key.clone(), value) {
+                            release(old);
+                        }
+                    }
+                    let fields: Vec<String> = bag.keys().cloned().collect();
+                    let slots: Vec<Value> = bag.into_values().collect();
+                    let shape =
+                        Rc::new(Shape::object(ShapeKind::Opaque, type_name.clone(), fields));
+                    set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
+                    frames[top].pc += 1;
+                }
+                Op::MakeEnum { dst, shape, args } => {
+                    let shape = self.shapes[*shape as usize].clone();
+                    let mut data = Vec::with_capacity(args.len());
+                    for &r in args.iter() {
+                        let v = frames[top].regs[r as usize];
+                        retain(v);
+                        data.push(v);
+                    }
+                    set_reg(&mut frames[top].regs, *dst, Value::enum_value(shape, data));
+                    frames[top].pc += 1;
+                }
+                Op::LoadField {
+                    dst,
+                    obj,
+                    field,
+                    span,
+                } => {
+                    let v = frames[top].regs[*obj as usize];
+                    match v.field(field) {
+                        Some(value) => {
+                            retain(value);
+                            set_reg(&mut frames[top].regs, *dst, value);
+                            frames[top].pc += 1;
+                        }
+                        None if v.is_object() => {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "type `{}` has no field `{field}`",
+                                    v.shape().unwrap().name
+                                ),
+                            ));
+                        }
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!("no field `{field}` on {}", v.type_name()),
                             ));
                         }
                     }
@@ -889,6 +1095,71 @@ mod tests {
     }
 
     #[test]
+    fn record_literal_field_access_and_structural_equality() {
+        let r = run(
+            "type Item = { price: float, qty: int };\na = Item { price: 2.5, qty: 4 };\necho a.price;\necho a.price * a.qty;\nb = Item { price: 2.5, qty: 4 };\necho a == b;\n",
+        );
+        assert_eq!(r.stdout, "2.5\n10.0\ntrue\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn object_displays_as_a_literal() {
+        let r = run("type Pt = { x: int, y: int };\necho Pt { x: 1, y: 2 };\n");
+        assert_eq!(r.stdout, "Pt {x: 1, y: 2}\n");
+    }
+
+    #[test]
+    fn missing_field_is_e0009() {
+        let r = run("type P = { x: int, y: int };\np = P { x: 1 };\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::MissingField
+        );
+    }
+
+    #[test]
+    fn class_constructor_method_and_field_access() {
+        let r = run(
+            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nb = Box.new(21);\necho b.doubled();\necho b.v;\n",
+        );
+        assert_eq!(r.stdout, "42\n21\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn method_takes_arguments_alongside_fields() {
+        let r = run(
+            "class Counter {\n  base: int\n  fn new(base: int): Counter { return Counter { base: base }; }\n  fn plus(n: int): int { return base + n; }\n}\nc = Counter.new(10);\necho c.plus(5);\n",
+        );
+        assert_eq!(r.stdout, "15\n");
+    }
+
+    #[test]
+    fn structural_update_overrides_one_field() {
+        let r = run(
+            "class M {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): M { return M { amount: a, currency: c }; }\n}\na = M.new(500, \"USD\");\nb = M { amount: 300, ..a };\necho b.amount;\necho b.currency;\necho a.amount;\n",
+        );
+        assert_eq!(r.stdout, "300\nUSD\n500\n");
+    }
+
+    #[test]
+    fn plain_enum_construction_and_equality() {
+        let r = run("enum S { A; B; }\necho S.A == S.A;\necho S.A == S.B;\n");
+        assert_eq!(r.stdout, "true\nfalse\n");
+    }
+
+    #[test]
+    fn opaque_use_stub_constructs_and_reads_fields() {
+        let r = run(
+            "use App.Models.User;\nu = User { name: \"Ada\", id: 7 };\necho u.name;\necho u.id;\necho u;\n",
+        );
+        // Opaque objects display their fields in sorted-key order (M0 `BTreeMap` parity).
+        assert_eq!(r.stdout, "Ada\n7\nUser {id: 7, name: \"Ada\"}\n");
+    }
+
+    #[test]
     fn string_interpolation_concatenates_display_forms() {
         let r = run("name = \"Niro\";\necho \"Hello {name}\";\necho \"sum is {1 + 2 * 3}\";\n");
         assert_eq!(r.stdout, "Hello Niro\nsum is 7\n");
@@ -1029,6 +1300,21 @@ mod tests {
             SourceId::FIRST,
             "t.lang",
             "mut total = 0;\nfor n in [1, 2, 3] {\n  total = total + n;\n}\necho total;\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        insta::assert_snapshot!(module.disassemble());
+    }
+
+    #[test]
+    fn disassembly_of_the_object_model_is_stable() {
+        // A record literal, a class with a constructor + an instance method (showing the
+        // shape and method tables, field loads, and enum construction).
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "enum Status { Pending; Paid; }\nclass Order {\n  id: int\n  mut status: Status\n  fn new(id: int): Order { return Order { id: id, status: Status.Pending }; }\n  fn tag(): int { return id; }\n}\no = Order.new(7);\necho o.tag();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

@@ -120,7 +120,30 @@ fn values_equal(left: Value, right: Value) -> bool {
     if left.is_unit() && right.is_unit() {
         return true;
     }
+    // Objects compare structurally: same type and equal fields (M0's `ObjectValue` eq).
+    if let (Some(sa), Some(sb)) = (left.shape(), right.shape())
+        && left.is_object()
+        && right.is_object()
+    {
+        return sa.name == sb.name
+            && sa.fields == sb.fields
+            && slices_equal(&left.slots().unwrap(), &right.slots().unwrap());
+    }
+    // Enum values compare by enum name, variant, and positional data (M0's `EnumValue` eq).
+    if let (Some(sa), Some(sb)) = (left.shape(), right.shape())
+        && left.is_enum()
+        && right.is_enum()
+    {
+        return sa.name == sb.name
+            && sa.variant == sb.variant
+            && slices_equal(&left.enum_data().unwrap(), &right.enum_data().unwrap());
+    }
     false
+}
+
+/// Element-wise [`values_equal`] over two equal-length slot/data arrays.
+fn slices_equal(a: &[Value], b: &[Value]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).all(|(&x, &y)| values_equal(x, y))
 }
 
 /// The integer value of an operand, but only if it is *not* a float — so `arithmetic` and
