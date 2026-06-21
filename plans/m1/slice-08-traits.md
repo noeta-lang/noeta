@@ -25,10 +25,16 @@ The surface, the registry, the checker rules, and infix operator overloading wir
 - [x] Conformance cases: `traits/operator_add.lang` (custom `Add`, runs identically in both backends), `traits/derive_value_object.lang` (`#[derive(...)]` validated + structural `==`), `traits/unknown_trait.lang` (E0014), `traits/invalid_impl.lang` (E0015).
 - [x] Snapshots: checker diagnostic gallery extended with E0014/E0015; VM/checker unit tests; `lang-types` consistency test.
 
-## M1.8b — todo (follow-up)
-- [ ] Derive *codegen* in the compiler: synthesize `Comparable` (structural ordering ⇒ `< <= > >=`), `Display` (`to_string`), `ToJson`, `Clone`. (`Equatable`/`Display`/`Clone` already match M1's default structural `==`/display/shallow-copy; `Comparable` ordering and `ToJson` are genuinely new behavior.)
-- [ ] Non-operator protocol dispatch: `Equatable.eq`/`Comparable.compare` (returning `bool`/`Ordering` — needs the post-call negate/ordering-map the infix group avoids), `Index`/`Length`/`Iterable`/`Callable`/`Members`/`DynamicCall`.
-- [ ] Fallible operators (`TryAdd` etc.) returning `Result`, composing with `?`.
+## M1.8b — in progress
+
+**Done (increment 1):**
+- [x] **`Equatable` dispatch** — `impl Equatable { fn eq(other): bool }` lights up `==`/`!=` in both backends, overriding the default structural equality. `!=` negates `eq`'s result via a new `RetTransform` on the VM frame (the call-then-transform mechanism the infix group didn't need); the tree-walker negates synchronously. Conformance `traits/operator_eq.lang`.
+- [x] **Fallible `TryAdd`** — needs *no* operator wiring: bare `+` is reserved for infallible `Add`, and a fallible add is the explicit `try_add` returning `Result`, composed with `?` (an ordinary method call + `?`, both already supported). The `impl TryAdd` is validated by the 8a checker (E0015 if `try_add` is missing). Conformance `traits/fallible_try_add.lang`. The `RetTransform` enum is built to extend to `Comparable`'s `Ordering` → `bool` map.
+
+**Todo:**
+- [ ] **`Comparable`** — `impl Comparable { fn compare(other): Ordering }` lighting up `< <= > >=`, and `#[derive(Comparable)]` structural ordering. **Prerequisite:** an `Ordering` built-in enum (`Less`/`Equal`/`Greater`) + `.compare()` on primitives, which do not exist yet (only Rust's internal `std::cmp::Ordering` in `ops.rs`). The `RetTransform` mechanism already covers the `Ordering` → `bool` step.
+- [ ] Derive *codegen* in the compiler: synthesize `Comparable` (structural ordering), `Display` (`to_string`), `ToJson`, `Clone`. (`Equatable`/`Display`/`Clone` already match M1's default structural `==`/display/shallow-copy; `Comparable` ordering and `ToJson` are genuinely new behavior.)
+- [ ] Other protocols: `Index` (`a[i]`), `Length` (`len`), `Iterable` (`for`), `Callable` (`a(...)`), `Members`/`DynamicCall` — each needs the surface operator routed to its method.
 - [ ] Generics via shapes (type-param slot, monomorphic guard elision) + the attribute manifest build artifact.
 - [ ] Inline-cache fast path for trait-method call sites (perf; currently a per-op hashmap lookup on the object path).
 

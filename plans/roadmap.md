@@ -29,7 +29,7 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 | 5 | [Result/Option/`?`/`??` + match](m1/slice-05-result-match.md) | A | **done (100% VM corpus coverage — Thrust A gate met)** |
 | 6 | [GC cycle collector + `__destruct`](m1/slice-06-gc.md) | A | done (deterministic `destruct` in both backends + trial-deletion cycle collector; `gc-arena` tracing path deferred — see slice) |
 | 7 | [Type checker: types + inference + ADT/exhaustiveness + ownership](m1/slice-07-checker.md) | B | done (gradual checker as a shared front-end: inference + exhaustiveness E0011 + `?`-typing E0012 + arithmetic mismatch E0007; unknown-type E0013 deferred to M1.9, ownership/immutability to 7b) |
-| 8 | [Traits as operators + derives + generics](m1/slice-08-traits.md) | B | in progress (8a done: operator overloading via `impl` + `#[derive]`/attribute surface, both backends, E0014/E0015; 8b todo: derive codegen, non-operator protocols, fallible ops, generics, manifest) |
+| 8 | [Traits as operators + derives + generics](m1/slice-08-traits.md) | B | in progress (8a done: `+ - * / ~` overloading via `impl` + `#[derive]`/attribute surface + E0014/E0015; 8b underway: `Equatable` `==`/`!=` + fallible `TryAdd` done; todo: `Comparable`/`Ordering`, derive codegen, other protocols, generics, manifest) |
 | 9 | [Modules / namespaces / `use` resolution](m1/slice-09-modules.md) | C | todo |
 | 10 | [Layered stdlib (Ring 1 + Ring 2)](m1/slice-10-stdlib.md) | C | todo |
 

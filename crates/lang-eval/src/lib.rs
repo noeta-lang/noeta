@@ -1533,14 +1533,31 @@ impl Interpreter {
         }
         let left = self.eval_expr(lhs)?;
         let right = self.eval_expr(rhs)?;
-        // Operator-trait dispatch: if the left operand is a user object whose class implements the
-        // operator's trait (e.g. `Add` for `+`), call that method; otherwise the built-in operator
-        // semantics apply. Comparisons/equality stay built-in (their trait wiring is M1.8b).
-        if let Value::Object(object) = &left
-            && let Some(method_name) = op.overload_method()
-            && let Some(method) = object.def.methods.get(method_name)
-        {
-            return self.call_method_on(&Rc::clone(object), &Rc::clone(method), vec![right], span);
+        // Operator-trait dispatch on a user object: an arithmetic/concat operator (`Add` for `+`,
+        // …) calls the matching method and uses its result directly; `==`/`!=` dispatch to the
+        // `Equatable` `eq` method (`!=` negating the bool). Comparisons (`Comparable`) stay
+        // built-in for now — they return `Ordering`, which is not a language type yet (M1.8b).
+        if let Value::Object(object) = &left {
+            if let Some(method_name) = op.overload_method()
+                && let Some(method) = object.def.methods.get(method_name)
+            {
+                return self.call_method_on(
+                    &Rc::clone(object),
+                    &Rc::clone(method),
+                    vec![right],
+                    span,
+                );
+            }
+            if let Some(negate) = op.equatable_negation()
+                && let Some(method) = object.def.methods.get("eq")
+            {
+                let result =
+                    self.call_method_on(&Rc::clone(object), &Rc::clone(method), vec![right], span)?;
+                return Ok(match result {
+                    Value::Bool(b) if negate => Value::Bool(!b),
+                    other => other,
+                });
+            }
         }
         match ops::apply_binary(op, &left, &right) {
             Ok(value) => Ok(value),
@@ -1722,6 +1739,17 @@ mod tests {
             "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: amount + other.amount, currency: currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
         );
         assert_eq!(out.stdout, "8\nUSD\n");
+        assert_eq!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn equatable_overrides_equality_and_negates_for_ne() {
+        // `impl Equatable` routes `==`/`!=` to `eq` (here ignoring `tag`); `!=` negates. The VM
+        // reproduces this identically (see lang-vm), guarded by the differential oracle.
+        let out = run(
+            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
+        );
+        assert_eq!(out.stdout, "true\nfalse\nfalse\n");
         assert_eq!(out.exit_code, 0);
     }
 

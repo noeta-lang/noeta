@@ -1,0 +1,44 @@
+// `TryAdd` is the fallible operator form: bare `+` is reserved for infallible `Add`, while a
+// fallible addition is the explicit `try_add` returning a `Result`, composed with `?`. The impl
+// is validated by the checker (E0015 if `try_add` were missing) and runs through both backends.
+// expect: stdout "8"
+// expect: stdout "mismatch"
+// expect: exit 0
+enum MoneyError {
+    CurrencyMismatch;
+}
+
+class Money {
+    amount: int
+    currency: string
+
+    fn new(amount: int, currency: string): Money {
+        return Money { amount: amount, currency: currency };
+    }
+
+    impl TryAdd {
+        fn try_add(other: Money): Result<Money, MoneyError> {
+            if currency != other.currency {
+                return Err(MoneyError.CurrencyMismatch);
+            }
+            return Ok(Money { amount: amount + other.amount, currency: currency });
+        }
+    }
+}
+
+fn combined(a: Money, b: Money): Result<Money, MoneyError> {
+    return Ok(a.try_add(b)?);
+}
+
+usd5 = Money.new(5, "USD");
+usd3 = Money.new(3, "USD");
+eur1 = Money.new(1, "EUR");
+
+echo match combined(usd5, usd3) {
+    Ok(m) => "{m.amount}",
+    Err(e) => "mismatch",
+};
+echo match combined(usd5, eur1) {
+    Ok(m) => "{m.amount}",
+    Err(e) => "mismatch",
+};

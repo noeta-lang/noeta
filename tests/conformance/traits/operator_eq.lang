@@ -1,0 +1,29 @@
+// Implementing `Equatable` overrides structural equality: `==`/`!=` dispatch to the class's `eq`
+// method. Here `eq` compares only `amount`, so two values with the same amount but a different
+// `tag` are equal — structural equality (the default) would say otherwise. `!=` negates `eq`.
+// Both backends agree (the differential oracle).
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: exit 0
+class Money {
+    amount: int
+    tag: int
+
+    fn new(amount: int, tag: int): Money {
+        return Money { amount: amount, tag: tag };
+    }
+
+    impl Equatable {
+        fn eq(other: Money): bool {
+            return amount == other.amount;
+        }
+    }
+}
+
+a = Money.new(5, 1);
+b = Money.new(5, 2);
+c = Money.new(9, 1);
+echo a == b;
+echo a != b;
+echo a == c;

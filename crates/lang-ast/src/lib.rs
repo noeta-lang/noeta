@@ -542,4 +542,17 @@ impl BinaryOp {
             | BinaryOp::Or => None,
         }
     }
+
+    /// How `==`/`!=` overload through the `Equatable` trait. Both dispatch to the class's `eq`
+    /// method (which returns `bool`); `==` uses the result as-is, `!=` negates it. The return is
+    /// `Some(negate)` for the two equality operators and `None` for every other operator. (Unlike
+    /// the arithmetic group in [`BinaryOp::overload_method`], whose method returns the result
+    /// directly, `eq`'s result is post-processed — hence a separate accessor.)
+    pub fn equatable_negation(self) -> Option<bool> {
+        match self {
+            BinaryOp::Eq => Some(false),
+            BinaryOp::Ne => Some(true),
+            _ => None,
+        }
+    }
 }

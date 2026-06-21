@@ -9,10 +9,11 @@
 //! [`BinaryOp::overload_method`](lang_ast::BinaryOp::overload_method) by a unit test below.
 //!
 //! M1.8a wires the *infix operator traits* (`Add`/`Sub`/`Mul`/`Div`/`Concat`) end-to-end through
-//! both backends and validates every trait/derive name here. The behavior behind the remaining
-//! protocols (structural `Comparable` ordering, `Display`/`ToJson` codegen, `Index`/`Members`/
-//! `Callable` dispatch, fallible `Try*`) is M1.8b; their names are registered now so the surface
-//! parses, checks, and reads as the design intends.
+//! both backends; M1.8b adds `Equatable` (`==`/`!=` → `eq`). Every trait/derive name is validated
+//! against this table. The behavior behind the remaining protocols (`Comparable` ordering — which
+//! needs an `Ordering` type — `Display`/`ToJson` codegen, `Index`/`Members`/`Callable` dispatch)
+//! is the rest of M1.8b; their names are registered now so the surface parses, checks, and reads
+//! as the design intends. (`TryAdd` is fallible-by-method: `a.try_add(b)?`, no operator wiring.)
 
 use lang_ast::BinaryOp;
 
@@ -194,6 +195,24 @@ mod tests {
                     "{op:?} is not overloadable but has an operator trait"
                 ),
             }
+        }
+    }
+
+    /// `Equatable`'s required method is the one the backends dispatch `==`/`!=` to, and only the
+    /// two equality operators carry a negation flag.
+    #[test]
+    fn equatable_dispatch_matches_registry() {
+        use BinaryOp::*;
+        let eq = BuiltinTrait::lookup("Equatable").unwrap();
+        assert_eq!(eq.required_method, Some(("eq", 1)));
+        assert_eq!(Eq.equatable_negation(), Some(false));
+        assert_eq!(Ne.equatable_negation(), Some(true));
+        for op in [Add, Sub, Mul, Div, Rem, Concat, Lt, Le, Gt, Ge, And, Or] {
+            assert_eq!(
+                op.equatable_negation(),
+                None,
+                "{op:?} is not an equality op"
+            );
         }
     }
 

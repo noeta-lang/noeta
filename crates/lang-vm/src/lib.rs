@@ -77,13 +77,39 @@ impl Backend for VmBackend {
     }
 }
 
-/// One activation record: a prototype index, its register file, the program counter, and the
-/// caller register the return value flows into (irrelevant for the bottom/top-level frame).
+/// One activation record: a prototype index, its register file, the program counter, the caller
+/// register the return value flows into (irrelevant for the bottom/top-level frame), and an
+/// optional transform applied to the return value as it lands in the caller.
 struct Frame {
     proto: u32,
     regs: Vec<Value>,
     pc: usize,
     ret_dst: u16,
+    ret_transform: RetTransform,
+}
+
+/// A transform applied to a frame's return value as it flows into the caller's destination
+/// register. Used by operator dispatch where the called trait method's raw result needs
+/// post-processing: `!=` calls `Equatable::eq` and negates the resulting `bool`. (`Comparable`'s
+/// `Ordering` → `bool` mapping for `< <= > >=` will be a further variant in M1.8b.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RetTransform {
+    /// Pass the value through unchanged (every ordinary call/return).
+    None,
+    /// Negate a `bool` result (for `!=` dispatched to `eq`); a non-bool passes through.
+    Negate,
+}
+
+impl RetTransform {
+    fn apply(self, v: Value) -> Value {
+        match self {
+            RetTransform::None => v,
+            RetTransform::Negate => match v.as_bool() {
+                Some(b) => Value::bool(!b),
+                None => v,
+            },
+        }
+    }
 }
 
 /// Signals that a diagnostic has been recorded and execution must unwind. The diagnostic
@@ -162,6 +188,7 @@ fn execute(module: &Module) -> RunResult {
         regs: vec![Value::unit(); module.main().num_registers as usize],
         pc: 0,
         ret_dst: 0,
+        ret_transform: RetTransform::None,
     };
     // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
     // it. On abort `run` has already released every frame register.
@@ -223,6 +250,7 @@ impl<'m> Vm<'m> {
             regs,
             pc: 0,
             ret_dst: 0,
+            ret_transform: RetTransform::None,
         };
         // A destructor returns unit (its body is run for its effects); discard it. An abort
         // inside a destructor has already recorded its diagnostic.
@@ -476,6 +504,7 @@ impl<'m> Vm<'m> {
                             regs: new_regs,
                             pc: 0,
                             ret_dst: *dst,
+                            ret_transform: RetTransform::None,
                         });
                         continue;
                     }
@@ -689,6 +718,9 @@ impl<'m> Vm<'m> {
                             for r in &finished.regs {
                                 release(*r);
                             }
+                            // Apply the frame's return transform on every exit path, for the same
+                            // reason `Op::Return` does (a short-circuiting `?` is an early return).
+                            let v = finished.ret_transform.apply(v);
                             match frames.last_mut() {
                                 Some(caller) => {
                                     let dst = finished.ret_dst as usize;
@@ -812,16 +844,33 @@ impl<'m> Vm<'m> {
                 } => {
                     let left = frames[top].regs[*a as usize];
                     let right = frames[top].regs[*b as usize];
-                    // Operator-trait dispatch: a user object whose class implements the operator's
-                    // trait (e.g. `Add` for `+`) routes the operation to that method, pushing a
-                    // frame exactly like a method call; otherwise the built-in operator applies.
-                    // The checker guarantees the method's arity (receiver + 1), so a mismatch here
-                    // simply falls through to the built-in path rather than dispatching.
-                    if left.is_object()
-                        && let Some(method_name) = op.overload_method()
-                        && let Some(&proto) = self
-                            .methods
-                            .get(&(left.shape().unwrap().name.clone(), method_name.to_string()))
+                    // Operator-trait dispatch on a user object: an arithmetic/concat operator
+                    // routes to its trait method and uses the result directly; `==`/`!=` route to
+                    // `Equatable::eq` (`!=` negating the bool via the frame's return transform).
+                    // Built-in semantics apply otherwise. The checker guarantees a dispatched
+                    // method's arity (receiver + 1); a mismatch falls through to the built-in path.
+                    let dispatch = if left.is_object() {
+                        let type_name = left.shape().unwrap().name.clone();
+                        if let Some(method_name) = op.overload_method() {
+                            self.methods
+                                .get(&(type_name, method_name.to_string()))
+                                .map(|&proto| (proto, RetTransform::None))
+                        } else if let Some(negate) = op.equatable_negation() {
+                            let transform = if negate {
+                                RetTransform::Negate
+                            } else {
+                                RetTransform::None
+                            };
+                            self.methods
+                                .get(&(type_name, "eq".to_string()))
+                                .map(|&proto| (proto, transform))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some((proto, transform)) = dispatch
                         && module.protos[proto as usize].num_params == 2
                     {
                         let chunk = &module.protos[proto as usize];
@@ -836,6 +885,7 @@ impl<'m> Vm<'m> {
                             regs: new_regs,
                             pc: 0,
                             ret_dst: *dst,
+                            ret_transform: transform,
                         });
                         continue;
                     }
@@ -947,6 +997,7 @@ impl<'m> Vm<'m> {
                                 regs: new_regs,
                                 pc: 0,
                                 ret_dst: *dst,
+                                ret_transform: RetTransform::None,
                             });
                         }
                         None => {
@@ -965,6 +1016,9 @@ impl<'m> Vm<'m> {
                     for r in &finished.regs {
                         release(*r);
                     }
+                    // An operator-dispatch frame may post-process its result (e.g. `!=` negates
+                    // `eq`'s bool). The transform maps immediates only, so it never affects refcounts.
+                    let v = finished.ret_transform.apply(v);
                     match frames.last_mut() {
                         Some(caller) => {
                             // Transfer the retained reference into the caller's destination.
@@ -1023,6 +1077,7 @@ impl<'m> Vm<'m> {
                     regs,
                     pc: 0,
                     ret_dst: 0,
+                    ret_transform: RetTransform::None,
                 }])
             }
             None => {
@@ -1444,6 +1499,17 @@ mod tests {
         // A class without the relevant trait method leaves built-in `+` semantics untouched.
         let r = run("echo 2 + 3;\necho \"a\" ~ \"b\";\n");
         assert_eq!(r.stdout, "5\nab\n");
+    }
+
+    #[test]
+    fn equatable_overrides_equality_and_negates_for_ne() {
+        // `impl Equatable` routes `==`/`!=` to `eq`; `eq` here ignores `tag`, and `!=` negates the
+        // returned bool through the frame's return transform.
+        let r = run(
+            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
+        );
+        assert_eq!(r.stdout, "true\nfalse\nfalse\n");
+        assert_eq!(r.exit_code, 0);
     }
 
     #[test]
