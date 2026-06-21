@@ -1,16 +1,17 @@
 ---
 source: crates/lang-vm/src/lib.rs
-expression: chunk.disassemble()
+expression: module.disassemble()
 ---
-registers: 4
+=== main ===
+params: 0, registers: 3
 constants:
   k0 = 1
   k1 = 2
 code:
     0  LoadConst   r0 <- k0
-    1  Move        r1 <- r0
-    2  Move        r2 <- r1
-    3  LoadConst   r3 <- k1
-    4  Binary      r2 <- r2 + r3
-    5  Echo        r2
+    1  StoreGlobal "x" <- r0
+    2  LoadGlobal  r1 <- "x"
+    3  LoadConst   r2 <- k1
+    4  Binary      r1 <- r1 + r2
+    5  Echo        r1
     6  Halt

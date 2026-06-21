@@ -27,13 +27,17 @@ struct ObjHeader {
     refcount: u32,
 }
 
-/// The M1.0 payloads. Strings are the heap string type; `Int` boxes an `i64` that does
+/// The heap payloads. Strings are the heap string type; `Int` boxes an `i64` that does
 /// not fit the 48-bit immediate small-int range, so full i64 wrapping semantics are kept
-/// (the differential oracle checks `i64::MAX + 1`). Later slices extend this with
-/// lists, maps, and shaped objects.
+/// (the differential oracle checks `i64::MAX + 1`). `Closure` holds a function-prototype
+/// index into the compiled module's proto table — M1.2 functions capture only globals
+/// (read live from the global environment), so a closure needs no upvalue array yet; that
+/// arrives with non-global capture in a later slice. Later slices extend this with lists,
+/// maps, and shaped objects.
 pub(crate) enum Payload {
     Str(String),
     Int(i64),
+    Closure(u32),
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.

@@ -87,6 +87,12 @@ impl Value {
         heap::alloc(Payload::Str(s.to_string()))
     }
 
+    /// A heap closure (refcount 1) referencing function prototype `proto` in the module's
+    /// proto table. M1.2 closures capture only globals (read live), so there are no upvalues.
+    pub fn closure(proto: u32) -> Value {
+        heap::alloc(Payload::Closure(proto))
+    }
+
     // --- Classification ---
 
     fn is_float(self) -> bool {
@@ -154,6 +160,18 @@ impl Value {
         }
     }
 
+    /// The function-prototype index, if this is a closure.
+    pub fn as_closure(self) -> Option<u32> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Closure(proto) => Some(*proto),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     // --- Display (mirrors the M0 tree-walker's `Value::display`) ---
 
     /// The display form used by `echo` and `~` concatenation.
@@ -168,6 +186,8 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => s.clone(),
                 Payload::Int(i) => i.to_string(),
+                // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"`.
+                Payload::Closure(_) => "<fn>".to_string(),
             })
         } else {
             // The unit value (and any other singleton) displays as empty, as in M0.
@@ -184,8 +204,13 @@ impl Value {
         } else if self.is_float() {
             "float"
         } else if self.is_pointer() {
-            // M1.0's only non-int heap payload is a string.
-            "string"
+            // Boxed ints were already caught by `as_int` above, so a pointer here is either a
+            // string or a closure. M0 names both user functions and builtins "function".
+            if self.as_closure().is_some() {
+                "function"
+            } else {
+                "string"
+            }
         } else {
             "unit"
         }
@@ -229,6 +254,8 @@ impl std::fmt::Debug for Value {
             write!(f, "Int({i})")
         } else if let Some(x) = self.as_float() {
             write!(f, "Float({x})")
+        } else if let Some(proto) = self.as_closure() {
+            write!(f, "Closure(proto={proto})")
         } else if self.is_pointer() {
             write!(f, "Str({:?})", self.as_string().unwrap_or_default())
         } else {
@@ -308,6 +335,19 @@ mod tests {
         assert_eq!(v.as_string().as_deref(), Some("héllo"));
         assert_eq!(v.display(), "héllo");
         assert_eq!(v.type_name(), "string");
+        assert!(v.dec_ref());
+        v.free();
+    }
+
+    #[test]
+    fn closures_round_trip_and_free() {
+        let v = Value::closure(7);
+        assert_eq!(v.as_closure(), Some(7));
+        assert_eq!(v.type_name(), "function");
+        assert_eq!(v.display(), "<fn>");
+        // A closure is not an int/string/bool, so it never compares "equal" numerically.
+        assert_eq!(v.as_int(), None);
+        assert_eq!(v.as_string(), None);
         assert!(v.dec_ref());
         v.free();
     }

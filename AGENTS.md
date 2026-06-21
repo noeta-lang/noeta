@@ -35,9 +35,9 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `lang-eval` | AST → `RunResult` (M0 tree-walker, retained as the **differential oracle**). |
 | `lang-value` | The M1 NaN-boxed `Value` + operator semantics. **The one crate with `unsafe`** (miri-gated). |
 | `lang-gc` | Refcount/`__destruct` GC policy over `lang-value`. |
-| `lang-bytecode` | The register IR: `Op`, `Chunk`, disassembler (pure data). |
-| `lang-compiler` | AST → `Chunk` (returns `Unsupported` outside the VM's current subset). |
-| `lang-vm` | `Chunk` → `RunResult` (M1 register VM, `VmBackend`). Add VM behavior here. |
+| `lang-bytecode` | The register IR: `Op`, `Chunk` (a function prototype), `Module` (the proto table), disassembler (pure data). |
+| `lang-compiler` | AST → `Module` (returns `Unsupported` outside the VM's current subset). |
+| `lang-vm` | `Module` → `RunResult` (M1 frame-based register VM, `VmBackend`). Add VM behavior here. |
 | `lang-builtins` | The prelude. |
 | `lang-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`, `--differential`). |
 | `lang-cli` | The `lang` binary (`run`/`repl`/`test`). |

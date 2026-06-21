@@ -1,0 +1,43 @@
+---
+source: crates/lang-vm/src/lib.rs
+expression: module.disassemble()
+---
+=== main ===
+params: 0, registers: 4
+constants:
+  k0 = 6
+code:
+    0  MakeClosure r0 <- proto 1
+    1  StoreGlobal "fib" <- r0
+    2  LoadGlobal  r2 <- "fib"
+    3  LoadConst   r3 <- k0
+    4  Call        r1 <- r2(r3)
+    5  Echo        r1
+    6  Halt
+=== proto 1 ===
+params: 1, registers: 12
+constants:
+  k0 = 2
+  k1 = 1
+  k2 = 2
+code:
+    0  Move        r1 <- r0
+    1  LoadConst   r2 <- k0
+    2  Binary      r1 <- r1 < r2
+    3  RequireCondBool r1 (if)
+    4  JumpIfFalse r1 -> 7
+    5  Move        r3 <- r0
+    6  Return      r3
+    7  LoadGlobal  r5 <- "fib"
+    8  Move        r6 <- r0
+    9  LoadConst   r7 <- k1
+   10  Binary      r6 <- r6 - r7
+   11  Call        r4 <- r5(r6)
+   12  LoadGlobal  r9 <- "fib"
+   13  Move        r10 <- r0
+   14  LoadConst   r11 <- k2
+   15  Binary      r10 <- r10 - r11
+   16  Call        r8 <- r9(r10)
+   17  Binary      r4 <- r4 + r8
+   18  Return      r4
+   19  Halt
