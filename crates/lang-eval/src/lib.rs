@@ -12,7 +12,10 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Program, Stmt, StrPart, UnaryOp};
+use lang_ast::{
+    BinaryOp, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, Pattern, Program, Stmt, StrPart,
+    UnaryOp,
+};
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -118,6 +121,48 @@ impl Builtin {
 enum FnBody {
     Arrow(Expr),
     Block(Vec<Stmt>),
+}
+
+/// The definition of an enum type, registered as an `EnumType` value.
+#[derive(Debug)]
+pub struct EnumDef {
+    name: String,
+    variants: Vec<VariantInfo>,
+}
+
+impl EnumDef {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn variant(&self, name: &str) -> Option<&VariantInfo> {
+        self.variants.iter().find(|v| v.name == name)
+    }
+}
+
+#[derive(Debug)]
+struct VariantInfo {
+    name: String,
+    field_names: Vec<String>,
+}
+
+/// A constructed enum value.
+#[derive(Debug, PartialEq)]
+pub struct EnumValue {
+    enum_name: String,
+    variant: String,
+    data: Vec<Value>,
+}
+
+impl EnumValue {
+    pub fn display(&self) -> String {
+        if self.data.is_empty() {
+            format!("{}.{}", self.enum_name, self.variant)
+        } else {
+            let parts: Vec<String> = self.data.iter().map(Value::display).collect();
+            format!("{}.{}({})", self.enum_name, self.variant, parts.join(", "))
+        }
+    }
 }
 
 /// A user function value: its parameter names, its body, and the lexical scope it was
@@ -278,6 +323,10 @@ impl Interpreter {
                 self.declare_fn(decl);
                 Ok(Flow::Normal)
             }
+            Stmt::Enum(decl) => {
+                self.declare_enum(decl);
+                Ok(Flow::Normal)
+            }
             Stmt::Return { value, .. } => {
                 let value = match value {
                     Some(expr) => self.eval_expr(expr)?,
@@ -414,6 +463,59 @@ impl Interpreter {
             .declare(decl.name.clone(), Value::Function(Rc::new(closure)), false);
     }
 
+    /// Register an enum type as an `EnumType` value. Backed values (`= "pending"`) are
+    /// parsed but not stored in M0 — backed enums match by variant like plain ones.
+    fn declare_enum(&mut self, decl: &EnumDecl) {
+        let variants = decl
+            .variants
+            .iter()
+            .map(|v| VariantInfo {
+                name: v.name.clone(),
+                field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
+            })
+            .collect();
+        let def = EnumDef {
+            name: decl.name.clone(),
+            variants,
+        };
+        self.scope
+            .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
+    }
+
+    /// Build an enum value from a type, a variant name, and its argument values.
+    fn make_variant(
+        &mut self,
+        def: &Rc<EnumDef>,
+        variant: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        let Some(info) = def.variant(variant) else {
+            return Err(self.runtime_error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("enum `{}` has no variant `{variant}`", def.name()),
+            ));
+        };
+        if args.len() != info.field_names.len() {
+            return Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "variant `{}.{variant}` takes {} field(s) but {} were supplied",
+                    def.name(),
+                    info.field_names.len(),
+                    args.len()
+                ),
+            ));
+        }
+        Ok(Value::Enum(Rc::new(EnumValue {
+            enum_name: def.name().to_string(),
+            variant: variant.to_string(),
+            data: args,
+        })))
+    }
+
     /// Apply the binding rules: `mut` declares/overwrites a mutable binding in the
     /// current scope; a bare `name = expr` reassigns an existing (mutable) binding if
     /// one is in scope, errors on an immutable one, and otherwise introduces a new
@@ -502,14 +604,31 @@ impl Interpreter {
                 }
                 Ok(Value::Map(Rc::new(map)))
             }
-            Expr::Member { name, span, .. } => {
-                // A bare (uncalled) member access is field access, which lands with
-                // records in Slice 6. In M0 the only members are methods, always called.
-                Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    *span,
-                    format!("no field `{name}` (method calls need `()`)"),
-                ))
+            Expr::Member {
+                receiver,
+                name,
+                span,
+                ..
+            } => {
+                let receiver = self.eval_expr(receiver)?;
+                match receiver {
+                    // `Status.Pending` — construct a no-data variant.
+                    Value::EnumType(def) => self.make_variant(&def, name, vec![], *span),
+                    // Bare field access on other values lands with records (Slice 6).
+                    other => Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        *span,
+                        format!("no field `{name}` on {}", other.type_name()),
+                    )),
+                }
+            }
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => {
+                let value = self.eval_expr(scrutinee)?;
+                self.eval_match(value, arms, *span)
             }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
@@ -568,7 +687,31 @@ impl Interpreter {
         }
     }
 
-    /// Dispatch a built-in method (`.count()`, `.enumerate()`) on a receiver value.
+    /// Evaluate a `match`: try each arm's pattern in order, bind on the first match, and
+    /// evaluate that arm's body in a child scope. M0 match is non-exhaustive (a checker
+    /// concern, M1), so a value matching no arm is a runtime error.
+    fn eval_match(&mut self, value: Value, arms: &[MatchArm], span: Span) -> Eval<Value> {
+        for arm in arms {
+            if let Some(bindings) = match_pattern(&arm.pattern, &value) {
+                let child = Scope::child(&self.scope);
+                for (name, bound) in bindings {
+                    child.declare(name, bound, false);
+                }
+                let saved = std::mem::replace(&mut self.scope, child);
+                let result = self.eval_expr(&arm.body);
+                self.scope = saved;
+                return result;
+            }
+        }
+        Err(self.runtime_error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!("no match arm matched the value {}", value.display()),
+        ))
+    }
+
+    /// Dispatch a built-in method (`.count()`, `.enumerate()`) on a receiver value, or
+    /// construct an enum variant (`OrderError.NegativePrice(2)`).
     fn call_method(
         &mut self,
         receiver: Value,
@@ -576,6 +719,9 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
+        if let Value::EnumType(def) = &receiver {
+            return self.make_variant(&Rc::clone(def), name, args, span);
+        }
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
@@ -840,6 +986,56 @@ impl Interpreter {
     }
 }
 
+/// Try to match `pattern` against `value`. Returns the bindings it introduces on
+/// success, or `None` if the pattern does not match.
+fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)>> {
+    match pattern {
+        Pattern::Wildcard { .. } => Some(Vec::new()),
+        Pattern::Binding { name, .. } => Some(vec![(name.clone(), value.clone())]),
+        Pattern::Int {
+            value: expected, ..
+        } => match value {
+            Value::Int(actual) if actual == expected => Some(Vec::new()),
+            _ => None,
+        },
+        Pattern::Str {
+            value: expected, ..
+        } => match value {
+            Value::Str(actual) if actual == expected => Some(Vec::new()),
+            _ => None,
+        },
+        Pattern::Bool {
+            value: expected, ..
+        } => match value {
+            Value::Bool(actual) if actual == expected => Some(Vec::new()),
+            _ => None,
+        },
+        Pattern::Variant {
+            type_name,
+            variant,
+            bindings,
+            ..
+        } => {
+            let Value::Enum(enum_value) = value else {
+                return None;
+            };
+            if let Some(type_name) = type_name
+                && &enum_value.enum_name != type_name
+            {
+                return None;
+            }
+            if &enum_value.variant != variant || bindings.len() != enum_value.data.len() {
+                return None;
+            }
+            let mut all = Vec::new();
+            for (sub, data) in bindings.iter().zip(&enum_value.data) {
+                all.extend(match_pattern(sub, data)?);
+            }
+            Some(all)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -936,6 +1132,36 @@ mod tests {
     fn interpolation_escapes_and_literal_braces() {
         assert_eq!(run("echo \"a\\tb\";").stdout, "a\tb\n");
         assert_eq!(run("echo \"{{literal}}\";").stdout, "{literal}\n");
+    }
+
+    #[test]
+    fn plain_enum_and_match() {
+        let src = "enum Color { Red; Green; Blue; } c = Color.Green; echo match c { Color.Red => \"r\", Color.Green => \"g\", Color.Blue => \"b\" };";
+        assert_eq!(run(src).stdout, "g\n");
+    }
+
+    #[test]
+    fn algebraic_enum_binds_data() {
+        let src = "enum E { Empty; Code(n: int); } x = E.Code(42); echo match x { E.Empty => \"empty\", E.Code(n) => \"code {n}\" };";
+        assert_eq!(run(src).stdout, "code 42\n");
+    }
+
+    #[test]
+    fn match_wildcard_and_literals() {
+        let src = "fn name(n) { return match n { 0 => \"zero\", 1 => \"one\", _ => \"many\" }; } echo name(0); echo name(5);";
+        assert_eq!(run(src).stdout, "zero\nmany\n");
+    }
+
+    #[test]
+    fn enum_equality() {
+        let src = "enum S { A; B; } echo S.A == S.A; echo S.A == S.B;";
+        assert_eq!(run(src).stdout, "true\nfalse\n");
+    }
+
+    #[test]
+    fn unmatched_value_is_a_runtime_error() {
+        let result = run("enum E { A; B; } echo match E.B { E.A => 1 };");
+        assert_eq!(result.exit_code, 1);
     }
 
     #[test]

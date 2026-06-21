@@ -1,0 +1,17 @@
+---
+source: crates/lang-parser/src/lib.rs
+assertion_line: 1049
+expression: "pretty(\"enum E { Empty; Code(n: int); } echo match x { E.Empty => 0, E.Code(n) => n, _ => -1 };\")"
+---
+(program @0..87
+  (enum E [Empty Code(n)] @0..31)
+  (echo @32..87
+    (match @37..86
+      (ident x @43..44)
+      (arm E.Empty
+        (int 0 @58..59))
+      (arm E.Code(n)
+        (ident n @74..75))
+      (arm _
+        (unary "-" @82..84
+          (int 1 @83..84))))))

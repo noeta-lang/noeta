@@ -10,7 +10,8 @@
 //! M0 scope grows one vertical slice at a time.
 
 use lang_ast::{
-    BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt, StrPart, TypeRef, UnaryOp,
+    BinaryOp, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, Param, Pattern, Program, Stmt, StrPart,
+    TypeRef, UnaryOp, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind, lex};
@@ -136,6 +137,7 @@ impl Parser<'_> {
             Some(TokenKind::FnKw) if self.peek_at(1).map(|t| t.kind) == Some(TokenKind::Ident) => {
                 self.parse_fn_decl().map(Stmt::Fn)
             }
+            Some(TokenKind::EnumKw) => self.parse_enum().map(Stmt::Enum),
             Some(_) => self.parse_expr_or_binding_stmt(),
             None => None,
         }
@@ -300,6 +302,61 @@ impl Parser<'_> {
             ret,
             body,
             span: fn_kw.span.merge(body_span),
+        })
+    }
+
+    fn parse_enum(&mut self) -> Option<EnumDecl> {
+        let enum_kw = self.expect(TokenKind::EnumKw)?;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let backing = if self.peek().map(|t| t.kind) == Some(TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        self.expect(TokenKind::LBrace)?;
+        let mut variants = Vec::new();
+        while !self.at_end() && self.peek().map(|t| t.kind) != Some(TokenKind::RBrace) {
+            let before = self.pos;
+            match self.parse_variant() {
+                Some(variant) => variants.push(variant),
+                None => self.synchronize(),
+            }
+            if self.pos == before {
+                self.advance();
+            }
+        }
+        let rbrace = self.expect(TokenKind::RBrace)?;
+        Some(EnumDecl {
+            name: self.text(name_tok.span),
+            name_span: name_tok.span,
+            backing,
+            variants,
+            span: enum_kw.span.merge(rbrace.span),
+        })
+    }
+
+    fn parse_variant(&mut self) -> Option<VariantDecl> {
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let mut fields = Vec::new();
+        let mut backed_value = None;
+        match self.peek().map(|t| t.kind) {
+            // Algebraic variant: `NegativePrice(index: int)`.
+            Some(TokenKind::LParen) => fields = self.parse_params()?,
+            // Backed variant: `Pending = "pending"`.
+            Some(TokenKind::Eq) => {
+                self.advance();
+                backed_value = Some(self.parse_expr()?);
+            }
+            _ => {}
+        }
+        let semi = self.expect(TokenKind::Semicolon)?;
+        Some(VariantDecl {
+            name: self.text(name_tok.span),
+            name_span: name_tok.span,
+            fields,
+            backed_value,
+            span: name_tok.span.merge(semi.span),
         })
     }
 
@@ -544,6 +601,7 @@ impl Parser<'_> {
                 })
             }
             TokenKind::FnKw => self.parse_closure(),
+            TokenKind::MatchKw => self.parse_match(),
             TokenKind::LBracket => self.parse_list(),
             TokenKind::LBrace => self.parse_map(),
             TokenKind::LParen => {
@@ -609,6 +667,133 @@ impl Parser<'_> {
             body: Box::new(body),
             span,
         })
+    }
+
+    fn parse_match(&mut self) -> Option<Expr> {
+        let match_kw = self.expect(TokenKind::MatchKw)?;
+        let scrutinee = self.parse_expr()?;
+        self.expect(TokenKind::LBrace)?;
+        let mut arms = Vec::new();
+        while !self.at_end() && self.peek().map(|t| t.kind) != Some(TokenKind::RBrace) {
+            let pattern = self.parse_pattern()?;
+            self.expect(TokenKind::FatArrow)?;
+            let body = self.parse_expr()?;
+            let span = pattern.span().merge(body.span());
+            arms.push(MatchArm {
+                pattern,
+                body,
+                span,
+            });
+            if self.peek().map(|t| t.kind) == Some(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let rbrace = self.expect(TokenKind::RBrace)?;
+        Some(Expr::Match {
+            scrutinee: Box::new(scrutinee),
+            arms,
+            span: match_kw.span.merge(rbrace.span),
+        })
+    }
+
+    fn parse_pattern(&mut self) -> Option<Pattern> {
+        let token = self.peek().copied()?;
+        match token.kind {
+            TokenKind::IntLit => {
+                self.advance();
+                Some(Pattern::Int {
+                    value: self.int_value(token.span),
+                    span: token.span,
+                })
+            }
+            TokenKind::StringLit => {
+                self.advance();
+                let raw = self.source.slice(token.span);
+                let value = raw
+                    .strip_prefix('"')
+                    .and_then(|r| r.strip_suffix('"'))
+                    .unwrap_or(raw);
+                Some(Pattern::Str {
+                    value: value.to_string(),
+                    span: token.span,
+                })
+            }
+            TokenKind::TrueKw => {
+                self.advance();
+                Some(Pattern::Bool {
+                    value: true,
+                    span: token.span,
+                })
+            }
+            TokenKind::FalseKw => {
+                self.advance();
+                Some(Pattern::Bool {
+                    value: false,
+                    span: token.span,
+                })
+            }
+            TokenKind::Ident => {
+                self.advance();
+                let name = self.text(token.span);
+                if name == "_" {
+                    return Some(Pattern::Wildcard { span: token.span });
+                }
+                // `Type.Variant` (optionally with bindings).
+                if self.peek().map(|t| t.kind) == Some(TokenKind::Dot) {
+                    self.advance();
+                    let variant_tok = self.expect(TokenKind::Ident)?;
+                    let (bindings, end) = self.parse_pattern_bindings(variant_tok.span)?;
+                    return Some(Pattern::Variant {
+                        type_name: Some(name),
+                        variant: self.text(variant_tok.span),
+                        bindings,
+                        span: token.span.merge(end),
+                    });
+                }
+                // `Variant(bindings)` — unqualified constructor (e.g. `Ok(x)`).
+                if self.peek().map(|t| t.kind) == Some(TokenKind::LParen) {
+                    let (bindings, end) = self.parse_pattern_bindings(token.span)?;
+                    return Some(Pattern::Variant {
+                        type_name: None,
+                        variant: name,
+                        bindings,
+                        span: token.span.merge(end),
+                    });
+                }
+                Some(Pattern::Binding {
+                    name,
+                    span: token.span,
+                })
+            }
+            _ => {
+                self.error_unexpected(token, "a pattern");
+                None
+            }
+        }
+    }
+
+    /// Parse the optional `(sub, sub)` binding list of a variant pattern. Returns the
+    /// sub-patterns and the span end (the `)` if present, else `default_end`).
+    fn parse_pattern_bindings(&mut self, default_end: Span) -> Option<(Vec<Pattern>, Span)> {
+        if self.peek().map(|t| t.kind) != Some(TokenKind::LParen) {
+            return Some((Vec::new(), default_end));
+        }
+        self.advance();
+        let mut bindings = Vec::new();
+        if self.peek().map(|t| t.kind) != Some(TokenKind::RParen) {
+            loop {
+                bindings.push(self.parse_pattern()?);
+                if self.peek().map(|t| t.kind) == Some(TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        let rparen = self.expect(TokenKind::RParen)?;
+        Some((bindings, rparen.span))
     }
 
     // --- Literal value extraction ---
@@ -883,6 +1068,13 @@ mod tests {
     fn string_interpolation_parses_to_parts() {
         // A hole's inner expression carries absolute source spans.
         insta::assert_snapshot!(pretty("echo \"Order #{id} by {user.name}\";"));
+    }
+
+    #[test]
+    fn enum_declaration_and_match() {
+        insta::assert_snapshot!(pretty(
+            "enum E { Empty; Code(n: int); } echo match x { E.Empty => 0, E.Code(n) => n, _ => -1 };"
+        ));
     }
 
     #[test]

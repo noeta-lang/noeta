@@ -41,6 +41,10 @@ pub enum TokenKind {
     ForKw,
     #[token("in")]
     InKw,
+    #[token("enum")]
+    EnumKw,
+    #[token("match")]
+    MatchKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. No escapes yet (Slice 4).
@@ -128,6 +132,8 @@ impl TokenKind {
             TokenKind::ElseKw => "ElseKw",
             TokenKind::ForKw => "ForKw",
             TokenKind::InKw => "InKw",
+            TokenKind::EnumKw => "EnumKw",
+            TokenKind::MatchKw => "MatchKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
@@ -177,6 +183,8 @@ impl TokenKind {
             TokenKind::ElseKw => "`else`",
             TokenKind::ForKw => "`for`",
             TokenKind::InKw => "`in`",
+            TokenKind::EnumKw => "`enum`",
+            TokenKind::MatchKw => "`match`",
             TokenKind::StringLit => "a string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",

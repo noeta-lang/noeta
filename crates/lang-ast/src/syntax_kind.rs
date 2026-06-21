@@ -23,6 +23,8 @@ pub enum SyntaxKind {
     ElseKw,
     ForKw,
     InKw,
+    EnumKw,
+    MatchKw,
 
     // --- Literal / name tokens ---
     StringLit,
@@ -91,6 +93,11 @@ pub enum SyntaxKind {
     MapExpr,
     MemberExpr,
     InterpExpr,
+    MatchExpr,
+    MatchArm,
+    Pattern,
+    EnumDecl,
+    VariantDecl,
 }
 
 impl SyntaxKind {
@@ -120,6 +127,11 @@ impl SyntaxKind {
                 | SyntaxKind::MapExpr
                 | SyntaxKind::MemberExpr
                 | SyntaxKind::InterpExpr
+                | SyntaxKind::MatchExpr
+                | SyntaxKind::MatchArm
+                | SyntaxKind::Pattern
+                | SyntaxKind::EnumDecl
+                | SyntaxKind::VariantDecl
         )
     }
 }

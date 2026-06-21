@@ -103,6 +103,9 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
+        (Value::List(a), Value::List(b)) => a == b,
+        (Value::Map(a), Value::Map(b)) => a == b,
+        (Value::Enum(a), Value::Enum(b)) => a == b,
         (Value::Unit, Value::Unit) => true,
         _ => false,
     }

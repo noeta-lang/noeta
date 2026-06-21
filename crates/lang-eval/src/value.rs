@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::{Builtin, Closure};
+use crate::{Builtin, Closure, EnumDef, EnumValue};
 
 /// A runtime value.
 #[derive(Clone)]
@@ -33,6 +33,10 @@ pub enum Value {
     Function(Rc<Closure>),
     /// A built-in (native) function from the prelude.
     Builtin(Builtin),
+    /// An enum *type* (e.g. the value `Status`), used to construct variants.
+    EnumType(Rc<EnumDef>),
+    /// An enum *value* (e.g. `Status.Pending` or `OrderError.NegativePrice(2)`).
+    Enum(Rc<EnumValue>),
 }
 
 impl Value {
@@ -58,6 +62,8 @@ impl Value {
             }
             Value::Function(_) => "<fn>".to_string(),
             Value::Builtin(b) => format!("<builtin {}>", b.name()),
+            Value::EnumType(def) => format!("<enum {}>", def.name()),
+            Value::Enum(value) => value.display(),
         }
     }
 
@@ -81,6 +87,8 @@ impl Value {
             Value::List(_) => "list",
             Value::Map(_) => "map",
             Value::Function(_) | Value::Builtin(_) => "function",
+            Value::EnumType(_) => "enum type",
+            Value::Enum(_) => "enum",
         }
     }
 }
@@ -97,6 +105,8 @@ impl fmt::Debug for Value {
             Value::Map(entries) => write!(f, "Map({entries:?})"),
             Value::Function(_) => write!(f, "Function(<fn>)"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
+            Value::EnumType(def) => write!(f, "EnumType({})", def.name()),
+            Value::Enum(value) => write!(f, "Enum({})", value.display()),
         }
     }
 }
@@ -111,7 +121,8 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
-            // Functions are not structurally comparable.
+            (Value::Enum(a), Value::Enum(b)) => a == b,
+            // Functions and enum types are not structurally comparable.
             _ => false,
         }
     }

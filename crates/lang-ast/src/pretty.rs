@@ -5,7 +5,7 @@
 //! span regression shows up directly in a snapshot diff. It is also the printer the
 //! parse→print→parse property test (Slice 9) builds on.
 
-use crate::{Expr, FnDecl, ForPattern, Param, Program, Stmt, StrPart};
+use crate::{EnumDecl, Expr, FnDecl, ForPattern, Param, Pattern, Program, Stmt, StrPart};
 use lang_span::Span;
 
 /// Render an AST node to the canonical pretty form.
@@ -72,6 +72,7 @@ impl Pretty for Stmt {
                 out.push(')');
             }
             Stmt::Fn(decl) => decl.pretty(out, level),
+            Stmt::Enum(decl) => decl.pretty(out, level),
             Stmt::Return { value, span: s } => {
                 indent(out, level);
                 match value {
@@ -155,6 +156,62 @@ impl Pretty for FnDecl {
             stmt.pretty(out, level + 1);
         }
         out.push(')');
+    }
+}
+
+impl Pretty for EnumDecl {
+    fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
+        let kind = if self.backing.is_some() {
+            "enum-backed"
+        } else {
+            "enum"
+        };
+        let variants: Vec<String> = self
+            .variants
+            .iter()
+            .map(|v| {
+                if v.fields.is_empty() {
+                    v.name.clone()
+                } else {
+                    format!("{}({})", v.name, param_list(&v.fields))
+                }
+            })
+            .collect();
+        out.push_str(&format!(
+            "({kind} {} [{}] {})",
+            self.name,
+            variants.join(" "),
+            span(self.span)
+        ));
+    }
+}
+
+/// Render a pattern to a compact inline form for snapshots.
+fn pattern_str(pattern: &Pattern) -> String {
+    match pattern {
+        Pattern::Wildcard { .. } => "_".to_string(),
+        Pattern::Binding { name, .. } => name.clone(),
+        Pattern::Int { value, .. } => value.to_string(),
+        Pattern::Str { value, .. } => format!("{value:?}"),
+        Pattern::Bool { value, .. } => value.to_string(),
+        Pattern::Variant {
+            type_name,
+            variant,
+            bindings,
+            ..
+        } => {
+            let head = match type_name {
+                Some(t) => format!("{t}.{variant}"),
+                None => variant.clone(),
+            };
+            if bindings.is_empty() {
+                head
+            } else {
+                let inner: Vec<String> = bindings.iter().map(pattern_str).collect();
+                format!("{head}({})", inner.join(", "))
+            }
+        }
     }
 }
 
@@ -278,6 +335,22 @@ impl Pretty for Expr {
                             out.push(')');
                         }
                     }
+                }
+                out.push(')');
+            }
+            Expr::Match {
+                scrutinee,
+                arms,
+                span: s,
+            } => {
+                out.push_str(&format!("(match {}\n", span(*s)));
+                scrutinee.pretty(out, level + 1);
+                for arm in arms {
+                    out.push('\n');
+                    indent(out, level + 1);
+                    out.push_str(&format!("(arm {}\n", pattern_str(&arm.pattern)));
+                    arm.body.pretty(out, level + 2);
+                    out.push(')');
                 }
                 out.push(')');
             }

@@ -1,0 +1,32 @@
+// Plain, backed, and algebraic enums with pattern matching that binds data.
+// expect: stdout "paid"
+// expect: stdout "item 2 is negative"
+// expect: stdout "true"
+// expect: exit 0
+enum Status: string {
+    Pending = "pending";
+    Paid = "paid";
+}
+
+enum OrderError {
+    Empty;
+    NegativePrice(index: int);
+}
+
+fn label(s: Status): string {
+    return match s {
+        Status.Pending => "pending",
+        Status.Paid => "paid",
+    };
+}
+echo label(Status.Paid);
+
+fn describe(e: OrderError): string {
+    return match e {
+        OrderError.Empty => "empty order",
+        OrderError.NegativePrice(i) => "item {i} is negative",
+    };
+}
+echo describe(OrderError.NegativePrice(2));
+
+echo Status.Pending == Status.Pending;

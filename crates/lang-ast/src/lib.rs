@@ -41,6 +41,8 @@ pub enum Stmt {
     },
     /// A named function declaration: `fn name(params): Ret { body }`.
     Fn(FnDecl),
+    /// An enum declaration (plain, backed, or algebraic).
+    Enum(EnumDecl),
     /// `return <expr>;` or `return;`.
     Return { value: Option<Expr>, span: Span },
     /// `if cond { ... } else if cond { ... } else { ... }`. An `else if` is represented
@@ -72,8 +74,34 @@ impl Stmt {
             | Stmt::For { span, .. }
             | Stmt::Expr { span, .. } => *span,
             Stmt::Fn(decl) => decl.span,
+            Stmt::Enum(decl) => decl.span,
         }
     }
+}
+
+/// An enum declaration. Plain (`enum Color { Red; ... }`), backed
+/// (`enum Status: string { Pending = "pending"; ... }`), or algebraic
+/// (`enum OrderError { Empty; NegativePrice(index: int); }`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// The backing primitive type for a backed enum (`: string`), if any.
+    pub backing: Option<TypeRef>,
+    pub variants: Vec<VariantDecl>,
+    pub span: Span,
+}
+
+/// One variant of an enum.
+#[derive(Debug, Clone, PartialEq)]
+pub struct VariantDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// Associated data fields (algebraic variant); empty otherwise.
+    pub fields: Vec<Param>,
+    /// The backing value (`= "pending"`) for a backed enum's variant.
+    pub backed_value: Option<Expr>,
+    pub span: Span,
 }
 
 /// The binding form of a `for` loop: either one variable, or a `(index, value)` pair
@@ -201,6 +229,67 @@ pub enum Expr {
     /// An interpolated string: `"Hello {name}"` becomes a sequence of literal and
     /// embedded-expression parts. A string with no holes stays a plain [`Expr::Str`].
     Interp { parts: Vec<StrPart>, span: Span },
+    /// `match scrutinee { pattern => body, ... }`.
+    Match {
+        scrutinee: Box<Expr>,
+        arms: Vec<MatchArm>,
+        span: Span,
+    },
+}
+
+/// One arm of a `match`: a pattern and the expression it evaluates to.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchArm {
+    pub pattern: Pattern,
+    pub body: Expr,
+    pub span: Span,
+}
+
+/// A `match` pattern. Exhaustiveness is unchecked in M0 (it is a checker concern, M1).
+#[derive(Debug, Clone, PartialEq)]
+pub enum Pattern {
+    /// `_` — matches anything, binds nothing.
+    Wildcard {
+        span: Span,
+    },
+    /// A lowercase name — matches anything and binds it.
+    Binding {
+        name: String,
+        span: Span,
+    },
+    Int {
+        value: i64,
+        span: Span,
+    },
+    Str {
+        value: String,
+        span: Span,
+    },
+    Bool {
+        value: bool,
+        span: Span,
+    },
+    /// `Type.Variant`, `Variant(sub, ...)`, or `Type.Variant(sub, ...)`. `type_name`
+    /// is `None` for unqualified constructors like `Ok(x)` / `some(x)`.
+    Variant {
+        type_name: Option<String>,
+        variant: String,
+        bindings: Vec<Pattern>,
+        span: Span,
+    },
+}
+
+impl Pattern {
+    pub fn span(&self) -> Span {
+        match self {
+            Pattern::Wildcard { span }
+            | Pattern::Binding { span, .. }
+            | Pattern::Int { span, .. }
+            | Pattern::Str { span, .. }
+            | Pattern::Bool { span, .. }
+            | Pattern::Variant { span, .. } => *span,
+        }
+    }
 }
 
 /// One part of an interpolated string.
@@ -228,7 +317,8 @@ impl Expr {
             | Expr::List { span, .. }
             | Expr::Map { span, .. }
             | Expr::Member { span, .. }
-            | Expr::Interp { span, .. } => *span,
+            | Expr::Interp { span, .. }
+            | Expr::Match { span, .. } => *span,
         }
     }
 }
