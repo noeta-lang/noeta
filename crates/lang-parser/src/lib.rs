@@ -567,6 +567,18 @@ where
                     span: to_span(e.span()),
                 },
             ),
+            // `receiver[index]` — index access (the `Index` trait / list element access).
+            // Binds as tightly as call/member, so `a[i].b` and `f()[0]` chain naturally.
+            postfix(
+                10,
+                expr.clone()
+                    .delimited_by(just(T::LBracket), just(T::RBracket)),
+                |receiver, index, e| Expr::Index {
+                    receiver: Box::new(receiver),
+                    index: Box::new(index),
+                    span: to_span(e.span()),
+                },
+            ),
             // `expr?` — error/absence propagation; binds as tightly as call/member.
             postfix(10, just(T::Question), |operand, _, e| Expr::Try {
                 expr: Box::new(operand),

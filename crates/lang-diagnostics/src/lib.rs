@@ -49,6 +49,8 @@ pub enum DiagnosticCode {
     /// An `impl` block does not satisfy the trait it names — a required method is missing or has
     /// the wrong arity.
     InvalidImpl,
+    /// An index expression `a[i]` addressed a list position outside its bounds.
+    IndexOutOfBounds,
 }
 
 impl DiagnosticCode {
@@ -70,6 +72,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnknownType,
         DiagnosticCode::UnknownTrait,
         DiagnosticCode::InvalidImpl,
+        DiagnosticCode::IndexOutOfBounds,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -91,6 +94,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnknownType => "E0013",
             DiagnosticCode::UnknownTrait => "E0014",
             DiagnosticCode::InvalidImpl => "E0015",
+            DiagnosticCode::IndexOutOfBounds => "E0016",
         }
     }
 

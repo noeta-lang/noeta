@@ -169,6 +169,17 @@ pub enum Op {
         args: Box<[Reg]>,
         span: Span,
     },
+    /// `dst = recv[index]` — index access (the `Index` trait / list element access), mirroring
+    /// the tree-walker's `eval_index`. On an object it dispatches to the `get` method (pushing a
+    /// call frame `[recv, index]`); on a list it addresses an element by integer position,
+    /// raising E0016 out of bounds. A non-int list index or a non-indexable receiver raises
+    /// E0007, at `span`.
+    Index {
+        dst: Reg,
+        recv: Reg,
+        index: Reg,
+        span: Span,
+    },
     /// `dst = Type { named..., ..spread }` — construct a declared record/class instance whose
     /// layout is `shapes[shape]`. `named` gives each provided field's slot index and value
     /// register; `spread` (if present) is a base object every still-unset declared slot is
@@ -529,6 +540,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
                 args.join(", ")
             )
         }
+        Op::Index {
+            dst, recv, index, ..
+        } => format!("Index       r{dst} <- r{recv}[r{index}]"),
         Op::MakeRecord {
             dst,
             shape,

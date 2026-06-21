@@ -10,9 +10,10 @@
 //!
 //! Every operator is now trait-dispatched through both backends: the infix traits `Add`/`Sub`/
 //! `Mul`/`Div`/`Concat` (`+ - * / ~`, M1.8a), `Equatable` (`==`/`!=` → `eq`), and `Comparable`
-//! (`< <= > >=` → `compare`, returning the built-in `Ordering` enum). Every trait/derive name is
+//! (`< <= > >=` → `compare`, returning the built-in `Ordering` enum). The `Index` trait lights up
+//! `a[i]` (→ `get`, with built-in list element access as the fallback). Every trait/derive name is
 //! validated against this table. The behavior behind the remaining protocols (`Display`/`ToJson`
-//! codegen, `Index`/`Members`/`Callable` dispatch) is the rest of M1.8b; their names are registered
+//! codegen, `Length`/`Members`/`Callable` dispatch) is the rest of M1.8b; their names are registered
 //! now so the surface parses, checks, and reads as the design intends. (`TryAdd` is fallible-by-
 //! method: `a.try_add(b)?`, no operator wiring.)
 

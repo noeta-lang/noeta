@@ -402,6 +402,16 @@ impl Checker {
                 Type::Map(Box::new(Type::Unknown), Box::new(Type::Unknown))
             }
             Expr::Member { receiver, name, .. } => self.infer_member(receiver, name, env),
+            Expr::Index {
+                receiver, index, ..
+            } => {
+                // Recurse so nested checks (exhaustiveness, `?`-typing) still fire inside an
+                // index expression. The element type is gradual: a list element or an `Index`
+                // impl's return are not statically tracked yet.
+                self.infer(receiver, env);
+                self.infer(index, env);
+                Type::Unknown
+            }
             Expr::Match {
                 scrutinee,
                 arms,

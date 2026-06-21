@@ -1,0 +1,34 @@
+// Implementing the `Index` trait lights up the `a[i]` operator: `inv[i]` dispatches to the class's
+// `get` method. The overload runs identically under both backends (the differential oracle).
+// expect: stdout "200"
+// expect: stdout "currency: USD"
+// expect: exit 0
+class Inventory {
+    items: list
+
+    fn new(items: list): Inventory {
+        return Inventory { items: items };
+    }
+
+    impl Index {
+        fn get(i: int): int {
+            return items[i];
+        }
+    }
+}
+
+inv = Inventory.new([100, 200, 300]);
+echo inv[1];
+
+class Config {
+    currency: string
+
+    impl Index {
+        fn get(key: string): string {
+            return "{key}: {currency}";
+        }
+    }
+}
+
+cfg = Config { currency: "USD" };
+echo cfg["currency"];

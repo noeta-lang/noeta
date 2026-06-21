@@ -1,0 +1,10 @@
+// Index access `a[i]` addresses a built-in list element by integer position. It chains like any
+// other postfix operator, so a list literal can be indexed directly and indices can nest.
+// expect: stdout "20"
+// expect: stdout "10"
+// expect: stdout "3"
+// expect: exit 0
+xs = [10, 20, 30];
+echo xs[1];
+echo [10, 20, 30][0];
+echo [[1, 2], [3, 4]][1][0];

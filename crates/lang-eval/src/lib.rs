@@ -1092,6 +1092,15 @@ impl Interpreter {
                     )),
                 }
             }
+            Expr::Index {
+                receiver,
+                index,
+                span,
+            } => {
+                let receiver = self.eval_expr(receiver)?;
+                let index = self.eval_expr(index)?;
+                self.eval_index(receiver, index, *span)
+            }
             Expr::Match {
                 scrutinee,
                 arms,
@@ -1321,6 +1330,39 @@ impl Interpreter {
                 DiagnosticCode::UnknownName,
                 span,
                 format!("no method `{name}` on {}", receiver.type_name()),
+            )),
+        }
+    }
+
+    /// Evaluate `receiver[index]`. A user object dispatches through its `Index` trait
+    /// (`receiver.get(index)`); a built-in list addresses an element by integer position
+    /// (bounds-checked). Any other receiver is not indexable.
+    fn eval_index(&mut self, receiver: Value, index: Value, span: Span) -> Eval<Value> {
+        match &receiver {
+            // `o[i]` on a user object lights up the `Index` trait: dispatch to `get`. An object
+            // without an `Index` impl has no `get` method, so this reports the missing method.
+            Value::Object(_) => self.call_method(receiver, "get", vec![index], span),
+            Value::List(items) => {
+                let Value::Int(i) = index else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("list index must be an int, found {}", index.type_name()),
+                    ));
+                };
+                if i < 0 || i as usize >= items.len() {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::IndexOutOfBounds,
+                        span,
+                        format!("index {i} out of bounds for list of length {}", items.len()),
+                    ));
+                }
+                Ok(items[i as usize].clone())
+            }
+            other => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("cannot index a value of type {}", other.type_name()),
             )),
         }
     }

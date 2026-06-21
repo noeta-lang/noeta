@@ -1,0 +1,5 @@
+// Indexing a list outside its bounds is a runtime error (E0016), identical under both backends.
+// expect: error E0016 at 5:6
+// expect: exit 1
+xs = [1, 2];
+echo xs[5];

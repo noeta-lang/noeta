@@ -404,6 +404,17 @@ impl Pretty for Expr {
                 receiver.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::Index {
+                receiver,
+                index,
+                span: s,
+            } => {
+                out.push_str(&format!("(index {}\n", span(*s)));
+                receiver.pretty(out, level + 1);
+                out.push('\n');
+                index.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::Interp { parts, span: s } => {
                 out.push_str(&format!("(interp {}", span(*s)));
                 for part in parts {

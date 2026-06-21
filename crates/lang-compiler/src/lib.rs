@@ -969,6 +969,22 @@ impl<'m> FnCompiler<'m> {
                 span,
                 ..
             } => self.member(receiver, name, dst, *span)?,
+            Expr::Index {
+                receiver,
+                index,
+                span,
+            } => {
+                let recv = self.alloc_reg();
+                self.expr(receiver, recv)?;
+                let idx = self.alloc_reg();
+                self.expr(index, idx)?;
+                self.code.push(Op::Index {
+                    dst,
+                    recv,
+                    index: idx,
+                    span: *span,
+                });
+            }
             Expr::Match {
                 scrutinee,
                 arms,

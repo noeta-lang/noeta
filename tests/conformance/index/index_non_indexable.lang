@@ -1,0 +1,5 @@
+// Indexing a value that is neither a list nor an `Index`-implementing object is a type error
+// (E0007), identical under both backends.
+// expect: error E0007 at 5:6
+// expect: exit 1
+echo 42[0];

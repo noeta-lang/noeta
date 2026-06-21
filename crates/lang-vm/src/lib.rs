@@ -608,6 +608,83 @@ impl<'m> Vm<'m> {
                         }
                     }
                 }
+                Op::Index {
+                    dst,
+                    recv,
+                    index,
+                    span,
+                } => {
+                    let v = frames[top].regs[*recv as usize];
+                    let idx = frames[top].regs[*index as usize];
+                    // `o[i]` on a user object lights up the `Index` trait: dispatch to `get`,
+                    // pushing a call frame `[recv, index]` exactly like a method call. An object
+                    // without an `Index` impl has no `get` method, so this reports the missing
+                    // method — matching the tree-walker's `eval_index`.
+                    if v.is_object() {
+                        let type_name = v.shape().unwrap().name.clone();
+                        let Some(&proto) =
+                            self.methods.get(&(type_name.clone(), "get".to_string()))
+                        else {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!("type `{type_name}` has no method `get`"),
+                            ));
+                        };
+                        let chunk = &module.protos[proto as usize];
+                        if chunk.num_params as usize != 2 {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "this method takes {} argument(s) but 1 were supplied",
+                                    chunk.num_params - 1
+                                ),
+                            ));
+                        }
+                        let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                        retain(v);
+                        new_regs[0] = v;
+                        retain(idx);
+                        new_regs[1] = idx;
+                        frames[top].pc += 1;
+                        frames.push(Frame {
+                            proto,
+                            regs: new_regs,
+                            pc: 0,
+                            ret_dst: *dst,
+                            ret_transform: RetTransform::None,
+                        });
+                        continue;
+                    }
+                    // A built-in list addresses an element by integer position (bounds-checked).
+                    if let Some(len) = v.list_len() {
+                        let Some(i) = idx.as_int() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("list index must be an int, found {}", idx.type_name()),
+                            ));
+                        };
+                        if i < 0 || i as usize >= len {
+                            return Err(self.error(
+                                DiagnosticCode::IndexOutOfBounds,
+                                *span,
+                                format!("index {i} out of bounds for list of length {len}"),
+                            ));
+                        }
+                        let element = v.list_get(i as usize).expect("bounds checked above");
+                        retain(element);
+                        set_reg(&mut frames[top].regs, *dst, element);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("cannot index a value of type {}", v.type_name()),
+                    ));
+                }
                 Op::MakeRecord {
                     dst,
                     shape,
@@ -1653,6 +1730,44 @@ mod tests {
         let r = run(
             "class P {\n  x: int\n  fn new(x: int): P { return P { x: x }; }\n}\necho P.new(1) < P.new(2);\n",
         );
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn index_list_by_position() {
+        // List element access retains the element (refcount discipline checked under miri).
+        let r = run("xs = [\"a\", \"b\", \"c\"];\necho xs[1];\necho [10, 20][0];\n");
+        assert_eq!(r.stdout, "b\n10\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn index_out_of_bounds_is_e0016() {
+        let r = run("xs = [1, 2];\necho xs[5];\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::IndexOutOfBounds
+        );
+    }
+
+    #[test]
+    fn index_dispatches_to_index_trait() {
+        // `inv[i]` routes to the class's `Index::get`, pushing a call frame `[recv, index]`.
+        let r = run(
+            "class Inv {\n  items: list\n  fn new(items: list): Inv { return Inv { items: items }; }\n  impl Index {\n    fn get(i: int): int { return items[i]; }\n  }\n}\necho Inv.new([7, 8, 9])[2];\n",
+        );
+        assert_eq!(r.stdout, "9\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn indexing_a_non_indexable_is_type_error() {
+        let r = run("echo 42[0];\n");
         assert_eq!(r.exit_code, 1);
         assert_eq!(
             r.diagnostics[0].code,

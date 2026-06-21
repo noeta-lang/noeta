@@ -338,6 +338,13 @@ pub enum Expr {
         name_span: Span,
         span: Span,
     },
+    /// Index access: `receiver[index]`. Lights up the `Index` trait (`receiver.get(index)`)
+    /// for user objects, and addresses a list element by integer position for built-in lists.
+    Index {
+        receiver: Box<Expr>,
+        index: Box<Expr>,
+        span: Span,
+    },
     /// An interpolated string: `"Hello {name}"` becomes a sequence of literal and
     /// embedded-expression parts. A string with no holes stays a plain [`Expr::Str`].
     Interp { parts: Vec<StrPart>, span: Span },
@@ -463,6 +470,7 @@ impl Expr {
             | Expr::List { span, .. }
             | Expr::Map { span, .. }
             | Expr::Member { span, .. }
+            | Expr::Index { span, .. }
             | Expr::Interp { span, .. }
             | Expr::Match { span, .. }
             | Expr::Try { span, .. }
