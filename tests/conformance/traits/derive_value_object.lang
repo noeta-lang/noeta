@@ -1,9 +1,12 @@
-// `#[derive(...)]` on a value-object class: the derives parse and type-check (each names a
-// derivable value-object protocol), and the class runs with the structural equality M1 already
-// provides by default. The synthesized `Comparable` ordering and `Display`/`Clone` codegen the
-// derives drive are M1.8b; here the surface is validated and the program runs unchanged.
+// The flagship `#[derive(...)]` value object. `Equatable`/`Display`/`Clone` are M1's structural
+// defaults (so deriving them is the explicit, checked spelling of behavior already present);
+// `#[derive(Comparable)]` synthesizes field-wise ordering — `< <= > >=` compare `x` then `y` in
+// declared order. Runs identically under both backends (the differential oracle).
 // expect: stdout "true"
 // expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
 // expect: exit 0
 #[derive(Equatable, Comparable, Display, Clone)]
 class Point {
@@ -17,6 +20,9 @@ class Point {
 
 a = Point.new(1, 2);
 b = Point.new(1, 2);
-c = Point.new(3, 4);
+c = Point.new(1, 5);
 echo a == b;
 echo a == c;
+echo a < c;
+echo a > c;
+echo a <= b;

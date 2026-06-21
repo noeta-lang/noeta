@@ -31,7 +31,7 @@
 //! is a local of `run`, never a field of [`Vm`], so this nesting is just ordinary Rust
 //! recursion over the shared `globals`/`stdout`/`diagnostics`.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
 
 use lang_ast::{BinaryOp, Program};
@@ -42,7 +42,7 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_gc::{release, retain};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
-use lang_value::{Value, apply_binary, apply_unary};
+use lang_value::{Value, apply_binary, apply_unary, compare_primitive, structural_compare};
 
 /// The bytecode-VM backend.
 #[derive(Debug, Clone, Default)]
@@ -143,6 +143,9 @@ struct Vm<'m> {
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
     destructors: HashMap<String, u32>,
+    /// Type names that `#[derive(Comparable)]` (without a hand-written `compare`): their instances
+    /// get structural field-wise ordering for `< <= > >=`.
+    comparable_derives: HashSet<String>,
     globals: HashMap<String, Value>,
     /// Top-level binding names in declaration order, so globals are destroyed at program end
     /// in reverse declaration order (the deterministic "program order" the spec requires).
@@ -187,11 +190,13 @@ fn execute(module: &Module) -> RunResult {
         .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
         .collect();
     let destructors = module.destructors.iter().cloned().collect();
+    let comparable_derives = module.comparable_derives.iter().cloned().collect();
     let mut vm = Vm {
         module,
         shapes: module.shapes.iter().cloned().map(Rc::new).collect(),
         methods,
         destructors,
+        comparable_derives,
         globals: HashMap::new(),
         global_order: Vec::new(),
         next_id: 1,
@@ -946,6 +951,36 @@ impl<'m> Vm<'m> {
                         });
                         continue;
                     }
+                    // Derived structural comparison: `< <= > >=` on an object whose type
+                    // `#[derive(Comparable)]`s (and has no hand-written `compare`) — field-wise
+                    // ordering, computed synchronously (no method to call).
+                    if left.is_object()
+                        && op.comparable_method().is_some()
+                        && self
+                            .comparable_derives
+                            .contains(&left.shape().unwrap().name)
+                    {
+                        match structural_compare(left, right) {
+                            Some(ordering) => {
+                                let satisfied =
+                                    op.ordering_satisfies(lang_ast::ordering_variant(ordering));
+                                set_reg(&mut frames[top].regs, *dst, Value::bool(satisfied));
+                                frames[top].pc += 1;
+                            }
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "cannot compare {} and {}",
+                                        left.type_name(),
+                                        right.type_name()
+                                    ),
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     match apply_binary(*op, left, right) {
                         Ok(v) => {
                             set_reg(&mut frames[top].regs, *dst, v);
@@ -1333,27 +1368,6 @@ fn make_ordering(variant: &str) -> Value {
     Value::enum_value(shape, Vec::new())
 }
 
-/// The total order of two primitives for `x.compare(y)`: integers compare exactly, strings
-/// lexically, and any other numeric pairing as `f64`. `None` when the operands are not comparable
-/// (different non-numeric kinds, or a `NaN` float). Mirrors the tree-walker's `compare_primitive`.
-fn compare_primitive(left: Value, right: Value) -> Option<std::cmp::Ordering> {
-    let int_operand = |v: Value| {
-        if v.as_float().is_some() {
-            None
-        } else {
-            v.as_int()
-        }
-    };
-    if let (Some(a), Some(b)) = (int_operand(left), int_operand(right)) {
-        return Some(a.cmp(&b));
-    }
-    if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
-        return Some(a.cmp(&b));
-    }
-    let num = |v: Value| v.as_float().or_else(|| v.as_int().map(|i| i as f64));
-    num(left)?.partial_cmp(&num(right)?)
-}
-
 /// Turn a compile-time constant into a freshly-owned runtime value.
 fn materialize(c: &Const) -> Value {
     match c {
@@ -1621,6 +1635,28 @@ mod tests {
         assert_eq!(
             r.stdout,
             "Ordering.Less\nOrdering.Equal\nOrdering.Greater\n"
+        );
+    }
+
+    #[test]
+    fn derive_comparable_orders_fields_lexicographically() {
+        // `#[derive(Comparable)]` gives structural ordering via the Module's comparable set + the
+        // VM's `structural_compare`; no method is called.
+        let r = run(
+            "#[derive(Comparable)]\nclass P {\n  x: int\n  y: int\n  fn new(x: int, y: int): P { return P { x: x, y: y }; }\n}\na = P.new(1, 2);\nb = P.new(1, 5);\nc = P.new(1, 2);\necho a < b;\necho a > b;\necho a <= c;\necho a >= c;\n",
+        );
+        assert_eq!(r.stdout, "true\nfalse\ntrue\ntrue\n");
+    }
+
+    #[test]
+    fn comparison_on_non_comparable_object_errors() {
+        let r = run(
+            "class P {\n  x: int\n  fn new(x: int): P { return P { x: x }; }\n}\necho P.new(1) < P.new(2);\n",
+        );
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::TypeMismatch
         );
     }
 

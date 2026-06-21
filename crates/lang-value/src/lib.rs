@@ -24,7 +24,7 @@ mod heap;
 mod ops;
 
 pub use heap::Color;
-pub use ops::{OpError, apply_binary, apply_unary};
+pub use ops::{OpError, apply_binary, apply_unary, compare_primitive, structural_compare};
 
 use std::collections::BTreeMap;
 use std::rc::Rc;
@@ -749,6 +749,33 @@ mod tests {
                 == Some(true)
         );
         for v in [obj, obj2] {
+            assert!(v.dec_ref());
+            v.free();
+        }
+    }
+
+    #[test]
+    fn structural_compare_orders_objects_lexicographically() {
+        use std::cmp::Ordering;
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Record,
+            "Version",
+            vec!["major".into(), "minor".into()],
+        ));
+        let v19 = Value::object(shape.clone(), vec![Value::int(1), Value::int(9)]);
+        let v20 = Value::object(shape.clone(), vec![Value::int(2), Value::int(0)]);
+        let v19b = Value::object(shape.clone(), vec![Value::int(1), Value::int(9)]);
+        // major dominates; equal major falls to minor; equal objects compare Equal.
+        assert_eq!(structural_compare(v19, v20), Some(Ordering::Less));
+        assert_eq!(structural_compare(v20, v19), Some(Ordering::Greater));
+        assert_eq!(structural_compare(v19, v19b), Some(Ordering::Equal));
+        // A primitive on one side is not an object pair: no defined order.
+        assert_eq!(structural_compare(v19, Value::int(1)), None);
+        assert_eq!(
+            compare_primitive(Value::int(3), Value::int(5)),
+            Some(Ordering::Less)
+        );
+        for v in [v19, v20, v19b] {
             assert!(v.dec_ref());
             v.free();
         }

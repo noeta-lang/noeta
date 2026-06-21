@@ -73,6 +73,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         shapes: Vec::new(),
         methods: Vec::new(),
         destructors: Vec::new(),
+        comparable_derives: Vec::new(),
         types: HashMap::new(),
     };
     module.register_types(program);
@@ -91,6 +92,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         shapes: module.shapes,
         methods: module.methods,
         destructors: module.destructors,
+        comparable_derives: module.comparable_derives,
     })
 }
 
@@ -121,6 +123,7 @@ struct ModuleCompiler {
     shapes: Vec<Shape>,
     methods: Vec<MethodEntry>,
     destructors: Vec<(String, u32)>,
+    comparable_derives: Vec<String>,
     types: HashMap<String, TypeInfo>,
 }
 
@@ -132,11 +135,21 @@ impl ModuleCompiler {
             match stmt {
                 Stmt::Record(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
+                    if lang_ast::derives_trait(&decl.attrs, "Comparable") {
+                        self.comparable_derives.push(decl.name.clone());
+                    }
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Record { fields });
                 }
                 Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
+                    // A hand-written `compare` (via `impl Comparable`) takes precedence over the
+                    // derived structural ordering.
+                    if lang_ast::derives_trait(&decl.attrs, "Comparable")
+                        && !decl.methods.iter().any(|m| m.name == "compare")
+                    {
+                        self.comparable_derives.push(decl.name.clone());
+                    }
                     let mut fns = HashMap::new();
                     for method in &decl.methods {
                         let proto = self.protos.len() as u32;

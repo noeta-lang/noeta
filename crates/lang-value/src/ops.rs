@@ -83,6 +83,52 @@ fn arithmetic(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError>
     Err(type_mismatch(op, left, right))
 }
 
+/// The total order of two primitives for `x.compare(y)` and `#[derive(Comparable)]`: integers
+/// compare exactly, strings lexically, and any other numeric pairing as `f64`. `None` when the
+/// operands are not comparable (different non-numeric kinds, or a `NaN` float).
+pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
+    let int_operand = |v: Value| {
+        if v.as_float().is_some() {
+            None
+        } else {
+            v.as_int()
+        }
+    };
+    if let (Some(a), Some(b)) = (int_operand(left), int_operand(right)) {
+        return Some(a.cmp(&b));
+    }
+    if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
+        return Some(a.cmp(&b));
+    }
+    let num = |v: Value| v.as_float().or_else(|| v.as_int().map(|i| i as f64));
+    num(left)?.partial_cmp(&num(right)?)
+}
+
+/// Field-wise (declared slot order) ordering of two same-type objects, the behavior synthesized
+/// by `#[derive(Comparable)]`. Slots compare lexicographically via [`compare_primitive`]. Returns
+/// `None` if the operands are not two same-type objects, or any field is non-primitive (and so
+/// has no defined order) — the caller turns that into a runtime type error.
+pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
+    if !left.is_object() || !right.is_object() {
+        return None;
+    }
+    let (sa, sb) = (left.shape()?, right.shape()?);
+    if sa.name != sb.name {
+        return None;
+    }
+    let (la, lb) = (left.slots()?, right.slots()?);
+    if la.len() != lb.len() {
+        return None;
+    }
+    for (a, b) in la.iter().zip(lb.iter()) {
+        match compare_primitive(*a, *b)? {
+            Ordering::Equal => continue,
+            other => return Some(other),
+        }
+    }
+    Some(Ordering::Equal)
+}
+
 fn compare(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError> {
     let ordering = match (left.as_string(), right.as_string()) {
         (Some(a), Some(b)) => Some(a.cmp(&b)),

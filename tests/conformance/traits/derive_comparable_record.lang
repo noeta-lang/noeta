@@ -1,0 +1,17 @@
+// `#[derive(Comparable)]` on a record: structural ordering compares fields in declared order, so
+// versions order major-then-minor. Records are the canonical value objects, so this is the
+// common case for derived ordering.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+#[derive(Comparable)]
+type Version = { major: int, minor: int };
+
+v19 = Version { major: 1, minor: 9 };
+v20 = Version { major: 2, minor: 0 };
+v110 = Version { major: 1, minor: 10 };
+
+echo v19 < v20;
+echo v20 < v19;
+echo v19 < v110;

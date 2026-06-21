@@ -415,6 +415,9 @@ pub struct Module {
     /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs
     /// it when the last reference to an instance of that type drops.
     pub destructors: Vec<(String, u32)>,
+    /// Type names that `#[derive(Comparable)]` without a hand-written `compare` method — the VM
+    /// gives their instances structural field-wise ordering for `< <= > >=`.
+    pub comparable_derives: Vec<String>,
 }
 
 impl Module {

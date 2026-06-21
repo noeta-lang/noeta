@@ -124,6 +124,17 @@ pub struct Attribute {
     pub span: Span,
 }
 
+/// Whether a declaration's attributes include `#[derive(..., trait_name, ...)]`. Used by both
+/// backends and the compiler to detect which traits a value object derives (e.g. `Comparable`,
+/// which synthesizes structural ordering).
+pub fn derives_trait(attrs: &[Attribute], trait_name: &str) -> bool {
+    attrs
+        .iter()
+        .filter(|a| a.name == "derive")
+        .flat_map(|a| a.args.iter())
+        .any(|(name, _)| name == trait_name)
+}
+
 /// An `impl Trait { ... }` block inside a class body. Implementing a built-in trait "lights up"
 /// its operator or protocol (e.g. `impl Add` enables `+`). The block's methods are flattened into
 /// [`ClassDecl::methods`] for execution; the block itself is retained here so the checker can
