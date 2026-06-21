@@ -1,0 +1,8 @@
+// `@derive(...)` accepts only derivable traits. `Add` is an operator trait (implemented with an
+// `impl` block, not derived), so deriving it is a compile-time error (E0014).
+// expect: error E0014 at 5:9
+// expect: exit 1
+@derive(Add)
+class Point {
+    x: int
+}

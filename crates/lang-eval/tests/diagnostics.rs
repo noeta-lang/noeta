@@ -43,7 +43,7 @@ fn render_first_failing_stage(src: &str) -> String {
 fn diagnostic_gallery() {
     // One representative program per code, E0001..=E0010.
     let cases = [
-        ("E0001 unexpected character", "echo @;"),
+        ("E0001 unexpected character", "echo $;"),
         ("E0002 unterminated string", "echo \"oops;"),
         ("E0003 unexpected token", "echo ;"),
         ("E0004 unexpected end of input", "echo \"hi\""),

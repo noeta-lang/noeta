@@ -135,7 +135,7 @@ impl ModuleCompiler {
             match stmt {
                 Stmt::Record(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
-                    if lang_ast::derives_trait(&decl.attrs, "Comparable") {
+                    if lang_ast::derives_trait(&decl.derives, "Comparable") {
                         self.comparable_derives.push(decl.name.clone());
                     }
                     self.types
@@ -145,7 +145,7 @@ impl ModuleCompiler {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
                     // A hand-written `compare` (via `impl Comparable`) takes precedence over the
                     // derived structural ordering.
-                    if lang_ast::derives_trait(&decl.attrs, "Comparable")
+                    if lang_ast::derives_trait(&decl.derives, "Comparable")
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
                         self.comparable_derives.push(decl.name.clone());

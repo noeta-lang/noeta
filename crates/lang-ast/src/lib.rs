@@ -105,34 +105,36 @@ pub struct RecordDecl {
     pub name: String,
     pub name_span: Span,
     pub fields: Vec<FieldDecl>,
-    /// Leading `#[...]` attributes (e.g. `#[derive(Equatable)]`). Parsed and validated by the
-    /// checker; the manifest/codegen they drive arrives with M1.8b.
+    /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
+    /// across all directive lines. Validated by the checker; drives compiler codegen.
+    pub derives: Vec<(String, Span)>,
+    /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; the
+    /// manifest that consumes them arrives with M1.8b.
     pub attrs: Vec<Attribute>,
     pub span: Span,
 }
 
-/// An attribute in annotation position (`#[derive(Equatable, Clone)]`, `#[Route("/x")]`). The
-/// surface is a name with optional identifier arguments. `derive` is interpreted by the checker
-/// (and, later, the compiler); other attributes reduce to records in the manifest (M1.8b).
+/// A **data attribute** in annotation position (`#[Route("/x")]`, `#[lint(level: warn)]`). The
+/// surface is a name with optional identifier arguments; semantically it is a record instance
+/// attached as metadata, discovered via the compiler-built manifest and acted on by a consumer
+/// (router, DI, lint runner). It carries no codegen meaning — code generation is the separate
+/// `@derive(...)` directive (a type declaration's `derives` list). Richer record-valued
+/// attributes and the manifest are M1.8b.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub name: String,
     pub name_span: Span,
-    /// The identifier arguments inside the parentheses, each with its span (e.g. the derived
-    /// trait names in `#[derive(A, B)]`). Empty for a bare `#[Marker]`.
+    /// The identifier arguments inside the parentheses, each with its span. Empty for a bare
+    /// `#[Marker]`.
     pub args: Vec<(String, Span)>,
     pub span: Span,
 }
 
-/// Whether a declaration's attributes include `#[derive(..., trait_name, ...)]`. Used by both
-/// backends and the compiler to detect which traits a value object derives (e.g. `Comparable`,
-/// which synthesizes structural ordering).
-pub fn derives_trait(attrs: &[Attribute], trait_name: &str) -> bool {
-    attrs
-        .iter()
-        .filter(|a| a.name == "derive")
-        .flat_map(|a| a.args.iter())
-        .any(|(name, _)| name == trait_name)
+/// Whether a declaration's `@derive(...)` directives include `trait_name`. Used by both backends
+/// and the compiler to detect which traits a value object derives (e.g. `Comparable`, which
+/// synthesizes structural ordering).
+pub fn derives_trait(derives: &[(String, Span)], trait_name: &str) -> bool {
+    derives.iter().any(|(name, _)| name == trait_name)
 }
 
 /// An `impl Trait { ... }` block inside a class body. Implementing a built-in trait "lights up"
@@ -161,7 +163,10 @@ pub struct ClassDecl {
     /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in
     /// `methods`; these entries let the checker validate each trait and its required signatures.
     pub impls: Vec<ImplBlock>,
-    /// Leading `#[...]` attributes on the class (e.g. `#[derive(Comparable)]`).
+    /// Leading `@derive(...)` codegen directives on the class (e.g. `@derive(Comparable)`),
+    /// flattened across all directive lines.
+    pub derives: Vec<(String, Span)>,
+    /// Leading `#[...]` data attributes on the class.
     pub attrs: Vec<Attribute>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
@@ -192,7 +197,9 @@ pub struct EnumDecl {
     /// The backing primitive type for a backed enum (`: string`), if any.
     pub backing: Option<TypeRef>,
     pub variants: Vec<VariantDecl>,
-    /// Leading `#[...]` attributes on the enum.
+    /// Leading `@derive(...)` codegen directives on the enum, flattened across all directive lines.
+    pub derives: Vec<(String, Span)>,
+    /// Leading `#[...]` data attributes on the enum.
     pub attrs: Vec<Attribute>,
     pub span: Span,
 }

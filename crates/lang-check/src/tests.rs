@@ -127,19 +127,33 @@ fn impl_with_wrong_arity_is_reported() {
 
 #[test]
 fn derivable_traits_are_accepted() {
-    let src = "#[derive(Equatable, Comparable, Display, Clone)]\nclass P {\n  x: int\n}\n";
+    let src = "@derive(Equatable, Comparable, Display, Clone)\nclass P {\n  x: int\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn deriving_a_non_derivable_trait_is_reported() {
     // `Add` is an operator trait, implemented not derived.
-    let src = "#[derive(Add)]\nclass P {\n  x: int\n}\n";
+    let src = "@derive(Add)\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0014"]);
 }
 
 #[test]
 fn deriving_an_unknown_trait_is_reported() {
-    let src = "#[derive(Bogus)]\nclass P {\n  x: int\n}\n";
+    let src = "@derive(Bogus)\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0014"]);
+}
+
+#[test]
+fn old_derive_attribute_spelling_is_reported() {
+    // `#[derive(...)]` is the old codegen spelling; it is now `@derive(...)`.
+    let src = "#[derive(Equatable)]\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0017"]);
+}
+
+#[test]
+fn data_attribute_is_accepted() {
+    // A non-`derive` `#[...]` attribute attaches as data and is not (yet) validated.
+    let src = "#[Route]\nclass P {\n  x: int\n}\n";
+    assert!(codes(src).is_empty());
 }

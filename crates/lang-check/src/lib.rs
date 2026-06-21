@@ -223,6 +223,7 @@ impl Checker {
     fn check_record(&mut self, r: &RecordDecl) {
         // Field type annotations are resolved (and unknown-type-checked) from M1.9; nothing to
         // verify here until then. Records introduce no body to infer, but they may carry derives.
+        self.check_derives(&r.derives);
         self.check_attrs(&r.attrs);
     }
 
@@ -232,6 +233,7 @@ impl Checker {
             .iter()
             .map(|f| (f.name.clone(), field_type(&f.ty)))
             .collect();
+        self.check_derives(&c.derives);
         self.check_attrs(&c.attrs);
         for block in &c.impls {
             self.check_impl(block);
@@ -253,6 +255,7 @@ impl Checker {
 
     fn check_enum(&mut self, e: &EnumDecl) {
         // Backing/variant type annotations are unknown-type-checked from M1.9 (see module docs).
+        self.check_derives(&e.derives);
         self.check_attrs(&e.attrs);
     }
 
@@ -302,31 +305,50 @@ impl Checker {
         }
     }
 
-    /// Validate the `#[derive(...)]` attributes on a declaration: every named trait must be a
-    /// known *derivable* built-in. Other (non-`derive`) attributes reduce to records in the
-    /// manifest (M1.8b) and are not validated here yet.
-    fn check_attrs(&mut self, attrs: &[Attribute]) {
-        for attr in attrs {
-            if attr.name != "derive" {
-                continue;
-            }
-            for (trait_name, span) in &attr.args {
-                match BuiltinTrait::lookup(trait_name) {
-                    Some(t) if t.derivable => {}
-                    Some(_) => self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::UnknownTrait,
-                            *span,
-                            format!("`{trait_name}` cannot be derived"),
-                        )
-                        .with_help("only `Equatable`, `Comparable`, `Display`, `Clone`, `ToJson`, `Serialize` are derivable"),
-                    ),
-                    None => self.diags.push(Diagnostic::error(
+    /// Validate the `@derive(...)` directives on a declaration: every named trait must be a known
+    /// *derivable* built-in. The compiler synthesizes the listed impls from the type's fields.
+    fn check_derives(&mut self, derives: &[(String, Span)]) {
+        for (trait_name, span) in derives {
+            match BuiltinTrait::lookup(trait_name) {
+                Some(t) if t.derivable => {}
+                Some(_) => self.diags.push(
+                    Diagnostic::error(
                         DiagnosticCode::UnknownTrait,
                         *span,
-                        format!("unknown trait `{trait_name}` in `#[derive(...)]`"),
-                    )),
-                }
+                        format!("`{trait_name}` is not a derivable trait"),
+                    )
+                    .with_help(
+                        "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
+                         `ToJson`, `Serialize`; mark attribute records with `impl Attribute for X {}`",
+                    ),
+                ),
+                None => self.diags.push(Diagnostic::error(
+                    DiagnosticCode::UnknownTrait,
+                    *span,
+                    format!("unknown trait `{trait_name}` in `@derive(...)`"),
+                )),
+            }
+        }
+    }
+
+    /// Validate the `#[...]` data attributes on a declaration. These reduce to records in the
+    /// manifest (M1.8b) and carry no codegen meaning. The one error checked now is the migration
+    /// case: `#[derive(...)]` is the old codegen spelling, which is now the `@derive(...)`
+    /// directive. (The `Attribute`-trait gate on `#[Foo(...)]` usage lands with the manifest.)
+    fn check_attrs(&mut self, attrs: &[Attribute]) {
+        for attr in attrs {
+            if attr.name == "derive" {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidAttribute,
+                        attr.span,
+                        "`#[derive(...)]` is not a data attribute",
+                    )
+                    .with_help(
+                        "code generation now uses the `@derive(...)` directive; `#[...]` is for \
+                         data attributes only",
+                    ),
+                );
             }
         }
     }

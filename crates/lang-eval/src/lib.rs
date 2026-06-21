@@ -262,7 +262,7 @@ pub struct TypeDef {
     destructor: Option<Rc<Vec<Stmt>>>,
     /// Whether this came from a `type X = {...}` record (vs. a `class`). Cosmetic in M0.
     is_record: bool,
-    /// Whether the type `#[derive(Comparable)]`s without a hand-written `compare`: its instances
+    /// Whether the type `@derive(Comparable)`s without a hand-written `compare`: its instances
     /// get structural field-wise ordering for `< <= > >=`.
     derives_comparable: bool,
     /// An *opaque* stub introduced by a `use` import: its real field set is unknown until
@@ -768,7 +768,7 @@ impl Interpreter {
             methods: HashMap::new(),
             destructor: None,
             is_record: true,
-            derives_comparable: lang_ast::derives_trait(&decl.attrs, "Comparable"),
+            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable"),
             opaque: false,
         };
         self.scope
@@ -825,7 +825,7 @@ impl Interpreter {
             destructor: decl.destructor.clone().map(Rc::new),
             is_record: false,
             // A hand-written `compare` (via `impl Comparable`) takes precedence over derivation.
-            derives_comparable: lang_ast::derives_trait(&decl.attrs, "Comparable")
+            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
             opaque: false,
         };
@@ -1652,7 +1652,7 @@ impl Interpreter {
                     _ => result,
                 });
             }
-            // Derived structural comparison: `#[derive(Comparable)]` without a hand-written
+            // Derived structural comparison: `@derive(Comparable)` without a hand-written
             // `compare` gives `< <= > >=` field-wise ordering.
             if op.comparable_method().is_some() && object.def.derives_comparable {
                 return match object_structural_compare(object, &right) {
@@ -1740,7 +1740,7 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
 }
 
 /// Field-wise (declared order) ordering of two same-type objects, the behavior synthesized by
-/// `#[derive(Comparable)]`. Compares fields lexicographically via [`compare_primitive`]. Returns
+/// `@derive(Comparable)`. Compares fields lexicographically via [`compare_primitive`]. Returns
 /// `None` if `right` is not an object of the same type, or any field is non-primitive — the caller
 /// turns that into a runtime type error. Mirrors `lang_value::structural_compare` (VM side).
 fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::cmp::Ordering> {
@@ -1930,16 +1930,16 @@ mod tests {
 
     #[test]
     fn derive_comparable_orders_fields_lexicographically() {
-        // `#[derive(Comparable)]` synthesizes structural ordering: compare `x`, then `y`.
+        // `@derive(Comparable)` synthesizes structural ordering: compare `x`, then `y`.
         let out = run(
-            "#[derive(Comparable)]\nclass P {\n  x: int\n  y: int\n  fn new(x: int, y: int): P { return P { x: x, y: y }; }\n}\na = P.new(1, 2);\nb = P.new(1, 5);\nc = P.new(1, 2);\necho a < b;\necho a > b;\necho a <= c;\necho a >= c;\n",
+            "@derive(Comparable)\nclass P {\n  x: int\n  y: int\n  fn new(x: int, y: int): P { return P { x: x, y: y }; }\n}\na = P.new(1, 2);\nb = P.new(1, 5);\nc = P.new(1, 2);\necho a < b;\necho a > b;\necho a <= c;\necho a >= c;\n",
         );
         assert_eq!(out.stdout, "true\nfalse\ntrue\ntrue\n");
     }
 
     #[test]
     fn comparison_on_non_comparable_object_still_errors() {
-        // Without `#[derive(Comparable)]` or an `impl`, an object has no order: `<` is an error.
+        // Without `@derive(Comparable)` or an `impl`, an object has no order: `<` is an error.
         let out = run(
             "class P {\n  x: int\n  fn new(x: int): P { return P { x: x }; }\n}\necho P.new(1) < P.new(2);\n",
         );

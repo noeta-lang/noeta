@@ -1,0 +1,14 @@
+// `@derive(...)` (codegen) and `#[...]` (a data attribute) are two separate mechanisms and may
+// both decorate the same declaration. The derive synthesizes structural ordering; the data
+// attribute is inert metadata (consumed via the manifest, M1.8b). Runs identically in both backends.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+#[Entity]
+@derive(Comparable)
+type Version = { major: int, minor: int };
+
+a = Version { major: 1, minor: 0 };
+b = Version { major: 1, minor: 5 };
+echo a < b;
+echo b < a;

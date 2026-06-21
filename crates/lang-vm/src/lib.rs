@@ -143,7 +143,7 @@ struct Vm<'m> {
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
     destructors: HashMap<String, u32>,
-    /// Type names that `#[derive(Comparable)]` (without a hand-written `compare`): their instances
+    /// Type names that `@derive(Comparable)` (without a hand-written `compare`): their instances
     /// get structural field-wise ordering for `< <= > >=`.
     comparable_derives: HashSet<String>,
     globals: HashMap<String, Value>,
@@ -1029,7 +1029,7 @@ impl<'m> Vm<'m> {
                         continue;
                     }
                     // Derived structural comparison: `< <= > >=` on an object whose type
-                    // `#[derive(Comparable)]`s (and has no hand-written `compare`) — field-wise
+                    // `@derive(Comparable)`s (and has no hand-written `compare`) — field-wise
                     // ordering, computed synchronously (no method to call).
                     if left.is_object()
                         && op.comparable_method().is_some()
@@ -1717,10 +1717,10 @@ mod tests {
 
     #[test]
     fn derive_comparable_orders_fields_lexicographically() {
-        // `#[derive(Comparable)]` gives structural ordering via the Module's comparable set + the
+        // `@derive(Comparable)` gives structural ordering via the Module's comparable set + the
         // VM's `structural_compare`; no method is called.
         let r = run(
-            "#[derive(Comparable)]\nclass P {\n  x: int\n  y: int\n  fn new(x: int, y: int): P { return P { x: x, y: y }; }\n}\na = P.new(1, 2);\nb = P.new(1, 5);\nc = P.new(1, 2);\necho a < b;\necho a > b;\necho a <= c;\necho a >= c;\n",
+            "@derive(Comparable)\nclass P {\n  x: int\n  y: int\n  fn new(x: int, y: int): P { return P { x: x, y: y }; }\n}\na = P.new(1, 2);\nb = P.new(1, 5);\nc = P.new(1, 2);\necho a < b;\necho a > b;\necho a <= c;\necho a >= c;\n",
         );
         assert_eq!(r.stdout, "true\nfalse\ntrue\ntrue\n");
     }

@@ -1,10 +1,11 @@
-//! The built-in trait registry — the fixed set of traits an `impl` block or `#[derive(...)]`
-//! may name.
+//! The built-in trait registry — the fixed set of traits an `impl` block or `@derive(...)`
+//! directive may name.
 //!
 //! The language has no user-defined traits: a class implements one of these built-ins to "light
-//! up" its operator or protocol (`impl Add` enables `+`, `impl Display` enables `echo`), and
-//! `#[derive(...)]` asks the compiler to synthesize the implementation for the value-object cases.
-//! This table is the single source of truth the checker validates `impl`/`derive` names against
+//! up" its operator or protocol (`impl Add` enables `+`, `impl Display` enables `echo`), and the
+//! `@derive(...)` directive asks the compiler to synthesize the implementation for the
+//! value-object cases. Data attributes (`#[...]`) are a separate mechanism and do not name traits
+//! here. This table is the single source of truth the checker validates `impl`/`@derive` names against
 //! (`lang-check`), and the operator → method correspondence it encodes is kept in lockstep with
 //! [`BinaryOp::overload_method`](lang_ast::BinaryOp::overload_method) by a unit test below.
 //!
@@ -19,7 +20,7 @@
 
 use lang_ast::BinaryOp;
 
-/// One built-in trait: the name users write in `impl`/`#[derive(...)]`, the single method an
+/// One built-in trait: the name users write in `impl`/`@derive(...)`, the single method an
 /// `impl` block must provide (with its user-facing arity, i.e. excluding the receiver), the infix
 /// operator it overloads (if any), and whether it may be derived.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,7 +32,7 @@ pub struct BuiltinTrait {
     pub required_method: Option<(&'static str, usize)>,
     /// The infix operator this trait overloads, for the operator traits; `None` otherwise.
     pub operator: Option<BinaryOp>,
-    /// Whether `#[derive(Name)]` is accepted for this trait.
+    /// Whether `@derive(Name)` is accepted for this trait.
     pub derivable: bool,
 }
 
@@ -119,11 +120,13 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         operator: None,
         derivable: true,
     },
+    // `Attribute` is a capability trait, not codegen: a record becomes usable in `#[...]`
+    // annotation position by implementing it (`impl Attribute for X {}`), never by deriving it.
     BuiltinTrait {
         name: "Attribute",
         required_method: None,
         operator: None,
-        derivable: true,
+        derivable: false,
     },
     BuiltinTrait {
         name: "Index",

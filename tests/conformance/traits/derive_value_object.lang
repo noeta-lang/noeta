@@ -1,6 +1,6 @@
-// The flagship `#[derive(...)]` value object. `Equatable`/`Display`/`Clone` are M1's structural
+// The flagship `@derive(...)` value object. `Equatable`/`Display`/`Clone` are M1's structural
 // defaults (so deriving them is the explicit, checked spelling of behavior already present);
-// `#[derive(Comparable)]` synthesizes field-wise ordering — `< <= > >=` compare `x` then `y` in
+// `@derive(Comparable)` synthesizes field-wise ordering — `< <= > >=` compare `x` then `y` in
 // declared order. Runs identically under both backends (the differential oracle).
 // expect: stdout "true"
 // expect: stdout "false"
@@ -8,7 +8,7 @@
 // expect: stdout "false"
 // expect: stdout "true"
 // expect: exit 0
-#[derive(Equatable, Comparable, Display, Clone)]
+@derive(Equatable, Comparable, Display, Clone)
 class Point {
     x: int
     y: int

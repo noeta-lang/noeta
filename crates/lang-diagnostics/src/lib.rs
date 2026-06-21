@@ -44,13 +44,16 @@ pub enum DiagnosticCode {
     /// A type annotation names a type that does not resolve to any declared, built-in, or
     /// imported type.
     UnknownType,
-    /// An `impl` block or `#[derive(...)]` names a trait that is not a known built-in trait.
+    /// An `impl` block or `@derive(...)` directive names a trait that is not a known built-in trait.
     UnknownTrait,
     /// An `impl` block does not satisfy the trait it names — a required method is missing or has
     /// the wrong arity.
     InvalidImpl,
     /// An index expression `a[i]` addressed a list position outside its bounds.
     IndexOutOfBounds,
+    /// A `#[...]` data attribute is malformed or misused — most commonly the old `#[derive(...)]`
+    /// spelling (code generation now uses the `@derive(...)` directive).
+    InvalidAttribute,
 }
 
 impl DiagnosticCode {
@@ -73,6 +76,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnknownTrait,
         DiagnosticCode::InvalidImpl,
         DiagnosticCode::IndexOutOfBounds,
+        DiagnosticCode::InvalidAttribute,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -95,6 +99,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnknownTrait => "E0014",
             DiagnosticCode::InvalidImpl => "E0015",
             DiagnosticCode::IndexOutOfBounds => "E0016",
+            DiagnosticCode::InvalidAttribute => "E0017",
         }
     }
 

@@ -135,9 +135,12 @@ pub enum TokenKind {
     Tilde,
     #[token("!")]
     Bang,
-    /// `#`, introducing an attribute (`#[derive(...)]`).
+    /// `#`, introducing a data attribute (`#[Route("/users")]`).
     #[token("#")]
     Hash,
+    /// `@`, introducing a codegen directive (`@derive(...)`).
+    #[token("@")]
+    At,
 }
 
 impl TokenKind {
@@ -198,6 +201,7 @@ impl TokenKind {
             TokenKind::Tilde => "Tilde",
             TokenKind::Bang => "Bang",
             TokenKind::Hash => "Hash",
+            TokenKind::At => "At",
         }
     }
 
@@ -258,6 +262,7 @@ impl TokenKind {
             TokenKind::Tilde => "`~`",
             TokenKind::Bang => "`!`",
             TokenKind::Hash => "`#`",
+            TokenKind::At => "`@`",
         }
     }
 }

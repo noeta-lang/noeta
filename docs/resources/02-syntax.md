@@ -424,10 +424,10 @@ impl Comparable {
 // a < b, a >= b, etc. now all work
 ```
 
-**Derivation for the common value-object case** — no hand-written body needed:
+**Derivation for the common value-object case** — no hand-written body needed. Code generation is its own directive, `@derive(...)` (the `@` sigil means "the compiler generates something"), kept distinct from the `#[...]` data attributes of §9.7:
 
 ```
-#[derive(Equatable, Comparable, Display, Clone)]
+@derive(Equatable, Comparable, Display, Clone)
 class Point {
     x: int
     y: int
@@ -470,12 +470,12 @@ Common protocols and the PHP magic they replace: `Equatable` (`==`), `Comparable
 
 ### 9.7 Attributes and reflection
 
-No comptime or user-defined macros (see architecture §9.13). Three surfaces cover the cases PHP uses runtime reflection for.
+No comptime or user-defined macros (see architecture §9.13). Three surfaces cover the cases PHP uses runtime reflection for. Code generation and data attributes are **two different operations with two different sigils**, so neither overloads the other: `@derive(...)` is compile-time codegen (closed, compiler-provided); `#[...]` attaches a data attribute (open, user-definable). One-line model: **`@` = the compiler generates something; `#[...]` = metadata attached** (PHP-attributes model).
 
-**Built-in derives** handle shape-based codegen. You apply them; you do not write new ones (the stdlib/compiler implements them):
+**Built-in derives** (`@derive`) handle shape-based codegen. You apply them; you do not write new ones (the stdlib/compiler implements them):
 
 ```
-#[derive(ToJson, Equatable, Clone)]
+@derive(ToJson, Equatable, Clone)
 class User {
     name: string
     age: int
@@ -483,11 +483,11 @@ class User {
 }
 ```
 
-**Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record marked with the `Attribute` trait can be attached; constructing the attribute is the same constructor machinery as any value. Constraints on *where* it attaches are an ordinary trait impl, checked at compile time:
+**Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record becomes usable in annotation position by **implementing the `Attribute` trait** (a capability declaration, hence a trait — not a derive); constructing the attribute is the same constructor machinery as any value. Constraints on *where* it attaches are an ordinary trait impl, checked at compile time:
 
 ```
-#[derive(Attribute)]
-record Route { path: string }                 // a plain record, usable as an attribute
+record Route { path: string }                  // a plain record
+impl Attribute for Route {}                    // marks it usable in annotation position
 
 impl AttachableTo for Route {                  // optional: constrain placement
     fn valid_target(t: Target): bool {

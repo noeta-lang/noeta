@@ -1,0 +1,9 @@
+// Migration: `#[derive(...)]` was the old codegen spelling. Code generation now uses the
+// `@derive(...)` directive, and `#[...]` is for data attributes only, so the old spelling is a
+// compile-time error (E0017).
+// expect: error E0017 at 6:1
+// expect: exit 1
+#[derive(Equatable)]
+class Point {
+    x: int
+}

@@ -3,12 +3,12 @@ source: crates/lang-eval/tests/diagnostics.rs
 expression: out
 ---
 ================ E0001 unexpected character ================
-[E0001] Error: unexpected character `@`
+[E0001] Error: unexpected character `$`
    ╭─[ snippet.lang:1:6 ]
    │
- 1 │ echo @;
+ 1 │ echo $;
    │      ┬  
-   │      ╰── unexpected character `@`
+   │      ╰── unexpected character `$`
 ───╯
 
 ================ E0002 unterminated string ================

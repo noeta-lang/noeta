@@ -69,6 +69,17 @@ enum ClassMember {
     Destructor(Vec<Stmt>),
 }
 
+/// A leading decorator on a type declaration: either a `@derive(...)` codegen directive or a
+/// `#[...]` data attribute. Collected as a sequence and partitioned in [`attach_decorators`].
+enum Decorator {
+    Derive {
+        name: String,
+        name_span: Span,
+        traits: Vec<(String, Span)>,
+    },
+    Attr(Attribute),
+}
+
 /// One `.`-led segment of a `use` path: either another path identifier (with its span) or
 /// the trailing `{ a, b }` group (which, when present, is always last).
 enum UseTail {
@@ -76,22 +87,26 @@ enum UseTail {
     Group(Vec<UseName>),
 }
 
-/// Attach leading `#[...]` attributes to the type declaration they precede. Attributes are only
-/// valid on class/record/enum declarations; the grammar only ever pairs them with one of those.
-fn attach_attributes(stmt: Stmt, attrs: Vec<Attribute>) -> Stmt {
-    if attrs.is_empty() {
+/// Attach leading `@derive(...)` directives and `#[...]` data attributes to the type declaration
+/// they precede. Both are only valid on class/record/enum declarations; the grammar only ever
+/// pairs them with one of those.
+fn attach_decorators(stmt: Stmt, derives: Vec<(String, Span)>, attrs: Vec<Attribute>) -> Stmt {
+    if derives.is_empty() && attrs.is_empty() {
         return stmt;
     }
     match stmt {
         Stmt::Class(mut c) => {
+            c.derives = derives;
             c.attrs = attrs;
             Stmt::Class(c)
         }
         Stmt::Record(mut r) => {
+            r.derives = derives;
             r.attrs = attrs;
             Stmt::Record(r)
         }
         Stmt::Enum(mut e) => {
+            e.derives = derives;
             e.attrs = attrs;
             Stmt::Enum(e)
         }
@@ -845,6 +860,7 @@ where
                     name_span: name_pair.1,
                     backing,
                     variants,
+                    derives: Vec::new(),
                     attrs: Vec::new(),
                     span: to_span(e.span()),
                 })
@@ -879,6 +895,7 @@ where
                     name,
                     name_span,
                     fields,
+                    derives: Vec::new(),
                     attrs: Vec::new(),
                     span: to_span(e.span()),
                 })
@@ -974,6 +991,7 @@ where
                     fields,
                     methods,
                     impls,
+                    derives: Vec::new(),
                     attrs: Vec::new(),
                     destructor,
                     span: to_span(e.span()),
@@ -1054,9 +1072,28 @@ where
                 }
             });
 
-        // `#[ Name ]` or `#[ Name(arg, arg) ]` — an attribute in annotation position. Arguments
-        // are identifiers (the derived trait names in `#[derive(...)]`); richer record-valued
-        // attributes and the build-time manifest are M1.8b.
+        // `@derive ( Name, ... )` — a compile-time codegen directive: the compiler synthesizes the
+        // listed trait impls from the type's fields. `@` is used for nothing else; an `@name` other
+        // than `@derive` is a diagnostic (handled where decorators are partitioned).
+        let derive_directive = just(T::At)
+            .ignore_then(id.clone())
+            .then(
+                id.clone()
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LParen), just(T::RParen)),
+            )
+            .map(|((name, name_span), traits)| Decorator::Derive {
+                name,
+                name_span,
+                traits,
+            });
+
+        // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position. A record
+        // instance attached as metadata, consumed via the manifest (M1.8b). It carries no codegen
+        // meaning; code generation is `@derive`. Arguments are identifiers for now (richer
+        // record-valued attributes are M1.8b).
         let attribute = just(T::Hash)
             .ignore_then(just(T::LBracket))
             .ignore_then(id.clone())
@@ -1069,19 +1106,49 @@ where
                     .or_not(),
             )
             .then_ignore(just(T::RBracket))
-            .map_with(|((name, name_span), args), e| Attribute {
-                name,
-                name_span,
-                args: args.unwrap_or_default(),
-                span: to_span(e.span()),
+            .map_with(|((name, name_span), args), e| {
+                Decorator::Attr(Attribute {
+                    name,
+                    name_span,
+                    args: args.unwrap_or_default(),
+                    span: to_span(e.span()),
+                })
             });
-        // Attributes attach only to type declarations (class/record/enum). Leading attributes are
-        // injected into the parsed declaration; the checker validates them.
-        let attributed_type_decl = attribute
+
+        // Decorators attach only to type declarations (class/record/enum). Leading `@derive(...)`
+        // directives and `#[...]` attributes are collected in order and partitioned onto the parsed
+        // declaration; the checker validates each.
+        let attributed_type_decl = choice((derive_directive, attribute))
             .repeated()
             .collect::<Vec<_>>()
             .then(choice((enum_decl, record_decl, class_decl)))
-            .map(|(attrs, stmt)| attach_attributes(stmt, attrs));
+            .map(move |(decorators, stmt)| {
+                let mut derives: Vec<(String, Span)> = Vec::new();
+                let mut attrs: Vec<Attribute> = Vec::new();
+                for decorator in decorators {
+                    match decorator {
+                        Decorator::Derive {
+                            name,
+                            name_span,
+                            traits,
+                        } => {
+                            if name == "derive" {
+                                derives.extend(traits);
+                            } else {
+                                ctx.diags.borrow_mut().push(Diagnostic::error(
+                                    DiagnosticCode::UnexpectedToken,
+                                    name_span,
+                                    format!(
+                                        "unknown directive `@{name}`; the only codegen directive is `@derive(...)`"
+                                    ),
+                                ));
+                            }
+                        }
+                        Decorator::Attr(attr) => attrs.push(attr),
+                    }
+                }
+                attach_decorators(stmt, derives, attrs)
+            });
 
         choice((
             echo,
