@@ -47,6 +47,16 @@ pub enum Stmt {
     Record(RecordDecl),
     /// A class declaration: `class Order { fields... methods... }`.
     Class(ClassDecl),
+    /// `namespace App.Orders;` — declares the file's namespace. M0 records the path but
+    /// otherwise treats it as a no-op (real module scoping is M1).
+    Namespace { path: Vec<String>, span: Span },
+    /// `use App.Models.User;` or `use App.Billing.{Invoice, Receipt};` — imports names.
+    /// `path` is the dotted prefix; `names` are the imported leaf names.
+    Use {
+        path: Vec<String>,
+        names: Vec<UseName>,
+        span: Span,
+    },
     /// `return <expr>;` or `return;`.
     Return { value: Option<Expr>, span: Span },
     /// `if cond { ... } else if cond { ... } else { ... }`. An `else if` is represented
@@ -73,6 +83,8 @@ impl Stmt {
         match self {
             Stmt::Echo { span, .. }
             | Stmt::Binding { span, .. }
+            | Stmt::Namespace { span, .. }
+            | Stmt::Use { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::If { span, .. }
             | Stmt::For { span, .. }
@@ -159,6 +171,13 @@ pub enum ForPattern {
         second: String,
         second_span: Span,
     },
+}
+
+/// One imported leaf name in a `use` declaration, with its span for diagnostics.
+#[derive(Debug, Clone, PartialEq)]
+pub struct UseName {
+    pub name: String,
+    pub span: Span,
 }
 
 /// A named function declaration. Constructors are not special in this language — a

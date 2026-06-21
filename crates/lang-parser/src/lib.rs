@@ -31,7 +31,8 @@ use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
     BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, MatchArm,
-    ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef, UnaryOp, VariantDecl,
+    ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef, UnaryOp, UseName,
+    VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -63,6 +64,42 @@ enum ObjItem {
 enum ClassMember {
     Field(FieldDecl),
     Method(FnDecl),
+}
+
+/// One `.`-led segment of a `use` path: either another path identifier (with its span) or
+/// the trailing `{ a, b }` group (which, when present, is always last).
+enum UseTail {
+    Seg(String, Span),
+    Group(Vec<UseName>),
+}
+
+/// Assemble a parsed `use` path into its dotted `path` prefix and imported `names`. With
+/// a `{ ... }` group the whole dotted run is the prefix; otherwise the last segment is the
+/// single imported name (`use App.Models.User;` → path `App.Models`, name `User`).
+fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -> Stmt {
+    let mut segs: Vec<(String, Span)> = vec![(first, first_span)];
+    let mut group: Option<Vec<UseName>> = None;
+    for tail in tails {
+        match tail {
+            UseTail::Seg(name, seg_span) => segs.push((name, seg_span)),
+            UseTail::Group(g) => group = Some(g),
+        }
+    }
+    let (path, names) = match group {
+        Some(g) => (segs.into_iter().map(|(n, _)| n).collect(), g),
+        None => {
+            let (leaf, leaf_span) = segs.pop().expect("the leading id is always present");
+            let path = segs.into_iter().map(|(n, _)| n).collect();
+            (
+                path,
+                vec![UseName {
+                    name: leaf,
+                    span: leaf_span,
+                }],
+            )
+        }
+    };
+    Stmt::Use { path, names, span }
 }
 
 /// Convert a chumsky [`SimpleSpan`] (usize offsets) to a [`Span`] (u32 offsets).
@@ -858,6 +895,47 @@ where
                 })
             });
 
+        // `namespace App.Orders;` — a dotted path. M0 records it but does not scope on it.
+        let namespace_decl = just(T::NamespaceKw)
+            .ignore_then(id.clone())
+            .then(
+                just(T::Dot)
+                    .ignore_then(id.clone())
+                    .repeated()
+                    .collect::<Vec<_>>(),
+            )
+            .then_ignore(just(T::Semicolon))
+            .map_with(|((first, _), rest), e| {
+                let mut path = vec![first];
+                path.extend(rest.into_iter().map(|(name, _)| name));
+                Stmt::Namespace {
+                    path,
+                    span: to_span(e.span()),
+                }
+            });
+
+        // `use App.Models.User;` (single) or `use App.Billing.{Invoice, Receipt};` (grouped).
+        let use_group = id
+            .clone()
+            .map(|(name, span)| UseName { name, span })
+            .separated_by(just(T::Comma))
+            .allow_trailing()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::LBrace), just(T::RBrace));
+        // Each `.`-led tail is either the trailing `{ group }` (matched first) or a path id.
+        let use_tail = just(T::Dot).ignore_then(choice((
+            use_group.map(UseTail::Group),
+            id.clone().map(|(name, span)| UseTail::Seg(name, span)),
+        )));
+        let use_decl = just(T::UseKw)
+            .ignore_then(id.clone())
+            .then(use_tail.repeated().collect::<Vec<_>>())
+            .then_ignore(just(T::Semicolon))
+            .map_with(|((first, first_span), tails), e| {
+                build_use(first, first_span, tails, to_span(e.span()))
+            });
+
         // A bare expression, optionally an assignment `name = expr`. Whether `name = …`
         // introduces or reassigns a binding is a runtime decision (see `lang-eval`).
         let assign_or_expr = expr
@@ -901,6 +979,8 @@ where
             enum_decl,
             record_decl,
             class_decl,
+            namespace_decl,
+            use_decl,
             assign_or_expr,
         ))
         .boxed()
@@ -1107,6 +1187,13 @@ mod tests {
     fn try_and_coalesce_operators() {
         insta::assert_snapshot!(pretty(
             "fn place(items): int { validate(items)?; user = find(1) ?? guest(); return Ok(user); }"
+        ));
+    }
+
+    #[test]
+    fn namespace_and_use_declarations() {
+        insta::assert_snapshot!(pretty(
+            "namespace App.Orders; use App.Models.User; use App.Billing.{Invoice, Receipt}; echo \"ok\";"
         ));
     }
 

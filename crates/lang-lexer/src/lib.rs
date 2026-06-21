@@ -49,6 +49,10 @@ pub enum TokenKind {
     TypeKw,
     #[token("class")]
     ClassKw,
+    #[token("namespace")]
+    NamespaceKw,
+    #[token("use")]
+    UseKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. No escapes yet (Slice 4).
@@ -146,6 +150,8 @@ impl TokenKind {
             TokenKind::MatchKw => "MatchKw",
             TokenKind::TypeKw => "TypeKw",
             TokenKind::ClassKw => "ClassKw",
+            TokenKind::NamespaceKw => "NamespaceKw",
+            TokenKind::UseKw => "UseKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
@@ -201,6 +207,8 @@ impl TokenKind {
             TokenKind::MatchKw => "`match`",
             TokenKind::TypeKw => "`type`",
             TokenKind::ClassKw => "`class`",
+            TokenKind::NamespaceKw => "`namespace`",
+            TokenKind::UseKw => "`use`",
             TokenKind::StringLit => "a string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",
@@ -409,6 +417,30 @@ mod tests {
                 TokenKind::Question,
                 TokenKind::QuestionQuestion,
                 TokenKind::Ident
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_namespace_and_use_keywords() {
+        let (_source, lexed) = lex_str("namespace App.Orders; use App.Models.User;");
+        assert!(lexed.diagnostics.is_empty());
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::NamespaceKw,
+                TokenKind::Ident,
+                TokenKind::Dot,
+                TokenKind::Ident,
+                TokenKind::Semicolon,
+                TokenKind::UseKw,
+                TokenKind::Ident,
+                TokenKind::Dot,
+                TokenKind::Ident,
+                TokenKind::Dot,
+                TokenKind::Ident,
+                TokenKind::Semicolon,
             ]
         );
     }

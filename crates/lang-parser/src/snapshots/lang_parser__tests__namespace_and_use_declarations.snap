@@ -1,0 +1,10 @@
+---
+source: crates/lang-parser/src/lib.rs
+expression: "pretty(\"namespace App.Orders; use App.Models.User; use App.Billing.{Invoice, Receipt}; echo \\\"ok\\\";\")"
+---
+(program @0..89
+  (namespace App.Orders @0..21)
+  (use App.Models [User] @22..42)
+  (use App.Billing [Invoice Receipt] @43..78)
+  (echo @79..89
+    (str "ok" @84..88)))

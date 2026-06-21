@@ -78,6 +78,24 @@ impl Pretty for Stmt {
             Stmt::Enum(decl) => decl.pretty(out, level),
             Stmt::Record(decl) => decl.pretty(out, level),
             Stmt::Class(decl) => decl.pretty(out, level),
+            Stmt::Namespace { path, span: s } => {
+                indent(out, level);
+                out.push_str(&format!("(namespace {} {})", path.join("."), span(*s)));
+            }
+            Stmt::Use {
+                path,
+                names,
+                span: s,
+            } => {
+                indent(out, level);
+                let names: Vec<&str> = names.iter().map(|n| n.name.as_str()).collect();
+                out.push_str(&format!(
+                    "(use {} [{}] {})",
+                    path.join("."),
+                    names.join(" "),
+                    span(*s)
+                ));
+            }
             Stmt::Return { value, span: s } => {
                 indent(out, level);
                 match value {

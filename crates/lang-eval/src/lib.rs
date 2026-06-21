@@ -205,6 +205,10 @@ pub struct TypeDef {
     methods: HashMap<String, Rc<Closure>>,
     /// Whether this came from a `type X = {...}` record (vs. a `class`). Cosmetic in M0.
     is_record: bool,
+    /// An *opaque* stub introduced by a `use` import: its real field set is unknown until
+    /// module loading lands (M1), so its all-fields literal accepts whatever fields are
+    /// given (no unknown-field or full-init checks) and `..` spread copies the whole base.
+    opaque: bool,
 }
 
 impl TypeDef {
@@ -223,6 +227,7 @@ impl std::fmt::Debug for TypeDef {
         f.debug_struct("TypeDef")
             .field("name", &self.name)
             .field("is_record", &self.is_record)
+            .field("opaque", &self.opaque)
             .finish_non_exhaustive()
     }
 }
@@ -244,21 +249,29 @@ pub struct ObjectValue {
 }
 
 impl ObjectValue {
-    /// `Type { field: value, ... }`, fields in declared order.
+    /// `Type { field: value, ... }`. Fields are shown in declared order for records and
+    /// classes; for an opaque imported stub (no declared fields) the actual bag is shown
+    /// in key order.
     pub fn display(&self) -> String {
-        let parts: Vec<String> = self
-            .def
-            .fields
-            .iter()
-            .map(|f| {
-                let value = self
-                    .fields
-                    .get(&f.name)
-                    .map(Value::repr)
-                    .unwrap_or_default();
-                format!("{}: {value}", f.name)
-            })
-            .collect();
+        let parts: Vec<String> = if self.def.opaque {
+            self.fields
+                .iter()
+                .map(|(name, value)| format!("{name}: {}", value.repr()))
+                .collect()
+        } else {
+            self.def
+                .fields
+                .iter()
+                .map(|f| {
+                    let value = self
+                        .fields
+                        .get(&f.name)
+                        .map(Value::repr)
+                        .unwrap_or_default();
+                    format!("{}: {value}", f.name)
+                })
+                .collect()
+        };
         format!("{} {{{}}}", self.def.name, parts.join(", "))
     }
 }
@@ -458,6 +471,13 @@ impl Interpreter {
                 self.declare_class(decl);
                 Ok(Flow::Normal)
             }
+            // `namespace` is a no-op in M0 (no module scoping yet); `use` registers each
+            // imported name as an opaque stub so references resolve.
+            Stmt::Namespace { .. } => Ok(Flow::Normal),
+            Stmt::Use { names, .. } => {
+                self.declare_use(names);
+                Ok(Flow::Normal)
+            }
             Stmt::Return { value, .. } => {
                 let value = match value {
                     Some(expr) => self.eval_expr(expr)?,
@@ -629,9 +649,27 @@ impl Interpreter {
             fields,
             methods: HashMap::new(),
             is_record: true,
+            opaque: false,
         };
         self.scope
             .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+    }
+
+    /// Register the names imported by a `use` declaration. Real module loading is M1; in
+    /// M0 each imported name resolves to an *opaque stub type* so references and all-fields
+    /// literals (`User { name: ... }`) work even though the type's real shape is unknown.
+    fn declare_use(&mut self, names: &[lang_ast::UseName]) {
+        for imported in names {
+            let def = TypeDef {
+                name: imported.name.clone(),
+                fields: Vec::new(),
+                methods: HashMap::new(),
+                is_record: false,
+                opaque: true,
+            };
+            self.scope
+                .declare(imported.name.clone(), Value::Type(Rc::new(def)), false);
+        }
     }
 
     /// Register a class type. Methods are compiled to closures capturing the current
@@ -663,6 +701,7 @@ impl Interpreter {
             fields,
             methods,
             is_record: false,
+            opaque: false,
         };
         self.scope
             .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
@@ -696,9 +735,15 @@ impl Interpreter {
 
         let mut fields: BTreeMap<String, Value> = BTreeMap::new();
 
-        // `..base` fills the unnamed fields first (named initializers override below).
+        // `..base` fills the unnamed fields first (named initializers override below). For
+        // an opaque imported stub the field set is unknown, so the whole base is copied.
         if let Some(spread) = &lit.spread {
             match self.eval_expr(spread)? {
+                Value::Object(base) if def.opaque => {
+                    for (name, value) in &base.fields {
+                        fields.insert(name.clone(), value.clone());
+                    }
+                }
                 Value::Object(base) => {
                     for spec in &def.fields {
                         if let Some(value) = base.fields.get(&spec.name) {
@@ -717,7 +762,8 @@ impl Interpreter {
         }
 
         for init in &lit.fields {
-            if !def.has_field(&init.name) {
+            // An opaque stub accepts any field (its real shape is unknown until M1).
+            if !def.opaque && !def.has_field(&init.name) {
                 return Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
                     init.name_span,
@@ -728,6 +774,8 @@ impl Interpreter {
             fields.insert(init.name.clone(), value);
         }
 
+        // The full-initialization guarantee applies only to types with a known field set;
+        // an opaque import has none to be missing.
         let missing: Vec<&str> = def
             .fields
             .iter()
@@ -1818,6 +1866,29 @@ mod tests {
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::Panic);
         // stdout up to the panic is preserved; nothing after runs.
         assert_eq!(result.stdout, "before\n");
+    }
+
+    #[test]
+    fn namespace_is_a_noop_and_use_imports_resolve() {
+        // `namespace` runs without effect; the `use`d name `User` resolves to a stub type
+        // that can be constructed and read, proving import resolution works.
+        let src = "namespace App.Orders; use App.Models.User; \
+                   u = User { name: \"Ada\", id: 1 }; echo u.name; echo u.id;";
+        assert_eq!(run(src).stdout, "Ada\n1\n");
+    }
+
+    #[test]
+    fn grouped_use_imports_each_name() {
+        let src = "use App.Billing.{Invoice, Receipt}; \
+                   i = Invoice { number: 42 }; r = Receipt { paid: true }; \
+                   echo i.number; echo r.paid;";
+        assert_eq!(run(src).stdout, "42\ntrue\n");
+    }
+
+    #[test]
+    fn imported_stub_displays_its_actual_fields() {
+        let src = "use M.User; echo User { name: \"Ada\" };";
+        assert_eq!(run(src).stdout, "User {name: \"Ada\"}\n");
     }
 
     #[test]

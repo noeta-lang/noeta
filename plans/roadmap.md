@@ -27,7 +27,7 @@ Each links to its file in `m0/`. Pick the lowest-numbered `todo`.
 | 5 | [`match` + enums](m0/slice-05-match-enums.md) | done |
 | 6 | [Records & classes](m0/slice-06-records-classes.md) | done |
 | 7 | [`Result`/`Option`/`?`](m0/slice-07-result-option.md) | done |
-| 8 | [`namespace` / `use`](m0/slice-08-namespace-use.md) | todo |
+| 8 | [`namespace` / `use`](m0/slice-08-namespace-use.md) | done |
 | 9 | [§14 demo + REPL + proptest](m0/slice-09-demo-proptest.md) | todo |
 
 ## Standing requirements (every slice)

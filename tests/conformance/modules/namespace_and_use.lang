@@ -1,0 +1,19 @@
+// `namespace` declares the file's module path (a no-op in M0 — no module scoping yet).
+// `use` imports names: the single form (`App.Models.User`) and the grouped form
+// (`App.Billing.{Invoice, Receipt}`). Real module loading is M1; in M0 each imported name
+// resolves to an opaque stub type, so a reference to `User`/`Invoice` constructs and reads.
+// expect: stdout "Ada"
+// expect: stdout "42"
+// expect: stdout "true"
+// expect: exit 0
+namespace App.Orders;
+
+use App.Models.User;
+use App.Billing.{Invoice, Receipt};
+
+customer = User { name: "Ada", id: 7 };
+invoice = Invoice { number: 42, paid: true };
+
+echo customer.name;
+echo invoice.number;
+echo invoice.paid;

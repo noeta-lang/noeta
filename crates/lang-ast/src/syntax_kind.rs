@@ -27,6 +27,8 @@ pub enum SyntaxKind {
     MatchKw,
     TypeKw,
     ClassKw,
+    NamespaceKw,
+    UseKw,
 
     // --- Literal / name tokens ---
     StringLit,
@@ -109,6 +111,9 @@ pub enum SyntaxKind {
     RecordDecl,
     ClassDecl,
     FieldDecl,
+    NamespaceDecl,
+    UseDecl,
+    UseName,
 }
 
 impl SyntaxKind {
@@ -150,6 +155,9 @@ impl SyntaxKind {
                 | SyntaxKind::RecordDecl
                 | SyntaxKind::ClassDecl
                 | SyntaxKind::FieldDecl
+                | SyntaxKind::NamespaceDecl
+                | SyntaxKind::UseDecl
+                | SyntaxKind::UseName
         )
     }
 }
