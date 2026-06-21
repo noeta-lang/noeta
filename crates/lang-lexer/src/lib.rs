@@ -51,6 +51,8 @@ pub enum TokenKind {
     ClassKw,
     #[token("destruct")]
     DestructKw,
+    #[token("impl")]
+    ImplKw,
     #[token("namespace")]
     NamespaceKw,
     #[token("use")]
@@ -133,6 +135,9 @@ pub enum TokenKind {
     Tilde,
     #[token("!")]
     Bang,
+    /// `#`, introducing an attribute (`#[derive(...)]`).
+    #[token("#")]
+    Hash,
 }
 
 impl TokenKind {
@@ -154,6 +159,7 @@ impl TokenKind {
             TokenKind::TypeKw => "TypeKw",
             TokenKind::ClassKw => "ClassKw",
             TokenKind::DestructKw => "DestructKw",
+            TokenKind::ImplKw => "ImplKw",
             TokenKind::NamespaceKw => "NamespaceKw",
             TokenKind::UseKw => "UseKw",
             TokenKind::StringLit => "StringLit",
@@ -191,6 +197,7 @@ impl TokenKind {
             TokenKind::Percent => "Percent",
             TokenKind::Tilde => "Tilde",
             TokenKind::Bang => "Bang",
+            TokenKind::Hash => "Hash",
         }
     }
 
@@ -212,6 +219,7 @@ impl TokenKind {
             TokenKind::TypeKw => "`type`",
             TokenKind::ClassKw => "`class`",
             TokenKind::DestructKw => "`destruct`",
+            TokenKind::ImplKw => "`impl`",
             TokenKind::NamespaceKw => "`namespace`",
             TokenKind::UseKw => "`use`",
             TokenKind::StringLit => "a string literal",
@@ -249,6 +257,7 @@ impl TokenKind {
             TokenKind::Percent => "`%`",
             TokenKind::Tilde => "`~`",
             TokenKind::Bang => "`!`",
+            TokenKind::Hash => "`#`",
         }
     }
 }

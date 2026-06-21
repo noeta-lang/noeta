@@ -98,3 +98,48 @@ fn annotations_do_not_produce_false_positives() {
                fn f(xs: List<Item>): Result<void, string> { return Ok(); }\n";
     assert!(codes(src).is_empty());
 }
+
+#[test]
+fn valid_operator_impl_is_clean() {
+    let src = "class M {\n  amount: int\n  impl Add {\n    fn add(other: M): M { return other; }\n  }\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn impl_of_unknown_trait_is_reported() {
+    let src = "class W {\n  impl Frob {\n    fn frob(other: W): W { return other; }\n  }\n}\n";
+    assert_eq!(codes(src), ["E0014"]);
+}
+
+#[test]
+fn impl_missing_required_method_is_reported() {
+    // `impl Add` without an `add` method does not satisfy the trait.
+    let src = "class M {\n  amount: int\n  impl Add {\n    fn plus(other: M): M { return other; }\n  }\n}\n";
+    assert_eq!(codes(src), ["E0015"]);
+}
+
+#[test]
+fn impl_with_wrong_arity_is_reported() {
+    // `add` must take exactly one parameter besides the receiver.
+    let src = "class M {\n  amount: int\n  impl Add {\n    fn add(): M { return M { amount: 0 }; }\n  }\n}\n";
+    assert_eq!(codes(src), ["E0015"]);
+}
+
+#[test]
+fn derivable_traits_are_accepted() {
+    let src = "#[derive(Equatable, Comparable, Display, Clone)]\nclass P {\n  x: int\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn deriving_a_non_derivable_trait_is_reported() {
+    // `Add` is an operator trait, implemented not derived.
+    let src = "#[derive(Add)]\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0014"]);
+}
+
+#[test]
+fn deriving_an_unknown_trait_is_reported() {
+    let src = "#[derive(Bogus)]\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0014"]);
+}

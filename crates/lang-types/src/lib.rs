@@ -18,6 +18,9 @@
 
 use lang_ast::TypeRef;
 
+mod traits;
+pub use traits::{BUILTIN_TRAITS, BuiltinTrait, operator_trait};
+
 /// A type in the lattice.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Type {

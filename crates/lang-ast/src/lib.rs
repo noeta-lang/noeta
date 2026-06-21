@@ -105,6 +105,34 @@ pub struct RecordDecl {
     pub name: String,
     pub name_span: Span,
     pub fields: Vec<FieldDecl>,
+    /// Leading `#[...]` attributes (e.g. `#[derive(Equatable)]`). Parsed and validated by the
+    /// checker; the manifest/codegen they drive arrives with M1.8b.
+    pub attrs: Vec<Attribute>,
+    pub span: Span,
+}
+
+/// An attribute in annotation position (`#[derive(Equatable, Clone)]`, `#[Route("/x")]`). The
+/// surface is a name with optional identifier arguments. `derive` is interpreted by the checker
+/// (and, later, the compiler); other attributes reduce to records in the manifest (M1.8b).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Attribute {
+    pub name: String,
+    pub name_span: Span,
+    /// The identifier arguments inside the parentheses, each with its span (e.g. the derived
+    /// trait names in `#[derive(A, B)]`). Empty for a bare `#[Marker]`.
+    pub args: Vec<(String, Span)>,
+    pub span: Span,
+}
+
+/// An `impl Trait { ... }` block inside a class body. Implementing a built-in trait "lights up"
+/// its operator or protocol (e.g. `impl Add` enables `+`). The block's methods are flattened into
+/// [`ClassDecl::methods`] for execution; the block itself is retained here so the checker can
+/// validate the trait name and its required method signatures.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplBlock {
+    pub trait_name: String,
+    pub trait_span: Span,
+    pub methods: Vec<FnDecl>,
     pub span: Span,
 }
 
@@ -116,7 +144,14 @@ pub struct ClassDecl {
     pub name: String,
     pub name_span: Span,
     pub fields: Vec<FieldDecl>,
+    /// All callable methods, including the ones flattened out of `impl` blocks — so the existing
+    /// `(type, method)` dispatch machinery resolves an operator's trait method with no change.
     pub methods: Vec<FnDecl>,
+    /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in
+    /// `methods`; these entries let the checker validate each trait and its required signatures.
+    pub impls: Vec<ImplBlock>,
+    /// Leading `#[...]` attributes on the class (e.g. `#[derive(Comparable)]`).
+    pub attrs: Vec<Attribute>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.
@@ -146,6 +181,8 @@ pub struct EnumDecl {
     /// The backing primitive type for a backed enum (`: string`), if any.
     pub backing: Option<TypeRef>,
     pub variants: Vec<VariantDecl>,
+    /// Leading `#[...]` attributes on the enum.
+    pub attrs: Vec<Attribute>,
     pub span: Span,
 }
 
@@ -479,6 +516,30 @@ impl BinaryOp {
             BinaryOp::Ge => ">=",
             BinaryOp::And => "&&",
             BinaryOp::Or => "||",
+        }
+    }
+
+    /// The trait method a user object's class implements to overload this operator, if the
+    /// operator is overloadable. `a + b` dispatches to `a`'s `add(b)` when `a` is an object whose
+    /// type defines that method; otherwise the built-in semantics apply. Comparisons, equality,
+    /// and the logical operators are *not* overloadable here (their trait wiring — `Equatable`,
+    /// `Comparable`, returning `bool`/`Ordering` — is M1.8b); they return `None`.
+    pub fn overload_method(self) -> Option<&'static str> {
+        match self {
+            BinaryOp::Add => Some("add"),
+            BinaryOp::Sub => Some("sub"),
+            BinaryOp::Mul => Some("mul"),
+            BinaryOp::Div => Some("div"),
+            BinaryOp::Concat => Some("concat"),
+            BinaryOp::Rem
+            | BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::And
+            | BinaryOp::Or => None,
         }
     }
 }

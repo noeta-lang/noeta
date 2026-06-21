@@ -19,6 +19,13 @@ Every expression gets an inferred `Type`, with `Type::Unknown` (the gradual top)
 - **`?` on a non-fallible value** (`E0012`) — `expr?` where `expr` is statically neither `Result` nor `Option`.
 - **Arithmetic type mismatch** (`E0007`) — `+ - * / %` on a concretely non-numeric operand, reusing the runtime `TypeMismatch` code at the same span.
 
+## What it checks (M1.8a)
+
+- **Unknown trait** (`E0014`) — an `impl Trait { ... }` block or a `#[derive(Trait)]` attribute names a trait that is not a built-in (or, for `derive`, not a *derivable* one). Validated against the `BuiltinTrait` registry in `lang-types`.
+- **Invalid impl** (`E0015`) — an `impl` block does not satisfy the trait it names: the trait's required method is missing or has the wrong arity (e.g. `impl Add` without an `add(other)` method).
+
+These are declaration-level checks (they never touch expression typing), so they stay gradual-safe: a correct program emits nothing, and the differential oracle is unaffected. The *behavior* the traits drive — operator overloading — is wired in both backends (`lang-eval`, `lang-vm`); derive codegen, the non-operator protocols, fallible operators, and generics are M1.8b.
+
 Inference is a conservative name-first gradual pass, not yet full Hindley–Milner unification/generalization (the lattice and `Type::Var` are in place for that hardening). Unknown-type checking (`E0013`) is deferred to M1.9 (it needs `use`/module resolution to tell "undeclared" from "valid-but-unresolved"); immutability/ownership analysis is the 7b follow-up.
 
 Part of the `lang` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).

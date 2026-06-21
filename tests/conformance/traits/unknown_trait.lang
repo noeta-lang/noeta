@@ -1,0 +1,9 @@
+// An `impl` block may only name a built-in trait; an unknown trait name is a compile-time
+// error (E0014), caught by the type checker before either backend runs.
+// expect: error E0014 at 6:10
+// expect: exit 1
+class Widget {
+    impl Frobnicate {
+        fn frob(other: Widget): Widget { return other; }
+    }
+}

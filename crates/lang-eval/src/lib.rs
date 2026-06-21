@@ -1533,6 +1533,15 @@ impl Interpreter {
         }
         let left = self.eval_expr(lhs)?;
         let right = self.eval_expr(rhs)?;
+        // Operator-trait dispatch: if the left operand is a user object whose class implements the
+        // operator's trait (e.g. `Add` for `+`), call that method; otherwise the built-in operator
+        // semantics apply. Comparisons/equality stay built-in (their trait wiring is M1.8b).
+        if let Value::Object(object) = &left
+            && let Some(method_name) = op.overload_method()
+            && let Some(method) = object.def.methods.get(method_name)
+        {
+            return self.call_method_on(&Rc::clone(object), &Rc::clone(method), vec![right], span);
+        }
         match ops::apply_binary(op, &left, &right) {
             Ok(value) => Ok(value),
             Err(error) => Err(self.runtime_error(error.code, span, error.text)),
@@ -1703,6 +1712,17 @@ mod tests {
             parsed.diagnostics
         );
         parsed.program
+    }
+
+    #[test]
+    fn operator_trait_overloads_plus() {
+        // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8); the VM
+        // reproduces this identically (see lang-vm), guarded by the differential oracle.
+        let out = run(
+            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: amount + other.amount, currency: currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
+        );
+        assert_eq!(out.stdout, "8\nUSD\n");
+        assert_eq!(out.exit_code, 0);
     }
 
     #[test]

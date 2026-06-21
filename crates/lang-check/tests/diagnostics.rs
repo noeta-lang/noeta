@@ -37,6 +37,14 @@ fn checker_diagnostic_gallery() {
             "E0012 `?` on a non-fallible value",
             "fn f(): int { return 5?; }",
         ),
+        (
+            "E0014 `impl` of an unknown trait",
+            "class W {\n  impl Frob {\n    fn frob(other: W): W { return other; }\n  }\n}",
+        ),
+        (
+            "E0015 `impl` missing the trait's required method",
+            "class M {\n  amount: int\n  impl Add {\n    fn plus(other: M): M { return other; }\n  }\n}",
+        ),
     ];
     let mut out = String::new();
     for (label, src) in cases {

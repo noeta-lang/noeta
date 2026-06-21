@@ -30,9 +30,9 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
-    BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, MatchArm,
-    ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef, UnaryOp, UseName,
-    VariantDecl,
+    Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
+    ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef,
+    UnaryOp, UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -65,6 +65,7 @@ enum ObjItem {
 enum ClassMember {
     Field(FieldDecl),
     Method(FnDecl),
+    Impl(ImplBlock),
     Destructor(Vec<Stmt>),
 }
 
@@ -73,6 +74,29 @@ enum ClassMember {
 enum UseTail {
     Seg(String, Span),
     Group(Vec<UseName>),
+}
+
+/// Attach leading `#[...]` attributes to the type declaration they precede. Attributes are only
+/// valid on class/record/enum declarations; the grammar only ever pairs them with one of those.
+fn attach_attributes(stmt: Stmt, attrs: Vec<Attribute>) -> Stmt {
+    if attrs.is_empty() {
+        return stmt;
+    }
+    match stmt {
+        Stmt::Class(mut c) => {
+            c.attrs = attrs;
+            Stmt::Class(c)
+        }
+        Stmt::Record(mut r) => {
+            r.attrs = attrs;
+            Stmt::Record(r)
+        }
+        Stmt::Enum(mut e) => {
+            e.attrs = attrs;
+            Stmt::Enum(e)
+        }
+        other => other,
+    }
 }
 
 /// Assemble a parsed `use` path into its dotted `path` prefix and imported `names`. With
@@ -809,6 +833,7 @@ where
                     name_span: name_pair.1,
                     backing,
                     variants,
+                    attrs: Vec::new(),
                     span: to_span(e.span()),
                 })
             });
@@ -842,6 +867,7 @@ where
                     name,
                     name_span,
                     fields,
+                    attrs: Vec::new(),
                     span: to_span(e.span()),
                 })
             });
@@ -862,18 +888,37 @@ where
                     span: to_span(e.span()),
                 })
             });
-        let class_method = just(T::FnKw)
+        // A bare `fn ...` declaration, shared by plain class methods and `impl`-block methods.
+        let method = just(T::FnKw)
             .ignore_then(id.clone())
             .then(params_parser(ctx))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
-            .map_with(|(((name_pair, params), ret), body), e| {
-                ClassMember::Method(FnDecl {
-                    name: name_pair.0,
-                    name_span: name_pair.1,
-                    params,
-                    ret,
-                    body,
+            .map_with(|(((name_pair, params), ret), body), e| FnDecl {
+                name: name_pair.0,
+                name_span: name_pair.1,
+                params,
+                ret,
+                body,
+                span: to_span(e.span()),
+            });
+        let class_method = method.clone().map(ClassMember::Method);
+        // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
+        // The body is just methods; they are flattened into the class's method table below.
+        let class_impl = just(T::ImplKw)
+            .ignore_then(id.clone())
+            .then(
+                method
+                    .clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(|((trait_name, trait_span), methods), e| {
+                ClassMember::Impl(ImplBlock {
+                    trait_name,
+                    trait_span,
+                    methods,
                     span: to_span(e.span()),
                 })
             });
@@ -885,7 +930,7 @@ where
         let class_decl = just(T::ClassKw)
             .ignore_then(id.clone())
             .then(
-                choice((class_method, class_destructor, class_field))
+                choice((class_method, class_impl, class_destructor, class_field))
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
@@ -893,11 +938,19 @@ where
             .map_with(|((name, name_span), members), e| {
                 let mut fields = Vec::new();
                 let mut methods = Vec::new();
+                let mut impls = Vec::new();
                 let mut destructor = None;
                 for member in members {
                     match member {
                         ClassMember::Field(field) => fields.push(field),
                         ClassMember::Method(method) => methods.push(method),
+                        // An `impl` block's methods are flattened into the method table (so the
+                        // existing dispatch resolves them) and the block is retained for the
+                        // checker to validate against the trait it names.
+                        ClassMember::Impl(block) => {
+                            methods.extend(block.methods.iter().cloned());
+                            impls.push(block);
+                        }
                         // A second `destruct` block silently keeps the last; the checker (M1.7)
                         // will reject duplicates. M0/M1 accept the surface for now.
                         ClassMember::Destructor(body) => destructor = Some(body),
@@ -908,6 +961,8 @@ where
                     name_span,
                     fields,
                     methods,
+                    impls,
+                    attrs: Vec::new(),
                     destructor,
                     span: to_span(e.span()),
                 })
@@ -987,6 +1042,35 @@ where
                 }
             });
 
+        // `#[ Name ]` or `#[ Name(arg, arg) ]` — an attribute in annotation position. Arguments
+        // are identifiers (the derived trait names in `#[derive(...)]`); richer record-valued
+        // attributes and the build-time manifest are M1.8b.
+        let attribute = just(T::Hash)
+            .ignore_then(just(T::LBracket))
+            .ignore_then(id.clone())
+            .then(
+                id.clone()
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .or_not(),
+            )
+            .then_ignore(just(T::RBracket))
+            .map_with(|((name, name_span), args), e| Attribute {
+                name,
+                name_span,
+                args: args.unwrap_or_default(),
+                span: to_span(e.span()),
+            });
+        // Attributes attach only to type declarations (class/record/enum). Leading attributes are
+        // injected into the parsed declaration; the checker validates them.
+        let attributed_type_decl = attribute
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(choice((enum_decl, record_decl, class_decl)))
+            .map(|(attrs, stmt)| attach_attributes(stmt, attrs));
+
         choice((
             echo,
             mut_binding,
@@ -994,9 +1078,7 @@ where
             if_,
             for_,
             fn_decl,
-            enum_decl,
-            record_decl,
-            class_decl,
+            attributed_type_decl,
             namespace_decl,
             use_decl,
             assign_or_expr,

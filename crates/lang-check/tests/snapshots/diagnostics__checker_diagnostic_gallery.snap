@@ -32,3 +32,25 @@ expression: out
    │ 
    │ Help: `?` only propagates `Result`/`Option`; this value is neither
 ───╯
+
+================ E0014 `impl` of an unknown trait ================
+[E0014] Error: unknown trait `Frob`
+   ╭─[ snippet.lang:2:8 ]
+   │
+ 2 │   impl Frob {
+   │        ──┬─  
+   │          ╰─── unknown trait `Frob`
+   │ 
+   │ Help: only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)
+───╯
+
+================ E0015 `impl` missing the trait's required method ================
+[E0015] Error: `impl Add` must define `fn add`
+   ╭─[ snippet.lang:3:8 ]
+   │
+ 3 │   impl Add {
+   │        ─┬─  
+   │         ╰─── `impl Add` must define `fn add`
+   │ 
+   │ Help: the `Add` trait requires the `add` method
+───╯

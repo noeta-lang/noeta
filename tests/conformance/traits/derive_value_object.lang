@@ -1,0 +1,22 @@
+// `#[derive(...)]` on a value-object class: the derives parse and type-check (each names a
+// derivable value-object protocol), and the class runs with the structural equality M1 already
+// provides by default. The synthesized `Comparable` ordering and `Display`/`Clone` codegen the
+// derives drive are M1.8b; here the surface is validated and the program runs unchanged.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+#[derive(Equatable, Comparable, Display, Clone)]
+class Point {
+    x: int
+    y: int
+
+    fn new(x: int, y: int): Point {
+        return Point { x: x, y: y };
+    }
+}
+
+a = Point.new(1, 2);
+b = Point.new(1, 2);
+c = Point.new(3, 4);
+echo a == b;
+echo a == c;

@@ -42,12 +42,12 @@
 use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
-    BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, Param, Pattern, Program,
-    RecordDecl, Stmt, StrPart, TypeRef,
+    Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock, MatchArm, Param,
+    Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
-use lang_types::Type;
+use lang_types::{BuiltinTrait, Type};
 
 /// Type-check a program and return every diagnostic found, in source order. An empty result
 /// means the program is well-typed (as far as the gradual checker can determine).
@@ -220,9 +220,10 @@ impl Checker {
         env.pop();
     }
 
-    fn check_record(&mut self, _r: &RecordDecl) {
+    fn check_record(&mut self, r: &RecordDecl) {
         // Field type annotations are resolved (and unknown-type-checked) from M1.9; nothing to
-        // verify here until then. Records introduce no body to infer.
+        // verify here until then. Records introduce no body to infer, but they may carry derives.
+        self.check_attrs(&r.attrs);
     }
 
     fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
@@ -231,6 +232,10 @@ impl Checker {
             .iter()
             .map(|f| (f.name.clone(), field_type(&f.ty)))
             .collect();
+        self.check_attrs(&c.attrs);
+        for block in &c.impls {
+            self.check_impl(block);
+        }
         for method in &c.methods {
             self.check_fn(method, env, &fields);
         }
@@ -246,8 +251,84 @@ impl Checker {
         }
     }
 
-    fn check_enum(&mut self, _e: &EnumDecl) {
+    fn check_enum(&mut self, e: &EnumDecl) {
         // Backing/variant type annotations are unknown-type-checked from M1.9 (see module docs).
+        self.check_attrs(&e.attrs);
+    }
+
+    // ----- traits: impl coherence and derive validation (M1.8) -----
+
+    /// Validate an `impl Trait { ... }` block: the trait must be a known built-in, and the block
+    /// must provide the trait's required method with the right arity. The impl's method *bodies*
+    /// are checked separately (they are flattened into `ClassDecl::methods`).
+    fn check_impl(&mut self, block: &ImplBlock) {
+        let Some(t) = BuiltinTrait::lookup(&block.trait_name) else {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::UnknownTrait,
+                    block.trait_span,
+                    format!("unknown trait `{}`", block.trait_name),
+                )
+                .with_help(
+                    "only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)",
+                ),
+            );
+            return;
+        };
+        let Some((req_name, req_arity)) = t.required_method else {
+            return; // a marker trait (e.g. `Clone`) imposes no hand-written method
+        };
+        match block.methods.iter().find(|m| m.name == req_name) {
+            None => self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::InvalidImpl,
+                    block.trait_span,
+                    format!("`impl {}` must define `fn {req_name}`", block.trait_name),
+                )
+                .with_help(format!(
+                    "the `{}` trait requires the `{req_name}` method",
+                    block.trait_name
+                )),
+            ),
+            Some(m) if m.params.len() != req_arity => self.diags.push(Diagnostic::error(
+                DiagnosticCode::InvalidImpl,
+                m.name_span,
+                format!(
+                    "`{req_name}` must take {req_arity} parameter(s), found {}",
+                    m.params.len()
+                ),
+            )),
+            Some(_) => {}
+        }
+    }
+
+    /// Validate the `#[derive(...)]` attributes on a declaration: every named trait must be a
+    /// known *derivable* built-in. Other (non-`derive`) attributes reduce to records in the
+    /// manifest (M1.8b) and are not validated here yet.
+    fn check_attrs(&mut self, attrs: &[Attribute]) {
+        for attr in attrs {
+            if attr.name != "derive" {
+                continue;
+            }
+            for (trait_name, span) in &attr.args {
+                match BuiltinTrait::lookup(trait_name) {
+                    Some(t) if t.derivable => {}
+                    Some(_) => self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::UnknownTrait,
+                            *span,
+                            format!("`{trait_name}` cannot be derived"),
+                        )
+                        .with_help("only `Equatable`, `Comparable`, `Display`, `Clone`, `ToJson`, `Serialize` are derivable"),
+                    ),
+                    None => self.diags.push(Diagnostic::error(
+                        DiagnosticCode::UnknownTrait,
+                        *span,
+                        format!("unknown trait `{trait_name}` in `#[derive(...)]`"),
+                    )),
+                }
+            }
+        }
     }
 
     // ----- inference -----

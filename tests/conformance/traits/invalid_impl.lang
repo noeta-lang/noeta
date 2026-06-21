@@ -1,0 +1,11 @@
+// An `impl Add` must define the trait's required method, `fn add`. This block defines the wrong
+// method name, so the impl does not satisfy the trait (E0015).
+// expect: error E0015 at 8:10
+// expect: exit 1
+class Money {
+    amount: int
+
+    impl Add {
+        fn plus(other: Money): Money { return other; }
+    }
+}

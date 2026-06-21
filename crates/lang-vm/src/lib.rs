@@ -809,17 +809,44 @@ impl<'m> Vm<'m> {
                     a,
                     b,
                     span,
-                } => match apply_binary(
-                    *op,
-                    frames[top].regs[*a as usize],
-                    frames[top].regs[*b as usize],
-                ) {
-                    Ok(v) => {
-                        set_reg(&mut frames[top].regs, *dst, v);
+                } => {
+                    let left = frames[top].regs[*a as usize];
+                    let right = frames[top].regs[*b as usize];
+                    // Operator-trait dispatch: a user object whose class implements the operator's
+                    // trait (e.g. `Add` for `+`) routes the operation to that method, pushing a
+                    // frame exactly like a method call; otherwise the built-in operator applies.
+                    // The checker guarantees the method's arity (receiver + 1), so a mismatch here
+                    // simply falls through to the built-in path rather than dispatching.
+                    if left.is_object()
+                        && let Some(method_name) = op.overload_method()
+                        && let Some(&proto) = self
+                            .methods
+                            .get(&(left.shape().unwrap().name.clone(), method_name.to_string()))
+                        && module.protos[proto as usize].num_params == 2
+                    {
+                        let chunk = &module.protos[proto as usize];
+                        let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                        retain(left);
+                        new_regs[0] = left;
+                        retain(right);
+                        new_regs[1] = right;
                         frames[top].pc += 1;
+                        frames.push(Frame {
+                            proto,
+                            regs: new_regs,
+                            pc: 0,
+                            ret_dst: *dst,
+                        });
+                        continue;
                     }
-                    Err(e) => return Err(self.error(e.code, *span, e.text)),
-                },
+                    match apply_binary(*op, left, right) {
+                        Ok(v) => {
+                            set_reg(&mut frames[top].regs, *dst, v);
+                            frames[top].pc += 1;
+                        }
+                        Err(e) => return Err(self.error(e.code, *span, e.text)),
+                    }
+                }
                 Op::RequireBool {
                     reg,
                     side,
@@ -1400,6 +1427,23 @@ mod tests {
             "class M {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): M { return M { amount: a, currency: c }; }\n}\na = M.new(500, \"USD\");\nb = M { amount: 300, ..a };\necho b.amount;\necho b.currency;\necho a.amount;\n",
         );
         assert_eq!(r.stdout, "300\nUSD\n500\n");
+    }
+
+    #[test]
+    fn operator_trait_overloads_plus() {
+        // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8).
+        let r = run(
+            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: amount + other.amount, currency: currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
+        );
+        assert_eq!(r.stdout, "8\nUSD\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn operators_on_builtins_are_unaffected_by_overloads() {
+        // A class without the relevant trait method leaves built-in `+` semantics untouched.
+        let r = run("echo 2 + 3;\necho \"a\" ~ \"b\";\n");
+        assert_eq!(r.stdout, "5\nab\n");
     }
 
     #[test]
