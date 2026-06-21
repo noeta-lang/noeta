@@ -88,6 +88,15 @@ pub(crate) fn with_payload<R>(value: Value, f: impl FnOnce(&Payload) -> R) -> R 
     f(&obj.payload)
 }
 
+/// Read the current refcount of a pointer value. Used to detect the last reference (so a
+/// destructor can run on the about-to-be-final release). The caller must have checked
+/// `value.is_pointer()`.
+pub(crate) fn refcount(value: Value) -> u32 {
+    // SAFETY: live object allocated by this module; single-threaded read.
+    let obj = unsafe { &*obj_ptr(value) };
+    obj.header.refcount
+}
+
 /// Increment the refcount of a pointer value. No-op enforced by the caller for immediates.
 pub(crate) fn inc_ref(value: Value) {
     // SAFETY: live object allocated by this module; single-threaded so the read-modify-write

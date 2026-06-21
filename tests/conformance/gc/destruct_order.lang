@@ -1,0 +1,34 @@
+// Deterministic destruction: a class's `destruct` block runs when the last reference to an
+// instance drops. Top-level bindings are destroyed at program end in reverse declaration
+// order; reassigning a binding destroys the value it displaced. The destructor reads the
+// instance's fields directly (like a parameterless method).
+// expect: stdout "open a"
+// expect: stdout "open b"
+// expect: stdout "replace"
+// expect: stdout "closing first"
+// expect: stdout "body done"
+// expect: stdout "closing second"
+// expect: stdout "closing b"
+// expect: stdout "closing a"
+// expect: exit 0
+class Resource {
+    name: string
+
+    fn new(name: string): Resource {
+        return Resource { name: name };
+    }
+
+    destruct {
+        echo "closing {name}";
+    }
+}
+
+echo "open a";
+a = Resource.new("a");
+echo "open b";
+b = Resource.new("b");
+
+mut r = Resource.new("first");
+echo "replace";
+r = Resource.new("second");
+echo "body done";

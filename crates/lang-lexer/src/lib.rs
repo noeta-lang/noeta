@@ -49,6 +49,8 @@ pub enum TokenKind {
     TypeKw,
     #[token("class")]
     ClassKw,
+    #[token("destruct")]
+    DestructKw,
     #[token("namespace")]
     NamespaceKw,
     #[token("use")]
@@ -151,6 +153,7 @@ impl TokenKind {
             TokenKind::MatchKw => "MatchKw",
             TokenKind::TypeKw => "TypeKw",
             TokenKind::ClassKw => "ClassKw",
+            TokenKind::DestructKw => "DestructKw",
             TokenKind::NamespaceKw => "NamespaceKw",
             TokenKind::UseKw => "UseKw",
             TokenKind::StringLit => "StringLit",
@@ -208,6 +211,7 @@ impl TokenKind {
             TokenKind::MatchKw => "`match`",
             TokenKind::TypeKw => "`type`",
             TokenKind::ClassKw => "`class`",
+            TokenKind::DestructKw => "`destruct`",
             TokenKind::NamespaceKw => "`namespace`",
             TokenKind::UseKw => "`use`",
             TokenKind::StringLit => "a string literal",

@@ -59,11 +59,13 @@ enum ObjItem {
     Spread(Box<Expr>),
 }
 
-/// One member parsed from a class body: a field declaration or a method. Partitioned
-/// into [`ClassDecl`]'s `fields`/`methods` after the body is parsed.
+/// One member parsed from a class body: a field declaration, a method, or the (at most one)
+/// `destruct` block. Partitioned into [`ClassDecl`]'s `fields`/`methods`/`destructor` after the
+/// body is parsed.
 enum ClassMember {
     Field(FieldDecl),
     Method(FnDecl),
+    Destructor(Vec<Stmt>),
 }
 
 /// One `.`-led segment of a `use` path: either another path identifier (with its span) or
@@ -875,10 +877,15 @@ where
                     span: to_span(e.span()),
                 })
             });
+        // `destruct { ... }` — the runtime-invoked destructor block. Not a method (no name,
+        // no params, no receiver syntax); the GC calls it when the last reference drops.
+        let class_destructor = just(T::DestructKw)
+            .ignore_then(block.clone())
+            .map(ClassMember::Destructor);
         let class_decl = just(T::ClassKw)
             .ignore_then(id.clone())
             .then(
-                choice((class_method, class_field))
+                choice((class_method, class_destructor, class_field))
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
@@ -886,10 +893,14 @@ where
             .map_with(|((name, name_span), members), e| {
                 let mut fields = Vec::new();
                 let mut methods = Vec::new();
+                let mut destructor = None;
                 for member in members {
                     match member {
                         ClassMember::Field(field) => fields.push(field),
                         ClassMember::Method(method) => methods.push(method),
+                        // A second `destruct` block silently keeps the last; the checker (M1.7)
+                        // will reject duplicates. M0/M1 accept the surface for now.
+                        ClassMember::Destructor(body) => destructor = Some(body),
                     }
                 }
                 Stmt::Class(ClassDecl {
@@ -897,6 +908,7 @@ where
                     name_span,
                     fields,
                     methods,
+                    destructor,
                     span: to_span(e.span()),
                 })
             });

@@ -92,7 +92,12 @@ struct Vm<'m> {
     shapes: Vec<Rc<Shape>>,
     /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
     methods: HashMap<(String, String), u32>,
+    /// `type_name` to its `destruct` prototype, for classes with a destructor.
+    destructors: HashMap<String, u32>,
     globals: HashMap<String, Value>,
+    /// Top-level binding names in declaration order, so globals are destroyed at program end
+    /// in reverse declaration order (the deterministic "program order" the spec requires).
+    global_order: Vec<String>,
     /// The deterministic `next_id()` counter, seeded at 1 (matching the M0 `IdGen`).
     next_id: u64,
     stdout: String,
@@ -132,11 +137,14 @@ fn execute(module: &Module) -> RunResult {
         .iter()
         .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
         .collect();
+    let destructors = module.destructors.iter().cloned().collect();
     let mut vm = Vm {
         module,
         shapes: module.shapes.iter().cloned().map(Rc::new).collect(),
         methods,
+        destructors,
         globals: HashMap::new(),
+        global_order: Vec::new(),
         next_id: 1,
         stdout: String::new(),
         diagnostics: Vec::new(),
@@ -152,8 +160,12 @@ fn execute(module: &Module) -> RunResult {
     if let Ok(v) = vm.run(vec![top]) {
         release(v);
     }
-    for v in vm.globals.values() {
-        release(*v);
+    // Destroy the globals at program end in reverse declaration order, running each
+    // destructor on its last reference — the deterministic destruction the spec requires.
+    for name in vm.global_order.clone().into_iter().rev() {
+        if let Some(v) = vm.globals.get(&name).copied() {
+            vm.release_value(v);
+        }
     }
 
     let exit_code = if vm.diagnostics.is_empty() { 0 } else { 1 };
@@ -170,6 +182,45 @@ impl<'m> Vm<'m> {
         self.diagnostics
             .push(Diagnostic::error(code, span, message));
         Abort
+    }
+
+    /// Release a value that may be the *last* reference to a destructor-carrying object. If so,
+    /// the `destruct` block runs synchronously (with the instance's fields in scope) before the
+    /// object is freed — the deterministic destruction the spec requires. Used at the global
+    /// drop points (reassignment and program end); ordinary register releases use the plain
+    /// `release`, since a corpus destructible only ever lives in a global (its count never
+    /// reaches zero elsewhere).
+    fn release_value(&mut self, value: Value) {
+        if value.is_object()
+            && value.refcount() == 1
+            && let Some(shape) = value.shape()
+            && let Some(&proto) = self.destructors.get(&shape.name)
+        {
+            self.run_destructor(proto, value);
+        }
+        release(value);
+    }
+
+    /// Run an instance's `destruct` block on a fresh frame stack, with the instance in
+    /// register 0 (so its fields resolve like a method's). The instance is retained for the
+    /// duration, so the block sees a live object and the net reference count is unchanged —
+    /// the caller's subsequent `release` performs the actual free.
+    fn run_destructor(&mut self, proto: u32, instance: Value) {
+        let chunk = &self.module.protos[proto as usize];
+        let mut regs = vec![Value::unit(); chunk.num_registers as usize];
+        retain(instance);
+        regs[0] = instance;
+        let frame = Frame {
+            proto,
+            regs,
+            pc: 0,
+            ret_dst: 0,
+        };
+        // A destructor returns unit (its body is run for its effects); discard it. An abort
+        // inside a destructor has already recorded its diagnostic.
+        if let Ok(v) = self.run(vec![frame]) {
+            release(v);
+        }
     }
 
     /// Run a frame stack until its bottom frame returns (`Return`) or the program/function
@@ -228,10 +279,18 @@ impl<'m> Vm<'m> {
                     }
                 },
                 Op::StoreGlobal { name, src } => {
-                    let v = frames[top].regs[*src as usize];
-                    retain(v);
-                    if let Some(old) = self.globals.insert(name.clone(), v) {
-                        release(old);
+                    // Transfer ownership from the (dead) source temporary into the global,
+                    // rather than retaining a duplicate. This keeps the reference count equal
+                    // to the tree-walker's direct-binding model — a lingering temporary would
+                    // otherwise inflate the count and hide a reassigned value's last reference,
+                    // suppressing its destructor.
+                    let v = std::mem::replace(&mut frames[top].regs[*src as usize], Value::unit());
+                    match self.globals.insert(name.clone(), v) {
+                        // Reassigning a global: the previous value is dropped here, running its
+                        // destructor if this was its last reference.
+                        Some(old) => self.release_value(old),
+                        // First binding of this name: record it for reverse-order destruction.
+                        None => self.global_order.push(name.clone()),
                     }
                     frames[top].pc += 1;
                 }
@@ -1256,6 +1315,33 @@ mod tests {
             r.diagnostics[0].code,
             lang_diagnostics::DiagnosticCode::UnknownName
         );
+    }
+
+    #[test]
+    fn destructors_run_at_program_end_in_reverse_declaration_order() {
+        let r = run(
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close {name}\"; }\n}\na = R.new(\"a\");\nb = R.new(\"b\");\necho \"body\";\n",
+        );
+        // Globals destroyed in reverse declaration order: b before a.
+        assert_eq!(r.stdout, "body\nclose b\nclose a\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn reassigning_a_binding_destroys_the_displaced_value() {
+        let r = run(
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close {name}\"; }\n}\nmut x = R.new(\"first\");\nx = R.new(\"second\");\necho \"mid\";\n",
+        );
+        // "first" is destroyed at the reassignment; "second" at program end.
+        assert_eq!(r.stdout, "close first\nmid\nclose second\n");
+    }
+
+    #[test]
+    fn a_class_without_a_destructor_runs_nothing() {
+        let r = run(
+            "class R {\n  v: int\n  fn new(v: int): R { return R { v: v }; }\n}\nx = R.new(1);\necho \"done\";\n",
+        );
+        assert_eq!(r.stdout, "done\n");
     }
 
     #[test]

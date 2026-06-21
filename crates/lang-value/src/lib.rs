@@ -443,6 +443,17 @@ impl Value {
 
     // --- Refcount management (the GC policy layer lives in `lang-gc`) ---
 
+    /// The current reference count (0 for immediates, which are not refcounted). A count of 1
+    /// means this is the last reference — the GC uses this to run a destructor on the
+    /// about-to-be-final release.
+    pub fn refcount(self) -> u32 {
+        if self.is_pointer() {
+            heap::refcount(self)
+        } else {
+            0
+        }
+    }
+
     /// Increment the refcount (no-op for immediates).
     pub fn inc_ref(self) {
         if self.is_pointer() {

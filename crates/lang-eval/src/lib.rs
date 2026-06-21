@@ -257,6 +257,9 @@ pub struct TypeDef {
     name: String,
     fields: Vec<FieldSpec>,
     methods: HashMap<String, Rc<Closure>>,
+    /// The class's `destruct` block, if any — run by the runtime when the last reference to an
+    /// instance drops (not directly callable). Shared so an `ObjectValue` can reach it.
+    destructor: Option<Rc<Vec<Stmt>>>,
     /// Whether this came from a `type X = {...}` record (vs. a `class`). Cosmetic in M0.
     is_record: bool,
     /// An *opaque* stub introduced by a `use` import: its real field set is unknown until
@@ -373,12 +376,17 @@ struct Binding {
 /// M0; the planned cycle collector reclaims these in M1.
 struct Scope {
     vars: RefCell<HashMap<String, Binding>>,
+    /// Binding names in declaration order, so the runtime can destroy them in reverse
+    /// declaration order at scope exit — the deterministic destruction order the spec wants.
+    order: RefCell<Vec<String>>,
     parent: Option<Rc<Scope>>,
 }
 
-/// The outcome of trying to reassign an existing binding through the scope chain.
+/// The outcome of trying to reassign an existing binding through the scope chain. `Assigned`
+/// carries the *displaced* value, so the caller can run its destructor if it was the last
+/// reference.
 enum AssignOutcome {
-    Assigned,
+    Assigned(Value),
     Immutable,
     NotFound,
 }
@@ -387,6 +395,7 @@ impl Scope {
     fn global() -> Rc<Scope> {
         Rc::new(Scope {
             vars: RefCell::new(HashMap::new()),
+            order: RefCell::new(Vec::new()),
             parent: None,
         })
     }
@@ -394,6 +403,7 @@ impl Scope {
     fn child(parent: &Rc<Scope>) -> Rc<Scope> {
         Rc::new(Scope {
             vars: RefCell::new(HashMap::new()),
+            order: RefCell::new(Vec::new()),
             parent: Some(Rc::clone(parent)),
         })
     }
@@ -406,17 +416,22 @@ impl Scope {
     }
 
     fn declare(&self, name: String, value: Value, mutable: bool) {
-        self.vars
-            .borrow_mut()
-            .insert(name, Binding { value, mutable });
+        let mut vars = self.vars.borrow_mut();
+        if vars
+            .insert(name.clone(), Binding { value, mutable })
+            .is_none()
+        {
+            self.order.borrow_mut().push(name);
+        }
     }
 
-    /// Reassign an existing binding, searching outward through the chain.
+    /// Reassign an existing binding, searching outward through the chain, returning the
+    /// displaced value on success.
     fn assign(&self, name: &str, value: Value) -> AssignOutcome {
         if let Some(binding) = self.vars.borrow_mut().get_mut(name) {
             return if binding.mutable {
-                binding.value = value;
-                AssignOutcome::Assigned
+                let old = std::mem::replace(&mut binding.value, value);
+                AssignOutcome::Assigned(old)
             } else {
                 AssignOutcome::Immutable
             };
@@ -425,6 +440,18 @@ impl Scope {
             Some(parent) => parent.assign(name, value),
             None => AssignOutcome::NotFound,
         }
+    }
+
+    /// Remove and return this scope's bindings in **reverse** declaration order, for
+    /// deterministic destruction at scope exit.
+    fn drain_reverse(&self) -> Vec<Value> {
+        let order = std::mem::take(&mut *self.order.borrow_mut());
+        let mut vars = self.vars.borrow_mut();
+        order
+            .into_iter()
+            .rev()
+            .filter_map(|name| vars.remove(&name).map(|b| b.value))
+            .collect()
     }
 }
 
@@ -482,12 +509,46 @@ impl Interpreter {
                 Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => break,
             }
         }
+        // Destroy the top-level bindings at program end, in reverse declaration order, running
+        // each destructor on its last reference — the deterministic destruction the spec wants.
+        self.destroy_globals();
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
             stdout: self.stdout,
             exit_code,
             diagnostics: self.diagnostics,
         }
+    }
+
+    /// Destroy the global scope's bindings in reverse declaration order.
+    fn destroy_globals(&mut self) {
+        for value in self.scope.drain_reverse() {
+            self.destroy_value(value);
+        }
+    }
+
+    /// Run an object's destructor if `value` is the last reference to a destructor-carrying
+    /// instance, then let it drop. Mirrors the VM's `release_value`.
+    fn destroy_value(&mut self, value: Value) {
+        let Value::Object(obj) = &value else { return };
+        if Rc::strong_count(obj) != 1 {
+            return;
+        }
+        let Some(body) = obj.def.destructor.clone() else {
+            return;
+        };
+        // Run the `destruct` block with the instance's fields and `self` in scope, like a
+        // parameterless method. It runs for its effects; its control flow/errors are not part
+        // of any expression's value, so they are swallowed at this boundary.
+        let scope = Scope::child(&self.scope);
+        for (name, field) in &obj.fields {
+            scope.declare(name.clone(), field.clone(), false);
+        }
+        scope.declare("self".to_string(), value.clone(), false);
+        let saved = std::mem::replace(&mut self.scope, scope);
+        let _ = self.exec_stmts(&body);
+        self.scope = saved;
+        // `value` drops here; being the last reference, the object is freed.
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Eval<Flow> {
@@ -702,6 +763,7 @@ impl Interpreter {
             name: decl.name.clone(),
             fields,
             methods: HashMap::new(),
+            destructor: None,
             is_record: true,
             opaque: false,
         };
@@ -718,6 +780,7 @@ impl Interpreter {
                 name: imported.name.clone(),
                 fields: Vec::new(),
                 methods: HashMap::new(),
+                destructor: None,
                 is_record: false,
                 opaque: true,
             };
@@ -754,6 +817,7 @@ impl Interpreter {
             name: decl.name.clone(),
             fields,
             methods,
+            destructor: decl.destructor.clone().map(Rc::new),
             is_record: false,
             opaque: false,
         };
@@ -902,7 +966,12 @@ impl Interpreter {
             return Ok(());
         }
         match self.scope.assign(name, value.clone()) {
-            AssignOutcome::Assigned => Ok(()),
+            // Reassignment drops the displaced value, running its destructor if it was the
+            // last reference (the deterministic destruction the spec requires).
+            AssignOutcome::Assigned(old) => {
+                self.destroy_value(old);
+                Ok(())
+            }
             AssignOutcome::NotFound => {
                 self.scope.declare(name.to_string(), value, false);
                 Ok(())
@@ -1867,6 +1936,20 @@ mod tests {
         let result = run("class P { x: int y: int } p = P { x: 1 };");
         assert_eq!(result.exit_code, 1);
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::MissingField);
+    }
+
+    #[test]
+    fn destructors_run_in_reverse_declaration_order_at_program_end() {
+        // A `destruct` block runs when the last reference to an instance drops; top-level
+        // bindings are destroyed at program end in reverse declaration order.
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close {name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
+        assert_eq!(run(src).stdout, "body\nclose b\nclose a\n");
+    }
+
+    #[test]
+    fn reassignment_destroys_the_displaced_instance() {
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close {name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
+        assert_eq!(run(src).stdout, "close first\nmid\nclose second\n");
     }
 
     #[test]

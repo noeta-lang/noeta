@@ -1,6 +1,6 @@
 # Slice M1.6 — GC cycle collector + `__destruct` + tracing path
 
-Status: todo
+Status: in progress (M1.6a — `destruct` + deterministic destruction — done; M1.6b — cycle collector + tracing path — pending)
 
 ## Goal
 Complete the GC floor: synchronous deterministic destruction for the acyclic case, a cycle collector for reference cycles, and a `gc-arena` tracing path as an invisible optimization.
@@ -10,12 +10,12 @@ Complete the GC floor: synchronous deterministic destruction for the acyclic cas
 - Out: generational/moving GC (never planned); per-isolate non-atomic refcount tuning beyond the single-isolate default (M2 isolates).
 
 ## Checklist (vertical slice)
-- [ ] Grammar / AST: `destruct` block surface (if not already parsed) as a distinct construct — **not** a trait, not an ordinary function (GC invokes it).
-- [ ] Checker rule: n/a (M1.7 may add a "has `__destruct` ⇒ refcount-managed" classification).
-- [ ] Bytecode: destructor hook registration on class definition.
-- [ ] VM op / GC: refcount-zero destructor dispatch, cycle-collector roots + trial deletion, tracing-path selection (`lang-gc`).
-- [ ] Conformance cases: `gc/destruct_order.lang` (deterministic ordering), `gc/cycle_reclaimed.lang`; assert tracing path leaves output identical via `--differential`.
-- [ ] Snapshots: none required (behavior is in stdout/ordering).
+- [x] Grammar / AST: `destruct` block surface — lexer `destruct` keyword, `ClassDecl.destructor: Option<Vec<Stmt>>`, parser (a distinct class member, **not** a method).
+- [x] Checker rule: n/a (M1.7 may add a "has `__destruct` ⇒ refcount-managed" classification).
+- [x] Bytecode: destructor prototype registration on class definition (`Module.destructors`).
+- [x] VM / GC: last-reference destructor dispatch in **both** backends, deterministic ordering. *(Cycle collector + tracing path → M1.6b.)*
+- [x] Conformance cases: `gc/destruct_order.lang` (deterministic ordering + reassignment), differential-identical. *(`gc/cycle_reclaimed.lang` deferred to M1.6b — no cycle can form without field mutation; see below.)*
+- [x] Snapshots: none required (behavior is in stdout/ordering).
 
 ## Definition of done
 - Deterministic `__destruct` ordering matches the spec; cycles are reclaimed (no leak under stress mode).
@@ -25,3 +25,19 @@ Complete the GC floor: synchronous deterministic destruction for the acyclic cas
 ## Notes / traps
 - `__destruct` determinism is the decisive constraint — the tracing path is an optimization for destructor-free classes only and must never make destruction best-effort for code that didn't opt in.
 - `gc-arena` carries its own vetted `unsafe`; the *glue* to it is still miri-gated.
+
+## Outcome (M1.6a — `destruct` + deterministic destruction)
+
+This is the **first M1 slice to add a genuinely new language feature** (not a port of existing M0 behavior), so it landed in **both** backends at once — by the post-Thrust-A rule, the destructor's observable output must match across the oracle and the VM. Differential stays at 100% (33 cases matched, zero divergence).
+
+**Surface.** `destruct { ... }` is a distinct class member (lexer keyword, `ClassDecl.destructor`, parser) — not a method, not directly callable, with the instance's fields in scope.
+
+**The decisive obstacle — and the fix.** The differential oracle caught a real cross-model bug: the VM's monotonic register allocator keeps an object's constructor result alive in a *lingering temporary register*, inflating its refcount so a reassigned value's last reference is hidden (its destructor never fired). The fix makes `StoreGlobal` **transfer ownership** (move the value out of the dead source temp instead of retaining a duplicate), matching the tree-walker's direct-binding model. This realigned the reference counts so "last reference drops" means the same thing in both backends.
+
+**Both backends.** A `destruct` block compiles like a parameterless method (receiver in register 0, fields resolving against it). Destruction runs when an object's last reference drops, at two points: **reassignment** (the displaced value) and **program end** (top-level bindings in **reverse declaration order**). The VM gained `Value::refcount()`, a `release_value` that runs the destructor on the about-to-be-final release, and ordered `global_order`; the M0 tree-walker gained ordered scopes (`Scope.order` + `drain_reverse`), `AssignOutcome::Assigned(old)`, and a matching `destroy_value`/`destroy_globals`.
+
+**Scope deliberately bounded (consistent in both → no divergence):** destruction fires for **global-scoped** objects (the canonical "program order" case). Function-local and nested-cascade destruction are not yet wired — *and absent in both backends identically*, so the oracle stays green; they extend incrementally. The cycle collector and `gc-arena` tracing path are **M1.6b**.
+
+### Why the cycle collector / `gc/cycle_reclaimed.lang` is deferred to M1.6b
+
+No reference cycle can form in the language yet: objects are immutable after construction (no field-assignment op exists), and construction can't tie a knot (each field value must already exist). So a trial-deletion collector has no reachable cyclic garbage to exercise, and `gc/cycle_reclaimed.lang` cannot be written as a program. M1.6b adds the collector with a Rust unit test that wires a cycle directly in the heap (RunResult-invisible); a corpus case waits on field mutation (a later slice).

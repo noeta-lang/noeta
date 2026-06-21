@@ -411,6 +411,10 @@ pub struct Module {
     pub protos: Vec<Chunk>,
     pub shapes: Vec<Shape>,
     pub methods: Vec<MethodEntry>,
+    /// `(type_name, proto)` for each class with a `destruct` block — the runtime-invoked
+    /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs
+    /// it when the last reference to an instance of that type drops.
+    pub destructors: Vec<(String, u32)>,
 }
 
 impl Module {
@@ -447,6 +451,12 @@ impl Module {
             out.push_str("methods:\n");
             for m in &self.methods {
                 let _ = writeln!(out, "  {}.{} -> proto {}", m.type_name, m.method, m.proto);
+            }
+        }
+        if !self.destructors.is_empty() {
+            out.push_str("destructors:\n");
+            for (type_name, proto) in &self.destructors {
+                let _ = writeln!(out, "  {type_name} -> proto {proto}");
             }
         }
         for (i, proto) in self.protos.iter().enumerate() {

@@ -72,6 +72,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         protos: vec![Chunk::placeholder()],
         shapes: Vec::new(),
         methods: Vec::new(),
+        destructors: Vec::new(),
         types: HashMap::new(),
     };
     module.register_types(program);
@@ -89,6 +90,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         protos: module.protos,
         shapes: module.shapes,
         methods: module.methods,
+        destructors: module.destructors,
     })
 }
 
@@ -118,6 +120,7 @@ struct ModuleCompiler {
     protos: Vec<Chunk>,
     shapes: Vec<Shape>,
     methods: Vec<MethodEntry>,
+    destructors: Vec<(String, u32)>,
     types: HashMap<String, TypeInfo>,
 }
 
@@ -144,6 +147,12 @@ impl ModuleCompiler {
                             method: method.name.clone(),
                             proto,
                         });
+                    }
+                    // Reserve a prototype for the `destruct` block (compiled like a method).
+                    if decl.destructor.is_some() {
+                        let proto = self.protos.len() as u32;
+                        self.protos.push(Chunk::placeholder());
+                        self.destructors.push((decl.name.clone(), proto));
                     }
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Class { fields, fns });
@@ -187,6 +196,24 @@ impl ModuleCompiler {
                 let chunk = self.compile_fn_body(
                     &method.params,
                     Body::Block(&method.body),
+                    Some(MethodCtx {
+                        fields: field_set.clone(),
+                    }),
+                    HashSet::new(),
+                )?;
+                self.protos[proto as usize] = chunk;
+            }
+            // The `destruct` block compiles like a parameterless method (fields in scope).
+            if let Some(body) = &decl.destructor {
+                let proto = self
+                    .destructors
+                    .iter()
+                    .find(|(name, _)| name == &decl.name)
+                    .map(|(_, proto)| *proto)
+                    .expect("a destructor proto was reserved in pass 1");
+                let chunk = self.compile_fn_body(
+                    &[],
+                    Body::Block(body),
                     Some(MethodCtx {
                         fields: field_set.clone(),
                     }),

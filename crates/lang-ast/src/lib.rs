@@ -117,6 +117,10 @@ pub struct ClassDecl {
     pub name_span: Span,
     pub fields: Vec<FieldDecl>,
     pub methods: Vec<FnDecl>,
+    /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
+    /// method (no call site, not directly callable); the GC runs it when the last reference to
+    /// an instance drops. Its statements run with the instance's fields in scope.
+    pub destructor: Option<Vec<Stmt>>,
     pub span: Span,
 }
 
