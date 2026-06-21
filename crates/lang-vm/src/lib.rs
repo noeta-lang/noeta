@@ -58,6 +58,14 @@ impl VmBackend {
         let module = compile(program)?;
         Ok(execute(&module))
     }
+
+    /// Execute an already-compiled [`Module`]. This is the seam the salsa graph (`lang-db`)
+    /// drives: it produces the `Module` via the memoized `bytecode` query, then hands it here.
+    /// Splitting compilation from execution is what lets the VM "consume `chunk(db)`" (M1.1)
+    /// without the VM crate depending on the database.
+    pub fn run_module(&self, module: &Module) -> RunResult {
+        execute(module)
+    }
 }
 
 impl Backend for VmBackend {

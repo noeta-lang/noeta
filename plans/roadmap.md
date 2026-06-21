@@ -22,7 +22,7 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 | # | Slice | Thrust | Status |
 |---|---|---|---|
 | 0 | [Value spine + minimal VM + differential oracle](m1/slice-00-vm-spine.md) | A | done (31.2% VM corpus coverage) |
-| 1 | [Salsa db plumbing](m1/slice-01-salsa-db.md) | A | todo (deferred to before M1.7) |
+| 1 | [Salsa db plumbing](m1/slice-01-salsa-db.md) | A | done (pipeline as salsa 0.27 queries: `tokens → ast → bytecode`; differential unchanged at 100%) |
 | 2 | [Functions, calls, closures, pipeline](m1/slice-02-functions.md) | A | done (43.8% VM corpus coverage) |
 | 3 | [Heap collections: List + Map](m1/slice-03-collections.md) | A | done (62.5% VM corpus coverage; string interpolation `Expr::Interp` landed alongside) |
 | 4 | [Shapes + objects + enums (object model)](m1/slice-04-shapes-objects.md) | A | done (75.0% VM corpus coverage) |

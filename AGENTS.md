@@ -16,6 +16,11 @@ The canonical design lives in `docs/resources/` (positioning, architecture, synt
 source ─► lang-lexer ─► tokens ─► lang-parser ─► AST (lang-ast) ─┤
                                                   └─► lang-compiler ─► Chunk ─► lang-vm ─► RunResult   (M1 VM)
                                    (lang-diagnostics renders every stage's typed Diagnostics)
+
+  The M1 lex→parse→compile path is also exposed as a salsa query graph (lang-db):
+  SourceProgram (input) ─► tokens(db) ─► ast(db) ─► bytecode(db).  The conformance
+  differential drives both backends through it; M1.7's checker inserts checked_ast
+  between ast and bytecode.
 ```
 
 Both backends implement `lang-backend::Backend`. The conformance harness runs a program through both and asserts identical `RunResult`s — the **differential oracle** (`lang test --differential`). The tree-walker is frozen as the reference; the VM must reproduce it. While the VM compiles only a growing subset, programs it can't lower yet are *skipped* (a climbing coverage %), never failed.
@@ -43,7 +48,9 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `lang-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`, `--differential`). |
 | `lang-cli` | The `lang` binary (`run`/`repl`/`test`). |
 
-In progress (M1, see `plans/m1/`): the type checker (`lang-check`/`lang-types`), the salsa query graph (`lang-db`), and the layered stdlib (`lang-stdlib`). Deferred to later milestones (do **not** stub now): `runtime`, `server`, `lsp`.
+| `lang-db` | The salsa (0.27) query graph: `SourceProgram` input → memoized `tokens`/`ast`/`bytecode` queries (pass-through wrappers today; the checker's `checked_ast` slots in at M1.7). Carries the crate's one small `unsafe` (always-replace `Update` for foreign-result newtypes). |
+
+In progress (M1, see `plans/m1/`): the type checker (`lang-check`/`lang-types`) and the layered stdlib (`lang-stdlib`). The salsa query graph (`lang-db`) has landed (M1.1). Deferred to later milestones (do **not** stub now): `runtime`, `server`, `lsp`.
 
 ## The new-feature template (the standard shape of a change)
 

@@ -13,6 +13,7 @@
 use std::path::Path;
 
 use lang_backend::{Backend, RunResult};
+use lang_db::LangDatabase;
 use lang_eval::TreeWalkBackend;
 use lang_span::{Source, SourceId};
 use lang_vm::VmBackend;
@@ -118,21 +119,28 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
 }
 
 fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
+    // Drive the whole pipeline through the salsa graph (M1.1): both backends consume artifacts
+    // derived from the same `tokens`/`ast`/`bytecode` queries. The tree-walker runs the parsed
+    // AST; the VM runs the `Module` the `bytecode` query produced — proving the query layer is
+    // behavior-preserving, since any divergence would surface here.
+    let db = LangDatabase::default();
     let source = Source::new(SourceId::FIRST, name, text);
-    let lexed = lang_lexer::lex(&source);
-    let parsed = lang_parser::parse(&source, &lexed.tokens);
+    let src = lang_db::source_program(&db, &source);
 
     // A program that does not parse cleanly has no eval-level behavior to compare — that is
     // the normal conformance harness's job (the lexer/parser stages). Exclude it here.
-    if !lexed.diagnostics.is_empty() || !parsed.diagnostics.is_empty() {
+    let tokens = lang_db::tokens(&db, src);
+    let parsed = lang_db::ast(&db, src);
+    if !tokens.0.diagnostics.is_empty() || !parsed.0.diagnostics.is_empty() {
         report.parse_failed += 1;
         return;
     }
 
-    let tree = TreeWalkBackend::new().run(&parsed.program);
-    match VmBackend::new().try_run(&parsed.program) {
+    let tree = TreeWalkBackend::new().run(&parsed.0.program);
+    match &lang_db::bytecode(&db, src).0 {
         Err(_) => report.skipped += 1,
-        Ok(vm) => {
+        Ok(module) => {
+            let vm = VmBackend::new().run_module(module);
             if vm == tree {
                 report.matched += 1;
             } else {

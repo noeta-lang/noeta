@@ -26,10 +26,12 @@ lang-gc = { path = "crates/lang-gc" }
 lang-bytecode = { path = "crates/lang-bytecode" }
 lang-compiler = { path = "crates/lang-compiler" }
 lang-vm = { path = "crates/lang-vm" }
+lang-db = { path = "crates/lang-db" }
 lang-conformance = { path = "crates/lang-conformance" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
+salsa = "0.27"
 chumsky = { version = "1.0.0-alpha.8", features = ["pratt"] }
 ariadne = "0.6"
 clap = { version = "4", features = ["derive"] }
