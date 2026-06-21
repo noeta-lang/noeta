@@ -13,8 +13,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
 use lang_ast::{
-    BinaryOp, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, Pattern, Program, Stmt, StrPart,
-    UnaryOp,
+    BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, ObjectLit, Pattern, Program,
+    RecordDecl, Stmt, StrPart, UnaryOp,
 };
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
@@ -162,6 +162,89 @@ impl EnumValue {
             let parts: Vec<String> = self.data.iter().map(Value::display).collect();
             format!("{}.{}({})", self.enum_name, self.variant, parts.join(", "))
         }
+    }
+}
+
+/// The definition of a record or class type, registered as a [`Value::Type`].
+///
+/// Records and classes share one representation: a record is just a class with no
+/// methods. `new`/`draft`/etc. are ordinary entries in `methods` (associated functions
+/// returning the type); the distinction between an associated function and an instance
+/// method is made at the call site (a type receiver vs. an instance receiver), not here.
+pub struct TypeDef {
+    name: String,
+    fields: Vec<FieldSpec>,
+    methods: HashMap<String, Rc<Closure>>,
+    /// Whether this came from a `type X = {...}` record (vs. a `class`). Cosmetic in M0.
+    is_record: bool,
+}
+
+impl TypeDef {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn has_field(&self, name: &str) -> bool {
+        self.fields.iter().any(|f| f.name == name)
+    }
+}
+
+impl std::fmt::Debug for TypeDef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Methods hold `Rc<Closure>` whose captured scope can be cyclic; never recurse.
+        f.debug_struct("TypeDef")
+            .field("name", &self.name)
+            .field("is_record", &self.is_record)
+            .finish_non_exhaustive()
+    }
+}
+
+/// One declared field of a [`TypeDef`]: its name and whether it was declared `mut`.
+/// `mutable` is recorded for M1 tooling (field-assignment checking); M0 objects are
+/// immutable after construction, so it is not yet read.
+struct FieldSpec {
+    name: String,
+    #[allow(dead_code)]
+    mutable: bool,
+}
+
+/// A record or class instance: its type and the values of its fields. Immutable in M0
+/// (`..` structural update produces a new object rather than mutating one).
+pub struct ObjectValue {
+    def: Rc<TypeDef>,
+    fields: BTreeMap<String, Value>,
+}
+
+impl ObjectValue {
+    /// `Type { field: value, ... }`, fields in declared order.
+    pub fn display(&self) -> String {
+        let parts: Vec<String> = self
+            .def
+            .fields
+            .iter()
+            .map(|f| {
+                let value = self
+                    .fields
+                    .get(&f.name)
+                    .map(Value::repr)
+                    .unwrap_or_default();
+                format!("{}: {value}", f.name)
+            })
+            .collect();
+        format!("{} {{{}}}", self.def.name, parts.join(", "))
+    }
+}
+
+impl std::fmt::Debug for ObjectValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "ObjectValue({})", self.display())
+    }
+}
+
+impl PartialEq for ObjectValue {
+    fn eq(&self, other: &ObjectValue) -> bool {
+        // Structural equality: same type name and equal fields (M0 records and classes).
+        self.def.name == other.def.name && self.fields == other.fields
     }
 }
 
@@ -327,6 +410,14 @@ impl Interpreter {
                 self.declare_enum(decl);
                 Ok(Flow::Normal)
             }
+            Stmt::Record(decl) => {
+                self.declare_record(decl);
+                Ok(Flow::Normal)
+            }
+            Stmt::Class(decl) => {
+                self.declare_class(decl);
+                Ok(Flow::Normal)
+            }
             Stmt::Return { value, .. } => {
                 let value = match value {
                     Some(expr) => self.eval_expr(expr)?,
@@ -482,6 +573,149 @@ impl Interpreter {
             .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
     }
 
+    /// Register a structural record type. Records have fields but no methods; they are
+    /// constructed via the all-fields literal and compared structurally.
+    fn declare_record(&mut self, decl: &RecordDecl) {
+        let fields = decl
+            .fields
+            .iter()
+            .map(|f| FieldSpec {
+                name: f.name.clone(),
+                mutable: f.mut_field,
+            })
+            .collect();
+        let def = TypeDef {
+            name: decl.name.clone(),
+            fields,
+            methods: HashMap::new(),
+            is_record: true,
+        };
+        self.scope
+            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+    }
+
+    /// Register a class type. Methods are compiled to closures capturing the current
+    /// (global) scope, exactly like top-level `fn`s, so they can see the class itself
+    /// (for `Type { ... }` literals) and other globals.
+    fn declare_class(&mut self, decl: &ClassDecl) {
+        let fields = decl
+            .fields
+            .iter()
+            .map(|f| FieldSpec {
+                name: f.name.clone(),
+                mutable: f.mut_field,
+            })
+            .collect();
+        let methods = decl
+            .methods
+            .iter()
+            .map(|m| {
+                let closure = Closure {
+                    params: m.params.iter().map(|p| p.name.clone()).collect(),
+                    body: FnBody::Block(m.body.clone()),
+                    captured: Rc::clone(&self.scope),
+                };
+                (m.name.clone(), Rc::new(closure))
+            })
+            .collect();
+        let def = TypeDef {
+            name: decl.name.clone(),
+            fields,
+            methods,
+            is_record: false,
+        };
+        self.scope
+            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+    }
+
+    /// Construct a record/class instance from an all-fields object literal. This is the
+    /// full-initialization choke point: every declared field must end up set (by a named
+    /// initializer or the `..` spread), or it is a [`DiagnosticCode::MissingField`] error.
+    fn eval_object(&mut self, lit: &ObjectLit) -> Eval<Value> {
+        let def = match self.scope.lookup(&lit.type_name) {
+            Some(Value::Type(def)) => def,
+            Some(other) => {
+                return Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    lit.type_name_span,
+                    format!(
+                        "`{}` is a {}, not a record or class type",
+                        lit.type_name,
+                        other.type_name()
+                    ),
+                ));
+            }
+            None => {
+                return Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    lit.type_name_span,
+                    format!("cannot find type `{}` in this scope", lit.type_name),
+                ));
+            }
+        };
+
+        let mut fields: BTreeMap<String, Value> = BTreeMap::new();
+
+        // `..base` fills the unnamed fields first (named initializers override below).
+        if let Some(spread) = &lit.spread {
+            match self.eval_expr(spread)? {
+                Value::Object(base) => {
+                    for spec in &def.fields {
+                        if let Some(value) = base.fields.get(&spec.name) {
+                            fields.insert(spec.name.clone(), value.clone());
+                        }
+                    }
+                }
+                other => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        spread.span(),
+                        format!("spread `..` expects an object, found {}", other.type_name()),
+                    ));
+                }
+            }
+        }
+
+        for init in &lit.fields {
+            if !def.has_field(&init.name) {
+                return Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    init.name_span,
+                    format!("type `{}` has no field `{}`", def.name(), init.name),
+                ));
+            }
+            let value = self.eval_expr(&init.value)?;
+            fields.insert(init.name.clone(), value);
+        }
+
+        let missing: Vec<&str> = def
+            .fields
+            .iter()
+            .filter(|spec| !fields.contains_key(&spec.name))
+            .map(|spec| spec.name.as_str())
+            .collect();
+        if !missing.is_empty() {
+            let list = missing
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(self.runtime_error(
+                DiagnosticCode::MissingField,
+                lit.span,
+                format!(
+                    "missing field(s) {list} in `{}` literal — every field must be set",
+                    def.name()
+                ),
+            ));
+        }
+
+        Ok(Value::Object(Rc::new(ObjectValue {
+            def: Rc::clone(&def),
+            fields,
+        })))
+    }
+
     /// Build an enum value from a type, a variant name, and its argument values.
     fn make_variant(
         &mut self,
@@ -614,7 +848,24 @@ impl Interpreter {
                 match receiver {
                     // `Status.Pending` — construct a no-data variant.
                     Value::EnumType(def) => self.make_variant(&def, name, vec![], *span),
-                    // Bare field access on other values lands with records (Slice 6).
+                    // `order.id` — field access on an instance.
+                    Value::Object(object) => match object.fields.get(name) {
+                        Some(value) => Ok(value.clone()),
+                        None => Err(self.runtime_error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("type `{}` has no field `{name}`", object.def.name()),
+                        )),
+                    },
+                    // `Order.new` (without a call) — the associated function as a value.
+                    Value::Type(def) => match def.methods.get(name) {
+                        Some(method) => Ok(Value::Function(Rc::clone(method))),
+                        None => Err(self.runtime_error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("type `{}` has no associated function `{name}`", def.name()),
+                        )),
+                    },
                     other => Err(self.runtime_error(
                         DiagnosticCode::UnknownName,
                         *span,
@@ -630,6 +881,7 @@ impl Interpreter {
                 let value = self.eval_expr(scrutinee)?;
                 self.eval_match(value, arms, *span)
             }
+            Expr::Object(lit) => self.eval_object(lit),
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
@@ -722,6 +974,30 @@ impl Interpreter {
         if let Value::EnumType(def) = &receiver {
             return self.make_variant(&Rc::clone(def), name, args, span);
         }
+        // `Order.new(...)` — an associated function (no instance); call it directly.
+        if let Value::Type(def) = &receiver {
+            return match def.methods.get(name) {
+                Some(method) => self.call_closure(&Rc::clone(method), args, span),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("type `{}` has no associated function `{name}`", def.name()),
+                )),
+            };
+        }
+        // `order.total()` — an instance method; the instance's fields are in scope.
+        if let Value::Object(object) = &receiver {
+            return match object.def.methods.get(name) {
+                Some(method) => {
+                    self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span)
+                }
+                None => Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("type `{}` has no method `{name}`", object.def.name()),
+                )),
+            };
+        }
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
@@ -782,6 +1058,45 @@ impl Interpreter {
         }
         let saved = std::mem::replace(&mut self.scope, call_scope);
         let result = match &closure.body {
+            FnBody::Arrow(expr) => self.eval_expr(expr),
+            FnBody::Block(stmts) => self.exec_fn_body(stmts),
+        };
+        self.scope = saved;
+        result
+    }
+
+    /// Call an instance method: the receiver's fields are bound directly into the method
+    /// scope (so `total()` can reference `items` without a `self.` prefix), and `self` is
+    /// also bound to the whole object. Parameters bind last, so they win over a field of
+    /// the same name.
+    fn call_method_on(
+        &mut self,
+        object: &Rc<ObjectValue>,
+        method: &Rc<Closure>,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        if args.len() != method.params.len() {
+            return Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "this method takes {} argument(s) but {} were supplied",
+                    method.params.len(),
+                    args.len()
+                ),
+            ));
+        }
+        let call_scope = Scope::child(&method.captured);
+        for (name, value) in &object.fields {
+            call_scope.declare(name.clone(), value.clone(), false);
+        }
+        call_scope.declare("self".to_string(), Value::Object(Rc::clone(object)), false);
+        for (param, arg) in method.params.iter().zip(args) {
+            call_scope.declare(param.clone(), arg, false);
+        }
+        let saved = std::mem::replace(&mut self.scope, call_scope);
+        let result = match &method.body {
             FnBody::Arrow(expr) => self.eval_expr(expr),
             FnBody::Block(stmts) => self.exec_fn_body(stmts),
         };
@@ -1227,5 +1542,54 @@ mod tests {
     fn arity_mismatch_is_an_error() {
         let result = run("fn one(a) { return a; } echo one(1, 2);");
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::TypeMismatch);
+    }
+
+    #[test]
+    fn record_literal_and_field_access() {
+        let src = "type Item = { price: float, qty: int }; a = Item { price: 2.5, qty: 4 }; echo a.price; echo a.price * a.qty;";
+        assert_eq!(run(src).stdout, "2.5\n10.0\n");
+    }
+
+    #[test]
+    fn records_compare_structurally() {
+        let src = "type P = { x: int, y: int }; a = P { x: 1, y: 2 }; b = P { x: 1, y: 2 }; c = P { x: 1, y: 9 }; echo a == b; echo a == c;";
+        assert_eq!(run(src).stdout, "true\nfalse\n");
+    }
+
+    #[test]
+    fn class_constructor_and_instance_method() {
+        let src = "class Box { v: int fn new(v: int): Box { return Box { v: v }; } fn doubled(): int { return v * 2; } } b = Box.new(21); echo b.doubled(); echo b.v;";
+        assert_eq!(run(src).stdout, "42\n21\n");
+    }
+
+    #[test]
+    fn method_takes_arguments_alongside_fields() {
+        let src = "class Counter { base: int fn new(base: int): Counter { return Counter { base: base }; } fn plus(n: int): int { return base + n; } } c = Counter.new(10); echo c.plus(5);";
+        assert_eq!(run(src).stdout, "15\n");
+    }
+
+    #[test]
+    fn structural_update_overrides_one_field() {
+        let src = "class M { amount: int currency: string fn new(a: int, c: string): M { return M { amount: a, currency: c }; } } a = M.new(500, \"USD\"); b = M { amount: 300, ..a }; echo b.amount; echo b.currency; echo a.amount;";
+        assert_eq!(run(src).stdout, "300\nUSD\n500\n");
+    }
+
+    #[test]
+    fn missing_field_is_an_error() {
+        let result = run("class P { x: int y: int } p = P { x: 1 };");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.diagnostics[0].code, DiagnosticCode::MissingField);
+    }
+
+    #[test]
+    fn unknown_field_in_literal_is_an_error() {
+        let result = run("type R = { a: int }; r = R { a: 1, b: 2 };");
+        assert_eq!(result.diagnostics[0].code, DiagnosticCode::UnknownName);
+    }
+
+    #[test]
+    fn object_displays_as_a_literal() {
+        let src = "type Pt = { x: int, y: int }; echo Pt { x: 1, y: 2 };";
+        assert_eq!(run(src).stdout, "Pt {x: 1, y: 2}\n");
     }
 }

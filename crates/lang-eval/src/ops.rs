@@ -106,6 +106,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::List(a), Value::List(b)) => a == b,
         (Value::Map(a), Value::Map(b)) => a == b,
         (Value::Enum(a), Value::Enum(b)) => a == b,
+        (Value::Object(a), Value::Object(b)) => a == b,
         (Value::Unit, Value::Unit) => true,
         _ => false,
     }

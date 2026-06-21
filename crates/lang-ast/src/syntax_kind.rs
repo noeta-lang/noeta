@@ -25,6 +25,8 @@ pub enum SyntaxKind {
     InKw,
     EnumKw,
     MatchKw,
+    TypeKw,
+    ClassKw,
 
     // --- Literal / name tokens ---
     StringLit,
@@ -35,6 +37,7 @@ pub enum SyntaxKind {
     // --- Punctuation / operator tokens ---
     Semicolon,
     Dot,
+    DotDot,
     LBracket,
     RBracket,
     Eq,
@@ -95,9 +98,14 @@ pub enum SyntaxKind {
     InterpExpr,
     MatchExpr,
     MatchArm,
+    ObjectExpr,
+    FieldInit,
     Pattern,
     EnumDecl,
     VariantDecl,
+    RecordDecl,
+    ClassDecl,
+    FieldDecl,
 }
 
 impl SyntaxKind {
@@ -129,9 +137,14 @@ impl SyntaxKind {
                 | SyntaxKind::InterpExpr
                 | SyntaxKind::MatchExpr
                 | SyntaxKind::MatchArm
+                | SyntaxKind::ObjectExpr
+                | SyntaxKind::FieldInit
                 | SyntaxKind::Pattern
                 | SyntaxKind::EnumDecl
                 | SyntaxKind::VariantDecl
+                | SyntaxKind::RecordDecl
+                | SyntaxKind::ClassDecl
+                | SyntaxKind::FieldDecl
         )
     }
 }

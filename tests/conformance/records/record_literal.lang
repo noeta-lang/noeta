@@ -1,0 +1,14 @@
+// A structural record: the all-fields literal constructs it, `.` reads fields, and
+// records compare structurally (two records with equal fields are equal).
+// expect: stdout "2.5"
+// expect: stdout "10.0"
+// expect: stdout "true"
+// expect: exit 0
+type Item = { price: float, qty: int };
+
+a = Item { price: 2.5, qty: 4 };
+echo a.price;
+echo a.price * a.qty;
+
+b = Item { price: 2.5, qty: 4 };
+echo a == b;

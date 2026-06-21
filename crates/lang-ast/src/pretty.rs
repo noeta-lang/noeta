@@ -5,7 +5,10 @@
 //! span regression shows up directly in a snapshot diff. It is also the printer the
 //! parse→print→parse property test (Slice 9) builds on.
 
-use crate::{EnumDecl, Expr, FnDecl, ForPattern, Param, Pattern, Program, Stmt, StrPart};
+use crate::{
+    ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program,
+    RecordDecl, Stmt, StrPart,
+};
 use lang_span::Span;
 
 /// Render an AST node to the canonical pretty form.
@@ -73,6 +76,8 @@ impl Pretty for Stmt {
             }
             Stmt::Fn(decl) => decl.pretty(out, level),
             Stmt::Enum(decl) => decl.pretty(out, level),
+            Stmt::Record(decl) => decl.pretty(out, level),
+            Stmt::Class(decl) => decl.pretty(out, level),
             Stmt::Return { value, span: s } => {
                 indent(out, level);
                 match value {
@@ -184,6 +189,68 @@ impl Pretty for EnumDecl {
             variants.join(" "),
             span(self.span)
         ));
+    }
+}
+
+fn field_decl_str(field: &FieldDecl) -> String {
+    if field.mut_field {
+        format!("mut {}", field.name)
+    } else {
+        field.name.clone()
+    }
+}
+
+impl Pretty for RecordDecl {
+    fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
+        let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
+        out.push_str(&format!(
+            "(record {} [{}] {})",
+            self.name,
+            fields.join(" "),
+            span(self.span)
+        ));
+    }
+}
+
+impl Pretty for ClassDecl {
+    fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
+        let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
+        out.push_str(&format!(
+            "(class {} [{}] {}",
+            self.name,
+            fields.join(" "),
+            span(self.span)
+        ));
+        for method in &self.methods {
+            out.push('\n');
+            method.pretty(out, level + 1);
+        }
+        out.push(')');
+    }
+}
+
+impl Pretty for ObjectLit {
+    fn pretty(&self, out: &mut String, level: usize) {
+        // The header line is already indented by the caller (`Expr::pretty` emits the
+        // leading indent before delegating here), so we start the text directly.
+        out.push_str(&format!("(object {} {}", self.type_name, span(self.span)));
+        for field in &self.fields {
+            out.push('\n');
+            indent(out, level + 1);
+            out.push_str(&format!("(field {} {}\n", field.name, span(field.span)));
+            field.value.pretty(out, level + 2);
+            out.push(')');
+        }
+        if let Some(spread) = &self.spread {
+            out.push('\n');
+            indent(out, level + 1);
+            out.push_str("(spread\n");
+            spread.pretty(out, level + 2);
+            out.push(')');
+        }
+        out.push(')');
     }
 }
 
@@ -354,6 +421,7 @@ impl Pretty for Expr {
                 }
                 out.push(')');
             }
+            Expr::Object(lit) => lit.pretty(out, level),
         }
     }
 }

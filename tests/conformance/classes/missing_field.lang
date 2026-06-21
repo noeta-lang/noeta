@@ -1,0 +1,10 @@
+// The all-fields literal must set every declared field. Omitting one is a compile-time
+// guarantee violation at the point of the literal (which begins on line 9, column 5).
+// expect: error E0009 at 9:5
+// expect: exit 1
+class Point {
+    x: int
+    y: int
+}
+p = Point { x: 1 };
+echo p.x;

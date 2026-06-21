@@ -31,6 +31,8 @@ pub enum DiagnosticCode {
     TypeMismatch,
     /// Integer division or remainder by zero.
     DivisionByZero,
+    /// An all-fields object literal left a declared field unset.
+    MissingField,
 }
 
 impl DiagnosticCode {
@@ -45,6 +47,7 @@ impl DiagnosticCode {
         DiagnosticCode::ImmutableAssignment,
         DiagnosticCode::TypeMismatch,
         DiagnosticCode::DivisionByZero,
+        DiagnosticCode::MissingField,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -59,6 +62,7 @@ impl DiagnosticCode {
             DiagnosticCode::ImmutableAssignment => "E0006",
             DiagnosticCode::TypeMismatch => "E0007",
             DiagnosticCode::DivisionByZero => "E0008",
+            DiagnosticCode::MissingField => "E0009",
         }
     }
 

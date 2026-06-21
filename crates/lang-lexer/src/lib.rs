@@ -45,6 +45,10 @@ pub enum TokenKind {
     EnumKw,
     #[token("match")]
     MatchKw,
+    #[token("type")]
+    TypeKw,
+    #[token("class")]
+    ClassKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. No escapes yet (Slice 4).
@@ -62,6 +66,9 @@ pub enum TokenKind {
     Semicolon,
     #[token(",")]
     Comma,
+    // `..` must be listed before `.`; logos resolves the overlap by longest match.
+    #[token("..")]
+    DotDot,
     #[token(".")]
     Dot,
     #[token(":")]
@@ -134,12 +141,15 @@ impl TokenKind {
             TokenKind::InKw => "InKw",
             TokenKind::EnumKw => "EnumKw",
             TokenKind::MatchKw => "MatchKw",
+            TokenKind::TypeKw => "TypeKw",
+            TokenKind::ClassKw => "ClassKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
             TokenKind::Semicolon => "Semicolon",
             TokenKind::Comma => "Comma",
+            TokenKind::DotDot => "DotDot",
             TokenKind::Dot => "Dot",
             TokenKind::Colon => "Colon",
             TokenKind::Question => "Question",
@@ -185,12 +195,15 @@ impl TokenKind {
             TokenKind::InKw => "`in`",
             TokenKind::EnumKw => "`enum`",
             TokenKind::MatchKw => "`match`",
+            TokenKind::TypeKw => "`type`",
+            TokenKind::ClassKw => "`class`",
             TokenKind::StringLit => "a string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",
             TokenKind::Semicolon => "`;`",
             TokenKind::Comma => "`,`",
+            TokenKind::DotDot => "`..`",
             TokenKind::Dot => "`.`",
             TokenKind::Colon => "`:`",
             TokenKind::Question => "`?`",
@@ -357,6 +370,23 @@ mod tests {
                 TokenKind::EchoKw,
                 TokenKind::StringLit,
                 TokenKind::Semicolon
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_record_class_and_spread_tokens() {
+        let (_source, lexed) = lex_str("type class ..a");
+        assert!(lexed.diagnostics.is_empty());
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        // `..a` is `DotDot` then `Ident` — longest match keeps `..` whole, not two `.`.
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::TypeKw,
+                TokenKind::ClassKw,
+                TokenKind::DotDot,
+                TokenKind::Ident
             ]
         );
     }

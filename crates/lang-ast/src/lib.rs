@@ -43,6 +43,10 @@ pub enum Stmt {
     Fn(FnDecl),
     /// An enum declaration (plain, backed, or algebraic).
     Enum(EnumDecl),
+    /// A structural record type alias: `type Item = { price: float, qty: int };`.
+    Record(RecordDecl),
+    /// A class declaration: `class Order { fields... methods... }`.
+    Class(ClassDecl),
     /// `return <expr>;` or `return;`.
     Return { value: Option<Expr>, span: Span },
     /// `if cond { ... } else if cond { ... } else { ... }`. An `else if` is represented
@@ -75,8 +79,45 @@ impl Stmt {
             | Stmt::Expr { span, .. } => *span,
             Stmt::Fn(decl) => decl.span,
             Stmt::Enum(decl) => decl.span,
+            Stmt::Record(decl) => decl.span,
+            Stmt::Class(decl) => decl.span,
         }
     }
+}
+
+/// A structural record type alias (`type Item = { price: float, qty: int };`). A value
+/// type with structural equality; all fields immutable. Constructed via the all-fields
+/// literal (`Item { price: 9.99, qty: 2 }`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<FieldDecl>,
+    pub span: Span,
+}
+
+/// A class declaration: fields declared in the body (immutable by default, `mut` opt-in)
+/// plus methods and associated functions (`fn`). There is no special constructor — `new`
+/// is just a conventional associated function returning the enclosing type.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ClassDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<FieldDecl>,
+    pub methods: Vec<FnDecl>,
+    pub span: Span,
+}
+
+/// One field of a record or class: a name, an optional `mut` marker (classes only), and
+/// its declared type. The type is parsed but unchecked in M0.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldDecl {
+    pub name: String,
+    pub name_span: Span,
+    /// Whether the field was declared `mut` (class fields only; always false for records).
+    pub mut_field: bool,
+    pub ty: Option<TypeRef>,
+    pub span: Span,
 }
 
 /// An enum declaration. Plain (`enum Color { Red; ... }`), backed
@@ -235,6 +276,29 @@ pub enum Expr {
         arms: Vec<MatchArm>,
         span: Span,
     },
+    /// An all-fields object literal: `Order { id: 1, ..base }`. Constructs a record or
+    /// class instance; the evaluator requires every declared field to be set.
+    Object(ObjectLit),
+}
+
+/// An all-fields object literal. `spread` (`..expr`) supplies values for fields not named
+/// explicitly, so the full-initialization guarantee still holds.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ObjectLit {
+    pub type_name: String,
+    pub type_name_span: Span,
+    pub fields: Vec<FieldInit>,
+    pub spread: Option<Box<Expr>>,
+    pub span: Span,
+}
+
+/// One `name: value` initializer in an object literal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FieldInit {
+    pub name: String,
+    pub name_span: Span,
+    pub value: Expr,
+    pub span: Span,
 }
 
 /// One arm of a `match`: a pattern and the expression it evaluates to.
@@ -319,6 +383,7 @@ impl Expr {
             | Expr::Member { span, .. }
             | Expr::Interp { span, .. }
             | Expr::Match { span, .. } => *span,
+            Expr::Object(lit) => lit.span,
         }
     }
 }

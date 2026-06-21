@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
-use crate::{Builtin, Closure, EnumDef, EnumValue};
+use crate::{Builtin, Closure, EnumDef, EnumValue, ObjectValue, TypeDef};
 
 /// A runtime value.
 #[derive(Clone)]
@@ -37,6 +37,11 @@ pub enum Value {
     EnumType(Rc<EnumDef>),
     /// An enum *value* (e.g. `Status.Pending` or `OrderError.NegativePrice(2)`).
     Enum(Rc<EnumValue>),
+    /// A record or class *type* (e.g. the value `Order`), used to construct instances
+    /// and call associated functions (`Order.new(...)`).
+    Type(Rc<TypeDef>),
+    /// A record or class *instance* — a bag of named field values.
+    Object(Rc<ObjectValue>),
 }
 
 impl Value {
@@ -64,12 +69,14 @@ impl Value {
             Value::Builtin(b) => format!("<builtin {}>", b.name()),
             Value::EnumType(def) => format!("<enum {}>", def.name()),
             Value::Enum(value) => value.display(),
+            Value::Type(def) => format!("<type {}>", def.name()),
+            Value::Object(object) => object.display(),
         }
     }
 
-    /// The representation of a value *inside* a collection: strings are quoted so the
-    /// structure stays legible (`["a", "b"]`, not `[a, b]`).
-    fn repr(&self) -> String {
+    /// The representation of a value *inside* a collection or object: strings are quoted
+    /// so the structure stays legible (`["a", "b"]`, not `[a, b]`).
+    pub(crate) fn repr(&self) -> String {
         match self {
             Value::Str(s) => format!("{s:?}"),
             other => other.display(),
@@ -89,6 +96,8 @@ impl Value {
             Value::Function(_) | Value::Builtin(_) => "function",
             Value::EnumType(_) => "enum type",
             Value::Enum(_) => "enum",
+            Value::Type(_) => "type",
+            Value::Object(_) => "object",
         }
     }
 }
@@ -107,6 +116,8 @@ impl fmt::Debug for Value {
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
             Value::EnumType(def) => write!(f, "EnumType({})", def.name()),
             Value::Enum(value) => write!(f, "Enum({})", value.display()),
+            Value::Type(def) => write!(f, "Type({})", def.name()),
+            Value::Object(object) => write!(f, "Object({})", object.display()),
         }
     }
 }
@@ -122,7 +133,8 @@ impl PartialEq for Value {
             (Value::List(a), Value::List(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Enum(a), Value::Enum(b)) => a == b,
-            // Functions and enum types are not structurally comparable.
+            (Value::Object(a), Value::Object(b)) => a == b,
+            // Functions and types are not structurally comparable.
             _ => false,
         }
     }

@@ -1,0 +1,38 @@
+// A class: fields, an associated constructor (`new`, called on the type), and instance
+// methods that read fields directly (`items`, `id`, `status`) without a `self.` prefix.
+// expect: stdout "Order #7 awaiting payment"
+// expect: stdout "10.0"
+// expect: stdout "7"
+// expect: exit 0
+type Item = { price: float, qty: int };
+
+enum Status: string {
+    Pending = "pending";
+    Paid = "paid";
+}
+
+class Order {
+    id: int
+    items: List<Item>
+    mut status: Status
+
+    fn new(id: int, items: List<Item>): Order {
+        return Order { id: id, items: items, status: Status.Pending };
+    }
+
+    fn total(): float {
+        return items |> map(fn(it) => it.price * it.qty) |> sum();
+    }
+
+    fn label(): string {
+        return match status {
+            Status.Pending => "Order #{id} awaiting payment",
+            Status.Paid => "Order #{id} paid",
+        };
+    }
+}
+
+order = Order.new(7, [Item { price: 2.5, qty: 4 }]);
+echo order.label();
+echo order.total();
+echo order.id;

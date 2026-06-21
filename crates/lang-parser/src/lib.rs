@@ -30,8 +30,8 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
-    BinaryOp, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, Param, Pattern, Program, Stmt, StrPart,
-    TypeRef, UnaryOp, VariantDecl,
+    BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern, MatchArm,
+    ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef, UnaryOp, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -49,6 +49,20 @@ type Extra<'src> = extra::Err<Rich<'src, T, SimpleSpan>>;
 struct Ctx<'src> {
     source: &'src Source,
     diags: &'src RefCell<Vec<Diagnostic>>,
+}
+
+/// One item inside an object literal's braces: a `name: value` field or a `..base`
+/// spread. Collected into [`ObjectLit`] after the comma-separated list is parsed.
+enum ObjItem {
+    Field(FieldInit),
+    Spread(Box<Expr>),
+}
+
+/// One member parsed from a class body: a field declaration or a method. Partitioned
+/// into [`ClassDecl`]'s `fields`/`methods` after the body is parsed.
+enum ClassMember {
+    Field(FieldDecl),
+    Method(FnDecl),
 }
 
 /// Convert a chumsky [`SimpleSpan`] (usize offsets) to a [`Span`] (u32 offsets).
@@ -334,7 +348,57 @@ where
                 span: to_span(e.span()),
             }),
         ));
-        let ident_expr = id.clone().map(|(name, span)| Expr::Ident { name, span });
+        // A bare name, or an all-fields object literal `Type { field: v, ..base }`. The
+        // object body is required to be **non-empty**: that is what lets `if x { ... }`,
+        // `for x in xs { ... }`, and `match x { ... }` keep their block/arm braces — an
+        // empty `{}` is never an object literal, and a `{` whose contents are statements
+        // (not `name: value`) fails the field parse and falls back to a bare ident.
+        let obj_field = id
+            .clone()
+            .then_ignore(just(T::Colon))
+            .then(expr.clone())
+            .map_with(|((name, name_span), value), e| {
+                ObjItem::Field(FieldInit {
+                    name,
+                    name_span,
+                    value,
+                    span: to_span(e.span()),
+                })
+            });
+        let obj_spread = just(T::DotDot)
+            .ignore_then(expr.clone())
+            .map(|value| ObjItem::Spread(Box::new(value)));
+        let object_body = choice((obj_spread, obj_field))
+            .separated_by(just(T::Comma))
+            .allow_trailing()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::LBrace), just(T::RBrace));
+        let obj_or_ident = id.clone().then(object_body.or_not()).map_with(
+            |((name, name_span), body), e| match body {
+                Some(items) => {
+                    let mut fields = Vec::new();
+                    let mut spread = None;
+                    for item in items {
+                        match item {
+                            ObjItem::Field(field) => fields.push(field),
+                            ObjItem::Spread(value) => spread = Some(value),
+                        }
+                    }
+                    Expr::Object(ObjectLit {
+                        type_name: name,
+                        type_name_span: name_span,
+                        fields,
+                        spread,
+                        span: to_span(e.span()),
+                    })
+                }
+                None => Expr::Ident {
+                    name,
+                    span: name_span,
+                },
+            },
+        );
 
         // Anonymous function: `fn(params) => expr`.
         let closure = just(T::FnKw)
@@ -395,7 +459,16 @@ where
         let paren = expr.clone().delimited_by(just(T::LParen), just(T::RParen));
 
         let atom = choice((
-            int, float, string, bool_, closure, match_, list, map, ident_expr, paren,
+            int,
+            float,
+            string,
+            bool_,
+            closure,
+            match_,
+            list,
+            map,
+            obj_or_ident,
+            paren,
         ))
         .boxed();
 
@@ -681,6 +754,96 @@ where
                 })
             });
 
+        // Structural record alias: `type Item = { price: float, qty: int };`. Record
+        // fields are comma-separated `name: type` and always immutable.
+        let record_field = id
+            .clone()
+            .then_ignore(just(T::Colon))
+            .then(type_parser(ctx))
+            .map_with(|((name, name_span), ty), e| FieldDecl {
+                name,
+                name_span,
+                mut_field: false,
+                ty: Some(ty),
+                span: to_span(e.span()),
+            });
+        let record_decl = just(T::TypeKw)
+            .ignore_then(id.clone())
+            .then_ignore(just(T::Eq))
+            .then(
+                record_field
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .then_ignore(just(T::Semicolon))
+            .map_with(|((name, name_span), fields), e| {
+                Stmt::Record(RecordDecl {
+                    name,
+                    name_span,
+                    fields,
+                    span: to_span(e.span()),
+                })
+            });
+
+        // Class body member: a field (`mut? name: type`, no terminator) or a method
+        // (`fn ...`). Disambiguated by the leading token (`fn` vs `mut`/name).
+        let class_field = just(T::MutKw)
+            .or_not()
+            .then(id.clone())
+            .then_ignore(just(T::Colon))
+            .then(type_parser(ctx))
+            .map_with(|((mut_kw, (name, name_span)), ty), e| {
+                ClassMember::Field(FieldDecl {
+                    name,
+                    name_span,
+                    mut_field: mut_kw.is_some(),
+                    ty: Some(ty),
+                    span: to_span(e.span()),
+                })
+            });
+        let class_method = just(T::FnKw)
+            .ignore_then(id.clone())
+            .then(params_parser(ctx))
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(block.clone())
+            .map_with(|(((name_pair, params), ret), body), e| {
+                ClassMember::Method(FnDecl {
+                    name: name_pair.0,
+                    name_span: name_pair.1,
+                    params,
+                    ret,
+                    body,
+                    span: to_span(e.span()),
+                })
+            });
+        let class_decl = just(T::ClassKw)
+            .ignore_then(id.clone())
+            .then(
+                choice((class_method, class_field))
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(|((name, name_span), members), e| {
+                let mut fields = Vec::new();
+                let mut methods = Vec::new();
+                for member in members {
+                    match member {
+                        ClassMember::Field(field) => fields.push(field),
+                        ClassMember::Method(method) => methods.push(method),
+                    }
+                }
+                Stmt::Class(ClassDecl {
+                    name,
+                    name_span,
+                    fields,
+                    methods,
+                    span: to_span(e.span()),
+                })
+            });
+
         // A bare expression, optionally an assignment `name = expr`. Whether `name = …`
         // introduces or reassigns a binding is a runtime decision (see `lang-eval`).
         let assign_or_expr = expr
@@ -722,6 +885,8 @@ where
             for_,
             fn_decl,
             enum_decl,
+            record_decl,
+            class_decl,
             assign_or_expr,
         ))
         .boxed()
@@ -914,6 +1079,13 @@ mod tests {
     fn enum_declaration_and_match() {
         insta::assert_snapshot!(pretty(
             "enum E { Empty; Code(n: int); } echo match x { E.Empty => 0, E.Code(n) => n, _ => -1 };"
+        ));
+    }
+
+    #[test]
+    fn record_and_class_and_object_literal() {
+        insta::assert_snapshot!(pretty(
+            "type Item = { price: float, qty: int }; class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ..base };"
         ));
     }
 
