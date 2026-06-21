@@ -63,6 +63,7 @@ pub enum SyntaxKind {
     Comma,
     Colon,
     Question,
+    QuestionQuestion,
     FatArrow,
     PipeGt,
 
@@ -100,6 +101,8 @@ pub enum SyntaxKind {
     MatchArm,
     ObjectExpr,
     FieldInit,
+    TryExpr,
+    CoalesceExpr,
     Pattern,
     EnumDecl,
     VariantDecl,
@@ -139,6 +142,8 @@ impl SyntaxKind {
                 | SyntaxKind::MatchArm
                 | SyntaxKind::ObjectExpr
                 | SyntaxKind::FieldInit
+                | SyntaxKind::TryExpr
+                | SyntaxKind::CoalesceExpr
                 | SyntaxKind::Pattern
                 | SyntaxKind::EnumDecl
                 | SyntaxKind::VariantDecl

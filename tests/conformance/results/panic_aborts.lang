@@ -1,0 +1,9 @@
+// `panic` is the unrecoverable path (NOT the everyday error channel): it records E0010
+// and stops the program with a nonzero exit. Output written before the panic is kept;
+// nothing after it runs. The panic call begins on line 8, column 1.
+// expect: stdout "starting"
+// expect: error E0010 at 8:1
+// expect: exit 1
+echo "starting";
+panic("unreachable: validated upstream");
+echo "unreached";

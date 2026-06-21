@@ -1,0 +1,12 @@
+// `??` supplies a fallback for the empty case: `find(false)` is `none`, so `?? "guest"`
+// is taken; `find(true)` is `some("ada")`, so `??` unwraps it to the inner value.
+// expect: stdout "ada"
+// expect: stdout "guest"
+// expect: exit 0
+fn find(hit): ?User {
+    if hit { return some("ada"); }
+    return none;
+}
+
+echo find(true) ?? "guest";
+echo find(false) ?? "guest";

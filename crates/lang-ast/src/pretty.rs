@@ -422,6 +422,22 @@ impl Pretty for Expr {
                 out.push(')');
             }
             Expr::Object(lit) => lit.pretty(out, level),
+            Expr::Try { expr, span: s } => {
+                out.push_str(&format!("(try {}\n", span(*s)));
+                expr.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Coalesce {
+                value,
+                fallback,
+                span: s,
+            } => {
+                out.push_str(&format!("(coalesce {}\n", span(*s)));
+                value.pretty(out, level + 1);
+                out.push('\n');
+                fallback.pretty(out, level + 1);
+                out.push(')');
+            }
         }
     }
 }

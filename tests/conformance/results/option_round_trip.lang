@@ -1,0 +1,12 @@
+// `some`/`none` round-trip through `match`: the present case binds the inner value, the
+// absent case is handled explicitly. There is no ambient `null` — absence is a value.
+// expect: stdout "found 7"
+// expect: stdout "absent"
+// expect: exit 0
+fn pick(hit): ?int {
+    if hit { return some(7); }
+    return none;
+}
+
+echo match pick(true) { some(n) => "found {n}", none => "absent" };
+echo match pick(false) { some(n) => "found {n}", none => "absent" };

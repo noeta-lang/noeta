@@ -346,7 +346,7 @@ The discipline (architecture §7.1): `async` for I/O, isolates for parallelism, 
 
 ```
 // Absence is Option, written as ?T. `none`/`some` are the values.
-fn find(id: int): User? {
+fn find(id: int): ?User {
     // ...
     return none;
 }

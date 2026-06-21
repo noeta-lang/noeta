@@ -94,6 +94,14 @@ pub enum Builtin {
     Filter,
     /// `sum(list)` — the numeric sum of a list's elements.
     Sum,
+    /// `Ok(x)` / `Ok()` — construct a `Result.Ok`.
+    MakeOk,
+    /// `Err(e)` — construct a `Result.Err`.
+    MakeErr,
+    /// `some(x)` — construct an `Option.some`.
+    MakeSome,
+    /// `panic(msg)` — abort with an unrecoverable runtime diagnostic and nonzero exit.
+    Panic,
 }
 
 impl Builtin {
@@ -104,16 +112,25 @@ impl Builtin {
             Builtin::Map => "map",
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
+            Builtin::MakeOk => "Ok",
+            Builtin::MakeErr => "Err",
+            Builtin::MakeSome => "some",
+            Builtin::Panic => "panic",
         }
     }
 
-    /// The prelude functions registered in every program's global scope.
+    /// The prelude functions registered in every program's global scope. `none` is a
+    /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
         Builtin::NextId,
         Builtin::Len,
         Builtin::Map,
         Builtin::Filter,
         Builtin::Sum,
+        Builtin::MakeOk,
+        Builtin::MakeErr,
+        Builtin::MakeSome,
+        Builtin::Panic,
     ];
 }
 
@@ -156,12 +173,23 @@ pub struct EnumValue {
 
 impl EnumValue {
     pub fn display(&self) -> String {
-        if self.data.is_empty() {
+        // The built-in `Result`/`Option` print with their bare surface constructors
+        // (`Ok(x)`, `none`), matching how they are written; user enums keep `Type.Variant`.
+        let head = if self.is_builtin_result_or_option() {
+            self.variant.clone()
+        } else {
             format!("{}.{}", self.enum_name, self.variant)
+        };
+        if self.data.is_empty() {
+            head
         } else {
             let parts: Vec<String> = self.data.iter().map(Value::display).collect();
-            format!("{}.{}({})", self.enum_name, self.variant, parts.join(", "))
+            format!("{head}({})", parts.join(", "))
         }
+    }
+
+    fn is_builtin_result_or_option(&self) -> bool {
+        self.enum_name == "Result" || self.enum_name == "Option"
     }
 }
 
@@ -333,11 +361,15 @@ impl Scope {
     }
 }
 
-/// Sentinel returned by evaluation when an error has already been recorded and
-/// execution of the current program should stop (a panic-like abort).
-struct Aborted;
+/// Why evaluation is unwinding the Rust call stack. Either a fatal abort (a diagnostic
+/// has been recorded and the whole program stops) or an early function return triggered
+/// by `?` short-circuiting on an `Err`/`none`, caught at the enclosing call boundary.
+enum Unwind {
+    Abort,
+    Return(Value),
+}
 
-type Eval<T> = Result<T, Aborted>;
+type Eval<T> = Result<T, Unwind>;
 
 /// Whether a statement fell through normally or returned from the enclosing function.
 enum Flow {
@@ -359,6 +391,13 @@ impl Interpreter {
         for &builtin in Builtin::PRELUDE {
             global.declare(builtin.name().to_string(), Value::Builtin(builtin), false);
         }
+        // `none` is the `Option` absence value — a binding, not a function (it takes no
+        // parens), so it is registered here rather than as a `Builtin`.
+        global.declare(
+            "none".to_string(),
+            builtin_enum("Option", "none", vec![]),
+            false,
+        );
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
@@ -371,8 +410,9 @@ impl Interpreter {
         for stmt in &program.stmts {
             match self.exec_stmt(stmt) {
                 Ok(Flow::Normal) => {}
-                // A top-level `return` or a runtime error stops the program.
-                Ok(Flow::Return(_)) | Err(Aborted) => break,
+                // A top-level `return`, a `?` short-circuit, or a runtime error all stop
+                // the program. A `?`-induced return records no diagnostic, so exit stays 0.
+                Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => break,
             }
         }
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
@@ -776,7 +816,7 @@ impl Interpreter {
                         "declare it with `mut {name} = ...` to allow reassignment"
                     )),
                 );
-                Err(Aborted)
+                Err(Unwind::Abort)
             }
         }
     }
@@ -795,7 +835,7 @@ impl Interpreter {
                         *span,
                         format!("cannot find `{name}` in this scope"),
                     ));
-                    Err(Aborted)
+                    Err(Unwind::Abort)
                 }
             },
             Expr::Unary { op, operand, span } => {
@@ -882,6 +922,18 @@ impl Interpreter {
                 self.eval_match(value, arms, *span)
             }
             Expr::Object(lit) => self.eval_object(lit),
+            Expr::Try { expr, span } => {
+                let value = self.eval_expr(expr)?;
+                self.eval_try(value, *span)
+            }
+            Expr::Coalesce {
+                value,
+                fallback,
+                span,
+            } => {
+                let value = self.eval_expr(value)?;
+                self.eval_coalesce(value, fallback, *span)
+            }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
@@ -960,6 +1012,41 @@ impl Interpreter {
             span,
             format!("no match arm matched the value {}", value.display()),
         ))
+    }
+
+    /// The `?` operator. On `Ok(x)`/`some(x)` it yields `x`; on `Err(e)`/`none` it
+    /// short-circuits via [`Unwind::Return`], propagating that value out of the enclosing
+    /// function (caught at the call boundary in [`Interpreter::call_closure`]).
+    fn eval_try(&mut self, value: Value, span: Span) -> Eval<Value> {
+        match try_branch(&value) {
+            Some(TryBranch::Success(inner)) => Ok(inner),
+            Some(TryBranch::Empty) => Err(Unwind::Return(value)),
+            None => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`?` expects a `Result` or `Option`, found {}",
+                    value.type_name()
+                ),
+            )),
+        }
+    }
+
+    /// The `??` operator. On `Ok(x)`/`some(x)` it yields `x`; on `Err(_)`/`none` it
+    /// evaluates and yields the `fallback` expression.
+    fn eval_coalesce(&mut self, value: Value, fallback: &Expr, span: Span) -> Eval<Value> {
+        match try_branch(&value) {
+            Some(TryBranch::Success(inner)) => Ok(inner),
+            Some(TryBranch::Empty) => self.eval_expr(fallback),
+            None => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`??` expects a `Result` or `Option` on the left, found {}",
+                    value.type_name()
+                ),
+            )),
+        }
     }
 
     /// Dispatch a built-in method (`.count()`, `.enumerate()`) on a receiver value, or
@@ -1062,7 +1149,7 @@ impl Interpreter {
             FnBody::Block(stmts) => self.exec_fn_body(stmts),
         };
         self.scope = saved;
-        result
+        catch_return(result)
     }
 
     /// Call an instance method: the receiver's fields are bound directly into the method
@@ -1101,7 +1188,7 @@ impl Interpreter {
             FnBody::Block(stmts) => self.exec_fn_body(stmts),
         };
         self.scope = saved;
-        result
+        catch_return(result)
     }
 
     fn exec_fn_body(&mut self, stmts: &[Stmt]) -> Eval<Value> {
@@ -1170,6 +1257,36 @@ impl Interpreter {
                 self.expect_arity(builtin, &args, 1, span)?;
                 let items = self.expect_list(&args[0], "sum", span)?;
                 self.sum_list(&items, span)
+            }
+            // `Ok(x)` wraps a value; `Ok()` is the void success used by `Result<void, _>`.
+            Builtin::MakeOk => {
+                let data = match args.len() {
+                    0 => Vec::new(),
+                    1 => args,
+                    n => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("`Ok` takes 0 or 1 argument(s) but {n} were supplied"),
+                        ));
+                    }
+                };
+                Ok(builtin_enum("Result", "Ok", data))
+            }
+            Builtin::MakeErr => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                Ok(builtin_enum("Result", "Err", args))
+            }
+            Builtin::MakeSome => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                Ok(builtin_enum("Option", "some", args))
+            }
+            // `panic(msg)` is the unrecoverable path: record an `E0010` and unwind. There
+            // is no `catch`; it stops the program with a nonzero exit.
+            Builtin::Panic => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                let message = args[0].display();
+                Err(self.runtime_error(DiagnosticCode::Panic, span, format!("panic: {message}")))
             }
         }
     }
@@ -1294,10 +1411,53 @@ impl Interpreter {
     }
 
     /// Record a runtime diagnostic and produce the abort sentinel.
-    fn runtime_error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Aborted {
+    fn runtime_error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Unwind {
         self.diagnostics
             .push(Diagnostic::error(code, span, message));
-        Aborted
+        Unwind::Abort
+    }
+}
+
+/// Construct a built-in `Result`/`Option` value (`Ok`/`Err`/`some`/`none`). These reuse
+/// the ordinary [`EnumValue`] representation, so they participate in `match` and equality
+/// like any enum; only their display and the `?`/`??` operators treat them specially.
+fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
+    Value::Enum(Rc::new(EnumValue {
+        enum_name: enum_name.to_string(),
+        variant: variant.to_string(),
+        data,
+    }))
+}
+
+/// At a function-call boundary, turn a `?`-induced early return into the call's value;
+/// pass every other outcome (normal value or fatal abort) through unchanged.
+fn catch_return(result: Eval<Value>) -> Eval<Value> {
+    match result {
+        Err(Unwind::Return(value)) => Ok(value),
+        other => other,
+    }
+}
+
+/// How a value behaves under `?`/`??`: the unwrapped success payload, or the empty case.
+enum TryBranch {
+    /// `Ok(x)` / `some(x)` — unwrap to `x` (or `unit` for the void `Ok()`).
+    Success(Value),
+    /// `Err(_)` / `none` — short-circuit (`?`) or take the fallback (`??`).
+    Empty,
+}
+
+/// Classify a value for the `?`/`??` operators. Only the built-in `Result`/`Option`
+/// enums qualify; anything else returns `None` (a type error at the operator's span).
+fn try_branch(value: &Value) -> Option<TryBranch> {
+    let Value::Enum(e) = value else {
+        return None;
+    };
+    match (e.enum_name.as_str(), e.variant.as_str()) {
+        ("Result", "Ok") | ("Option", "some") => Some(TryBranch::Success(
+            e.data.first().cloned().unwrap_or(Value::Unit),
+        )),
+        ("Result", "Err") | ("Option", "none") => Some(TryBranch::Empty),
+        _ => None,
     }
 }
 
@@ -1591,5 +1751,80 @@ mod tests {
     fn object_displays_as_a_literal() {
         let src = "type Pt = { x: int, y: int }; echo Pt { x: 1, y: 2 };";
         assert_eq!(run(src).stdout, "Pt {x: 1, y: 2}\n");
+    }
+
+    #[test]
+    fn result_constructors_display_bare() {
+        assert_eq!(run("echo Ok(5);").stdout, "Ok(5)\n");
+        assert_eq!(run("echo Err(\"boom\");").stdout, "Err(boom)\n");
+        assert_eq!(run("echo some(3);").stdout, "some(3)\n");
+        assert_eq!(run("echo none;").stdout, "none\n");
+        // The void success carries no payload.
+        assert_eq!(run("echo Ok();").stdout, "Ok\n");
+    }
+
+    #[test]
+    fn question_propagates_err_from_enclosing_fn() {
+        // `validate` returns Err; `?` re-returns it from `run_it`, so the trailing
+        // `Ok("done")` never executes and the caller sees the original error.
+        let src = "fn validate(): int { return Err(\"empty\"); } \
+                   fn run_it(): int { validate()?; return Ok(\"done\"); } \
+                   echo run_it();";
+        assert_eq!(run(src).stdout, "Err(empty)\n");
+    }
+
+    #[test]
+    fn question_unwraps_ok_and_some() {
+        let src = "fn ok_val(): int { return Ok(41); } \
+                   fn use_it(): int { x = ok_val()?; return Ok(x + 1); } \
+                   echo use_it();";
+        assert_eq!(run(src).stdout, "Ok(42)\n");
+    }
+
+    #[test]
+    fn question_propagates_none() {
+        let src = "fn lookup(): int { return none; } \
+                   fn first(): int { v = lookup()?; return some(v); } \
+                   echo first();";
+        assert_eq!(run(src).stdout, "none\n");
+    }
+
+    #[test]
+    fn coalesce_supplies_a_default() {
+        assert_eq!(run("echo none ?? 99;").stdout, "99\n");
+        assert_eq!(run("echo some(7) ?? 99;").stdout, "7\n");
+        assert_eq!(run("echo Err(\"x\") ?? 0;").stdout, "0\n");
+        assert_eq!(run("echo Ok(5) ?? 0;").stdout, "5\n");
+    }
+
+    #[test]
+    fn coalesce_round_trip_through_option() {
+        let src = "fn find(b): int { if b { return some(10); } return none; } \
+                   echo find(true) ?? -1; echo find(false) ?? -1;";
+        assert_eq!(run(src).stdout, "10\n-1\n");
+    }
+
+    #[test]
+    fn question_on_a_non_result_is_an_error() {
+        let result = run("fn f(): int { x = 5?; return Ok(x); } echo f();");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.diagnostics[0].code, DiagnosticCode::TypeMismatch);
+    }
+
+    #[test]
+    fn panic_aborts_with_nonzero_exit() {
+        let result = run("echo \"before\"; panic(\"boom\"); echo \"after\";");
+        assert_eq!(result.exit_code, 1);
+        assert_eq!(result.diagnostics[0].code, DiagnosticCode::Panic);
+        // stdout up to the panic is preserved; nothing after runs.
+        assert_eq!(result.stdout, "before\n");
+    }
+
+    #[test]
+    fn result_and_option_participate_in_match() {
+        let src = "fn run_it(b): int { if b { return Ok(1); } return Err(\"no\"); } \
+                   echo match run_it(true) { Ok(n) => \"ok {n}\", Err(e) => \"err {e}\" }; \
+                   echo match run_it(false) { Ok(n) => \"ok {n}\", Err(e) => \"err {e}\" };";
+        assert_eq!(run(src).stdout, "ok 1\nerr no\n");
     }
 }

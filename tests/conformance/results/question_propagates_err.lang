@@ -1,0 +1,17 @@
+// `?` early-returns the `Err` from the enclosing function: `validate` fails on an empty
+// order, so `place` propagates that same error and never reaches its `Ok(...)`.
+// expect: stdout "Err(empty)"
+// expect: exit 0
+fn validate(items): Result<void, string> {
+    if items.count() == 0 {
+        return Err("empty");
+    }
+    return Ok();
+}
+
+fn place(items): Result<string, string> {
+    validate(items)?;
+    return Ok("placed");
+}
+
+echo place([]);

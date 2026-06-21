@@ -498,6 +498,11 @@ where
                     span: to_span(e.span()),
                 },
             ),
+            // `expr?` — error/absence propagation; binds as tightly as call/member.
+            postfix(10, just(T::Question), |operand, _, e| Expr::Try {
+                expr: Box::new(operand),
+                span: to_span(e.span()),
+            }),
             prefix(9, just(T::Minus), |_, operand, e| Expr::Unary {
                 op: UnaryOp::Neg,
                 operand: Box::new(operand),
@@ -549,6 +554,15 @@ where
             }),
             infix(left(2), just(T::PipePipe), |l, _, r, e| {
                 binary(BinaryOp::Or, l, r, e)
+            }),
+            // `value ?? fallback` — supply a default for the `Err`/`none` case. Loose,
+            // alongside `||`; tighter than the pipeline so `a ?? b |> f` is `(a ?? b) |> f`.
+            infix(left(2), just(T::QuestionQuestion), |l, _, r, e| {
+                Expr::Coalesce {
+                    value: Box::new(l),
+                    fallback: Box::new(r),
+                    span: to_span(e.span()),
+                }
             }),
             infix(left(1), just(T::PipeGt), |l, _, r, e| Expr::Pipeline {
                 left: Box::new(l),
@@ -1086,6 +1100,13 @@ mod tests {
     fn record_and_class_and_object_literal() {
         insta::assert_snapshot!(pretty(
             "type Item = { price: float, qty: int }; class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ..base };"
+        ));
+    }
+
+    #[test]
+    fn try_and_coalesce_operators() {
+        insta::assert_snapshot!(pretty(
+            "fn place(items): int { validate(items)?; user = find(1) ?? guest(); return Ok(user); }"
         ));
     }
 

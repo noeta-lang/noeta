@@ -33,6 +33,9 @@ pub enum DiagnosticCode {
     DivisionByZero,
     /// An all-fields object literal left a declared field unset.
     MissingField,
+    /// A `panic(...)` call (or a violated invariant) aborted the program. This is the
+    /// unrecoverable path, distinct from a `Result`/`Option` an ordinary program handles.
+    Panic,
 }
 
 impl DiagnosticCode {
@@ -48,6 +51,7 @@ impl DiagnosticCode {
         DiagnosticCode::TypeMismatch,
         DiagnosticCode::DivisionByZero,
         DiagnosticCode::MissingField,
+        DiagnosticCode::Panic,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -63,6 +67,7 @@ impl DiagnosticCode {
             DiagnosticCode::TypeMismatch => "E0007",
             DiagnosticCode::DivisionByZero => "E0008",
             DiagnosticCode::MissingField => "E0009",
+            DiagnosticCode::Panic => "E0010",
         }
     }
 

@@ -279,6 +279,17 @@ pub enum Expr {
     /// An all-fields object literal: `Order { id: 1, ..base }`. Constructs a record or
     /// class instance; the evaluator requires every declared field to be set.
     Object(ObjectLit),
+    /// The `?` propagation operator: `expr?`. On `Ok(x)`/`some(x)` it yields `x`; on
+    /// `Err(e)`/`none` it early-returns that value from the enclosing function. Kept as
+    /// its own node (not desugared) so M1 diagnostics can point at the `?`.
+    Try { expr: Box<Expr>, span: Span },
+    /// The `??` fallback operator: `value ?? fallback`. On `Ok(x)`/`some(x)` it yields
+    /// `x`; on `Err(_)`/`none` it evaluates and yields `fallback`.
+    Coalesce {
+        value: Box<Expr>,
+        fallback: Box<Expr>,
+        span: Span,
+    },
 }
 
 /// An all-fields object literal. `spread` (`..expr`) supplies values for fields not named
@@ -382,7 +393,9 @@ impl Expr {
             | Expr::Map { span, .. }
             | Expr::Member { span, .. }
             | Expr::Interp { span, .. }
-            | Expr::Match { span, .. } => *span,
+            | Expr::Match { span, .. }
+            | Expr::Try { span, .. }
+            | Expr::Coalesce { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }
     }
