@@ -11,8 +11,8 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use lang_conformance::{Stage, run_corpus};
-use lang_diagnostics::{Diagnostic, render};
-use lang_eval::{Backend, TreeWalkBackend};
+use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
+use lang_eval::{Backend, Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId};
@@ -105,24 +105,108 @@ fn cmd_run(file: &std::path::Path) -> ExitCode {
     exit_code(run_source(&source))
 }
 
+/// Whether an entry was consumed (evaluated or reported) or is still incomplete and needs
+/// more input (multiline continuation).
+enum ReplStep {
+    Consumed,
+    Incomplete,
+}
+
 fn cmd_repl() -> ExitCode {
     let stdin = io::stdin();
-    let mut line_no: u32 = 0;
+    let mut session = Session::new();
+    let mut buffer = String::new();
+    let mut entry_no: u32 = 0;
     eprint!("lang repl — type a statement, Ctrl-D to exit\n» ");
     let _ = io::stderr().flush();
 
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
-        if !line.trim().is_empty() {
-            line_no += 1;
-            let source = Source::new(SourceId::FIRST, format!("<repl:{line_no}>"), line);
-            run_source(&source);
+        // Skip blank lines when nothing is pending.
+        if buffer.is_empty() && line.trim().is_empty() {
+            eprint!("» ");
+            let _ = io::stderr().flush();
+            continue;
         }
-        eprint!("» ");
+        if !buffer.is_empty() {
+            buffer.push('\n');
+        }
+        buffer.push_str(&line);
+
+        match repl_step(&mut session, &buffer, &mut entry_no) {
+            ReplStep::Consumed => {
+                buffer.clear();
+                eprint!("» ");
+            }
+            // Keep the buffer and read another line; show a continuation prompt.
+            ReplStep::Incomplete => eprint!("… "),
+        }
         let _ = io::stderr().flush();
     }
     eprintln!();
     ExitCode::SUCCESS
+}
+
+/// Try to evaluate the accumulated REPL buffer. Statements ending in `;`/`}` evaluate as-is;
+/// a bare expression (no trailing `;`) is retried with a `;` appended so its value can be
+/// printed. If the only parse problem is hitting end-of-input, the entry is treated as
+/// incomplete and more input is requested (multiline). Any other error is reported, and the
+/// buffer is reset so one bad entry cannot wedge the session.
+fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplStep {
+    let source = Source::new(
+        SourceId::FIRST,
+        format!("<repl:{entry_no}>"),
+        buffer.to_string(),
+    );
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let diags: Vec<Diagnostic> = lexed
+        .diagnostics
+        .iter()
+        .chain(parsed.diagnostics.iter())
+        .cloned()
+        .collect();
+
+    if diags.is_empty() {
+        *entry_no += 1;
+        emit_session(&source, session.eval(&parsed.program));
+        return ReplStep::Consumed;
+    }
+
+    // A bare expression needs a terminating `;`; retry with one appended.
+    let patched = format!("{buffer};");
+    let psource = Source::new(SourceId::FIRST, format!("<repl:{entry_no}>"), patched);
+    let plexed = lex(&psource);
+    let pparsed = parse(&psource, &plexed.tokens);
+    if plexed.diagnostics.is_empty() && pparsed.diagnostics.is_empty() {
+        *entry_no += 1;
+        emit_session(&psource, session.eval(&pparsed.program));
+        return ReplStep::Consumed;
+    }
+
+    // Only end-of-input errors → the entry is unfinished; gather more lines.
+    if diags
+        .iter()
+        .all(|d| d.code == DiagnosticCode::UnexpectedEndOfInput)
+    {
+        return ReplStep::Incomplete;
+    }
+
+    // A genuine syntax error: report it against the original buffer and reset.
+    *entry_no += 1;
+    emit_diagnostics(&source, diags.iter());
+    ReplStep::Consumed
+}
+
+/// Print a session evaluation's stdout, the value of a trailing bare expression (if any),
+/// then any diagnostics.
+fn emit_session(source: &Source, out: SessionOutput) {
+    print!("{}", out.stdout);
+    if let Some(value) = out.value {
+        println!("{value}");
+    }
+    let _ = io::stdout().flush();
+    emit_diagnostics(source, out.diagnostics.iter());
 }
 
 fn cmd_test(

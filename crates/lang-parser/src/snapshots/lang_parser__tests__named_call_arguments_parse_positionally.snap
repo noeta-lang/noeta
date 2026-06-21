@@ -1,0 +1,10 @@
+---
+source: crates/lang-parser/src/lib.rs
+expression: "pretty(\"x = OrderError.NegativePrice(index: i);\")"
+---
+(program @0..39
+  (binding x @0..39
+    (call @4..38
+      (member NegativePrice @4..28
+        (ident OrderError @4..14))
+      (ident i @36..37))))

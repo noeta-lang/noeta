@@ -6,7 +6,7 @@ The single source of "what's next / what's done". Milestones are distilled from 
 
 | Milestone | Goal | Status |
 |---|---|---|
-| **M0 — Walking skeleton** | Run simple programs via a tree-walking evaluator; prove the syntax feels right; stand up the test harness and crate seams. | in-progress |
+| **M0 — Walking skeleton** | Run simple programs via a tree-walking evaluator; prove the syntax feels right; stand up the test harness and crate seams. | **done** |
 | **M1 — Real language core** | Replace tree-walker with register-based bytecode + VM; NaN-boxed values; shape-based object model + inline caches; refcount+cycle GC; type checker + inference (salsa query graph); generics/ADTs/traits/derives; modules; layered stdlib (Ring 1/2). | not started |
 | **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface; baseline DB; packed value types. | not started |
 | **M3 — Long tail** | WASM target; Tauri desktop; background-work extensions; JIT; editor grammars + VS Code ext; reactive persistence; p2p/local-first; extension system + stable host ABI; startup cache; editions. | not started |
@@ -28,7 +28,7 @@ Each links to its file in `m0/`. Pick the lowest-numbered `todo`.
 | 6 | [Records & classes](m0/slice-06-records-classes.md) | done |
 | 7 | [`Result`/`Option`/`?`](m0/slice-07-result-option.md) | done |
 | 8 | [`namespace` / `use`](m0/slice-08-namespace-use.md) | done |
-| 9 | [§14 demo + REPL + proptest](m0/slice-09-demo-proptest.md) | todo |
+| 9 | [§14 demo + REPL + proptest](m0/slice-09-demo-proptest.md) | done |
 
 ## Standing requirements (every slice)
 

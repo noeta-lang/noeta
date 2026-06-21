@@ -663,7 +663,7 @@ fn validate(items: List<Item>): Result<void, OrderError> {
 
 fn place(items: List<Item>, customer: User): Result<Order, OrderError> {
     validate(items)?;
-    return Ok(Order { id: next_id(), customer: customer, items: items });
+    return Ok(Order { id: next_id(), customer: customer, items: items, status: Status.Pending });
 }
 ```
 

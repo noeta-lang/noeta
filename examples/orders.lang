@@ -1,0 +1,91 @@
+// The complete §14 program from docs/resources/02-syntax.md — the M0 acceptance artifact.
+// Everything above the `--- driver ---` marker is the syntax-doc program verbatim; the
+// driver below exercises it end-to-end so `lang run` produces observable output. This file
+// is mirrored byte-for-byte as tests/conformance/demo/orders.lang (the `// expect:` headers
+// below double as that corpus case's assertions and as documentation of the output).
+// expect: stdout "Placed: Order #1 awaiting payment"
+// expect: stdout "Order #2 awaiting payment"
+// expect: stdout "Cannot place an empty order"
+// expect: stdout "Item 0 has a negative price"
+// expect: exit 0
+
+namespace App.Orders;
+
+use App.Models.User;
+
+type Item = { price: float, qty: int };
+
+enum Status: string {
+    Pending = "pending";
+    Paid = "paid";
+    Refunded = "refunded";
+}
+
+enum OrderError {
+    Empty;
+    NegativePrice(index: int);
+}
+
+class Order {
+    id: int
+    customer: User
+    items: List<Item>
+    mut status: Status
+
+    fn new(id: int, customer: User, items: List<Item>): Order {
+        return Order { id: id, customer: customer, items: items, status: Status.Pending };
+    }
+
+    fn total(): float {
+        return items |> map(fn(it) => it.price * it.qty) |> sum();
+    }
+
+    fn label(): string {
+        return match status {
+            Status.Pending  => "Order #{id} awaiting payment",
+            Status.Paid     => "Order #{id} paid: {customer.name}",
+            Status.Refunded => "Order #{id} refunded",
+        };
+    }
+}
+
+fn validate(items: List<Item>): Result<void, OrderError> {
+    if items.count() == 0 {
+        return Err(OrderError.Empty);
+    }
+    for (i, item) in items.enumerate() {
+        if item.price < 0 {
+            return Err(OrderError.NegativePrice(index: i));
+        }
+    }
+    return Ok();
+}
+
+fn place(items: List<Item>, customer: User): Result<Order, OrderError> {
+    validate(items)?;
+    return Ok(Order { id: next_id(), customer: customer, items: items, status: Status.Pending });
+}
+
+// --- driver ---
+
+fn describe(items: List<Item>, customer: User): string {
+    return match place(items, customer) {
+        Ok(order)  => order.label(),
+        Err(error) => match error {
+            OrderError.Empty            => "Cannot place an empty order",
+            OrderError.NegativePrice(i) => "Item {i} has a negative price",
+        },
+    };
+}
+
+customer = User { name: "Ada Lovelace" };
+items = [Item { price: 9.99, qty: 2 }, Item { price: 4.50, qty: 1 }];
+
+order = place(items, customer);
+echo match order {
+    Ok(o)  => "Placed: {o.label()}",
+    Err(e) => "Failed",
+};
+echo describe(items, customer);
+echo describe([], customer);
+echo describe([Item { price: -1.0, qty: 1 }], customer);

@@ -509,9 +509,15 @@ where
         ))
         .boxed();
 
-        // Postfix call argument list (no trailing comma).
-        let call_args = expr
-            .clone()
+        // Postfix call argument list (no trailing comma). An argument may carry a `name:`
+        // label (`NegativePrice(index: i)`); in M0 the label is parsed for surface fidelity
+        // but arguments bind positionally — M1 will validate/reorder names against the
+        // callee's declared parameters/fields.
+        let call_arg = ident_parser(ctx)
+            .then_ignore(just(T::Colon))
+            .or_not()
+            .ignore_then(expr.clone());
+        let call_args = call_arg
             .separated_by(just(T::Comma))
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen));
@@ -1188,6 +1194,24 @@ mod tests {
         insta::assert_snapshot!(pretty(
             "fn place(items): int { validate(items)?; user = find(1) ?? guest(); return Ok(user); }"
         ));
+    }
+
+    #[test]
+    fn named_call_arguments_parse_positionally() {
+        // The `index:` label is parsed for surface fidelity; the call still binds by
+        // position in M0 (so this is one positional arg).
+        insta::assert_snapshot!(pretty("x = OrderError.NegativePrice(index: i);"));
+    }
+
+    #[test]
+    fn full_demo_ast_is_stable() {
+        // The §14 acceptance program (the same bytes `lang run examples/orders.lang` runs)
+        // must parse with no diagnostics; this snapshot guards the whole grammar at once.
+        let src = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/orders.lang"
+        ));
+        insta::assert_snapshot!(pretty(src));
     }
 
     #[test]

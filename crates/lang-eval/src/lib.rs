@@ -79,6 +79,78 @@ impl Backend for TreeWalkBackend {
     }
 }
 
+/// A persistent evaluation session — the REPL backend. Unlike [`TreeWalkBackend::run`],
+/// which builds a fresh interpreter per program (the clean slate the differential oracle
+/// needs), a session keeps its scope and id counter alive across [`Session::eval`] calls,
+/// so bindings, `fn`/`type`/`enum`/`class` declarations, and `next_id()` continuity persist
+/// between REPL entries.
+pub struct Session {
+    interp: Interpreter,
+}
+
+impl std::fmt::Debug for Session {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The interpreter holds an `Rc<Scope>` whose capture graph can be cyclic; stay
+        // shallow rather than recursing into it.
+        f.debug_struct("Session").finish_non_exhaustive()
+    }
+}
+
+impl Session {
+    pub fn new() -> Session {
+        Session {
+            interp: Interpreter::new(DEFAULT_SEED),
+        }
+    }
+
+    /// Evaluate a program against the persistent scope. Returns just this batch's stdout
+    /// and diagnostics; if the final statement is a bare expression, its non-unit value's
+    /// display form is returned in `value` so the REPL can echo it (`1 + 2` → `3`).
+    pub fn eval(&mut self, program: &Program) -> SessionOutput {
+        self.interp.stdout.clear();
+        self.interp.diagnostics.clear();
+        let mut value = None;
+        let last = program.stmts.len().saturating_sub(1);
+        for (i, stmt) in program.stmts.iter().enumerate() {
+            // A trailing bare expression is evaluated for its value rather than discarded.
+            if i == last
+                && let Stmt::Expr { expr, .. } = stmt
+            {
+                if let Ok(v) = self.interp.eval_expr(expr)
+                    && !matches!(v, Value::Unit)
+                {
+                    value = Some(v.display());
+                }
+                break;
+            }
+            match self.interp.exec_stmt(stmt) {
+                Ok(Flow::Normal) => {}
+                Ok(Flow::Return(_)) | Err(_) => break,
+            }
+        }
+        SessionOutput {
+            stdout: std::mem::take(&mut self.interp.stdout),
+            diagnostics: std::mem::take(&mut self.interp.diagnostics),
+            value,
+        }
+    }
+}
+
+impl Default for Session {
+    fn default() -> Session {
+        Session::new()
+    }
+}
+
+/// The outcome of one [`Session::eval`]: this batch's output, any diagnostics, and the
+/// display value of a trailing bare expression (for the REPL to print).
+#[derive(Debug, Clone)]
+pub struct SessionOutput {
+    pub stdout: String,
+    pub diagnostics: Vec<Diagnostic>,
+    pub value: Option<String>,
+}
+
 // --- Functions and scopes ---
 
 /// A built-in (native) function from the prelude.
@@ -1567,6 +1639,10 @@ mod tests {
     use lang_span::{Source, SourceId};
 
     fn run(text: &str) -> RunResult {
+        TreeWalkBackend::new().run(&program_of(text))
+    }
+
+    fn program_of(text: &str) -> Program {
         let source = Source::new(SourceId::FIRST, "test.lang", text);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
@@ -1575,7 +1651,29 @@ mod tests {
             "parse errors: {:?}",
             parsed.diagnostics
         );
-        TreeWalkBackend::new().run(&parsed.program)
+        parsed.program
+    }
+
+    #[test]
+    fn session_persists_state_and_prints_trailing_expression() {
+        let mut session = Session::new();
+        // A binding in one entry is visible in the next (persistent scope).
+        session.eval(&program_of("x = 5;"));
+        let out = session.eval(&program_of("echo x;"));
+        assert_eq!(out.stdout, "5\n");
+        assert_eq!(out.value, None);
+        // A trailing bare expression is returned as a value to print, not discarded.
+        let out = session.eval(&program_of("x + 10;"));
+        assert_eq!(out.value.as_deref(), Some("15"));
+        // `next_id()` continuity persists across entries.
+        assert_eq!(
+            session.eval(&program_of("next_id();")).value.as_deref(),
+            Some("1")
+        );
+        assert_eq!(
+            session.eval(&program_of("next_id();")).value.as_deref(),
+            Some("2")
+        );
     }
 
     #[test]
@@ -1889,6 +1987,15 @@ mod tests {
     fn imported_stub_displays_its_actual_fields() {
         let src = "use M.User; echo User { name: \"Ada\" };";
         assert_eq!(run(src).stdout, "User {name: \"Ada\"}\n");
+    }
+
+    #[test]
+    fn named_call_arguments_bind_positionally() {
+        // `E.Bad(index: 5)` — the `index:` label is surface sugar in M0; the value binds by
+        // position, so the variant's single field gets `5`.
+        let src = "enum E { Bad(index: int); } x = E.Bad(index: 5); \
+                   echo match x { E.Bad(i) => \"bad {i}\" };";
+        assert_eq!(run(src).stdout, "bad 5\n");
     }
 
     #[test]
