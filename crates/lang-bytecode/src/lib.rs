@@ -74,20 +74,39 @@ pub enum Const {
 #[derive(Debug, Clone)]
 pub enum Op {
     /// `dst = consts[k]`
-    LoadConst { dst: Reg, k: u16 },
+    LoadConst {
+        dst: Reg,
+        k: u16,
+    },
     /// `dst = src` (a refcounted copy: release old `dst`, retain `src`).
-    Move { dst: Reg, src: Reg },
+    Move {
+        dst: Reg,
+        src: Reg,
+    },
     /// `dst = globals[name]`, or raise E0005 ("cannot find `name` in this scope") at `span`
     /// if the global is unbound. The single name-resolution path for everything that is not a
     /// frame-local register: top-level bindings, function names, and (at runtime) unknowns.
-    LoadGlobal { dst: Reg, name: String, span: Span },
+    LoadGlobal {
+        dst: Reg,
+        name: String,
+        span: Span,
+    },
     /// `globals[name] = src` (refcounted: release old binding, retain `src`). Only emitted at
     /// the top level — functions never assign globals in the M1.2 subset.
-    StoreGlobal { name: String, src: Reg },
+    StoreGlobal {
+        name: String,
+        src: Reg,
+    },
     /// `dst = <closure over proto>` — materialize a function value referencing `proto`.
-    MakeClosure { dst: Reg, proto: u32 },
+    MakeClosure {
+        dst: Reg,
+        proto: u32,
+    },
     /// `dst = [items...]` — build a heap list, retaining each element into it.
-    MakeList { dst: Reg, items: Box<[Reg]> },
+    MakeList {
+        dst: Reg,
+        items: Box<[Reg]>,
+    },
     /// `dst = {key: value, ...}` — build a heap map (sorted-key), retaining each value. Keys
     /// are validated by a preceding `RequireMapKey`, so they are known strings here.
     MakeMap {
@@ -97,16 +116,30 @@ pub enum Op {
     /// Require `reg` to be a string (a map key), else raise E0007 ("map keys must be strings,
     /// found <type>") at `span`. Emitted between a map entry's key and value so the error
     /// timing matches the M0 tree-walker (key checked before the value is evaluated).
-    RequireMapKey { reg: Reg, span: Span },
+    RequireMapKey {
+        reg: Reg,
+        span: Span,
+    },
     /// `dst = <elements of src to iterate>`. A list yields a retained shallow copy; a map
     /// yields a new list of its values in sorted-key order; anything else raises E0007
     /// ("cannot iterate over <type>") at `span`. Snapshots iteration, as the M0 tree-walker
     /// does, so `dst` is always a list the loop can index.
-    IterSnapshot { dst: Reg, src: Reg, span: Span },
+    IterSnapshot {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
     /// `dst = len(src)` where `src` is a list (an iteration snapshot). Never fails.
-    ListLen { dst: Reg, src: Reg },
+    ListLen {
+        dst: Reg,
+        src: Reg,
+    },
     /// `dst = list[index]` (retained), where `list` is a list and `index` an in-bounds int.
-    ListGet { dst: Reg, list: Reg, index: Reg },
+    ListGet {
+        dst: Reg,
+        list: Reg,
+        index: Reg,
+    },
     /// Destructure a 2-element list `src` into `first`/`second` (each retained), else raise
     /// E0007 ("destructuring `(a, b)` expects a 2-element list, found <type>") at `span`.
     DestructurePair {
@@ -174,6 +207,72 @@ pub enum Op {
         field: String,
         span: Span,
     },
+    /// `dst = next_id()` — the deterministic seeded counter (1, 2, 3, …), reproducing the M0
+    /// tree-walker's `IdGen` (seed 1).
+    NextId {
+        dst: Reg,
+    },
+    /// `panic(msg)` — record E0010 ("panic: <msg display>") at `span` and abort the program.
+    Panic {
+        msg: Reg,
+        span: Span,
+    },
+    /// The `?` operator. If `src` is `Ok(x)`/`some(x)`, `dst = x` (unit for the void `Ok()`)
+    /// and execution continues; if it is `Err(_)`/`none`, that value is early-returned from the
+    /// current frame (the M0 `Unwind::Return`); anything else raises E0007 at `span`.
+    TryUnwrap {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
+    /// The `??` operator. If `src` is `Ok(x)`/`some(x)`, `dst = x` and execution continues; if
+    /// it is `Err(_)`/`none`, jump to `fallback` (the right-hand expression); anything else
+    /// raises E0007 at `span`.
+    Coalesce {
+        dst: Reg,
+        src: Reg,
+        fallback: u32,
+        span: Span,
+    },
+    /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
+    /// next arm). Three variants for the three literal pattern kinds.
+    MatchInt {
+        src: Reg,
+        value: i64,
+        fail: u32,
+    },
+    MatchStr {
+        src: Reg,
+        value: String,
+        fail: u32,
+    },
+    MatchBool {
+        src: Reg,
+        value: bool,
+        fail: u32,
+    },
+    /// A `match` variant test: if `src` is an enum of the given variant (and, when
+    /// `type_name` is set, that enum) with `arity` data fields, continue; else jump to `fail`.
+    MatchVariant {
+        src: Reg,
+        type_name: Option<String>,
+        variant: String,
+        arity: u16,
+        fail: u32,
+    },
+    /// `dst = src.data[index]` (retained) — extract an enum variant's positional field for a
+    /// sub-pattern, after a `MatchVariant` has confirmed the shape.
+    ExtractField {
+        dst: Reg,
+        src: Reg,
+        index: u16,
+    },
+    /// No `match` arm matched `src`: raise E0007 ("no match arm matched the value <...>") at
+    /// `span` (the M0 runtime non-exhaustive-match error).
+    MatchFail {
+        src: Reg,
+        span: Span,
+    },
     /// `dst = callee(args...)`. Pushes a new call frame; the callee must be a closure whose
     /// prototype's arity equals `args.len()` (else E0007 at `span`); a non-callable callee is
     /// E0007 ("<type> is not callable") at `span`.
@@ -185,7 +284,9 @@ pub enum Op {
     },
     /// Return `src` from the current frame to the caller's destination register (or end the
     /// program if returning from the top-level frame).
-    Return { src: Reg },
+    Return {
+        src: Reg,
+    },
     /// `dst = op src` — may raise (E0007) at `span`.
     Unary {
         op: UnaryOp,
@@ -211,18 +312,33 @@ pub enum Op {
     },
     /// Require `reg` to be a bool, else raise E0007 with the `if`-condition message
     /// ("`if` condition must be a bool, found <type>") at `span`.
-    RequireCondBool { reg: Reg, span: Span },
+    RequireCondBool {
+        reg: Reg,
+        span: Span,
+    },
     /// Unconditional jump to `target`.
-    Jump { target: u32 },
+    Jump {
+        target: u32,
+    },
     /// Jump to `target` if `reg` (a bool) is true.
-    JumpIfTrue { reg: Reg, target: u32 },
+    JumpIfTrue {
+        reg: Reg,
+        target: u32,
+    },
     /// Jump to `target` if `reg` (a bool) is false.
-    JumpIfFalse { reg: Reg, target: u32 },
+    JumpIfFalse {
+        reg: Reg,
+        target: u32,
+    },
     /// Print `reg`'s display form followed by a newline.
-    Echo { reg: Reg },
+    Echo {
+        reg: Reg,
+    },
     /// Push a precomputed diagnostic (`diagnostics[idx]`) and halt — the unknown-name (E0005)
     /// and immutable-assignment (E0006) errors, whose text the compiler knows statically.
-    Raise { idx: u16 },
+    Raise {
+        idx: u16,
+    },
     /// Stop the program successfully.
     Halt,
 }
@@ -438,6 +554,36 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::LoadField {
             dst, obj, field, ..
         } => format!("LoadField   r{dst} <- r{obj}.{field}"),
+        Op::NextId { dst } => format!("NextId      r{dst}"),
+        Op::Panic { msg, .. } => format!("Panic       r{msg}"),
+        Op::TryUnwrap { dst, src, .. } => format!("TryUnwrap   r{dst} <- r{src}?"),
+        Op::Coalesce {
+            dst, src, fallback, ..
+        } => format!("Coalesce    r{dst} <- r{src} ?? -> {fallback}"),
+        Op::MatchInt { src, value, fail } => {
+            format!("MatchInt    r{src} == {value} else -> {fail}")
+        }
+        Op::MatchStr { src, value, fail } => {
+            format!("MatchStr    r{src} == {value:?} else -> {fail}")
+        }
+        Op::MatchBool { src, value, fail } => {
+            format!("MatchBool   r{src} == {value} else -> {fail}")
+        }
+        Op::MatchVariant {
+            src,
+            type_name,
+            variant,
+            arity,
+            fail,
+        } => {
+            let qualifier = match type_name {
+                Some(name) => format!("{name}."),
+                None => String::new(),
+            };
+            format!("MatchVariant r{src} is {qualifier}{variant}/{arity} else -> {fail}")
+        }
+        Op::ExtractField { dst, src, index } => format!("ExtractField r{dst} <- r{src}.{index}"),
+        Op::MatchFail { src, .. } => format!("MatchFail   r{src}"),
         Op::Call {
             dst, callee, args, ..
         } => {

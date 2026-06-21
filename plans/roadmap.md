@@ -26,14 +26,14 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 | 2 | [Functions, calls, closures, pipeline](m1/slice-02-functions.md) | A | done (43.8% VM corpus coverage) |
 | 3 | [Heap collections: List + Map](m1/slice-03-collections.md) | A | done (62.5% VM corpus coverage; string interpolation `Expr::Interp` landed alongside) |
 | 4 | [Shapes + objects + enums (object model)](m1/slice-04-shapes-objects.md) | A | done (75.0% VM corpus coverage) |
-| 5 | [Result/Option/`?`/`??` + match](m1/slice-05-result-match.md) | A | todo |
+| 5 | [Result/Option/`?`/`??` + match](m1/slice-05-result-match.md) | A | **done (100% VM corpus coverage — Thrust A gate met)** |
 | 6 | [GC cycle collector + `__destruct`](m1/slice-06-gc.md) | A | todo |
 | 7 | [Type checker: types + inference + ADT/exhaustiveness + ownership](m1/slice-07-checker.md) | B | todo |
 | 8 | [Traits as operators + derives + generics](m1/slice-08-traits.md) | B | todo |
 | 9 | [Modules / namespaces / `use` resolution](m1/slice-09-modules.md) | C | todo |
 | 10 | [Layered stdlib (Ring 1 + Ring 2)](m1/slice-10-stdlib.md) | C | todo |
 
-**Thrust A gate:** `VmBackend` runs 100% of the M0 corpus, every case differential-identical to the tree-walker. **Thrust B gate:** every static-error class has a negative conformance case. New `unsafe` is quarantined to `lang-value`/`lang-gc`/`lang-vm`, miri-gated.
+**Thrust A gate (✅ met at M1.5):** `VmBackend` runs 100% of the M0 corpus, every case differential-identical to the tree-walker — including the full §14 demo. The tree-walker is now frozen as the pure oracle; the conformance suite asserts `skipped == 0`, so any new feature must land in both backends (or be explicitly oracle-exempt). **Thrust B gate:** every static-error class has a negative conformance case. New `unsafe` is quarantined to `lang-value`/`lang-gc`/`lang-vm`, miri-gated.
 
 ## M0 slices
 

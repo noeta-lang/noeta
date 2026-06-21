@@ -1,12 +1,15 @@
 //! The bytecode compiler: AST → [`Module`].
 //!
-//! The supported subset grows slice by slice: the literal/binding/arithmetic core (M1.0),
-//! **functions** (`fn` declarations, calls, arrow closures, the `|>` pipeline, `return`, and
-//! `if`/`else` — M1.2), and **collections** (`[...]`/`{...}` literals, `for`-iteration, the
-//! `len`/`map`/`filter`/`sum` builtins, `.count()`/`.enumerate()`, and string interpolation —
-//! M1.3). Anything outside the supported subset returns [`Unsupported`]; the differential
-//! harness skips those, so coverage climbs slice by slice while every compiled program is
-//! asserted identical to the M0 tree-walker.
+//! As of M1.5 the compiler lowers the **whole** M0 language: the literal/binding/arithmetic
+//! core (M1.0); **functions** (`fn`, calls, arrow closures, the `|>` pipeline, `return`,
+//! `if`/`else` — M1.2); **collections** (`[...]`/`{...}` literals, `for`-iteration, the
+//! `len`/`map`/`filter`/`sum` builtins, `.count()`/`.enumerate()`, string interpolation —
+//! M1.3); the **object model** (records/classes/enums on shapes, member access, methods,
+//! `..spread` — M1.4); and **`match`/`?`/`??`** with the `Result`/`Option` constructors and
+//! `panic`/`next_id` (M1.5). The few constructs still outside the subset (true upvalue
+//! capture; a bare `x = expr` new-local inside a function body) return [`Unsupported`] and the
+//! differential harness skips them — but every M0 corpus program now compiles and is asserted
+//! identical to the tree-walker (the Thrust-A gate).
 //!
 //! ## The two-level scope model
 //!
@@ -30,7 +33,9 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, ObjectLit, Param, Program, Stmt, StrPart};
+use lang_ast::{
+    BinaryOp, Expr, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program, Stmt, StrPart,
+};
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{BoolSide, Builtin, Chunk, Const, MethodEntry, Module, Op, Reg};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
@@ -185,6 +190,7 @@ impl ModuleCompiler {
                     Some(MethodCtx {
                         fields: field_set.clone(),
                     }),
+                    HashSet::new(),
                 )?;
                 self.protos[proto as usize] = chunk;
             }
@@ -193,15 +199,19 @@ impl ModuleCompiler {
     }
 
     /// Compile one function/closure/method body into a [`Chunk`]. A `method` context reserves
-    /// register 0 for the receiver (`self`) and resolves the class's field names against it.
+    /// register 0 for the receiver (`self`) and resolves the class's field names against it;
+    /// `forbidden` names (an enclosing function's locals, for a nested closure) make any
+    /// capture `Unsupported`.
     fn compile_fn_body(
         &mut self,
         params: &[Param],
         body: Body<'_>,
         method: Option<MethodCtx>,
+        forbidden: HashSet<String>,
     ) -> Result<Chunk, Unsupported> {
         let is_method = method.is_some();
         let mut fc = FnCompiler::new(self, false, method);
+        fc.captures_forbidden = forbidden;
         // A method reserves register 0 for the receiver; ordinary functions do not.
         if is_method {
             fc.alloc_reg();
@@ -235,9 +245,23 @@ impl ModuleCompiler {
         Ok(fc.into_chunk(num_params))
     }
 
-    /// Compile a top-level `fn`/closure body into a fresh prototype and return its index.
+    /// Compile a top-level `fn` body into a fresh prototype and return its index.
     fn add_function(&mut self, params: &[Param], body: Body<'_>) -> Result<u32, Unsupported> {
-        let chunk = self.compile_fn_body(params, body, None)?;
+        let chunk = self.compile_fn_body(params, body, None, HashSet::new())?;
+        let idx = self.protos.len() as u32;
+        self.protos.push(chunk);
+        Ok(idx)
+    }
+
+    /// Compile an arrow closure body into a fresh prototype, forbidding capture of `forbidden`
+    /// (the enclosing function's locals/fields), and return its index.
+    fn add_closure(
+        &mut self,
+        params: &[Param],
+        body: &Expr,
+        forbidden: HashSet<String>,
+    ) -> Result<u32, Unsupported> {
+        let chunk = self.compile_fn_body(params, Body::Arrow(body), None, forbidden)?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
@@ -253,6 +277,18 @@ impl ModuleCompiler {
         let idx = self.shapes.len() as u32;
         self.shapes.push(shape);
         idx
+    }
+
+    /// Intern a built-in `Result`/`Option` variant shape (these display with their bare
+    /// constructor, `Ok(x)`/`none`, rather than `Type.Variant`). The data carried varies at
+    /// the use site, so the shape needs no declared field names.
+    fn builtin_enum_shape(&mut self, enum_name: &str, variant: &str) -> u32 {
+        self.intern_shape(Shape::enum_variant(
+            enum_name.to_string(),
+            variant.to_string(),
+            Vec::new(),
+            true,
+        ))
     }
 }
 
@@ -281,6 +317,10 @@ struct FnCompiler<'m> {
     is_main: bool,
     /// When compiling a class method, the receiver's field names (resolved against register 0).
     method: Option<MethodCtx>,
+    /// Names bound in an enclosing function (when compiling a nested closure). Referencing one
+    /// is an upvalue capture, which the VM does not model yet — so it makes the closure (and
+    /// thus the program) [`Unsupported`]. Empty for top-level functions/methods and `main`.
+    captures_forbidden: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -302,6 +342,9 @@ enum Resolved {
     SelfRecv,
     /// A field of the method receiver, loaded via `LoadField` from register 0.
     Field,
+    /// A name bound in an *enclosing* function — a closure upvalue. Not yet supported, so a
+    /// closure that references one is skipped (the program falls outside the VM subset).
+    Capture,
     /// A global, read via `LoadGlobal` (the name may or may not exist at runtime).
     Global,
     /// A prelude value/builtin — not yet modeled by the VM, so the program is skipped.
@@ -324,7 +367,23 @@ impl<'m> FnCompiler<'m> {
             next_reg: 0,
             is_main,
             method,
+            captures_forbidden: HashSet::new(),
         }
+    }
+
+    /// The names bound in this function that a nested closure must not capture (the VM has no
+    /// upvalues yet): every register scope, plus a method's fields and `self`, plus anything
+    /// already forbidden to *this* function (so the restriction accumulates through nesting).
+    fn enclosing_local_names(&self) -> HashSet<String> {
+        let mut names = self.captures_forbidden.clone();
+        for scope in &self.scopes {
+            names.extend(scope.keys().cloned());
+        }
+        if let Some(ctx) = &self.method {
+            names.extend(ctx.fields.iter().cloned());
+            names.insert("self".to_string());
+        }
+        names
     }
 
     fn into_chunk(self, num_params: u16) -> Chunk {
@@ -383,6 +442,12 @@ impl<'m> FnCompiler<'m> {
                 return Resolved::Field;
             }
         }
+        // A name bound in an enclosing function is an upvalue capture (not yet modeled). This
+        // is checked before globals/prelude: the tree-walker captures the nearest lexical
+        // binding, so a same-named global must not silently take its place.
+        if self.captures_forbidden.contains(name) {
+            return Resolved::Capture;
+        }
         if self.is_main && self.globals.contains_key(name) {
             return Resolved::Global;
         }
@@ -391,17 +456,6 @@ impl<'m> FnCompiler<'m> {
         }
         // Unknown in `main` (→ runtime E0005), or a forward/global reference inside a function.
         Resolved::Global
-    }
-
-    /// The collection builtin a callee name refers to, but only when the name still resolves
-    /// to the prelude (a user binding of the same name shadows it) and the builtin is one
-    /// this slice implements (`len`/`map`/`filter`/`sum`). Other prelude names stay
-    /// unsupported, so a program using them is skipped rather than miscompiled.
-    fn resolve_builtin(&self, name: &str) -> Option<Builtin> {
-        match self.resolve(name) {
-            Resolved::Prelude => Builtin::from_name(name),
-            _ => None,
-        }
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
@@ -650,7 +704,12 @@ impl<'m> FnCompiler<'m> {
         match &mut self.code[at] {
             Op::Jump { target: t }
             | Op::JumpIfFalse { target: t, .. }
-            | Op::JumpIfTrue { target: t, .. } => *t = target,
+            | Op::JumpIfTrue { target: t, .. }
+            | Op::Coalesce { fallback: t, .. }
+            | Op::MatchInt { fail: t, .. }
+            | Op::MatchStr { fail: t, .. }
+            | Op::MatchBool { fail: t, .. }
+            | Op::MatchVariant { fail: t, .. } => *t = target,
             _ => unreachable!("patching a jump we just emitted"),
         }
     }
@@ -782,13 +841,29 @@ impl<'m> FnCompiler<'m> {
                     name: name.clone(),
                     span: *span,
                 }),
+                // `none` is the one prelude *value* (not a function): the `Option.none` variant.
+                Resolved::Prelude if name == "none" => {
+                    let shape = self.module.builtin_enum_shape("Option", "none");
+                    self.code.push(Op::MakeEnum {
+                        dst,
+                        shape,
+                        args: Box::new([]),
+                    });
+                }
                 Resolved::Prelude => return unsupported("reference to a prelude value/builtin"),
+                Resolved::Capture => {
+                    return unsupported(
+                        "closure captures an enclosing local (upvalues unsupported)",
+                    );
+                }
             },
             Expr::Closure { params, body, .. } => {
-                if !self.at_global_depth() {
-                    return unsupported("closure outside the top level (may capture a local)");
-                }
-                let proto = self.module.add_function(params, Body::Arrow(body))?;
+                // A nested closure is allowed as long as it captures nothing from an enclosing
+                // function — its free variables must all be globals/prelude. The forbidden set
+                // (enclosing locals/fields/`self`) makes any capture `Unsupported` (no upvalues
+                // yet). A top-level closure has an empty forbidden set, so it is unrestricted.
+                let forbidden = self.enclosing_local_names();
+                let proto = self.module.add_closure(params, body, forbidden)?;
                 self.code.push(Op::MakeClosure { dst, proto });
             }
             Expr::List { items, .. } => {
@@ -854,6 +929,25 @@ impl<'m> FnCompiler<'m> {
                 span,
                 ..
             } => self.member(receiver, name, dst, *span)?,
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => self.match_expr(scrutinee, arms, dst, *span)?,
+            Expr::Try { expr, span } => {
+                let src = self.alloc_reg();
+                self.expr(expr, src)?;
+                self.code.push(Op::TryUnwrap {
+                    dst,
+                    src,
+                    span: *span,
+                });
+            }
+            Expr::Coalesce {
+                value,
+                fallback,
+                span,
+            } => self.coalesce(value, fallback, dst, *span)?,
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {
@@ -881,7 +975,6 @@ impl<'m> FnCompiler<'m> {
                     });
                 }
             }
-            _ => return unsupported("expression outside the VM subset"),
         }
         Ok(())
     }
@@ -934,25 +1027,34 @@ impl<'m> FnCompiler<'m> {
             });
             return Ok(());
         }
-        // A prelude collection builtin called directly by name (`len(x)`, `xs |> map(f)`).
-        // A user binding of the same name shadows the builtin (resolved as an ordinary call).
+        // A prelude function called directly by name. A user binding of the same name shadows
+        // the prelude (resolved as an ordinary call below).
         if let Expr::Ident { name, .. } = callee
-            && let Some(builtin) = self.resolve_builtin(name)
+            && matches!(self.resolve(name), Resolved::Prelude)
         {
-            let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
-            arg_regs.extend(prepend);
-            for arg in args {
-                let r = self.alloc_reg();
-                self.expr(arg, r)?;
-                arg_regs.push(r);
+            if let Some(builtin) = Builtin::from_name(name) {
+                // `len`/`map`/`filter`/`sum` — the collection builtins.
+                let args = self.eval_args(args, prepend)?;
+                self.code.push(Op::CallBuiltin {
+                    dst,
+                    builtin,
+                    args,
+                    span,
+                });
+                return Ok(());
             }
-            self.code.push(Op::CallBuiltin {
-                dst,
-                builtin,
-                args: arg_regs.into_boxed_slice(),
-                span,
-            });
-            return Ok(());
+            return match name.as_str() {
+                // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)` — the Result/Option constructors.
+                "Ok" => self.make_result_option("Result", "Ok", args, prepend, dst, span),
+                "Err" => self.make_result_option("Result", "Err", args, prepend, dst, span),
+                "some" => self.make_result_option("Option", "some", args, prepend, dst, span),
+                "panic" => self.make_panic(args, prepend, dst, span),
+                "next_id" if prepend.is_none() && args.is_empty() => {
+                    self.code.push(Op::NextId { dst });
+                    Ok(())
+                }
+                _ => unsupported("prelude function not in the VM subset"),
+            };
         }
         let callee_reg = self.alloc_reg();
         self.expr(callee, callee_reg)?;
@@ -1223,6 +1325,191 @@ impl<'m> FnCompiler<'m> {
             span,
         });
         Ok(())
+    }
+
+    /// Evaluate a `prepend` (the pipeline-threaded value, if any) followed by `args`, each into
+    /// a fresh register, returning the register list.
+    fn eval_args(
+        &mut self,
+        args: &[Expr],
+        prepend: Option<Reg>,
+    ) -> Result<Box<[Reg]>, Unsupported> {
+        let mut regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
+        regs.extend(prepend);
+        for arg in args {
+            let r = self.alloc_reg();
+            self.expr(arg, r)?;
+            regs.push(r);
+        }
+        Ok(regs.into_boxed_slice())
+    }
+
+    /// Construct a built-in `Result`/`Option` value (`Ok`/`Err`/`some`). `Ok` accepts 0 or 1
+    /// arguments (the void success `Ok()` and the wrapping `Ok(x)`); `Err`/`some` take 1.
+    fn make_result_option(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[Expr],
+        prepend: Option<Reg>,
+        dst: Reg,
+        _span: Span,
+    ) -> Result<(), Unsupported> {
+        let arg_regs = self.eval_args(args, prepend)?;
+        let allowed = if variant == "Ok" { 0..=1 } else { 1..=1 };
+        if !allowed.contains(&arg_regs.len()) {
+            return unsupported("Result/Option constructor with an unexpected argument count");
+        }
+        let shape = self.module.builtin_enum_shape(enum_name, variant);
+        self.code.push(Op::MakeEnum {
+            dst,
+            shape,
+            args: arg_regs,
+        });
+        Ok(())
+    }
+
+    /// `panic(msg)` — evaluate the message and emit the abort op (E0010).
+    fn make_panic(
+        &mut self,
+        args: &[Expr],
+        prepend: Option<Reg>,
+        _dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let arg_regs = self.eval_args(args, prepend)?;
+        if arg_regs.len() != 1 {
+            return unsupported("`panic` with an unexpected argument count");
+        }
+        self.code.push(Op::Panic {
+            msg: arg_regs[0],
+            span,
+        });
+        Ok(())
+    }
+
+    /// `value ?? fallback` — unwrap the success payload, or evaluate `fallback` on the empty
+    /// case (mirroring the tree-walker's `eval_coalesce`).
+    fn coalesce(
+        &mut self,
+        value: &Expr,
+        fallback: &Expr,
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let src = self.alloc_reg();
+        self.expr(value, src)?;
+        let coalesce_pos = self.code.len();
+        self.code.push(Op::Coalesce {
+            dst,
+            src,
+            fallback: 0,
+            span,
+        });
+        // Success path: `dst` is set, then jump past the fallback.
+        let jump_end = self.code.len();
+        self.code.push(Op::Jump { target: 0 });
+        let fallback_start = self.code.len() as u32;
+        self.patch_jump(coalesce_pos, fallback_start);
+        self.expr(fallback, dst)?;
+        let end = self.code.len() as u32;
+        self.patch_jump(jump_end, end);
+        Ok(())
+    }
+
+    /// `match scrutinee { pattern => body, ... }` — lowered to a linear decision chain: each
+    /// arm tests its pattern (jumping to the next arm on mismatch), binds, evaluates its body
+    /// into `dst`, and jumps to the end. A value matching no arm hits `MatchFail` (E0007),
+    /// reproducing the tree-walker's runtime non-exhaustive-match error.
+    fn match_expr(
+        &mut self,
+        scrutinee: &Expr,
+        arms: &[lang_ast::MatchArm],
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let s = self.alloc_reg();
+        self.expr(scrutinee, s)?;
+        let mut end_jumps: Vec<usize> = Vec::new();
+        for arm in arms {
+            let mut fail_jumps: Vec<usize> = Vec::new();
+            self.scopes.push(HashMap::new());
+            self.emit_pattern(&arm.pattern, s, &mut fail_jumps);
+            let body = self.expr(&arm.body, dst);
+            self.scopes.pop();
+            body?;
+            end_jumps.push(self.code.len());
+            self.code.push(Op::Jump { target: 0 });
+            // A mismatch in this arm jumps to the next arm (or the `MatchFail` below).
+            let next = self.code.len() as u32;
+            for pos in fail_jumps {
+                self.patch_jump(pos, next);
+            }
+        }
+        self.code.push(Op::MatchFail { src: s, span });
+        let end = self.code.len() as u32;
+        for pos in end_jumps {
+            self.patch_jump(pos, end);
+        }
+        Ok(())
+    }
+
+    /// Emit the test for one pattern against value register `reg`, recording into `fail_jumps`
+    /// the positions of every conditional that must jump to the arm's failure target. Bindings
+    /// alias the matched register into the current (arm) scope. Mirrors `match_pattern`.
+    fn emit_pattern(&mut self, pattern: &Pattern, reg: Reg, fail_jumps: &mut Vec<usize>) {
+        match pattern {
+            Pattern::Wildcard { .. } => {}
+            Pattern::Binding { name, .. } => self.bind_loop_var(name, reg),
+            Pattern::Int { value, .. } => {
+                fail_jumps.push(self.code.len());
+                self.code.push(Op::MatchInt {
+                    src: reg,
+                    value: *value,
+                    fail: 0,
+                });
+            }
+            Pattern::Str { value, .. } => {
+                fail_jumps.push(self.code.len());
+                self.code.push(Op::MatchStr {
+                    src: reg,
+                    value: value.clone(),
+                    fail: 0,
+                });
+            }
+            Pattern::Bool { value, .. } => {
+                fail_jumps.push(self.code.len());
+                self.code.push(Op::MatchBool {
+                    src: reg,
+                    value: *value,
+                    fail: 0,
+                });
+            }
+            Pattern::Variant {
+                type_name,
+                variant,
+                bindings,
+                ..
+            } => {
+                fail_jumps.push(self.code.len());
+                self.code.push(Op::MatchVariant {
+                    src: reg,
+                    type_name: type_name.clone(),
+                    variant: variant.clone(),
+                    arity: bindings.len() as u16,
+                    fail: 0,
+                });
+                for (i, sub) in bindings.iter().enumerate() {
+                    let dr = self.alloc_reg();
+                    self.code.push(Op::ExtractField {
+                        dst: dr,
+                        src: reg,
+                        index: i as u16,
+                    });
+                    self.emit_pattern(sub, dr, fail_jumps);
+                }
+            }
+        }
     }
 
     /// Lower `a && b` / `a || b` to branches, matching the tree-walker's `eval_logical`:

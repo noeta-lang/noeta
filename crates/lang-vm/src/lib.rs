@@ -93,8 +93,36 @@ struct Vm<'m> {
     /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
     methods: HashMap<(String, String), u32>,
     globals: HashMap<String, Value>,
+    /// The deterministic `next_id()` counter, seeded at 1 (matching the M0 `IdGen`).
+    next_id: u64,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+}
+
+/// How a value behaves under `?`/`??`: the unwrapped success payload, or the empty case.
+enum TryOutcome {
+    Success(Value),
+    Empty,
+}
+
+/// Classify a value for `?`/`??`. Only the built-in `Result`/`Option` enums qualify; the
+/// success payload is shared (not retained). Mirrors the M0 tree-walker's `try_branch`.
+fn try_classify(v: Value) -> Option<TryOutcome> {
+    if !v.is_enum() {
+        return None;
+    }
+    let shape = v.shape()?;
+    match (shape.name.as_str(), shape.variant.as_deref()) {
+        ("Result", Some("Ok")) | ("Option", Some("some")) => {
+            let inner = v
+                .enum_data()
+                .and_then(|d| d.into_iter().next())
+                .unwrap_or_else(Value::unit);
+            Some(TryOutcome::Success(inner))
+        }
+        ("Result", Some("Err")) | ("Option", Some("none")) => Some(TryOutcome::Empty),
+        _ => None,
+    }
 }
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.
@@ -109,6 +137,7 @@ fn execute(module: &Module) -> RunResult {
         shapes: module.shapes.iter().cloned().map(Rc::new).collect(),
         methods,
         globals: HashMap::new(),
+        next_id: 1,
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -562,6 +591,141 @@ impl<'m> Vm<'m> {
                             ));
                         }
                     }
+                }
+                Op::NextId { dst } => {
+                    let id = self.next_id;
+                    self.next_id += 1;
+                    set_reg(&mut frames[top].regs, *dst, Value::int(id as i64));
+                    frames[top].pc += 1;
+                }
+                Op::Panic { msg, span } => {
+                    let message = frames[top].regs[*msg as usize].display();
+                    return Err(self.error(
+                        DiagnosticCode::Panic,
+                        *span,
+                        format!("panic: {message}"),
+                    ));
+                }
+                Op::TryUnwrap { dst, src, span } => {
+                    let v = frames[top].regs[*src as usize];
+                    match try_classify(v) {
+                        Some(TryOutcome::Success(inner)) => {
+                            retain(inner);
+                            set_reg(&mut frames[top].regs, *dst, inner);
+                            frames[top].pc += 1;
+                        }
+                        // `Err(_)`/`none`: early-return the whole value from this frame, exactly
+                        // as `Op::Return` does (the M0 `Unwind::Return`).
+                        Some(TryOutcome::Empty) => {
+                            retain(v);
+                            let finished = frames.pop().unwrap();
+                            for r in &finished.regs {
+                                release(*r);
+                            }
+                            match frames.last_mut() {
+                                Some(caller) => {
+                                    let dst = finished.ret_dst as usize;
+                                    let old = caller.regs[dst];
+                                    caller.regs[dst] = v;
+                                    release(old);
+                                }
+                                None => return Ok(v),
+                            }
+                        }
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`?` expects a `Result` or `Option`, found {}",
+                                    v.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Op::Coalesce {
+                    dst,
+                    src,
+                    fallback,
+                    span,
+                } => {
+                    let v = frames[top].regs[*src as usize];
+                    match try_classify(v) {
+                        Some(TryOutcome::Success(inner)) => {
+                            retain(inner);
+                            set_reg(&mut frames[top].regs, *dst, inner);
+                            frames[top].pc += 1;
+                        }
+                        // Empty: jump to the fallback expression (which writes `dst`).
+                        Some(TryOutcome::Empty) => frames[top].pc = *fallback as usize,
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`??` expects a `Result` or `Option` on the left, found {}",
+                                    v.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Op::MatchInt { src, value, fail } => {
+                    if frames[top].regs[*src as usize].as_int() == Some(*value) {
+                        frames[top].pc += 1;
+                    } else {
+                        frames[top].pc = *fail as usize;
+                    }
+                }
+                Op::MatchStr { src, value, fail } => {
+                    if frames[top].regs[*src as usize].as_string().as_deref() == Some(value) {
+                        frames[top].pc += 1;
+                    } else {
+                        frames[top].pc = *fail as usize;
+                    }
+                }
+                Op::MatchBool { src, value, fail } => {
+                    if frames[top].regs[*src as usize].as_bool() == Some(*value) {
+                        frames[top].pc += 1;
+                    } else {
+                        frames[top].pc = *fail as usize;
+                    }
+                }
+                Op::MatchVariant {
+                    src,
+                    type_name,
+                    variant,
+                    arity,
+                    fail,
+                } => {
+                    let v = frames[top].regs[*src as usize];
+                    let matches = v.is_enum()
+                        && v.shape().is_some_and(|shape| {
+                            shape.variant.as_deref() == Some(variant)
+                                && type_name.as_ref().is_none_or(|t| &shape.name == t)
+                        })
+                        && v.enum_data().is_some_and(|d| d.len() == *arity as usize);
+                    if matches {
+                        frames[top].pc += 1;
+                    } else {
+                        frames[top].pc = *fail as usize;
+                    }
+                }
+                Op::ExtractField { dst, src, index } => {
+                    let element =
+                        frames[top].regs[*src as usize].enum_data().unwrap()[*index as usize];
+                    retain(element);
+                    set_reg(&mut frames[top].regs, *dst, element);
+                    frames[top].pc += 1;
+                }
+                Op::MatchFail { src, span } => {
+                    let shown = frames[top].regs[*src as usize].display();
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("no match arm matched the value {shown}"),
+                    ));
                 }
                 Op::Unary { op, dst, src, span } => {
                     match apply_unary(*op, frames[top].regs[*src as usize]) {
@@ -1160,6 +1324,86 @@ mod tests {
     }
 
     #[test]
+    fn match_over_enums_binds_variant_data() {
+        let r = run(
+            "enum E { Empty; Code(n: int); }\nx = E.Code(42);\necho match x { E.Empty => \"empty\", E.Code(n) => \"code {n}\" };\n",
+        );
+        assert_eq!(r.stdout, "code 42\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn match_literals_and_wildcard() {
+        let r = run(
+            "fn name(n) { return match n { 0 => \"zero\", 1 => \"one\", _ => \"many\" }; }\necho name(0);\necho name(5);\n",
+        );
+        assert_eq!(r.stdout, "zero\nmany\n");
+    }
+
+    #[test]
+    fn unmatched_value_is_a_runtime_error() {
+        let r = run("enum E { A; B; C; }\necho match E.C { E.A => 1, E.B => 2 };\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn result_constructors_display_bare() {
+        let r = run("echo Ok(5);\necho Err(\"boom\");\necho some(3);\necho none;\necho Ok();\n");
+        assert_eq!(r.stdout, "Ok(5)\nErr(boom)\nsome(3)\nnone\nOk\n");
+    }
+
+    #[test]
+    fn question_propagates_err_and_unwraps_ok() {
+        assert_eq!(
+            run("fn validate(): int { return Err(\"empty\"); }\nfn run_it(): int { validate()?; return Ok(\"done\"); }\necho run_it();\n").stdout,
+            "Err(empty)\n"
+        );
+        assert_eq!(
+            run("fn ok_val(): int { return Ok(41); }\nfn use_it(): int { return Ok(ok_val()? + 1); }\necho use_it();\n").stdout,
+            "Ok(42)\n"
+        );
+    }
+
+    #[test]
+    fn coalesce_supplies_a_default() {
+        let r =
+            run("echo none ?? 99;\necho some(7) ?? 99;\necho Err(\"x\") ?? 0;\necho Ok(5) ?? 0;\n");
+        assert_eq!(r.stdout, "99\n7\n0\n5\n");
+    }
+
+    #[test]
+    fn panic_aborts_with_e0010_keeping_prior_output() {
+        let r = run("echo \"before\";\npanic(\"boom\");\necho \"after\";\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(r.stdout, "before\n");
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::Panic
+        );
+    }
+
+    #[test]
+    fn next_id_is_a_deterministic_counter() {
+        let r = run("echo next_id();\necho next_id();\necho next_id();\n");
+        assert_eq!(r.stdout, "1\n2\n3\n");
+    }
+
+    #[test]
+    fn capture_free_closure_inside_a_method_is_supported() {
+        // The `fn(it) => it.price * it.qty` closure captures nothing enclosing, so it compiles
+        // even though it is defined inside a method (true upvalue capture stays unsupported).
+        let r = run(
+            "type Item = { price: float, qty: int };\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return items |> map(fn(it) => it.price * it.qty) |> sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
+        );
+        assert_eq!(r.stdout, "13.0\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn string_interpolation_concatenates_display_forms() {
         let r = run("name = \"Niro\";\necho \"Hello {name}\";\necho \"sum is {1 + 2 * 3}\";\n");
         assert_eq!(r.stdout, "Hello Niro\nsum is 7\n");
@@ -1315,6 +1559,32 @@ mod tests {
             SourceId::FIRST,
             "t.lang",
             "enum Status { Pending; Paid; }\nclass Order {\n  id: int\n  mut status: Status\n  fn new(id: int): Order { return Order { id: id, status: Status.Pending }; }\n  fn tag(): int { return id; }\n}\no = Order.new(7);\necho o.tag();\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        insta::assert_snapshot!(module.disassemble());
+    }
+
+    #[test]
+    fn disassembly_of_a_match_decision_tree_is_stable() {
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "enum E { Empty; Code(n: int); }\nfn describe(e): string {\n  return match e {\n    E.Empty => \"empty\",\n    E.Code(n) => \"code {n}\",\n  };\n}\necho describe(E.Code(7));\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        insta::assert_snapshot!(module.disassemble());
+    }
+
+    #[test]
+    fn disassembly_of_a_question_propagating_function_is_stable() {
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "fn validate(): int { return Err(\"bad\"); }\nfn place(): int { validate()?; return Ok(\"ok\"); }\necho place();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

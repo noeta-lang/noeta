@@ -60,12 +60,14 @@ fn differential_backends_agree() {
         "the VM diverged from the tree-walker:\n{}",
         report.to_human()
     );
-    // M1.0 established the spine on the smallest subset; each slice raises this floor until it
-    // reaches 100%. M1.4 added the object model — records/classes/enums on shapes, member
-    // access, methods, structural update, and opaque `use` stubs. Guard against collapse.
-    assert!(
-        report.supported() >= 24,
-        "expected the VM to compile at least the M1.4 subset, got:\n{}",
+    // M1.0 established the spine on the smallest subset; each slice raised this floor until
+    // M1.5 reached the **Thrust-A gate**: the VM compiles 100% of the comparable corpus
+    // (every parse-clean case) — match/`?`/`??`/constructors completing the feature surface.
+    // The tree-walker is now frozen as the pure oracle; this floor must never regress.
+    assert_eq!(
+        report.skipped,
+        0,
+        "the VM must compile 100% of the comparable corpus (Thrust-A gate); got:\n{}",
         report.to_human()
     );
 }
