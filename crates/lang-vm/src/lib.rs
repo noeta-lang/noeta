@@ -34,7 +34,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use lang_ast::Program;
+use lang_ast::{BinaryOp, Program};
 use lang_backend::{Backend, RunResult};
 use lang_bytecode::{BoolSide, Builtin, Const, Module, Op};
 use lang_compiler::{Unsupported, compile};
@@ -90,23 +90,38 @@ struct Frame {
 
 /// A transform applied to a frame's return value as it flows into the caller's destination
 /// register. Used by operator dispatch where the called trait method's raw result needs
-/// post-processing: `!=` calls `Equatable::eq` and negates the resulting `bool`. (`Comparable`'s
-/// `Ordering` → `bool` mapping for `< <= > >=` will be a further variant in M1.8b.)
+/// post-processing: `!=` calls `Equatable::eq` and negates the resulting `bool`; `< <= > >=` call
+/// `Comparable::compare` and map the resulting `Ordering` variant to a `bool`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RetTransform {
     /// Pass the value through unchanged (every ordinary call/return).
     None,
     /// Negate a `bool` result (for `!=` dispatched to `eq`); a non-bool passes through.
     Negate,
+    /// Map a returned `Ordering` enum to this operator's `bool` (for `< <= > >=` dispatched to
+    /// `compare`); a non-`Ordering` value passes through (an ill-typed `compare`).
+    Ordering(BinaryOp),
 }
 
 impl RetTransform {
-    fn apply(self, v: Value) -> Value {
+    /// Map the frame's raw return value. Returns the transformed value and whether the original
+    /// `v` was *replaced* (so the caller must release `v`'s keep-alive reference — the transformed
+    /// result is always a fresh immediate `bool`, holding no heap reference of its own). A
+    /// pass-through (`None`, or an ill-typed value the transform doesn't recognize) returns `v`
+    /// unchanged with `false`, so the caller transfers `v`'s reference onward as usual.
+    fn apply(self, v: Value) -> (Value, bool) {
         match self {
-            RetTransform::None => v,
+            RetTransform::None => (v, false),
             RetTransform::Negate => match v.as_bool() {
-                Some(b) => Value::bool(!b),
-                None => v,
+                Some(b) => (Value::bool(!b), true),
+                None => (v, false),
+            },
+            RetTransform::Ordering(op) => match v.shape() {
+                Some(shape) if shape.kind == ShapeKind::Enum && shape.name == "Ordering" => {
+                    let variant = shape.variant.as_deref().unwrap_or("");
+                    (Value::bool(op.ordering_satisfies(variant)), true)
+                }
+                _ => (v, false),
             },
         }
     }
@@ -508,6 +523,40 @@ impl<'m> Vm<'m> {
                         });
                         continue;
                     }
+                    // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
+                    // impl returns). One argument, on any non-object receiver.
+                    if method == "compare" {
+                        if args.len() != 1 {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "method `compare` takes 1 argument but {} were supplied",
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        let other = frames[top].regs[args[0] as usize];
+                        match compare_primitive(v, other) {
+                            Some(ordering) => {
+                                let value = make_ordering(lang_ast::ordering_variant(ordering));
+                                set_reg(&mut frames[top].regs, *dst, value);
+                                frames[top].pc += 1;
+                            }
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "cannot compare {} and {}",
+                                        v.type_name(),
+                                        other.type_name()
+                                    ),
+                                ));
+                            }
+                        }
+                        continue;
+                    }
                     // Built-in zero-argument methods on lists/maps/strings.
                     let result = if !args.is_empty() {
                         None
@@ -719,16 +768,20 @@ impl<'m> Vm<'m> {
                                 release(*r);
                             }
                             // Apply the frame's return transform on every exit path, for the same
-                            // reason `Op::Return` does (a short-circuiting `?` is an early return).
-                            let v = finished.ret_transform.apply(v);
+                            // reason `Op::Return` does (a short-circuiting `?` is an early return);
+                            // release the original if the transform replaced it.
+                            let (out, replaced) = finished.ret_transform.apply(v);
+                            if replaced {
+                                release(v);
+                            }
                             match frames.last_mut() {
                                 Some(caller) => {
                                     let dst = finished.ret_dst as usize;
                                     let old = caller.regs[dst];
-                                    caller.regs[dst] = v;
+                                    caller.regs[dst] = out;
                                     release(old);
                                 }
-                                None => return Ok(v),
+                                None => return Ok(out),
                             }
                         }
                         None => {
@@ -864,6 +917,10 @@ impl<'m> Vm<'m> {
                             self.methods
                                 .get(&(type_name, "eq".to_string()))
                                 .map(|&proto| (proto, transform))
+                        } else if let Some(method_name) = op.comparable_method() {
+                            self.methods
+                                .get(&(type_name, method_name.to_string()))
+                                .map(|&proto| (proto, RetTransform::Ordering(*op)))
                         } else {
                             None
                         }
@@ -1010,15 +1067,20 @@ impl<'m> Vm<'m> {
                     }
                 }
                 Op::Return { src } => {
-                    let v = frames[top].regs[*src as usize];
-                    retain(v); // keep alive across this frame's teardown
+                    let raw = frames[top].regs[*src as usize];
+                    retain(raw); // keep alive across this frame's teardown
                     let finished = frames.pop().unwrap();
                     for r in &finished.regs {
                         release(*r);
                     }
-                    // An operator-dispatch frame may post-process its result (e.g. `!=` negates
-                    // `eq`'s bool). The transform maps immediates only, so it never affects refcounts.
-                    let v = finished.ret_transform.apply(v);
+                    // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s
+                    // bool; `< <= > >=` map `compare`'s `Ordering`). When the transform replaces a
+                    // heap value (an `Ordering`) with a fresh `bool`, release the original's
+                    // keep-alive reference so it is not leaked.
+                    let (v, replaced) = finished.ret_transform.apply(raw);
+                    if replaced {
+                        release(raw);
+                    }
                     match frames.last_mut() {
                         Some(caller) => {
                             // Transfer the retained reference into the caller's destination.
@@ -1260,6 +1322,36 @@ fn set_reg(regs: &mut [Value], dst: u16, value: Value) {
     let old = regs[dst as usize];
     regs[dst as usize] = value;
     release(old);
+}
+
+/// Build a built-in `Ordering` enum value (`Ordering.Less`/`Equal`/`Greater`) with a fresh shape.
+/// Shapes carry no identity for matching or equality (both compare by name + variant), so an
+/// on-the-fly shape is interchangeable with any other `Ordering` shape — including the
+/// tree-walker's, which is what keeps the differential identical.
+fn make_ordering(variant: &str) -> Value {
+    let shape = Rc::new(Shape::enum_variant("Ordering", variant, Vec::new(), false));
+    Value::enum_value(shape, Vec::new())
+}
+
+/// The total order of two primitives for `x.compare(y)`: integers compare exactly, strings
+/// lexically, and any other numeric pairing as `f64`. `None` when the operands are not comparable
+/// (different non-numeric kinds, or a `NaN` float). Mirrors the tree-walker's `compare_primitive`.
+fn compare_primitive(left: Value, right: Value) -> Option<std::cmp::Ordering> {
+    let int_operand = |v: Value| {
+        if v.as_float().is_some() {
+            None
+        } else {
+            v.as_int()
+        }
+    };
+    if let (Some(a), Some(b)) = (int_operand(left), int_operand(right)) {
+        return Some(a.cmp(&b));
+    }
+    if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
+        return Some(a.cmp(&b));
+    }
+    let num = |v: Value| v.as_float().or_else(|| v.as_int().map(|i| i as f64));
+    num(left)?.partial_cmp(&num(right)?)
 }
 
 /// Turn a compile-time constant into a freshly-owned runtime value.
@@ -1510,6 +1602,26 @@ mod tests {
         );
         assert_eq!(r.stdout, "true\nfalse\nfalse\n");
         assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn comparable_overloads_ordering_operators() {
+        // `impl Comparable` routes `< <= > >=` to `compare`; the returned `Ordering` is mapped to
+        // each operator's bool via the frame's return transform.
+        let r = run(
+            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
+        );
+        assert_eq!(r.stdout, "true\nfalse\ntrue\nfalse\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn primitive_compare_yields_ordering() {
+        let r = run("echo 1.compare(2);\necho 5.compare(5);\necho 9.compare(2);\n");
+        assert_eq!(
+            r.stdout,
+            "Ordering.Less\nOrdering.Equal\nOrdering.Greater\n"
+        );
     }
 
     #[test]

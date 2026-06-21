@@ -1,0 +1,30 @@
+// Implementing `Comparable` lights up `< <= > >=`: each dispatches to the class's `compare`
+// method (returning an `Ordering`) and maps the result to a bool. The body delegates to the
+// built-in `.compare()` on a field. Both backends agree (the differential oracle).
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+class Money {
+    amount: int
+
+    fn new(amount: int): Money {
+        return Money { amount: amount };
+    }
+
+    impl Comparable {
+        fn compare(other: Money): Ordering {
+            return amount.compare(other.amount);
+        }
+    }
+}
+
+a = Money.new(5);
+b = Money.new(8);
+echo a < b;
+echo a > b;
+echo a <= b;
+echo b >= a;
+echo a >= b;

@@ -1,0 +1,17 @@
+// An `Ordering` from `.compare()` is an ordinary enum value: it can be matched by variant. This
+// is how a richer `compare` (e.g. multi-field) inspects a sub-comparison.
+// expect: stdout "lt"
+// expect: stdout "eq"
+// expect: stdout "gt"
+// expect: exit 0
+fn describe(o: Ordering): string {
+    return match o {
+        Ordering.Less => "lt",
+        Ordering.Equal => "eq",
+        Ordering.Greater => "gt",
+    };
+}
+
+echo describe(3.compare(7));
+echo describe(4.compare(4));
+echo describe(9.compare(1));

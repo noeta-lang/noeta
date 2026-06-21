@@ -1256,6 +1256,37 @@ impl Interpreter {
                 )),
             };
         }
+        // `x.compare(y)` — the `Ordering` of two primitives. This is the value a `Comparable`
+        // impl returns (typically by delegating to a field's `compare`); it lights up nothing on
+        // its own, but `Comparable` dispatch reads the variant to derive `< <= > >=`.
+        if name == "compare" {
+            if args.len() != 1 {
+                return Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "method `compare` takes 1 argument but {} were supplied",
+                        args.len()
+                    ),
+                ));
+            }
+            return match compare_primitive(&receiver, &args[0]) {
+                Some(ordering) => Ok(builtin_enum(
+                    "Ordering",
+                    lang_ast::ordering_variant(ordering),
+                    Vec::new(),
+                )),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "cannot compare {} and {}",
+                        receiver.type_name(),
+                        args[0].type_name()
+                    ),
+                )),
+            };
+        }
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
@@ -1558,6 +1589,19 @@ impl Interpreter {
                     other => other,
                 });
             }
+            if let Some(method_name) = op.comparable_method()
+                && let Some(method) = object.def.methods.get(method_name)
+            {
+                let result =
+                    self.call_method_on(&Rc::clone(object), &Rc::clone(method), vec![right], span)?;
+                // `compare` returns an `Ordering`; map its variant to this operator's bool.
+                return Ok(match &result {
+                    Value::Enum(e) if e.enum_name == "Ordering" => {
+                        Value::Bool(op.ordering_satisfies(&e.variant))
+                    }
+                    _ => result,
+                });
+            }
         }
         match ops::apply_binary(op, &left, &right) {
             Ok(value) => Ok(value),
@@ -1615,15 +1659,34 @@ impl Interpreter {
     }
 }
 
-/// Construct a built-in `Result`/`Option` value (`Ok`/`Err`/`some`/`none`). These reuse
-/// the ordinary [`EnumValue`] representation, so they participate in `match` and equality
-/// like any enum; only their display and the `?`/`??` operators treat them specially.
+/// Construct a built-in `Result`/`Option`/`Ordering` value (`Ok`/`Err`/`some`/`none`, or
+/// `Ordering.Less`/`Equal`/`Greater`). These reuse the ordinary [`EnumValue`] representation, so
+/// they participate in `match` and equality like any enum; only `Result`/`Option`'s display and
+/// the `?`/`??` operators treat them specially.
 fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
     Value::Enum(Rc::new(EnumValue {
         enum_name: enum_name.to_string(),
         variant: variant.to_string(),
         data,
     }))
+}
+
+/// The total order of two primitives for `x.compare(y)`: integers compare exactly, strings
+/// lexically, and any other numeric pairing as `f64`. Returns `None` when the operands are not
+/// comparable (different non-numeric kinds, or a `NaN` float).
+fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+    match (left, right) {
+        (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
+        (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        _ => {
+            let num = |v: &Value| match v {
+                Value::Int(i) => Some(*i as f64),
+                Value::Float(f) => Some(*f),
+                _ => None,
+            };
+            num(left)?.partial_cmp(&num(right)?)
+        }
+    }
 }
 
 /// At a function-call boundary, turn a `?`-induced early return into the call's value;
@@ -1751,6 +1814,28 @@ mod tests {
         );
         assert_eq!(out.stdout, "true\nfalse\nfalse\n");
         assert_eq!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn comparable_overloads_ordering_operators() {
+        // `impl Comparable` routes `< <= > >=` to `compare` (delegating to the built-in primitive
+        // `.compare()`); the returned `Ordering` is mapped to each operator's bool.
+        let out = run(
+            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
+        );
+        assert_eq!(out.stdout, "true\nfalse\ntrue\nfalse\n");
+        assert_eq!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn primitive_compare_yields_ordering() {
+        let out = run(
+            "echo 1.compare(2);\necho 5.compare(5);\necho 9.compare(2);\necho \"a\".compare(\"b\");\n",
+        );
+        assert_eq!(
+            out.stdout,
+            "Ordering.Less\nOrdering.Equal\nOrdering.Greater\nOrdering.Less\n"
+        );
     }
 
     #[test]

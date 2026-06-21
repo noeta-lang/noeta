@@ -1,0 +1,11 @@
+// The built-in `.compare()` on primitives yields an `Ordering` value (`Less`/`Equal`/`Greater`),
+// the building block a `Comparable` impl returns. Integers compare numerically, strings lexically.
+// expect: stdout "Ordering.Less"
+// expect: stdout "Ordering.Equal"
+// expect: stdout "Ordering.Greater"
+// expect: stdout "Ordering.Less"
+// expect: exit 0
+echo 1.compare(2);
+echo 5.compare(5);
+echo 9.compare(2);
+echo "apple".compare("banana");

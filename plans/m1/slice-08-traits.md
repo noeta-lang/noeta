@@ -27,12 +27,16 @@ The surface, the registry, the checker rules, and infix operator overloading wir
 
 ## M1.8b — in progress
 
-**Done (increment 1):**
-- [x] **`Equatable` dispatch** — `impl Equatable { fn eq(other): bool }` lights up `==`/`!=` in both backends, overriding the default structural equality. `!=` negates `eq`'s result via a new `RetTransform` on the VM frame (the call-then-transform mechanism the infix group didn't need); the tree-walker negates synchronously. Conformance `traits/operator_eq.lang`.
-- [x] **Fallible `TryAdd`** — needs *no* operator wiring: bare `+` is reserved for infallible `Add`, and a fallible add is the explicit `try_add` returning `Result`, composed with `?` (an ordinary method call + `?`, both already supported). The `impl TryAdd` is validated by the 8a checker (E0015 if `try_add` is missing). Conformance `traits/fallible_try_add.lang`. The `RetTransform` enum is built to extend to `Comparable`'s `Ordering` → `bool` map.
+**Done (increment 1 — equality + fallible):**
+- [x] **`Equatable` dispatch** — `impl Equatable { fn eq(other): bool }` lights up `==`/`!=` in both backends, overriding the default structural equality. `!=` negates `eq`'s result via a `RetTransform` on the VM frame (the call-then-transform mechanism the infix group didn't need); the tree-walker negates synchronously. Conformance `traits/operator_eq.lang`.
+- [x] **Fallible `TryAdd`** — needs *no* operator wiring: bare `+` is reserved for infallible `Add`, and a fallible add is the explicit `try_add` returning `Result`, composed with `?` (an ordinary method call + `?`, both already supported). The `impl TryAdd` is validated by the 8a checker (E0015 if `try_add` is missing). Conformance `traits/fallible_try_add.lang`.
+
+**Done (increment 2 — ordering):**
+- [x] **`Ordering` built-in enum** (`Less`/`Equal`/`Greater`) + **`.compare()` on primitives** (int/float/string), both backends. `Ordering` values are constructed on the fly (eval `builtin_enum`; VM an on-the-fly `Shape::enum_variant`, like `MakeOpaque`) — shapes carry no identity (match/equality are by name + variant), so the two backends' values are interchangeable, keeping the differential identical. The values are ordinary enums: they display (`Ordering.Less`) and **`match` by variant** (`traits/match_ordering.lang`). Conformance `traits/compare_primitives.lang`.
+- [x] **`Comparable` dispatch** — `impl Comparable { fn compare(other): Ordering }` lights up `< <= > >=` in both backends; the returned `Ordering` is mapped to each operator's bool (`<` ⇒ `Less`, `<=` ⇒ `Less`/`Equal`, …) via the new `RetTransform::Ordering(op)` variant (VM) / synchronously (eval). The canonical body delegates to `.compare()` on a field, exactly as the syntax doc shows. Conformance `traits/comparable.lang`. (A refcount-leak trap: the VM's `Ordering` → `bool` transform discards a *heap* value, so the frame's keep-alive reference must be released — `apply` now reports whether it replaced the value; miri-gated.)
 
 **Todo:**
-- [ ] **`Comparable`** — `impl Comparable { fn compare(other): Ordering }` lighting up `< <= > >=`, and `#[derive(Comparable)]` structural ordering. **Prerequisite:** an `Ordering` built-in enum (`Less`/`Equal`/`Greater`) + `.compare()` on primitives, which do not exist yet (only Rust's internal `std::cmp::Ordering` in `ops.rs`). The `RetTransform` mechanism already covers the `Ordering` → `bool` step.
+- [ ] User-facing `Ordering.Less` construction (the dispatch needs only delegation via `.compare()`, so this is deferred); register `Ordering` as a namable prelude enum.
 - [ ] Derive *codegen* in the compiler: synthesize `Comparable` (structural ordering), `Display` (`to_string`), `ToJson`, `Clone`. (`Equatable`/`Display`/`Clone` already match M1's default structural `==`/display/shallow-copy; `Comparable` ordering and `ToJson` are genuinely new behavior.)
 - [ ] Other protocols: `Index` (`a[i]`), `Length` (`len`), `Iterable` (`for`), `Callable` (`a(...)`), `Members`/`DynamicCall` — each needs the surface operator routed to its method.
 - [ ] Generics via shapes (type-param slot, monomorphic guard elision) + the attribute manifest build artifact.

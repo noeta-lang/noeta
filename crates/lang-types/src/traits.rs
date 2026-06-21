@@ -8,12 +8,13 @@
 //! (`lang-check`), and the operator → method correspondence it encodes is kept in lockstep with
 //! [`BinaryOp::overload_method`](lang_ast::BinaryOp::overload_method) by a unit test below.
 //!
-//! M1.8a wires the *infix operator traits* (`Add`/`Sub`/`Mul`/`Div`/`Concat`) end-to-end through
-//! both backends; M1.8b adds `Equatable` (`==`/`!=` → `eq`). Every trait/derive name is validated
-//! against this table. The behavior behind the remaining protocols (`Comparable` ordering — which
-//! needs an `Ordering` type — `Display`/`ToJson` codegen, `Index`/`Members`/`Callable` dispatch)
-//! is the rest of M1.8b; their names are registered now so the surface parses, checks, and reads
-//! as the design intends. (`TryAdd` is fallible-by-method: `a.try_add(b)?`, no operator wiring.)
+//! Every operator is now trait-dispatched through both backends: the infix traits `Add`/`Sub`/
+//! `Mul`/`Div`/`Concat` (`+ - * / ~`, M1.8a), `Equatable` (`==`/`!=` → `eq`), and `Comparable`
+//! (`< <= > >=` → `compare`, returning the built-in `Ordering` enum). Every trait/derive name is
+//! validated against this table. The behavior behind the remaining protocols (`Display`/`ToJson`
+//! codegen, `Index`/`Members`/`Callable` dispatch) is the rest of M1.8b; their names are registered
+//! now so the surface parses, checks, and reads as the design intends. (`TryAdd` is fallible-by-
+//! method: `a.try_add(b)?`, no operator wiring.)
 
 use lang_ast::BinaryOp;
 
@@ -214,6 +215,27 @@ mod tests {
                 "{op:?} is not an equality op"
             );
         }
+    }
+
+    /// `Comparable`'s required method is the one `< <= > >=` dispatch to, and the `Ordering` →
+    /// bool mapping matches each operator's meaning.
+    #[test]
+    fn comparable_dispatch_matches_registry() {
+        use BinaryOp::*;
+        let cmp = BuiltinTrait::lookup("Comparable").unwrap();
+        assert_eq!(cmp.required_method, Some(("compare", 1)));
+        for op in [Lt, Le, Gt, Ge] {
+            assert_eq!(op.comparable_method(), Some("compare"));
+        }
+        for op in [Add, Sub, Mul, Div, Rem, Concat, Eq, Ne, And, Or] {
+            assert_eq!(op.comparable_method(), None, "{op:?} is not an ordering op");
+        }
+        // The mapping: < is Less; <= is Less|Equal; > is Greater; >= is Greater|Equal.
+        assert!(Lt.ordering_satisfies("Less") && !Lt.ordering_satisfies("Equal"));
+        assert!(Le.ordering_satisfies("Less") && Le.ordering_satisfies("Equal"));
+        assert!(Gt.ordering_satisfies("Greater") && !Gt.ordering_satisfies("Equal"));
+        assert!(Ge.ordering_satisfies("Greater") && Ge.ordering_satisfies("Equal"));
+        assert!(!Lt.ordering_satisfies("Greater") && !Gt.ordering_satisfies("Less"));
     }
 
     #[test]

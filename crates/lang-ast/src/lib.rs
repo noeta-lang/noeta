@@ -555,4 +555,47 @@ impl BinaryOp {
             _ => None,
         }
     }
+
+    /// The `Comparable` method `< <= > >=` dispatch to: each calls the class's `compare` method
+    /// (returning an `Ordering`) and maps the result to a bool. Returns `Some("compare")` for the
+    /// four ordering comparisons and `None` for every other operator. The `Ordering` → bool
+    /// mapping is operator-specific and applied after the call (see [`BinaryOp::ordering_satisfies`]).
+    pub fn comparable_method(self) -> Option<&'static str> {
+        matches!(
+            self,
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+        )
+        .then_some("compare")
+    }
+
+    /// Map an `Ordering` variant name (`"Less"`/`"Equal"`/`"Greater"`, as returned by a
+    /// `compare` method) to this comparison operator's bool result. Defined here so both backends
+    /// agree on the mapping; an unrecognized variant yields `false`.
+    pub fn ordering_satisfies(self, ordering_variant: &str) -> bool {
+        let less = ordering_variant == "Less";
+        let equal = ordering_variant == "Equal";
+        let greater = ordering_variant == "Greater";
+        match self {
+            BinaryOp::Lt => less,
+            BinaryOp::Le => less || equal,
+            BinaryOp::Gt => greater,
+            BinaryOp::Ge => greater || equal,
+            _ => false,
+        }
+    }
+}
+
+/// The three `Ordering` variant names a `compare` method returns. The built-in `Ordering` enum is
+/// constructed on the fly by the `.compare()` primitive method and by `Comparable` dispatch; this
+/// is the canonical spelling shared by both backends so their values display and match identically.
+pub const ORDERING_VARIANTS: [&str; 3] = ["Less", "Equal", "Greater"];
+
+/// The `Ordering` variant name for a `std::cmp::Ordering`. Keeps the primitive `.compare()` in
+/// both backends mapping to the same surface variant.
+pub fn ordering_variant(ordering: std::cmp::Ordering) -> &'static str {
+    match ordering {
+        std::cmp::Ordering::Less => "Less",
+        std::cmp::Ordering::Equal => "Equal",
+        std::cmp::Ordering::Greater => "Greater",
+    }
 }
