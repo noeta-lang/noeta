@@ -3,9 +3,20 @@
 //! Deliberately a simple boxed `enum` in M0. M1 replaces this with the NaN-boxed
 //! value representation and the shape-based object model; keeping it behind this type
 //! (and the `display()`/`type_name()` methods) keeps that swap local.
+//!
+//! `Debug` and `PartialEq` are hand-written rather than derived: function values hold
+//! an `Rc<Scope>` whose graph can contain reference cycles (a global function captures
+//! the global scope, which holds the function), so a derived recursive `Debug`/`PartialEq`
+//! could loop forever. We print functions opaquely and treat them as never structurally
+//! equal.
+
+use std::fmt;
+use std::rc::Rc;
+
+use crate::{Builtin, Closure};
 
 /// A runtime value.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Clone)]
 pub enum Value {
     /// The unit value, produced by statements and effectful calls.
     Unit,
@@ -13,6 +24,10 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Str(String),
+    /// A user-defined function or closure.
+    Function(Rc<Closure>),
+    /// A built-in (native) function from the prelude.
+    Builtin(Builtin),
 }
 
 impl Value {
@@ -25,6 +40,8 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.clone(),
+            Value::Function(_) => "<fn>".to_string(),
+            Value::Builtin(b) => format!("<builtin {}>", b.name()),
         }
     }
 
@@ -36,6 +53,35 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Str(_) => "string",
+            Value::Function(_) | Value::Builtin(_) => "function",
+        }
+    }
+}
+
+impl fmt::Debug for Value {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Value::Unit => write!(f, "Unit"),
+            Value::Bool(b) => write!(f, "Bool({b})"),
+            Value::Int(i) => write!(f, "Int({i})"),
+            Value::Float(x) => write!(f, "Float({x})"),
+            Value::Str(s) => write!(f, "Str({s:?})"),
+            Value::Function(_) => write!(f, "Function(<fn>)"),
+            Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Unit, Value::Unit) => true,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            // Functions are not structurally comparable.
+            _ => false,
         }
     }
 }

@@ -1,6 +1,6 @@
 # Slice 2 — Functions, closures, calls, pipeline `|>`
 
-Status: todo
+Status: done
 
 ## Goal
 `fn` declarations, arrow closures, function application, and the `|>` pipeline operator.
@@ -10,16 +10,24 @@ Status: todo
 - Out: methods on classes (Slice 6), `?` (Slice 7).
 
 ## Checklist (vertical slice)
-- [ ] Grammar / AST: fn decl, params (name-first types), closure expr, call expr, pipeline expr (kept as its own node — sugar stays in the AST), `return` stmt.
-- [ ] Checker rule: n/a.
-- [ ] Bytecode: n/a.
-- [ ] Eval op: closures capture env; call frames; `return`; pipeline evaluation; `map`/`filter`/`sum` builtins over lists.
-- [ ] Conformance cases: a function, a closure, a `|>` chain producing a known result.
-- [ ] Snapshots: AST for a pipeline program.
+- [x] Grammar / AST: `FnDecl`, `Param`, `TypeRef` (parsed, unchecked), `Stmt::{Return, Expr}`, `Expr::{Call, Closure, Pipeline}`; postfix call + pipeline in the Pratt loop; type-annotation and block parsing.
+- [x] Checker rule: n/a.
+- [x] Bytecode: n/a.
+- [x] Eval op: lexical scope chain (`Rc<Scope>` with parent links), closures capturing their defining scope, call frames with arity checks, `return` flow, pipeline threading, `next_id` builtin.
+- [x] Conformance cases: `functions/basic.lang`, `functions/closures_and_pipeline.lang`.
+- [x] Snapshots: fn+pipeline and closure+call parser snapshots.
 
-## Notes / traps
-- Keep `|>` as a distinct AST node (don't desugar in the parser) so later diagnostics can point at the pipeline.
-- `map`/`filter` take a closure; ensure closure values are first-class.
+## Outcome
+First-class functions and closures with a proper lexical scope chain (forward references
+work; self-recursion lands with `if` in Slice 3). `next_id()` wired as a deterministic
+builtin. 36 tests; 8 conformance cases; fmt/clippy clean.
+
+Notes / deferred:
+- `map`/`filter`/`sum` moved to **Slice 3** (they need List, which lands there).
+- The scope chain uses non-atomic `Rc` (matches the per-isolate design). A global function
+  capturing the global scope forms an `Rc` cycle that leaks until process exit — exactly
+  what the planned M1 cycle collector addresses; documented in `lang-eval`.
+- `TypeRef` annotations are parsed and retained but not interpreted (M1 checker).
 
 ## Definition of done
 - Conformance cases pass for fn/closure/`|>`.

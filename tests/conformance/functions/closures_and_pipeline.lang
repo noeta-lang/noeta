@@ -1,0 +1,18 @@
+// Closures capture their environment; the pipeline threads a value as the first arg.
+// expect: stdout "105"
+// expect: stdout "7"
+// expect: stdout "15"
+// expect: exit 0
+base = 100;
+add_base = fn(x) => x + base;
+echo add_base(5);
+
+fn inc(n: int): int {
+    return n + 1;
+}
+echo 5 |> inc |> inc;
+
+fn add(a: int, b: int): int {
+    return a + b;
+}
+echo 5 |> add(10);

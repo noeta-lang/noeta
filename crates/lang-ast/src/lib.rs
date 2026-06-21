@@ -39,12 +39,67 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
+    /// A named function declaration: `fn name(params): Ret { body }`.
+    Fn(FnDecl),
+    /// `return <expr>;` or `return;`.
+    Return { value: Option<Expr>, span: Span },
+    /// A bare expression used for its effect: `expr;`.
+    Expr { expr: Expr, span: Span },
 }
 
 impl Stmt {
     pub fn span(&self) -> Span {
         match self {
-            Stmt::Echo { span, .. } | Stmt::Binding { span, .. } => *span,
+            Stmt::Echo { span, .. }
+            | Stmt::Binding { span, .. }
+            | Stmt::Return { span, .. }
+            | Stmt::Expr { span, .. } => *span,
+            Stmt::Fn(decl) => decl.span,
+        }
+    }
+}
+
+/// A named function declaration. Constructors are not special in this language — a
+/// `fn` declaration just introduces a callable binding.
+#[derive(Debug, Clone, PartialEq)]
+pub struct FnDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub params: Vec<Param>,
+    /// The declared return type, if any. Parsed but not yet checked in M0.
+    pub ret: Option<TypeRef>,
+    pub body: Vec<Stmt>,
+    pub span: Span,
+}
+
+/// A function parameter: a name and an optional type annotation (unchecked in M0).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Param {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: Option<TypeRef>,
+    pub span: Span,
+}
+
+/// A type reference in source (e.g. `int`, `List<Item>`, `Result<Order, OrderError>`,
+/// `?User`). Parsed and retained for M1's type checker; M0 does not interpret it.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeRef {
+    /// A named type with optional generic arguments.
+    Named {
+        name: String,
+        args: Vec<TypeRef>,
+        span: Span,
+    },
+    /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so M1 can
+    /// produce precise diagnostics on the nullability surface.
+    Optional { inner: Box<TypeRef>, span: Span },
+}
+
+impl TypeRef {
+    pub fn span(&self) -> Span {
+        match self {
+            TypeRef::Named { span, .. } | TypeRef::Optional { span, .. } => *span,
         }
     }
 }
@@ -75,6 +130,26 @@ pub enum Expr {
         rhs: Box<Expr>,
         span: Span,
     },
+    /// A call: `callee(args)`.
+    Call {
+        callee: Box<Expr>,
+        args: Vec<Expr>,
+        span: Span,
+    },
+    /// An anonymous function (arrow closure): `fn(params) => body`.
+    Closure {
+        params: Vec<Param>,
+        body: Box<Expr>,
+        span: Span,
+    },
+    /// The pipeline operator: `left |> right`. Kept as its own node (not desugared in
+    /// the parser) so diagnostics can point at the pipeline. `x |> f(a)` means
+    /// `f(x, a)`; `x |> f` means `f(x)`.
+    Pipeline {
+        left: Box<Expr>,
+        right: Box<Expr>,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -86,7 +161,10 @@ impl Expr {
             | Expr::Bool { span, .. }
             | Expr::Ident { span, .. }
             | Expr::Unary { span, .. }
-            | Expr::Binary { span, .. } => *span,
+            | Expr::Binary { span, .. }
+            | Expr::Call { span, .. }
+            | Expr::Closure { span, .. }
+            | Expr::Pipeline { span, .. } => *span,
         }
     }
 }

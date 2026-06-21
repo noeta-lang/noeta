@@ -29,6 +29,10 @@ pub enum TokenKind {
     TrueKw,
     #[token("false")]
     FalseKw,
+    #[token("fn")]
+    FnKw,
+    #[token("return")]
+    ReturnKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. No escapes yet (Slice 4).
@@ -44,10 +48,24 @@ pub enum TokenKind {
     // Punctuation and operators
     #[token(";")]
     Semicolon,
+    #[token(",")]
+    Comma,
+    #[token(":")]
+    Colon,
+    #[token("?")]
+    Question,
     #[token("(")]
     LParen,
     #[token(")")]
     RParen,
+    #[token("{")]
+    LBrace,
+    #[token("}")]
+    RBrace,
+    #[token("=>")]
+    FatArrow,
+    #[token("|>")]
+    PipeGt,
     #[token("==")]
     EqEq,
     #[token("!=")]
@@ -90,13 +108,22 @@ impl TokenKind {
             TokenKind::MutKw => "MutKw",
             TokenKind::TrueKw => "TrueKw",
             TokenKind::FalseKw => "FalseKw",
+            TokenKind::FnKw => "FnKw",
+            TokenKind::ReturnKw => "ReturnKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
             TokenKind::Semicolon => "Semicolon",
+            TokenKind::Comma => "Comma",
+            TokenKind::Colon => "Colon",
+            TokenKind::Question => "Question",
             TokenKind::LParen => "LParen",
             TokenKind::RParen => "RParen",
+            TokenKind::LBrace => "LBrace",
+            TokenKind::RBrace => "RBrace",
+            TokenKind::FatArrow => "FatArrow",
+            TokenKind::PipeGt => "PipeGt",
             TokenKind::EqEq => "EqEq",
             TokenKind::NotEq => "NotEq",
             TokenKind::LtEq => "LtEq",
@@ -123,13 +150,22 @@ impl TokenKind {
             TokenKind::MutKw => "`mut`",
             TokenKind::TrueKw => "`true`",
             TokenKind::FalseKw => "`false`",
+            TokenKind::FnKw => "`fn`",
+            TokenKind::ReturnKw => "`return`",
             TokenKind::StringLit => "a string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",
             TokenKind::Semicolon => "`;`",
+            TokenKind::Comma => "`,`",
+            TokenKind::Colon => "`:`",
+            TokenKind::Question => "`?`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
+            TokenKind::LBrace => "`{`",
+            TokenKind::RBrace => "`}`",
+            TokenKind::FatArrow => "`=>`",
+            TokenKind::PipeGt => "`|>`",
             TokenKind::EqEq => "`==`",
             TokenKind::NotEq => "`!=`",
             TokenKind::LtEq => "`<=`",

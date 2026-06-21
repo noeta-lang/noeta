@@ -17,6 +17,8 @@ pub enum SyntaxKind {
     MutKw,
     TrueKw,
     FalseKw,
+    FnKw,
+    ReturnKw,
 
     // --- Literal / name tokens ---
     StringLit,
@@ -44,6 +46,13 @@ pub enum SyntaxKind {
     Bang,
     LParen,
     RParen,
+    LBrace,
+    RBrace,
+    Comma,
+    Colon,
+    Question,
+    FatArrow,
+    PipeGt,
 
     // --- Trivia / sentinels ---
     Whitespace,
@@ -55,11 +64,19 @@ pub enum SyntaxKind {
     Program,
     EchoStmt,
     BindingStmt,
+    FnDecl,
+    ReturnStmt,
+    ExprStmt,
+    Param,
+    TypeRef,
     LiteralExpr,
     IdentExpr,
     UnaryExpr,
     BinaryExpr,
     ParenExpr,
+    CallExpr,
+    ClosureExpr,
+    PipelineExpr,
 }
 
 impl SyntaxKind {
@@ -69,11 +86,19 @@ impl SyntaxKind {
             SyntaxKind::Program
                 | SyntaxKind::EchoStmt
                 | SyntaxKind::BindingStmt
+                | SyntaxKind::FnDecl
+                | SyntaxKind::ReturnStmt
+                | SyntaxKind::ExprStmt
+                | SyntaxKind::Param
+                | SyntaxKind::TypeRef
                 | SyntaxKind::LiteralExpr
                 | SyntaxKind::IdentExpr
                 | SyntaxKind::UnaryExpr
                 | SyntaxKind::BinaryExpr
                 | SyntaxKind::ParenExpr
+                | SyntaxKind::CallExpr
+                | SyntaxKind::ClosureExpr
+                | SyntaxKind::PipelineExpr
         )
     }
 }

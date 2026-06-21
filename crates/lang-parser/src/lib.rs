@@ -9,7 +9,7 @@
 //!
 //! M0 scope grows one vertical slice at a time.
 
-use lang_ast::{BinaryOp, Expr, Program, Stmt, UnaryOp};
+use lang_ast::{BinaryOp, Expr, FnDecl, Param, Program, Stmt, TypeRef, UnaryOp};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind};
 use lang_span::{Source, Span};
@@ -46,26 +46,30 @@ struct Parser<'a> {
 
 /// Binding power of prefix operators: tighter than any infix operator, so `-a * b`
 /// parses as `(-a) * b`.
-const PREFIX_BP: u8 = 15;
+const PREFIX_BP: u8 = 17;
+
+/// Left/right binding power of the pipeline operator — the lowest-binding infix form,
+/// so `a + b |> f` is `(a + b) |> f` and `x |> f |> g` is `(x |> f) |> g`.
+const PIPE_BP: (u8, u8) = (1, 2);
 
 /// The left and right binding powers of an infix operator. Left-associative operators
 /// have `right = left + 1`. `None` means the token does not continue an expression.
 fn infix_op(kind: TokenKind) -> Option<(BinaryOp, u8, u8)> {
     let (op, left) = match kind {
-        TokenKind::PipePipe => (BinaryOp::Or, 1),
-        TokenKind::AmpAmp => (BinaryOp::And, 3),
-        TokenKind::EqEq => (BinaryOp::Eq, 5),
-        TokenKind::NotEq => (BinaryOp::Ne, 5),
-        TokenKind::Lt => (BinaryOp::Lt, 7),
-        TokenKind::LtEq => (BinaryOp::Le, 7),
-        TokenKind::Gt => (BinaryOp::Gt, 7),
-        TokenKind::GtEq => (BinaryOp::Ge, 7),
-        TokenKind::Tilde => (BinaryOp::Concat, 9),
-        TokenKind::Plus => (BinaryOp::Add, 11),
-        TokenKind::Minus => (BinaryOp::Sub, 11),
-        TokenKind::Star => (BinaryOp::Mul, 13),
-        TokenKind::Slash => (BinaryOp::Div, 13),
-        TokenKind::Percent => (BinaryOp::Rem, 13),
+        TokenKind::PipePipe => (BinaryOp::Or, 3),
+        TokenKind::AmpAmp => (BinaryOp::And, 5),
+        TokenKind::EqEq => (BinaryOp::Eq, 7),
+        TokenKind::NotEq => (BinaryOp::Ne, 7),
+        TokenKind::Lt => (BinaryOp::Lt, 9),
+        TokenKind::LtEq => (BinaryOp::Le, 9),
+        TokenKind::Gt => (BinaryOp::Gt, 9),
+        TokenKind::GtEq => (BinaryOp::Ge, 9),
+        TokenKind::Tilde => (BinaryOp::Concat, 11),
+        TokenKind::Plus => (BinaryOp::Add, 13),
+        TokenKind::Minus => (BinaryOp::Sub, 13),
+        TokenKind::Star => (BinaryOp::Mul, 15),
+        TokenKind::Slash => (BinaryOp::Div, 15),
+        TokenKind::Percent => (BinaryOp::Rem, 15),
         _ => return None,
     };
     Some((op, left, left + 1))
@@ -75,9 +79,14 @@ impl Parser<'_> {
     fn parse_program(&mut self) -> Program {
         let mut stmts = Vec::new();
         while !self.at_end() {
+            let before = self.pos;
             match self.parse_stmt() {
                 Some(stmt) => stmts.push(stmt),
                 None => self.synchronize(),
+            }
+            // Guarantee forward progress so a stray token cannot loop forever.
+            if self.pos == before {
+                self.advance();
             }
         }
         let end = self.source.text().len() as u32;
@@ -87,19 +96,18 @@ impl Parser<'_> {
         }
     }
 
+    // --- Statements ---
+
     fn parse_stmt(&mut self) -> Option<Stmt> {
         match self.peek().map(|t| t.kind) {
             Some(TokenKind::EchoKw) => self.parse_echo(),
-            Some(TokenKind::MutKw) => self.parse_binding(),
-            // A bare `name = expr;` binding; otherwise this is not a statement we know.
-            Some(TokenKind::Ident) if self.peek_at(1).map(|t| t.kind) == Some(TokenKind::Eq) => {
-                self.parse_binding()
+            Some(TokenKind::MutKw) => self.parse_mut_binding(),
+            Some(TokenKind::ReturnKw) => self.parse_return(),
+            // `fn name(...)` is a declaration; `fn(...)` is a closure expression.
+            Some(TokenKind::FnKw) if self.peek_at(1).map(|t| t.kind) == Some(TokenKind::Ident) => {
+                self.parse_fn_decl().map(Stmt::Fn)
             }
-            Some(_) => {
-                let token = *self.peek().unwrap();
-                self.error_unexpected(token, "a statement");
-                None
-            }
+            Some(_) => self.parse_expr_or_binding_stmt(),
             None => None,
         }
     }
@@ -114,24 +122,181 @@ impl Parser<'_> {
         })
     }
 
-    fn parse_binding(&mut self) -> Option<Stmt> {
-        let mut_kw = if self.peek().map(|t| t.kind) == Some(TokenKind::MutKw) {
-            Some(self.advance().unwrap())
-        } else {
-            None
-        };
+    fn parse_mut_binding(&mut self) -> Option<Stmt> {
+        let mut_kw = self.expect(TokenKind::MutKw)?;
         let name_tok = self.expect(TokenKind::Ident)?;
-        let name = self.source.slice(name_tok.span).to_string();
+        let name = self.text(name_tok.span);
         self.expect(TokenKind::Eq)?;
         let value = self.parse_expr()?;
         let semi = self.expect(TokenKind::Semicolon)?;
-        let start = mut_kw.map_or(name_tok.span, |t| t.span);
         Some(Stmt::Binding {
-            mut_decl: mut_kw.is_some(),
+            mut_decl: true,
             name,
             name_span: name_tok.span,
             value,
-            span: start.merge(semi.span),
+            span: mut_kw.span.merge(semi.span),
+        })
+    }
+
+    fn parse_return(&mut self) -> Option<Stmt> {
+        let ret = self.expect(TokenKind::ReturnKw)?;
+        if self.peek().map(|t| t.kind) == Some(TokenKind::Semicolon) {
+            let semi = self.advance().unwrap();
+            return Some(Stmt::Return {
+                value: None,
+                span: ret.span.merge(semi.span),
+            });
+        }
+        let value = self.parse_expr()?;
+        let semi = self.expect(TokenKind::Semicolon)?;
+        Some(Stmt::Return {
+            value: Some(value),
+            span: ret.span.merge(semi.span),
+        })
+    }
+
+    /// A statement starting with an expression. If the expression is a bare name
+    /// followed by `=`, it is a binding/reassignment; otherwise it is an expression
+    /// statement.
+    fn parse_expr_or_binding_stmt(&mut self) -> Option<Stmt> {
+        let expr = self.parse_expr()?;
+        if self.peek().map(|t| t.kind) == Some(TokenKind::Eq) {
+            if let Expr::Ident {
+                name,
+                span: name_span,
+            } = expr
+            {
+                self.advance(); // consume `=`
+                let value = self.parse_expr()?;
+                let semi = self.expect(TokenKind::Semicolon)?;
+                return Some(Stmt::Binding {
+                    mut_decl: false,
+                    name,
+                    name_span,
+                    value,
+                    span: name_span.merge(semi.span),
+                });
+            }
+            // `<non-name> = ...` is not a valid assignment target.
+            let eq = *self.peek().unwrap();
+            self.error_unexpected(eq, "a statement (assignment target must be a name)");
+            return None;
+        }
+        let semi = self.expect(TokenKind::Semicolon)?;
+        Some(Stmt::Expr {
+            span: expr.span().merge(semi.span),
+            expr,
+        })
+    }
+
+    fn parse_fn_decl(&mut self) -> Option<FnDecl> {
+        let fn_kw = self.expect(TokenKind::FnKw)?;
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let params = self.parse_params()?;
+        let ret = if self.peek().map(|t| t.kind) == Some(TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
+        let (body, body_span) = self.parse_block()?;
+        Some(FnDecl {
+            name: self.text(name_tok.span),
+            name_span: name_tok.span,
+            params,
+            ret,
+            body,
+            span: fn_kw.span.merge(body_span),
+        })
+    }
+
+    fn parse_block(&mut self) -> Option<(Vec<Stmt>, Span)> {
+        let lbrace = self.expect(TokenKind::LBrace)?;
+        let mut stmts = Vec::new();
+        while !self.at_end() && self.peek().map(|t| t.kind) != Some(TokenKind::RBrace) {
+            let before = self.pos;
+            match self.parse_stmt() {
+                Some(stmt) => stmts.push(stmt),
+                None => self.synchronize(),
+            }
+            if self.pos == before {
+                self.advance();
+            }
+        }
+        let rbrace = self.expect(TokenKind::RBrace)?;
+        Some((stmts, lbrace.span.merge(rbrace.span)))
+    }
+
+    // --- Parameters and types ---
+
+    fn parse_params(&mut self) -> Option<Vec<Param>> {
+        self.expect(TokenKind::LParen)?;
+        let mut params = Vec::new();
+        if self.peek().map(|t| t.kind) != Some(TokenKind::RParen) {
+            loop {
+                params.push(self.parse_param()?);
+                if self.peek().map(|t| t.kind) == Some(TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen)?;
+        Some(params)
+    }
+
+    fn parse_param(&mut self) -> Option<Param> {
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let mut span = name_tok.span;
+        let ty = if self.peek().map(|t| t.kind) == Some(TokenKind::Colon) {
+            self.advance();
+            let ty = self.parse_type()?;
+            span = span.merge(ty.span());
+            Some(ty)
+        } else {
+            None
+        };
+        Some(Param {
+            name: self.text(name_tok.span),
+            name_span: name_tok.span,
+            ty,
+            span,
+        })
+    }
+
+    /// Parse a type reference (e.g. `int`, `List<Item>`, `Result<Order, E>`, `?User`).
+    /// Retained for M1's checker; M0 does not interpret it.
+    fn parse_type(&mut self) -> Option<TypeRef> {
+        if self.peek().map(|t| t.kind) == Some(TokenKind::Question) {
+            let q = self.advance().unwrap();
+            let inner = self.parse_type()?;
+            let span = q.span.merge(inner.span());
+            return Some(TypeRef::Optional {
+                inner: Box::new(inner),
+                span,
+            });
+        }
+        let name_tok = self.expect(TokenKind::Ident)?;
+        let mut span = name_tok.span;
+        let mut args = Vec::new();
+        if self.peek().map(|t| t.kind) == Some(TokenKind::Lt) {
+            self.advance();
+            loop {
+                args.push(self.parse_type()?);
+                if self.peek().map(|t| t.kind) == Some(TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+            let gt = self.expect(TokenKind::Gt)?;
+            span = span.merge(gt.span);
+        }
+        Some(TypeRef::Named {
+            name: self.text(name_tok.span),
+            args,
+            span,
         })
     }
 
@@ -144,23 +309,67 @@ impl Parser<'_> {
     fn parse_bp(&mut self, min_bp: u8) -> Option<Expr> {
         let mut lhs = self.parse_prefix()?;
         while let Some(token) = self.peek().copied() {
-            let Some((op, left_bp, right_bp)) = infix_op(token.kind) else {
-                break;
-            };
-            if left_bp < min_bp {
-                break;
+            match token.kind {
+                // A call binds tighter than any operator (postfix).
+                TokenKind::LParen => {
+                    lhs = self.parse_call(lhs)?;
+                }
+                TokenKind::PipeGt => {
+                    let (left_bp, right_bp) = PIPE_BP;
+                    if left_bp < min_bp {
+                        break;
+                    }
+                    self.advance();
+                    let right = self.parse_bp(right_bp)?;
+                    let span = lhs.span().merge(right.span());
+                    lhs = Expr::Pipeline {
+                        left: Box::new(lhs),
+                        right: Box::new(right),
+                        span,
+                    };
+                }
+                _ => {
+                    let Some((op, left_bp, right_bp)) = infix_op(token.kind) else {
+                        break;
+                    };
+                    if left_bp < min_bp {
+                        break;
+                    }
+                    self.advance();
+                    let rhs = self.parse_bp(right_bp)?;
+                    let span = lhs.span().merge(rhs.span());
+                    lhs = Expr::Binary {
+                        op,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                        span,
+                    };
+                }
             }
-            self.advance();
-            let rhs = self.parse_bp(right_bp)?;
-            let span = lhs.span().merge(rhs.span());
-            lhs = Expr::Binary {
-                op,
-                lhs: Box::new(lhs),
-                rhs: Box::new(rhs),
-                span,
-            };
         }
         Some(lhs)
+    }
+
+    fn parse_call(&mut self, callee: Expr) -> Option<Expr> {
+        self.expect(TokenKind::LParen)?;
+        let mut args = Vec::new();
+        if self.peek().map(|t| t.kind) != Some(TokenKind::RParen) {
+            loop {
+                args.push(self.parse_expr()?);
+                if self.peek().map(|t| t.kind) == Some(TokenKind::Comma) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        let rparen = self.expect(TokenKind::RParen)?;
+        let span = callee.span().merge(rparen.span);
+        Some(Expr::Call {
+            callee: Box::new(callee),
+            args,
+            span,
+        })
     }
 
     fn parse_prefix(&mut self) -> Option<Expr> {
@@ -228,10 +437,11 @@ impl Parser<'_> {
             TokenKind::Ident => {
                 self.advance();
                 Some(Expr::Ident {
-                    name: self.source.slice(token.span).to_string(),
+                    name: self.text(token.span),
                     span: token.span,
                 })
             }
+            TokenKind::FnKw => self.parse_closure(),
             TokenKind::LParen => {
                 self.advance();
                 let inner = self.parse_bp(0)?;
@@ -245,7 +455,24 @@ impl Parser<'_> {
         }
     }
 
+    fn parse_closure(&mut self) -> Option<Expr> {
+        let fn_kw = self.expect(TokenKind::FnKw)?;
+        let params = self.parse_params()?;
+        self.expect(TokenKind::FatArrow)?;
+        let body = self.parse_expr()?;
+        let span = fn_kw.span.merge(body.span());
+        Some(Expr::Closure {
+            params,
+            body: Box::new(body),
+            span,
+        })
+    }
+
     // --- Literal value extraction ---
+
+    fn text(&self, span: Span) -> String {
+        self.source.slice(span).to_string()
+    }
 
     /// Strip the surrounding quotes from a string-literal token's source text.
     /// (No escape processing yet; that arrives with interpolation in Slice 4.)
@@ -273,8 +500,7 @@ impl Parser<'_> {
     }
 
     fn float_value(&mut self, span: Span) -> f64 {
-        let text = self.source.slice(span);
-        text.parse::<f64>().unwrap_or(0.0)
+        self.source.slice(span).parse::<f64>().unwrap_or(0.0)
     }
 
     // --- Cursor helpers ---
@@ -332,12 +558,19 @@ impl Parser<'_> {
         ));
     }
 
-    /// Recover after a parse error by skipping tokens up to and including the next
-    /// `;` (a statement boundary), so one bad statement does not derail the rest.
+    /// Recover after a parse error by skipping to the next statement boundary (`;`,
+    /// consumed) or a closing brace (`}`, left for the enclosing block).
     fn synchronize(&mut self) {
-        while let Some(token) = self.advance() {
-            if token.kind == TokenKind::Semicolon {
-                return;
+        while let Some(token) = self.peek().copied() {
+            match token.kind {
+                TokenKind::Semicolon => {
+                    self.advance();
+                    return;
+                }
+                TokenKind::RBrace => return,
+                _ => {
+                    self.advance();
+                }
             }
         }
     }
@@ -356,44 +589,43 @@ mod tests {
         parse(&source, &lexed.tokens)
     }
 
-    #[test]
-    fn parses_echo_statements() {
-        let parsed = parse_str("echo \"hello\"; echo \"world\";");
-        assert!(parsed.diagnostics.is_empty());
-        assert_eq!(parsed.program.stmts.len(), 2);
+    fn pretty(text: &str) -> String {
+        let parsed = parse_str(text);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "parse errors: {:?}",
+            parsed.diagnostics
+        );
+        parsed.program.to_pretty_string()
     }
 
     #[test]
-    fn parses_bindings_and_mut() {
-        let parsed = parse_str("mut total = 0; name = \"x\";");
+    fn parses_function_declaration() {
+        let parsed = parse_str("fn add(a: int, b: int): int { return a + b; }");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        assert_eq!(parsed.program.stmts.len(), 2);
-        assert!(matches!(
-            parsed.program.stmts[0],
-            Stmt::Binding { mut_decl: true, .. }
-        ));
-        assert!(matches!(
-            parsed.program.stmts[1],
-            Stmt::Binding {
-                mut_decl: false,
-                ..
-            }
-        ));
+        assert!(matches!(parsed.program.stmts[0], Stmt::Fn(_)));
     }
 
     #[test]
     fn arithmetic_precedence_is_stable() {
-        // `1 + 2 * 3 - 4` should group as `(1 + (2 * 3)) - 4`.
-        let parsed = parse_str("echo 1 + 2 * 3 - 4;");
-        assert!(parsed.diagnostics.is_empty());
-        insta::assert_snapshot!(parsed.program.to_pretty_string());
+        insta::assert_snapshot!(pretty("echo 1 + 2 * 3 - 4;"));
     }
 
     #[test]
     fn unary_and_comparison() {
-        let parsed = parse_str("echo -1 < 2 && !false;");
-        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        insta::assert_snapshot!(parsed.program.to_pretty_string());
+        insta::assert_snapshot!(pretty("echo -1 < 2 && !false;"));
+    }
+
+    #[test]
+    fn function_and_closure_and_pipeline() {
+        insta::assert_snapshot!(pretty(
+            "fn double(n: int): int { return n * 2; } echo 5 |> double |> double;"
+        ));
+    }
+
+    #[test]
+    fn closure_and_call() {
+        insta::assert_snapshot!(pretty("apply = fn(x) => x + 1; echo apply(10);"));
     }
 
     #[test]

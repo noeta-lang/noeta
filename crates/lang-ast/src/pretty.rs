@@ -5,7 +5,7 @@
 //! span regression shows up directly in a snapshot diff. It is also the printer the
 //! parse→print→parse property test (Slice 9) builds on.
 
-use crate::{Expr, Program, Stmt};
+use crate::{Expr, FnDecl, Param, Program, Stmt};
 use lang_span::Span;
 
 /// Render an AST node to the canonical pretty form.
@@ -27,6 +27,14 @@ fn indent(out: &mut String, level: usize) {
 
 fn span(s: Span) -> String {
     format!("@{}..{}", s.start, s.end)
+}
+
+fn param_list(params: &[Param]) -> String {
+    params
+        .iter()
+        .map(|p| p.name.as_str())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 impl Pretty for Program {
@@ -63,7 +71,42 @@ impl Pretty for Stmt {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Stmt::Fn(decl) => decl.pretty(out, level),
+            Stmt::Return { value, span: s } => {
+                indent(out, level);
+                match value {
+                    Some(value) => {
+                        out.push_str(&format!("(return {}\n", span(*s)));
+                        value.pretty(out, level + 1);
+                        out.push(')');
+                    }
+                    None => out.push_str(&format!("(return {})", span(*s))),
+                }
+            }
+            Stmt::Expr { expr, span: s } => {
+                indent(out, level);
+                out.push_str(&format!("(expr-stmt {}\n", span(*s)));
+                expr.pretty(out, level + 1);
+                out.push(')');
+            }
         }
+    }
+}
+
+impl Pretty for FnDecl {
+    fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
+        out.push_str(&format!(
+            "(fn {} [{}] {}",
+            self.name,
+            param_list(&self.params),
+            span(self.span)
+        ));
+        for stmt in &self.body {
+            out.push('\n');
+            stmt.pretty(out, level + 1);
+        }
+        out.push(')');
     }
 }
 
@@ -105,6 +148,39 @@ impl Pretty for Expr {
                 lhs.pretty(out, level + 1);
                 out.push('\n');
                 rhs.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Call {
+                callee,
+                args,
+                span: s,
+            } => {
+                out.push_str(&format!("(call {}\n", span(*s)));
+                callee.pretty(out, level + 1);
+                for arg in args {
+                    out.push('\n');
+                    arg.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
+            Expr::Closure {
+                params,
+                body,
+                span: s,
+            } => {
+                out.push_str(&format!("(closure [{}] {}\n", param_list(params), span(*s)));
+                body.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Pipeline {
+                left,
+                right,
+                span: s,
+            } => {
+                out.push_str(&format!("(pipeline {}\n", span(*s)));
+                left.pretty(out, level + 1);
+                out.push('\n');
+                right.pretty(out, level + 1);
                 out.push(')');
             }
         }

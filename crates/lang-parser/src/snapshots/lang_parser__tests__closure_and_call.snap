@@ -1,0 +1,15 @@
+---
+source: crates/lang-parser/src/lib.rs
+assertion_line: 537
+expression: "pretty(\"apply = fn(x) => x + 1; echo apply(10);\")"
+---
+(program @0..39
+  (binding apply @0..23
+    (closure [x] @8..22
+      (binary "+" @17..22
+        (ident x @17..18)
+        (int 1 @21..22))))
+  (echo @24..39
+    (call @29..38
+      (ident apply @29..34)
+      (int 10 @35..37))))
