@@ -440,6 +440,9 @@ pub struct Module {
     /// Type names that `@derive(Comparable)` without a hand-written `compare` method — the VM
     /// gives their instances structural field-wise ordering for `< <= > >=`.
     pub comparable_derives: Vec<String>,
+    /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
+    /// synthesizes a structural JSON serializer for `o.to_json()`.
+    pub tojson_derives: Vec<String>,
 }
 
 impl Module {

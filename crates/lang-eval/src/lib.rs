@@ -265,6 +265,9 @@ pub struct TypeDef {
     /// Whether the type `@derive(Comparable)`s without a hand-written `compare`: its instances
     /// get structural field-wise ordering for `< <= > >=`.
     derives_comparable: bool,
+    /// Whether the type `@derive(ToJson)`s without a hand-written `to_json`: `o.to_json()`
+    /// synthesizes a structural JSON serializer.
+    derives_tojson: bool,
     /// An *opaque* stub introduced by a `use` import: its real field set is unknown until
     /// module loading lands (M1), so its all-fields literal accepts whatever fields are
     /// given (no unknown-field or full-init checks) and `..` spread copies the whole base.
@@ -785,6 +788,7 @@ impl Interpreter {
             destructor: None,
             is_record: true,
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable"),
+            derives_tojson: lang_ast::derives_trait(&decl.derives, "ToJson"),
             opaque: false,
         };
         self.scope
@@ -803,6 +807,7 @@ impl Interpreter {
                 destructor: None,
                 is_record: false,
                 derives_comparable: false,
+                derives_tojson: false,
                 opaque: true,
             };
             self.scope
@@ -843,6 +848,9 @@ impl Interpreter {
             // A hand-written `compare` (via `impl Comparable`) takes precedence over derivation.
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
+            // A hand-written `to_json` takes precedence over the derived serializer.
+            derives_tojson: lang_ast::derives_trait(&decl.derives, "ToJson")
+                && !decl.methods.iter().any(|m| m.name == "to_json"),
             opaque: false,
         };
         self.scope
@@ -1281,6 +1289,11 @@ impl Interpreter {
         }
         // `order.total()` — an instance method; the instance's fields are in scope.
         if let Value::Object(object) = &receiver {
+            // `o.to_json()` on a type that `@derive(ToJson)` (so has no hand-written `to_json`)
+            // synthesizes a structural JSON string.
+            if name == "to_json" && args.is_empty() && object.def.derives_tojson {
+                return Ok(Value::Str(value_to_json(&receiver)));
+            }
             return match object.def.methods.get(name) {
                 Some(method) => {
                     self.call_method_on(&Rc::clone(object), &Rc::clone(method), args, span)
@@ -1836,6 +1849,73 @@ fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::c
         }
     }
     Some(std::cmp::Ordering::Equal)
+}
+
+/// The JSON encoding synthesized by `@derive(ToJson)`. The byte-for-byte mirror of the VM's
+/// `Value::to_json`: scalars reuse `display` (so both backends format numbers identically),
+/// strings are quoted/escaped via [`json_string`], lists become JSON arrays, maps and objects
+/// JSON objects (objects in declared field order), unit is `null`, and any other value falls
+/// back to its quoted display form.
+fn value_to_json(value: &Value) -> String {
+    match value {
+        Value::Bool(_) | Value::Int(_) | Value::Float(_) => value.display(),
+        Value::Str(s) => json_string(s),
+        Value::List(items) => {
+            let parts: Vec<String> = items.iter().map(value_to_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        Value::Map(entries) => {
+            let parts: Vec<String> = entries
+                .iter()
+                .map(|(k, v)| format!("{}:{}", json_string(k), value_to_json(v)))
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Object(object) => {
+            // Declared field order for records/classes; an opaque imported stub uses key order.
+            let parts: Vec<String> = if object.def.opaque {
+                object
+                    .fields
+                    .iter()
+                    .map(|(name, v)| format!("{}:{}", json_string(name), value_to_json(v)))
+                    .collect()
+            } else {
+                object
+                    .def
+                    .fields
+                    .iter()
+                    .map(|f| {
+                        let v = object.fields.get(&f.name).cloned().unwrap_or(Value::Unit);
+                        format!("{}:{}", json_string(&f.name), value_to_json(&v))
+                    })
+                    .collect()
+            };
+            format!("{{{}}}", parts.join(","))
+        }
+        Value::Enum(e) => json_string(&e.variant),
+        Value::Unit => "null".to_string(),
+        other => json_string(&other.display()),
+    }
+}
+
+/// Encode a string as a JSON string literal (quotes + the mandatory escapes). Byte-identical to
+/// the VM's copy so `@derive(ToJson)` renders the same under both backends.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 /// The total order of two primitives for `x.compare(y)`: integers compare exactly, strings

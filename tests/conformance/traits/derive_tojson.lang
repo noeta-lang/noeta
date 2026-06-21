@@ -1,0 +1,29 @@
+// `@derive(ToJson)` synthesizes a structural `to_json` method: `o.to_json()` returns the object's
+// JSON encoding, fields in declared order, strings quoted and escaped, nested objects and lists
+// recursed. Runs identically under both backends (the differential oracle).
+// expect: stdout "{"name":"Ada","id":7,"active":true}"
+// expect: stdout "{"label":"pt","at":{"name":"Bob","id":2,"active":false}}"
+// expect: exit 0
+@derive(ToJson)
+class User {
+    name: string
+    id: int
+    active: bool
+
+    fn new(name: string, id: int, active: bool): User {
+        return User { name: name, id: id, active: active };
+    }
+}
+
+@derive(ToJson)
+class Tagged {
+    label: string
+    at: User
+
+    fn new(label: string, at: User): Tagged {
+        return Tagged { label: label, at: at };
+    }
+}
+
+echo User.new("Ada", 7, true).to_json();
+echo Tagged.new("pt", User.new("Bob", 2, false)).to_json();

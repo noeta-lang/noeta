@@ -417,6 +417,52 @@ impl Value {
         }
     }
 
+    /// The JSON encoding synthesized by `@derive(ToJson)`, mirrored exactly by the tree-walker.
+    /// Scalars reuse `display` (so the two backends format numbers identically); strings are
+    /// quoted and escaped via [`json_string`]; lists become JSON arrays, maps and objects JSON
+    /// objects (objects in declared slot order). The unit value is `null`; a value with no JSON
+    /// analog (closure/enum) falls back to its quoted display form.
+    pub fn to_json(self) -> String {
+        if let Some(b) = self.as_bool() {
+            b.to_string()
+        } else if self.is_small_int() {
+            self.as_int().unwrap().to_string()
+        } else if self.is_float() {
+            format_float(self.as_float().unwrap())
+        } else if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Str(s) => json_string(s),
+                Payload::Int(i) => i.to_string(),
+                Payload::List(items) => {
+                    let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
+                    format!("[{}]", parts.join(","))
+                }
+                Payload::Map(entries) => {
+                    let parts: Vec<String> = entries
+                        .iter()
+                        .map(|(k, v)| format!("{}:{}", json_string(k), v.to_json()))
+                        .collect();
+                    format!("{{{}}}", parts.join(","))
+                }
+                Payload::Object { shape, slots } => {
+                    let parts: Vec<String> = shape
+                        .fields
+                        .iter()
+                        .zip(slots)
+                        .map(|(name, v)| format!("{}:{}", json_string(name), v.to_json()))
+                        .collect();
+                    format!("{{{}}}", parts.join(","))
+                }
+                Payload::Closure(_) => json_string("<fn>"),
+                Payload::Enum { shape, .. } => {
+                    json_string(shape.variant.as_deref().unwrap_or(&shape.name))
+                }
+            })
+        } else {
+            "null".to_string()
+        }
+    }
+
     /// The representation of a value *inside* a collection: strings are quoted so the
     /// structure stays legible (`["a", "b"]`, not `[a, b]`). Mirrors M0's `Value::repr`.
     pub fn repr(self) -> String {
@@ -606,6 +652,27 @@ fn format_float(f: f64) -> String {
     } else {
         f.to_string()
     }
+}
+
+/// Encode a string as a JSON string literal: surrounding quotes plus the mandatory escapes.
+/// The tree-walker carries a byte-identical copy, so `@derive(ToJson)` produces the same output
+/// under both backends.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
 }
 
 #[cfg(test)]

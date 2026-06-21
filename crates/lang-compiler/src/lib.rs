@@ -74,6 +74,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         methods: Vec::new(),
         destructors: Vec::new(),
         comparable_derives: Vec::new(),
+        tojson_derives: Vec::new(),
         types: HashMap::new(),
     };
     module.register_types(program);
@@ -93,6 +94,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         methods: module.methods,
         destructors: module.destructors,
         comparable_derives: module.comparable_derives,
+        tojson_derives: module.tojson_derives,
     })
 }
 
@@ -124,6 +126,7 @@ struct ModuleCompiler {
     methods: Vec<MethodEntry>,
     destructors: Vec<(String, u32)>,
     comparable_derives: Vec<String>,
+    tojson_derives: Vec<String>,
     types: HashMap<String, TypeInfo>,
 }
 
@@ -138,6 +141,9 @@ impl ModuleCompiler {
                     if lang_ast::derives_trait(&decl.derives, "Comparable") {
                         self.comparable_derives.push(decl.name.clone());
                     }
+                    if lang_ast::derives_trait(&decl.derives, "ToJson") {
+                        self.tojson_derives.push(decl.name.clone());
+                    }
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Record { fields });
                 }
@@ -149,6 +155,12 @@ impl ModuleCompiler {
                         && !decl.methods.iter().any(|m| m.name == "compare")
                     {
                         self.comparable_derives.push(decl.name.clone());
+                    }
+                    // A hand-written `to_json` takes precedence over the derived serializer.
+                    if lang_ast::derives_trait(&decl.derives, "ToJson")
+                        && !decl.methods.iter().any(|m| m.name == "to_json")
+                    {
+                        self.tojson_derives.push(decl.name.clone());
                     }
                     let mut fns = HashMap::new();
                     for method in &decl.methods {
