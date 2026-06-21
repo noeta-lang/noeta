@@ -13,6 +13,7 @@ lang-lexer = { workspace = true }
 lang-parser = { workspace = true }
 lang-backend = { workspace = true }
 lang-eval = { workspace = true }
+lang-check = { workspace = true }
 lang-vm = { workspace = true }
 lang-db = { workspace = true }
 serde = { workspace = true }

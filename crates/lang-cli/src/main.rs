@@ -91,6 +91,13 @@ fn run_source(source: &Source) -> i32 {
         return 1;
     }
 
+    // Type-check before running (M1.7): reject type-incorrect programs at compile time.
+    let type_diagnostics = lang_check::check(&parsed.program);
+    if !type_diagnostics.is_empty() {
+        emit_diagnostics(source, type_diagnostics.iter());
+        return 1;
+    }
+
     let result = TreeWalkBackend::new().run(&parsed.program);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();

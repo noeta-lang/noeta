@@ -36,6 +36,14 @@ pub enum DiagnosticCode {
     /// A `panic(...)` call (or a violated invariant) aborted the program. This is the
     /// unrecoverable path, distinct from a `Result`/`Option` an ordinary program handles.
     Panic,
+    /// A `match` does not cover every variant of its scrutinee's type, and has no catch-all
+    /// arm. The M1 type checker proves this statically (in M0 it was a runtime `TypeMismatch`).
+    NonExhaustiveMatch,
+    /// The `?` operator was applied to a value that is statically not a `Result` or `Option`.
+    InvalidTry,
+    /// A type annotation names a type that does not resolve to any declared, built-in, or
+    /// imported type.
+    UnknownType,
 }
 
 impl DiagnosticCode {
@@ -52,6 +60,9 @@ impl DiagnosticCode {
         DiagnosticCode::DivisionByZero,
         DiagnosticCode::MissingField,
         DiagnosticCode::Panic,
+        DiagnosticCode::NonExhaustiveMatch,
+        DiagnosticCode::InvalidTry,
+        DiagnosticCode::UnknownType,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -68,6 +79,9 @@ impl DiagnosticCode {
             DiagnosticCode::DivisionByZero => "E0008",
             DiagnosticCode::MissingField => "E0009",
             DiagnosticCode::Panic => "E0010",
+            DiagnosticCode::NonExhaustiveMatch => "E0011",
+            DiagnosticCode::InvalidTry => "E0012",
+            DiagnosticCode::UnknownType => "E0013",
         }
     }
 

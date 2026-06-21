@@ -11,12 +11,12 @@
 //!   SourceProgram (input)
 //!        │
 //!        ▼
-//!     tokens(db)  ──►  ast(db)  ──►  bytecode(db)
-//!     (lang-lexer)    (lang-parser)  (lang-compiler)
+//!     tokens(db)  ──►  ast(db)  ──►  checked(db)   ──►  bytecode(db)
+//!     (lang-lexer)    (lang-parser)  (lang-check)       (lang-compiler)
 //! ```
 //!
-//! The checker (`checked_ast`) will slot in between [`ast`] and [`bytecode`] without
-//! re-threading anything — that is the whole point of landing the plumbing now.
+//! The checker query (`checked`, added in M1.7) slotted in between [`ast`] and [`bytecode`]
+//! with no re-threading — exactly what landing the plumbing early bought.
 //!
 //! ## Foreign results and `Update`
 //!
@@ -31,6 +31,7 @@
 
 use lang_bytecode::Module;
 use lang_compiler::Unsupported;
+use lang_diagnostics::Diagnostic;
 use lang_lexer::Lexed;
 use lang_parser::Parsed;
 use lang_span::{Source, SourceId};
@@ -90,6 +91,10 @@ pub struct Tokens(pub Lexed);
 #[derive(Debug, Clone)]
 pub struct Ast(pub Parsed);
 
+/// Type-checker output: the diagnostics the gradual checker found (empty ⇒ well-typed).
+#[derive(Debug, Clone)]
+pub struct Checked(pub Vec<Diagnostic>);
+
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
 #[derive(Debug, Clone)]
 pub struct Bytecode(pub Result<Module, Unsupported>);
@@ -128,6 +133,7 @@ macro_rules! replace_update {
 
 replace_update!(Tokens);
 replace_update!(Ast);
+replace_update!(Checked);
 replace_update!(Bytecode);
 
 /// Tokenize the source. Memoized; re-runs only when `SourceProgram::text` changes.
@@ -145,8 +151,18 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
     Ast(lang_parser::parse(&source, &toks.0.tokens))
 }
 
+/// Type-check the AST and return the checker's diagnostics. Depends on [`ast`]. The pipeline's
+/// front-end gate: a program with type errors is rejected before either backend runs (so both
+/// backends surface the identical compile-time result — see the conformance differential).
+#[salsa::tracked(returns(ref))]
+pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
+    let parsed = ast(db, src);
+    Checked(lang_check::check(&parsed.0.program))
+}
+
 /// Compile the AST to a [`Module`], or report the first unsupported construct. Depends on
-/// [`ast`]. The type-checker query (M1.7) will be inserted between [`ast`] and here.
+/// [`ast`]. (Compilation is independent of [`checked`]; callers gate execution on the checker's
+/// diagnostics, then compile/run only well-typed programs.)
 #[salsa::tracked(returns(ref))]
 pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let parsed = ast(db, src);
@@ -182,6 +198,19 @@ mod tests {
             a, b,
             "second call must return the memoized value, not recompute"
         );
+    }
+
+    #[test]
+    fn checker_diagnostics_flow_through_the_query() {
+        // A well-typed program checks clean; a non-exhaustive match surfaces E0011 through the
+        // `checked` query — the front-end gate both backends consult.
+        let (db, ok) = db_and_src("echo 1 + 2;\n");
+        assert!(checked(&db, ok).0.is_empty());
+
+        let (db, bad) = db_and_src("enum E { A; B; }\necho match E.A { E.A => 1 };\n");
+        let diags = &checked(&db, bad).0;
+        assert_eq!(diags.len(), 1);
+        assert_eq!(diags[0].code.to_string(), "E0011");
     }
 
     #[test]

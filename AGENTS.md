@@ -7,7 +7,7 @@ This project is a **new programming language, built from scratch in Rust** — a
 The canonical design lives in `docs/resources/` (positioning, architecture, syntax, implementation plan, cross-reference). The implementation overview is in `ARCHITECTURE.md`. The work tracker is `plans/` (start at `plans/roadmap.md`).
 
 > [!NOTE]
-> **Current milestone: M1 (real language core)** — replacing the tree-walker with a register-based bytecode VM over NaN-boxed values, a shape-based object model, refcount+cycle GC, and a salsa-based type checker. M0 (the tree-walking interpreter) is complete and **retained as the differential oracle** (`TreeWalkBackend`), against which the new `VmBackend` is asserted identical. **Thrust A is complete (M1.0–M1.6): the `VmBackend` runs 100% of the M0 corpus differential-identical to the tree-walker (incl. the §14 demo), with deterministic `destruct` in both backends and a trial-deletion cycle collector.** Next: the salsa type checker (Thrust B, M1.7+; M1.1 salsa plumbing lands just before it). See `plans/roadmap.md` for the slice sequence. Crate prefix `lang-` and binary name `lang` are placeholders pending the real language name.
+> **Current milestone: M1 (real language core)** — replacing the tree-walker with a register-based bytecode VM over NaN-boxed values, a shape-based object model, refcount+cycle GC, and a salsa-based type checker. M0 (the tree-walking interpreter) is complete and **retained as the differential oracle** (`TreeWalkBackend`), against which the new `VmBackend` is asserted identical. **Thrust A is complete (M1.0–M1.6): the `VmBackend` runs 100% of the M0 corpus differential-identical to the tree-walker (incl. the §14 demo), with deterministic `destruct` in both backends and a trial-deletion cycle collector.** Thrust B has begun: M1.1 (salsa query graph, `lang-db`) and M1.7 (the gradual type checker, `lang-types`/`lang-check`, run as a shared front-end) are in. Next: traits/operators (M1.8), then modules + stdlib (Thrust C). See `plans/roadmap.md` for the slice sequence. Crate prefix `lang-` and binary name `lang` are placeholders pending the real language name.
 
 ## The compilation pipeline
 
@@ -18,9 +18,9 @@ source ─► lang-lexer ─► tokens ─► lang-parser ─► AST (lang-ast) 
                                    (lang-diagnostics renders every stage's typed Diagnostics)
 
   The M1 lex→parse→compile path is also exposed as a salsa query graph (lang-db):
-  SourceProgram (input) ─► tokens(db) ─► ast(db) ─► bytecode(db).  The conformance
-  differential drives both backends through it; M1.7's checker inserts checked_ast
-  between ast and bytecode.
+  SourceProgram (input) ─► tokens(db) ─► ast(db) ─► checked(db) ─► bytecode(db).
+  The checker (lang-check) is a shared front-end: programs with type errors are
+  rejected before either backend runs, so both stay observably identical.
 ```
 
 Both backends implement `lang-backend::Backend`. The conformance harness runs a program through both and asserts identical `RunResult`s — the **differential oracle** (`lang test --differential`). The tree-walker is frozen as the reference; the VM must reproduce it. While the VM compiles only a growing subset, programs it can't lower yet are *skipped* (a climbing coverage %), never failed.
@@ -48,9 +48,11 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `lang-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`, `--differential`). |
 | `lang-cli` | The `lang` binary (`run`/`repl`/`test`). |
 
-| `lang-db` | The salsa (0.27) query graph: `SourceProgram` input → memoized `tokens`/`ast`/`bytecode` queries (pass-through wrappers today; the checker's `checked_ast` slots in at M1.7). Carries the crate's one small `unsafe` (always-replace `Update` for foreign-result newtypes). |
+| `lang-db` | The salsa (0.27) query graph: `SourceProgram` input → memoized `tokens`/`ast`/`checked`/`bytecode` queries. Carries the crate's one small `unsafe` (always-replace `Update` for foreign-result newtypes). |
+| `lang-types` | The `Type` lattice (pure data): primitives, `List`/`Map`/`Option`/`Result`, named/`Fn`, the gradual top `Unknown`, and the `?T` → `Option<T>` desugar. |
+| `lang-check` | The gradual type checker (`check(&Program) -> Vec<Diagnostic>`), the `checked` query's body. A shared front-end run upstream of both backends: exhaustiveness (E0011), `?`-typing (E0012), arithmetic mismatch (E0007). |
 
-In progress (M1, see `plans/m1/`): the type checker (`lang-check`/`lang-types`) and the layered stdlib (`lang-stdlib`). The salsa query graph (`lang-db`) has landed (M1.1). Deferred to later milestones (do **not** stub now): `runtime`, `server`, `lsp`.
+In progress (M1, see `plans/m1/`): the layered stdlib (`lang-stdlib`) and the rest of Thrust B/C. The salsa query graph (`lang-db`, M1.1) and the gradual type checker (`lang-types`/`lang-check`, M1.7) have landed. Deferred to later milestones (do **not** stub now): `runtime`, `server`, `lsp`.
 
 ## The new-feature template (the standard shape of a change)
 

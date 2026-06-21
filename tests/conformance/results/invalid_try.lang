@@ -1,0 +1,5 @@
+// `?` on a value that is statically neither a `Result` nor an `Option` (here a plain `int`)
+// is a compile-time error (E0012), caught by the M1 type checker.
+// expect: error E0012 at 5:22
+// expect: exit 1
+fn f(): int { return 5?; }

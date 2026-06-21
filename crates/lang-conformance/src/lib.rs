@@ -77,7 +77,15 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         let parsed = parse(&source, &lexed.tokens);
         diagnostics.extend(parsed.diagnostics);
 
-        // Only evaluate a program that compiled cleanly and only when asked to.
+        // The type checker (M1.7) is the front-end gate for the eval stage: a program with type
+        // errors is rejected before it runs, exactly as the bytecode pipeline gates it. Running
+        // it here (not only on the VM path) is what lets a negative type-error case assert via
+        // `// expect: error E00xx`, and keeps the tree-walker and VM observably identical.
+        if stage == Stage::Eval && diagnostics.is_empty() {
+            diagnostics.extend(lang_check::check(&parsed.program));
+        }
+
+        // Only evaluate a program that checked cleanly and only when asked to.
         if stage == Stage::Eval && diagnostics.is_empty() {
             let result = TreeWalkBackend::new().run(&parsed.program);
             stdout = result.stdout;

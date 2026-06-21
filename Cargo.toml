@@ -28,6 +28,9 @@ lang-compiler = { path = "crates/lang-compiler" }
 lang-vm = { path = "crates/lang-vm" }
 lang-db = { path = "crates/lang-db" }
 lang-conformance = { path = "crates/lang-conformance" }
+# M1 type checker (Thrust B)
+lang-types = { path = "crates/lang-types" }
+lang-check = { path = "crates/lang-check" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"

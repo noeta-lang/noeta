@@ -494,11 +494,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "lang-check"
+version = "0.0.0"
+dependencies = [
+ "insta",
+ "lang-ast",
+ "lang-diagnostics",
+ "lang-lexer",
+ "lang-parser",
+ "lang-span",
+ "lang-types",
+]
+
+[[package]]
 name = "lang-cli"
 version = "0.0.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "lang-check",
  "lang-conformance",
  "lang-diagnostics",
  "lang-eval",
@@ -527,6 +541,7 @@ version = "0.0.0"
 dependencies = [
  "insta",
  "lang-backend",
+ "lang-check",
  "lang-db",
  "lang-diagnostics",
  "lang-eval",
@@ -544,6 +559,7 @@ version = "0.0.0"
 dependencies = [
  "lang-ast",
  "lang-bytecode",
+ "lang-check",
  "lang-compiler",
  "lang-diagnostics",
  "lang-lexer",
@@ -616,6 +632,14 @@ name = "lang-span"
 version = "0.0.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "lang-types"
+version = "0.0.0"
+dependencies = [
+ "lang-ast",
+ "lang-span",
 ]
 
 [[package]]

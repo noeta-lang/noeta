@@ -136,6 +136,15 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
         return;
     }
 
+    // The type checker (M1.7) is a shared front-end: a program it rejects never reaches either
+    // backend, and its diagnostics are the program's whole observable result — identical no
+    // matter which backend would have run. So a type error is a guaranteed agreement, counted as
+    // matched. (The corpus harness separately asserts the diagnostic's code+span.)
+    if !lang_db::checked(&db, src).0.is_empty() {
+        report.matched += 1;
+        return;
+    }
+
     let tree = TreeWalkBackend::new().run(&parsed.0.program);
     match &lang_db::bytecode(&db, src).0 {
         Err(_) => report.skipped += 1,

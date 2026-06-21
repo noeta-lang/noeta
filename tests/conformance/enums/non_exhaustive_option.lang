@@ -1,0 +1,6 @@
+// A `match` on an `Option` that omits the `none` case is non-exhaustive (E0011). The scrutinee
+// type comes from `pick`'s `?int` return annotation, so the checker knows the full variant set.
+// expect: error E0011 at 6:6
+// expect: exit 1
+fn pick(): ?int { return some(1); }
+echo match pick() { some(n) => n };

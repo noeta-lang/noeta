@@ -1,5 +1,6 @@
-// Adding incompatible types is a runtime E0007 (M0 has no static type checker, so this
-// surfaces at evaluation rather than compile time).
-// expect: error E0007 at 5:6
+// Arithmetic on incompatible types is a TypeMismatch (E0007). The M1 type checker catches it
+// statically at the `1 + true` expression — the same code and span the M0 runtime reported, so
+// the error reads identically whether caught at compile time or (pre-M1.7) at evaluation.
+// expect: error E0007 at 6:6
 // expect: exit 1
 echo 1 + true;
