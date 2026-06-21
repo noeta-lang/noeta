@@ -456,6 +456,7 @@ dependencies = [
 name = "lang-gc"
 version = "0.0.0"
 dependencies = [
+ "lang-object",
  "lang-value",
 ]
 

@@ -23,6 +23,7 @@
 mod heap;
 mod ops;
 
+pub use heap::Color;
 pub use ops::{OpError, apply_binary, apply_unary};
 
 use std::collections::BTreeMap;
@@ -477,6 +478,78 @@ impl Value {
         if self.is_pointer() {
             heap::free(self);
         }
+    }
+
+    // --- Cycle-collector primitives (the trial-deletion collector lives in `lang-gc`) ---
+    //
+    // These expose the heap's per-object color/buffered flags, raw (non-freeing) refcount
+    // edits, internal child enumeration, and a child-preserving free, so the collector can
+    // trace the reference graph. They are no-ops/empty for immediates, which cannot cycle.
+
+    /// This object's collector color (`Black` for immediates, which never cycle).
+    pub fn gc_color(self) -> Color {
+        if self.is_pointer() {
+            heap::color(self)
+        } else {
+            Color::Black
+        }
+    }
+
+    /// Set this object's collector color (no-op for immediates).
+    pub fn gc_set_color(self, color: Color) {
+        if self.is_pointer() {
+            heap::set_color(self, color);
+        }
+    }
+
+    /// Whether this object is in the collector's candidate-root buffer.
+    pub fn gc_buffered(self) -> bool {
+        self.is_pointer() && heap::buffered(self)
+    }
+
+    /// Mark/unmark this object as buffered (no-op for immediates).
+    pub fn gc_set_buffered(self, buffered: bool) {
+        if self.is_pointer() {
+            heap::set_buffered(self, buffered);
+        }
+    }
+
+    /// Raw refcount increment with no color logic (collector scan phase).
+    pub fn gc_rc_inc(self) {
+        if self.is_pointer() {
+            heap::rc_inc(self);
+        }
+    }
+
+    /// Raw refcount decrement that never frees (collector trial deletion).
+    pub fn gc_rc_dec(self) {
+        if self.is_pointer() {
+            heap::rc_dec(self);
+        }
+    }
+
+    /// The pointer-valued children this object references (empty for immediates and leaves).
+    pub fn gc_children(self) -> Vec<Value> {
+        if self.is_pointer() {
+            heap::children(self)
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// Free this object's own allocation without releasing its children (the collector frees
+    /// each cycle member itself). Must only be called by the collector on proven garbage.
+    pub fn gc_free_shallow(self) {
+        if self.is_pointer() {
+            heap::free_shallow(self);
+        }
+    }
+
+    /// Overwrite object slot `index` with `value` (retaining the new, releasing the old) — the
+    /// heap mutation that lets references form cycles, and the basis for future field
+    /// assignment. Panics if this is not an object.
+    pub fn set_slot(self, index: usize, value: Value) {
+        heap::set_slot(self, index, value);
     }
 }
 

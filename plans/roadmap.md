@@ -27,7 +27,7 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 | 3 | [Heap collections: List + Map](m1/slice-03-collections.md) | A | done (62.5% VM corpus coverage; string interpolation `Expr::Interp` landed alongside) |
 | 4 | [Shapes + objects + enums (object model)](m1/slice-04-shapes-objects.md) | A | done (75.0% VM corpus coverage) |
 | 5 | [Result/Option/`?`/`??` + match](m1/slice-05-result-match.md) | A | **done (100% VM corpus coverage — Thrust A gate met)** |
-| 6 | [GC cycle collector + `__destruct`](m1/slice-06-gc.md) | A | todo |
+| 6 | [GC cycle collector + `__destruct`](m1/slice-06-gc.md) | A | done (deterministic `destruct` in both backends + trial-deletion cycle collector; `gc-arena` tracing path deferred — see slice) |
 | 7 | [Type checker: types + inference + ADT/exhaustiveness + ownership](m1/slice-07-checker.md) | B | todo |
 | 8 | [Traits as operators + derives + generics](m1/slice-08-traits.md) | B | todo |
 | 9 | [Modules / namespaces / `use` resolution](m1/slice-09-modules.md) | C | todo |

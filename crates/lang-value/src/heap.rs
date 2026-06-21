@@ -29,6 +29,22 @@ pub(crate) struct Obj {
 struct ObjHeader {
     /// Non-atomic: per-isolate single-threaded ownership (architecture §5, §7).
     refcount: u32,
+    /// The trial-deletion cycle collector's per-object color (architecture §5). `Black` in
+    /// normal use; the other colors are transient bookkeeping during a `collect`.
+    color: Color,
+    /// Whether the object is currently in the collector's candidate-root buffer.
+    buffered: bool,
+}
+
+/// The cycle collector's object colors (Bacon–Rajan synchronous trial deletion). `Black` =
+/// in use; `Gray` = under trial deletion; `White` = provisionally garbage; `Purple` = a
+/// possible cycle root (an object whose count was decremented without reaching zero).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Color {
+    Black,
+    Gray,
+    White,
+    Purple,
 }
 
 /// The heap payloads. Strings are the heap string type; `Int` boxes an `i64` that does
@@ -61,7 +77,11 @@ pub(crate) enum Payload {
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
 pub(crate) fn alloc(payload: Payload) -> Value {
     let raw = Box::into_raw(Box::new(Obj {
-        header: ObjHeader { refcount: 1 },
+        header: ObjHeader {
+            refcount: 1,
+            color: Color::Black,
+            buffered: false,
+        },
         payload,
     }));
     let addr = raw.expose_provenance();
@@ -144,5 +164,96 @@ pub(crate) fn free(value: Value) {
 fn release_child(value: Value) {
     if value.dec_ref() {
         value.free();
+    }
+}
+
+// --- Cycle-collector primitives (used by `lang-gc`'s trial-deletion collector) ---
+//
+// The collector follows the heap's internal reference graph, trial-decrementing refcounts to
+// discover objects kept alive only by a cycle. These expose the per-object color/buffered
+// flags, raw refcount edits (no auto-free), child enumeration, and a child-preserving free.
+
+/// Read an object's cycle-collector color.
+pub(crate) fn color(value: Value) -> Color {
+    let obj = unsafe { &*obj_ptr(value) };
+    obj.header.color
+}
+
+/// Set an object's cycle-collector color.
+pub(crate) fn set_color(value: Value, color: Color) {
+    let obj = unsafe { &mut *obj_ptr(value) };
+    obj.header.color = color;
+}
+
+/// Whether the object is in the collector's candidate-root buffer.
+pub(crate) fn buffered(value: Value) -> bool {
+    let obj = unsafe { &*obj_ptr(value) };
+    obj.header.buffered
+}
+
+/// Mark/unmark the object as buffered in the candidate-root set.
+pub(crate) fn set_buffered(value: Value, buffered: bool) {
+    let obj = unsafe { &mut *obj_ptr(value) };
+    obj.header.buffered = buffered;
+}
+
+/// Raw refcount increment (no color logic). Used to restore counts during the collector's
+/// scan phase.
+pub(crate) fn rc_inc(value: Value) {
+    let obj = unsafe { &mut *obj_ptr(value) };
+    obj.header.refcount += 1;
+}
+
+/// Raw refcount decrement that never frees (unlike [`dec_ref`]). Used for the collector's
+/// trial deletion, which restores or reclaims separately.
+pub(crate) fn rc_dec(value: Value) {
+    let obj = unsafe { &mut *obj_ptr(value) };
+    obj.header.refcount -= 1;
+}
+
+/// The pointer-valued children an object references (list/map/object/enum slots). Immediates
+/// are excluded — they have no heap identity and cannot participate in a cycle.
+pub(crate) fn children(value: Value) -> Vec<Value> {
+    let obj = unsafe { &*obj_ptr(value) };
+    let mut out = Vec::new();
+    let mut push = |v: Value| {
+        if v.is_pointer() {
+            out.push(v);
+        }
+    };
+    match &obj.payload {
+        Payload::List(items)
+        | Payload::Object { slots: items, .. }
+        | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),
+        Payload::Map(entries) => entries.values().copied().for_each(&mut push),
+        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) => {}
+    }
+    out
+}
+
+/// Free an object's own allocation **without** releasing its children — the cycle collector
+/// frees every white object in a cycle itself, so each child is reclaimed on its own pass.
+pub(crate) fn free_shallow(value: Value) {
+    // SAFETY: the collector proved `value` is unreachable garbage and frees it exactly once;
+    // children are freed by their own `free_shallow`, so they are not released here.
+    let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
+    // Replace each child slot with an immediate so the `Vec`/`BTreeMap` drop does not touch
+    // the (already independently freed) child objects — though dropping a `Value` is a no-op
+    // regardless, this documents that ownership was surrendered.
+    drop(boxed);
+}
+
+/// Overwrite object slot `index` with `value`, retaining the new occupant and releasing the
+/// old. This is the heap mutation primitive that lets references form cycles (and the
+/// foundation for field assignment in a later slice).
+pub(crate) fn set_slot(object: Value, index: usize, value: Value) {
+    let obj = unsafe { &mut *obj_ptr(object) };
+    let Payload::Object { slots, .. } = &mut obj.payload else {
+        panic!("set_slot on a non-object value");
+    };
+    value.inc_ref();
+    let old = std::mem::replace(&mut slots[index], value);
+    if old.dec_ref() {
+        old.free();
     }
 }

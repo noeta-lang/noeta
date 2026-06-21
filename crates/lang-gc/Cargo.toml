@@ -9,5 +9,8 @@ rust-version.workspace = true
 [dependencies]
 lang-value = { workspace = true }
 
+[dev-dependencies]
+lang-object = { workspace = true }
+
 [lints]
 workspace = true

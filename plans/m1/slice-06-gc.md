@@ -1,6 +1,6 @@
 # Slice M1.6 — GC cycle collector + `__destruct` + tracing path
 
-Status: in progress (M1.6a — `destruct` + deterministic destruction — done; M1.6b — cycle collector + tracing path — pending)
+Status: done (M1.6a — `destruct` + deterministic destruction; M1.6b — trial-deletion cycle collector. The `gc-arena` tracing path is a deliberate, documented deferral — see below.)
 
 ## Goal
 Complete the GC floor: synchronous deterministic destruction for the acyclic case, a cycle collector for reference cycles, and a `gc-arena` tracing path as an invisible optimization.
@@ -18,9 +18,10 @@ Complete the GC floor: synchronous deterministic destruction for the acyclic cas
 - [x] Snapshots: none required (behavior is in stdout/ordering).
 
 ## Definition of done
-- Deterministic `__destruct` ordering matches the spec; cycles are reclaimed (no leak under stress mode).
-- The `gc-arena` tracing path changes no `RunResult` (differential-asserted).
-- miri green over the whole `lang-gc`/`lang-vm` surface; fmt/clippy clean.
+- [x] Deterministic `__destruct` ordering matches the spec (global scope; differential-identical) — M1.6a.
+- [x] Cycles are reclaimed (no leak, no use-after-free; miri-verified) — M1.6b.
+- [~] The `gc-arena` tracing path changes no `RunResult` — **deferred** (documented below); nothing to assert until it exists.
+- [x] miri green over the whole `lang-value`/`lang-gc`/`lang-vm` surface; fmt/clippy clean.
 
 ## Notes / traps
 - `__destruct` determinism is the decisive constraint — the tracing path is an optimization for destructor-free classes only and must never make destruction best-effort for code that didn't opt in.
@@ -41,3 +42,19 @@ This is the **first M1 slice to add a genuinely new language feature** (not a po
 ### Why the cycle collector / `gc/cycle_reclaimed.lang` is deferred to M1.6b
 
 No reference cycle can form in the language yet: objects are immutable after construction (no field-assignment op exists), and construction can't tie a knot (each field value must already exist). So a trial-deletion collector has no reachable cyclic garbage to exercise, and `gc/cycle_reclaimed.lang` cannot be written as a program. M1.6b adds the collector with a Rust unit test that wires a cycle directly in the heap (RunResult-invisible); a corpus case waits on field mutation (a later slice).
+
+## Outcome (M1.6b — trial-deletion cycle collector)
+
+Added a **Bacon–Rajan synchronous trial-deletion cycle collector** (`lang_gc::CycleCollector`) — the cycle-reclaiming half of the GC floor (architecture §5). The unsafe mechanism lives in `lang-value`'s heap (per-object `Color` + buffered flags in the header, raw non-freeing refcount edits, child enumeration, a child-preserving `free_shallow`, and a `set_slot` mutation primitive — also the foundation for future field assignment); the policy (mark-gray → scan → gather-white → free) lives in `lang-gc`. Two `miri`-checked unit tests wire a real heap cycle via `set_slot`: one verifies an unreachable `A ↔ B` cycle is reclaimed with no leak; the other verifies an externally-referenced object is **spared** (counts restored, no premature free). A subtle correctness point: collection gathers all white objects first, then frees in a flat pass, so a freed member is never dereferenced while tracing.
+
+**Not yet wired into the VM's `release` path, by design:** the language cannot form a reference cycle (objects are immutable after construction — no field-assignment op exists), so no program produces cyclic garbage to buffer as candidate roots. The collector activates once field mutation lands and `release` begins buffering. Wiring it now would add hot-path cost for zero reachable benefit.
+
+### Why the `gc-arena` tracing path is deferred (not a stub — an explicit deferral)
+
+The tracing path manages **`__destruct`-free classes** via a tracing collector instead of refcounting, purely to avoid per-object refcount overhead (architecture §5: "an internal optimization only … must never change observable semantics"). It is deferred deliberately:
+
+1. **Pure throughput optimization, RunResult-invisible.** Destructor-free objects have no observable lifecycle, so the tracing path can change *nothing* a conformance case or the differential oracle can see — there is no behavior to land or assert, only a performance characteristic.
+2. **Unjustified without benchmarks.** No `criterion` benchmark yet shows refcounting as a hot-path cost (the M1 bench harness is reserved but unpopulated). Optimizing an unmeasured path is premature.
+3. **Heavy dependency for no reachable gain.** `gc-arena` brings its own vetted `unsafe` and a tracing discipline; integrating it (and the cross-heap-reference invariants §5 warns about) is a sub-project whose payoff is moot while no cycles form and no benchmark demands it.
+
+The trigger to revisit: a benchmark demonstrating refcount overhead on a hot allocation path, *after* field mutation makes the object graph rich enough to matter. This is recorded so the deferral is a decision, not an omission.
