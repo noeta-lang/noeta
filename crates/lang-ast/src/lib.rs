@@ -104,6 +104,9 @@ impl Stmt {
 pub struct RecordDecl {
     pub name: String,
     pub name_span: Span,
+    /// Generic type parameters (`type Pair<A, B> = {...}`). Erased at runtime — they exist for
+    /// the checker; empty for a non-generic type.
+    pub type_params: Vec<String>,
     pub fields: Vec<FieldDecl>,
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
     /// across all directive lines. Validated by the checker; drives compiler codegen.
@@ -156,6 +159,9 @@ pub struct ImplBlock {
 pub struct ClassDecl {
     pub name: String,
     pub name_span: Span,
+    /// Generic type parameters (`class Box<T> {...}`). Erased at runtime — they exist for the
+    /// checker; empty for a non-generic class.
+    pub type_params: Vec<String>,
     pub fields: Vec<FieldDecl>,
     /// All callable methods, including the ones flattened out of `impl` blocks — so the existing
     /// `(type, method)` dispatch machinery resolves an operator's trait method with no change.
@@ -194,6 +200,9 @@ pub struct FieldDecl {
 pub struct EnumDecl {
     pub name: String,
     pub name_span: Span,
+    /// Generic type parameters (`enum Tree<T> {...}`). Erased at runtime — they exist for the
+    /// checker; empty for a non-generic enum.
+    pub type_params: Vec<String>,
     /// The backing primitive type for a backed enum (`: string`), if any.
     pub backing: Option<TypeRef>,
     pub variants: Vec<VariantDecl>,

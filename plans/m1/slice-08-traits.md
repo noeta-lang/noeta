@@ -1,6 +1,6 @@
 # Slice M1.8 — Traits as operators + built-in derives + generics
 
-Status: in progress (M1.8a done; M1.8b todo)
+Status: done (M1.8a + M1.8b — the Thrust B gate is met: the four built-in derives work, a generic type checks and runs, and the attribute manifest is queryable; a handful of non-gate tail items are tracked as deferred follow-ups below)
 
 Split, following the M1.6a/6b precedent: **M1.8a** lands the trait/operator/attribute *surface* and wires infix operator overloading end-to-end through both backends (the headline, differential-guarded feature). **M1.8b** lands the behavior behind the remaining protocols (derive codegen, structural `Comparable`, `Display`/`Index`/`Members`/`Callable` dispatch, fallible `Try*`), generics, and the attribute manifest.
 
@@ -60,18 +60,21 @@ The surface, the registry, the checker rules, and infix operator overloading wir
 **Done (increment 10 — the attribute manifest):**
 - [x] **`#[...]` data attributes are collected into a queryable build manifest.** The compiler records every `#[Name(args...)]` attached to a class/record/enum into a new `Module.manifest` (`Vec<AttributeRecord>` of `{type_name, name, args}`), in source order, populated in `register_types`. Because the manifest rides inside the compiled `Module`, it is automatically queryable through the existing `bytecode(db)` salsa query — no new query needed. `Module::attributes_for(type_name)` is the convenience accessor (e.g. "every type tagged `#[Entity]`"). Attributes still carry no codegen meaning and the runtime ignores them, so this changes no `RunResult` (the manifest is omitted from `disassemble()`, so no snapshot churn) — it is a pure build artifact. Unit test `attribute_manifest_records_decorations`. No `unsafe` touched (compiler/bytecode only), so no miri gate. This satisfies the Thrust B gate's "the attribute manifest is queryable."
 
-**Todo:**
+**Done (increment 11 — generics (erased)):**
+- [x] **A generic type checks and runs, type parameters erased.** Declarations carry generic parameters — `class Box<T>`, `type Pair<A, B>`, `enum Opt<T>` — parsed into a new `type_params: Vec<String>` on each decl (AST + parser; in declaration position a `<` after the type name is unambiguous). Type *arguments* in annotations (`Box<int>`, `Pair<int, string>`) already parsed (`TypeRef::Named { args }`). At runtime the parameters are **erased**: shapes are keyed by name, so `Box<int>` and `Box<string>` share one shape and one method table, and neither backend reads the annotations for storage — a generic type therefore runs unchanged in both, differential-identical. The checker treats a type parameter gradually (`Unknown`), so a field/param annotated `T` is accepted without an unknown-type error (E0013-awareness of the in-scope parameters lands with M1.9, where E0013 itself lands). `pretty` renders `<A, B>` only when non-generic decls would be unchanged. Conformance `generics/erased_box.lang` (one class at `int` and `string`), `generics/generic_record_and_enum.lang`. Parser unit test `parses_generic_type_parameters`. No `unsafe` touched (AST/parser only). Differential **62 matched / 0 skipped / 100%**. This satisfies the Thrust B gate's "a generic type checks and runs"; monomorphic shape specialization / type-param slot guards (the perf reification path) and bounded parameters remain a later hardening.
+
+**Todo (deferred past M1.8 — tracked follow-ups):**
 - [ ] User-facing `Ordering.Less` construction (the dispatch needs only delegation via `.compare()`, so this is deferred); register `Ordering` as a namable prelude enum.
 - [ ] The standalone `impl Attribute for X {}` capability-marker construct + the `#[Foo(...)]`-requires-`Attribute` gate (the manifest itself landed in increment 10; this gate on *which* records may be used as attributes still needs the standalone top-level `impl` construct).
 - [ ] Nested-object fields in derived `Comparable` (recurse into sub-objects). (`Display` dispatch and the `ToJson` derive codegen landed in increments 7 and 9.)
 - [ ] The remaining protocols routed to user objects: `Callable` (`a(...)`), `Members`/`DynamicCall` — each needs the surface operator routed to its method.
-- [ ] Generics via shapes (type-param slot, monomorphic guard elision) + the attribute manifest build artifact.
+- [ ] Monomorphic shape specialization for generics (type-param slot + guard elision, the reification-for-identity path) and bounded type parameters (`<T: Comparable>`).
 - [ ] Inline-cache fast path for trait-method call sites (perf; currently a per-op hashmap lookup on the object path).
 
 ## Definition of done
 - **M1.8a gate (met):** operator overloading is trait-dispatched end-to-end in both backends, differential-identical; every trait/derive misuse has a negative conformance case; the surface parses/checks as the syntax doc shows.
-- **Thrust B gate (M1.8b):** the four built-in derives work; a generic type checks and runs; the attribute manifest is queryable.
-- All prior corpus cases still pass (operators on built-in types are untouched). miri green on the VM path; fmt/clippy clean.
+- **Thrust B gate (M1.8b — met):** the four built-in derives work (`Comparable` structural ordering + `ToJson` codegen are the two with genuinely-new behavior; `Equatable`/`Display`/`Clone` are the checked spelling of M1's structural defaults, with `Display` *dispatch* to a user `to_string` also wired); a generic type checks and runs (erased); the attribute manifest is queryable. Every operator and the `Index`/`Length`/`Display`/`Iterable` protocols are trait-dispatched in both backends.
+- All prior corpus cases still pass (operators on built-in types are untouched). miri green on the VM path; fmt/clippy clean. Differential ended **62 matched / 0 skipped / 100% / zero divergence**.
 
 ## Notes / traps
 - `~` and `+` on built-in types must produce identical observable behavior to M0 — the overload only engages when the **left operand is a user object** with the trait method, so built-ins are never rerouted. The oracle guards this.

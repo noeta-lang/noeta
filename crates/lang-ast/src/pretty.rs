@@ -202,8 +202,9 @@ impl Pretty for EnumDecl {
             })
             .collect();
         out.push_str(&format!(
-            "({kind} {} [{}] {})",
+            "({kind} {}{} [{}] {})",
             self.name,
+            type_params_str(&self.type_params),
             variants.join(" "),
             span(self.span)
         ));
@@ -218,13 +219,24 @@ fn field_decl_str(field: &FieldDecl) -> String {
     }
 }
 
+/// Render a declaration's generic parameters as `<A, B>`, or the empty string when there are
+/// none (so non-generic declarations' pretty output is unchanged).
+fn type_params_str(params: &[String]) -> String {
+    if params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", params.join(", "))
+    }
+}
+
 impl Pretty for RecordDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
-            "(record {} [{}] {})",
+            "(record {}{} [{}] {})",
             self.name,
+            type_params_str(&self.type_params),
             fields.join(" "),
             span(self.span)
         ));
@@ -236,8 +248,9 @@ impl Pretty for ClassDecl {
         indent(out, level);
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
-            "(class {} [{}] {}",
+            "(class {}{} [{}] {}",
             self.name,
+            type_params_str(&self.type_params),
             fields.join(" "),
             span(self.span)
         ));

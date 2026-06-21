@@ -1,0 +1,24 @@
+// A generic class `Box<T>` type-checks and runs: the type parameter is erased at runtime (one
+// shape, instantiated at both `int` and `string`), so the same class holds either. Runs
+// identically under both backends (the differential oracle).
+// expect: stdout "42"
+// expect: stdout "hello"
+// expect: stdout "42 and hello"
+// expect: exit 0
+class Box<T> {
+    value: T
+
+    fn new(v: T): Box<T> {
+        return Box { value: v };
+    }
+
+    fn get(): T {
+        return value;
+    }
+}
+
+bi = Box.new(42);
+bs = Box.new("hello");
+echo bi.get();
+echo bs.value;
+echo "{bi.value} and {bs.value}";

@@ -845,8 +845,23 @@ where
                     span: to_span(e.span()),
                 },
             );
+        // Optional generic type parameters on a declaration: `<T>`, `<A, B>`. Erased at runtime
+        // (retained for the checker). In declaration position a `<` right after the type name is
+        // unambiguous — no comparison expression can appear there.
+        let type_params = id
+            .clone()
+            .map(|(name, _span)| name)
+            .separated_by(just(T::Comma))
+            .at_least(1)
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::Lt), just(T::Gt))
+            .or_not()
+            .map(Option::unwrap_or_default);
+
         let enum_decl = just(T::EnumKw)
             .ignore_then(id.clone())
+            .then(type_params.clone())
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(
                 variant
@@ -854,10 +869,11 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(|((name_pair, backing), variants), e| {
+            .map_with(|(((name_pair, type_params), backing), variants), e| {
                 Stmt::Enum(EnumDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
+                    type_params,
                     backing,
                     variants,
                     derives: Vec::new(),
@@ -881,6 +897,7 @@ where
             });
         let record_decl = just(T::TypeKw)
             .ignore_then(id.clone())
+            .then(type_params.clone())
             .then_ignore(just(T::Eq))
             .then(
                 record_field
@@ -890,10 +907,11 @@ where
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
             .then_ignore(just(T::Semicolon))
-            .map_with(|((name, name_span), fields), e| {
+            .map_with(|(((name, name_span), type_params), fields), e| {
                 Stmt::Record(RecordDecl {
                     name,
                     name_span,
+                    type_params,
                     fields,
                     derives: Vec::new(),
                     attrs: Vec::new(),
@@ -958,13 +976,14 @@ where
             .map(ClassMember::Destructor);
         let class_decl = just(T::ClassKw)
             .ignore_then(id.clone())
+            .then(type_params.clone())
             .then(
                 choice((class_method, class_impl, class_destructor, class_field))
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(|((name, name_span), members), e| {
+            .map_with(|(((name, name_span), type_params), members), e| {
                 let mut fields = Vec::new();
                 let mut methods = Vec::new();
                 let mut impls = Vec::new();
@@ -988,6 +1007,7 @@ where
                 Stmt::Class(ClassDecl {
                     name,
                     name_span,
+                    type_params,
                     fields,
                     methods,
                     impls,
@@ -1316,6 +1336,20 @@ mod tests {
     #[test]
     fn arithmetic_precedence_is_stable() {
         insta::assert_snapshot!(pretty("echo 1 + 2 * 3 - 4;"));
+    }
+
+    #[test]
+    fn parses_generic_type_parameters() {
+        // Declarations carry their generic parameters (erased at runtime, kept for the checker).
+        let class = pretty("class Box<T> { value: T fn get(): T { return value; } }");
+        assert!(class.contains("(class Box<T>"), "{class}");
+        let record = pretty("type Pair<A, B> = { first: A, second: B };");
+        assert!(record.contains("(record Pair<A, B>"), "{record}");
+        let enom = pretty("enum Opt<T> { None; Some(value: T); }");
+        assert!(enom.contains("(enum Opt<T>"), "{enom}");
+        // A non-generic declaration renders exactly as before (no angle brackets).
+        let plain = pretty("class P { x: int }");
+        assert!(plain.contains("(class P ["), "{plain}");
     }
 
     #[test]
