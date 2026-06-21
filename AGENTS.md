@@ -109,6 +109,15 @@ Follow these practices when working on this codebase as an AI coding agent.
 
 This project is primarily developed by coding agents, so its imperative that we maintain a high quality and high coverage test suite.
 
+**Coverage.** Measure with `cargo-llvm-cov`, never `cargo-tarpaulin` (tarpaulin can't see across the process boundary, so it reports the subprocess-driven CLI tests in `crates/lang-cli/tests/` as 0% coverage of the `lang` binary).
+
+```sh
+cargo llvm-cov --workspace --summary-only   # per-file line/region/function summary
+cargo llvm-cov --workspace --html           # browsable report under target/llvm-cov/html
+```
+
+Setup if missing: `rustup component add llvm-tools-preview && cargo install cargo-llvm-cov`. Treat a coverage drop on a touched file as a regression to fix, not to ignore.
+
 ### Version Control and Continuous Work
 
 Commit as you go and always implement features in full, no stubs or todos unless deferring entire subsystems. When a task is clear, work independently and verify changes using the comprehensive test suite.
