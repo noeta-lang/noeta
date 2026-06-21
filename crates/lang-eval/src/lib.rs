@@ -1359,6 +1359,44 @@ impl Interpreter {
                 }
                 Ok(items[i as usize].clone())
             }
+            // `m[k]` on a map looks the value up by its string key; a missing key is `E0018`.
+            Value::Map(entries) => {
+                let Value::Str(key) = &index else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("map index must be a string, found {}", index.type_name()),
+                    ));
+                };
+                match entries.get(key) {
+                    Some(value) => Ok(value.clone()),
+                    None => Err(self.runtime_error(
+                        DiagnosticCode::KeyNotFound,
+                        span,
+                        format!("map has no key {key:?}"),
+                    )),
+                }
+            }
+            // `s[i]` on a string addresses a single character by position (bounds-checked),
+            // counting by Unicode scalar values to match `len`.
+            Value::Str(s) => {
+                let Value::Int(i) = index else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("string index must be an int, found {}", index.type_name()),
+                    ));
+                };
+                let count = s.chars().count();
+                if i < 0 || i as usize >= count {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::IndexOutOfBounds,
+                        span,
+                        format!("index {i} out of bounds for string of length {count}"),
+                    ));
+                }
+                Ok(Value::Str(s.chars().nth(i as usize).unwrap().to_string()))
+            }
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,

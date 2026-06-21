@@ -679,6 +679,50 @@ impl<'m> Vm<'m> {
                         frames[top].pc += 1;
                         continue;
                     }
+                    // A map looks the value up by its string key; a missing key is `E0018`.
+                    if v.is_map() {
+                        let Some(key) = idx.as_string() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("map index must be a string, found {}", idx.type_name()),
+                            ));
+                        };
+                        let Some(element) = v.map_get(&key) else {
+                            return Err(self.error(
+                                DiagnosticCode::KeyNotFound,
+                                *span,
+                                format!("map has no key {key:?}"),
+                            ));
+                        };
+                        retain(element);
+                        set_reg(&mut frames[top].regs, *dst, element);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    // A string addresses a single character by position (bounds-checked),
+                    // counting by Unicode scalar values to match `len`.
+                    if let Some(s) = v.as_string() {
+                        let Some(i) = idx.as_int() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("string index must be an int, found {}", idx.type_name()),
+                            ));
+                        };
+                        let count = s.chars().count();
+                        if i < 0 || i as usize >= count {
+                            return Err(self.error(
+                                DiagnosticCode::IndexOutOfBounds,
+                                *span,
+                                format!("index {i} out of bounds for string of length {count}"),
+                            ));
+                        }
+                        let ch = s.chars().nth(i as usize).unwrap().to_string();
+                        set_reg(&mut frames[top].regs, *dst, Value::string(&ch));
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     return Err(self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
@@ -1772,6 +1816,41 @@ mod tests {
         assert_eq!(
             r.diagnostics[0].code,
             lang_diagnostics::DiagnosticCode::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn index_map_by_key() {
+        // Map element access by string key retains the value (refcount discipline under miri).
+        let r = run("m = {\"a\": \"x\", \"b\": \"y\"};\necho m[\"b\"];\n");
+        assert_eq!(r.stdout, "y\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn index_map_missing_key_is_e0018() {
+        let r = run("m = {\"a\": 1};\necho m[\"z\"];\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::KeyNotFound
+        );
+    }
+
+    #[test]
+    fn index_string_by_position() {
+        let r = run("s = \"hello\";\necho s[0];\necho s[4];\n");
+        assert_eq!(r.stdout, "h\no\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn index_string_out_of_bounds_is_e0016() {
+        let r = run("s = \"hi\";\necho s[5];\n");
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::IndexOutOfBounds
         );
     }
 

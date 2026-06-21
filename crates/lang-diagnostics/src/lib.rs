@@ -54,6 +54,8 @@ pub enum DiagnosticCode {
     /// A `#[...]` data attribute is malformed or misused — most commonly the old `#[derive(...)]`
     /// spelling (code generation now uses the `@derive(...)` directive).
     InvalidAttribute,
+    /// An index expression `m[k]` addressed a map with a key it does not contain.
+    KeyNotFound,
 }
 
 impl DiagnosticCode {
@@ -77,6 +79,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidImpl,
         DiagnosticCode::IndexOutOfBounds,
         DiagnosticCode::InvalidAttribute,
+        DiagnosticCode::KeyNotFound,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -100,6 +103,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidImpl => "E0015",
             DiagnosticCode::IndexOutOfBounds => "E0016",
             DiagnosticCode::InvalidAttribute => "E0017",
+            DiagnosticCode::KeyNotFound => "E0018",
         }
     }
 

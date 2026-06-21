@@ -237,6 +237,20 @@ impl Value {
         }
     }
 
+    /// The value for `key`, if this is a map containing that key. The returned value shares
+    /// the map's reference (it is *not* retained); the caller must retain it before storing it
+    /// as an independent owner.
+    pub fn map_get(self, key: &str) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => entries.get(key).copied(),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// The element at `index`, if this is a list and the index is in bounds. The returned
     /// value shares the list's reference (it is *not* retained); the caller must retain it
     /// before storing it as an independent owner.

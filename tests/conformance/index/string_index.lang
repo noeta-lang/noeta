@@ -1,0 +1,8 @@
+// Index access `s[i]` addresses a single character of a string by position, counting by Unicode
+// scalar values to match `len`, identical under both backends.
+// expect: stdout "h"
+// expect: stdout "o"
+// expect: exit 0
+s = "hello";
+echo s[0];
+echo s[4];

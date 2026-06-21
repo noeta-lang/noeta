@@ -1,0 +1,8 @@
+// Index access `m[k]` looks a value up in a map by its string key. It chains like any other
+// postfix operator, identical under both backends.
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: exit 0
+m = {"a": 1, "b": 2};
+echo m["a"];
+echo m["b"];
