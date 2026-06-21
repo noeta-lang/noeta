@@ -129,10 +129,12 @@ pub enum Op {
         src: Reg,
         span: Span,
     },
-    /// `dst = len(src)` where `src` is a list (an iteration snapshot). Never fails.
+    /// `dst = len(src)` where `src` is a list (an iteration snapshot). When `src` is not a list —
+    /// only reachable when an `Iterable::iter` returned a non-list — raises E0007 at `span`.
     ListLen {
         dst: Reg,
         src: Reg,
+        span: Span,
     },
     /// `dst = list[index]` (retained), where `list` is a list and `index` an in-bounds int.
     ListGet {
@@ -521,7 +523,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         }
         Op::RequireMapKey { reg, .. } => format!("RequireMapKey r{reg}"),
         Op::IterSnapshot { dst, src, .. } => format!("IterSnapshot r{dst} <- r{src}"),
-        Op::ListLen { dst, src } => format!("ListLen     r{dst} <- len r{src}"),
+        Op::ListLen { dst, src, .. } => format!("ListLen     r{dst} <- len r{src}"),
         Op::ListGet { dst, list, index } => format!("ListGet     r{dst} <- r{list}[r{index}]"),
         Op::DestructurePair {
             first, second, src, ..

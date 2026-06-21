@@ -667,10 +667,25 @@ impl Interpreter {
         body: &[Stmt],
         span: Span,
     ) -> Eval<Flow> {
-        let elements = match self.eval_expr(iterable)? {
-            Value::List(items) => (*items).clone(),
+        let iterable_value = self.eval_expr(iterable)?;
+        let elements = match &iterable_value {
+            Value::List(items) => (**items).clone(),
             // Iterating a map yields its values, in deterministic key order.
             Value::Map(entries) => entries.values().cloned().collect(),
+            // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
+            // `iter` method returns.
+            Value::Object(object) if object.def.methods.contains_key("iter") => {
+                match self.call_method(iterable_value.clone(), "iter", Vec::new(), span)? {
+                    Value::List(items) => (*items).clone(),
+                    other => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("`iter` must return a list, found {}", other.type_name()),
+                        ));
+                    }
+                }
+            }
             other => {
                 return Err(self.runtime_error(
                     DiagnosticCode::TypeMismatch,

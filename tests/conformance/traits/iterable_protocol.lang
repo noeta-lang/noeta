@@ -1,0 +1,28 @@
+// Implementing the `Iterable` trait lights up `for x in o`: iteration runs over the list the
+// object's `iter` method returns. Runs identically under both backends (the differential oracle).
+// expect: stdout "10"
+// expect: stdout "20"
+// expect: stdout "30"
+// expect: stdout "60"
+// expect: exit 0
+class Bag {
+    items: list
+
+    fn new(items: list): Bag {
+        return Bag { items: items };
+    }
+
+    impl Iterable {
+        fn iter(): list {
+            return items;
+        }
+    }
+}
+
+bag = Bag.new([10, 20, 30]);
+mut total = 0;
+for x in bag {
+    echo x;
+    total = total + x;
+}
+echo total;

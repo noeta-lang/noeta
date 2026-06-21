@@ -644,6 +644,7 @@ impl<'m> FnCompiler<'m> {
         self.code.push(Op::ListLen {
             dst: len,
             src: items,
+            span,
         });
         let index = self.alloc_reg();
         let zero = self.add_const(Const::Int(0));

@@ -395,6 +395,40 @@ impl<'m> Vm<'m> {
                 }
                 Op::IterSnapshot { dst, src, span } => {
                     let v = frames[top].regs[*src as usize];
+                    // A user object lights up the `Iterable` trait: `for x in o` iterates the list
+                    // its `iter` method returns. The method runs bytecode, so it is pushed as a
+                    // call frame; its returned value becomes the snapshot (the following `ListLen`
+                    // raises E0007 if it was not a list). Matches the tree-walker's `exec_for`.
+                    if v.is_object() {
+                        let type_name = v.shape().unwrap().name.clone();
+                        if let Some(&proto) =
+                            self.methods.get(&(type_name.clone(), "iter".to_string()))
+                        {
+                            let chunk = &module.protos[proto as usize];
+                            if chunk.num_params != 1 {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "this method takes {} argument(s) but 0 were supplied",
+                                        chunk.num_params - 1
+                                    ),
+                                ));
+                            }
+                            let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                            retain(v);
+                            new_regs[0] = v;
+                            frames[top].pc += 1;
+                            frames.push(Frame {
+                                proto,
+                                regs: new_regs,
+                                pc: 0,
+                                ret_dst: *dst,
+                                ret_transform: RetTransform::None,
+                            });
+                            continue;
+                        }
+                    }
                     // Snapshot the elements to iterate (a list's elements, or a map's values
                     // in sorted-key order), each retained so the loop owns them independently.
                     let snapshot = match v.list_items().or_else(|| v.map_values()) {
@@ -415,12 +449,24 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, snapshot);
                     frames[top].pc += 1;
                 }
-                Op::ListLen { dst, src } => {
-                    let n = frames[top].regs[*src as usize]
-                        .list_len()
-                        .expect("ListLen operates on an iteration snapshot");
-                    set_reg(&mut frames[top].regs, *dst, Value::int(n as i64));
-                    frames[top].pc += 1;
+                Op::ListLen { dst, src, span } => {
+                    // After `IterSnapshot`, `src` is a list for the list/map paths; the only way it
+                    // is not is an `Iterable::iter` that returned a non-list, reported here (E0007),
+                    // matching the tree-walker's `exec_for`.
+                    let v = frames[top].regs[*src as usize];
+                    match v.list_len() {
+                        Some(n) => {
+                            set_reg(&mut frames[top].regs, *dst, Value::int(n as i64));
+                            frames[top].pc += 1;
+                        }
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("`iter` must return a list, found {}", v.type_name()),
+                            ));
+                        }
+                    }
                 }
                 Op::ListGet { dst, list, index } => {
                     let idx = frames[top].regs[*index as usize]
@@ -1952,6 +1998,28 @@ mod tests {
         );
         assert_eq!(r.stdout, "P#7\nit is P#7\n");
         assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn for_dispatches_to_iterable_trait() {
+        // `for x in o` routes to the class's `Iterable::iter`, iterating its returned list.
+        let r = run(
+            "class Bag {\n  items: list\n  fn new(items: list): Bag { return Bag { items: items }; }\n  impl Iterable {\n    fn iter(): list { return items; }\n  }\n}\nmut total = 0;\nfor x in Bag.new([1, 2, 3]) { total = total + x; }\necho total;\n",
+        );
+        assert_eq!(r.stdout, "6\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn iterable_returning_non_list_is_e0007() {
+        let r = run(
+            "class B {\n  x: int\n  fn new(): B { return B { x: 1 }; }\n  impl Iterable { fn iter(): int { return 5; } }\n}\nfor v in B.new() { echo v; }\n",
+        );
+        assert_eq!(r.exit_code, 1);
+        assert_eq!(
+            r.diagnostics[0].code,
+            lang_diagnostics::DiagnosticCode::TypeMismatch
+        );
     }
 
     #[test]
