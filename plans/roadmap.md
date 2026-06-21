@@ -7,11 +7,33 @@ The single source of "what's next / what's done". Milestones are distilled from 
 | Milestone | Goal | Status |
 |---|---|---|
 | **M0 — Walking skeleton** | Run simple programs via a tree-walking evaluator; prove the syntax feels right; stand up the test harness and crate seams. | **done** |
-| **M1 — Real language core** | Replace tree-walker with register-based bytecode + VM; NaN-boxed values; shape-based object model + inline caches; refcount+cycle GC; type checker + inference (salsa query graph); generics/ADTs/traits/derives; modules; layered stdlib (Ring 1/2). | not started |
+| **M1 — Real language core** | Replace tree-walker with register-based bytecode + VM; NaN-boxed values; shape-based object model + inline caches; refcount+cycle GC; type checker + inference (salsa query graph); generics/ADTs/traits/derives; modules; layered stdlib (Ring 1/2). | **in progress** |
 | **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface; baseline DB; packed value types. | not started |
 | **M3 — Long tail** | WASM target; Tauri desktop; background-work extensions; JIT; editor grammars + VS Code ext; reactive persistence; p2p/local-first; extension system + stable host ABI; startup cache; editions. | not started |
 
-Detailed M1–M3 decomposition is deferred to a dedicated planning pass when each milestone is reached. Only M0 is sliced below.
+Detailed M2–M3 decomposition is deferred to a dedicated planning pass when each milestone is reached. M0 and M1 are sliced below.
+
+## M1 slices
+
+The runtime/VM-first sequence: stand up the bytecode VM and reproduce M0 byte-for-byte (Thrust A), then layer the salsa type checker (Thrust B), then modules + stdlib (Thrust C). Each slice links to its file in `m1/`. Pick the lowest-numbered `todo`.
+
+The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new `VmBackend` are run against the same programs and their `RunResult`s asserted identical via `lang test --differential`. The tree-walker is retained forever as the oracle, never deleted. Until the VM compiles 100% of the corpus, cases it can't yet lower are **skipped** (not failed), tracked as a climbing coverage %.
+
+| # | Slice | Thrust | Status |
+|---|---|---|---|
+| 0 | [Value spine + minimal VM + differential oracle](m1/slice-00-vm-spine.md) | A | todo |
+| 1 | [Salsa db plumbing](m1/slice-01-salsa-db.md) | A | todo |
+| 2 | [Functions, calls, closures, pipeline](m1/slice-02-functions.md) | A | todo |
+| 3 | [Heap collections: List + Map](m1/slice-03-collections.md) | A | todo |
+| 4 | [Shapes + objects + enums (object model)](m1/slice-04-shapes-objects.md) | A | todo |
+| 5 | [Result/Option/`?`/`??` + match](m1/slice-05-result-match.md) | A | todo |
+| 6 | [GC cycle collector + `__destruct`](m1/slice-06-gc.md) | A | todo |
+| 7 | [Type checker: types + inference + ADT/exhaustiveness + ownership](m1/slice-07-checker.md) | B | todo |
+| 8 | [Traits as operators + derives + generics](m1/slice-08-traits.md) | B | todo |
+| 9 | [Modules / namespaces / `use` resolution](m1/slice-09-modules.md) | C | todo |
+| 10 | [Layered stdlib (Ring 1 + Ring 2)](m1/slice-10-stdlib.md) | C | todo |
+
+**Thrust A gate:** `VmBackend` runs 100% of the M0 corpus, every case differential-identical to the tree-walker. **Thrust B gate:** every static-error class has a negative conformance case. New `unsafe` is quarantined to `lang-value`/`lang-gc`/`lang-vm`, miri-gated.
 
 ## M0 slices
 
@@ -29,6 +51,15 @@ Each links to its file in `m0/`. Pick the lowest-numbered `todo`.
 | 7 | [`Result`/`Option`/`?`](m0/slice-07-result-option.md) | done |
 | 8 | [`namespace` / `use`](m0/slice-08-namespace-use.md) | done |
 | 9 | [§14 demo + REPL + proptest](m0/slice-09-demo-proptest.md) | done |
+
+### Post-M0 hardening (after Slice 9, before M1)
+
+A test-hardening pass closed coverage gaps the slices left (commits `5b285a5`, `539daba`):
+
+- **New test suites:** `crates/lang-cli/tests/cli.rs` (subprocess-driven `run`/`repl`/`test` end-to-end via `assert_cmd`), `crates/lang-eval/tests/diagnostics.rs` (rendered-`ariadne` snapshot gallery for E0001–E0010), plus expanded `value.rs`/`ops.rs` unit tests.
+- **Real bug fixed:** the lexer string regex `"[^"]*"` couldn't span an escaped quote (`\"` terminated the string early); fixed to `"([^"\\]|\\.)*"`, with a regression test.
+- **Corpus grew 22 → 36 cases; test functions 88 → 120.**
+- **Coverage tooling switched to `cargo-llvm-cov`** (tarpaulin uninstalled — it can't see across the subprocess boundary, reporting the CLI tests' `lang` binary as 0%). Baseline: **87.10% lines / 89.40% regions / 92.36% functions**. See `AGENTS.md` Testing.
 
 ## Standing requirements (every slice)
 

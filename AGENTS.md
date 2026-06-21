@@ -7,7 +7,7 @@ This project is a **new programming language, built from scratch in Rust** — a
 The canonical design lives in `docs/resources/` (positioning, architecture, syntax, implementation plan, cross-reference). The implementation overview is in `ARCHITECTURE.md`. The work tracker is `plans/` (start at `plans/roadmap.md`).
 
 > [!NOTE]
-> **Current milestone: M0 (walking skeleton)** — a tree-walking interpreter for a growing subset of the language. Crate prefix `lang-` and binary name `lang` are placeholders pending the real language name.
+> **Current milestone: M1 (real language core)** — replacing the tree-walker with a register-based bytecode VM over NaN-boxed values, a shape-based object model, refcount+cycle GC, and a salsa-based type checker. M0 (the tree-walking interpreter) is complete and **retained as the differential oracle** (`TreeWalkBackend`), against which the new `VmBackend` is asserted identical. See `plans/roadmap.md` for the M1 slice sequence. Crate prefix `lang-` and binary name `lang` are placeholders pending the real language name.
 
 ## The compilation pipeline (M0)
 
