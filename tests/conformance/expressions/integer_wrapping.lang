@@ -1,0 +1,7 @@
+// Integer arithmetic wraps on overflow (M0 ints are i64 with wrapping semantics) rather
+// than panicking — so the pipeline stays total even on overflow.
+// expect: stdout "-9223372036854775808"
+// expect: stdout "-2"
+// expect: exit 0
+echo 9223372036854775807 + 1;
+echo 9223372036854775807 * 2;

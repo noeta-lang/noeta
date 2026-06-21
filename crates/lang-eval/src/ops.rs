@@ -13,6 +13,7 @@ use crate::value::Value;
 
 /// A failed operator application: the diagnostic code and message (the span is added by
 /// the caller, which knows the expression's location).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OpError {
     pub code: DiagnosticCode,
     pub text: String,
@@ -137,5 +138,156 @@ fn type_mismatch(op: BinaryOp, left: &Value, right: &Value) -> OpError {
             left.type_name(),
             right.type_name()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn int(n: i64) -> Value {
+        Value::Int(n)
+    }
+    fn float(f: f64) -> Value {
+        Value::Float(f)
+    }
+    fn binary(op: BinaryOp, l: Value, r: Value) -> Result<Value, OpError> {
+        apply_binary(op, &l, &r)
+    }
+
+    #[test]
+    fn integer_arithmetic() {
+        assert_eq!(binary(BinaryOp::Add, int(2), int(3)), Ok(int(5)));
+        assert_eq!(binary(BinaryOp::Sub, int(2), int(3)), Ok(int(-1)));
+        assert_eq!(binary(BinaryOp::Mul, int(4), int(5)), Ok(int(20)));
+        assert_eq!(binary(BinaryOp::Div, int(7), int(2)), Ok(int(3)));
+        assert_eq!(binary(BinaryOp::Rem, int(7), int(2)), Ok(int(1)));
+    }
+
+    #[test]
+    fn integer_arithmetic_wraps_rather_than_panicking() {
+        assert_eq!(
+            binary(BinaryOp::Add, int(i64::MAX), int(1)),
+            Ok(int(i64::MIN))
+        );
+        assert_eq!(
+            binary(BinaryOp::Mul, int(i64::MAX), int(2)),
+            Ok(int(-2)) // wrapping
+        );
+    }
+
+    #[test]
+    fn division_and_remainder_by_zero_are_errors() {
+        let div = binary(BinaryOp::Div, int(1), int(0)).unwrap_err();
+        assert_eq!(div.code, DiagnosticCode::DivisionByZero);
+        let rem = binary(BinaryOp::Rem, int(1), int(0)).unwrap_err();
+        assert_eq!(rem.code, DiagnosticCode::DivisionByZero);
+    }
+
+    #[test]
+    fn mixed_int_float_coerces_to_float() {
+        assert_eq!(binary(BinaryOp::Add, int(1), float(2.5)), Ok(float(3.5)));
+        assert_eq!(binary(BinaryOp::Mul, float(2.0), int(3)), Ok(float(6.0)));
+        // Float division does not error on a zero divisor (yields inf/NaN per IEEE).
+        assert!(matches!(
+            binary(BinaryOp::Div, float(1.0), float(0.0)),
+            Ok(Value::Float(f)) if f.is_infinite()
+        ));
+    }
+
+    #[test]
+    fn concat_stringifies_any_operands() {
+        assert_eq!(
+            binary(BinaryOp::Concat, Value::Str("a".into()), int(1)),
+            Ok(Value::Str("a1".into()))
+        );
+        assert_eq!(
+            binary(BinaryOp::Concat, int(2), Value::Bool(true)),
+            Ok(Value::Str("2true".into()))
+        );
+    }
+
+    #[test]
+    fn equality_across_numeric_kinds() {
+        assert_eq!(
+            binary(BinaryOp::Eq, int(3), float(3.0)),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            binary(BinaryOp::Ne, int(3), float(3.0)),
+            Ok(Value::Bool(false))
+        );
+        assert_eq!(
+            binary(BinaryOp::Eq, Value::Str("x".into()), Value::Str("x".into())),
+            Ok(Value::Bool(true))
+        );
+        // Different kinds are simply unequal, never an error.
+        assert_eq!(
+            binary(BinaryOp::Eq, int(1), Value::Bool(true)),
+            Ok(Value::Bool(false))
+        );
+    }
+
+    #[test]
+    fn comparisons_on_numbers_and_strings() {
+        assert_eq!(binary(BinaryOp::Lt, int(1), int(2)), Ok(Value::Bool(true)));
+        assert_eq!(binary(BinaryOp::Le, int(2), int(2)), Ok(Value::Bool(true)));
+        assert_eq!(
+            binary(BinaryOp::Gt, float(2.5), int(2)),
+            Ok(Value::Bool(true))
+        );
+        assert_eq!(
+            binary(BinaryOp::Ge, Value::Str("b".into()), Value::Str("a".into())),
+            Ok(Value::Bool(true))
+        );
+    }
+
+    #[test]
+    fn nan_comparisons_are_all_false() {
+        let nan = float(f64::NAN);
+        for op in [BinaryOp::Lt, BinaryOp::Le, BinaryOp::Gt, BinaryOp::Ge] {
+            assert_eq!(binary(op, nan.clone(), float(1.0)), Ok(Value::Bool(false)));
+        }
+    }
+
+    #[test]
+    fn incompatible_operands_are_type_errors() {
+        assert_eq!(
+            binary(BinaryOp::Add, int(1), Value::Bool(true))
+                .unwrap_err()
+                .code,
+            DiagnosticCode::TypeMismatch
+        );
+        assert_eq!(
+            binary(BinaryOp::Lt, Value::Bool(true), int(1))
+                .unwrap_err()
+                .code,
+            DiagnosticCode::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn unary_operators() {
+        assert_eq!(apply_unary(UnaryOp::Neg, &int(5)), Ok(int(-5)));
+        assert_eq!(apply_unary(UnaryOp::Neg, &float(2.5)), Ok(float(-2.5)));
+        assert_eq!(
+            apply_unary(UnaryOp::Not, &Value::Bool(true)),
+            Ok(Value::Bool(false))
+        );
+        assert_eq!(
+            apply_unary(UnaryOp::Neg, &Value::Bool(true))
+                .unwrap_err()
+                .code,
+            DiagnosticCode::TypeMismatch
+        );
+        assert_eq!(
+            apply_unary(UnaryOp::Not, &int(1)).unwrap_err().code,
+            DiagnosticCode::TypeMismatch
+        );
+    }
+
+    #[test]
+    fn negating_int_min_wraps() {
+        assert_eq!(apply_unary(UnaryOp::Neg, &int(i64::MIN)), Ok(int(i64::MIN)));
     }
 }

@@ -1,0 +1,4 @@
+// `echo` with no expression: the `;` appears where a value was required (E0003).
+// expect: error E0003 at 4:6
+// expect: exit 1
+echo ;

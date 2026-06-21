@@ -1,0 +1,4 @@
+// Integer division by zero is E0008 (remainder by zero is the same code).
+// expect: error E0008 at 4:6
+// expect: exit 1
+echo 1 / 0;

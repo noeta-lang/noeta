@@ -1,0 +1,4 @@
+// Referencing an unbound name is E0005, reported at the reference site.
+// expect: error E0005 at 4:6
+// expect: exit 1
+echo missing;

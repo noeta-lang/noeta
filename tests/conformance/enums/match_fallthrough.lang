@@ -1,0 +1,7 @@
+// M0 `match` is runtime-dispatched and non-exhaustive (exhaustiveness checking is an M1
+// checker concern): a value that matches no arm is a runtime error (E0007), not a compile
+// error. The negative case pins that runtime behaviour.
+// expect: error E0007 at 7:6
+// expect: exit 1
+enum E { A; B; C; }
+echo match E.C { E.A => 1, E.B => 2 };

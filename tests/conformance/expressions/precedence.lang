@@ -1,0 +1,13 @@
+// Operator precedence: `*` binds tighter than `+`, comparison looser than arithmetic,
+// `&&` tighter than `||`, and unary `!`/`-` tightest. Parentheses override.
+// expect: stdout "14"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "20"
+// expect: stdout "-5"
+// expect: exit 0
+echo 2 + 3 * 4;
+echo 2 + 3 * 4 == 14 && !false;
+echo 1 < 2 && 3 > 4;
+echo (2 + 3) * 4;
+echo -2 - 3;

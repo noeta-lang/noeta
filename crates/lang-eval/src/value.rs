@@ -149,3 +149,99 @@ fn format_float(f: f64) -> String {
         f.to_string()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn list(items: Vec<Value>) -> Value {
+        Value::List(Rc::new(items))
+    }
+
+    fn map(pairs: &[(&str, Value)]) -> Value {
+        Value::Map(Rc::new(
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.clone()))
+                .collect(),
+        ))
+    }
+
+    #[test]
+    fn display_of_scalars() {
+        assert_eq!(Value::Unit.display(), "");
+        assert_eq!(Value::Bool(true).display(), "true");
+        assert_eq!(Value::Bool(false).display(), "false");
+        assert_eq!(Value::Int(-42).display(), "-42");
+        assert_eq!(Value::Str("hi".into()).display(), "hi");
+    }
+
+    #[test]
+    fn float_formatting_keeps_whole_values_distinct_from_ints() {
+        assert_eq!(format_float(3.0), "3.0");
+        assert_eq!(format_float(-2.0), "-2.0");
+        assert_eq!(format_float(2.5), "2.5");
+        assert_eq!(format_float(-1.25), "-1.25");
+        assert_eq!(format_float(0.0), "0.0");
+        // Non-finite values fall back to the default formatting rather than `.0`.
+        assert_eq!(format_float(f64::INFINITY), "inf");
+        assert_eq!(format_float(f64::NAN), "NaN");
+    }
+
+    #[test]
+    fn repr_quotes_strings_but_display_does_not() {
+        let s = Value::Str("x".into());
+        assert_eq!(s.display(), "x");
+        assert_eq!(s.repr(), "\"x\"");
+        // Non-strings render the same either way.
+        assert_eq!(Value::Int(1).repr(), "1");
+    }
+
+    #[test]
+    fn collections_use_repr_for_their_elements() {
+        assert_eq!(
+            list(vec![Value::Int(1), Value::Str("a".into())]).display(),
+            "[1, \"a\"]"
+        );
+        // Maps iterate in deterministic (sorted) key order.
+        assert_eq!(
+            map(&[("b", Value::Int(2)), ("a", Value::Int(1))]).display(),
+            "{\"a\": 1, \"b\": 2}"
+        );
+        assert_eq!(list(vec![]).display(), "[]");
+    }
+
+    #[test]
+    fn type_names() {
+        assert_eq!(Value::Unit.type_name(), "unit");
+        assert_eq!(Value::Bool(true).type_name(), "bool");
+        assert_eq!(Value::Int(0).type_name(), "int");
+        assert_eq!(Value::Float(0.0).type_name(), "float");
+        assert_eq!(Value::Str(String::new()).type_name(), "string");
+        assert_eq!(list(vec![]).type_name(), "list");
+        assert_eq!(map(&[]).type_name(), "map");
+        assert_eq!(Value::Builtin(Builtin::Len).type_name(), "function");
+    }
+
+    #[test]
+    fn structural_equality_and_cross_kind_inequality() {
+        assert_eq!(Value::Int(1), Value::Int(1));
+        assert_ne!(Value::Int(1), Value::Int(2));
+        assert_eq!(Value::Unit, Value::Unit);
+        assert_eq!(list(vec![Value::Int(1)]), list(vec![Value::Int(1)]));
+        assert_ne!(list(vec![Value::Int(1)]), list(vec![Value::Int(2)]));
+        // Different kinds are never equal; functions are never equal even to themselves.
+        assert_ne!(Value::Int(1), Value::Bool(true));
+        assert_ne!(Value::Builtin(Builtin::Len), Value::Builtin(Builtin::Len));
+    }
+
+    #[test]
+    fn debug_is_shallow_and_does_not_panic() {
+        // Debug must never recurse into the (possibly cyclic) closure scope graph.
+        assert_eq!(format!("{:?}", Value::Int(7)), "Int(7)");
+        assert_eq!(
+            format!("{:?}", Value::Builtin(Builtin::Sum)),
+            "Builtin(sum)"
+        );
+    }
+}

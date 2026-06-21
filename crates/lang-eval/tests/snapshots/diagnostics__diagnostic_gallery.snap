@@ -1,0 +1,97 @@
+---
+source: crates/lang-eval/tests/diagnostics.rs
+expression: out
+---
+================ E0001 unexpected character ================
+[E0001] Error: unexpected character `@`
+   ╭─[ snippet.lang:1:6 ]
+   │
+ 1 │ echo @;
+   │      ┬  
+   │      ╰── unexpected character `@`
+───╯
+
+================ E0002 unterminated string ================
+[E0002] Error: unterminated string literal
+   ╭─[ snippet.lang:1:6 ]
+   │
+ 1 │ echo "oops;
+   │      ───┬──  
+   │         ╰──── unterminated string literal
+   │ 
+   │ Help: add a closing `"` to terminate the string
+───╯
+
+================ E0003 unexpected token ================
+[E0003] Error: found '`;`' expected '`-`', '`!`', 'an integer literal', 'a float literal', 'a string literal', '`true`', '`false`', '`fn`', '`match`', '`[`', '`{`', 'an identifier', or '`(`'
+   ╭─[ snippet.lang:1:6 ]
+   │
+ 1 │ echo ;
+   │      ┬  
+   │      ╰── found '`;`' expected '`-`', '`!`', 'an integer literal', 'a float literal', 'a string literal', '`true`', '`false`', '`fn`', '`match`', '`[`', '`{`', 'an identifier', or '`(`'
+───╯
+
+================ E0004 unexpected end of input ================
+[E0004] Error: found end of input expected '`(`', '`.`', '`?`', '`*`', '`/`', '`%`', '`+`', '`-`', '`~`', '`<`', '`<=`', '`>`', '`>=`', '`==`', '`!=`', '`&&`', '`||`', '`??`', '`|>`', or '`;`'
+   ╭─[ snippet.lang:1:10 ]
+   │
+ 1 │ echo "hi"
+   │          │ 
+   │          ╰─ found end of input expected '`(`', '`.`', '`?`', '`*`', '`/`', '`%`', '`+`', '`-`', '`~`', '`<`', '`<=`', '`>`', '`>=`', '`==`', '`!=`', '`&&`', '`||`', '`??`', '`|>`', or '`;`'
+───╯
+
+================ E0005 unknown name ================
+[E0005] Error: cannot find `missing` in this scope
+   ╭─[ snippet.lang:1:6 ]
+   │
+ 1 │ echo missing;
+   │      ───┬───  
+   │         ╰───── cannot find `missing` in this scope
+───╯
+
+================ E0006 immutable assignment ================
+[E0006] Error: cannot assign to `x`, which is immutable
+   ╭─[ snippet.lang:2:1 ]
+   │
+ 2 │ x = 2;
+   │ ┬  
+   │ ╰── cannot assign to `x`, which is immutable
+   │ 
+   │ Help: declare it with `mut x = ...` to allow reassignment
+───╯
+
+================ E0007 type mismatch ================
+[E0007] Error: cannot apply `+` to int and bool
+   ╭─[ snippet.lang:1:6 ]
+   │
+ 1 │ echo 1 + true;
+   │      ────┬───  
+   │          ╰───── cannot apply `+` to int and bool
+───╯
+
+================ E0008 division by zero ================
+[E0008] Error: division by zero
+   ╭─[ snippet.lang:1:6 ]
+   │
+ 1 │ echo 1 / 0;
+   │      ──┬──  
+   │        ╰──── division by zero
+───╯
+
+================ E0009 missing field ================
+[E0009] Error: missing field(s) `y` in `P` literal — every field must be set
+   ╭─[ snippet.lang:2:5 ]
+   │
+ 2 │ p = P { x: 1 };
+   │     ─────┬────  
+   │          ╰────── missing field(s) `y` in `P` literal — every field must be set
+───╯
+
+================ E0010 panic ================
+[E0010] Error: panic: boom
+   ╭─[ snippet.lang:1:1 ]
+   │
+ 1 │ panic("boom");
+   │ ──────┬──────  
+   │       ╰──────── panic: boom
+───╯

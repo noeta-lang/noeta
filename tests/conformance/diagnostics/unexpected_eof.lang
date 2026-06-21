@@ -1,0 +1,4 @@
+// A statement that runs off the end of input (missing `;`) is E0004.
+// expect: error E0004 at 4:10
+// expect: exit 1
+echo "hi"

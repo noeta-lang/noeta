@@ -1,0 +1,11 @@
+// String escapes (`\"`, `\\`, `\t`) and doubled braces (`{{`/`}}`) produce literal
+// characters; interpolation still works alongside them.
+// expect: stdout "say \"hi\""
+// expect: stdout "back\\slash"
+// expect: stdout "a\tb"
+// expect: stdout "{literal} and 3"
+// expect: exit 0
+echo "say \"hi\"";
+echo "back\\slash";
+echo "a\tb";
+echo "{{literal}} and {1 + 2}";

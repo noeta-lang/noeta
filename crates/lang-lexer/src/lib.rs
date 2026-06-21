@@ -55,8 +55,9 @@ pub enum TokenKind {
     UseKw,
 
     // Literals and names
-    /// A double-quoted string literal, quotes included. No escapes yet (Slice 4).
-    #[regex(r#""[^"]*""#)]
+    /// A double-quoted string literal, quotes included. A backslash escapes the next
+    /// character (so `\"` does not close the string); the parser unescapes the contents.
+    #[regex(r#""([^"\\]|\\.)*""#)]
     StringLit,
     #[regex(r"[0-9]+\.[0-9]+")]
     FloatLit,
@@ -349,6 +350,23 @@ mod tests {
         );
         // The string token spans the quotes.
         assert_eq!(source.slice(lexed.tokens[1].span), "\"hello\"");
+    }
+
+    #[test]
+    fn string_literal_spans_escaped_quotes() {
+        // An escaped quote does not terminate the string; the whole literal is one token.
+        let (source, lexed) = lex_str(r#"echo "say \"hi\"";"#);
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::EchoKw,
+                TokenKind::StringLit,
+                TokenKind::Semicolon
+            ]
+        );
+        assert_eq!(source.slice(lexed.tokens[1].span), r#""say \"hi\"""#);
     }
 
     #[test]

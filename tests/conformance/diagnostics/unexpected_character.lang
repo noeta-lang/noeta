@@ -1,0 +1,5 @@
+// A character that cannot begin a token is E0001. The lexer is error-tolerant, so the
+// rest of the line still tokenises; the case asserts the lex error is produced.
+// expect: error E0001 at 5:6
+// expect: exit 1
+echo @;

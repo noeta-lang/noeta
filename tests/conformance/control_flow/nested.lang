@@ -1,0 +1,10 @@
+// Nested control flow: a `for` loop containing an `if`, accumulating into a `mut` binding.
+// expect: stdout "12"
+// expect: exit 0
+mut total = 0;
+for n in [1, 2, 3, 4, 5, 6] {
+    if n % 2 == 0 {
+        total = total + n;
+    }
+}
+echo total;

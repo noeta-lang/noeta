@@ -1,0 +1,5 @@
+// Adding incompatible types is a runtime E0007 (M0 has no static type checker, so this
+// surfaces at evaluation rather than compile time).
+// expect: error E0007 at 5:6
+// expect: exit 1
+echo 1 + true;

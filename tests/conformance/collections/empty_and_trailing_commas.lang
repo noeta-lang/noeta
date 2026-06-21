@@ -1,0 +1,14 @@
+// Empty collections are valid (length 0; iterating does nothing), and trailing commas are
+// accepted in list and map literals.
+// expect: stdout "[]"
+// expect: stdout "0"
+// expect: stdout "[1, 2, 3]"
+// expect: stdout "2"
+// expect: stdout "done"
+// expect: exit 0
+echo [];
+echo len([]);
+echo [1, 2, 3,];
+echo {"a": 1, "b": 2,}.count();
+for x in [] { echo "never"; }
+echo "done";
