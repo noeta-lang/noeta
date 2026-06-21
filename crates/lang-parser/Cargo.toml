@@ -11,6 +11,7 @@ lang-span = { workspace = true }
 lang-diagnostics = { workspace = true }
 lang-ast = { workspace = true }
 lang-lexer = { workspace = true }
+chumsky = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }

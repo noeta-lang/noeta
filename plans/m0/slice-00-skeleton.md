@@ -24,8 +24,10 @@ parsing, JSON/`--file`/`--stage` modes, the `Backend`/`RunResult` differential s
 `cargo test` corpus gate. 25 tests green; fmt/clippy clean; zero warnings.
 
 Notes for later slices:
-- The parser is hand-written (recursive descent) behind `parse()`, not `chumsky` — a
-  deliberate, reversible choice recorded in `crates/lang-parser/README.md` and `ARCHITECTURE.md`.
+- The parser is built with `chumsky` (parser combinators + the `pratt` expression
+  combinator) behind `parse()`. It was briefly hand-written during Slices 0–5 and then
+  migrated to `chumsky`; the public surface (`parse(source, tokens) -> Parsed`) is
+  unchanged, so the swap touched no other crate. See `crates/lang-parser/README.md`.
 - Conformance `error CODE at L:C` positions are **absolute in the file**, so header
   comment lines shift line numbers.
 
