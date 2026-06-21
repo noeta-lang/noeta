@@ -9,7 +9,7 @@
 //!
 //! M0 scope grows one vertical slice at a time.
 
-use lang_ast::{BinaryOp, Expr, FnDecl, Param, Program, Stmt, TypeRef, UnaryOp};
+use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt, TypeRef, UnaryOp};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind};
 use lang_span::{Source, Span};
@@ -103,6 +103,8 @@ impl Parser<'_> {
             Some(TokenKind::EchoKw) => self.parse_echo(),
             Some(TokenKind::MutKw) => self.parse_mut_binding(),
             Some(TokenKind::ReturnKw) => self.parse_return(),
+            Some(TokenKind::IfKw) => self.parse_if(),
+            Some(TokenKind::ForKw) => self.parse_for(),
             // `fn name(...)` is a declaration; `fn(...)` is a closure expression.
             Some(TokenKind::FnKw) if self.peek_at(1).map(|t| t.kind) == Some(TokenKind::Ident) => {
                 self.parse_fn_decl().map(Stmt::Fn)
@@ -153,6 +155,70 @@ impl Parser<'_> {
             value: Some(value),
             span: ret.span.merge(semi.span),
         })
+    }
+
+    fn parse_if(&mut self) -> Option<Stmt> {
+        let if_kw = self.expect(TokenKind::IfKw)?;
+        let cond = self.parse_expr()?;
+        let (then_body, then_span) = self.parse_block()?;
+        let mut end = then_span;
+        let else_body = if self.peek().map(|t| t.kind) == Some(TokenKind::ElseKw) {
+            self.advance();
+            if self.peek().map(|t| t.kind) == Some(TokenKind::IfKw) {
+                // `else if` is an `else` whose body is a single nested `if`.
+                let nested = self.parse_if()?;
+                end = nested.span();
+                Some(vec![nested])
+            } else {
+                let (body, body_span) = self.parse_block()?;
+                end = body_span;
+                Some(body)
+            }
+        } else {
+            None
+        };
+        Some(Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            span: if_kw.span.merge(end),
+        })
+    }
+
+    fn parse_for(&mut self) -> Option<Stmt> {
+        let for_kw = self.expect(TokenKind::ForKw)?;
+        let pattern = self.parse_for_pattern()?;
+        self.expect(TokenKind::InKw)?;
+        let iterable = self.parse_expr()?;
+        let (body, body_span) = self.parse_block()?;
+        Some(Stmt::For {
+            pattern,
+            iterable,
+            body,
+            span: for_kw.span.merge(body_span),
+        })
+    }
+
+    fn parse_for_pattern(&mut self) -> Option<ForPattern> {
+        if self.peek().map(|t| t.kind) == Some(TokenKind::LParen) {
+            self.advance();
+            let first = self.expect(TokenKind::Ident)?;
+            self.expect(TokenKind::Comma)?;
+            let second = self.expect(TokenKind::Ident)?;
+            self.expect(TokenKind::RParen)?;
+            Some(ForPattern::Pair {
+                first: self.text(first.span),
+                first_span: first.span,
+                second: self.text(second.span),
+                second_span: second.span,
+            })
+        } else {
+            let name = self.expect(TokenKind::Ident)?;
+            Some(ForPattern::Single {
+                name: self.text(name.span),
+                name_span: name.span,
+            })
+        }
     }
 
     /// A statement starting with an expression. If the expression is a bare name
@@ -314,6 +380,18 @@ impl Parser<'_> {
                 TokenKind::LParen => {
                     lhs = self.parse_call(lhs)?;
                 }
+                // Member access `.name` is also a tight postfix.
+                TokenKind::Dot => {
+                    self.advance();
+                    let name_tok = self.expect(TokenKind::Ident)?;
+                    let span = lhs.span().merge(name_tok.span);
+                    lhs = Expr::Member {
+                        receiver: Box::new(lhs),
+                        name: self.text(name_tok.span),
+                        name_span: name_tok.span,
+                        span,
+                    };
+                }
                 TokenKind::PipeGt => {
                     let (left_bp, right_bp) = PIPE_BP;
                     if left_bp < min_bp {
@@ -442,6 +520,8 @@ impl Parser<'_> {
                 })
             }
             TokenKind::FnKw => self.parse_closure(),
+            TokenKind::LBracket => self.parse_list(),
+            TokenKind::LBrace => self.parse_map(),
             TokenKind::LParen => {
                 self.advance();
                 let inner = self.parse_bp(0)?;
@@ -453,6 +533,45 @@ impl Parser<'_> {
                 None
             }
         }
+    }
+
+    fn parse_list(&mut self) -> Option<Expr> {
+        let lbracket = self.expect(TokenKind::LBracket)?;
+        let mut items = Vec::new();
+        while self.peek().map(|t| t.kind) != Some(TokenKind::RBracket) {
+            items.push(self.parse_expr()?);
+            if self.peek().map(|t| t.kind) == Some(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let rbracket = self.expect(TokenKind::RBracket)?;
+        Some(Expr::List {
+            items,
+            span: lbracket.span.merge(rbracket.span),
+        })
+    }
+
+    fn parse_map(&mut self) -> Option<Expr> {
+        let lbrace = self.expect(TokenKind::LBrace)?;
+        let mut entries = Vec::new();
+        while self.peek().map(|t| t.kind) != Some(TokenKind::RBrace) {
+            let key = self.parse_expr()?;
+            self.expect(TokenKind::Colon)?;
+            let value = self.parse_expr()?;
+            entries.push((key, value));
+            if self.peek().map(|t| t.kind) == Some(TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let rbrace = self.expect(TokenKind::RBrace)?;
+        Some(Expr::Map {
+            entries,
+            span: lbrace.span.merge(rbrace.span),
+        })
     }
 
     fn parse_closure(&mut self) -> Option<Expr> {
@@ -626,6 +745,13 @@ mod tests {
     #[test]
     fn closure_and_call() {
         insta::assert_snapshot!(pretty("apply = fn(x) => x + 1; echo apply(10);"));
+    }
+
+    #[test]
+    fn control_flow_and_collections() {
+        insta::assert_snapshot!(pretty(
+            "for (i, x) in [10, 20].enumerate() { if i == 0 { echo x; } else { echo {\"k\": x}; } }"
+        ));
     }
 
     #[test]

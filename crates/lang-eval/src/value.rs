@@ -10,6 +10,7 @@
 //! could loop forever. We print functions opaquely and treat them as never structurally
 //! equal.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
@@ -24,6 +25,10 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Str(String),
+    /// An immutable list. `Rc` keeps copies cheap (map/filter produce new lists).
+    List(Rc<Vec<Value>>),
+    /// An immutable string-keyed map. `BTreeMap` gives deterministic iteration order.
+    Map(Rc<BTreeMap<String, Value>>),
     /// A user-defined function or closure.
     Function(Rc<Closure>),
     /// A built-in (native) function from the prelude.
@@ -40,8 +45,28 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.clone(),
+            Value::List(items) => {
+                let parts: Vec<String> = items.iter().map(Value::repr).collect();
+                format!("[{}]", parts.join(", "))
+            }
+            Value::Map(entries) => {
+                let parts: Vec<String> = entries
+                    .iter()
+                    .map(|(k, v)| format!("{k:?}: {}", v.repr()))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
             Value::Function(_) => "<fn>".to_string(),
             Value::Builtin(b) => format!("<builtin {}>", b.name()),
+        }
+    }
+
+    /// The representation of a value *inside* a collection: strings are quoted so the
+    /// structure stays legible (`["a", "b"]`, not `[a, b]`).
+    fn repr(&self) -> String {
+        match self {
+            Value::Str(s) => format!("{s:?}"),
+            other => other.display(),
         }
     }
 
@@ -53,6 +78,8 @@ impl Value {
             Value::Int(_) => "int",
             Value::Float(_) => "float",
             Value::Str(_) => "string",
+            Value::List(_) => "list",
+            Value::Map(_) => "map",
             Value::Function(_) | Value::Builtin(_) => "function",
         }
     }
@@ -66,6 +93,8 @@ impl fmt::Debug for Value {
             Value::Int(i) => write!(f, "Int({i})"),
             Value::Float(x) => write!(f, "Float({x})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
+            Value::List(items) => write!(f, "List({items:?})"),
+            Value::Map(entries) => write!(f, "Map({entries:?})"),
             Value::Function(_) => write!(f, "Function(<fn>)"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
         }
@@ -80,6 +109,8 @@ impl PartialEq for Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
             // Functions are not structurally comparable.
             _ => false,
         }

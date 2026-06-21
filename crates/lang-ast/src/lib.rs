@@ -43,6 +43,21 @@ pub enum Stmt {
     Fn(FnDecl),
     /// `return <expr>;` or `return;`.
     Return { value: Option<Expr>, span: Span },
+    /// `if cond { ... } else if cond { ... } else { ... }`. An `else if` is represented
+    /// as an `else_body` containing a single nested `If`.
+    If {
+        cond: Expr,
+        then_body: Vec<Stmt>,
+        else_body: Option<Vec<Stmt>>,
+        span: Span,
+    },
+    /// `for <pattern> in <iterable> { ... }`.
+    For {
+        pattern: ForPattern,
+        iterable: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
     /// A bare expression used for its effect: `expr;`.
     Expr { expr: Expr, span: Span },
 }
@@ -53,10 +68,28 @@ impl Stmt {
             Stmt::Echo { span, .. }
             | Stmt::Binding { span, .. }
             | Stmt::Return { span, .. }
+            | Stmt::If { span, .. }
+            | Stmt::For { span, .. }
             | Stmt::Expr { span, .. } => *span,
             Stmt::Fn(decl) => decl.span,
         }
     }
+}
+
+/// The binding form of a `for` loop: either one variable, or a `(index, value)` pair
+/// (as produced by `.enumerate()`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ForPattern {
+    Single {
+        name: String,
+        name_span: Span,
+    },
+    Pair {
+        first: String,
+        first_span: Span,
+        second: String,
+        second_span: Span,
+    },
 }
 
 /// A named function declaration. Constructors are not special in this language — a
@@ -150,6 +183,21 @@ pub enum Expr {
         right: Box<Expr>,
         span: Span,
     },
+    /// A list literal: `[a, b, c]`.
+    List { items: Vec<Expr>, span: Span },
+    /// A map literal: `{"a": 1, "b": 2}`.
+    Map {
+        entries: Vec<(Expr, Expr)>,
+        span: Span,
+    },
+    /// Member access: `receiver.name`. When immediately called (`receiver.name(...)`)
+    /// it is a method call; bare field access lands with records (Slice 6).
+    Member {
+        receiver: Box<Expr>,
+        name: String,
+        name_span: Span,
+        span: Span,
+    },
 }
 
 impl Expr {
@@ -164,7 +212,10 @@ impl Expr {
             | Expr::Binary { span, .. }
             | Expr::Call { span, .. }
             | Expr::Closure { span, .. }
-            | Expr::Pipeline { span, .. } => *span,
+            | Expr::Pipeline { span, .. }
+            | Expr::List { span, .. }
+            | Expr::Map { span, .. }
+            | Expr::Member { span, .. } => *span,
         }
     }
 }

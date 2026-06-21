@@ -19,6 +19,10 @@ pub enum SyntaxKind {
     FalseKw,
     FnKw,
     ReturnKw,
+    IfKw,
+    ElseKw,
+    ForKw,
+    InKw,
 
     // --- Literal / name tokens ---
     StringLit,
@@ -28,6 +32,9 @@ pub enum SyntaxKind {
 
     // --- Punctuation / operator tokens ---
     Semicolon,
+    Dot,
+    LBracket,
+    RBracket,
     Eq,
     EqEq,
     NotEq,
@@ -66,9 +73,12 @@ pub enum SyntaxKind {
     BindingStmt,
     FnDecl,
     ReturnStmt,
+    IfStmt,
+    ForStmt,
     ExprStmt,
     Param,
     TypeRef,
+    ForPattern,
     LiteralExpr,
     IdentExpr,
     UnaryExpr,
@@ -77,6 +87,9 @@ pub enum SyntaxKind {
     CallExpr,
     ClosureExpr,
     PipelineExpr,
+    ListExpr,
+    MapExpr,
+    MemberExpr,
 }
 
 impl SyntaxKind {
@@ -88,9 +101,12 @@ impl SyntaxKind {
                 | SyntaxKind::BindingStmt
                 | SyntaxKind::FnDecl
                 | SyntaxKind::ReturnStmt
+                | SyntaxKind::IfStmt
+                | SyntaxKind::ForStmt
                 | SyntaxKind::ExprStmt
                 | SyntaxKind::Param
                 | SyntaxKind::TypeRef
+                | SyntaxKind::ForPattern
                 | SyntaxKind::LiteralExpr
                 | SyntaxKind::IdentExpr
                 | SyntaxKind::UnaryExpr
@@ -99,6 +115,9 @@ impl SyntaxKind {
                 | SyntaxKind::CallExpr
                 | SyntaxKind::ClosureExpr
                 | SyntaxKind::PipelineExpr
+                | SyntaxKind::ListExpr
+                | SyntaxKind::MapExpr
+                | SyntaxKind::MemberExpr
         )
     }
 }

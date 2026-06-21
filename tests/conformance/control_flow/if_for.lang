@@ -1,0 +1,20 @@
+// if/else-if/else and for-in over a list.
+// expect: stdout "many"
+// expect: stdout "10"
+// expect: exit 0
+fn classify(n: int): string {
+    if n == 0 {
+        return "zero";
+    } else if n == 1 {
+        return "one";
+    } else {
+        return "many";
+    }
+}
+echo classify(7);
+
+mut total = 0;
+for n in [1, 2, 3, 4] {
+    total = total + n;
+}
+echo total;

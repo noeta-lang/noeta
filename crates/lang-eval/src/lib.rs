@@ -9,10 +9,10 @@
 //! M0 scope grows one vertical slice at a time.
 
 use std::cell::RefCell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::rc::Rc;
 
-use lang_ast::{BinaryOp, Expr, FnDecl, Program, Stmt, UnaryOp};
+use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Program, Stmt, UnaryOp};
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -83,14 +83,35 @@ impl Backend for TreeWalkBackend {
 pub enum Builtin {
     /// `next_id()` — a deterministic, seeded counter.
     NextId,
+    /// `len(x)` — element/character count of a list, map, or string.
+    Len,
+    /// `map(list, fn)` — a new list with `fn` applied to each element.
+    Map,
+    /// `filter(list, fn)` — a new list of the elements for which `fn` is true.
+    Filter,
+    /// `sum(list)` — the numeric sum of a list's elements.
+    Sum,
 }
 
 impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
             Builtin::NextId => "next_id",
+            Builtin::Len => "len",
+            Builtin::Map => "map",
+            Builtin::Filter => "filter",
+            Builtin::Sum => "sum",
         }
     }
+
+    /// The prelude functions registered in every program's global scope.
+    const PRELUDE: &'static [Builtin] = &[
+        Builtin::NextId,
+        Builtin::Len,
+        Builtin::Map,
+        Builtin::Filter,
+        Builtin::Sum,
+    ];
 }
 
 /// The body of a user function: either a single arrow expression or a `{ ... }` block.
@@ -207,11 +228,9 @@ struct Interpreter {
 impl Interpreter {
     fn new(seed: u64) -> Interpreter {
         let global = Scope::global();
-        global.declare(
-            "next_id".to_string(),
-            Value::Builtin(Builtin::NextId),
-            false,
-        );
+        for &builtin in Builtin::PRELUDE {
+            global.declare(builtin.name().to_string(), Value::Builtin(builtin), false);
+        }
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
@@ -266,10 +285,122 @@ impl Interpreter {
                 };
                 Ok(Flow::Return(value))
             }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                span,
+            } => {
+                let taken = match self.eval_expr(cond)? {
+                    Value::Bool(b) => b,
+                    other => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("`if` condition must be a bool, found {}", other.type_name()),
+                        ));
+                    }
+                };
+                if taken {
+                    self.exec_block(then_body)
+                } else if let Some(else_body) = else_body {
+                    self.exec_block(else_body)
+                } else {
+                    Ok(Flow::Normal)
+                }
+            }
+            Stmt::For {
+                pattern,
+                iterable,
+                body,
+                span,
+            } => self.exec_for(pattern, iterable, body, *span),
             Stmt::Expr { expr, .. } => {
                 self.eval_expr(expr)?;
                 Ok(Flow::Normal)
             }
+        }
+    }
+
+    /// Run a block of statements in a fresh child scope, propagating any `return`.
+    fn exec_block(&mut self, stmts: &[Stmt]) -> Eval<Flow> {
+        let child = Scope::child(&self.scope);
+        let saved = std::mem::replace(&mut self.scope, child);
+        let result = self.exec_stmts(stmts);
+        self.scope = saved;
+        result
+    }
+
+    /// Execute statements in the current scope, stopping at the first `return`.
+    fn exec_stmts(&mut self, stmts: &[Stmt]) -> Eval<Flow> {
+        for stmt in stmts {
+            if let Flow::Return(value) = self.exec_stmt(stmt)? {
+                return Ok(Flow::Return(value));
+            }
+        }
+        Ok(Flow::Normal)
+    }
+
+    fn exec_for(
+        &mut self,
+        pattern: &ForPattern,
+        iterable: &Expr,
+        body: &[Stmt],
+        span: Span,
+    ) -> Eval<Flow> {
+        let elements = match self.eval_expr(iterable)? {
+            Value::List(items) => (*items).clone(),
+            // Iterating a map yields its values, in deterministic key order.
+            Value::Map(entries) => entries.values().cloned().collect(),
+            other => {
+                return Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("cannot iterate over {}", other.type_name()),
+                ));
+            }
+        };
+
+        for element in elements {
+            let child = Scope::child(&self.scope);
+            self.bind_for_pattern(&child, pattern, element, span)?;
+            let saved = std::mem::replace(&mut self.scope, child);
+            let flow = self.exec_stmts(body);
+            self.scope = saved;
+            if let Flow::Return(value) = flow? {
+                return Ok(Flow::Return(value));
+            }
+        }
+        Ok(Flow::Normal)
+    }
+
+    fn bind_for_pattern(
+        &mut self,
+        scope: &Rc<Scope>,
+        pattern: &ForPattern,
+        element: Value,
+        span: Span,
+    ) -> Eval<()> {
+        match pattern {
+            ForPattern::Single { name, .. } => {
+                scope.declare(name.clone(), element, false);
+                Ok(())
+            }
+            ForPattern::Pair { first, second, .. } => match element {
+                Value::List(items) if items.len() == 2 => {
+                    scope.declare(first.clone(), items[0].clone(), false);
+                    scope.declare(second.clone(), items[1].clone(), false);
+                    Ok(())
+                }
+                other => Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "destructuring `(a, b)` expects a 2-element list, found {}",
+                        other.type_name()
+                    ),
+                )),
+            },
         }
     }
 
@@ -341,38 +472,127 @@ impl Interpreter {
                 body: FnBody::Arrow((**body).clone()),
                 captured: Rc::clone(&self.scope),
             }))),
-            Expr::Call { callee, args, span } => {
-                let callee = self.eval_expr(callee)?;
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(self.eval_expr(arg)?);
-                }
-                self.call(callee, values, *span)
-            }
+            Expr::Call { callee, args, span } => self.eval_call(callee, args, None, *span),
             Expr::Pipeline { left, right, span } => {
                 let left = self.eval_expr(left)?;
                 self.eval_pipeline(left, right, *span)
             }
+            Expr::List { items, .. } => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.eval_expr(item)?);
+                }
+                Ok(Value::List(Rc::new(values)))
+            }
+            Expr::Map { entries, span } => {
+                let mut map = BTreeMap::new();
+                for (key_expr, value_expr) in entries {
+                    let key = match self.eval_expr(key_expr)? {
+                        Value::Str(s) => s,
+                        other => {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("map keys must be strings, found {}", other.type_name()),
+                            ));
+                        }
+                    };
+                    let value = self.eval_expr(value_expr)?;
+                    map.insert(key, value);
+                }
+                Ok(Value::Map(Rc::new(map)))
+            }
+            Expr::Member { name, span, .. } => {
+                // A bare (uncalled) member access is field access, which lands with
+                // records in Slice 6. In M0 the only members are methods, always called.
+                Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    *span,
+                    format!("no field `{name}` (method calls need `()`)"),
+                ))
+            }
         }
     }
 
+    /// Evaluate a call expression. If `callee` is a member access it is a method call;
+    /// otherwise it is an ordinary call. `prepend` supplies a leading argument (used by
+    /// the pipeline operator to thread the piped value as the first argument).
+    fn eval_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+        prepend: Option<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        if let Expr::Member { receiver, name, .. } = callee {
+            let receiver = self.eval_expr(receiver)?;
+            let mut values = Vec::with_capacity(args.len() + 1);
+            values.extend(prepend);
+            for arg in args {
+                values.push(self.eval_expr(arg)?);
+            }
+            return self.call_method(receiver, name, values, span);
+        }
+        let callee = self.eval_expr(callee)?;
+        let mut values = Vec::with_capacity(args.len() + 1);
+        values.extend(prepend);
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        self.call(callee, values, span)
+    }
+
     /// `x |> f(a)` evaluates `f`, prepends `x` to its arguments, and calls it.
-    /// `x |> f` (no call) is `f(x)`.
+    /// `x |> f` (no call) is `f(x)`; `x |> obj.m()` is `obj.m(x)`.
     fn eval_pipeline(&mut self, left: Value, right: &Expr, span: Span) -> Eval<Value> {
         match right {
-            Expr::Call { callee, args, .. } => {
-                let callee = self.eval_expr(callee)?;
-                let mut values = Vec::with_capacity(args.len() + 1);
-                values.push(left);
-                for arg in args {
-                    values.push(self.eval_expr(arg)?);
-                }
-                self.call(callee, values, span)
+            Expr::Call { callee, args, .. } => self.eval_call(callee, args, Some(left), span),
+            Expr::Member { receiver, name, .. } => {
+                let receiver = self.eval_expr(receiver)?;
+                self.call_method(receiver, name, vec![left], span)
             }
             _ => {
                 let callee = self.eval_expr(right)?;
                 self.call(callee, vec![left], span)
             }
+        }
+    }
+
+    /// Dispatch a built-in method (`.count()`, `.enumerate()`) on a receiver value.
+    fn call_method(
+        &mut self,
+        receiver: Value,
+        name: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        let arity_ok = args.is_empty();
+        let result = match (name, &receiver) {
+            ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("count", Value::Map(entries)) if arity_ok => Some(Value::Int(entries.len() as i64)),
+            ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
+            ("enumerate", Value::List(items)) if arity_ok => {
+                let pairs = items
+                    .iter()
+                    .enumerate()
+                    .map(|(i, v)| Value::List(Rc::new(vec![Value::Int(i as i64), v.clone()])))
+                    .collect();
+                Some(Value::List(Rc::new(pairs)))
+            }
+            _ => None,
+        };
+        match result {
+            Some(value) => Ok(value),
+            None if !arity_ok => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("method `{name}` takes no arguments"),
+            )),
+            None => Err(self.runtime_error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no method `{name}` on {}", receiver.type_name()),
+            )),
         }
     }
 
@@ -414,29 +634,135 @@ impl Interpreter {
     }
 
     fn exec_fn_body(&mut self, stmts: &[Stmt]) -> Eval<Value> {
-        for stmt in stmts {
-            if let Flow::Return(value) = self.exec_stmt(stmt)? {
-                return Ok(value);
-            }
+        match self.exec_stmts(stmts)? {
+            Flow::Return(value) => Ok(value),
+            Flow::Normal => Ok(Value::Unit),
         }
-        Ok(Value::Unit)
     }
 
     fn call_builtin(&mut self, builtin: Builtin, args: Vec<Value>, span: Span) -> Eval<Value> {
         match builtin {
             Builtin::NextId => {
-                if !args.is_empty() {
+                self.expect_arity(builtin, &args, 0, span)?;
+                Ok(Value::Int(self.ids.next_id() as i64))
+            }
+            Builtin::Len => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                match &args[0] {
+                    Value::List(items) => Ok(Value::Int(items.len() as i64)),
+                    Value::Map(entries) => Ok(Value::Int(entries.len() as i64)),
+                    Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    other => Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`len` expects a list, map, or string, found {}",
+                            other.type_name()
+                        ),
+                    )),
+                }
+            }
+            Builtin::Map => {
+                self.expect_arity(builtin, &args, 2, span)?;
+                let items = self.expect_list(&args[0], "map", span)?;
+                let function = args[1].clone();
+                let mut result = Vec::with_capacity(items.len());
+                for item in items.iter() {
+                    result.push(self.call(function.clone(), vec![item.clone()], span)?);
+                }
+                Ok(Value::List(Rc::new(result)))
+            }
+            Builtin::Filter => {
+                self.expect_arity(builtin, &args, 2, span)?;
+                let items = self.expect_list(&args[0], "filter", span)?;
+                let function = args[1].clone();
+                let mut result = Vec::new();
+                for item in items.iter() {
+                    match self.call(function.clone(), vec![item.clone()], span)? {
+                        Value::Bool(true) => result.push(item.clone()),
+                        Value::Bool(false) => {}
+                        other => {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "`filter` predicate must return a bool, found {}",
+                                    other.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Ok(Value::List(Rc::new(result)))
+            }
+            Builtin::Sum => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                let items = self.expect_list(&args[0], "sum", span)?;
+                self.sum_list(&items, span)
+            }
+        }
+    }
+
+    fn expect_arity(
+        &mut self,
+        builtin: Builtin,
+        args: &[Value],
+        expected: usize,
+        span: Span,
+    ) -> Eval<()> {
+        if args.len() == expected {
+            Ok(())
+        } else {
+            Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`{}` takes {expected} argument(s) but {} were supplied",
+                    builtin.name(),
+                    args.len()
+                ),
+            ))
+        }
+    }
+
+    fn expect_list(&mut self, value: &Value, who: &str, span: Span) -> Eval<Rc<Vec<Value>>> {
+        match value {
+            Value::List(items) => Ok(Rc::clone(items)),
+            other => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`{who}` expects a list, found {}", other.type_name()),
+            )),
+        }
+    }
+
+    fn sum_list(&mut self, items: &[Value], span: Span) -> Eval<Value> {
+        let mut int_total: i64 = 0;
+        let mut float_total: f64 = 0.0;
+        let mut any_float = false;
+        for item in items {
+            match item {
+                Value::Int(i) => int_total = int_total.wrapping_add(*i),
+                Value::Float(f) => {
+                    any_float = true;
+                    float_total += f;
+                }
+                other => {
                     return Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!(
-                            "`next_id` takes no arguments but {} were supplied",
-                            args.len()
+                            "`sum` expects numeric elements, found {}",
+                            other.type_name()
                         ),
                     ));
                 }
-                Ok(Value::Int(self.ids.next_id() as i64))
             }
+        }
+        if any_float {
+            Ok(Value::Float(float_total + int_total as f64))
+        } else {
+            Ok(Value::Int(int_total))
         }
     }
 
@@ -535,6 +861,51 @@ mod tests {
         assert_eq!(
             run("echo \"users/\" ~ 42 ~ \"/profile\";").stdout,
             "users/42/profile\n"
+        );
+    }
+
+    #[test]
+    fn if_else_chain() {
+        let src = "fn classify(n) { if n == 0 { return \"zero\"; } else if n == 1 { return \"one\"; } else { return \"many\"; } } echo classify(0); echo classify(1); echo classify(7);";
+        assert_eq!(run(src).stdout, "zero\none\nmany\n");
+    }
+
+    #[test]
+    fn for_loop_sums_a_list() {
+        assert_eq!(
+            run("mut t = 0; for n in [1, 2, 3, 4] { t = t + n; } echo t;").stdout,
+            "10\n"
+        );
+    }
+
+    #[test]
+    fn for_loop_destructures_enumerate() {
+        assert_eq!(
+            run("for (i, x) in [\"a\", \"b\"].enumerate() { echo i ~ \":\" ~ x; }").stdout,
+            "0:a\n1:b\n"
+        );
+    }
+
+    #[test]
+    fn list_and_map_literals_and_len() {
+        assert_eq!(run("echo [1, 2, 3];").stdout, "[1, 2, 3]\n");
+        assert_eq!(run("echo len([1, 2, 3]);").stdout, "3\n");
+        assert_eq!(run("echo {\"a\": 1, \"b\": 2}.count();").stdout, "2\n");
+    }
+
+    #[test]
+    fn map_filter_sum_pipeline() {
+        let src =
+            "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();";
+        assert_eq!(run(src).stdout, "60\n");
+    }
+
+    #[test]
+    fn recursion_with_if() {
+        assert_eq!(
+            run("fn fact(n) { if n <= 1 { return 1; } return n * fact(n - 1); } echo fact(5);")
+                .stdout,
+            "120\n"
         );
     }
 

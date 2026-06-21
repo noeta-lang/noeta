@@ -1,6 +1,6 @@
 # Slice 3 — Control flow + collections
 
-Status: todo
+Status: done
 
 ## Goal
 `if`/`else if`/`else`, `for ... in`, indexed `for (i, x) in xs.enumerate()`, and List/Map literals + their core methods.
@@ -10,12 +10,21 @@ Status: todo
 - Out: `match` (Slice 5).
 
 ## Checklist (vertical slice)
-- [ ] Grammar / AST: if/else-if/else chain, for-in (with optional tuple-destructure binding), list literal, map literal, index/method-call exprs.
-- [ ] Checker rule: n/a.
-- [ ] Bytecode: n/a.
-- [ ] Eval op: branch evaluation; iteration over lists/maps; tuple destructuring in `for`; `enumerate`/`count`/`len`.
-- [ ] Conformance cases: an if-chain, a `for..in` sum, an enumerate loop printing `{i}: {x}` (uses interpolation — may stub until Slice 4 or use concatenation).
-- [ ] Snapshots: AST for an if + for program.
+- [x] Grammar / AST: `Stmt::{If, For}`, `ForPattern`, `Expr::{List, Map, Member}`; `.` member access + map/list literals in the Pratt parser. `else if` desugars to a nested `if`.
+- [x] Checker rule: n/a.
+- [x] Bytecode: n/a.
+- [x] Eval op: branch eval with child scopes; for-in over lists (and map values); pair destructuring; `.count()`/`.enumerate()` methods; `len`/`map`/`filter`/`sum` builtins. Recursion now works (`fact` via `if`).
+- [x] Conformance cases: `control_flow/if_for.lang`, `collections/list_map_pipeline.lang`.
+- [x] Snapshots: control-flow + collections parser snapshot.
+
+## Outcome
+`if`/`else if`/`else`, `for ... in`, indexed `for (i, x) in xs.enumerate()`, List/Map
+literals, `.count()`/`.enumerate()`, and the `map`/`filter`/`sum` pipeline all work.
+Map literal `{...}` vs block `{...}` disambiguated by position. Self-recursion confirmed.
+43 tests; 10 conformance cases; fmt/clippy clean.
+
+Note: iterating a map yields its values in deterministic key order; map keys are strings
+in M0; bare (uncalled) member access is reserved for record fields (Slice 6).
 
 ## Notes / traps
 - Map iteration order must be deterministic in test mode (sort keys) — required for stable conformance output.

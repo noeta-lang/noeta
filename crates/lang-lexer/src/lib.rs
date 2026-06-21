@@ -33,6 +33,14 @@ pub enum TokenKind {
     FnKw,
     #[token("return")]
     ReturnKw,
+    #[token("if")]
+    IfKw,
+    #[token("else")]
+    ElseKw,
+    #[token("for")]
+    ForKw,
+    #[token("in")]
+    InKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. No escapes yet (Slice 4).
@@ -50,6 +58,8 @@ pub enum TokenKind {
     Semicolon,
     #[token(",")]
     Comma,
+    #[token(".")]
+    Dot,
     #[token(":")]
     Colon,
     #[token("?")]
@@ -62,6 +72,10 @@ pub enum TokenKind {
     LBrace,
     #[token("}")]
     RBrace,
+    #[token("[")]
+    LBracket,
+    #[token("]")]
+    RBracket,
     #[token("=>")]
     FatArrow,
     #[token("|>")]
@@ -110,18 +124,25 @@ impl TokenKind {
             TokenKind::FalseKw => "FalseKw",
             TokenKind::FnKw => "FnKw",
             TokenKind::ReturnKw => "ReturnKw",
+            TokenKind::IfKw => "IfKw",
+            TokenKind::ElseKw => "ElseKw",
+            TokenKind::ForKw => "ForKw",
+            TokenKind::InKw => "InKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
             TokenKind::Semicolon => "Semicolon",
             TokenKind::Comma => "Comma",
+            TokenKind::Dot => "Dot",
             TokenKind::Colon => "Colon",
             TokenKind::Question => "Question",
             TokenKind::LParen => "LParen",
             TokenKind::RParen => "RParen",
             TokenKind::LBrace => "LBrace",
             TokenKind::RBrace => "RBrace",
+            TokenKind::LBracket => "LBracket",
+            TokenKind::RBracket => "RBracket",
             TokenKind::FatArrow => "FatArrow",
             TokenKind::PipeGt => "PipeGt",
             TokenKind::EqEq => "EqEq",
@@ -152,18 +173,25 @@ impl TokenKind {
             TokenKind::FalseKw => "`false`",
             TokenKind::FnKw => "`fn`",
             TokenKind::ReturnKw => "`return`",
+            TokenKind::IfKw => "`if`",
+            TokenKind::ElseKw => "`else`",
+            TokenKind::ForKw => "`for`",
+            TokenKind::InKw => "`in`",
             TokenKind::StringLit => "a string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",
             TokenKind::Semicolon => "`;`",
             TokenKind::Comma => "`,`",
+            TokenKind::Dot => "`.`",
             TokenKind::Colon => "`:`",
             TokenKind::Question => "`?`",
             TokenKind::LParen => "`(`",
             TokenKind::RParen => "`)`",
             TokenKind::LBrace => "`{`",
             TokenKind::RBrace => "`}`",
+            TokenKind::LBracket => "`[`",
+            TokenKind::RBracket => "`]`",
             TokenKind::FatArrow => "`=>`",
             TokenKind::PipeGt => "`|>`",
             TokenKind::EqEq => "`==`",

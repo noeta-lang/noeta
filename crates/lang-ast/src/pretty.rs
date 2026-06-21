@@ -5,7 +5,7 @@
 //! span regression shows up directly in a snapshot diff. It is also the printer the
 //! parse→print→parse property test (Slice 9) builds on.
 
-use crate::{Expr, FnDecl, Param, Program, Stmt};
+use crate::{Expr, FnDecl, ForPattern, Param, Program, Stmt};
 use lang_span::Span;
 
 /// Render an AST node to the canonical pretty form.
@@ -82,6 +82,54 @@ impl Pretty for Stmt {
                     }
                     None => out.push_str(&format!("(return {})", span(*s))),
                 }
+            }
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                span: s,
+            } => {
+                indent(out, level);
+                out.push_str(&format!("(if {}\n", span(*s)));
+                cond.pretty(out, level + 1);
+                out.push('\n');
+                indent(out, level + 1);
+                out.push_str("(then");
+                for stmt in then_body {
+                    out.push('\n');
+                    stmt.pretty(out, level + 2);
+                }
+                out.push(')');
+                if let Some(else_body) = else_body {
+                    out.push('\n');
+                    indent(out, level + 1);
+                    out.push_str("(else");
+                    for stmt in else_body {
+                        out.push('\n');
+                        stmt.pretty(out, level + 2);
+                    }
+                    out.push(')');
+                }
+                out.push(')');
+            }
+            Stmt::For {
+                pattern,
+                iterable,
+                body,
+                span: s,
+            } => {
+                indent(out, level);
+                let pat = match pattern {
+                    ForPattern::Single { name, .. } => name.clone(),
+                    ForPattern::Pair { first, second, .. } => format!("{first} {second}"),
+                };
+                out.push_str(&format!("(for [{pat}] {}\n", span(*s)));
+                iterable.pretty(out, level + 1);
+                for stmt in body {
+                    out.push('\n');
+                    stmt.pretty(out, level + 1);
+                }
+                out.push(')');
             }
             Stmt::Expr { expr, span: s } => {
                 indent(out, level);
@@ -181,6 +229,37 @@ impl Pretty for Expr {
                 left.pretty(out, level + 1);
                 out.push('\n');
                 right.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::List { items, span: s } => {
+                out.push_str(&format!("(list {}", span(*s)));
+                for item in items {
+                    out.push('\n');
+                    item.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
+            Expr::Map { entries, span: s } => {
+                out.push_str(&format!("(map {}", span(*s)));
+                for (key, value) in entries {
+                    out.push('\n');
+                    indent(out, level + 1);
+                    out.push_str("(entry\n");
+                    key.pretty(out, level + 2);
+                    out.push('\n');
+                    value.pretty(out, level + 2);
+                    out.push(')');
+                }
+                out.push(')');
+            }
+            Expr::Member {
+                receiver,
+                name,
+                span: s,
+                ..
+            } => {
+                out.push_str(&format!("(member {name} {}\n", span(*s)));
+                receiver.pretty(out, level + 1);
                 out.push(')');
             }
         }
