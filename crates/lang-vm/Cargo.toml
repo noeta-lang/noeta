@@ -14,11 +14,11 @@ lang-bytecode = { workspace = true }
 lang-compiler = { workspace = true }
 lang-value = { workspace = true }
 lang-gc = { workspace = true }
+lang-span = { workspace = true }
 
 [dev-dependencies]
 lang-lexer = { workspace = true }
 lang-parser = { workspace = true }
-lang-span = { workspace = true }
 insta = { workspace = true }
 
 [lints]

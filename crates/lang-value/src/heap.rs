@@ -9,6 +9,7 @@
 //! `lib.rs`, and freed by reconstructing the `Box`. Refcounts are non-atomic — the runtime
 //! is shared-nothing per isolate, so no value crosses a thread boundary.
 
+use std::collections::BTreeMap;
 use std::ptr;
 
 use crate::Value;
@@ -32,12 +33,19 @@ struct ObjHeader {
 /// (the differential oracle checks `i64::MAX + 1`). `Closure` holds a function-prototype
 /// index into the compiled module's proto table — M1.2 functions capture only globals
 /// (read live from the global environment), so a closure needs no upvalue array yet; that
-/// arrives with non-global capture in a later slice. Later slices extend this with lists,
-/// maps, and shaped objects.
+/// arrives with non-global capture in a later slice.
+///
+/// `List` and `Map` are the M1.3 heap collections. A collection **owns one reference to
+/// each value it holds** (the list's elements, the map's values; map keys are plain owned
+/// `String`s, not values). When the collection is freed those owned references are released
+/// first (see [`free`]), so dropping a list of strings frees the strings too. `BTreeMap`
+/// gives the map deterministic, sorted-key iteration, matching the M0 tree-walker exactly.
 pub(crate) enum Payload {
     Str(String),
     Int(i64),
     Closure(u32),
+    List(Vec<Value>),
+    Map(BTreeMap<String, Value>),
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
@@ -87,9 +95,33 @@ pub(crate) fn dec_ref(value: Value) -> bool {
 }
 
 /// Free a pointer value whose refcount has reached zero, running the payload's destructor
-/// (e.g. the `String`'s) by reconstructing and dropping the `Box`.
+/// (e.g. the `String`'s) by reconstructing and dropping the `Box`. A collection owns one
+/// reference to each value it holds, so those are released first (which recursively frees
+/// any that reach zero) before the container's own allocation is dropped.
 pub(crate) fn free(value: Value) {
     // SAFETY: `value` is a pointer this module allocated, its refcount is zero (so no other
     // owner exists), and it is freed exactly once.
-    drop(unsafe { Box::from_raw(obj_ptr(value)) });
+    let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
+    match &boxed.payload {
+        Payload::List(items) => {
+            for &element in items {
+                release_child(element);
+            }
+        }
+        Payload::Map(entries) => {
+            for &element in entries.values() {
+                release_child(element);
+            }
+        }
+        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) => {}
+    }
+    drop(boxed);
+}
+
+/// Drop one owned reference to a value a freed container held, freeing it at zero. The
+/// child is a distinct object from the container being freed, so there is no aliasing.
+fn release_child(value: Value) {
+    if value.dec_ref() {
+        value.free();
+    }
 }

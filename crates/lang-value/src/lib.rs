@@ -25,6 +25,8 @@ mod ops;
 
 pub use ops::{OpError, apply_binary, apply_unary};
 
+use std::collections::BTreeMap;
+
 use heap::Payload;
 
 /// A NaN-boxed runtime value (one 64-bit word). `Copy`: it is just an integer; ownership of
@@ -91,6 +93,19 @@ impl Value {
     /// proto table. M1.2 closures capture only globals (read live), so there are no upvalues.
     pub fn closure(proto: u32) -> Value {
         heap::alloc(Payload::Closure(proto))
+    }
+
+    /// A heap list (refcount 1). The list takes ownership of one reference to each element,
+    /// so the caller must have already retained any value it puts in `items` (and must not
+    /// release it afterward); the list releases them when it is freed.
+    pub fn list(items: Vec<Value>) -> Value {
+        heap::alloc(Payload::List(items))
+    }
+
+    /// A heap map (refcount 1), keyed by owned strings, iterating in sorted-key order. As
+    /// with [`Value::list`], the map takes ownership of one reference to each value.
+    pub fn map(entries: BTreeMap<String, Value>) -> Value {
+        heap::alloc(Payload::Map(entries))
     }
 
     // --- Classification ---
@@ -172,6 +187,80 @@ impl Value {
         }
     }
 
+    /// Whether this is a heap list.
+    pub fn is_list(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::List(_)))
+    }
+
+    /// Whether this is a heap map.
+    pub fn is_map(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Map(_)))
+    }
+
+    /// The number of elements, if this is a list.
+    pub fn list_len(self) -> Option<usize> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::List(items) => Some(items.len()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The number of entries, if this is a map.
+    pub fn map_len(self) -> Option<usize> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => Some(entries.len()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The element at `index`, if this is a list and the index is in bounds. The returned
+    /// value shares the list's reference (it is *not* retained); the caller must retain it
+    /// before storing it as an independent owner.
+    pub fn list_get(self, index: usize) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::List(items) => items.get(index).copied(),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A shallow copy of a list's elements, if this is a list. The copied values share the
+    /// list's references (they are *not* retained); the caller decides whether to retain.
+    pub fn list_items(self) -> Option<Vec<Value>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::List(items) => Some(items.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A map's values in sorted-key order, if this is a map. As with [`Value::list_items`],
+    /// the copied values share the map's references and are not retained.
+    pub fn map_values(self) -> Option<Vec<Value>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => Some(entries.values().copied().collect()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     // --- Display (mirrors the M0 tree-walker's `Value::display`) ---
 
     /// The display form used by `echo` and `~` concatenation.
@@ -188,10 +277,32 @@ impl Value {
                 Payload::Int(i) => i.to_string(),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"`.
                 Payload::Closure(_) => "<fn>".to_string(),
+                // Collections render their elements with `repr` (strings quoted), exactly
+                // like the M0 tree-walker's `Value::List`/`Value::Map` display.
+                Payload::List(items) => {
+                    let parts: Vec<String> = items.iter().map(|v| v.repr()).collect();
+                    format!("[{}]", parts.join(", "))
+                }
+                Payload::Map(entries) => {
+                    let parts: Vec<String> = entries
+                        .iter()
+                        .map(|(k, v)| format!("{k:?}: {}", v.repr()))
+                        .collect();
+                    format!("{{{}}}", parts.join(", "))
+                }
             })
         } else {
             // The unit value (and any other singleton) displays as empty, as in M0.
             String::new()
+        }
+    }
+
+    /// The representation of a value *inside* a collection: strings are quoted so the
+    /// structure stays legible (`["a", "b"]`, not `[a, b]`). Mirrors M0's `Value::repr`.
+    pub fn repr(self) -> String {
+        match self.as_string() {
+            Some(s) => format!("{s:?}"),
+            None => self.display(),
         }
     }
 
@@ -204,10 +315,15 @@ impl Value {
         } else if self.is_float() {
             "float"
         } else if self.is_pointer() {
-            // Boxed ints were already caught by `as_int` above, so a pointer here is either a
-            // string or a closure. M0 names both user functions and builtins "function".
+            // Boxed ints were already caught by `as_int` above, so a pointer here is a
+            // closure, list, map, or string. M0 names both user functions and builtins
+            // "function".
             if self.as_closure().is_some() {
                 "function"
+            } else if self.is_list() {
+                "list"
+            } else if self.is_map() {
+                "map"
             } else {
                 "string"
             }
@@ -256,6 +372,10 @@ impl std::fmt::Debug for Value {
             write!(f, "Float({x})")
         } else if let Some(proto) = self.as_closure() {
             write!(f, "Closure(proto={proto})")
+        } else if self.is_list() {
+            write!(f, "List(len={})", self.list_len().unwrap())
+        } else if self.is_map() {
+            write!(f, "Map(len={})", self.map_len().unwrap())
         } else if self.is_pointer() {
             write!(f, "Str({:?})", self.as_string().unwrap_or_default())
         } else {
@@ -350,6 +470,59 @@ mod tests {
         assert_eq!(v.as_string(), None);
         assert!(v.dec_ref());
         v.free();
+    }
+
+    #[test]
+    fn lists_display_with_repr_and_free_their_elements() {
+        // The list owns one reference to each element; building it from retained values and
+        // then freeing it must release them (miri verifies no leak and no double-free).
+        let a = Value::string("a");
+        let items = vec![Value::int(1), a, Value::int(3)];
+        let list = Value::list(items);
+        assert_eq!(list.type_name(), "list");
+        // Strings are quoted inside a collection; bare ints are not.
+        assert_eq!(list.display(), "[1, \"a\", 3]");
+        assert_eq!(list.list_len(), Some(3));
+        assert!(list.dec_ref());
+        list.free();
+    }
+
+    #[test]
+    fn nested_lists_free_recursively() {
+        let inner = Value::list(vec![Value::string("x"), Value::string("y")]);
+        let outer = Value::list(vec![inner, Value::int(7)]);
+        assert_eq!(outer.display(), "[[\"x\", \"y\"], 7]");
+        assert!(outer.dec_ref());
+        outer.free();
+    }
+
+    #[test]
+    fn maps_iterate_in_sorted_key_order() {
+        let mut entries = BTreeMap::new();
+        entries.insert("b".to_string(), Value::int(2));
+        entries.insert("a".to_string(), Value::string("v"));
+        let map = Value::map(entries);
+        assert_eq!(map.type_name(), "map");
+        assert_eq!(map.display(), "{\"a\": \"v\", \"b\": 2}");
+        assert_eq!(map.map_len(), Some(2));
+        let values = map.map_values().unwrap();
+        assert_eq!(values.len(), 2);
+        assert_eq!(values[0].as_string().as_deref(), Some("v"));
+        assert_eq!(values[1].as_int(), Some(2));
+        assert!(map.dec_ref());
+        map.free();
+    }
+
+    #[test]
+    fn empty_collections_display_distinctly() {
+        let list = Value::list(vec![]);
+        assert_eq!(list.display(), "[]");
+        let map = Value::map(BTreeMap::new());
+        assert_eq!(map.display(), "{}");
+        assert!(list.dec_ref());
+        list.free();
+        assert!(map.dec_ref());
+        map.free();
     }
 
     #[test]

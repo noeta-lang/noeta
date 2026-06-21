@@ -1,0 +1,36 @@
+---
+source: crates/lang-vm/src/lib.rs
+expression: module.disassemble()
+---
+=== main ===
+params: 0, registers: 13
+constants:
+  k0 = 0
+  k1 = 1
+  k2 = 2
+  k3 = 3
+  k4 = 0
+  k5 = 1
+code:
+    0  LoadConst   r0 <- k0
+    1  StoreGlobal "total" <- r0
+    2  LoadConst   r2 <- k1
+    3  LoadConst   r3 <- k2
+    4  LoadConst   r4 <- k3
+    5  MakeList    r1 <- [r2, r3, r4]
+    6  IterSnapshot r1 <- r1
+    7  ListLen     r5 <- len r1
+    8  LoadConst   r6 <- k4
+    9  LoadConst   r7 <- k5
+   10  Binary      r8 <- r6 < r5
+   11  JumpIfFalse r8 -> 19
+   12  ListGet     r9 <- r1[r6]
+   13  LoadGlobal  r10 <- "total"
+   14  Move        r11 <- r9
+   15  Binary      r10 <- r10 + r11
+   16  StoreGlobal "total" <- r10
+   17  Binary      r6 <- r6 + r7
+   18  Jump        -> 10
+   19  LoadGlobal  r12 <- "total"
+   20  Echo        r12
+   21  Halt

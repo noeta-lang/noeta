@@ -1,0 +1,47 @@
+---
+source: crates/lang-vm/src/lib.rs
+expression: module.disassemble()
+---
+=== main ===
+params: 0, registers: 10
+constants:
+  k0 = 1
+  k1 = 2
+  k2 = 3
+  k3 = 4
+code:
+    0  LoadConst   r4 <- k0
+    1  LoadConst   r5 <- k1
+    2  LoadConst   r6 <- k2
+    3  LoadConst   r7 <- k3
+    4  MakeList    r3 <- [r4, r5, r6, r7]
+    5  MakeClosure r8 <- proto 1
+    6  CallBuiltin r2 <- filter(r3, r8)
+    7  MakeClosure r9 <- proto 2
+    8  CallBuiltin r1 <- map(r2, r9)
+    9  CallBuiltin r0 <- sum(r1)
+   10  Echo        r0
+   11  Halt
+=== proto 1 ===
+params: 1, registers: 4
+constants:
+  k0 = 2
+  k1 = 0
+code:
+    0  Move        r1 <- r0
+    1  LoadConst   r2 <- k0
+    2  Binary      r1 <- r1 % r2
+    3  LoadConst   r3 <- k1
+    4  Binary      r1 <- r1 == r3
+    5  Return      r1
+    6  Halt
+=== proto 2 ===
+params: 1, registers: 3
+constants:
+  k0 = 10
+code:
+    0  Move        r1 <- r0
+    1  LoadConst   r2 <- k0
+    2  Binary      r1 <- r1 * r2
+    3  Return      r1
+    4  Halt

@@ -61,10 +61,11 @@ fn differential_backends_agree() {
         report.to_human()
     );
     // M1.0 established the spine on the smallest subset; each slice raises this floor until it
-    // reaches 100%. M1.2 added functions/calls/closures/pipeline/`if`. Guard against collapse.
+    // reaches 100%. M1.3 added heap collections (`List`/`Map`), the `len`/`map`/`filter`/`sum`
+    // builtins, `.count()`/`.enumerate()`, and `for`-iteration. Guard against collapse.
     assert!(
-        report.supported() >= 14,
-        "expected the VM to compile at least the M1.2 subset, got:\n{}",
+        report.supported() >= 18,
+        "expected the VM to compile at least the M1.3 subset, got:\n{}",
         report.to_human()
     );
 }

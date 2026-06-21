@@ -28,9 +28,9 @@
 
 use std::collections::HashMap;
 
-use lang_ast::{BinaryOp, Expr, FnDecl, Param, Program, Stmt};
+use lang_ast::{BinaryOp, Expr, FnDecl, ForPattern, Param, Program, Stmt};
 use lang_builtins::PRELUDE_NAMES;
-use lang_bytecode::{BoolSide, Chunk, Const, Module, Op, Reg};
+use lang_bytecode::{BoolSide, Builtin, Chunk, Const, Method, Module, Op, Reg};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
@@ -225,6 +225,17 @@ impl<'m> FnCompiler<'m> {
         Resolved::Global
     }
 
+    /// The collection builtin a callee name refers to, but only when the name still resolves
+    /// to the prelude (a user binding of the same name shadows it) and the builtin is one
+    /// this slice implements (`len`/`map`/`filter`/`sum`). Other prelude names stay
+    /// unsupported, so a program using them is skipped rather than miscompiled.
+    fn resolve_builtin(&self, name: &str) -> Option<Builtin> {
+        match self.resolve(name) {
+            Resolved::Prelude => Builtin::from_name(name),
+            _ => None,
+        }
+    }
+
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
         match stmt {
             Stmt::Echo { value, .. } => {
@@ -248,6 +259,12 @@ impl<'m> FnCompiler<'m> {
                 else_body,
                 span,
             } => self.if_stmt(cond, then_body, else_body.as_deref(), *span),
+            Stmt::For {
+                pattern,
+                iterable,
+                body,
+                span,
+            } => self.for_stmt(pattern, iterable, body, *span),
             Stmt::Expr { expr, .. } => {
                 // Evaluated for its side effects (and any error); the value is discarded.
                 let t = self.alloc_reg();
@@ -325,6 +342,120 @@ impl<'m> FnCompiler<'m> {
             }
         }
         Ok(())
+    }
+
+    /// `for <pattern> in <iterable> { body }`, lowered to an index loop over a snapshot of
+    /// the iterable's elements. Mirrors the tree-walker: the iterable is snapshotted once
+    /// (`IterSnapshot`), a non-iterable is E0007 at the `for`'s span, each iteration binds the
+    /// pattern in a fresh body scope, and a map iterates its values in sorted-key order.
+    fn for_stmt(
+        &mut self,
+        pattern: &ForPattern,
+        iterable: &Expr,
+        body: &[Stmt],
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        // The loop's bookkeeping registers live in the enclosing frame (a list snapshot, its
+        // length, the running index, and a constant 1 to advance it).
+        let items = self.alloc_reg();
+        self.expr(iterable, items)?;
+        self.code.push(Op::IterSnapshot {
+            dst: items,
+            src: items,
+            span,
+        });
+        let len = self.alloc_reg();
+        self.code.push(Op::ListLen {
+            dst: len,
+            src: items,
+        });
+        let index = self.alloc_reg();
+        let zero = self.add_const(Const::Int(0));
+        self.code.push(Op::LoadConst {
+            dst: index,
+            k: zero,
+        });
+        let one_reg = self.alloc_reg();
+        let one = self.add_const(Const::Int(1));
+        self.code.push(Op::LoadConst {
+            dst: one_reg,
+            k: one,
+        });
+
+        let loop_top = self.code.len() as u32;
+        let cond = self.alloc_reg();
+        self.code.push(Op::Binary {
+            op: BinaryOp::Lt,
+            dst: cond,
+            a: index,
+            b: len,
+            span,
+        });
+        let exit_jump = self.code.len();
+        self.code.push(Op::JumpIfFalse {
+            reg: cond,
+            target: 0,
+        });
+
+        // Fetch the current element and bind the loop pattern in a fresh body scope.
+        let element = self.alloc_reg();
+        self.code.push(Op::ListGet {
+            dst: element,
+            list: items,
+            index,
+        });
+        self.scopes.push(HashMap::new());
+        let result = (|| {
+            match pattern {
+                ForPattern::Single { name, .. } => {
+                    self.bind_loop_var(name, element);
+                }
+                ForPattern::Pair { first, second, .. } => {
+                    let first_reg = self.alloc_reg();
+                    let second_reg = self.alloc_reg();
+                    self.code.push(Op::DestructurePair {
+                        first: first_reg,
+                        second: second_reg,
+                        src: element,
+                        span,
+                    });
+                    self.bind_loop_var(first, first_reg);
+                    self.bind_loop_var(second, second_reg);
+                }
+            }
+            for stmt in body {
+                self.stmt(stmt)?;
+            }
+            Ok(())
+        })();
+        self.scopes.pop();
+        result?;
+
+        // Advance the index and loop back; patch the exit once the end is known.
+        self.code.push(Op::Binary {
+            op: BinaryOp::Add,
+            dst: index,
+            a: index,
+            b: one_reg,
+            span,
+        });
+        self.code.push(Op::Jump { target: loop_top });
+        let end = self.code.len() as u32;
+        self.patch_jump(exit_jump, end);
+        Ok(())
+    }
+
+    /// Register an already-populated register as an immutable loop-body binding. Unlike
+    /// [`FnCompiler::declare_local`] this emits no `Move`: the element/destructure op has
+    /// already written the value into `reg`.
+    fn bind_loop_var(&mut self, name: &str, reg: Reg) {
+        self.scopes.last_mut().unwrap().insert(
+            name.to_string(),
+            Var {
+                reg,
+                mutable: false,
+            },
+        );
     }
 
     /// Compile a brace-delimited block in its own (block) scope.
@@ -478,6 +609,38 @@ impl<'m> FnCompiler<'m> {
                 let proto = self.module.add_function(params, Body::Arrow(body))?;
                 self.code.push(Op::MakeClosure { dst, proto });
             }
+            Expr::List { items, .. } => {
+                let mut regs = Vec::with_capacity(items.len());
+                for item in items {
+                    let r = self.alloc_reg();
+                    self.expr(item, r)?;
+                    regs.push(r);
+                }
+                self.code.push(Op::MakeList {
+                    dst,
+                    items: regs.into_boxed_slice(),
+                });
+            }
+            Expr::Map { entries, span } => {
+                // Evaluate each key, check it is a string (matching M0's per-entry error
+                // timing), then evaluate the value — then assemble the map.
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    let key_reg = self.alloc_reg();
+                    self.expr(key, key_reg)?;
+                    self.code.push(Op::RequireMapKey {
+                        reg: key_reg,
+                        span: *span,
+                    });
+                    let value_reg = self.alloc_reg();
+                    self.expr(value, value_reg)?;
+                    pairs.push((key_reg, value_reg));
+                }
+                self.code.push(Op::MakeMap {
+                    dst,
+                    entries: pairs.into_boxed_slice(),
+                });
+            }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {
@@ -522,9 +685,44 @@ impl<'m> FnCompiler<'m> {
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        if matches!(callee, Expr::Member { .. }) {
-            // `recv.method(...)` — method dispatch arrives with the object model.
+        if let Expr::Member { receiver, name, .. } = callee {
+            // A zero-argument builtin method (`xs.count()`, `xs.enumerate()`). Anything else
+            // (user methods, arguments, pipeline-into-method) awaits the object model.
+            if prepend.is_none()
+                && args.is_empty()
+                && let Some(method) = Method::from_name(name)
+            {
+                let recv = self.alloc_reg();
+                self.expr(receiver, recv)?;
+                self.code.push(Op::CallMethod {
+                    dst,
+                    recv,
+                    method,
+                    span,
+                });
+                return Ok(());
+            }
             return unsupported("method call");
+        }
+        // A prelude collection builtin called directly by name (`len(x)`, `xs |> map(f)`).
+        // A user binding of the same name shadows the builtin (resolved as an ordinary call).
+        if let Expr::Ident { name, .. } = callee
+            && let Some(builtin) = self.resolve_builtin(name)
+        {
+            let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
+            arg_regs.extend(prepend);
+            for arg in args {
+                let r = self.alloc_reg();
+                self.expr(arg, r)?;
+                arg_regs.push(r);
+            }
+            self.code.push(Op::CallBuiltin {
+                dst,
+                builtin,
+                args: arg_regs.into_boxed_slice(),
+                span,
+            });
+            return Ok(());
         }
         let callee_reg = self.alloc_reg();
         self.expr(callee, callee_reg)?;

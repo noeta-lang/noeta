@@ -24,6 +24,66 @@ pub enum BoolSide {
     Right,
 }
 
+/// A prelude collection builtin, called directly by name (`len(x)`, `map(xs, f)`). These
+/// are never first-class values in the M1.3 subset — a program that passes one around
+/// (rather than calling it) is left unsupported — so they ride in a dedicated `CallBuiltin`
+/// op rather than being materialized into a register.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Builtin {
+    Len,
+    Map,
+    Filter,
+    Sum,
+}
+
+impl Builtin {
+    /// The surface name, for diagnostics ("`map` expects a list, ...").
+    pub fn name(self) -> &'static str {
+        match self {
+            Builtin::Len => "len",
+            Builtin::Map => "map",
+            Builtin::Filter => "filter",
+            Builtin::Sum => "sum",
+        }
+    }
+
+    /// The builtin a prelude name refers to, if it is one this slice implements.
+    pub fn from_name(name: &str) -> Option<Builtin> {
+        match name {
+            "len" => Some(Builtin::Len),
+            "map" => Some(Builtin::Map),
+            "filter" => Some(Builtin::Filter),
+            "sum" => Some(Builtin::Sum),
+            _ => None,
+        }
+    }
+}
+
+/// A zero-argument builtin method dispatched on a receiver (`xs.count()`, `xs.enumerate()`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Count,
+    Enumerate,
+}
+
+impl Method {
+    pub fn name(self) -> &'static str {
+        match self {
+            Method::Count => "count",
+            Method::Enumerate => "enumerate",
+        }
+    }
+
+    /// The method a name refers to, if it is one this slice implements.
+    pub fn from_name(name: &str) -> Option<Method> {
+        match name {
+            "count" => Some(Method::Count),
+            "enumerate" => Some(Method::Enumerate),
+            _ => None,
+        }
+    }
+}
+
 /// A compile-time constant, materialized into a runtime value on `LoadConst`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Const {
@@ -50,6 +110,51 @@ pub enum Op {
     StoreGlobal { name: String, src: Reg },
     /// `dst = <closure over proto>` — materialize a function value referencing `proto`.
     MakeClosure { dst: Reg, proto: u32 },
+    /// `dst = [items...]` — build a heap list, retaining each element into it.
+    MakeList { dst: Reg, items: Box<[Reg]> },
+    /// `dst = {key: value, ...}` — build a heap map (sorted-key), retaining each value. Keys
+    /// are validated by a preceding `RequireMapKey`, so they are known strings here.
+    MakeMap {
+        dst: Reg,
+        entries: Box<[(Reg, Reg)]>,
+    },
+    /// Require `reg` to be a string (a map key), else raise E0007 ("map keys must be strings,
+    /// found <type>") at `span`. Emitted between a map entry's key and value so the error
+    /// timing matches the M0 tree-walker (key checked before the value is evaluated).
+    RequireMapKey { reg: Reg, span: Span },
+    /// `dst = <elements of src to iterate>`. A list yields a retained shallow copy; a map
+    /// yields a new list of its values in sorted-key order; anything else raises E0007
+    /// ("cannot iterate over <type>") at `span`. Snapshots iteration, as the M0 tree-walker
+    /// does, so `dst` is always a list the loop can index.
+    IterSnapshot { dst: Reg, src: Reg, span: Span },
+    /// `dst = len(src)` where `src` is a list (an iteration snapshot). Never fails.
+    ListLen { dst: Reg, src: Reg },
+    /// `dst = list[index]` (retained), where `list` is a list and `index` an in-bounds int.
+    ListGet { dst: Reg, list: Reg, index: Reg },
+    /// Destructure a 2-element list `src` into `first`/`second` (each retained), else raise
+    /// E0007 ("destructuring `(a, b)` expects a 2-element list, found <type>") at `span`.
+    DestructurePair {
+        first: Reg,
+        second: Reg,
+        src: Reg,
+        span: Span,
+    },
+    /// `dst = builtin(args...)` — a prelude collection builtin (`len`/`map`/`filter`/`sum`).
+    /// `map`/`filter` re-enter the VM to call their closure argument per element.
+    CallBuiltin {
+        dst: Reg,
+        builtin: Builtin,
+        args: Box<[Reg]>,
+        span: Span,
+    },
+    /// `dst = recv.method()` — a zero-argument builtin method (`count`/`enumerate`). May
+    /// raise E0005 ("no method `<name>` on <type>") at `span`.
+    CallMethod {
+        dst: Reg,
+        recv: Reg,
+        method: Method,
+        span: Span,
+    },
     /// `dst = callee(args...)`. Pushes a new call frame; the callee must be a closure whose
     /// prototype's arity equals `args.len()` (else E0007 at `span`); a non-callable callee is
     /// E0007 ("<type> is not callable") at `span`.
@@ -198,6 +303,34 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {name:?}"),
         Op::StoreGlobal { name, src } => format!("StoreGlobal {name:?} <- r{src}"),
         Op::MakeClosure { dst, proto } => format!("MakeClosure r{dst} <- proto {proto}"),
+        Op::MakeList { dst, items } => {
+            let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
+            format!("MakeList    r{dst} <- [{}]", items.join(", "))
+        }
+        Op::MakeMap { dst, entries } => {
+            let entries: Vec<String> = entries.iter().map(|(k, v)| format!("r{k}: r{v}")).collect();
+            format!("MakeMap     r{dst} <- {{{}}}", entries.join(", "))
+        }
+        Op::RequireMapKey { reg, .. } => format!("RequireMapKey r{reg}"),
+        Op::IterSnapshot { dst, src, .. } => format!("IterSnapshot r{dst} <- r{src}"),
+        Op::ListLen { dst, src } => format!("ListLen     r{dst} <- len r{src}"),
+        Op::ListGet { dst, list, index } => format!("ListGet     r{dst} <- r{list}[r{index}]"),
+        Op::DestructurePair {
+            first, second, src, ..
+        } => format!("DestructurePair (r{first}, r{second}) <- r{src}"),
+        Op::CallBuiltin {
+            dst, builtin, args, ..
+        } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "CallBuiltin r{dst} <- {}({})",
+                builtin.name(),
+                args.join(", ")
+            )
+        }
+        Op::CallMethod {
+            dst, recv, method, ..
+        } => format!("CallMethod  r{dst} <- r{recv}.{}()", method.name()),
         Op::Call {
             dst, callee, args, ..
         } => {
