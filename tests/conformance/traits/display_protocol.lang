@@ -1,0 +1,23 @@
+// Implementing the `Display` trait lights up `echo` and string interpolation: an object renders
+// via its `to_string` method instead of the structural default. Runs identically under both
+// backends (the differential oracle).
+// expect: stdout "Point(1, 2)"
+// expect: stdout "here: Point(3, 4)"
+// expect: exit 0
+class Point {
+    x: int
+    y: int
+
+    fn new(x: int, y: int): Point {
+        return Point { x: x, y: y };
+    }
+
+    impl Display {
+        fn to_string(): string {
+            return "Point({x}, {y})";
+        }
+    }
+}
+
+echo Point.new(1, 2);
+echo "here: {Point.new(3, 4)}";

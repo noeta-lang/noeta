@@ -3,7 +3,7 @@ source: crates/lang-vm/src/lib.rs
 expression: module.disassemble()
 ---
 === main ===
-params: 0, registers: 10
+params: 0, registers: 11
 constants:
   k0 = 1
   k1 = 2
@@ -20,8 +20,9 @@ code:
     7  MakeClosure r9 <- proto 2
     8  CallBuiltin r1 <- map(r2, r9)
     9  CallBuiltin r0 <- sum(r1)
-   10  Echo        r0
-   11  Halt
+   10  Stringify   r10 <- display(r0)
+   11  Echo        r10
+   12  Halt
 === proto 1 ===
 params: 1, registers: 4
 constants:

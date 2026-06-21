@@ -556,9 +556,10 @@ impl Interpreter {
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Eval<Flow> {
         match stmt {
-            Stmt::Echo { value, .. } => {
-                let value = self.eval_expr(value)?;
-                self.stdout.push_str(&value.display());
+            Stmt::Echo { value, span } => {
+                let v = self.eval_expr(value)?;
+                let text = self.display_value(&v, *span)?;
+                self.stdout.push_str(&text);
                 self.stdout.push('\n');
                 Ok(Flow::Normal)
             }
@@ -1127,7 +1128,10 @@ impl Interpreter {
                 for part in parts {
                     match part {
                         StrPart::Literal(text) => out.push_str(text),
-                        StrPart::Hole(expr) => out.push_str(&self.eval_expr(expr)?.display()),
+                        StrPart::Hole(expr) => {
+                            let v = self.eval_expr(expr)?;
+                            out.push_str(&self.display_value(&v, expr.span())?);
+                        }
                     }
                 }
                 Ok(Value::Str(out))
@@ -1334,6 +1338,20 @@ impl Interpreter {
         }
     }
 
+    /// Render a value for `echo` / string interpolation. A user object that implements the
+    /// `Display` trait (defines `to_string`) renders through that method; every other value
+    /// uses the structural `Value::display`. This is the one place `to_string` is consulted, so
+    /// the same object renders identically whether echoed or interpolated.
+    fn display_value(&mut self, value: &Value, span: Span) -> Eval<String> {
+        if let Value::Object(object) = value
+            && object.def.methods.contains_key("to_string")
+        {
+            let rendered = self.call_method(value.clone(), "to_string", Vec::new(), span)?;
+            return Ok(rendered.display());
+        }
+        Ok(value.display())
+    }
+
     /// Evaluate `receiver[index]`. A user object dispatches through its `Index` trait
     /// (`receiver.get(index)`); a built-in list addresses an element by integer position
     /// (bounds-checked). Any other receiver is not indexable.
@@ -1500,6 +1518,12 @@ impl Interpreter {
                     Value::List(items) => Ok(Value::Int(items.len() as i64)),
                     Value::Map(entries) => Ok(Value::Int(entries.len() as i64)),
                     Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
+                    // A user object lights up the `Length` trait: `len(o)` dispatches to its
+                    // `len` method (an object without a `Length` impl has no `len` method).
+                    Value::Object(object) if object.def.methods.contains_key("len") => {
+                        let receiver = args[0].clone();
+                        self.call_method(receiver, "len", Vec::new(), span)
+                    }
                     other => Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,

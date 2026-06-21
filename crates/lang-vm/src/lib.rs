@@ -467,6 +467,44 @@ impl<'m> Vm<'m> {
                     args,
                     span,
                 } => {
+                    // A user object lights up the `Length` trait: `len(o)` dispatches to its `len`
+                    // method, which runs bytecode, so it is pushed as a call frame rather than
+                    // handled by the synchronous `call_builtin`. (Matches the tree-walker's
+                    // `Builtin::Len` object case.)
+                    if *builtin == Builtin::Len && args.len() == 1 {
+                        let recv = frames[top].regs[args[0] as usize];
+                        if recv.is_object() {
+                            let type_name = recv.shape().unwrap().name.clone();
+                            if let Some(&proto) =
+                                self.methods.get(&(type_name.clone(), "len".to_string()))
+                            {
+                                let chunk = &module.protos[proto as usize];
+                                if chunk.num_params != 1 {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!(
+                                            "this method takes {} argument(s) but 0 were supplied",
+                                            chunk.num_params - 1
+                                        ),
+                                    ));
+                                }
+                                let mut new_regs =
+                                    vec![Value::unit(); chunk.num_registers as usize];
+                                retain(recv);
+                                new_regs[0] = recv;
+                                frames[top].pc += 1;
+                                frames.push(Frame {
+                                    proto,
+                                    regs: new_regs,
+                                    pc: 0,
+                                    ret_dst: *dst,
+                                    ret_transform: RetTransform::None,
+                                });
+                                continue;
+                            }
+                        }
+                    }
                     // Builtins borrow their arguments (the registers keep ownership); the
                     // result is a fresh owned value.
                     let arg_vals: Vec<Value> =
@@ -1168,6 +1206,48 @@ impl<'m> Vm<'m> {
                     self.stdout.push('\n');
                     frames[top].pc += 1;
                 }
+                Op::Stringify { dst, src, span } => {
+                    let v = frames[top].regs[*src as usize];
+                    // A user object lights up the `Display` trait: render it via its `to_string`
+                    // method (which runs bytecode, so it is pushed as a call frame). Matches the
+                    // tree-walker's `display_value`.
+                    if v.is_object() {
+                        let type_name = v.shape().unwrap().name.clone();
+                        if let Some(&proto) = self
+                            .methods
+                            .get(&(type_name.clone(), "to_string".to_string()))
+                        {
+                            let chunk = &module.protos[proto as usize];
+                            if chunk.num_params != 1 {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "this method takes {} argument(s) but 0 were supplied",
+                                        chunk.num_params - 1
+                                    ),
+                                ));
+                            }
+                            let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                            retain(v);
+                            new_regs[0] = v;
+                            frames[top].pc += 1;
+                            frames.push(Frame {
+                                proto,
+                                regs: new_regs,
+                                pc: 0,
+                                ret_dst: *dst,
+                                ret_transform: RetTransform::None,
+                            });
+                            continue;
+                        }
+                    }
+                    // Identity for every other value: the consuming `Echo`/`Concat` stringifies
+                    // it via `display`.
+                    retain(v);
+                    set_reg(&mut frames[top].regs, *dst, v);
+                    frames[top].pc += 1;
+                }
                 Op::Raise { idx } => {
                     self.diagnostics
                         .push(chunk.diagnostics[*idx as usize].clone());
@@ -1852,6 +1932,36 @@ mod tests {
             r.diagnostics[0].code,
             lang_diagnostics::DiagnosticCode::IndexOutOfBounds
         );
+    }
+
+    #[test]
+    fn len_dispatches_to_length_trait() {
+        // `len(o)` routes to the class's `Length::len`, pushing a receiver-only call frame.
+        let r = run(
+            "class Stack {\n  items: list\n  fn new(items: list): Stack { return Stack { items: items }; }\n  impl Length {\n    fn len(): int { return len(items); }\n  }\n}\necho len(Stack.new([1, 2, 3]));\n",
+        );
+        assert_eq!(r.stdout, "3\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn echo_dispatches_to_display_trait() {
+        // `echo o` and `"{o}"` route to the class's `Display::to_string` (the `Stringify` op).
+        let r = run(
+            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#{n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is {p}\";\n",
+        );
+        assert_eq!(r.stdout, "P#7\nit is P#7\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn object_without_display_uses_structural_render() {
+        // No `Display` impl ⇒ the `Stringify` op is identity and the structural form prints.
+        let r = run(
+            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n}\necho P.new(7);\n",
+        );
+        assert_eq!(r.stdout, "P {n: 7}\n");
+        assert_eq!(r.exit_code, 0);
     }
 
     #[test]

@@ -1,0 +1,21 @@
+// Implementing the `Length` trait lights up `len(o)`: the built-in `len` dispatches to the
+// object's `len` method. Runs identically under both backends (the differential oracle).
+// expect: stdout "3"
+// expect: stdout "0"
+// expect: exit 0
+class Stack {
+    items: list
+
+    fn new(items: list): Stack {
+        return Stack { items: items };
+    }
+
+    impl Length {
+        fn len(): int {
+            return len(items);
+        }
+    }
+}
+
+echo len(Stack.new([10, 20, 30]));
+echo len(Stack.new([]));

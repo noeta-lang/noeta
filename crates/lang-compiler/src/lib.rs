@@ -500,10 +500,17 @@ impl<'m> FnCompiler<'m> {
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
         match stmt {
-            Stmt::Echo { value, .. } => {
+            Stmt::Echo { value, span } => {
                 let t = self.alloc_reg();
                 self.expr(value, t)?;
-                self.code.push(Op::Echo { reg: t });
+                // Route a `Display` object through its `to_string`; identity otherwise.
+                let s = self.alloc_reg();
+                self.code.push(Op::Stringify {
+                    dst: s,
+                    src: t,
+                    span: *span,
+                });
+                self.code.push(Op::Echo { reg: s });
                 Ok(())
             }
             Stmt::Binding {
@@ -951,7 +958,16 @@ impl<'m> FnCompiler<'m> {
                             let k = self.add_const(Const::Str(text.clone()));
                             self.code.push(Op::LoadConst { dst: r, k });
                         }
-                        StrPart::Hole(expr) => self.expr(expr, r)?,
+                        StrPart::Hole(expr) => {
+                            self.expr(expr, r)?;
+                            // Route a `Display` object through its `to_string` before the
+                            // concatenation stringifies it; identity for every other value.
+                            self.code.push(Op::Stringify {
+                                dst: r,
+                                src: r,
+                                span: *span,
+                            });
+                        }
                     }
                     self.code.push(Op::Binary {
                         op: BinaryOp::Concat,

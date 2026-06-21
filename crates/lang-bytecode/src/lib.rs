@@ -345,6 +345,15 @@ pub enum Op {
     Echo {
         reg: Reg,
     },
+    /// `dst = display_string(src)` — render `src` for `echo`/interpolation. A user object that
+    /// implements the `Display` trait dispatches to its `to_string` method (pushing a call
+    /// frame); every other value is copied unchanged, since the consuming `Echo`/`Concat`
+    /// stringifies it via `display`. Emitted before each `Echo` and each interpolation hole.
+    Stringify {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
     /// Push a precomputed diagnostic (`diagnostics[idx]`) and halt — the unknown-name (E0005)
     /// and immutable-assignment (E0006) errors, whose text the compiler knows statically.
     Raise {
@@ -630,6 +639,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::JumpIfTrue { reg, target } => format!("JumpIfTrue  r{reg} -> {target}"),
         Op::JumpIfFalse { reg, target } => format!("JumpIfFalse r{reg} -> {target}"),
         Op::Echo { reg } => format!("Echo        r{reg}"),
+        Op::Stringify { dst, src, .. } => format!("Stringify   r{dst} <- display(r{src})"),
         Op::Raise { idx } => {
             let code = diagnostics
                 .get(*idx as usize)

@@ -5,7 +5,7 @@ expression: module.disassemble()
 shapes:
   s0 = enum E.Code(n)
 === main ===
-params: 0, registers: 5
+params: 0, registers: 6
 constants:
   k0 = 7
 code:
@@ -15,8 +15,9 @@ code:
     3  LoadConst   r4 <- k0
     4  MakeEnum    r3 <- shape s0(r4)
     5  Call        r1 <- r2(r3)
-    6  Echo        r1
-    7  Halt
+    6  Stringify   r5 <- display(r1)
+    7  Echo        r5
+    8  Halt
 === proto 1 ===
 params: 1, registers: 6
 constants:
@@ -27,15 +28,16 @@ code:
     0  Move        r2 <- r0
     1  MatchVariant r2 is E.Empty/0 else -> 4
     2  LoadConst   r1 <- k0
-    3  Jump        -> 13
-    4  MatchVariant r2 is E.Code/1 else -> 12
+    3  Jump        -> 14
+    4  MatchVariant r2 is E.Code/1 else -> 13
     5  ExtractField r3 <- r2.0
     6  LoadConst   r1 <- k1
     7  LoadConst   r4 <- k2
     8  Binary      r1 <- r1 ~ r4
     9  Move        r5 <- r3
-   10  Binary      r1 <- r1 ~ r5
-   11  Jump        -> 13
-   12  MatchFail   r2
-   13  Return      r1
-   14  Halt
+   10  Stringify   r5 <- display(r5)
+   11  Binary      r1 <- r1 ~ r5
+   12  Jump        -> 14
+   13  MatchFail   r2
+   14  Return      r1
+   15  Halt

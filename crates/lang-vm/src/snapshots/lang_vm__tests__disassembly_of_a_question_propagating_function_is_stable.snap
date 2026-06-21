@@ -6,7 +6,7 @@ shapes:
   s0 = enum Result.Err()
   s1 = enum Result.Ok()
 === main ===
-params: 0, registers: 4
+params: 0, registers: 5
 code:
     0  MakeClosure r0 <- proto 1
     1  StoreGlobal "validate" <- r0
@@ -14,8 +14,9 @@ code:
     3  StoreGlobal "place" <- r1
     4  LoadGlobal  r3 <- "place"
     5  Call        r2 <- r3()
-    6  Echo        r2
-    7  Halt
+    6  Stringify   r4 <- display(r2)
+    7  Echo        r4
+    8  Halt
 === proto 1 ===
 params: 0, registers: 2
 constants:

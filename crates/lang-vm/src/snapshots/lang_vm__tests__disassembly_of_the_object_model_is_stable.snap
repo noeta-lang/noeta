@@ -9,7 +9,7 @@ methods:
   Order.new -> proto 1
   Order.tag -> proto 2
 === main ===
-params: 0, registers: 6
+params: 0, registers: 7
 constants:
   k0 = unit
   k1 = 7
@@ -21,8 +21,9 @@ code:
     4  StoreGlobal "o" <- r0
     5  LoadGlobal  r5 <- "o"
     6  CallMethod  r4 <- r5.tag()
-    7  Echo        r4
-    8  Halt
+    7  Stringify   r6 <- display(r4)
+    8  Echo        r6
+    9  Halt
 === proto 1 ===
 params: 2, registers: 5
 code:

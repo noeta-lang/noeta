@@ -3,7 +3,7 @@ source: crates/lang-vm/src/lib.rs
 expression: module.disassemble()
 ---
 === main ===
-params: 0, registers: 3
+params: 0, registers: 4
 constants:
   k0 = 1
   k1 = 2
@@ -13,5 +13,6 @@ code:
     2  LoadGlobal  r1 <- "x"
     3  LoadConst   r2 <- k1
     4  Binary      r1 <- r1 + r2
-    5  Echo        r1
-    6  Halt
+    5  Stringify   r3 <- display(r1)
+    6  Echo        r3
+    7  Halt
