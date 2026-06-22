@@ -59,6 +59,9 @@ pub enum DiagnosticCode {
     /// A `use` named an import that the resolved module does not export — either no declaration of
     /// that name, or one that is not `pub`.
     UnresolvedImport,
+    /// An imported name collides with another top-level name in the entry: a second import of the
+    /// same name, or a local declaration of it. The reference would be ambiguous, so it is rejected.
+    NameCollision,
 }
 
 impl DiagnosticCode {
@@ -84,6 +87,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidAttribute,
         DiagnosticCode::KeyNotFound,
         DiagnosticCode::UnresolvedImport,
+        DiagnosticCode::NameCollision,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -109,6 +113,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidAttribute => "E0017",
             DiagnosticCode::KeyNotFound => "E0018",
             DiagnosticCode::UnresolvedImport => "E0019",
+            DiagnosticCode::NameCollision => "E0020",
         }
     }
 

@@ -17,6 +17,7 @@
 //! diagnostics that land on merged-in declarations against the right source is M1.9.2; for now
 //! the caller renders those against the entry source (positive linked programs produce none).
 
+use std::collections::HashSet;
 use std::io;
 use std::path::Path;
 
@@ -145,6 +146,18 @@ pub fn link(
         }
     }
 
+    // The entry's own top-level declaration names, pre-scanned so an import colliding with a local
+    // declaration is caught regardless of source order. As each import resolves, its name joins the
+    // set; a name that fails to insert (a duplicate) is a collision — a second import of the same
+    // name, or one that shadows a local declaration. The merged reference would be ambiguous.
+    let mut declared: HashSet<String> = entry_parsed
+        .program
+        .stmts
+        .iter()
+        .filter_map(decl_name)
+        .map(str::to_string)
+        .collect();
+
     // Resolve the entry's imports against the module namespaces, pulling each resolved name's
     // real declaration and trimming it from the `use` so the runtime makes no opaque stub for it.
     let mut imported: Vec<Stmt> = Vec::new();
@@ -156,7 +169,13 @@ pub fn link(
                 let mut unresolved: Vec<UseName> = Vec::new();
                 for name in names {
                     match resolve(&modules, &path, &name.name) {
-                        Resolution::Resolved(decl) => imported.push(*decl),
+                        Resolution::Resolved(decl) => {
+                            if declared.insert(name.name.clone()) {
+                                imported.push(*decl);
+                            } else {
+                                errors.push(collision_error(&entry, &path, &name));
+                            }
+                        }
                         // No module declares this namespace: fall back to the opaque stub (M0).
                         Resolution::NoModule => unresolved.push(name),
                         // The namespace exists but does not export the name — a hard error: a
@@ -265,6 +284,24 @@ fn import_error(
     }
 }
 
+/// Build the `E0020` diagnostic for an import whose name collides with another top-level name in
+/// the entry (a second import of it, or a local declaration), pointed at the imported name.
+fn collision_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagnostic {
+    let namespace = path.join(".");
+    LoadDiagnostic {
+        source: entry.clone(),
+        diagnostic: Diagnostic::error(
+            DiagnosticCode::NameCollision,
+            name.span,
+            format!(
+                "`{}` imported from `{namespace}` collides with another top-level name",
+                name.name
+            ),
+        )
+        .with_help("rename or remove the conflicting import or declaration"),
+    }
+}
+
 /// Whether a top-level declaration is `pub` (importable). Statements that declare no name are
 /// never importable.
 fn decl_is_public(stmt: &Stmt) -> bool {
@@ -364,6 +401,36 @@ mod tests {
         let errs = link("main.lang", entry, std::slice::from_ref(&models)).unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::UnresolvedImport);
+    }
+
+    #[test]
+    fn an_import_colliding_with_a_local_declaration_is_e0020() {
+        // The entry imports `User` but also declares its own `User` — the reference is ambiguous.
+        let models = module(
+            "models.lang",
+            "namespace App.Models;\npub class User { id: int }\n",
+        );
+        let entry = "use App.Models.User;\nclass User { name: string }\n";
+        let errs = link("main.lang", entry, std::slice::from_ref(&models)).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].diagnostic.code, DiagnosticCode::NameCollision);
+    }
+
+    #[test]
+    fn two_imports_of_the_same_name_collide() {
+        // Two modules each export `User`; importing both leaves an ambiguous reference.
+        let models = module(
+            "models.lang",
+            "namespace App.Models;\npub class User { id: int }\n",
+        );
+        let people = module(
+            "people.lang",
+            "namespace App.People;\npub class User { name: string }\n",
+        );
+        let entry = "use App.Models.User;\nuse App.People.User;\n";
+        let errs = link("main.lang", entry, &[models, people]).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].diagnostic.code, DiagnosticCode::NameCollision);
     }
 
     #[test]

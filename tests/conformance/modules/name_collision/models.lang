@@ -1,0 +1,7 @@
+// A library module exporting `User`, imported by the entry (main.lang) — which also declares its
+// own `User`, so the import is ambiguous. This module has no executable top-level statements.
+namespace App.Models;
+
+pub class User {
+    id: int
+}

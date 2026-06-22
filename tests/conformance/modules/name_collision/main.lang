@@ -1,0 +1,14 @@
+// Importing a name that the entry also declares locally is a collision (E0020): the reference
+// `User` would be ambiguous between the import and the local class, so the link is rejected. The
+// error points at the imported name in the `use`.
+// expect: error E0020 at 8:16
+// expect: exit 1
+namespace App.Main;
+
+use App.Models.User;
+
+class User {
+    name: string
+}
+
+echo "unreachable";
