@@ -1,0 +1,11 @@
+// The entry `use`s a sibling function that divides by zero. The error originates in the merged-in
+// `boom` declaration, so it must be reported at its real location in `models.lang` (line 8), not
+// at some bogus offset projected onto this short entry file. The expectation's line/column are
+// models.lang coordinates; a match proves the diagnostic resolved to the right source.
+// expect: error E0008 at 8:12
+// expect: exit 1
+namespace App.Main;
+
+use App.Math.boom;
+
+echo boom();

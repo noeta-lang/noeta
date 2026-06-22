@@ -1,0 +1,9 @@
+// A sibling module whose function divides by zero. The runtime error must render against THIS
+// file's coordinates (line/column in models.lang), not the entry's — even though the failing
+// declaration is merged into the entry program before running. This is the SourceMap behavior:
+// a span carries the SourceId of the file it came from, so it resolves to the right source.
+namespace App.Math;
+
+pub fn boom(): int {
+    return 1 / 0;
+}

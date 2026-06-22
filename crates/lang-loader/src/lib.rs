@@ -13,9 +13,10 @@
 //! sibling modules actually provide the imported names.
 //!
 //! Diagnostics produced while loading carry the [`Source`] they should render against (a sibling
-//! module's parse error renders against that module, not the entry). Rendering of *check/runtime*
-//! diagnostics that land on merged-in declarations against the right source is M1.9.2; for now
-//! the caller renders those against the entry source (positive linked programs produce none).
+//! module's parse error renders against that module, not the entry). *Check/runtime* diagnostics
+//! that land on a declaration merged in from a sibling resolve to the right source too: every span
+//! is tagged at parse time with its [`SourceId`], so the caller resolves it through the [`Linked`]
+//! [`SourceMap`] rather than against the entry (slice F4).
 
 use std::collections::HashSet;
 use std::io;
@@ -25,7 +26,7 @@ use lang_ast::{Program, Stmt, UseName};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::lex;
 use lang_parser::parse;
-use lang_span::{Source, SourceId};
+use lang_span::{Source, SourceId, SourceMap};
 
 /// A loaded, linked program ready to type-check and run.
 #[derive(Debug)]
@@ -33,8 +34,13 @@ pub struct Linked {
     /// The merged program: each resolved imported declaration, in resolution order, followed by
     /// the entry's own statements (with resolved names removed from their `use` lists).
     pub program: Program,
-    /// The entry source — what check/runtime diagnostics render against.
+    /// The entry source — kept for the entry's name and the single-source rendering path.
     pub entry: Source,
+    /// Every source the program is built from (entry + sibling modules), indexed by `SourceId`.
+    /// A diagnostic may land on a declaration merged in from a sibling module; its span carries
+    /// that module's `SourceId`, so it resolves to the right file through this map rather than
+    /// always rendering against the entry.
+    pub sources: SourceMap,
 }
 
 /// A diagnostic produced while loading, paired with the source it renders against.
@@ -147,7 +153,10 @@ pub fn link(
     // Parse each sibling. Only cleanly-parsed modules contribute (a module that fails to lex/parse
     // cannot be resolved against and is skipped — surfacing a *referenced-but-broken* module's
     // errors is the deferred SourceMap work). Keep the parsed programs alive for [`link_parsed`].
+    // Every sibling's `Source` is retained (whether or not it parsed) so the `SourceMap` indices
+    // line up with the `SourceId`s the parser stamped onto spans (entry = 0, sibling i = i + 1).
     let mut module_programs: Vec<Program> = Vec::new();
+    let mut sources: Vec<Source> = vec![entry.clone()];
     for (i, raw) in siblings.iter().enumerate() {
         let source = Source::new(
             SourceId((i + 1) as u32),
@@ -155,19 +164,22 @@ pub fn link(
             raw.text.as_str(),
         );
         let lexed = lex(&source);
-        if !lexed.diagnostics.is_empty() {
-            continue;
+        let parsed = (lexed.diagnostics.is_empty())
+            .then(|| parse(&source, &lexed.tokens))
+            .filter(|parsed| parsed.diagnostics.is_empty());
+        sources.push(source);
+        if let Some(parsed) = parsed {
+            module_programs.push(parsed.program);
         }
-        let parsed = parse(&source, &lexed.tokens);
-        if !parsed.diagnostics.is_empty() {
-            continue;
-        }
-        module_programs.push(parsed.program);
     }
 
     let refs: Vec<&Program> = module_programs.iter().collect();
     let program = link_parsed(&entry, &entry_parsed.program, &refs)?;
-    Ok(Linked { program, entry })
+    Ok(Linked {
+        program,
+        entry,
+        sources: SourceMap::new(sources),
+    })
 }
 
 /// Resolve and merge an *already-parsed* entry against already-parsed candidate modules — the pure
@@ -484,5 +496,39 @@ mod tests {
         let errs = link("main.lang", "echo $;", &[]).unwrap_err();
         assert!(!errs.is_empty());
         assert!(errs.iter().all(|e| e.source.name() == "main.lang"));
+    }
+
+    #[test]
+    fn merged_declaration_spans_carry_the_sibling_source_id() {
+        // The `User` class is declared in the sibling (SourceId 1) and merged into the entry
+        // program. Its spans — including those deep in a method body — must stay tagged with the
+        // sibling's id so a diagnostic on them renders against `models.lang`, not the entry.
+        let models = module(
+            "models.lang",
+            "namespace App.Models;\npub class User {\n  id: int\n  fn bad(): int { return 1 / 0; }\n}\n",
+        );
+        let entry = "use App.Models.User;\nu = User { id: 1 };\n";
+        let linked = link("main.lang", entry, std::slice::from_ref(&models)).unwrap();
+
+        // The merged class statement and everything under it belong to source 1 (the sibling).
+        let class = linked
+            .program
+            .stmts
+            .iter()
+            .find(|s| matches!(s, Stmt::Class(c) if c.name == "User"))
+            .expect("merged User class");
+        assert_eq!(class.span().source, SourceId(1));
+
+        // The entry's own statements stay tagged with source 0.
+        let entry_stmt = linked
+            .program
+            .stmts
+            .iter()
+            .find(|s| matches!(s, Stmt::Binding { .. }))
+            .expect("an entry statement");
+        assert_eq!(entry_stmt.span().source, SourceId(0));
+
+        // The source map resolves the sibling id to the sibling file.
+        assert_eq!(linked.sources.source(SourceId(1)).name(), "models.lang");
     }
 }

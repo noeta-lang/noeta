@@ -52,6 +52,19 @@ struct Ctx<'src> {
     diags: &'src RefCell<Vec<Diagnostic>>,
 }
 
+impl Ctx<'_> {
+    /// Convert a chumsky [`SimpleSpan`] (usize offsets) into a [`Span`] tagged with the source
+    /// being parsed. chumsky can hand back a reversed (`start > end`) span for some
+    /// end-of-input/recovery errors; normalise it to a well-formed zero-or-positive-width span.
+    /// This is the parser's single span-construction boundary, so every AST/diagnostic span is
+    /// stamped with the right [`SourceId`] — which is what lets a diagnostic on a declaration
+    /// merged in from a sibling module render against that module rather than the entry.
+    fn to_span(self, s: SimpleSpan) -> Span {
+        let (start, end) = (s.start.min(s.end) as u32, s.start.max(s.end) as u32);
+        Span::new_in(self.source.id(), start, end)
+    }
+}
+
 /// One item inside an object literal's braces: a `name: value` field or a `..base`
 /// spread. Collected into [`ObjectLit`] after the comma-separated list is parsed.
 enum ObjItem {
@@ -167,22 +180,9 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
     Stmt::Use { path, names, span }
 }
 
-/// Convert a chumsky [`SimpleSpan`] (usize offsets) to a [`Span`] (u32 offsets).
-/// chumsky can hand back a reversed (`start > end`) span for some end-of-input/recovery
-/// errors; normalise it to a well-formed zero-or-positive-width span.
-fn to_span(s: SimpleSpan) -> Span {
-    let (start, end) = (s.start.min(s.end) as u32, s.start.max(s.end) as u32);
-    Span::new(start, end)
-}
-
 /// Convert a [`Span`] to a chumsky [`SimpleSpan`].
 fn to_simple(s: Span) -> SimpleSpan {
     (s.start as usize..s.end as usize).into()
-}
-
-/// Shift a span produced against a substring back to its absolute source position.
-fn shift(span: Span, by: u32) -> Span {
-    Span::new(span.start + by, span.end + by)
 }
 
 /// Find the byte offset of the `}` that closes a hole opened at `start`, tracking brace
@@ -229,7 +229,7 @@ pub fn parse(source: &Source, tokens: &[Token]) -> Parsed {
 
     // Convert structural errors to owned diagnostics first: this releases the borrow of
     // `diags` (held via `ctx` through the `Rich` errors' lifetime) before `into_inner`.
-    let structural: Vec<Diagnostic> = errs.into_iter().map(rich_to_diag).collect();
+    let structural: Vec<Diagnostic> = errs.into_iter().map(|err| rich_to_diag(ctx, err)).collect();
     let mut diagnostics = diags.into_inner();
     diagnostics.extend(structural);
     // Deterministic ordering regardless of which channel produced each diagnostic.
@@ -238,7 +238,7 @@ pub fn parse(source: &Source, tokens: &[Token]) -> Parsed {
     Parsed {
         program: Program {
             stmts: stmts.unwrap_or_default(),
-            span: Span::new(0, len as u32),
+            span: Span::new_in(source.id(), 0, len as u32),
         },
         diagnostics,
     }
@@ -246,8 +246,8 @@ pub fn parse(source: &Source, tokens: &[Token]) -> Parsed {
 
 /// Map a chumsky [`Rich`] structural error onto the central diagnostic catalog. A
 /// missing `found` token means the parser hit end-of-input.
-fn rich_to_diag(err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
-    let span = to_span(*err.span());
+fn rich_to_diag(ctx: Ctx<'_>, err: Rich<'_, T, SimpleSpan>) -> Diagnostic {
+    let span = ctx.to_span(*err.span());
     let code = if err.found().is_none() {
         DiagnosticCode::UnexpectedEndOfInput
     } else {
@@ -268,7 +268,7 @@ where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
     just(T::Ident).map_with(move |_, e| {
-        let span = to_span(e.span());
+        let span = ctx.to_span(e.span());
         (ctx.source.slice(span).to_string(), span)
     })
 }
@@ -290,18 +290,17 @@ where
                     .delimited_by(just(T::Lt), just(T::Gt))
                     .or_not(),
             )
-            .map_with(|((name, _name_span), args), e| TypeRef::Named {
+            .map_with(move |((name, _name_span), args), e| TypeRef::Named {
                 name,
                 args: args.unwrap_or_default(),
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
-        let optional =
-            just(T::Question)
-                .ignore_then(type_)
-                .map_with(|inner, e| TypeRef::Optional {
-                    inner: Box::new(inner),
-                    span: to_span(e.span()),
-                });
+        let optional = just(T::Question)
+            .ignore_then(type_)
+            .map_with(move |inner, e| TypeRef::Optional {
+                inner: Box::new(inner),
+                span: ctx.to_span(e.span()),
+            });
         choice((optional, named)).boxed()
     })
 }
@@ -314,11 +313,11 @@ where
 {
     let param = ident_parser(ctx)
         .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
-        .map_with(|((name, name_span), ty), e| Param {
+        .map_with(move |((name, name_span), ty), e| Param {
             name,
             name_span,
             ty,
-            span: to_span(e.span()),
+            span: ctx.to_span(e.span()),
         });
     param
         .separated_by(just(T::Comma))
@@ -336,14 +335,14 @@ where
         let id = ident_parser(ctx);
 
         let int = just(T::IntLit).map_with(move |_, e| {
-            let span = to_span(e.span());
+            let span = ctx.to_span(e.span());
             Pattern::Int {
                 value: parse_int_literal(ctx.source.slice(span)).unwrap_or(0),
                 span,
             }
         });
         let str_ = just(T::StringLit).map_with(move |_, e| {
-            let span = to_span(e.span());
+            let span = ctx.to_span(e.span());
             let raw = ctx.source.slice(span);
             let value = raw
                 .strip_prefix('"')
@@ -353,13 +352,13 @@ where
             Pattern::Str { value, span }
         });
         let bool_ = choice((
-            just(T::TrueKw).map_with(|_, e| Pattern::Bool {
+            just(T::TrueKw).map_with(move |_, e| Pattern::Bool {
                 value: true,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
-            just(T::FalseKw).map_with(|_, e| Pattern::Bool {
+            just(T::FalseKw).map_with(move |_, e| Pattern::Bool {
                 value: false,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
         ));
 
@@ -376,22 +375,22 @@ where
             .then(id.clone())
             .then(bindings.clone().or_not())
             .map_with(
-                |(((type_name, _), (variant, _)), binds), e| Pattern::Variant {
+                move |(((type_name, _), (variant, _)), binds), e| Pattern::Variant {
                     type_name: Some(type_name),
                     variant,
                     bindings: binds.unwrap_or_default(),
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 },
             );
         // `Variant(subs)` — unqualified constructor (e.g. `Ok(x)`); requires the parens.
         let unqualified = id
             .clone()
             .then(bindings)
-            .map_with(|((variant, _), binds), e| Pattern::Variant {
+            .map_with(move |((variant, _), binds), e| Pattern::Variant {
                 type_name: None,
                 variant,
                 bindings: binds,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
         // A bare lowercase name binds; `_` matches anything.
         let plain = id.map(|(name, span)| {
@@ -419,7 +418,7 @@ where
 
         // Literals.
         let int = just(T::IntLit).map_with(move |_, e| {
-            let span = to_span(e.span());
+            let span = ctx.to_span(e.span());
             let text = ctx.source.slice(span);
             let value = parse_int_literal(text).unwrap_or_else(|_| {
                 ctx.diags.borrow_mut().push(Diagnostic::error(
@@ -432,26 +431,26 @@ where
             Expr::Int { value, span }
         });
         let float = just(T::FloatLit).map_with(move |_, e| {
-            let span = to_span(e.span());
+            let span = ctx.to_span(e.span());
             Expr::Float {
                 value: parse_float_literal(ctx.source.slice(span)),
                 span,
             }
         });
-        let string =
-            just(T::StringLit).map_with(move |_, e| parse_string_literal(ctx, to_span(e.span())));
+        let string = just(T::StringLit)
+            .map_with(move |_, e| parse_string_literal(ctx, ctx.to_span(e.span())));
         let raw_string =
-            just(T::RawStr).map_with(move |_, e| parse_raw_string(ctx, to_span(e.span())));
+            just(T::RawStr).map_with(move |_, e| parse_raw_string(ctx, ctx.to_span(e.span())));
         let template = just(T::TemplateStr)
-            .map_with(move |_, e| parse_template_string(ctx, to_span(e.span())));
+            .map_with(move |_, e| parse_template_string(ctx, ctx.to_span(e.span())));
         let bool_ = choice((
-            just(T::TrueKw).map_with(|_, e| Expr::Bool {
+            just(T::TrueKw).map_with(move |_, e| Expr::Bool {
                 value: true,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
-            just(T::FalseKw).map_with(|_, e| Expr::Bool {
+            just(T::FalseKw).map_with(move |_, e| Expr::Bool {
                 value: false,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
         ));
         // A bare name, or an all-fields object literal `Type { field: v, ..base }`. The
@@ -463,12 +462,12 @@ where
             .clone()
             .then_ignore(just(T::Colon))
             .then(expr.clone())
-            .map_with(|((name, name_span), value), e| {
+            .map_with(move |((name, name_span), value), e| {
                 ObjItem::Field(FieldInit {
                     name,
                     name_span,
                     value,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
         let obj_spread = just(T::DotDot)
@@ -480,51 +479,52 @@ where
             .at_least(1)
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBrace), just(T::RBrace));
-        let obj_or_ident = id.clone().then(object_body.or_not()).map_with(
-            |((name, name_span), body), e| match body {
-                Some(items) => {
-                    let mut fields = Vec::new();
-                    let mut spread = None;
-                    for item in items {
-                        match item {
-                            ObjItem::Field(field) => fields.push(field),
-                            ObjItem::Spread(value) => spread = Some(value),
+        let obj_or_ident =
+            id.clone()
+                .then(object_body.or_not())
+                .map_with(move |((name, name_span), body), e| match body {
+                    Some(items) => {
+                        let mut fields = Vec::new();
+                        let mut spread = None;
+                        for item in items {
+                            match item {
+                                ObjItem::Field(field) => fields.push(field),
+                                ObjItem::Spread(value) => spread = Some(value),
+                            }
                         }
+                        Expr::Object(ObjectLit {
+                            type_name: name,
+                            type_name_span: name_span,
+                            fields,
+                            spread,
+                            span: ctx.to_span(e.span()),
+                        })
                     }
-                    Expr::Object(ObjectLit {
-                        type_name: name,
-                        type_name_span: name_span,
-                        fields,
-                        spread,
-                        span: to_span(e.span()),
-                    })
-                }
-                None => Expr::Ident {
-                    name,
-                    span: name_span,
-                },
-            },
-        );
+                    None => Expr::Ident {
+                        name,
+                        span: name_span,
+                    },
+                });
 
         // Anonymous function: `fn(params) => expr`.
         let closure = just(T::FnKw)
             .ignore_then(params_parser(ctx))
             .then_ignore(just(T::FatArrow))
             .then(expr.clone())
-            .map_with(|(params, body), e| Expr::Closure {
+            .map_with(move |(params, body), e| Expr::Closure {
                 params,
                 body: Box::new(body),
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
 
         // `match scrutinee { pattern => body, ... }`.
         let arm = pattern_parser(ctx)
             .then_ignore(just(T::FatArrow))
             .then(expr.clone())
-            .map_with(|(pattern, body), e| MatchArm {
+            .map_with(move |(pattern, body), e| MatchArm {
                 pattern,
                 body,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
         let match_ = just(T::MatchKw)
             .ignore_then(expr.clone())
@@ -534,10 +534,10 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(|(scrutinee, arms), e| Expr::Match {
+            .map_with(move |(scrutinee, arms), e| Expr::Match {
                 scrutinee: Box::new(scrutinee),
                 arms,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
 
         // List literal `[a, b]` and map literal `{"k": v}`.
@@ -547,9 +547,9 @@ where
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBracket), just(T::RBracket))
-            .map_with(|items, e| Expr::List {
+            .map_with(move |items, e| Expr::List {
                 items,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
         let entry = expr.clone().then_ignore(just(T::Colon)).then(expr.clone());
         let map = entry
@@ -557,9 +557,9 @@ where
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBrace), just(T::RBrace))
-            .map_with(|entries, e| Expr::Map {
+            .map_with(move |entries, e| Expr::Map {
                 entries,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
         // A set literal `#{a, b, c}` is pure sugar for `[a, b, c].to_set()` — it lowers to the
         // same AST, so it reuses the existing `to_set` machinery and is differential-safe with no
@@ -573,8 +573,8 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(|items, e| {
-                let span = to_span(e.span());
+            .map_with(move |items, e| {
+                let span = ctx.to_span(e.span());
                 let list = Expr::List { items, span };
                 let to_set = Expr::Member {
                     receiver: Box::new(list),
@@ -625,19 +625,19 @@ where
         // +/- < */% < prefix < postfix (call/member, tightest). Mirrors the original
         // hand-written table.
         atom.pratt((
-            postfix(10, call_args, |callee, args, e| Expr::Call {
+            postfix(10, call_args, move |callee, args, e| Expr::Call {
                 callee: Box::new(callee),
                 args,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
             postfix(
                 10,
                 just(T::Dot).ignore_then(id),
-                |receiver, (name, name_span), e| Expr::Member {
+                move |receiver, (name, name_span), e| Expr::Member {
                     receiver: Box::new(receiver),
                     name,
                     name_span,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 },
             ),
             // `receiver[index]` — index access (the `Index` trait / list element access).
@@ -646,82 +646,82 @@ where
                 10,
                 expr.clone()
                     .delimited_by(just(T::LBracket), just(T::RBracket)),
-                |receiver, index, e| Expr::Index {
+                move |receiver, index, e| Expr::Index {
                     receiver: Box::new(receiver),
                     index: Box::new(index),
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 },
             ),
             // `expr?` — error/absence propagation; binds as tightly as call/member.
-            postfix(10, just(T::Question), |operand, _, e| Expr::Try {
+            postfix(10, just(T::Question), move |operand, _, e| Expr::Try {
                 expr: Box::new(operand),
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
-            prefix(9, just(T::Minus), |_, operand, e| Expr::Unary {
+            prefix(9, just(T::Minus), move |_, operand, e| Expr::Unary {
                 op: UnaryOp::Neg,
                 operand: Box::new(operand),
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
-            prefix(9, just(T::Bang), |_, operand, e| Expr::Unary {
+            prefix(9, just(T::Bang), move |_, operand, e| Expr::Unary {
                 op: UnaryOp::Not,
                 operand: Box::new(operand),
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
-            infix(left(8), just(T::Star), |l, _, r, e| {
-                binary(BinaryOp::Mul, l, r, e)
+            infix(left(8), just(T::Star), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Mul, l, r, e)
             }),
-            infix(left(8), just(T::Slash), |l, _, r, e| {
-                binary(BinaryOp::Div, l, r, e)
+            infix(left(8), just(T::Slash), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Div, l, r, e)
             }),
-            infix(left(8), just(T::Percent), |l, _, r, e| {
-                binary(BinaryOp::Rem, l, r, e)
+            infix(left(8), just(T::Percent), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Rem, l, r, e)
             }),
-            infix(left(7), just(T::Plus), |l, _, r, e| {
-                binary(BinaryOp::Add, l, r, e)
+            infix(left(7), just(T::Plus), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Add, l, r, e)
             }),
-            infix(left(7), just(T::Minus), |l, _, r, e| {
-                binary(BinaryOp::Sub, l, r, e)
+            infix(left(7), just(T::Minus), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Sub, l, r, e)
             }),
-            infix(left(6), just(T::Tilde), |l, _, r, e| {
-                binary(BinaryOp::Concat, l, r, e)
+            infix(left(6), just(T::Tilde), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Concat, l, r, e)
             }),
-            infix(left(5), just(T::Lt), |l, _, r, e| {
-                binary(BinaryOp::Lt, l, r, e)
+            infix(left(5), just(T::Lt), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Lt, l, r, e)
             }),
-            infix(left(5), just(T::LtEq), |l, _, r, e| {
-                binary(BinaryOp::Le, l, r, e)
+            infix(left(5), just(T::LtEq), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Le, l, r, e)
             }),
-            infix(left(5), just(T::Gt), |l, _, r, e| {
-                binary(BinaryOp::Gt, l, r, e)
+            infix(left(5), just(T::Gt), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Gt, l, r, e)
             }),
-            infix(left(5), just(T::GtEq), |l, _, r, e| {
-                binary(BinaryOp::Ge, l, r, e)
+            infix(left(5), just(T::GtEq), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Ge, l, r, e)
             }),
-            infix(left(4), just(T::EqEq), |l, _, r, e| {
-                binary(BinaryOp::Eq, l, r, e)
+            infix(left(4), just(T::EqEq), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Eq, l, r, e)
             }),
-            infix(left(4), just(T::NotEq), |l, _, r, e| {
-                binary(BinaryOp::Ne, l, r, e)
+            infix(left(4), just(T::NotEq), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Ne, l, r, e)
             }),
-            infix(left(3), just(T::AmpAmp), |l, _, r, e| {
-                binary(BinaryOp::And, l, r, e)
+            infix(left(3), just(T::AmpAmp), move |l, _, r, e| {
+                binary(ctx, BinaryOp::And, l, r, e)
             }),
-            infix(left(2), just(T::PipePipe), |l, _, r, e| {
-                binary(BinaryOp::Or, l, r, e)
+            infix(left(2), just(T::PipePipe), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Or, l, r, e)
             }),
             // `value ?? fallback` — supply a default for the `Err`/`none` case. Loose,
             // alongside `||`; tighter than the pipeline so `a ?? b |> f` is `(a ?? b) |> f`.
-            infix(left(2), just(T::QuestionQuestion), |l, _, r, e| {
+            infix(left(2), just(T::QuestionQuestion), move |l, _, r, e| {
                 Expr::Coalesce {
                     value: Box::new(l),
                     fallback: Box::new(r),
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 }
             }),
-            infix(left(1), just(T::PipeGt), |l, _, r, e| Expr::Pipeline {
+            infix(left(1), just(T::PipeGt), move |l, _, r, e| Expr::Pipeline {
                 left: Box::new(l),
                 right: Box::new(r),
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             }),
         ))
         .boxed()
@@ -731,6 +731,7 @@ where
 /// Build a binary-operation node spanning its operands. `e` is the pratt fold's extra,
 /// whose span covers `lhs .. rhs`.
 fn binary<'src, 'b, I>(
+    ctx: Ctx<'src>,
     op: BinaryOp,
     lhs: Expr,
     rhs: Expr,
@@ -743,7 +744,7 @@ where
         op,
         lhs: Box::new(lhs),
         rhs: Box::new(rhs),
-        span: to_span(e.span()),
+        span: ctx.to_span(e.span()),
     }
 }
 
@@ -790,9 +791,9 @@ where
         let echo = just(T::EchoKw)
             .ignore_then(expr.clone())
             .then_ignore(just(T::Semicolon))
-            .map_with(|value, e| Stmt::Echo {
+            .map_with(move |value, e| Stmt::Echo {
                 value,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
 
         let mut_binding = just(T::MutKw)
@@ -800,20 +801,20 @@ where
             .then_ignore(just(T::Eq))
             .then(expr.clone())
             .then_ignore(just(T::Semicolon))
-            .map_with(|((name, name_span), value), e| Stmt::Binding {
+            .map_with(move |((name, name_span), value), e| Stmt::Binding {
                 mut_decl: true,
                 name,
                 name_span,
                 value,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
 
         let return_ = just(T::ReturnKw)
             .ignore_then(expr.clone().or_not())
             .then_ignore(just(T::Semicolon))
-            .map_with(|value, e| Stmt::Return {
+            .map_with(move |value, e| Stmt::Return {
                 value,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
 
         let for_pattern = choice((
@@ -838,11 +839,11 @@ where
             .then_ignore(just(T::InKw))
             .then(expr.clone())
             .then(block.clone())
-            .map_with(|((pattern, iterable), body), e| Stmt::For {
+            .map_with(move |((pattern, iterable), body), e| Stmt::For {
                 pattern,
                 iterable,
                 body,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
 
         // `else if` is an `else` whose body is a single nested `if`.
@@ -857,11 +858,11 @@ where
                         .ignore_then(if_.map(|nested| vec![nested]).or(if_block.clone()))
                         .or_not(),
                 )
-                .map_with(|((cond, then_body), else_body), e| Stmt::If {
+                .map_with(move |((cond, then_body), else_body), e| Stmt::If {
                     cond,
                     then_body,
                     else_body,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
         });
 
@@ -874,7 +875,7 @@ where
             .then(params_parser(ctx))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
-            .map_with(|((((pub_kw, name_pair), params), ret), body), e| {
+            .map_with(move |((((pub_kw, name_pair), params), ret), body), e| {
                 Stmt::Fn(FnDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
@@ -882,7 +883,7 @@ where
                     params,
                     ret,
                     body,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
 
@@ -898,12 +899,12 @@ where
             )))
             .then_ignore(just(T::Semicolon))
             .map_with(
-                |((name, name_span), (fields, backed_value)), e| VariantDecl {
+                move |((name, name_span), (fields, backed_value)), e| VariantDecl {
                     name,
                     name_span,
                     fields,
                     backed_value,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 },
             );
         // Optional generic type parameters on a declaration: `<T>`, `<A, B>`. Erased at runtime
@@ -930,7 +931,7 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(|(((name_pair, type_params), backing), variants), e| {
+            .map_with(move |(((name_pair, type_params), backing), variants), e| {
                 Stmt::Enum(EnumDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
@@ -940,7 +941,7 @@ where
                     variants,
                     derives: Vec::new(),
                     attrs: Vec::new(),
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
 
@@ -950,12 +951,12 @@ where
             .clone()
             .then_ignore(just(T::Colon))
             .then(type_parser(ctx))
-            .map_with(|((name, name_span), ty), e| FieldDecl {
+            .map_with(move |((name, name_span), ty), e| FieldDecl {
                 name,
                 name_span,
                 mut_field: false,
                 ty: Some(ty),
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
         let record_decl = just(T::TypeKw)
             .ignore_then(id.clone())
@@ -969,7 +970,7 @@ where
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
             .then_ignore(just(T::Semicolon))
-            .map_with(|(((name, name_span), type_params), fields), e| {
+            .map_with(move |(((name, name_span), type_params), fields), e| {
                 Stmt::Record(RecordDecl {
                     name,
                     name_span,
@@ -978,7 +979,7 @@ where
                     fields,
                     derives: Vec::new(),
                     attrs: Vec::new(),
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
 
@@ -989,13 +990,13 @@ where
             .then(id.clone())
             .then_ignore(just(T::Colon))
             .then(type_parser(ctx))
-            .map_with(|((mut_kw, (name, name_span)), ty), e| {
+            .map_with(move |((mut_kw, (name, name_span)), ty), e| {
                 ClassMember::Field(FieldDecl {
                     name,
                     name_span,
                     mut_field: mut_kw.is_some(),
                     ty: Some(ty),
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
         // A bare `fn ...` declaration, shared by plain class methods and `impl`-block methods.
@@ -1004,14 +1005,14 @@ where
             .then(params_parser(ctx))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
-            .map_with(|(((name_pair, params), ret), body), e| FnDecl {
+            .map_with(move |(((name_pair, params), ret), body), e| FnDecl {
                 name: name_pair.0,
                 name_span: name_pair.1,
                 is_public: false,
                 params,
                 ret,
                 body,
-                span: to_span(e.span()),
+                span: ctx.to_span(e.span()),
             });
         let class_method = method.clone().map(ClassMember::Method);
         // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
@@ -1025,12 +1026,12 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(|((trait_name, trait_span), methods), e| {
+            .map_with(move |((trait_name, trait_span), methods), e| {
                 ClassMember::Impl(ImplBlock {
                     trait_name,
                     trait_span,
                     methods,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
         // `destruct { ... }` — the runtime-invoked destructor block. Not a method (no name,
@@ -1047,7 +1048,7 @@ where
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(|(((name, name_span), type_params), members), e| {
+            .map_with(move |(((name, name_span), type_params), members), e| {
                 let mut fields = Vec::new();
                 let mut methods = Vec::new();
                 let mut impls = Vec::new();
@@ -1079,7 +1080,7 @@ where
                     derives: Vec::new(),
                     attrs: Vec::new(),
                     destructor,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
 
@@ -1093,12 +1094,12 @@ where
                     .collect::<Vec<_>>(),
             )
             .then_ignore(just(T::Semicolon))
-            .map_with(|((first, _), rest), e| {
+            .map_with(move |((first, _), rest), e| {
                 let mut path = vec![first];
                 path.extend(rest.into_iter().map(|(name, _)| name));
                 Stmt::Namespace {
                     path,
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 }
             });
 
@@ -1120,8 +1121,8 @@ where
             .ignore_then(id.clone())
             .then(use_tail.repeated().collect::<Vec<_>>())
             .then_ignore(just(T::Semicolon))
-            .map_with(|((first, first_span), tails), e| {
-                build_use(first, first_span, tails, to_span(e.span()))
+            .map_with(move |((first, first_span), tails), e| {
+                build_use(first, first_span, tails, ctx.to_span(e.span()))
             });
 
         // A bare expression, optionally an assignment `name = expr`. Whether `name = …`
@@ -1131,7 +1132,7 @@ where
             .then(just(T::Eq).ignore_then(expr.clone()).or_not())
             .then_ignore(just(T::Semicolon))
             .map_with(move |(lhs, rhs), e| {
-                let span = to_span(e.span());
+                let span = ctx.to_span(e.span());
                 match rhs {
                     Some(value) => match lhs {
                         Expr::Ident {
@@ -1191,12 +1192,12 @@ where
                     .or_not(),
             )
             .then_ignore(just(T::RBracket))
-            .map_with(|((name, name_span), args), e| {
+            .map_with(move |((name, name_span), args), e| {
                 Decorator::Attr(Attribute {
                     name,
                     name_span,
                     args: args.unwrap_or_default(),
-                    span: to_span(e.span()),
+                    span: ctx.to_span(e.span()),
                 })
             });
 
@@ -1533,10 +1534,12 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     let toks: Vec<(T, SimpleSpan)> = lexed
         .tokens
         .iter()
-        .map(|t| (t.kind, to_simple(shift(t.span, abs_offset))))
+        .map(|t| (t.kind, to_simple(t.span.shifted(abs_offset))))
         .collect();
     for mut diag in lexed.diagnostics {
-        diag.span = shift(diag.span, abs_offset);
+        // The hole was lexed on a throwaway source; rebase its offsets and re-tag them to the
+        // real enclosing source so the diagnostic renders against the right file.
+        diag.span = diag.span.shifted(abs_offset).with_source(ctx.source.id());
         ctx.diags.borrow_mut().push(diag);
     }
 
@@ -1545,11 +1548,11 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     let input = toks.as_slice().map(eoi, |(t, s)| (t, s));
     let (expr, errs) = expr_parser(ctx).parse(input).into_output_errors();
     for err in errs {
-        ctx.diags.borrow_mut().push(rich_to_diag(err));
+        ctx.diags.borrow_mut().push(rich_to_diag(ctx, err));
     }
     expr.unwrap_or(Expr::Str {
         value: String::new(),
-        span: Span::empty_at(abs_offset),
+        span: Span::empty_at_in(ctx.source.id(), abs_offset),
     })
 }
 

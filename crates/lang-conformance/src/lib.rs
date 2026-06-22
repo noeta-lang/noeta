@@ -25,7 +25,7 @@ use lang_diagnostics::Diagnostic;
 use lang_eval::{Backend, TreeWalkBackend};
 use lang_lexer::lex;
 use lang_parser::parse;
-use lang_span::{Source, SourceId};
+use lang_span::{Source, SourceId, SourceMap};
 
 mod differential;
 mod expectation;
@@ -115,15 +115,26 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
 fn errors_of(source: &Source, diagnostics: &[Diagnostic]) -> Vec<ErrorExpectation> {
     diagnostics
         .iter()
-        .map(|d| {
-            let at = source.line_col(d.span.start);
-            ErrorExpectation {
-                code: d.code.to_string(),
-                line: at.line,
-                col: at.col,
-            }
-        })
+        .map(|d| expectation(d, source.line_col(d.span.start)))
         .collect()
+}
+
+/// Map each diagnostic to its `(code, line, col)` expectation, resolving each span against the
+/// source it belongs to (its `SourceId`) via the [`SourceMap`]. Used for the linked path, where a
+/// diagnostic on a merged-in sibling declaration must render against that sibling, not the entry.
+fn errors_of_mapped(sources: &SourceMap, diagnostics: &[Diagnostic]) -> Vec<ErrorExpectation> {
+    diagnostics
+        .iter()
+        .map(|d| expectation(d, sources.line_col(d.span)))
+        .collect()
+}
+
+fn expectation(d: &Diagnostic, at: lang_span::LineCol) -> ErrorExpectation {
+    ErrorExpectation {
+        code: d.code.to_string(),
+        line: at.line,
+        col: at.col,
+    }
 }
 
 /// Run a single named case (already-loaded source text) and compare it to its header.
@@ -233,17 +244,20 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
         };
     }
 
+    // Check/runtime diagnostics may land on a declaration merged in from a sibling module, so they
+    // resolve through the source map (by each span's `SourceId`) rather than always against the
+    // entry — that is what gives a cross-module error its real file/line/column.
     let check = lang_check::check(&linked.program);
     if !check.is_empty() {
         return Outcome {
             stdout: String::new(),
             exit_code: 1,
-            errors: errors_of(&linked.entry, &check),
+            errors: errors_of_mapped(&linked.sources, &check),
         };
     }
     let result = TreeWalkBackend::new().run(&linked.program);
     Outcome {
-        errors: errors_of(&linked.entry, &result.diagnostics),
+        errors: errors_of_mapped(&linked.sources, &result.diagnostics),
         stdout: result.stdout,
         exit_code: result.exit_code,
     }

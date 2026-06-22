@@ -16,7 +16,7 @@ use lang_eval::{Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::lex;
 use lang_loader::Linked;
 use lang_parser::parse;
-use lang_span::{Source, SourceId};
+use lang_span::{Source, SourceId, SourceMap};
 
 #[derive(Parser)]
 #[command(name = "lang", version, about = "The lang toolchain (working title)")]
@@ -77,12 +77,13 @@ fn main() -> ExitCode {
 }
 
 /// Type-check and run an already-loaded, linked program, writing stdout to the real stdout and
-/// rendering any diagnostics (against the entry source) to stderr. Returns the process exit code.
+/// rendering any diagnostics to stderr — each against the source its span belongs to (via the
+/// linked program's `SourceMap`). Returns the process exit code.
 fn run_linked(linked: &Linked) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     let type_diagnostics = lang_check::check(&linked.program);
     if !type_diagnostics.is_empty() {
-        emit_diagnostics(&linked.entry, type_diagnostics.iter());
+        emit_diagnostics_mapped(&linked.sources, type_diagnostics.iter());
         return 1;
     }
 
@@ -98,13 +99,27 @@ fn run_linked(linked: &Linked) -> i32 {
     };
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
-    emit_diagnostics(&linked.entry, result.diagnostics.iter());
+    emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
     result.exit_code
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
     let mut stderr = io::stderr();
     for diagnostic in diagnostics {
+        let _ = stderr.write_all(render(source, diagnostic).as_bytes());
+    }
+}
+
+/// Render each diagnostic against the source it belongs to (resolved by its span's `SourceId`
+/// through the [`SourceMap`]), so a diagnostic on a declaration merged in from a sibling module
+/// renders against that module's file and text rather than the entry's.
+fn emit_diagnostics_mapped<'a>(
+    sources: &SourceMap,
+    diagnostics: impl Iterator<Item = &'a Diagnostic>,
+) {
+    let mut stderr = io::stderr();
+    for diagnostic in diagnostics {
+        let source = sources.source(diagnostic.span.source);
         let _ = stderr.write_all(render(source, diagnostic).as_bytes());
     }
 }

@@ -62,9 +62,9 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 
 ## Diagnostics source attribution
 
-| Item | Source | Trigger |
+| Item | Source | Status |
 |---|---|---|
-| `SourceMap` / global-coordinate spans for a **check/runtime** diagnostic landing inside a merged-in cross-module declaration body (latent — also noted in the roadmap M1.9 row) | M1.9 | **Confirmed real & severe** (a sibling-module `1/0` renders against `main.lang:2:85`, inside a comment). The fix is a *global-coordinate re-architecture*: a full mutable AST span-shift visitor (`lang-ast`) re-bases every merged-in span; a new `SourceMap` (`lang-span`) maps global offset → (source, local); the loader assigns per-module bases + carries the map on `Linked`; `lang-conformance`/`lang-cli` resolve each diagnostic's span through it. **Not differential-covered** (both backends produce the same wrong offset and agree) — covered only by hand-written multi-file conformance fixtures. A real ~5-crate slice, not a quick fix; sequence as its own pass. Repro: an entry that `use`s a sibling whose method body does `x / y` with `y == 0`. |
+| ~~`SourceMap` / source attribution for a **check/runtime** diagnostic landing inside a merged-in cross-module declaration body~~ | M1.9 | **Done (slice F4, `plans/followups/slice-f4-sourcemap.md`).** Resolved via **`SourceId` on `Span`** (not the global-coordinate shift-visitor the original sketch proposed): the parser stamps each span with the file's `SourceId`, `Linked` carries a `SourceMap` (`lang-span`), and `lang-conformance`/`lang-cli` resolve each diagnostic through it. Correct by construction — no AST visitor. Covered by `tests/conformance/modules/cross_module_error/` (`E0008` rendered at `models.lang:8:12`) + loader/span unit tests. The original repro (sibling `1/0` rendered against the entry, inside a comment) now renders against the sibling. |
 
 ## Performance (invisible to `RunResult` — behavior is already correct)
 
