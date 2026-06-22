@@ -101,6 +101,7 @@
 | App/framework-registered tools (free-form, typed) | §12.4 | §13 | M2 | Mechanism standard, tool set free-form. |
 | Compiler-as-syntax-oracle (`check_snippet`) | §12.5 | — | M2 | Antidote to no-training-data. |
 | `lang init` scaffolding (AGENTS.md + primer) | §12.6 | — | M2 | Toolchain-generated, version-matched. |
+| Semantic role tags (`SemanticRole` → typed `Role` → MCP graph queries) | §12.7 | §9.7 | M2 | Attribute-conferred roles label the call graph; `list_roles`/`trace_from`/`flows_between`; composition over manifest §9.13 + call graph §9.17 + MCP §12.4. |
 | tree-sitter grammar (standalone artifact) | — (tooling artifact) | — | M3 (can land early) | Syntactic highlighting; consumed directly by Neovim/Helix/Zed/GitHub, and bundled by the VS Code extension. |
 | TextMate grammar (standalone artifact) | — (tooling artifact) | — | M3 (can land early) | VS Code classic syntactic highlighting; bundled by the extension. |
 | Semantic highlighting (LSP semantic tokens) | §9.6 | — | M2 | Context-aware (type vs var, `mut`, unused); layers on grammar highlighting. |

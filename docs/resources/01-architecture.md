@@ -373,6 +373,8 @@ This is better than both PHP (attributes-as-classes, but no manifest — relies 
 
 This keeps the language surface small: built-in derives + a typed/fallible/capability-gated runtime-reflection fallback + attributes-as-records (discovered via the compiler-built manifest, capabilities via traits). No comptime, no user macros, no bespoke attribute construct — the same discoverability and codegen benefits, none of the second-execution-model complexity. (The same manifest and query model also power rule-based static analysis; see §9.17.)
 
+**Semantic role tags layer directly on this manifest.** An attribute may additionally implement `SemanticRole` to confer a typed architectural **role** — entry point, trust boundary, persistence boundary, sink, layer — on whatever it annotates. The compiler evaluates `role()` at manifest-build time and records a `(declaration, Role)` index next to the `(declaration, attribute)` one, turning the structural manifest into a *semantically labeled* dependency graph that agents and lints query in architectural terms. The mechanism is pure composition over this manifest plus the call graph, declared once on the attribute and inherited by every use; full treatment in §12.7.
+
 ### 9.14 Hot module replacement (dev experience)
 Change backend code and the running program picks up the change **without restarting and without losing state** — and, fused with reactivity, the change propagates to the live UI. This is Vite-grade DX for a *backend* language, which essentially does not exist today, and it is unusually achievable here because four prerequisites are already in place:
 
@@ -447,7 +449,7 @@ Static analysis is unusually cheap here because the infrastructure a rule-based 
 - A **lossless CST** (`rowan`, already used by the LSP) for exact source spans — what autofix and span-precise lints need.
 - A **resolved, typed semantic model** (the salsa graph: name resolution, types, the call/use graph, trait impls) — the difference between syntactic linting and real semantic analysis ("this value could be `none` here," "this `Result` is never handled").
 - **Incremental recomputation** (salsa) — lint-on-save, instantly, re-running only over what changed.
-- The **attribute manifest** (§9.13) — rules key off annotations cheaply ("every `#[Route]` handler must return `Response`").
+- The **attribute manifest** (§9.13), including its **semantic role index** (§12.7) — rules key off annotations and architectural roles cheaply ("every `#[Route]` handler must return `Response`"; "no `Layer("transport")` declaration reaches a `PersistenceBoundary` directly").
 
 So an analyzer is "expose read-only queries over the salsa model + CST and let rules run against them," not a parallel analysis infrastructure. This eliminates the failure mode that plagues most ecosystems — PHPStan/Psalm/mypy/ESLint each *re-implement* a type model that perpetually drifts from the real compiler ("the linter disagrees with the compiler"). Here analysis rules query the **same** model the compiler and LSP use, so a rule can never disagree with the compiler about a type or about reachability. This is the Rust `clippy` advantage (built on the actual compiler, not a reimplementation) generalized and made pluggable — and a real differentiator for a language that sells type-driven correctness.
 
@@ -579,7 +581,26 @@ So an agent unsure how `concurrent { }` works *asks* or *tests against the real 
 - **`AGENTS.md`** — orientation: what the language is, the toolchain commands (`test`/`lint`/`fmt`/`build`), how to run things, that the MCP server is available and what it exposes, and project conventions. The "how to work here" file.
 - **A toolchain-generated language primer** (the `SYNTAX.md` instinct) — a concise, dense, example-driven spec of syntax and core semantics written *for an LLM to consume*, **generated and version-matched by the toolchain** from the canonical spec (not hand-written per project, so it is always correct for the installed version). The static primer orients; the live MCP oracle (§12.5) verifies — together they replace absent training data.
 
-### 12.7 Coherence of the DX story
+### 12.7 Semantic role tags
+The manifest (§9.13) and the salsa call/use graph (§9.17, §6) know *structural* facts — what calls what, which attribute sits on which declaration — but not the *semantic role* a declaration plays in the architecture. **Semantic role tags** close that gap: an attribute may declare a typed **role** it confers on whatever it annotates, turning the structural dependency graph into a **semantically labeled** one an agent can query in architectural terms — "list every entry point," "trace from this entry point to every persistence write," "does any trust boundary reach a sink without passing a validator" — instead of only raw call edges.
+
+**Roles ride attributes; they are not a separate annotation.** A framework's attribute implements a `SemanticRole` trait that returns the role it confers (`impl SemanticRole for Route { fn role(): Role { Role.EntryPoint(kind: "http", id: self.path) } }`). The role is declared **once** on the attribute and **inherited by every use** — so an application that already annotates its handlers with `#[Route]` gets a queryable semantic graph for free, with no per-call-site tagging. Only a type that already `impl Attribute` (§9.13) can meaningfully `impl SemanticRole`, since the role is conferred on whatever the attribute attaches to (a type that does the latter without the former is a compile error — the role would have nowhere to land).
+
+**The vocabulary is a small typed enum, not free-form strings.** `Role` is an ADT with a blessed core set — `EntryPoint`, `PersistenceBoundary`, `TrustBoundary`, `Sink`, `ExternalCall`, `Layer(name)` — plus a `Custom(name)` escape hatch. The entire value of the feature is a *shared* vocabulary that every agent and tool understands uniformly; free-form role strings would be tag-soup, worse than nothing, so `Custom` is deliberately secondary and not for cross-codebase reasoning.
+
+**Compile-time only.** `role()` is evaluated by the compiler when it builds the manifest (it reads the attribute's own fields, e.g. `self.path`), and the result is recorded as a `(declaration, Role)` index alongside the existing `(declaration, attribute)` index — a static build artifact, never runtime reflection, with zero runtime cost.
+
+**The query surface is graph traversal over data that already exists** — the role index plus the call/use graph — exposed as MCP tools (§12.4) returning structured data (declarations, spans, paths), dev-only by default like every other MCP tool:
+- `list_roles(kind)` — every declaration carrying a given role.
+- `trace_from(entry)` — everything reachable from an entry point via the call graph (the request lifecycle).
+- `trace_to(target)` — everything that reaches a declaration or role (impact analysis).
+- `flows_between(from_role, to_role)` — paths from any source role to any sink role (`TrustBoundary` → `Sink`, taint-style; finds the path, and finds none once a validator breaks it).
+
+The same role index feeds rule-based static analysis (§9.17) for free — an architectural-conformance rule like "a `Layer("transport")` declaration must not reach a `PersistenceBoundary` directly" is an ordinary lint over the index. And correlating the static role graph with runtime telemetry and profiling (§12.1, §12.3) closes a whole-system reasoning loop: *which* entry points are hot, *which* trust-boundary→sink paths actually execute.
+
+This is the same compounding pattern as the rest of §12 — almost no new machinery (one trait, one typed enum, one manifest-indexing pass, a few MCP query tools), just composition over the manifest, the call graph, and the MCP server that already exist.
+
+### 12.8 Coherence of the DX story
 Almost all of §12 is *exposure of models that already exist* (salsa, telemetry, the VM, isolates) through one interface (MCP), plus two pieces that earn their place on general-purpose merits regardless: the structured logging API (§12.1) and the debug engine (§12.2, needed for DAP anyway). So agentic DX is not a parallel subsystem — it is a new *consumer* of the existing spine, the same way the LSP, HMR, and static analysis are. Everything agent-facing is dev-only by default, capability-gated, production-allowlisted, and emits structured data rather than scraped text.
 
 ---

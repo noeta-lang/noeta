@@ -547,6 +547,26 @@ instance = some_type.construct(args)?;     // construct-by-name can fail → Res
 
 Runtime reflection is opt-in per type (capability-gated): reflectable types become tree-shaking roots, so unused metadata is eliminated from AOT binaries (architecture §9.8.1).
 
+**Semantic role tags** let an attribute confer a typed architectural *role* on whatever it annotates — declared once on the attribute, inherited by every use. An attribute additionally implements `SemanticRole`, returning a value from a small blessed enum:
+
+```
+impl SemanticRole for Route {                      // Route already impl Attribute
+    fn role(): Role { return Role.EntryPoint(kind: "http", id: self.path); }
+}
+
+enum Role {
+    EntryPoint(kind: string, id: string),
+    PersistenceBoundary,
+    TrustBoundary,
+    Sink,
+    ExternalCall,
+    Layer(name: string),
+    Custom(name: string),          // escape hatch; the typed variants are what tools rely on
+}
+```
+
+The compiler evaluates `role()` at manifest-build time and indexes `(declaration, Role)` (zero runtime cost), so the dependency graph becomes queryable in architectural terms — "every entry point," "does this trust boundary reach a sink." Only a type that `impl Attribute` may `impl SemanticRole` (the role rides on what the attribute attaches to; otherwise a compile error). Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
+
 ---
 
 ## 10. Namespaces and imports
