@@ -567,6 +567,7 @@ dependencies = [
  "lang-compiler",
  "lang-diagnostics",
  "lang-lexer",
+ "lang-loader",
  "lang-parser",
  "lang-span",
  "salsa",

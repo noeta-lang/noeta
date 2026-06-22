@@ -12,7 +12,6 @@
 
 use std::path::Path;
 
-use lang_ast::Program;
 use lang_backend::{Backend, RunResult};
 use lang_db::LangDatabase;
 use lang_eval::TreeWalkBackend;
@@ -113,12 +112,12 @@ pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
             .to_string_lossy()
             .into_owned();
         if case.multi {
-            // A multi-file fixture is loaded + linked (M1.9) and both backends run the merged
-            // program directly (the single-Source salsa graph cannot express the link yet; that
-            // is M1.9.3). The tree-walker runs the merged AST; the VM the compiled `Module`.
-            match lang_loader::load(&case.entry) {
-                Ok(Ok(linked)) => compare_backends_program(&name, &linked.program, &mut report),
-                Ok(Err(_)) | Err(_) => report.parse_failed += 1,
+            // A multi-file fixture flows through the salsa module graph (M1.9.3): its sources
+            // become a `Workspace`, the `linked` query merges them, and both backends consume the
+            // workspace queries — the multi-file analogue of the single-file path below.
+            match lang_loader::read_workspace(&case.entry) {
+                Ok(raw) => compare_backends_workspace(&name, &raw, &mut report),
+                Err(_) => report.parse_failed += 1,
             }
         } else {
             match std::fs::read_to_string(&case.entry) {
@@ -174,20 +173,36 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     }
 }
 
-/// Compare both backends on an already-linked `program` (a multi-file fixture's merged AST),
-/// bypassing the single-Source salsa graph. The checker is the shared front-end (a rejected
-/// program is a guaranteed agreement, counted matched); the tree-walker runs the AST, the VM the
-/// compiled `Module`.
-fn compare_backends_program(name: &str, program: &Program, report: &mut DiffReport) {
-    if !lang_check::check(program).is_empty() {
+/// Compare both backends on a multi-file fixture, driven through the salsa module graph (M1.9.3):
+/// the workspace's sources become `SourceProgram` inputs, the `linked` query resolves+merges them,
+/// and the backends consume the workspace queries. A load failure (entry parse error, E0019,
+/// E0020) has no eval-level behavior to compare and is excluded, like a single-file parse failure.
+/// The checker is the shared front-end (a rejected program is a guaranteed agreement, counted
+/// matched); the tree-walker runs the merged AST, the VM the compiled `Module`.
+fn compare_backends_workspace(
+    name: &str,
+    raw: &lang_loader::RawWorkspace,
+    report: &mut DiffReport,
+) {
+    let db = LangDatabase::default();
+    let ws = lang_db::workspace(&db, &raw.entry, &raw.modules);
+
+    let program = match &lang_db::linked(&db, ws).0 {
+        Ok(program) => program,
+        Err(_) => {
+            report.parse_failed += 1;
+            return;
+        }
+    };
+    if !lang_db::linked_checked(&db, ws).0.is_empty() {
         report.matched += 1;
         return;
     }
     let tree = TreeWalkBackend::new().run(program);
-    match lang_compiler::compile(program) {
+    match &lang_db::linked_bytecode(&db, ws).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {
-            let vm = VmBackend::new().run_module(&module);
+            let vm = VmBackend::new().run_module(module);
             if vm == tree {
                 report.matched += 1;
             } else {

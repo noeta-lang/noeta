@@ -62,6 +62,30 @@ pub struct RawModule {
     pub text: String,
 }
 
+/// The raw [`Source`]s of a workspace: the entry plus its sibling module files, each with its own
+/// [`SourceId`] (entry = 0, siblings 1..) assigned identically to [`link`]. Lexing/parsing happen
+/// downstream, so this only reads and labels files — it feeds the salsa module graph (`lang-db`,
+/// M1.9.3), which derives one memoized `SourceProgram` input per source.
+#[derive(Debug)]
+pub struct RawWorkspace {
+    pub entry: Source,
+    pub modules: Vec<Source>,
+}
+
+/// Read the entry file and its sibling `.lang` modules into labeled [`Source`]s, without lexing,
+/// parsing, or linking — the file-system front of the salsa module graph. An `io::Error` is only
+/// for a failure to read the entry itself; unreadable siblings are skipped (as in [`read_siblings`]).
+pub fn read_workspace(entry_path: &Path) -> io::Result<RawWorkspace> {
+    let text = std::fs::read_to_string(entry_path)?;
+    let entry = Source::new(SourceId(0), entry_path.display().to_string(), text);
+    let modules = read_siblings(entry_path)
+        .into_iter()
+        .enumerate()
+        .map(|(i, raw)| Source::new(SourceId((i + 1) as u32), raw.name, raw.text))
+        .collect();
+    Ok(RawWorkspace { entry, modules })
+}
+
 /// Gather the `.lang` files in the entry's directory other than the entry itself, in sorted
 /// order (so SourceId assignment and resolution are deterministic). A read failure yields no
 /// siblings — a lone file simply links to itself.
@@ -120,10 +144,10 @@ pub fn link(
             .collect());
     }
 
-    // Parse each sibling. Only cleanly-parsed modules that declare a namespace contribute their
-    // declarations; a module that fails to parse (or declares no namespace) cannot be resolved
-    // against and is skipped — surfacing a *referenced-but-broken* module's errors is M1.9.2.
-    let mut modules: Vec<ParsedModule> = Vec::new();
+    // Parse each sibling. Only cleanly-parsed modules contribute (a module that fails to lex/parse
+    // cannot be resolved against and is skipped — surfacing a *referenced-but-broken* module's
+    // errors is the deferred SourceMap work). Keep the parsed programs alive for [`link_parsed`].
+    let mut module_programs: Vec<Program> = Vec::new();
     for (i, raw) in siblings.iter().enumerate() {
         let source = Source::new(
             SourceId((i + 1) as u32),
@@ -138,20 +162,42 @@ pub fn link(
         if !parsed.diagnostics.is_empty() {
             continue;
         }
-        if let Some(namespace) = module_namespace(&parsed.program) {
-            modules.push(ParsedModule {
-                namespace,
-                stmts: parsed.program.stmts,
-            });
-        }
+        module_programs.push(parsed.program);
     }
+
+    let refs: Vec<&Program> = module_programs.iter().collect();
+    let program = link_parsed(&entry, &entry_parsed.program, &refs)?;
+    Ok(Linked { program, entry })
+}
+
+/// Resolve and merge an *already-parsed* entry against already-parsed candidate modules — the pure
+/// linking core shared by [`link`] (which lexes/parses first) and the salsa module-graph query
+/// (`lang-db`, M1.9.3), which feeds it programs straight from the memoized `ast` queries. `entry`
+/// is the entry's [`Source`] (so import errors render against it); `modules` are the cleanly-parsed
+/// candidate module programs (each declaring its `namespace`). Returns the merged [`Program`] — each
+/// resolved import's declaration ahead of the entry's own statements — or the `use`-resolution
+/// diagnostics (E0019 private/missing export, E0020 name collision).
+pub fn link_parsed(
+    entry: &Source,
+    entry_program: &Program,
+    modules: &[&Program],
+) -> Result<Program, Vec<LoadDiagnostic>> {
+    // A module contributes only if it declares a namespace to resolve against.
+    let module_views: Vec<ModuleView> = modules
+        .iter()
+        .filter_map(|prog| {
+            module_namespace(prog).map(|namespace| ModuleView {
+                namespace,
+                stmts: &prog.stmts,
+            })
+        })
+        .collect();
 
     // The entry's own top-level declaration names, pre-scanned so an import colliding with a local
     // declaration is caught regardless of source order. As each import resolves, its name joins the
     // set; a name that fails to insert (a duplicate) is a collision — a second import of the same
     // name, or one that shadows a local declaration. The merged reference would be ambiguous.
-    let mut declared: HashSet<String> = entry_parsed
-        .program
+    let mut declared: HashSet<String> = entry_program
         .stmts
         .iter()
         .filter_map(decl_name)
@@ -161,43 +207,43 @@ pub fn link(
     // Resolve the entry's imports against the module namespaces, pulling each resolved name's
     // real declaration and trimming it from the `use` so the runtime makes no opaque stub for it.
     let mut imported: Vec<Stmt> = Vec::new();
-    let mut linked_stmts: Vec<Stmt> = Vec::with_capacity(entry_parsed.program.stmts.len());
+    let mut linked_stmts: Vec<Stmt> = Vec::with_capacity(entry_program.stmts.len());
     let mut errors: Vec<LoadDiagnostic> = Vec::new();
-    for stmt in entry_parsed.program.stmts {
+    for stmt in &entry_program.stmts {
         match stmt {
             Stmt::Use { path, names, span } => {
                 let mut unresolved: Vec<UseName> = Vec::new();
                 for name in names {
-                    match resolve(&modules, &path, &name.name) {
+                    match resolve(&module_views, path, &name.name) {
                         Resolution::Resolved(decl) => {
                             if declared.insert(name.name.clone()) {
                                 imported.push(*decl);
                             } else {
-                                errors.push(collision_error(&entry, &path, &name));
+                                errors.push(collision_error(entry, path, name));
                             }
                         }
                         // No module declares this namespace: fall back to the opaque stub (M0).
-                        Resolution::NoModule => unresolved.push(name),
+                        Resolution::NoModule => unresolved.push(name.clone()),
                         // The namespace exists but does not export the name — a hard error: a
                         // private declaration is not importable, and an absent one is a typo.
                         Resolution::Private => {
-                            errors.push(import_error(&entry, &path, &name, Visibility::Private))
+                            errors.push(import_error(entry, path, name, Visibility::Private))
                         }
                         Resolution::Missing => {
-                            errors.push(import_error(&entry, &path, &name, Visibility::Missing))
+                            errors.push(import_error(entry, path, name, Visibility::Missing))
                         }
                     }
                 }
                 // Keep the `use` only for names no module provided (opaque-stub fallback).
                 if !unresolved.is_empty() {
                     linked_stmts.push(Stmt::Use {
-                        path,
+                        path: path.clone(),
                         names: unresolved,
-                        span,
+                        span: *span,
                     });
                 }
             }
-            other => linked_stmts.push(other),
+            other => linked_stmts.push(other.clone()),
         }
     }
     if !errors.is_empty() {
@@ -206,17 +252,17 @@ pub fn link(
 
     let mut stmts = imported;
     stmts.append(&mut linked_stmts);
-    let program = Program {
+    Ok(Program {
         stmts,
-        span: entry_parsed.program.span,
-    };
-    Ok(Linked { program, entry })
+        span: entry_program.span,
+    })
 }
 
-/// A parsed sibling module: its declared namespace path and its statements.
-struct ParsedModule {
+/// A candidate module viewed for resolution: its declared namespace path and a borrow of its
+/// statements (so resolution clones only the declarations it actually imports).
+struct ModuleView<'a> {
     namespace: Vec<String>,
-    stmts: Vec<Stmt>,
+    stmts: &'a [Stmt],
 }
 
 /// The namespace a module declares (`namespace App.Models;`), if any.
@@ -242,7 +288,7 @@ enum Resolution {
 
 /// Resolve the name `name` of namespace `path` against the loaded modules, honoring `pub`
 /// visibility: only a `pub` declaration is importable.
-fn resolve(modules: &[ParsedModule], path: &[String], name: &str) -> Resolution {
+fn resolve(modules: &[ModuleView], path: &[String], name: &str) -> Resolution {
     let Some(module) = modules.iter().find(|m| m.namespace == path) else {
         return Resolution::NoModule;
     };

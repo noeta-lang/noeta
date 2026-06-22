@@ -29,12 +29,13 @@
 //! *backdating* (a re-lex/parse/compile always re-runs dependents) — a precision trade-off,
 //! never a correctness one, and exactly right for pass-through plumbing.
 
+use lang_ast::Program;
 use lang_bytecode::Module;
 use lang_compiler::Unsupported;
 use lang_diagnostics::Diagnostic;
 use lang_lexer::Lexed;
 use lang_parser::Parsed;
-use lang_span::{Source, SourceId};
+use lang_span::{Source, SourceId, Span};
 
 /// The salsa database for the compile pipeline. Construct with `LangDatabase::default()`.
 #[salsa::db]
@@ -99,6 +100,12 @@ pub struct Checked(pub Vec<Diagnostic>);
 #[derive(Debug, Clone)]
 pub struct Bytecode(pub Result<Module, Unsupported>);
 
+/// Linker output (M1.9.3): the merged [`Program`] of an entry and its resolved imports, or the
+/// `use`-resolution diagnostics (entry parse errors, E0019, E0020). The whole-workspace analogue
+/// of [`Ast`] — what [`linked_checked`] and [`linked_bytecode`] build on.
+#[derive(Debug, Clone)]
+pub struct LinkedProgram(pub Result<Program, Vec<Diagnostic>>);
+
 /// Give a foreign-result newtype the two traits salsa needs for a memoized output, both in
 /// the conservative "always changed" direction:
 ///
@@ -135,6 +142,7 @@ replace_update!(Tokens);
 replace_update!(Ast);
 replace_update!(Checked);
 replace_update!(Bytecode);
+replace_update!(LinkedProgram);
 
 /// Tokenize the source. Memoized; re-runs only when `SourceProgram::text` changes.
 #[salsa::tracked(returns(ref))]
@@ -167,6 +175,114 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
 pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let parsed = ast(db, src);
     Bytecode(lang_compiler::compile(&parsed.0.program))
+}
+
+// ---------------------------------------------------------------------------
+// The module graph (M1.9.3)
+// ---------------------------------------------------------------------------
+//
+// A multi-file program is a [`Workspace`]: one entry `SourceProgram` plus its sibling module
+// inputs. The [`linked`] query resolves the entry's `use` declarations against the modules'
+// declared namespaces (reusing each source's memoized [`ast`]) and merges the resolved
+// declarations into one [`Program`]; [`linked_checked`] and [`linked_bytecode`] are the
+// whole-program checker and compiler over that merge — the workspace analogues of [`checked`]
+// and [`bytecode`].
+//
+// ```text
+//   Workspace (input: entry + module SourcePrograms)
+//        │
+//        ├── ast(entry) ─────┐
+//        ├── ast(module_1) ──┤
+//        ├── ast(module_n) ──┴──►  linked  ──►  linked_checked
+//        │                            │
+//        │                            └──────►  linked_bytecode
+// ```
+//
+// Resolution lives in [`linked`], so it depends on every module's `ast` — editing a module
+// re-links — but the per-source `tokens`/`ast` queries stay independent: editing one module
+// never recomputes another's parse. That is the incremental boundary M2's hot reload builds on.
+
+/// A multi-file program: the entry source plus its sibling module sources, each a memoized
+/// [`SourceProgram`] input. Mutating any one source invalidates exactly the queries that read it.
+#[salsa::input(debug)]
+pub struct Workspace {
+    pub entry: SourceProgram,
+    #[returns(ref)]
+    pub modules: Vec<SourceProgram>,
+}
+
+/// Build a [`Workspace`] input from the entry [`Source`] and its sibling module sources (as
+/// produced by `lang_loader::read_workspace`). Each becomes a [`SourceProgram`] input.
+pub fn workspace(db: &LangDatabase, entry: &Source, modules: &[Source]) -> Workspace {
+    let entry_input = source_program(db, entry);
+    let module_inputs = modules.iter().map(|s| source_program(db, s)).collect();
+    Workspace::new(db, entry_input, module_inputs)
+}
+
+/// Resolve and merge the workspace: the entry's imports against the modules' declared namespaces,
+/// producing one merged [`Program`] (or the load diagnostics). Depends on every source's [`ast`]
+/// (so editing any module re-links), but not on any cross-module edge — the per-source parse
+/// queries remain independent. The merge means both backends run the linked program unchanged, so
+/// the differential oracle is preserved by construction.
+#[salsa::tracked(returns(ref))]
+pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
+    let entry_src = ws.entry(db);
+    let entry_tokens = tokens(db, entry_src);
+    let entry_ast = ast(db, entry_src);
+    // The entry must lex and parse before it can be linked; surface its load diagnostics otherwise
+    // (rendered against the entry, like every import error).
+    let entry_diags: Vec<Diagnostic> = entry_tokens
+        .0
+        .diagnostics
+        .iter()
+        .chain(entry_ast.0.diagnostics.iter())
+        .cloned()
+        .collect();
+    if !entry_diags.is_empty() {
+        return LinkedProgram(Err(entry_diags));
+    }
+
+    let entry_source = source_of(db, entry_src);
+    // Read each module's `ast` (this is what makes `linked` a dependent of every module). Only a
+    // cleanly-parsed module contributes; `link_parsed` keeps just the ones declaring a namespace.
+    let mut module_programs: Vec<&Program> = Vec::new();
+    for &m in ws.modules(db) {
+        let toks = tokens(db, m);
+        let parsed = ast(db, m);
+        if toks.0.diagnostics.is_empty() && parsed.0.diagnostics.is_empty() {
+            module_programs.push(&parsed.0.program);
+        }
+    }
+
+    match lang_loader::link_parsed(&entry_source, &entry_ast.0.program, &module_programs) {
+        Ok(program) => LinkedProgram(Ok(program)),
+        Err(load) => LinkedProgram(Err(load.into_iter().map(|d| d.diagnostic).collect())),
+    }
+}
+
+/// Type-check the linked program — the workspace analogue of [`checked`]. A load failure carries
+/// its diagnostics straight through (there is no program to check).
+#[salsa::tracked(returns(ref))]
+pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
+    match &linked(db, ws).0 {
+        Ok(program) => Checked(lang_check::check(program)),
+        Err(diags) => Checked(diags.clone()),
+    }
+}
+
+/// Compile the linked program to a [`Module`] — the workspace analogue of [`bytecode`]. Callers
+/// gate on [`linked`] being `Ok` (and [`linked_checked`] being empty) before reaching a real
+/// `Module`; when the link failed there is nothing to compile, so an empty program stands in (a
+/// valid, never-observed `Module`).
+#[salsa::tracked(returns(ref))]
+pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
+    match &linked(db, ws).0 {
+        Ok(program) => Bytecode(lang_compiler::compile(program)),
+        Err(_) => Bytecode(lang_compiler::compile(&Program {
+            stmts: Vec::new(),
+            span: Span::empty_at(0),
+        })),
+    }
 }
 
 #[cfg(test)]
@@ -244,5 +360,115 @@ mod tests {
         let (db, src) = db_and_src("fn outer() { fn inner() { return 1; } return inner(); }\n");
         let direct = lang_compiler::compile(&ast(&db, src).0.program);
         assert_eq!(bytecode(&db, src).0.is_ok(), direct.is_ok());
+    }
+
+    // ----- the module graph (M1.9.3) -----
+
+    #[test]
+    fn module_graph_links_checks_and_compiles_a_used_module() {
+        let db = LangDatabase::default();
+        let entry = Source::new(
+            SourceId(0),
+            "main.lang",
+            "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n",
+        );
+        let a = Source::new(
+            SourceId(1),
+            "a.lang",
+            "namespace App.A;\npub class Foo { x: int }\n",
+        );
+        let ws = workspace(&db, &entry, std::slice::from_ref(&a));
+
+        let prog = match &linked(&db, ws).0 {
+            Ok(p) => p,
+            Err(e) => panic!("link failed: {e:?}"),
+        };
+        // The real `Foo` is merged in and its `use` dropped (resolved, no opaque stub).
+        assert!(
+            prog.stmts
+                .iter()
+                .any(|s| matches!(s, lang_ast::Stmt::Class(c) if c.name == "Foo"))
+        );
+        assert!(
+            !prog
+                .stmts
+                .iter()
+                .any(|s| matches!(s, lang_ast::Stmt::Use { .. }))
+        );
+        // The whole-workspace checker and compiler run over the merge.
+        assert!(linked_checked(&db, ws).0.is_empty());
+        assert!(linked_bytecode(&db, ws).0.is_ok());
+    }
+
+    #[test]
+    fn module_graph_reproduces_the_standalone_loader() {
+        // The salsa link must produce the byte-identical merge of the text-based loader — the tie
+        // that keeps the query layer behavior-preserving (and the differential oracle valid).
+        let entry_text = "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n";
+        let a_text = "namespace App.A;\npub class Foo { x: int }\n";
+        let raw = lang_loader::RawModule {
+            name: "a.lang".into(),
+            text: a_text.into(),
+        };
+        let loader =
+            lang_loader::link("main.lang", entry_text, std::slice::from_ref(&raw)).unwrap();
+
+        let db = LangDatabase::default();
+        let entry = Source::new(SourceId(0), "main.lang", entry_text);
+        let a = Source::new(SourceId(1), "a.lang", a_text);
+        let ws = workspace(&db, &entry, std::slice::from_ref(&a));
+        let salsa = match &linked(&db, ws).0 {
+            Ok(p) => p.clone(),
+            Err(e) => panic!("{e:?}"),
+        };
+        assert_eq!(
+            salsa, loader.program,
+            "the salsa graph must reproduce the loader's merge"
+        );
+    }
+
+    #[test]
+    fn editing_one_module_leaves_another_modules_parse_memoized() {
+        // The incremental boundary: a `Workspace` of two modules; editing one must not recompute
+        // the other's parse. (Pointer identity of the memoized `ast` is the same signal the
+        // `queries_are_memoized_stable` test uses.)
+        use salsa::Setter as _;
+        let mut db = LangDatabase::default();
+        let entry = Source::new(
+            SourceId(0),
+            "main.lang",
+            "namespace App.Main;\nuse App.A.Foo;\n",
+        );
+        let a = Source::new(
+            SourceId(1),
+            "a.lang",
+            "namespace App.A;\npub class Foo { x: int }\n",
+        );
+        let b = Source::new(
+            SourceId(2),
+            "b.lang",
+            "namespace App.B;\npub class Bar { y: int }\n",
+        );
+        let entry_src = source_program(&db, &entry);
+        let a_src = source_program(&db, &a);
+        let b_src = source_program(&db, &b);
+        let ws = Workspace::new(&db, entry_src, vec![a_src, b_src]);
+
+        assert!(linked(&db, ws).0.is_ok());
+        let a_ast_before = ast(&db, a_src) as *const Ast;
+
+        // Edit module B — which the entry does not import — by adding a field.
+        b_src
+            .set_text(&mut db)
+            .to("namespace App.B;\npub class Bar { y: int\n  z: int }\n".to_string());
+
+        // Module A was not recomputed: its memoized parse is the identical value.
+        let a_ast_after = ast(&db, a_src) as *const Ast;
+        assert_eq!(
+            a_ast_before, a_ast_after,
+            "editing module B must not recompute module A's ast"
+        );
+        // The link itself re-runs (it depends on every module) and stays well-formed.
+        assert!(linked(&db, ws).0.is_ok());
     }
 }
