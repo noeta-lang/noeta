@@ -62,9 +62,15 @@ pub enum TokenKind {
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
-    /// character (so `\"` does not close the string); the parser unescapes the contents.
+    /// character (so `\"` does not close the string); the parser unescapes the contents and
+    /// processes `${...}` interpolation.
     #[regex(r#""([^"\\]|\\.)*""#)]
     StringLit,
+    /// A single-quoted *raw* string literal, quotes included. No interpolation; the only escapes
+    /// are `\'` (a literal quote) and `\\` (a literal backslash) — every other character,
+    /// including `{`, `$`, and `\n`, is literal. Ideal for regex, paths, and JSON blobs.
+    #[regex(r#"'([^'\\]|\\.)*'"#)]
+    RawStr,
     #[regex(r"[0-9]+\.[0-9]+")]
     FloatLit,
     #[regex(r"[0-9]+")]
@@ -169,6 +175,7 @@ impl TokenKind {
             TokenKind::UseKw => "UseKw",
             TokenKind::PubKw => "PubKw",
             TokenKind::StringLit => "StringLit",
+            TokenKind::RawStr => "RawStr",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
@@ -231,6 +238,7 @@ impl TokenKind {
             TokenKind::UseKw => "`use`",
             TokenKind::PubKw => "`pub`",
             TokenKind::StringLit => "a string literal",
+            TokenKind::RawStr => "a raw string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",

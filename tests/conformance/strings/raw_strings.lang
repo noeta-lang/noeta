@@ -1,0 +1,15 @@
+// Single-quoted raw strings: no interpolation; only \' and \\ are escapes, so bare ${...},
+// braces, dollar signs, and backslashes are all literal. Both backends parse to the same
+// Expr::Str, so this is differential-safe with no runtime changes.
+// expect: stdout "plain ${name} {braces} $dollar"
+// expect: stdout "tab\\tnot-expanded"
+// expect: stdout "quote: it's"
+// expect: stdout "back: \\"
+// expect: stdout "interpolated: Niro"
+// expect: exit 0
+name = "Niro";
+echo 'plain ${name} {braces} $dollar';
+echo 'tab\tnot-expanded';
+echo 'quote: it\'s';
+echo 'back: \\';
+echo "interpolated: ${name}";

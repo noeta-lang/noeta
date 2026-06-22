@@ -2596,6 +2596,20 @@ mod tests {
     }
 
     #[test]
+    fn single_quoted_strings_are_raw() {
+        // No interpolation, and bare ${}, braces, $ are literal.
+        assert_eq!(
+            run("name = \"Niro\"; echo '${name} {x} $y';").stdout,
+            "${name} {x} $y\n"
+        );
+        // `\t` is not an escape in a raw string — backslash and t are both literal.
+        assert_eq!(run("echo 'a\\tb';").stdout, "a\\tb\n");
+        // The only escapes are `\'` (a quote) and `\\` (a backslash).
+        assert_eq!(run("echo 'it\\'s';").stdout, "it's\n");
+        assert_eq!(run("echo 'back\\\\slash';").stdout, "back\\slash\n");
+    }
+
+    #[test]
     fn plain_enum_and_match() {
         let src = "enum Color { Red; Green; Blue; } c = Color.Green; echo match c { Color.Red => \"r\", Color.Green => \"g\", Color.Blue => \"b\" };";
         assert_eq!(run(src).stdout, "g\n");

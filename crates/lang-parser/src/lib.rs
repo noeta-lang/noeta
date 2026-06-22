@@ -440,6 +440,8 @@ where
         });
         let string =
             just(T::StringLit).map_with(move |_, e| parse_string_literal(ctx, to_span(e.span())));
+        let raw_string =
+            just(T::RawStr).map_with(move |_, e| parse_raw_string(ctx, to_span(e.span())));
         let bool_ = choice((
             just(T::TrueKw).map_with(|_, e| Expr::Bool {
                 value: true,
@@ -564,6 +566,7 @@ where
             int,
             float,
             string,
+            raw_string,
             bool_,
             closure,
             match_,
@@ -1229,9 +1232,9 @@ where
 
 // --- String interpolation ---------------------------------------------------------
 
-/// Turn a string-literal token into an [`Expr`]: a plain [`Expr::Str`] if it has no
-/// `{...}` holes, or an [`Expr::Interp`] if it does. Backslash escapes (`\n`, `\t`,
-/// `\"`, `\\`, `\{`, `\}`) are processed, and `{{`/`}}` produce literal braces.
+/// Turn a double-quoted string-literal token into an [`Expr`]: a plain [`Expr::Str`] if it has
+/// no `${...}` holes, or an [`Expr::Interp`] if it does. Backslash escapes (`\n`, `\t`, `\"`,
+/// `\\`, `\$`) are processed; a bare `{`, `}`, or `$` is literal.
 fn parse_string_literal(ctx: Ctx<'_>, span: Span) -> Expr {
     let raw = ctx.source.slice(span);
     // Strip the surrounding quotes; `base` is the absolute offset of the content.
@@ -1298,6 +1301,30 @@ fn parse_string_literal(ctx: Ctx<'_>, span: Span) -> Expr {
         parts.push(StrPart::Literal(literal));
     }
     Expr::Interp { parts, span }
+}
+
+/// Turn a single-quoted *raw* string token into a plain [`Expr::Str`]. There is no
+/// interpolation; the only escapes are `\'` (a literal quote) and `\\` (a literal backslash).
+/// Every other character — including `{`, `}`, `$`, and `\n` — is taken verbatim, so regex,
+/// paths, and JSON blobs need no escaping.
+fn parse_raw_string(ctx: Ctx<'_>, span: Span) -> Expr {
+    let raw = ctx.source.slice(span);
+    let inner = raw
+        .strip_prefix('\'')
+        .and_then(|r| r.strip_suffix('\''))
+        .unwrap_or(raw);
+
+    let mut value = String::new();
+    let mut chars = inner.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\\' && matches!(chars.peek(), Some('\'') | Some('\\')) {
+            // Only `\'` and `\\` are escapes; consume the backslash and emit the next char.
+            value.push(chars.next().unwrap());
+        } else {
+            value.push(c);
+        }
+    }
+    Expr::Str { value, span }
 }
 
 /// Parse a single interpolation hole's expression. The hole text is lexed and parsed

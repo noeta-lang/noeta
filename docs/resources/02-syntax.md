@@ -50,12 +50,15 @@ The error message for assigning to a non-`mut` binding is a first-class concern:
 ```
 greeting = "Hello ${name}";             // ${expr} interpolation (bare braces are literal)
 path = "users/" ~ id ~ "/profile";      // `~` concatenation
-literal = "a {json} blob and a \${escaped} dollar-brace";  // both literal
-raw = `multi
+raw = 'a {json} blob, a $price, a \d+ regex';  // single quotes: no interpolation at all
+literal = "a {json} blob and a \${escaped} dollar-brace";  // double quotes, both literal
+multi = `multi
 line`;                                   // backtick multiline (also supports ${expr})
 ```
 
-Interpolation triggers only on `${ expr }`; a bare `{`, `}`, or `$` is a literal character, so JSON, regex, and currency strings need no escaping. The one escape is `\${` for a literal dollar-brace. (There is no `$name` shorthand — `${name}` is always written in full, which keeps a stray `$` in prose harmless.)
+**Double-quoted** strings interpolate, triggering only on `${ expr }`; a bare `{`, `}`, or `$` is a literal character, so JSON and currency strings need no escaping. The one escape is `\${` for a literal dollar-brace. (There is no `$name` shorthand — `${name}` is always written in full, which keeps a stray `$` in prose harmless.)
+
+**Single-quoted** strings are *raw*: no interpolation, and the only escapes are `\'` (a literal quote) and `\\` (a literal backslash). Everything else — `${...}`, braces, `$`, and other backslash sequences like `\d` or `\n` — is verbatim, which makes them ideal for regex, Windows paths, and JSON blobs.
 
 ---
 
