@@ -19,6 +19,8 @@
 //! binds the module value and converts results into its own values.
 
 pub mod json;
+pub mod math;
+pub mod random;
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
 /// stdlib introspects. Each backend cheaply projects its own `Value` onto this; anything
@@ -39,6 +41,8 @@ pub enum Output {
     Str(String),
     Bool(bool),
     Int(i64),
+    /// A float (e.g. `math.sqrt`). The caller wraps it in its float value.
+    Float(f64),
     /// A list of strings (e.g. `split`). The caller builds its native list of string values.
     StrList(Vec<String>),
 }
@@ -227,6 +231,8 @@ pub fn slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeModule {
     Json,
+    Math,
+    Random,
 }
 
 impl NativeModule {
@@ -234,6 +240,8 @@ impl NativeModule {
     pub fn from_name(name: &str) -> Option<NativeModule> {
         match name {
             "json" => Some(NativeModule::Json),
+            "math" => Some(NativeModule::Math),
+            "random" => Some(NativeModule::Random),
             _ => None,
         }
     }
@@ -242,6 +250,8 @@ impl NativeModule {
     pub fn name(self) -> &'static str {
         match self {
             NativeModule::Json => "json",
+            NativeModule::Math => "math",
+            NativeModule::Random => "random",
         }
     }
 }

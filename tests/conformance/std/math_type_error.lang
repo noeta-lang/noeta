@@ -1,0 +1,4 @@
+// A non-number argument to a math function is a runtime E0007, identical in both backends.
+// expect: error E0007 at 4:6
+use std.{math};
+echo math.sqrt("nope");

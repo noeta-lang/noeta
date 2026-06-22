@@ -155,6 +155,9 @@ struct Vm<'m> {
     global_order: Vec<String>,
     /// The deterministic `next_id()` counter, seeded at 1 (matching the M0 `IdGen`).
     next_id: u64,
+    /// The `random` module's PRNG state, threaded through the shared SplitMix64 stepper. Starts
+    /// at [`lang_stdlib::random::DEFAULT_SEED`] so un-seeded use matches the tree-walker.
+    rng: u64,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
 }
@@ -205,6 +208,7 @@ fn execute(module: &Module) -> RunResult {
         globals: HashMap::new(),
         global_order: Vec::new(),
         next_id: 1,
+        rng: lang_stdlib::random::DEFAULT_SEED,
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -442,9 +446,64 @@ impl<'m> Vm<'m> {
     ) -> Result<Value, Abort> {
         match lang_stdlib::NativeModule::from_name(module) {
             Some(lang_stdlib::NativeModule::Json) => self.call_json(func, args, span),
+            Some(lang_stdlib::NativeModule::Math) => self.call_math(func, args, span),
+            Some(lang_stdlib::NativeModule::Random) => self.call_random(func, args, span),
             // Only valid module names are ever bound, so this is unreachable in practice.
             None => {
                 let error = lang_stdlib::no_function_error(module, func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `math` module: pure scalar functions. Semantics live in `lang-stdlib::math`, so this
+    /// is thin glue — project args, dispatch, lift `Output`. Mirrors the tree-walker's `call_math`.
+    fn call_math(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        let projected: Vec<lang_stdlib::Arg> = args.iter().map(|a| project_arg(*a)).collect();
+        match lang_stdlib::math::call(func, &projected) {
+            lang_stdlib::Dispatch::Done(output) => Ok(stdlib_output_to_value(output)),
+            lang_stdlib::Dispatch::Err(error) => {
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+            lang_stdlib::Dispatch::Unknown => {
+                let error = lang_stdlib::no_function_error("math", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `random` module: a seeded PRNG whose state is `self.rng`, threaded through the shared
+    /// stepper so the stream matches the tree-walker for a given seed. Mirrors `call_random` there.
+    fn call_random(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        match func {
+            "seed" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let n = self.stdlib_int(func, args[0], span)?;
+                self.rng = lang_stdlib::random::seed_state(n);
+                Ok(Value::unit())
+            }
+            "int" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let lo = self.stdlib_int(func, args[0], span)?;
+                let hi = self.stdlib_int(func, args[1], span)?;
+                match lang_stdlib::random::int(self.rng, lo, hi) {
+                    Ok((next_state, value)) => {
+                        self.rng = next_state;
+                        Ok(Value::int(value))
+                    }
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "float" => {
+                self.stdlib_arity(func, args, 0, span)?;
+                let (next_state, value) = lang_stdlib::random::float(self.rng);
+                self.rng = next_state;
+                Ok(Value::float(value))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("random", func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
@@ -2027,11 +2086,29 @@ fn set_reg(regs: &mut [Value], dst: u16, value: Value) {
 
 /// Lift a shared stdlib [`lang_stdlib::Output`] into a freshly-owned VM `Value` (refcount 1,
 /// owned by the destination register). Mirrors the tree-walker's `output_to_value`.
+/// Project a VM value onto the backend-agnostic [`lang_stdlib::Arg`] for the numeric native
+/// modules (`math`/`random`). These never inspect string *content*, so a string collapses to
+/// [`lang_stdlib::Arg::Other`] (same effect: it is "not a number") and no borrow is needed —
+/// keeping the result `'static`. The string-method site projects strings itself, since it does
+/// read their content.
+fn project_arg(value: Value) -> lang_stdlib::Arg<'static> {
+    if let Some(i) = value.as_int() {
+        lang_stdlib::Arg::Int(i)
+    } else if let Some(f) = value.as_float() {
+        lang_stdlib::Arg::Float(f)
+    } else if let Some(b) = value.as_bool() {
+        lang_stdlib::Arg::Bool(b)
+    } else {
+        lang_stdlib::Arg::Other
+    }
+}
+
 fn stdlib_output_to_value(output: lang_stdlib::Output) -> Value {
     match output {
         lang_stdlib::Output::Str(s) => Value::string(&s),
         lang_stdlib::Output::Bool(b) => Value::bool(b),
         lang_stdlib::Output::Int(i) => Value::int(i),
+        lang_stdlib::Output::Float(f) => Value::float(f),
         lang_stdlib::Output::StrList(items) => {
             Value::list(items.iter().map(|s| Value::string(s)).collect())
         }

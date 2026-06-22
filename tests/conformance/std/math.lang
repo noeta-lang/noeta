@@ -1,0 +1,25 @@
+// The Ring 2 `math` module (use std.{math}): pure scalar math, identical on both backends.
+// `sqrt`/`pow`/constants yield floats; `floor`/`ceil`/`round` yield ints; `abs`/`min`/`max`
+// preserve their argument kind (int in -> int out).
+// expect: stdout "4.0"
+// expect: stdout "1024.0"
+// expect: stdout "7"
+// expect: stdout "2"
+// expect: stdout "3"
+// expect: stdout "3"
+// expect: stdout "3"
+// expect: stdout "8"
+// expect: stdout "3.5"
+// expect: stdout "true"
+// expect: exit 0
+use std.{math};
+echo math.sqrt(16.0);
+echo math.pow(2, 10);
+echo math.abs(-7);
+echo math.floor(2.9);
+echo math.ceil(2.1);
+echo math.round(2.5);
+echo math.min(3, 8);
+echo math.max(3, 8);
+echo math.max(3, 3.5);
+echo math.pi() > 3.14 && math.pi() < 3.15;

@@ -1,0 +1,4 @@
+// An empty range (lo > hi) for random.int is a runtime E0007, identical in both backends.
+// expect: error E0007 at 4:6
+use std.{random};
+echo random.int(6, 1);

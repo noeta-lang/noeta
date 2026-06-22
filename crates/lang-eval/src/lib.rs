@@ -483,6 +483,10 @@ struct Interpreter {
     diagnostics: Vec<Diagnostic>,
     ids: IdGen,
     scope: Rc<Scope>,
+    /// The `random` module's PRNG state — a single `u64` threaded through the shared SplitMix64
+    /// stepper. Defaults to [`lang_stdlib::random::DEFAULT_SEED`] so un-seeded use is still
+    /// deterministic and identical to the VM; `random.seed(n)` re-seeds it.
+    rng: u64,
 }
 
 impl Interpreter {
@@ -503,6 +507,7 @@ impl Interpreter {
             diagnostics: Vec::new(),
             ids: IdGen::new(seed),
             scope: global,
+            rng: lang_stdlib::random::DEFAULT_SEED,
         }
     }
 
@@ -1578,6 +1583,64 @@ impl Interpreter {
     ) -> Eval<Value> {
         match module {
             lang_stdlib::NativeModule::Json => self.call_json(func, args, span),
+            lang_stdlib::NativeModule::Math => self.call_math(func, args, span),
+            lang_stdlib::NativeModule::Random => self.call_random(func, args, span),
+        }
+    }
+
+    /// The `math` module: pure scalar functions whose semantics live entirely in
+    /// `lang-stdlib::math`, so both backends compute identically. Args project onto `Arg`, the
+    /// shared dispatcher runs, and the `Output` lifts back. Mirrors the VM's `call_math`.
+    fn call_math(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        let projected: Vec<lang_stdlib::Arg> = args.iter().map(project_arg).collect();
+        match lang_stdlib::math::call(func, &projected) {
+            lang_stdlib::Dispatch::Done(output) => Ok(output_to_value(output)),
+            lang_stdlib::Dispatch::Err(error) => {
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+            lang_stdlib::Dispatch::Unknown => {
+                let error = lang_stdlib::no_function_error("math", func);
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `random` module: a seeded PRNG. Stepping is shared (`lang-stdlib::random`); the state
+    /// lives in `self.rng`, threaded through each draw so a given seed yields the same stream the
+    /// VM produces. `seed(n)` re-seeds, `int(lo, hi)` and `float()` advance. Mirrors the VM's
+    /// `call_random`.
+    fn call_random(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        match func {
+            "seed" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let n = self.expect_std_int(func, &args[0], span)?;
+                self.rng = lang_stdlib::random::seed_state(n);
+                Ok(Value::Unit)
+            }
+            "int" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let lo = self.expect_std_int(func, &args[0], span)?;
+                let hi = self.expect_std_int(func, &args[1], span)?;
+                match lang_stdlib::random::int(self.rng, lo, hi) {
+                    Ok((next_state, value)) => {
+                        self.rng = next_state;
+                        Ok(Value::Int(value))
+                    }
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "float" => {
+                self.expect_std_arity(func, args, 0, span)?;
+                let (next_state, value) = lang_stdlib::random::float(self.rng);
+                self.rng = next_state;
+                Ok(Value::Float(value))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("random", func);
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
         }
     }
 
@@ -2157,6 +2220,7 @@ fn output_to_value(output: lang_stdlib::Output) -> Value {
         lang_stdlib::Output::Str(s) => Value::Str(s),
         lang_stdlib::Output::Bool(b) => Value::Bool(b),
         lang_stdlib::Output::Int(i) => Value::Int(i),
+        lang_stdlib::Output::Float(f) => Value::Float(f),
         lang_stdlib::Output::StrList(items) => {
             Value::List(Rc::new(items.into_iter().map(Value::Str).collect()))
         }

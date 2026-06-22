@@ -1,0 +1,37 @@
+// The Ring 2 `random` module (use std.{random}): a deterministic, seedable PRNG. The stepper is
+// shared (lang-stdlib::random, SplitMix64), so a given seed yields the identical stream on both
+// backends — the whole point. We assert reproducibility (same seed -> same draw), range bounds,
+// and pin one concrete sequence so an accidental algorithm change is caught.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "6,1,2"
+// expect: exit 0
+use std.{random};
+
+// Reproducible: re-seeding rewinds the stream.
+random.seed(42);
+a = random.int(1, 6);
+random.seed(42);
+b = random.int(1, 6);
+echo a == b;
+
+// In range [1, 6].
+echo a >= 1 && a <= 6;
+
+// `float()` is in [0, 1).
+random.seed(7);
+f = random.float();
+echo f >= 0.0 && f < 1.0;
+
+// A different seed (generally) gives a different stream.
+random.seed(1);
+x = random.int(0, 1000000);
+random.seed(2);
+y = random.int(0, 1000000);
+echo x != y;
+
+// Pinned concrete sequence from seed 99 — locks the algorithm.
+random.seed(99);
+echo "${random.int(1, 6)},${random.int(1, 6)},${random.int(1, 6)}";
