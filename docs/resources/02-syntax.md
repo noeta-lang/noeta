@@ -51,14 +51,25 @@ The error message for assigning to a non-`mut` binding is a first-class concern:
 greeting = "Hello ${name}";             // ${expr} interpolation (bare braces are literal)
 path = "users/" ~ id ~ "/profile";      // `~` concatenation
 raw = 'a {json} blob, a $price, a \d+ regex';  // single quotes: no interpolation at all
-literal = "a {json} blob and a \${escaped} dollar-brace";  // double quotes, both literal
-multi = `multi
-line`;                                   // backtick multiline (also supports ${expr})
+template = `                              // backtick: dedented multiline template
+    Dear ${name},
+    Your order shipped.
+`;                                        // → "Dear ${name},\nYour order shipped." (indent stripped)
 ```
+
+Three string forms, by what they do with interpolation and whitespace:
+
+| Form | Interpolation | Whitespace |
+|---|---|---|
+| `"..."` (double) | `${expr}` | literal (multiline allowed) |
+| `'...'` (single) | none — raw | literal (multiline allowed) |
+| `` `...` `` (backtick) | `${expr}` | **dedented** text block |
 
 **Double-quoted** strings interpolate, triggering only on `${ expr }`; a bare `{`, `}`, or `$` is a literal character, so JSON and currency strings need no escaping. The one escape is `\${` for a literal dollar-brace. (There is no `$name` shorthand — `${name}` is always written in full, which keeps a stray `$` in prose harmless.)
 
-**Single-quoted** strings are *raw*: no interpolation, and the only escapes are `\'` (a literal quote) and `\\` (a literal backslash). Everything else — `${...}`, braces, `$`, and other backslash sequences like `\d` or `\n` — is verbatim, which makes them ideal for regex, Windows paths, and JSON blobs.
+**Single-quoted** strings are *raw*: no interpolation, and the only escapes are `\'` and `\\`. Everything else — `${...}`, braces, `$`, `\d`, `\n` — is verbatim, ideal for regex, Windows paths, and JSON blobs.
+
+**Backtick** strings are *dedented templates*: `${expr}` interpolation like a double-quoted string, but the common leading indentation and a leading/trailing blank line are stripped (Kotlin `trimIndent` rules), so a multiline literal can be indented to match the surrounding code without that indentation leaking into the value — ideal for SQL, HTML, and email bodies.
 
 ---
 

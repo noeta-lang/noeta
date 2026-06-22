@@ -71,6 +71,11 @@ pub enum TokenKind {
     /// including `{`, `$`, and `\n`, is literal. Ideal for regex, paths, and JSON blobs.
     #[regex(r#"'([^'\\]|\\.)*'"#)]
     RawStr,
+    /// A backtick *template* string, quotes included. Multiline with `${...}` interpolation (like
+    /// a double-quoted string), but the common leading indentation and the leading/trailing blank
+    /// line are stripped — a dedented text block for SQL/HTML/email templates.
+    #[regex(r#"`([^`\\]|\\.)*`"#)]
+    TemplateStr,
     /// A float literal: a decimal with a fractional part and/or a scientific exponent. `_` digit
     /// separators are allowed and stripped by the parser. Examples: `4.2`, `1_000.5`, `1.5e-3`,
     /// `2e10`. (A bare `42` with no `.`/`e` is an [`TokenKind::IntLit`].)
@@ -185,6 +190,7 @@ impl TokenKind {
             TokenKind::PubKw => "PubKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
+            TokenKind::TemplateStr => "TemplateStr",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
@@ -248,6 +254,7 @@ impl TokenKind {
             TokenKind::PubKw => "`pub`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",
+            TokenKind::TemplateStr => "a template string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",

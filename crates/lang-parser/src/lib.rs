@@ -442,6 +442,8 @@ where
             just(T::StringLit).map_with(move |_, e| parse_string_literal(ctx, to_span(e.span())));
         let raw_string =
             just(T::RawStr).map_with(move |_, e| parse_raw_string(ctx, to_span(e.span())));
+        let template = just(T::TemplateStr)
+            .map_with(move |_, e| parse_template_string(ctx, to_span(e.span())));
         let bool_ = choice((
             just(T::TrueKw).map_with(|_, e| Expr::Bool {
                 value: true,
@@ -594,6 +596,7 @@ where
             float,
             string,
             raw_string,
+            template,
             bool_,
             closure,
             match_,
@@ -1270,8 +1273,149 @@ fn parse_string_literal(ctx: Ctx<'_>, span: Span) -> Expr {
         .strip_prefix('"')
         .and_then(|r| r.strip_suffix('"'))
         .unwrap_or(raw);
-    let base = span.start + 1;
+    build_interpolated(ctx, inner, span.start + 1, span)
+}
 
+/// Turn a backtick *template* token into an [`Expr`]: the same `${...}` interpolation as a
+/// double-quoted string, but the common leading indentation (and a leading/trailing blank line)
+/// is stripped so the literal can be indented to match surrounding code. Interpolation is parsed
+/// first (over the original text, so hole-expression spans stay accurate); the dedent is then
+/// applied to the *literal* parts only, leaving each hole's source span — and so the identifier
+/// names read from it — untouched.
+fn parse_template_string(ctx: Ctx<'_>, span: Span) -> Expr {
+    let raw = ctx.source.slice(span);
+    let inner = raw
+        .strip_prefix('`')
+        .and_then(|r| r.strip_suffix('`'))
+        .unwrap_or(raw);
+    match build_interpolated(ctx, inner, span.start + 1, span) {
+        // No holes: dedent the whole string directly.
+        Expr::Str { value, .. } => Expr::Str {
+            value: trim_indent_lines(value.split('\n').map(|l| l.to_string()).collect()).join("\n"),
+            span,
+        },
+        // With holes: dedent only the literal segments (holes keep their spans).
+        Expr::Interp { parts, .. } => {
+            let parts = dedent_parts(parts);
+            // A template whose holes all dedented away to nothing still stays an interp; the
+            // common case keeps at least one hole, so this is correct as-is.
+            Expr::Interp { parts, span }
+        }
+        other => other,
+    }
+}
+
+/// Apply the Kotlin `trimIndent` policy to a list of lines: drop a leading blank line and a
+/// trailing whitespace-only line, then strip the minimum indentation common to the non-blank
+/// lines. Returns the rewritten lines (the caller re-joins with `\n`).
+fn trim_indent_lines(mut lines: Vec<String>) -> Vec<String> {
+    if lines.first().is_some_and(|l| l.trim().is_empty()) {
+        lines.remove(0);
+    }
+    if lines.len() > 1 && lines.last().is_some_and(|l| l.trim().is_empty()) {
+        lines.pop();
+    }
+    let min_indent = lines
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+    lines
+        .into_iter()
+        .map(|l| {
+            let cut = min_indent.min(l.len() - l.trim_start().len());
+            l[cut..].to_string()
+        })
+        .collect()
+}
+
+/// Dedent an interpolated template's parts: split them into lines (template newlines live in
+/// literal segments), drop a leading/trailing blank line, strip the common indentation from each
+/// line's leading literal, and re-join with `\n` literals. Holes pass through untouched, so their
+/// source spans — and the names read from them — are preserved.
+fn dedent_parts(parts: Vec<StrPart>) -> Vec<StrPart> {
+    // 1. Break into lines. A line is the run of parts between template newlines.
+    let mut lines: Vec<Vec<StrPart>> = vec![Vec::new()];
+    for part in parts {
+        match part {
+            StrPart::Hole(expr) => lines.last_mut().unwrap().push(StrPart::Hole(expr)),
+            StrPart::Literal(text) => {
+                for (i, segment) in text.split('\n').enumerate() {
+                    if i > 0 {
+                        lines.push(Vec::new());
+                    }
+                    if !segment.is_empty() {
+                        lines
+                            .last_mut()
+                            .unwrap()
+                            .push(StrPart::Literal(segment.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    // A line is blank when it holds no hole and only whitespace literals.
+    let is_blank = |line: &[StrPart]| {
+        line.iter()
+            .all(|p| matches!(p, StrPart::Literal(s) if s.trim().is_empty()))
+    };
+    if lines.first().is_some_and(|l| is_blank(l)) {
+        lines.remove(0);
+    }
+    if lines.len() > 1 && lines.last().is_some_and(|l| is_blank(l)) {
+        lines.pop();
+    }
+    // 2. Minimum indentation over the non-blank lines (a line that starts with a hole has 0).
+    let indent_of = |line: &[StrPart]| -> usize {
+        match line.first() {
+            Some(StrPart::Literal(s)) => s.len() - s.trim_start().len(),
+            _ => 0,
+        }
+    };
+    let min_indent = lines
+        .iter()
+        .filter(|l| !is_blank(l))
+        .map(|l| indent_of(l))
+        .min()
+        .unwrap_or(0);
+    // 3. Re-emit, stripping `min_indent` from each line's leading literal and re-joining with `\n`.
+    let mut out: Vec<StrPart> = Vec::new();
+    for (line_index, line) in lines.into_iter().enumerate() {
+        if line_index > 0 {
+            push_literal(&mut out, "\n");
+        }
+        for (part_index, part) in line.into_iter().enumerate() {
+            match part {
+                StrPart::Literal(mut text) => {
+                    if part_index == 0 && min_indent > 0 {
+                        let cut = min_indent.min(text.len() - text.trim_start().len());
+                        text = text[cut..].to_string();
+                    }
+                    if !text.is_empty() {
+                        push_literal(&mut out, &text);
+                    }
+                }
+                hole => out.push(hole),
+            }
+        }
+    }
+    out
+}
+
+/// Append literal text to a parts list, merging into the previous literal segment if there is one.
+fn push_literal(out: &mut Vec<StrPart>, text: &str) {
+    if let Some(StrPart::Literal(last)) = out.last_mut() {
+        last.push_str(text);
+    } else {
+        out.push(StrPart::Literal(text.to_string()));
+    }
+}
+
+/// The shared `${...}` interpolation core over already-stripped inner text. `base` is the absolute
+/// source offset of `inner[0]` (used for hole-expression spans). Returns a plain [`Expr::Str`]
+/// when there are no holes, else an [`Expr::Interp`].
+fn build_interpolated(ctx: Ctx<'_>, inner: &str, base: u32, span: Span) -> Expr {
     let mut parts: Vec<StrPart> = Vec::new();
     let mut literal = String::new();
     let mut chars = inner.char_indices().peekable();

@@ -2610,6 +2610,16 @@ mod tests {
     }
 
     #[test]
+    fn backtick_templates_interpolate_and_dedent() {
+        // Dedent strips the common indentation and the leading/trailing blank line; `${}`
+        // interpolates with the right names (a regression guard — dedent must not corrupt holes).
+        let src = "name = \"Ada\";\necho `\n    Hi ${name}\n    bye\n`;";
+        assert_eq!(run(src).stdout, "Hi Ada\nbye\n");
+        // A single-line template behaves like a normal interpolated string.
+        assert_eq!(run("x = \"A\"; echo `v=${x}`;").stdout, "v=A\n");
+    }
+
+    #[test]
     fn set_literal_desugars_to_to_set() {
         // `#{...}` is `[...].to_set()`: sorted, de-duplicated, `#{}` empty.
         assert_eq!(run("echo #{3, 1, 2, 1};").stdout, "{1, 2, 3}\n");

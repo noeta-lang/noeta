@@ -1,0 +1,15 @@
+// Backtick template strings: `${}` interpolation plus dedent — the common leading indentation
+// and the leading/trailing blank line are stripped, so the literal can be indented to match the
+// code. Front-end only (lowers to the same Expr::Str/Expr::Interp), so both backends agree.
+// expect: stdout "Dear Ada,"
+// expect: stdout "Order #7 shipped."
+// expect: stdout "Thanks!"
+// expect: stdout "one Ada line"
+// expect: exit 0
+name = "Ada";
+echo `
+    Dear ${name},
+    Order #${1 + 6} shipped.
+    Thanks!
+`;
+echo `one ${name} line`;
