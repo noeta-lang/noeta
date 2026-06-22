@@ -192,12 +192,16 @@ pub fn type_error(method: &str, expected: &str) -> StdError {
     }
 }
 
-/// Build the canonical "cannot order" error for `sorted()` over values that are not mutually
-/// orderable (mixed kinds, or a non-orderable element). Maps to `E0007` like other type misuse.
-pub fn unorderable_error() -> StdError {
+/// Build the canonical "cannot order" error for a method (`sorted`, `to_set`) over values that
+/// are not mutually orderable (mixed kinds, or a non-orderable element). Maps to `E0007` like
+/// other type misuse. Both `sorted` and set construction require a single orderable element type
+/// so the result has a deterministic canonical order.
+pub fn unorderable_error(method: &str) -> StdError {
     StdError {
         kind: ErrorKind::ArgType,
-        message: "method `sorted` cannot order values of mixed or non-orderable types".to_string(),
+        message: format!(
+            "method `{method}` requires values of a single orderable type (int, float, or string)"
+        ),
     }
 }
 
@@ -240,6 +244,9 @@ pub enum ListMethod {
     First,
     /// `last()` → `some(tail)` if the list is non-empty, else `none`.
     Last,
+    /// `to_set()` → a `Set` of the list's elements (sorted + de-duplicated); a non-orderable or
+    /// mixed-kind element is an error.
+    ToSet,
 }
 
 impl ListMethod {
@@ -252,6 +259,30 @@ impl ListMethod {
             "slice" => Some(ListMethod::Slice),
             "first" => Some(ListMethod::First),
             "last" => Some(ListMethod::Last),
+            "to_set" => Some(ListMethod::ToSet),
+            _ => None,
+        }
+    }
+}
+
+/// The Ring 1 set methods. Value-specific (each backend implements them), enumerated here so the
+/// dispatch `match` is exhaustive in both backends — see [`ListMethod`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetMethod {
+    /// `contains(x)` → `bool`, whether `x` is a member (by structural equality).
+    Contains,
+    /// `union(other)` → a new set with every element of `self` or `other`.
+    Union,
+    /// `intersection(other)` → a new set with the elements in both `self` and `other`.
+    Intersection,
+}
+
+impl SetMethod {
+    pub fn from_name(name: &str) -> Option<SetMethod> {
+        match name {
+            "contains" => Some(SetMethod::Contains),
+            "union" => Some(SetMethod::Union),
+            "intersection" => Some(SetMethod::Intersection),
             _ => None,
         }
     }
@@ -394,11 +425,19 @@ mod tests {
         assert_eq!(ListMethod::from_name("slice"), Some(ListMethod::Slice));
         assert_eq!(ListMethod::from_name("first"), Some(ListMethod::First));
         assert_eq!(ListMethod::from_name("last"), Some(ListMethod::Last));
+        assert_eq!(ListMethod::from_name("to_set"), Some(ListMethod::ToSet));
         assert_eq!(ListMethod::from_name("nope"), None);
         assert_eq!(MapMethod::from_name("keys"), Some(MapMethod::Keys));
         assert_eq!(MapMethod::from_name("values"), Some(MapMethod::Values));
         assert_eq!(MapMethod::from_name("has"), Some(MapMethod::Has));
         assert_eq!(MapMethod::from_name("nope"), None);
+        assert_eq!(SetMethod::from_name("contains"), Some(SetMethod::Contains));
+        assert_eq!(SetMethod::from_name("union"), Some(SetMethod::Union));
+        assert_eq!(
+            SetMethod::from_name("intersection"),
+            Some(SetMethod::Intersection)
+        );
+        assert_eq!(SetMethod::from_name("nope"), None);
     }
 
     #[test]

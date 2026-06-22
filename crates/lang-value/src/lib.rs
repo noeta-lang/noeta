@@ -106,6 +106,13 @@ impl Value {
         heap::alloc(Payload::List(items))
     }
 
+    /// A heap set (refcount 1). `items` must already be in canonical form — sorted and
+    /// de-duplicated — since the set type relies on that for deterministic iteration, display,
+    /// and equality. Ownership of one reference to each element transfers in, like [`Value::list`].
+    pub fn set(items: Vec<Value>) -> Value {
+        heap::alloc(Payload::Set(items))
+    }
+
     /// A heap map (refcount 1), keyed by owned strings, iterating in sorted-key order. As
     /// with [`Value::list`], the map takes ownership of one reference to each value.
     pub fn map(entries: BTreeMap<String, Value>) -> Value {
@@ -211,6 +218,37 @@ impl Value {
     /// Whether this is a heap map.
     pub fn is_map(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Map(_)))
+    }
+
+    /// Whether this is a heap set.
+    pub fn is_set(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Set(_)))
+    }
+
+    /// The number of elements, if this is a set.
+    pub fn set_len(self) -> Option<usize> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Set(items) => Some(items.len()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A shallow copy of a set's canonical (sorted, de-duplicated) elements, if this is a set.
+    /// As with [`Value::list_items`], the copied values share the set's references and are not
+    /// retained.
+    pub fn set_items(self) -> Option<Vec<Value>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Set(items) => Some(items.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
     }
 
     /// The number of elements, if this is a list.
@@ -386,6 +424,12 @@ impl Value {
                     let parts: Vec<String> = items.iter().map(|v| v.repr()).collect();
                     format!("[{}]", parts.join(", "))
                 }
+                // A set renders with braces and no key colons (`{1, 2, 3}`), distinguishing it
+                // from a non-empty map; an empty set is `{}`, like an empty map.
+                Payload::Set(items) => {
+                    let parts: Vec<String> = items.iter().map(|v| v.repr()).collect();
+                    format!("{{{}}}", parts.join(", "))
+                }
                 Payload::Map(entries) => {
                     let parts: Vec<String> = entries
                         .iter()
@@ -450,6 +494,11 @@ impl Value {
                     let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
                     format!("[{}]", parts.join(","))
                 }
+                // A set serializes as a JSON array (JSON has no set type).
+                Payload::Set(items) => {
+                    let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
+                    format!("[{}]", parts.join(","))
+                }
                 Payload::Map(entries) => {
                     let parts: Vec<String> = entries
                         .iter()
@@ -501,6 +550,8 @@ impl Value {
                 "function"
             } else if self.is_list() {
                 "list"
+            } else if self.is_set() {
+                "set"
             } else if self.is_map() {
                 "map"
             } else if self.is_object() {

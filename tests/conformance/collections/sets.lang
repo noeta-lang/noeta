@@ -1,0 +1,27 @@
+// Set: construction via to_set() (sorted + de-duplicated), len, membership, union,
+// intersection, and deterministic (sorted) iteration — identical across both backends.
+// expect: stdout "{1, 2, 3}"
+// expect: stdout "{\"a\", \"b\"}"
+// expect: stdout "3"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "{1, 2, 3, 4}"
+// expect: stdout "{2, 3}"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "3"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+echo [3, 1, 2, 1, 3].to_set();
+echo ["b", "a", "b"].to_set();
+echo len([3, 1, 2, 1, 3].to_set());
+echo [1, 2, 3].to_set().contains(2);
+echo [1, 2, 3].to_set().contains(9);
+echo [1, 2].to_set().union([3, 4].to_set());
+echo [1, 2, 3].to_set().intersection([2, 3, 4].to_set());
+for x in [3, 1, 2].to_set() {
+    echo x;
+}
+echo [1, 2, 3].to_set() == [3, 2, 1, 1].to_set();
+echo [1, 2, 3].to_set() == [1, 2].to_set();

@@ -673,6 +673,8 @@ impl Interpreter {
         let iterable_value = self.eval_expr(iterable)?;
         let elements = match &iterable_value {
             Value::List(items) => (**items).clone(),
+            // A set iterates in its canonical (sorted) order — deterministic, like the VM.
+            Value::Set(items) => (**items).clone(),
             // Iterating a map yields its values, in deterministic key order.
             Value::Map(entries) => entries.values().cloned().collect(),
             // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
@@ -1361,6 +1363,12 @@ impl Interpreter {
         {
             return self.call_list_method(method, items, name, &args, span);
         }
+        // Ring 1 set methods (contains/union/intersection).
+        if let Value::Set(items) = &receiver
+            && let Some(method) = lang_stdlib::SetMethod::from_name(name)
+        {
+            return self.call_set_method(method, items, name, &args, span);
+        }
         // Ring 1 map methods (keys/values/has).
         if let Value::Map(entries) = &receiver
             && let Some(method) = lang_stdlib::MapMethod::from_name(name)
@@ -1370,6 +1378,7 @@ impl Interpreter {
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("count", Value::Set(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
             ("count", Value::Map(entries)) if arity_ok => Some(Value::Int(entries.len() as i64)),
             ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
             ("enumerate", Value::List(items)) if arity_ok => {
@@ -1438,7 +1447,7 @@ impl Interpreter {
                     .iter()
                     .any(|item| compare_primitive(&items[0], item).is_none())
                 {
-                    let error = lang_stdlib::unorderable_error();
+                    let error = lang_stdlib::unorderable_error(name);
                     return Err(self.runtime_error(
                         std_error_code(error.kind),
                         span,
@@ -1478,6 +1487,70 @@ impl Interpreter {
                     Some(value) => builtin_enum("Option", "some", vec![value.clone()]),
                     None => builtin_enum("Option", "none", Vec::new()),
                 })
+            }
+            lang_stdlib::ListMethod::ToSet => {
+                self.expect_std_arity(name, args, 0, span)?;
+                match canonical_set(items) {
+                    Some(canonical) => Ok(Value::Set(Rc::new(canonical))),
+                    None => {
+                        let error = lang_stdlib::unorderable_error(name);
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+        }
+    }
+
+    /// A Ring 1 set method (`contains`/`union`/`intersection`). Mirrors the VM's
+    /// `call_set_method`. The receiver `items` are already canonical (sorted, de-duplicated).
+    fn call_set_method(
+        &mut self,
+        method: lang_stdlib::SetMethod,
+        items: &[Value],
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        match method {
+            lang_stdlib::SetMethod::Contains => {
+                self.expect_std_arity(name, args, 1, span)?;
+                Ok(Value::Bool(items.iter().any(|item| *item == args[0])))
+            }
+            lang_stdlib::SetMethod::Union => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let other = self.expect_std_set(name, &args[0], span)?;
+                let mut combined = items.to_vec();
+                combined.extend(other.iter().cloned());
+                // Both operands are valid sets, so every element is orderable.
+                let canonical = canonical_set(&combined).expect("set elements are orderable");
+                Ok(Value::Set(Rc::new(canonical)))
+            }
+            lang_stdlib::SetMethod::Intersection => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let other = self.expect_std_set(name, &args[0], span)?;
+                // `items` is already canonical, so filtering it preserves sorted, de-duplicated order.
+                let kept: Vec<Value> = items
+                    .iter()
+                    .filter(|item| other.iter().any(|o| *item == o))
+                    .cloned()
+                    .collect();
+                Ok(Value::Set(Rc::new(kept)))
+            }
+        }
+    }
+
+    /// Read a set argument for a set method, raising the shared `lang-stdlib` type error.
+    fn expect_std_set<'a>(
+        &mut self,
+        name: &str,
+        value: &'a Value,
+        span: Span,
+    ) -> Eval<&'a Rc<Vec<Value>>> {
+        match value {
+            Value::Set(items) => Ok(items),
+            _ => {
+                let error = lang_stdlib::type_error(name, "set");
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }
     }
@@ -1725,6 +1798,7 @@ impl Interpreter {
                 self.expect_arity(builtin, &args, 1, span)?;
                 match &args[0] {
                     Value::List(items) => Ok(Value::Int(items.len() as i64)),
+                    Value::Set(items) => Ok(Value::Int(items.len() as i64)),
                     Value::Map(entries) => Ok(Value::Int(entries.len() as i64)),
                     Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                     // A user object lights up the `Length` trait: `len(o)` dispatches to its
@@ -2078,7 +2152,7 @@ fn value_to_json(value: &Value) -> String {
     match value {
         Value::Bool(_) | Value::Int(_) | Value::Float(_) => value.display(),
         Value::Str(s) => json_string(s),
-        Value::List(items) => {
+        Value::List(items) | Value::Set(items) => {
             let parts: Vec<String> = items.iter().map(value_to_json).collect();
             format!("[{}]", parts.join(","))
         }
@@ -2152,6 +2226,26 @@ fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp::Ordering> 
             num(left)?.partial_cmp(&num(right)?)
         }
     }
+}
+
+/// Build a set's canonical form from `items`: every element must be mutually orderable (a single
+/// orderable primitive — int, float, or string); the result is sorted and de-duplicated. Returns
+/// `None` if any element is non-orderable or of a different kind, so the caller raises the shared
+/// unorderable error. Mirrors the VM's `canonical_set` so both backends build identical sets.
+fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
+    if items.is_empty() {
+        return Some(Vec::new());
+    }
+    if items
+        .iter()
+        .any(|item| compare_primitive(&items[0], item).is_none())
+    {
+        return None;
+    }
+    let mut canonical = items.to_vec();
+    canonical.sort_by(|a, b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
+    canonical.dedup_by(|a, b| compare_primitive(a, b) == Some(std::cmp::Ordering::Equal));
+    Some(canonical)
 }
 
 /// At a function-call boundary, turn a `?`-induced early return into the call's value;

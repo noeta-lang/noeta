@@ -184,6 +184,11 @@ fn values_equal(left: Value, right: Value) -> bool {
             && sa.variant == sb.variant
             && slices_equal(&left.enum_data().unwrap(), &right.enum_data().unwrap());
     }
+    // Sets compare structurally by their canonical (sorted, de-duplicated) elements, matching
+    // the tree-walker's `Value::Set` equality.
+    if left.is_set() && right.is_set() {
+        return slices_equal(&left.set_items().unwrap(), &right.set_items().unwrap());
+    }
     false
 }
 

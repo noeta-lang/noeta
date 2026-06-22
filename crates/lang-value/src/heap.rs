@@ -69,9 +69,19 @@ pub(crate) enum Payload {
     Int(i64),
     Closure(u32),
     List(Vec<Value>),
+    /// A set, stored as its canonical (sorted, de-duplicated) element vector — so iteration,
+    /// display, and equality are deterministic and identical to the tree-walker. It owns one
+    /// reference to each element, freed like a list's.
+    Set(Vec<Value>),
     Map(BTreeMap<String, Value>),
-    Object { shape: Rc<Shape>, slots: Vec<Value> },
-    Enum { shape: Rc<Shape>, data: Vec<Value> },
+    Object {
+        shape: Rc<Shape>,
+        slots: Vec<Value>,
+    },
+    Enum {
+        shape: Rc<Shape>,
+        data: Vec<Value>,
+    },
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
@@ -143,6 +153,7 @@ pub(crate) fn free(value: Value) {
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
     match &boxed.payload {
         Payload::List(items)
+        | Payload::Set(items)
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => {
             for &element in items {
@@ -223,6 +234,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
     };
     match &obj.payload {
         Payload::List(items)
+        | Payload::Set(items)
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),

@@ -27,6 +27,9 @@ pub enum Value {
     Str(String),
     /// An immutable list. `Rc` keeps copies cheap (map/filter produce new lists).
     List(Rc<Vec<Value>>),
+    /// An immutable set, held in canonical (sorted, de-duplicated) order so iteration,
+    /// display, and equality are deterministic and identical to the VM's `Payload::Set`.
+    Set(Rc<Vec<Value>>),
     /// An immutable string-keyed map. `BTreeMap` gives deterministic iteration order.
     Map(Rc<BTreeMap<String, Value>>),
     /// A user-defined function or closure.
@@ -57,6 +60,12 @@ impl Value {
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(Value::repr).collect();
                 format!("[{}]", parts.join(", "))
+            }
+            // Braces with no key colons (`{1, 2, 3}`) distinguish a set from a non-empty map;
+            // an empty set is `{}`, like an empty map.
+            Value::Set(items) => {
+                let parts: Vec<String> = items.iter().map(Value::repr).collect();
+                format!("{{{}}}", parts.join(", "))
             }
             Value::Map(entries) => {
                 let parts: Vec<String> = entries
@@ -92,6 +101,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Str(_) => "string",
             Value::List(_) => "list",
+            Value::Set(_) => "set",
             Value::Map(_) => "map",
             Value::Function(_) | Value::Builtin(_) => "function",
             Value::EnumType(_) => "enum type",
@@ -111,6 +121,7 @@ impl fmt::Debug for Value {
             Value::Float(x) => write!(f, "Float({x})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
             Value::List(items) => write!(f, "List({items:?})"),
+            Value::Set(items) => write!(f, "Set({items:?})"),
             Value::Map(entries) => write!(f, "Map({entries:?})"),
             Value::Function(_) => write!(f, "Function(<fn>)"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
@@ -131,6 +142,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
+            (Value::Set(a), Value::Set(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Enum(a), Value::Enum(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => a == b,

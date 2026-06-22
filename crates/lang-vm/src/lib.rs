@@ -296,7 +296,7 @@ impl<'m> Vm<'m> {
                     .iter()
                     .any(|&item| compare_primitive(items[0], item).is_none())
                 {
-                    let error = lang_stdlib::unorderable_error();
+                    let error = lang_stdlib::unorderable_error(name);
                     return Err(self.error(stdlib_error_code(error.kind), span, error.message));
                 }
                 let mut sorted = items;
@@ -341,6 +341,92 @@ impl<'m> Vm<'m> {
                     }
                     None => make_none(),
                 })
+            }
+            lang_stdlib::ListMethod::ToSet => {
+                self.stdlib_arity(name, args, 0, span)?;
+                match canonical_set(&items) {
+                    Some(canonical) => {
+                        for &element in &canonical {
+                            retain(element);
+                        }
+                        Ok(Value::set(canonical))
+                    }
+                    None => {
+                        let error = lang_stdlib::unorderable_error(name);
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+        }
+    }
+
+    /// A Ring 1 set method (`contains`/`union`/`intersection`). Mirrors the tree-walker's
+    /// `call_set_method`. The receiver's elements (from `set_items`) are already canonical and
+    /// shared (not retained); any element placed into a new set is retained first.
+    fn call_set_method(
+        &mut self,
+        set: Value,
+        method: lang_stdlib::SetMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        let items = set.set_items().expect("set receiver");
+        match method {
+            lang_stdlib::SetMethod::Contains => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let target = args[0];
+                let found = items.iter().any(|&item| {
+                    apply_binary(BinaryOp::Eq, item, target)
+                        .ok()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                });
+                Ok(Value::bool(found))
+            }
+            lang_stdlib::SetMethod::Union => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let other = self.stdlib_set(name, args[0], span)?;
+                let mut combined = items;
+                combined.extend(other);
+                // Both operands are valid sets, so every element is orderable.
+                let canonical = canonical_set(&combined).expect("set elements are orderable");
+                for &element in &canonical {
+                    retain(element);
+                }
+                Ok(Value::set(canonical))
+            }
+            lang_stdlib::SetMethod::Intersection => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let other = self.stdlib_set(name, args[0], span)?;
+                // `items` is already canonical, so filtering preserves sorted, de-duplicated order.
+                let kept: Vec<Value> = items
+                    .into_iter()
+                    .filter(|&item| {
+                        other.iter().any(|&o| {
+                            apply_binary(BinaryOp::Eq, item, o)
+                                .ok()
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false)
+                        })
+                    })
+                    .collect();
+                for &element in &kept {
+                    retain(element);
+                }
+                Ok(Value::set(kept))
+            }
+        }
+    }
+
+    /// Read a set argument for a set method, raising the shared `lang-stdlib` type error. Returns
+    /// the set's canonical elements (shared, not retained).
+    fn stdlib_set(&mut self, name: &str, value: Value, span: Span) -> Result<Vec<Value>, Abort> {
+        match value.set_items() {
+            Some(items) => Ok(items),
+            None => {
+                let error = lang_stdlib::type_error(name, "set");
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
     }
@@ -606,9 +692,14 @@ impl<'m> Vm<'m> {
                             continue;
                         }
                     }
-                    // Snapshot the elements to iterate (a list's elements, or a map's values
-                    // in sorted-key order), each retained so the loop owns them independently.
-                    let snapshot = match v.list_items().or_else(|| v.map_values()) {
+                    // Snapshot the elements to iterate (a list's elements, a set's canonical
+                    // elements, or a map's values in sorted-key order), each retained so the loop
+                    // owns them independently.
+                    let snapshot = match v
+                        .list_items()
+                        .or_else(|| v.set_items())
+                        .or_else(|| v.map_values())
+                    {
                         Some(elements) => {
                             for &e in &elements {
                                 retain(e);
@@ -892,6 +983,18 @@ impl<'m> Vm<'m> {
                         frames[top].pc += 1;
                         continue;
                     }
+                    // Ring 1 set methods (contains/union/intersection).
+                    if v.is_set()
+                        && let Some(set_method) = lang_stdlib::SetMethod::from_name(method)
+                    {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        let value =
+                            self.call_set_method(v, set_method, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // Ring 1 map methods (keys/values/has).
                     if v.is_map()
                         && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
@@ -909,6 +1012,7 @@ impl<'m> Vm<'m> {
                         None
                     } else if method == "count" {
                         v.list_len()
+                            .or_else(|| v.set_len())
                             .or_else(|| v.map_len())
                             .or_else(|| v.as_string().map(|s| s.chars().count()))
                             .map(|n| Value::int(n as i64))
@@ -1710,6 +1814,7 @@ impl<'m> Vm<'m> {
                 let v = args[0];
                 match v
                     .list_len()
+                    .or_else(|| v.set_len())
                     .or_else(|| v.map_len())
                     .or_else(|| v.as_string().map(|s| s.chars().count()))
                 {
@@ -1886,6 +1991,27 @@ fn stdlib_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
         }
         lang_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
     }
+}
+
+/// Build a set's canonical form from `items`: every element must be mutually orderable (a single
+/// orderable primitive — int, float, or string); the result is sorted and de-duplicated. Returns
+/// `None` if any element is non-orderable or of a different kind. Mirrors the tree-walker's
+/// `canonical_set` so both backends build identical sets. The returned values are still shared
+/// (not retained) — the caller retains those it keeps.
+fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
+    if items.is_empty() {
+        return Some(Vec::new());
+    }
+    if items
+        .iter()
+        .any(|&item| compare_primitive(items[0], item).is_none())
+    {
+        return None;
+    }
+    let mut canonical = items.to_vec();
+    canonical.sort_by(|&a, &b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
+    canonical.dedup_by(|&mut a, &mut b| compare_primitive(a, b) == Some(std::cmp::Ordering::Equal));
+    Some(canonical)
 }
 
 /// Build a built-in `Ordering` enum value (`Ordering.Less`/`Equal`/`Greater`) with a fresh shape.
