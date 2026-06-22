@@ -538,11 +538,35 @@ impl<'m> Vm<'m> {
                     }
                 }
             }
+            "append" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                let content = self.stdlib_string(func, args[1], span)?;
+                match self.host.fs_append(&path, &content) {
+                    Ok(()) => Ok(Value::unit()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
             "read" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;
                 match self.host.fs_read(&path) {
                     Ok(content) => Ok(Value::string(&content)),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "read_lines" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                match self.host.fs_read(&path) {
+                    Ok(content) => {
+                        let lines = content.lines().map(Value::string).collect();
+                        Ok(Value::list(lines))
+                    }
                     Err(error) => {
                         Err(self.error(stdlib_error_code(error.kind), span, error.message))
                     }

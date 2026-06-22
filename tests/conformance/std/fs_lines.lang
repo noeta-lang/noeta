@@ -1,0 +1,15 @@
+// fs streaming surface (M2.4): line-oriented read and append over the sandbox VFS, identical on
+// both backends. `read_lines` splits on newlines (no trailing empty); `append` grows the file.
+// expect: stdout "alpha"
+// expect: stdout "beta"
+// expect: stdout "[\"alpha\", \"beta\", \"gamma\"]"
+// expect: exit 0
+use std.{fs};
+
+fs.write("log.txt", "alpha\nbeta\n");
+for line in fs.read_lines("log.txt") {
+    echo line;
+}
+
+fs.append("log.txt", "gamma\n");
+echo fs.read_lines("log.txt");

@@ -29,6 +29,7 @@ pub trait Host {
     // can surface disk errors; the in-memory `SandboxHost` simply never errors.
     // Directory hierarchy + streaming arrive in M2.4.
     fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError>;
+    fn fs_append(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_read(&self, path: &str) -> Result<String, StdError>;
     fn fs_exists(&self, path: &str) -> bool;
     fn fs_remove(&mut self, path: &str) -> Result<bool, StdError>;
@@ -88,6 +89,11 @@ impl Default for SandboxHost {
 impl Host for SandboxHost {
     fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError> {
         self.fs.write(path, content);
+        Ok(())
+    }
+
+    fn fs_append(&mut self, path: &str, content: &str) -> Result<(), StdError> {
+        self.fs.append(path, content);
         Ok(())
     }
 

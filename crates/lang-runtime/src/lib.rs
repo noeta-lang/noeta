@@ -65,6 +65,21 @@ impl Host for RealHost {
             .map_err(|e| io_error(format!("cannot write `{path}`: {e}")))
     }
 
+    fn fs_append(&mut self, path: &str, content: &str) -> Result<(), StdError> {
+        self.runtime.block_on(async {
+            use tokio::io::AsyncWriteExt;
+            let mut file = tokio::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(path)
+                .await
+                .map_err(|e| io_error(format!("cannot open `{path}` for append: {e}")))?;
+            file.write_all(content.as_bytes())
+                .await
+                .map_err(|e| io_error(format!("cannot append to `{path}`: {e}")))
+        })
+    }
+
     fn fs_read(&self, path: &str) -> Result<String, StdError> {
         self.runtime
             .block_on(tokio::fs::read_to_string(path))
@@ -159,6 +174,9 @@ mod tests {
         host.fs_write(&path, "hello disk").unwrap();
         assert!(host.fs_exists(&path));
         assert_eq!(host.fs_read(&path).unwrap(), "hello disk");
+        // Append grows the real file.
+        host.fs_append(&path, " + more").unwrap();
+        assert_eq!(host.fs_read(&path).unwrap(), "hello disk + more");
         assert!(host.fs_remove(&path).unwrap());
         assert!(!host.fs_exists(&path));
         // Reading a now-missing file is an Io error (E0021).

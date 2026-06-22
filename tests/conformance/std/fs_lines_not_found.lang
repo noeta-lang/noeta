@@ -1,0 +1,4 @@
+// read_lines of a missing path is the same runtime E0021 as fs.read, identical on both backends.
+// expect: error E0021 at 4:6
+use std.{fs};
+echo fs.read_lines("ghost.txt");

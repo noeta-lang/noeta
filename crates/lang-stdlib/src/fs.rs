@@ -43,6 +43,14 @@ impl Vfs {
         self.files.insert(path.to_string(), content.to_string());
     }
 
+    /// Append to the file at `path`, creating it (empty) first if it does not exist.
+    pub fn append(&mut self, path: &str, content: &str) {
+        self.files
+            .entry(path.to_string())
+            .or_default()
+            .push_str(content);
+    }
+
     /// Read the file at `path`, or an [`ErrorKind::Io`] error (→ `E0021`) if it does not exist.
     pub fn read(&self, path: &str) -> Result<String, StdError> {
         match self.files.get(path) {
@@ -87,6 +95,17 @@ mod tests {
         // Overwrite replaces.
         vfs.write("a.txt", "world");
         assert_eq!(vfs.read("a.txt").unwrap(), "world");
+    }
+
+    #[test]
+    fn append_creates_then_grows() {
+        let mut vfs = Vfs::new();
+        // Append to a missing path creates it.
+        vfs.append("log.txt", "a\n");
+        assert_eq!(vfs.read("log.txt").unwrap(), "a\n");
+        // Subsequent appends grow it.
+        vfs.append("log.txt", "b\n");
+        assert_eq!(vfs.read("log.txt").unwrap(), "a\nb\n");
     }
 
     #[test]

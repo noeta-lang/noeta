@@ -1623,6 +1623,30 @@ impl Interpreter {
                     }
                 }
             }
+            "append" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?.to_string();
+                let content = self.expect_std_string(func, &args[1], span)?.to_string();
+                match self.host.fs_append(&path, &content) {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "read_lines" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?;
+                match self.host.fs_read(path) {
+                    Ok(content) => {
+                        let lines = content.lines().map(|l| Value::Str(l.to_string())).collect();
+                        Ok(Value::List(Rc::new(lines)))
+                    }
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
             "read" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?;

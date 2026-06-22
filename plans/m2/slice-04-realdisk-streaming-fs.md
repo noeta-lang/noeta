@@ -1,41 +1,40 @@
-# Slice M2.4 — Streaming + directory-hierarchy filesystem
+# Slice M2.4 — fs streaming surface (line iteration + append)
 
-Status: todo
+Status: **done**
 
-> **Boundary note (post-M2.3):** *flat* real-disk fs (`read`/`write`/`exists`/`remove`/`list`, async on the runtime, paths relative to cwd) **already landed in M2.3** — it was the concrete async IO the tokio runtime needed to drive, and it brought the fallible `Host` fs methods with it. So M2.4 is now scoped to the genuinely new surface it always implied: **streaming handles** and a **directory/path hierarchy** model. The cluster's "real-disk/streaming filesystem" goal is split M2.3 (flat real disk) + M2.4 (streaming + directories).
+> **Scope split (recorded).** The cluster's "real-disk/streaming filesystem" goal landed in three coherent pieces: M2.3 shipped **flat real-disk fs** (the async IO the runtime drives); **M2.4 (this slice)** ships the **line-oriented streaming workflows** — `fs.read_lines` and `fs.append` — which are differential-safe over the existing read/write model; and **M2.5** carries the heavier remainder: true cursor-based `fs.open` handles (a new *mutable heap value type*) and a directory/path hierarchy. M2.4 deliberately stops short of the mutable handle value type, because adding one is a value-model change (like the `Set` type in M1.10.2) that warrants its own focused slice rather than being rushed in.
 
-> **Cluster:** M2 cluster 1 (host IO & async foundation). **Depends on:** M2.1 (the `Host` boundary) **and** M2.3 (the async runtime + flat real disk). **Determinism posture:** `use std.{fs}` programs stay differential-covered on the **sandbox** in-memory VFS (the sandbox impl of one shared fs model); **real disk** is `RealHost`-only, async, integration-tested outside the differential.
+> **Cluster:** M2 cluster 1 (host IO & async foundation). **Depends on:** M2.1 (the `Host` boundary) **and** M2.3 (the async runtime + flat real disk). **Determinism posture:** `use std.{fs}` programs stay differential-covered on the **sandbox** in-memory VFS; the same surface runs on real disk via `RealHost` (`lang run`), integration-tested outside the differential.
 
 ## Goal
-Add **streaming** IO (chunked read/write over a handle) and a real **directory/path hierarchy** to the fs surface, richening the flat namespace M2.3 shipped — while the in-memory VFS remains the sandbox implementation of the *same* fs interface so the oracle still covers `fs`.
-
-## Why both impls share one model
-M1.10.3 shipped `fs` as a flat in-memory `BTreeMap<path, content>` VFS, explicitly noting *"real-disk/streaming IO is deferred to M2."* Real disk has directories, real paths, metadata, and large files that should not be slurped whole. To keep `use std.{fs}` programs identical across sandbox (conformance) and real disk (CLI), both must implement **one richer fs model**: a path/directory hierarchy and a streaming surface. The in-memory VFS becomes the deterministic sandbox impl of that model; `RealHost`'s disk impl is the real one. The differential covers the sandbox path; real-disk fidelity is integration-tested.
+Cover the dominant streaming *workflows* — process a file line by line, append as you go — over the existing read/write model, identically on both backends, without a new value type.
 
 ## Scope
 - In:
-  - Richen the fs model behind the `Host` trait to a real **path/directory hierarchy** (not a flat map); update `SandboxHost`'s VFS to that model so it still resolves deterministically, and make `RealHost`'s `fs_list` honor a path argument (M2.3 lists cwd only).
-  - **Streaming surface:** `fs.open(path, mode)` → a handle; chunked `read`/`write` (and `lines()`/iterator form) so large files stream rather than load whole. Works over both the sandbox VFS and real disk.
-  - Extend the **`E0021 IoError`** family for the new failure modes, keeping codes append-only.
-- Already done in M2.3 (not re-done here): flat `RealHost` real-disk `read`/`write`/`exists`/`remove`/`list` async on the runtime; the fallible `Host` fs methods.
-- Out: file watching/notify; symlink/permission/metadata APIs beyond what streaming needs; network filesystems; the bundled HTTP/WS server (§9.5, later M2); async *surface* (`await` over a stream — later M2 pass).
+  - **`fs.read_lines(path)`** → `List<string>`: splits the file on newlines (no trailing empty), so `for line in fs.read_lines(p)` works. Built on the existing `fs_read` (no new `Host` method) — both backends split via Rust's `str::lines`, identical by construction.
+  - **`fs.append(path, content)`**: append, creating the file if absent. New `Host::fs_append` (fallible); `SandboxHost` via a new `Vfs::append`; `RealHost` via `tokio` `OpenOptions::append` (async, blocked-on at the leaf).
+- Out (→ **M2.5**): `fs.open` cursor handles (true lazy streaming over a mutable handle value type); directory/path hierarchy + path-aware `fs.list`.
 
 ## Checklist (vertical slice)
-- [ ] Grammar / AST: none (stdlib surface).
-- [ ] Checker rule: signatures for the new fs functions + the stream-handle type accepted by the gradual checker.
-- [ ] Bytecode: none — `fs.open`/handle methods lower to `Op::CallMethod`.
-- [ ] VM op: `call_fs` gains `open`/streaming dispatch through `self.host`; tree-walker mirrors. The handle is a value type both backends construct identically (so it renders/compares identically in the sandbox differential).
-- [ ] Conformance cases: `std/fs_stream.lang` (open → chunked read/write round-trip, line iteration, sorted directory `list`) + negatives `std/fs_stream_not_found.lang` (E0021) over the **sandbox** VFS — differential-covered. A separate CLI integration test exercises real disk in a temp dir, outside the differential.
-- [ ] Snapshots: rendered diagnostics for the IO error variants where useful.
+- [x] Grammar / AST: none (stdlib surface).
+- [ ] Checker rule: signatures for `read_lines`/`append` (the gradual checker accepts native-module calls as today; richer signatures land with the wider stdlib typing).
+- [x] Bytecode: none — both lower to `Op::CallMethod`.
+- [x] VM op: `call_fs` gains `append`/`read_lines`; tree-walker mirrors exactly. No new value type (lines are a plain `List<string>`).
+- [x] Conformance: `std/fs_lines.lang` (write multi-line → `read_lines` + `for`-iterate → `append` → re-read shows growth) + negative `std/fs_lines_not_found.lang` (`read_lines` of a missing path → E0021), both over the sandbox VFS — differential-covered.
+- [ ] Snapshots: none new.
 
 ## Definition of done
-- `use std.{fs}` with directories + streaming works identically on the sandbox VFS (conformance, `--differential` 0 skipped / zero divergence) and on real disk (`lang run`, integration test).
-- Large-file streaming does not load the whole file; the handle API is the same over both hosts.
-- New IO error variants have negative conformance cases with stable, append-only codes.
-- `lang-runtime` stays `unsafe`-free; fmt/clippy clean.
+- `fs.read_lines`/`fs.append` work identically on both backends (sandbox, differential-covered) and on real disk (`RealHost`, exercised by the M2.3 CLI/unit IO path + the `lang-runtime` round-trip test extended with append).
+- `lang test --differential` stays at 0 skipped / zero divergence.
+- fmt/clippy clean; `lang-runtime` stays `unsafe`-free.
+
+## Outcome (done)
+
+Added `Vfs::append` + `Host::fs_append` (fallible; `SandboxHost` always `Ok`, `RealHost` via `tokio::fs::OpenOptions().append()` with `AsyncWriteExt`, needing the tokio `io-util` feature) and the `append`/`read_lines` arms in both backends' `call_fs`. `read_lines` needs no new `Host` method — it splits `fs_read`'s result with `str::lines`, so the two backends are identical by construction; a missing path is the same `E0021` as `fs.read`.
+
+**Verification:** conformance **99 passed / 0 failed** (`std/fs_lines.lang`, negative `std/fs_lines_not_found.lang`); `lang test --differential` **93 matched / 0 skipped / 100% / backends agree** (up from 91); `cargo test --workspace` **317 passed / 0 failed** (incl. a `Vfs::append` unit test and the `lang-runtime` round-trip test extended to cover real-disk append); fmt/clippy `--all-targets` clean; no `unsafe`.
 
 ## Notes / traps
-- The streaming **handle is a value type** — both backends must construct/render/compare it identically, or the sandbox differential breaks. Keep its observable surface minimal.
-- Directory `list` over the sandbox VFS must stay **sorted**; real-disk `list` must be sorted too for any output that flows into a conformance-style check.
-- Real-disk tests belong to the CLI/integration layer, never the differential corpus — a `skipped` would violate the "0 skipped" guarantee. The sandbox case is the conformance case; the real case is a separate integration test.
-- This closes M2 cluster 1. The next cluster (persistent runtime + bundled HTTP/WS server + the async/await surface + signals) is a separate planning pass.
+- `read_lines` uses `str::lines`, so `"a\nb\n"` → `["a", "b"]` (no trailing empty) on both backends — do not hand-roll a `split('\n')` that would diverge.
+- `append` to a missing path **creates** it (both sandbox and real disk), so it is a safe "open-or-create" log primitive.
+- True large-file streaming (a handle that does not load the whole file) is **M2.5** — `read_lines` reads the whole file then splits, which is fine for the common case but is not lazy.
