@@ -1,0 +1,9 @@
+// Importing a module-private (non-`pub`) declaration is a hard error (E0019). Once the
+// namespace is found, resolution is strict: only `pub` declarations are importable.
+// expect: error E0019 at 7:16
+// expect: exit 1
+namespace App.Main;
+
+use App.Models.Secret;
+
+echo "unreachable";

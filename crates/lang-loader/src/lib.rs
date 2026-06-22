@@ -21,7 +21,7 @@ use std::io;
 use std::path::Path;
 
 use lang_ast::{Program, Stmt, UseName};
-use lang_diagnostics::Diagnostic;
+use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId};
@@ -149,14 +149,24 @@ pub fn link(
     // real declaration and trimming it from the `use` so the runtime makes no opaque stub for it.
     let mut imported: Vec<Stmt> = Vec::new();
     let mut linked_stmts: Vec<Stmt> = Vec::with_capacity(entry_parsed.program.stmts.len());
+    let mut errors: Vec<LoadDiagnostic> = Vec::new();
     for stmt in entry_parsed.program.stmts {
         match stmt {
             Stmt::Use { path, names, span } => {
                 let mut unresolved: Vec<UseName> = Vec::new();
                 for name in names {
                     match resolve(&modules, &path, &name.name) {
-                        Some(decl) => imported.push(decl),
-                        None => unresolved.push(name),
+                        Resolution::Resolved(decl) => imported.push(*decl),
+                        // No module declares this namespace: fall back to the opaque stub (M0).
+                        Resolution::NoModule => unresolved.push(name),
+                        // The namespace exists but does not export the name — a hard error: a
+                        // private declaration is not importable, and an absent one is a typo.
+                        Resolution::Private => {
+                            errors.push(import_error(&entry, &path, &name, Visibility::Private))
+                        }
+                        Resolution::Missing => {
+                            errors.push(import_error(&entry, &path, &name, Visibility::Missing))
+                        }
                     }
                 }
                 // Keep the `use` only for names no module provided (opaque-stub fallback).
@@ -170,6 +180,9 @@ pub fn link(
             }
             other => linked_stmts.push(other),
         }
+    }
+    if !errors.is_empty() {
+        return Err(errors);
     }
 
     let mut stmts = imported;
@@ -195,15 +208,73 @@ fn module_namespace(program: &Program) -> Option<Vec<String>> {
     })
 }
 
-/// Find the declaration named `name` exported by the module whose namespace is `path`. Returns a
-/// clone of the declaration statement, ready to merge into the linked program.
-fn resolve(modules: &[ParsedModule], path: &[String], name: &str) -> Option<Stmt> {
-    let module = modules.iter().find(|m| m.namespace == path)?;
-    module
+/// The outcome of resolving one imported name against the loaded modules.
+enum Resolution {
+    /// The namespace exists and exports the name (a `pub` declaration): merge this clone. Boxed
+    /// because the declaration statement is far larger than the unit variants.
+    Resolved(Box<Stmt>),
+    /// The namespace exists and declares the name, but it is not `pub`.
+    Private,
+    /// The namespace exists but declares no such name.
+    Missing,
+    /// No loaded module declares the namespace — fall back to the opaque stub (M0 behavior).
+    NoModule,
+}
+
+/// Resolve the name `name` of namespace `path` against the loaded modules, honoring `pub`
+/// visibility: only a `pub` declaration is importable.
+fn resolve(modules: &[ParsedModule], path: &[String], name: &str) -> Resolution {
+    let Some(module) = modules.iter().find(|m| m.namespace == path) else {
+        return Resolution::NoModule;
+    };
+    match module
         .stmts
         .iter()
         .find(|stmt| decl_name(stmt) == Some(name))
-        .cloned()
+    {
+        Some(decl) if decl_is_public(decl) => Resolution::Resolved(Box::new(decl.clone())),
+        Some(_) => Resolution::Private,
+        None => Resolution::Missing,
+    }
+}
+
+/// Which `E0019` an unresolved import is.
+enum Visibility {
+    Private,
+    Missing,
+}
+
+/// Build the `E0019` diagnostic for an import the resolved module does not export, pointed at the
+/// imported name in the entry's `use`.
+fn import_error(
+    entry: &Source,
+    path: &[String],
+    name: &UseName,
+    kind: Visibility,
+) -> LoadDiagnostic {
+    let namespace = path.join(".");
+    let message = match kind {
+        Visibility::Private => {
+            format!("`{}` is private to module `{namespace}`", name.name)
+        }
+        Visibility::Missing => format!("module `{namespace}` has no export `{}`", name.name),
+    };
+    LoadDiagnostic {
+        source: entry.clone(),
+        diagnostic: Diagnostic::error(DiagnosticCode::UnresolvedImport, name.span, message),
+    }
+}
+
+/// Whether a top-level declaration is `pub` (importable). Statements that declare no name are
+/// never importable.
+fn decl_is_public(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Class(d) => d.is_public,
+        Stmt::Record(d) => d.is_public,
+        Stmt::Enum(d) => d.is_public,
+        Stmt::Fn(d) => d.is_public,
+        _ => false,
+    }
 }
 
 /// The name a top-level declaration introduces (a class, record, enum, or function); `None` for
@@ -233,7 +304,7 @@ mod tests {
     fn links_a_used_module_declaration() {
         let models = module(
             "models.lang",
-            "namespace App.Models;\nclass User {\n  name: string\n  id: int\n  fn new(name: string, id: int): User { return User { name: name, id: id }; }\n}\n",
+            "namespace App.Models;\npub class User {\n  name: string\n  id: int\n  fn new(name: string, id: int): User { return User { name: name, id: id }; }\n}\n",
         );
         let entry =
             "namespace App.Main;\nuse App.Models.User;\nu = User.new(\"Ada\", 7);\necho u.name;\n";
@@ -267,6 +338,32 @@ mod tests {
                 .iter()
                 .any(|s| matches!(s, Stmt::Use { .. }))
         );
+    }
+
+    #[test]
+    fn importing_a_private_declaration_is_e0019() {
+        // The namespace exists and declares `User`, but it is not `pub` → a hard error.
+        let models = module(
+            "models.lang",
+            "namespace App.Models;\nclass User { id: int }\n",
+        );
+        let entry = "use App.Models.User;\n";
+        let errs = link("main.lang", entry, std::slice::from_ref(&models)).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].diagnostic.code, DiagnosticCode::UnresolvedImport);
+    }
+
+    #[test]
+    fn importing_a_missing_export_is_e0019() {
+        // The namespace exists but declares no `Ghost`.
+        let models = module(
+            "models.lang",
+            "namespace App.Models;\npub class User { id: int }\n",
+        );
+        let entry = "use App.Models.Ghost;\n";
+        let errs = link("main.lang", entry, std::slice::from_ref(&models)).unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert_eq!(errs[0].diagnostic.code, DiagnosticCode::UnresolvedImport);
     }
 
     #[test]

@@ -57,6 +57,8 @@ pub enum TokenKind {
     NamespaceKw,
     #[token("use")]
     UseKw,
+    #[token("pub")]
+    PubKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -165,6 +167,7 @@ impl TokenKind {
             TokenKind::ImplKw => "ImplKw",
             TokenKind::NamespaceKw => "NamespaceKw",
             TokenKind::UseKw => "UseKw",
+            TokenKind::PubKw => "PubKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::IntLit => "IntLit",
@@ -226,6 +229,7 @@ impl TokenKind {
             TokenKind::ImplKw => "`impl`",
             TokenKind::NamespaceKw => "`namespace`",
             TokenKind::UseKw => "`use`",
+            TokenKind::PubKw => "`pub`",
             TokenKind::StringLit => "a string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::IntLit => "an integer literal",

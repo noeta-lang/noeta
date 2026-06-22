@@ -56,6 +56,9 @@ pub enum DiagnosticCode {
     InvalidAttribute,
     /// An index expression `m[k]` addressed a map with a key it does not contain.
     KeyNotFound,
+    /// A `use` named an import that the resolved module does not export — either no declaration of
+    /// that name, or one that is not `pub`.
+    UnresolvedImport,
 }
 
 impl DiagnosticCode {
@@ -80,6 +83,7 @@ impl DiagnosticCode {
         DiagnosticCode::IndexOutOfBounds,
         DiagnosticCode::InvalidAttribute,
         DiagnosticCode::KeyNotFound,
+        DiagnosticCode::UnresolvedImport,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -104,6 +108,7 @@ impl DiagnosticCode {
             DiagnosticCode::IndexOutOfBounds => "E0016",
             DiagnosticCode::InvalidAttribute => "E0017",
             DiagnosticCode::KeyNotFound => "E0018",
+            DiagnosticCode::UnresolvedImport => "E0019",
         }
     }
 

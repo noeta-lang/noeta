@@ -114,6 +114,30 @@ fn attach_decorators(stmt: Stmt, derives: Vec<(String, Span)>, attrs: Vec<Attrib
     }
 }
 
+/// Set a declaration's `pub` visibility (the keyword is parsed at the statement level, after any
+/// decorators, so it applies uniformly to classes, records, enums, and top-level functions).
+fn set_public(stmt: Stmt, is_public: bool) -> Stmt {
+    match stmt {
+        Stmt::Class(mut d) => {
+            d.is_public = is_public;
+            Stmt::Class(d)
+        }
+        Stmt::Record(mut d) => {
+            d.is_public = is_public;
+            Stmt::Record(d)
+        }
+        Stmt::Enum(mut d) => {
+            d.is_public = is_public;
+            Stmt::Enum(d)
+        }
+        Stmt::Fn(mut d) => {
+            d.is_public = is_public;
+            Stmt::Fn(d)
+        }
+        other => other,
+    }
+}
+
 /// Assemble a parsed `use` path into its dotted `path` prefix and imported `names`. With
 /// a `{ ... }` group the whole dotted run is the prefix; otherwise the last segment is the
 /// single imported name (`use App.Models.User;` → path `App.Models`, name `User`).
@@ -809,15 +833,18 @@ where
 
         // `fn name(params): Ret { body }` — a declaration (the `name` distinguishes it
         // from the `fn(...) =>` closure expression, which falls through to `expr`).
-        let fn_decl = just(T::FnKw)
-            .ignore_then(id.clone())
+        let fn_decl = just(T::PubKw)
+            .or_not()
+            .then_ignore(just(T::FnKw))
+            .then(id.clone())
             .then(params_parser(ctx))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
-            .map_with(|(((name_pair, params), ret), body), e| {
+            .map_with(|((((pub_kw, name_pair), params), ret), body), e| {
                 Stmt::Fn(FnDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
+                    is_public: pub_kw.is_some(),
                     params,
                     ret,
                     body,
@@ -873,6 +900,7 @@ where
                 Stmt::Enum(EnumDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
+                    is_public: false,
                     type_params,
                     backing,
                     variants,
@@ -911,6 +939,7 @@ where
                 Stmt::Record(RecordDecl {
                     name,
                     name_span,
+                    is_public: false,
                     type_params,
                     fields,
                     derives: Vec::new(),
@@ -944,6 +973,7 @@ where
             .map_with(|(((name_pair, params), ret), body), e| FnDecl {
                 name: name_pair.0,
                 name_span: name_pair.1,
+                is_public: false,
                 params,
                 ret,
                 body,
@@ -1007,6 +1037,7 @@ where
                 Stmt::Class(ClassDecl {
                     name,
                     name_span,
+                    is_public: false,
                     type_params,
                     fields,
                     methods,
@@ -1141,8 +1172,9 @@ where
         let attributed_type_decl = choice((derive_directive, attribute))
             .repeated()
             .collect::<Vec<_>>()
+            .then(just(T::PubKw).or_not())
             .then(choice((enum_decl, record_decl, class_decl)))
-            .map(move |(decorators, stmt)| {
+            .map(move |((decorators, pub_kw), stmt)| {
                 let mut derives: Vec<(String, Span)> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
                 for decorator in decorators {
@@ -1167,7 +1199,7 @@ where
                         Decorator::Attr(attr) => attrs.push(attr),
                     }
                 }
-                attach_decorators(stmt, derives, attrs)
+                set_public(attach_decorators(stmt, derives, attrs), pub_kw.is_some())
             });
 
         choice((
@@ -1350,6 +1382,18 @@ mod tests {
         // A non-generic declaration renders exactly as before (no angle brackets).
         let plain = pretty("class P { x: int }");
         assert!(plain.contains("(class P ["), "{plain}");
+    }
+
+    #[test]
+    fn parses_pub_visibility() {
+        // `pub` marks a declaration exported from its module (after any decorators).
+        assert!(pretty("pub class User { id: int }").contains("(class pub User ["));
+        assert!(pretty("pub type Pair = { a: int };").contains("(record pub Pair ["));
+        assert!(pretty("pub enum Color { Red; }").contains("(enum pub Color ["));
+        assert!(pretty("pub fn helper(): int { return 1; }").contains("(fn pub helper ["));
+        assert!(pretty("@derive(Comparable) pub type V = { n: int };").contains("(record pub V ["));
+        // A module-private declaration renders exactly as before.
+        assert!(pretty("class P { x: int }").contains("(class P ["));
     }
 
     #[test]

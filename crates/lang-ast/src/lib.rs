@@ -104,6 +104,9 @@ impl Stmt {
 pub struct RecordDecl {
     pub name: String,
     pub name_span: Span,
+    /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
+    /// default.
+    pub is_public: bool,
     /// Generic type parameters (`type Pair<A, B> = {...}`). Erased at runtime — they exist for
     /// the checker; empty for a non-generic type.
     pub type_params: Vec<String>,
@@ -159,6 +162,9 @@ pub struct ImplBlock {
 pub struct ClassDecl {
     pub name: String,
     pub name_span: Span,
+    /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
+    /// default.
+    pub is_public: bool,
     /// Generic type parameters (`class Box<T> {...}`). Erased at runtime — they exist for the
     /// checker; empty for a non-generic class.
     pub type_params: Vec<String>,
@@ -200,6 +206,9 @@ pub struct FieldDecl {
 pub struct EnumDecl {
     pub name: String,
     pub name_span: Span,
+    /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
+    /// default.
+    pub is_public: bool,
     /// Generic type parameters (`enum Tree<T> {...}`). Erased at runtime — they exist for the
     /// checker; empty for a non-generic enum.
     pub type_params: Vec<String>,
@@ -254,6 +263,9 @@ pub struct UseName {
 pub struct FnDecl {
     pub name: String,
     pub name_span: Span,
+    /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
+    /// default; meaningless for a method (only top-level declarations are importable).
+    pub is_public: bool,
     pub params: Vec<Param>,
     /// The declared return type, if any. Parsed but not yet checked in M0.
     pub ret: Option<TypeRef>,

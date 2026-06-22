@@ -169,7 +169,8 @@ impl Pretty for FnDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
         out.push_str(&format!(
-            "(fn {} [{}] {}",
+            "(fn {}{} [{}] {}",
+            pub_str(self.is_public),
             self.name,
             param_list(&self.params),
             span(self.span)
@@ -202,7 +203,8 @@ impl Pretty for EnumDecl {
             })
             .collect();
         out.push_str(&format!(
-            "({kind} {}{} [{}] {})",
+            "({kind} {}{}{} [{}] {})",
+            pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
             variants.join(" "),
@@ -229,12 +231,19 @@ fn type_params_str(params: &[String]) -> String {
     }
 }
 
+/// Render `pub ` for an exported declaration, or the empty string otherwise (so module-private
+/// declarations' pretty output is unchanged).
+fn pub_str(is_public: bool) -> &'static str {
+    if is_public { "pub " } else { "" }
+}
+
 impl Pretty for RecordDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
-            "(record {}{} [{}] {})",
+            "(record {}{}{} [{}] {})",
+            pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
             fields.join(" "),
@@ -248,7 +257,8 @@ impl Pretty for ClassDecl {
         indent(out, level);
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
-            "(class {}{} [{}] {}",
+            "(class {}{}{} [{}] {}",
+            pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
             fields.join(" "),

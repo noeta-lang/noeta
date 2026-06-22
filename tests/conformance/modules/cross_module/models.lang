@@ -2,7 +2,7 @@
 // statements — it is only `use`d by the entry (main.lang).
 namespace App.Models;
 
-class User {
+pub class User {
     name: string
     id: int
 
