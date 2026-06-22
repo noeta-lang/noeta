@@ -1,0 +1,16 @@
+// The entry module: `use App.Models.User` resolves to the real `User` class declared in the
+// sibling `models.lang` (not an opaque stub), so its constructor, fields, and methods are real.
+// The linker merges the resolved declaration into one program, so both backends run it
+// identically (the differential oracle).
+// expect: stdout "Ada"
+// expect: stdout "7"
+// expect: stdout "Hi, Ada"
+// expect: exit 0
+namespace App.Main;
+
+use App.Models.User;
+
+customer = User.new("Ada", 7);
+echo customer.name;
+echo customer.id;
+echo customer.greeting();

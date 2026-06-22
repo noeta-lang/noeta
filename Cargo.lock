@@ -517,6 +517,7 @@ dependencies = [
  "lang-diagnostics",
  "lang-eval",
  "lang-lexer",
+ "lang-loader",
  "lang-parser",
  "lang-span",
  "predicates",
@@ -540,12 +541,15 @@ name = "lang-conformance"
 version = "0.0.0"
 dependencies = [
  "insta",
+ "lang-ast",
  "lang-backend",
  "lang-check",
+ "lang-compiler",
  "lang-db",
  "lang-diagnostics",
  "lang-eval",
  "lang-lexer",
+ "lang-loader",
  "lang-parser",
  "lang-span",
  "lang-vm",
@@ -608,6 +612,17 @@ dependencies = [
  "lang-diagnostics",
  "lang-span",
  "logos",
+]
+
+[[package]]
+name = "lang-loader"
+version = "0.0.0"
+dependencies = [
+ "lang-ast",
+ "lang-diagnostics",
+ "lang-lexer",
+ "lang-parser",
+ "lang-span",
 ]
 
 [[package]]

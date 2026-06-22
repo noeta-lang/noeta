@@ -1,6 +1,18 @@
 # Slice M1.9 — Modules / namespaces / `use` resolution
 
-Status: todo
+Status: in progress (M1.9.1 done — multi-file loader + linker + real `use` resolution, both backends; M1.9.2 visibility/E0013/cross-module + M1.9.3 salsa module graph todo)
+
+## Approach (decided with the user)
+
+**Multi-file modules (faithful to the design doc's file = module model).** Each `.lang` file is a module declaring `namespace App.Models;`. A program is rooted at an *entry* file; its sibling `.lang` files are candidate modules. The entry's `use App.Models.{User}` resolves against modules' *declared* namespaces (not a path convention), and the new `lang-loader` crate **merges each resolved declaration into one `Program`** ahead of the entry's statements — so both backends run the linked program unchanged and the differential oracle is preserved by construction (no module-aware runtime). The conformance harness gained multi-file fixtures: a directory containing `main.lang` is one case (its siblings are that program's modules, not standalone cases).
+
+## M1.9.1 — done
+
+- [x] **`lang-loader` crate.** `load(entry_path)` reads the entry + its sibling `.lang` files, parses each (own `Source`/`SourceId`), builds a namespace→module map, resolves the entry's `use` declarations to real declarations, and returns one merged `Program` (`Linked`). `link(entry_name, entry_text, &[RawModule])` is the in-memory testable core. **Backward-compatible:** a `use` no loaded module provides is left in place, so the runtime keeps its M0 opaque-stub fallback — a lone file links to exactly itself, and the whole existing corpus is unaffected. A resolved name's `use` is trimmed so no opaque stub shadows the real declaration.
+- [x] **CLI + harness wiring.** `lang run <file>` loads + links via the loader. The conformance harness discovers a `main.lang`-containing directory as a single multi-file case (siblings are modules, not cases) and runs the merged program through check + the tree-walker; the differential runs the merged program through **both** backends directly (the single-`Source` salsa graph can't express the link yet — that's M1.9.3), proving the VM reproduces the linked program.
+- [x] **Conformance:** `modules/cross_module/` (`main.lang` `use`s `App.Models.User` from `models.lang`; the real class's constructor *and* a `greeting()` method run — an opaque stub has neither). `modules/namespace_and_use.lang` still passes on the opaque-stub fallback (single file, no sibling modules). Loader unit tests (resolve, opaque fallback, entry parse-error sourcing). Suite **67 passed**; differential **63 matched / 0 skipped / 100% / zero divergence**.
+
+## M1.9.2 / M1.9.3 — todo (see checklist below)
 
 ## Goal
 Replace M0's opaque `use`-stubs with real module loading and name resolution, expressed as salsa queries so incrementality and HMR blast-radius fall out for free.

@@ -14,6 +14,7 @@ use lang_conformance::{Stage, run_corpus, run_differential};
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Backend, Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::lex;
+use lang_loader::Linked;
 use lang_parser::parse;
 use lang_span::{Source, SourceId};
 
@@ -75,33 +76,20 @@ fn main() -> ExitCode {
     }
 }
 
-/// Compile and run a source, writing stdout to the real stdout and rendering any
-/// diagnostics to stderr. Returns the process exit code.
-fn run_source(source: &Source) -> i32 {
-    let lexed = lex(source);
-    let parsed = parse(source, &lexed.tokens);
-
-    let compile_diagnostics: Vec<&Diagnostic> = lexed
-        .diagnostics
-        .iter()
-        .chain(parsed.diagnostics.iter())
-        .collect();
-    if !compile_diagnostics.is_empty() {
-        emit_diagnostics(source, compile_diagnostics.into_iter());
-        return 1;
-    }
-
-    // Type-check before running (M1.7): reject type-incorrect programs at compile time.
-    let type_diagnostics = lang_check::check(&parsed.program);
+/// Type-check and run an already-loaded, linked program, writing stdout to the real stdout and
+/// rendering any diagnostics (against the entry source) to stderr. Returns the process exit code.
+fn run_linked(linked: &Linked) -> i32 {
+    // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
+    let type_diagnostics = lang_check::check(&linked.program);
     if !type_diagnostics.is_empty() {
-        emit_diagnostics(source, type_diagnostics.iter());
+        emit_diagnostics(&linked.entry, type_diagnostics.iter());
         return 1;
     }
 
-    let result = TreeWalkBackend::new().run(&parsed.program);
+    let result = TreeWalkBackend::new().run(&linked.program);
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
-    emit_diagnostics(source, result.diagnostics.iter());
+    emit_diagnostics(&linked.entry, result.diagnostics.iter());
     result.exit_code
 }
 
@@ -113,15 +101,22 @@ fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a D
 }
 
 fn cmd_run(file: &std::path::Path) -> ExitCode {
-    let text = match std::fs::read_to_string(file) {
-        Ok(text) => text,
+    // Load + link the program: sibling `.lang` modules the entry `use`s are resolved and merged
+    // (M1.9); a lone file with no sibling modules links to exactly itself.
+    match lang_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
-            return ExitCode::from(2);
+            ExitCode::from(2)
         }
-    };
-    let source = Source::new(SourceId::FIRST, file.display().to_string(), text);
-    exit_code(run_source(&source))
+        Ok(Ok(linked)) => exit_code(run_linked(&linked)),
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            ExitCode::from(1)
+        }
+    }
 }
 
 /// Whether an entry was consumed (evaluated or reported) or is still incomplete and needs

@@ -9,13 +9,16 @@ rust-version.workspace = true
 [dependencies]
 lang-span = { workspace = true }
 lang-diagnostics = { workspace = true }
+lang-ast = { workspace = true }
 lang-lexer = { workspace = true }
 lang-parser = { workspace = true }
 lang-backend = { workspace = true }
 lang-eval = { workspace = true }
 lang-check = { workspace = true }
+lang-compiler = { workspace = true }
 lang-vm = { workspace = true }
 lang-db = { workspace = true }
+lang-loader = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 

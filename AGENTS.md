@@ -52,7 +52,9 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `lang-types` | The `Type` lattice (pure data): primitives, `List`/`Map`/`Option`/`Result`, named/`Fn`, the gradual top `Unknown`, and the `?T` → `Option<T>` desugar. Also the built-in trait registry (`BuiltinTrait`/`BUILTIN_TRAITS`) the checker validates `impl`/`@derive` against. |
 | `lang-check` | The gradual type checker (`check(&Program) -> Vec<Diagnostic>`), the `checked` query's body. A shared front-end run upstream of both backends: exhaustiveness (E0011), `?`-typing (E0012), arithmetic mismatch (E0007), trait/derive validation (E0014 unknown trait, E0015 invalid impl), and data-attribute validation (E0017 invalid attribute). |
 
-In progress (M1, see `plans/m1/`): the layered stdlib (`lang-stdlib`) and the rest of Thrust B/C. The salsa query graph (`lang-db`, M1.1) and the gradual type checker (`lang-types`/`lang-check`, M1.7) have landed. Deferred to later milestones (do **not** stub now): `runtime`, `server`, `lsp`.
+| `lang-loader` | Multi-file module loading + linking (M1.9): parses the entry `.lang` file and its sibling modules (each declaring a `namespace`), resolves the entry's `use` declarations to real declarations, and merges them into one `Program` both backends run unchanged. A `use` no module provides falls back to the M0 opaque stub. |
+
+In progress (M1, see `plans/m1/`): the layered stdlib (`lang-stdlib`) and the rest of Thrust C. The salsa query graph (`lang-db`, M1.1), the gradual type checker (`lang-types`/`lang-check`, M1.7), the trait system (M1.8), and multi-file modules (`lang-loader`, M1.9.1) have landed. Deferred to later milestones (do **not** stub now): `runtime`, `server`, `lsp`.
 
 ## The new-feature template (the standard shape of a change)
 

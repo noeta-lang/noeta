@@ -12,13 +12,14 @@
 
 use std::path::Path;
 
+use lang_ast::Program;
 use lang_backend::{Backend, RunResult};
 use lang_db::LangDatabase;
 use lang_eval::TreeWalkBackend;
 use lang_span::{Source, SourceId};
 use lang_vm::VmBackend;
 
-use crate::collect_lang_files;
+use crate::collect_cases;
 
 /// A backend disagreement on one program: the field that differed.
 #[derive(Debug, Clone)]
@@ -93,26 +94,37 @@ impl DiffReport {
 /// Run the differential oracle over every `.lang` file under `root` (optionally narrowed to
 /// one file).
 pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
-    let mut files = Vec::new();
-    collect_lang_files(root, &mut files);
-    files.sort();
+    let mut cases = Vec::new();
+    collect_cases(root, &mut cases);
+    cases.sort_by(|a, b| a.entry.cmp(&b.entry));
 
     let mut report = DiffReport::default();
-    for path in files {
+    for case in cases {
         if let Some(only) = only
-            && path != only
-            && !path.ends_with(only)
+            && case.entry != only
+            && !case.entry.ends_with(only)
         {
             continue;
         }
-        let name = path
+        let name = case
+            .entry
             .strip_prefix(root)
-            .unwrap_or(&path)
+            .unwrap_or(&case.entry)
             .to_string_lossy()
             .into_owned();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => compare_backends(&name, &text, &mut report),
-            Err(_) => report.parse_failed += 1,
+        if case.multi {
+            // A multi-file fixture is loaded + linked (M1.9) and both backends run the merged
+            // program directly (the single-Source salsa graph cannot express the link yet; that
+            // is M1.9.3). The tree-walker runs the merged AST; the VM the compiled `Module`.
+            match lang_loader::load(&case.entry) {
+                Ok(Ok(linked)) => compare_backends_program(&name, &linked.program, &mut report),
+                Ok(Err(_)) | Err(_) => report.parse_failed += 1,
+            }
+        } else {
+            match std::fs::read_to_string(&case.entry) {
+                Ok(text) => compare_backends(&name, &text, &mut report),
+                Err(_) => report.parse_failed += 1,
+            }
         }
     }
     report
@@ -150,6 +162,32 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
         Err(_) => report.skipped += 1,
         Ok(module) => {
             let vm = VmBackend::new().run_module(module);
+            if vm == tree {
+                report.matched += 1;
+            } else {
+                report.mismatches.push(Mismatch {
+                    name: name.to_string(),
+                    detail: describe_difference(&tree, &vm),
+                });
+            }
+        }
+    }
+}
+
+/// Compare both backends on an already-linked `program` (a multi-file fixture's merged AST),
+/// bypassing the single-Source salsa graph. The checker is the shared front-end (a rejected
+/// program is a guaranteed agreement, counted matched); the tree-walker runs the AST, the VM the
+/// compiled `Module`.
+fn compare_backends_program(name: &str, program: &Program, report: &mut DiffReport) {
+    if !lang_check::check(program).is_empty() {
+        report.matched += 1;
+        return;
+    }
+    let tree = TreeWalkBackend::new().run(program);
+    match lang_compiler::compile(program) {
+        Err(_) => report.skipped += 1,
+        Ok(module) => {
+            let vm = VmBackend::new().run_module(&module);
             if vm == tree {
                 report.matched += 1;
             } else {

@@ -19,6 +19,9 @@
 //! `lang test`. Output is available as human text or machine-readable JSON, and runs
 //! can be narrowed by file or by pipeline stage so an agent's loop stays fast.
 
+use std::path::{Path, PathBuf};
+
+use lang_diagnostics::Diagnostic;
 use lang_eval::{Backend, TreeWalkBackend};
 use lang_lexer::lex;
 use lang_parser::parse;
@@ -101,7 +104,16 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         exit_code = 1;
     }
 
-    let errors = diagnostics
+    Outcome {
+        stdout,
+        exit_code,
+        errors: errors_of(&source, &diagnostics),
+    }
+}
+
+/// Map each diagnostic to its `(code, line, col)` expectation, resolved against `source`.
+fn errors_of(source: &Source, diagnostics: &[Diagnostic]) -> Vec<ErrorExpectation> {
+    diagnostics
         .iter()
         .map(|d| {
             let at = source.line_col(d.span.start);
@@ -111,13 +123,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
                 col: at.col,
             }
         })
-        .collect();
-
-    Outcome {
-        stdout,
-        exit_code,
-        errors,
-    }
+        .collect()
 }
 
 /// Run a single named case (already-loaded source text) and compare it to its header.
@@ -177,47 +183,139 @@ fn compare(name: &str, expected: &Expectations, actual: &Outcome, stage: Stage) 
     }
 }
 
-/// Discover and run every `.lang` file under `root`, optionally narrowed to a single
-/// file. Returns a [`Report`] that can be rendered as text or JSON.
-pub fn run_corpus(root: &std::path::Path, only: Option<&std::path::Path>, stage: Stage) -> Report {
-    let mut files = Vec::new();
-    collect_lang_files(root, &mut files);
-    files.sort();
+/// Run a multi-file case rooted at `entry` (the `main.lang` of a module fixture): sibling
+/// modules are loaded and linked (M1.9) and the merged program is checked and run like any
+/// other case. The expectation header lives in the entry file.
+pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
+    let text = match std::fs::read_to_string(entry) {
+        Ok(text) => text,
+        Err(err) => return CaseResult::malformed(display, format!("could not read: {err}")),
+    };
+    let expectations = match Expectations::parse(&text) {
+        Ok(expectations) => expectations,
+        Err(message) => return CaseResult::malformed(display, message),
+    };
+    let outcome = run_linked(entry, stage);
+    compare(display, &expectations, &outcome, stage)
+}
+
+/// Load + link `entry` and run the merged program to an [`Outcome`]. Lex/parse errors render
+/// against the source they came from; check/runtime diagnostics against the entry source.
+fn run_linked(entry: &Path, stage: Stage) -> Outcome {
+    let linked = match lang_loader::load(entry) {
+        Ok(Ok(linked)) => linked,
+        Ok(Err(load_diagnostics)) => {
+            let errors = load_diagnostics
+                .iter()
+                .flat_map(|ld| errors_of(&ld.source, std::slice::from_ref(&ld.diagnostic)))
+                .collect();
+            return Outcome {
+                stdout: String::new(),
+                exit_code: 1,
+                errors,
+            };
+        }
+        Err(err) => {
+            return Outcome {
+                stdout: format!("could not read: {err}"),
+                exit_code: 1,
+                errors: Vec::new(),
+            };
+        }
+    };
+
+    // The loader already lexed + parsed cleanly; the lexer/parser stages have nothing more to do.
+    if stage != Stage::Eval {
+        return Outcome {
+            stdout: String::new(),
+            exit_code: 0,
+            errors: Vec::new(),
+        };
+    }
+
+    let check = lang_check::check(&linked.program);
+    if !check.is_empty() {
+        return Outcome {
+            stdout: String::new(),
+            exit_code: 1,
+            errors: errors_of(&linked.entry, &check),
+        };
+    }
+    let result = TreeWalkBackend::new().run(&linked.program);
+    Outcome {
+        errors: errors_of(&linked.entry, &result.diagnostics),
+        stdout: result.stdout,
+        exit_code: result.exit_code,
+    }
+}
+
+/// Discover and run every case under `root`, optionally narrowed to a single entry file.
+/// Returns a [`Report`] that can be rendered as text or JSON.
+pub fn run_corpus(root: &Path, only: Option<&Path>, stage: Stage) -> Report {
+    let mut cases = Vec::new();
+    collect_cases(root, &mut cases);
+    cases.sort_by(|a, b| a.entry.cmp(&b.entry));
 
     let mut report = Report::default();
-    for path in files {
+    for case in cases {
         if let Some(only) = only
-            && path != only
-            && !path.ends_with(only)
+            && case.entry != only
+            && !case.entry.ends_with(only)
         {
             continue;
         }
-        let display = path
+        let display = case
+            .entry
             .strip_prefix(root)
-            .unwrap_or(&path)
+            .unwrap_or(&case.entry)
             .to_string_lossy()
             .into_owned();
-        match std::fs::read_to_string(&path) {
-            Ok(text) => report.push(run_case(&display, &text, stage)),
-            Err(err) => report.push(CaseResult::malformed(
-                &display,
-                format!("could not read: {err}"),
-            )),
+        if case.multi {
+            report.push(run_case_path(&case.entry, &display, stage));
+        } else {
+            match std::fs::read_to_string(&case.entry) {
+                Ok(text) => report.push(run_case(&display, &text, stage)),
+                Err(err) => report.push(CaseResult::malformed(
+                    &display,
+                    format!("could not read: {err}"),
+                )),
+            }
         }
     }
     report
 }
 
-pub(crate) fn collect_lang_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+/// One discovered case: its entry `.lang` file and whether it is a multi-file module fixture.
+pub(crate) struct Case {
+    pub entry: PathBuf,
+    pub multi: bool,
+}
+
+/// Discover cases under `dir`. A directory that directly contains a `main.lang` is a single
+/// **multi-file** case — its other `.lang` files are that program's modules, not standalone
+/// cases — so discovery does not descend into it. Every other `.lang` file is its own
+/// single-file case.
+pub(crate) fn collect_cases(dir: &Path, out: &mut Vec<Case>) {
+    let main = dir.join("main.lang");
+    if main.is_file() {
+        out.push(Case {
+            entry: main,
+            multi: true,
+        });
+        return;
+    }
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            collect_lang_files(&path, out);
+            collect_cases(&path, out);
         } else if path.extension().is_some_and(|ext| ext == "lang") {
-            out.push(path);
+            out.push(Case {
+                entry: path,
+                multi: false,
+            });
         }
     }
 }
