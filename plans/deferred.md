@@ -40,10 +40,12 @@ Still open (narrowed from the original cluster):
 
 ## Type checker / inference hardening
 
+> **Superseded by a direction decision (2026-06-22): the language targets an INFERRED-STATIC type system with an explicit `dyn` escape — not the gradual/`Unknown`-tolerant checker shipped today.** Annotations stay optional because inference reconstructs them; an un-inferable type is a *compile error*, and `dyn`/`Any` is the only sanctioned dynamic boundary (the sole place runtime trait dispatch survives). This **absorbs the two rows below and the bounded-generics row in the next section** into one milestone-scale type-system track (≈ M1.7 + M1.8 redone under a soundness mandate, plus trait coherence and the `dyn` story), and it *gates* the packed-types/SIMD perf work. Decided, not yet planned — needs its own planning pass. Rationale + spec sketch in the `type-system-direction` memory.
+
 | Item | Source | Trigger |
 |---|---|---|
-| Promote `E0006 ImmutableAssignment` from a **runtime** check to a **static** one (the "M1.7b" ownership/immutability analysis — no `slice-07b` was ever written) | M1.7 | Wanting `mut`-correctness caught at compile time; a corpus case asserting the static diagnostic |
-| Full Hindley–Milner unification + let-generalization (the checker is gradual/`Unknown`-tolerant today) | M1.7 | Inference gaps that gradual typing lets through and that users hit in practice |
+| Promote `E0006 ImmutableAssignment` from a **runtime** check to a **static** one (the "M1.7b" ownership/immutability analysis — no `slice-07b` was ever written) | M1.7 | Folded into the inferred-static track above |
+| Full Hindley–Milner unification + let-generalization (the checker is gradual/`Unknown`-tolerant today) | M1.7 | Folded into the inferred-static track above (becomes *the* checker, not a permissive add-on) |
 
 ## Traits / generics (the M1.8 deferred tail)
 
@@ -55,7 +57,7 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 | Standalone top-level `impl Attribute for X {}` + the `#[Foo(...)]`-requires-`Attribute` gate | M1.8 | Gating *which* records may be used as data attributes; needs the top-level `impl` construct (our `impl`s are class-body-nested) |
 | Nested-object fields in derived `Comparable` (recurse into sub-objects) | M1.8 | A `@derive(Comparable)` type whose fields are themselves objects |
 | `Callable` (`a(...)`), `Members` / `DynamicCall` protocols routed to user objects | M1.8 | Objects used as functions / dynamic member dispatch (agentic/proxy surface) |
-| Monomorphic shape specialization + bounded type parameters (`<T: Comparable>`) — generics are erased-for-storage today | M1.8 | The packed/perf reification path (relates to M2 "packed value types"); or a need to *constrain* a type parameter |
+| Monomorphic shape specialization + bounded type parameters (`<T: Comparable>`) — generics are erased-for-storage today | M1.8 | **Bounded params fold into the inferred-static type-system track** (enforced statically, not at runtime); monomorphic specialization is the packed/perf reification path it then unlocks (M2 "packed value types") |
 | Richer record-valued `#[attr(...)]` arguments (identifiers only today) | M1.8 | A data attribute needing structured (non-identifier) arguments |
 
 ## Diagnostics source attribution
