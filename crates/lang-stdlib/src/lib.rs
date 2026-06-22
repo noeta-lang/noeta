@@ -236,6 +236,10 @@ pub enum ListMethod {
     Sorted,
     /// `slice(start, end)` → the sublist `[start, end)`; out-of-range bounds are an error.
     Slice,
+    /// `first()` → `some(head)` if the list is non-empty, else `none`.
+    First,
+    /// `last()` → `some(tail)` if the list is non-empty, else `none`.
+    Last,
 }
 
 impl ListMethod {
@@ -246,6 +250,8 @@ impl ListMethod {
             "join" => Some(ListMethod::Join),
             "sorted" => Some(ListMethod::Sorted),
             "slice" => Some(ListMethod::Slice),
+            "first" => Some(ListMethod::First),
+            "last" => Some(ListMethod::Last),
             _ => None,
         }
     }
@@ -384,6 +390,10 @@ mod tests {
             Some(ListMethod::Contains)
         );
         assert_eq!(ListMethod::from_name("join"), Some(ListMethod::Join));
+        assert_eq!(ListMethod::from_name("sorted"), Some(ListMethod::Sorted));
+        assert_eq!(ListMethod::from_name("slice"), Some(ListMethod::Slice));
+        assert_eq!(ListMethod::from_name("first"), Some(ListMethod::First));
+        assert_eq!(ListMethod::from_name("last"), Some(ListMethod::Last));
         assert_eq!(ListMethod::from_name("nope"), None);
         assert_eq!(MapMethod::from_name("keys"), Some(MapMethod::Keys));
         assert_eq!(MapMethod::from_name("values"), Some(MapMethod::Values));

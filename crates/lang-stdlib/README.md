@@ -42,7 +42,7 @@ Determinism is a hard requirement across the whole stdlib: no wall-clock, no has
 ## Status
 
 - **M1.10.1 — done:** this crate + the Ring 1 string surface, shared by both backends.
-- **M1.10.2 — in progress:** Ring 1 list `reverse`/`contains`/`join`/`sorted`/`slice` and map `keys`/`values`/`has` done (per backend, gated by the shared `ListMethod`/`MapMethod` enums); list `first`/`last` (→ Option) and a possible `Set` remain.
+- **M1.10.2 — in progress:** Ring 1 list `reverse`/`contains`/`join`/`sorted`/`slice`/`first`/`last` and map `keys`/`values`/`has` done (per backend, gated by the shared `ListMethod`/`MapMethod` enums); `first`/`last` return a built-in `Option` constructed identically in both backends. A `Set` type remains.
 - **M1.10.3 — todo:** Ring 2 modules (json/math/seeded-random first; file IO and time pending a differential-oracle design decision).
 
 See `plans/m1/slice-10-stdlib.md`.

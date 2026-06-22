@@ -1,0 +1,18 @@
+// list first()/last() → Option: some(head)/some(tail) or none on an empty list, rendered and
+// constructed identically in both backends.
+// expect: stdout "some(1)"
+// expect: stdout "some(3)"
+// expect: stdout "none"
+// expect: stdout "none"
+// expect: stdout "some(hi)"
+// expect: stdout "got 5"
+// expect: exit 0
+echo [1, 2, 3].first();
+echo [1, 2, 3].last();
+echo [].first();
+echo [].last();
+echo ["hi"].first();
+echo match [5].first() {
+    some(x) => "got {x}",
+    none => "empty",
+};

@@ -322,6 +322,26 @@ impl<'m> Vm<'m> {
                 }
                 Ok(Value::list(slice))
             }
+            lang_stdlib::ListMethod::First => {
+                self.stdlib_arity(name, args, 0, span)?;
+                Ok(match items.first() {
+                    Some(&value) => {
+                        retain(value);
+                        make_some(value)
+                    }
+                    None => make_none(),
+                })
+            }
+            lang_stdlib::ListMethod::Last => {
+                self.stdlib_arity(name, args, 0, span)?;
+                Ok(match items.last() {
+                    Some(&value) => {
+                        retain(value);
+                        make_some(value)
+                    }
+                    None => make_none(),
+                })
+            }
         }
     }
 
@@ -1874,6 +1894,20 @@ fn stdlib_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
 /// tree-walker's, which is what keeps the differential identical.
 fn make_ordering(variant: &str) -> Value {
     let shape = Rc::new(Shape::enum_variant("Ordering", variant, Vec::new(), false));
+    Value::enum_value(shape, Vec::new())
+}
+
+/// Build the built-in `Option::some(value)` with a fresh shape (the `builtin_result_option` flag
+/// makes it render as `some(..)`, matching the tree-walker and the compiler-lowered `some(x)`).
+/// The enum owns one reference to `value`, so the caller must have retained it first.
+fn make_some(value: Value) -> Value {
+    let shape = Rc::new(Shape::enum_variant("Option", "some", Vec::new(), true));
+    Value::enum_value(shape, vec![value])
+}
+
+/// Build the built-in `Option::none` (no payload), matching the tree-walker / compiler `none`.
+fn make_none() -> Value {
+    let shape = Rc::new(Shape::enum_variant("Option", "none", Vec::new(), true));
     Value::enum_value(shape, Vec::new())
 }
 

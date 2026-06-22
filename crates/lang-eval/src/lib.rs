@@ -1465,6 +1465,20 @@ impl Interpreter {
                 let slice = items[start as usize..end as usize].to_vec();
                 Ok(Value::List(Rc::new(slice)))
             }
+            lang_stdlib::ListMethod::First => {
+                self.expect_std_arity(name, args, 0, span)?;
+                Ok(match items.first() {
+                    Some(value) => builtin_enum("Option", "some", vec![value.clone()]),
+                    None => builtin_enum("Option", "none", Vec::new()),
+                })
+            }
+            lang_stdlib::ListMethod::Last => {
+                self.expect_std_arity(name, args, 0, span)?;
+                Ok(match items.last() {
+                    Some(value) => builtin_enum("Option", "some", vec![value.clone()]),
+                    None => builtin_enum("Option", "none", Vec::new()),
+                })
+            }
         }
     }
 
