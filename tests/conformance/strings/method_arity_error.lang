@@ -1,0 +1,3 @@
+// A string method misused (wrong arity) is a runtime E0007, identical in both backends.
+// expect: error E0007 at 3:6
+echo "hello".upper("extra");

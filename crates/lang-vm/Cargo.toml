@@ -16,6 +16,7 @@ lang-value = { workspace = true }
 lang-gc = { workspace = true }
 lang-span = { workspace = true }
 lang-object = { workspace = true }
+lang-stdlib = { workspace = true }
 
 [dev-dependencies]
 lang-lexer = { workspace = true }

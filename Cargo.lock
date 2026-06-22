@@ -594,6 +594,7 @@ dependencies = [
  "lang-lexer",
  "lang-parser",
  "lang-span",
+ "lang-stdlib",
  "proptest",
 ]
 
@@ -651,6 +652,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "lang-stdlib"
+version = "0.0.0"
+
+[[package]]
 name = "lang-types"
 version = "0.0.0"
 dependencies = [
@@ -683,6 +688,7 @@ dependencies = [
  "lang-object",
  "lang-parser",
  "lang-span",
+ "lang-stdlib",
  "lang-value",
 ]
 

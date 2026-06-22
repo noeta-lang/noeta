@@ -1336,6 +1336,23 @@ impl Interpreter {
                 )),
             };
         }
+        // Ring 1 string methods (`upper`/`split`/`replace`/...) — their semantics, arity, and
+        // argument typing live once in `lang-stdlib`, shared with the VM, so the two backends
+        // cannot drift. `Unknown` falls through to the collection methods below.
+        if let Value::Str(s) = &receiver {
+            let projected: Vec<_> = args.iter().map(project_arg).collect();
+            match lang_stdlib::string_method(s, name, &projected) {
+                lang_stdlib::Dispatch::Done(output) => return Ok(output_to_value(output)),
+                lang_stdlib::Dispatch::Err(error) => {
+                    return Err(self.runtime_error(
+                        std_error_code(error.kind),
+                        span,
+                        error.message,
+                    ));
+                }
+                lang_stdlib::Dispatch::Unknown => {}
+            }
+        }
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
@@ -1827,6 +1844,37 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
         variant: variant.to_string(),
         data,
     }))
+}
+
+/// Project a tree-walker `Value` onto the backend-agnostic [`lang_stdlib::Arg`] the shared
+/// stdlib dispatch reads. Only the primitive shapes the stdlib introspects are distinguished;
+/// everything else collapses to `Other`. Mirrors the VM-side projection so both backends feed
+/// the shared surface identically.
+fn project_arg(value: &Value) -> lang_stdlib::Arg<'_> {
+    match value {
+        Value::Str(s) => lang_stdlib::Arg::Str(s),
+        Value::Int(i) => lang_stdlib::Arg::Int(*i),
+        Value::Float(f) => lang_stdlib::Arg::Float(*f),
+        Value::Bool(b) => lang_stdlib::Arg::Bool(*b),
+        _ => lang_stdlib::Arg::Other,
+    }
+}
+
+/// Lift a shared stdlib [`lang_stdlib::Output`] back into a tree-walker `Value`.
+fn output_to_value(output: lang_stdlib::Output) -> Value {
+    match output {
+        lang_stdlib::Output::Str(s) => Value::Str(s),
+        lang_stdlib::Output::Bool(b) => Value::Bool(b),
+        lang_stdlib::Output::Int(i) => Value::Int(i),
+        lang_stdlib::Output::StrList(items) => {
+            Value::List(Rc::new(items.into_iter().map(Value::Str).collect()))
+        }
+    }
+}
+
+/// Both stdlib misuse kinds surface as a `TypeMismatch` (wrong arity or wrong argument type).
+fn std_error_code(_kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
+    DiagnosticCode::TypeMismatch
 }
 
 /// Field-wise (declared order) ordering of two same-type objects, the behavior synthesized by

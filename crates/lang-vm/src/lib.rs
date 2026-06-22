@@ -663,6 +663,49 @@ impl<'m> Vm<'m> {
                         }
                         continue;
                     }
+                    // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
+                    // the shared `lang-stdlib` surface so the tree-walker and the VM cannot drift.
+                    // `Unknown` falls through to the collection methods below. `as_string` clones
+                    // out of the heap, so the projected args own their strings for the call.
+                    if let Some(recv_str) = v.as_string() {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        let arg_strings: Vec<Option<String>> =
+                            arg_values.iter().map(|a| a.as_string()).collect();
+                        let projected: Vec<lang_stdlib::Arg> = arg_values
+                            .iter()
+                            .zip(&arg_strings)
+                            .map(|(a, s)| {
+                                if let Some(s) = s {
+                                    lang_stdlib::Arg::Str(s)
+                                } else if let Some(i) = a.as_int() {
+                                    lang_stdlib::Arg::Int(i)
+                                } else if let Some(f) = a.as_float() {
+                                    lang_stdlib::Arg::Float(f)
+                                } else if let Some(b) = a.as_bool() {
+                                    lang_stdlib::Arg::Bool(b)
+                                } else {
+                                    lang_stdlib::Arg::Other
+                                }
+                            })
+                            .collect();
+                        match lang_stdlib::string_method(&recv_str, method, &projected) {
+                            lang_stdlib::Dispatch::Done(output) => {
+                                let value = stdlib_output_to_value(output);
+                                set_reg(&mut frames[top].regs, *dst, value);
+                                frames[top].pc += 1;
+                                continue;
+                            }
+                            lang_stdlib::Dispatch::Err(error) => {
+                                return Err(self.error(
+                                    stdlib_error_code(error.kind),
+                                    *span,
+                                    error.message,
+                                ));
+                            }
+                            lang_stdlib::Dispatch::Unknown => {}
+                        }
+                    }
                     // Built-in zero-argument methods on lists/maps/strings.
                     let result = if !args.is_empty() {
                         None
@@ -1621,6 +1664,25 @@ fn set_reg(regs: &mut [Value], dst: u16, value: Value) {
     let old = regs[dst as usize];
     regs[dst as usize] = value;
     release(old);
+}
+
+/// Lift a shared stdlib [`lang_stdlib::Output`] into a freshly-owned VM `Value` (refcount 1,
+/// owned by the destination register). Mirrors the tree-walker's `output_to_value`.
+fn stdlib_output_to_value(output: lang_stdlib::Output) -> Value {
+    match output {
+        lang_stdlib::Output::Str(s) => Value::string(&s),
+        lang_stdlib::Output::Bool(b) => Value::bool(b),
+        lang_stdlib::Output::Int(i) => Value::int(i),
+        lang_stdlib::Output::StrList(items) => {
+            Value::list(items.iter().map(|s| Value::string(s)).collect())
+        }
+    }
+}
+
+/// Both stdlib misuse kinds surface as a `TypeMismatch` (wrong arity or wrong argument type),
+/// matching the tree-walker.
+fn stdlib_error_code(_kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
+    DiagnosticCode::TypeMismatch
 }
 
 /// Build a built-in `Ordering` enum value (`Ordering.Less`/`Equal`/`Greater`) with a fresh shape.

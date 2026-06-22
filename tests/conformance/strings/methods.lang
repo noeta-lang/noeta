@@ -1,0 +1,24 @@
+// Ring 1 string methods — semantics live once in lang-stdlib, shared by both backends.
+// expect: stdout "HELLO"
+// expect: stdout "hello"
+// expect: stdout "trimmed"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "[\"a\", \"b\", \"c\"]"
+// expect: stdout "a/b/c"
+// expect: stdout "abcabc"
+// expect: stdout "NAÏVE"
+// expect: exit 0
+echo "hello".upper();
+echo "HELLO".lower();
+echo "  trimmed  ".trim();
+echo "hello".contains("ell");
+echo "hello".contains("z");
+echo "hello".starts_with("he");
+echo "hello".ends_with("lo");
+echo "a,b,c".split(",");
+echo "a.b.c".replace(".", "/");
+echo "abc".repeat(2);
+echo "naïve".upper();
