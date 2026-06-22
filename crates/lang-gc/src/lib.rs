@@ -204,6 +204,23 @@ mod tests {
     }
 
     #[test]
+    fn cycle_collector_reclaims_a_closure_capturing_its_own_cell() {
+        // The self-recursive nested `fn` shape: a cell holds a closure, and that closure captures
+        // the cell as its upvalue (cell -> closure -> cell). Once the external handle is dropped
+        // the pair is an unreachable cycle that only the collector can free.
+        let cell = Value::cell(Value::unit());
+        let closure = Value::closure(0, vec![cell]); // closure owns one ref to the cell
+        cell.cell_set(closure); // cell now holds the closure (closure refcount 2)
+        release(closure); // drop the external handle: closure 2 -> 1, kept alive only by the cell
+        assert_eq!(closure.refcount(), 1, "the cycle keeps the closure alive");
+
+        let mut gc = CycleCollector::new();
+        gc.add_candidate(cell);
+        gc.add_candidate(closure);
+        gc.collect(); // frees both members of the cycle; miri verifies no leak
+    }
+
+    #[test]
     fn cycle_collector_spares_an_externally_referenced_object() {
         // a -> b, and b is also held by an outside reference. The collector must NOT free b
         // (or a, which b would drag down): only genuine garbage is reclaimed.

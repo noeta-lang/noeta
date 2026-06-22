@@ -36,7 +36,7 @@ use std::rc::Rc;
 
 use lang_ast::{BinaryOp, Program};
 use lang_backend::{Backend, RunResult};
-use lang_bytecode::{BoolSide, Builtin, Const, Module, Op};
+use lang_bytecode::{BoolSide, Builtin, CaptureFrom, Const, Module, Op};
 use lang_compiler::{Unsupported, compile};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_gc::{release, retain};
@@ -98,6 +98,10 @@ struct Frame {
     pc: usize,
     ret_dst: u16,
     ret_transform: RetTransform,
+    /// The closure's captured upvalue cells, one owned reference each (released at frame
+    /// teardown). Empty for top-level functions, methods, and operator-dispatch frames — only a
+    /// closure built with captures carries any.
+    upvalues: Vec<Value>,
 }
 
 /// A transform applied to a frame's return value as it flows into the caller's destination
@@ -232,6 +236,7 @@ fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
         pc: 0,
         ret_dst: 0,
         ret_transform: RetTransform::None,
+        upvalues: Vec::new(),
     };
     // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
     // it. On abort `run` has already released every frame register.
@@ -924,6 +929,7 @@ impl<'m> Vm<'m> {
             pc: 0,
             ret_dst: 0,
             ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
         };
         // A destructor returns unit (its body is run for its effects); discard it. An abort
         // inside a destructor has already recorded its diagnostic.
@@ -941,6 +947,9 @@ impl<'m> Vm<'m> {
             for frame in &frames {
                 for r in &frame.regs {
                     release(*r);
+                }
+                for u in &frame.upvalues {
+                    release(*u);
                 }
             }
         }
@@ -1003,9 +1012,55 @@ impl<'m> Vm<'m> {
                     }
                     frames[top].pc += 1;
                 }
-                Op::MakeClosure { dst, proto } => {
-                    let v = Value::closure(*proto);
+                Op::MakeClosure {
+                    dst,
+                    proto,
+                    captures,
+                } => {
+                    // Gather one cell per capture (from a celled local register, or one of this
+                    // frame's own upvalues — forwarding a capture down a level), retaining each
+                    // into the new closure, which owns its upvalue cells.
+                    let mut upvalues = Vec::with_capacity(captures.len());
+                    for capture in captures.iter() {
+                        let cell = match capture {
+                            CaptureFrom::Local(reg) => frames[top].regs[*reg as usize],
+                            CaptureFrom::Upvalue(index) => frames[top].upvalues[*index as usize],
+                        };
+                        retain(cell);
+                        upvalues.push(cell);
+                    }
+                    let v = Value::closure(*proto, upvalues);
                     set_reg(&mut frames[top].regs, *dst, v);
+                    frames[top].pc += 1;
+                }
+                Op::MakeCell { dst, src } => {
+                    // Box the value into a fresh cell, which owns one reference to it.
+                    let v = frames[top].regs[*src as usize];
+                    retain(v);
+                    set_reg(&mut frames[top].regs, *dst, Value::cell(v));
+                    frames[top].pc += 1;
+                }
+                Op::CellGet { dst, cell } => {
+                    let v = frames[top].regs[*cell as usize].cell_get();
+                    retain(v);
+                    set_reg(&mut frames[top].regs, *dst, v);
+                    frames[top].pc += 1;
+                }
+                Op::CellSet { cell, src } => {
+                    // `cell_set` retains the new occupant and releases the old internally.
+                    let v = frames[top].regs[*src as usize];
+                    frames[top].regs[*cell as usize].cell_set(v);
+                    frames[top].pc += 1;
+                }
+                Op::UpvalueGet { dst, index } => {
+                    let v = frames[top].upvalues[*index as usize].cell_get();
+                    retain(v);
+                    set_reg(&mut frames[top].regs, *dst, v);
+                    frames[top].pc += 1;
+                }
+                Op::UpvalueSet { index, src } => {
+                    let v = frames[top].regs[*src as usize];
+                    frames[top].upvalues[*index as usize].cell_set(v);
                     frames[top].pc += 1;
                 }
                 Op::MakeList { dst, items } => {
@@ -1078,6 +1133,7 @@ impl<'m> Vm<'m> {
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::None,
+                                upvalues: Vec::new(),
                             });
                             continue;
                         }
@@ -1204,6 +1260,7 @@ impl<'m> Vm<'m> {
                                     pc: 0,
                                     ret_dst: *dst,
                                     ret_transform: RetTransform::None,
+                                    upvalues: Vec::new(),
                                 });
                                 continue;
                             }
@@ -1290,6 +1347,7 @@ impl<'m> Vm<'m> {
                             pc: 0,
                             ret_dst: *dst,
                             ret_transform: RetTransform::None,
+                            upvalues: Vec::new(),
                         });
                         continue;
                     }
@@ -1520,6 +1578,7 @@ impl<'m> Vm<'m> {
                             pc: 0,
                             ret_dst: *dst,
                             ret_transform: RetTransform::None,
+                            upvalues: Vec::new(),
                         });
                         continue;
                     }
@@ -1759,6 +1818,9 @@ impl<'m> Vm<'m> {
                             for r in &finished.regs {
                                 release(*r);
                             }
+                            for u in &finished.upvalues {
+                                release(*u);
+                            }
                             // Apply the frame's return transform on every exit path, for the same
                             // reason `Op::Return` does (a short-circuiting `?` is an early return);
                             // release the original if the transform replaced it.
@@ -1935,6 +1997,7 @@ impl<'m> Vm<'m> {
                             pc: 0,
                             ret_dst: *dst,
                             ret_transform: transform,
+                            upvalues: Vec::new(),
                         });
                         continue;
                     }
@@ -2066,6 +2129,7 @@ impl<'m> Vm<'m> {
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::None,
+                                upvalues: Vec::new(),
                             });
                             continue;
                         }
@@ -2111,6 +2175,16 @@ impl<'m> Vm<'m> {
                                 retain(v);
                                 new_regs[i] = v;
                             }
+                            // Carry the closure's captured upvalue cells into the frame (one owned
+                            // reference each, released at teardown), so the body can read/write
+                            // through them.
+                            let count = callee_val.closure_upvalue_count();
+                            let mut upvalues = Vec::with_capacity(count);
+                            for i in 0..count {
+                                let cell = callee_val.closure_upvalue(i);
+                                retain(cell);
+                                upvalues.push(cell);
+                            }
                             // Resume after the call once the callee returns.
                             frames[top].pc += 1;
                             frames.push(Frame {
@@ -2119,6 +2193,7 @@ impl<'m> Vm<'m> {
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::None,
+                                upvalues,
                             });
                         }
                         None => {
@@ -2136,6 +2211,9 @@ impl<'m> Vm<'m> {
                     let finished = frames.pop().unwrap();
                     for r in &finished.regs {
                         release(*r);
+                    }
+                    for u in &finished.upvalues {
+                        release(*u);
                     }
                     // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s
                     // bool; `< <= > >=` map `compare`'s `Ordering`). When the transform replaces a
@@ -2161,6 +2239,9 @@ impl<'m> Vm<'m> {
                     let finished = frames.pop().unwrap();
                     for r in &finished.regs {
                         release(*r);
+                    }
+                    for u in &finished.upvalues {
+                        release(*u);
                     }
                     match frames.last_mut() {
                         // A non-bottom frame falling off the end implicitly returns unit.
@@ -2198,12 +2279,22 @@ impl<'m> Vm<'m> {
                 for (i, v) in args.into_iter().enumerate() {
                     regs[i] = v;
                 }
+                // A first-class closure passed to `map`/`filter` may capture upvalues; carry its
+                // cells into the re-entrant frame (one owned reference each).
+                let count = callee.closure_upvalue_count();
+                let mut upvalues = Vec::with_capacity(count);
+                for i in 0..count {
+                    let cell = callee.closure_upvalue(i);
+                    retain(cell);
+                    upvalues.push(cell);
+                }
                 self.run(vec![Frame {
                     proto,
                     regs,
                     pc: 0,
                     ret_dst: 0,
                     ret_transform: RetTransform::None,
+                    upvalues,
                 }])
             }
             None => {

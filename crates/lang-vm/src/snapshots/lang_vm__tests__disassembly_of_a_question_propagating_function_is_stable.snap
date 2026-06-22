@@ -8,9 +8,9 @@ shapes:
 === main ===
 params: 0, registers: 5
 code:
-    0  MakeClosure r0 <- proto 1
+    0  MakeClosure r0 <- proto 1 [0 captures]
     1  StoreGlobal "validate" <- r0
-    2  MakeClosure r1 <- proto 2
+    2  MakeClosure r1 <- proto 2 [0 captures]
     3  StoreGlobal "place" <- r1
     4  LoadGlobal  r3 <- "place"
     5  Call        r2 <- r3()

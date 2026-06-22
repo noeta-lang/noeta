@@ -6,30 +6,33 @@
 //! `len`/`map`/`filter`/`sum` builtins, `.count()`/`.enumerate()`, string interpolation —
 //! M1.3); the **object model** (records/classes/enums on shapes, member access, methods,
 //! `..spread` — M1.4); and **`match`/`?`/`??`** with the `Result`/`Option` constructors and
-//! `panic`/`next_id` (M1.5). The few constructs still outside the subset (true upvalue
-//! capture; a bare `x = expr` new-local inside a function body) return [`Unsupported`] and the
-//! differential harness skips them — but every M0 corpus program now compiles and is asserted
-//! identical to the tree-walker (the Thrust-A gate).
+//! `panic`/`next_id` (M1.5). A nested closure or `fn` that captures an enclosing function's
+//! local is lowered via **upvalues** (slice F1 — see [`freevars`]); the few constructs still
+//! outside the subset (a closure inside a *method* capturing `self`/a field; a prelude
+//! value/builtin used as a value) return [`Unsupported`] and the differential harness skips
+//! them — but every M0 corpus program compiles and is asserted identical to the tree-walker.
 //!
-//! ## The two-level scope model
+//! ## The scope model
 //!
 //! The tree-walker resolves names through a chain of reference-counted lexical scopes. The
-//! VM splits that into two tiers:
+//! VM splits that into three tiers:
 //!
 //! - **Globals.** Every top-level binding and `fn` name lives in a runtime global table,
-//!   read/written by name (`LoadGlobal`/`StoreGlobal`). A function's free variables resolve
-//!   here at call time — which is faithful, because the tree-walker's captured scope for a
+//!   read/written by name (`LoadGlobal`/`StoreGlobal`). A top-level function's free variables
+//!   resolve here at call time — faithful, because the tree-walker's captured scope for a
 //!   top-level function *is* the (shared, mutable) global scope, so reads see live values.
 //! - **Frame-locals.** Parameters and locals live in registers, one register file per call
 //!   frame. Block scopes (`if`/`else` bodies) nest within the same register file.
+//! - **Upvalues.** A local captured by an inner closure is boxed into a heap *cell* shared
+//!   between the defining frame and every capturing closure, so a closure reads (and mutates)
+//!   the live binding — matching the tree-walker's `Rc`-captured scope chain. The free-variable
+//!   analysis in [`freevars`] decides which locals are celled and lays out each closure's
+//!   ordered upvalues; the closure carries the cells (`MakeClosure` captures), and the body
+//!   reaches them with `UpvalueGet`/`UpvalueSet`.
 //!
-//! This is why M1.2 needs no upvalue machinery: the only functions it compiles are defined
-//! at the top level, so they capture nothing but globals. A function or closure defined
-//! *inside* another function could capture a non-global local, so those are [`Unsupported`]
-//! for now (the upvalue path arrives with a later slice). The compiler stays faithful to the
-//! tree-walker's evaluation order and exact diagnostic text/spans, because the differential
-//! oracle compares full `RunResult`s. Registers are allocated monotonically (one per value,
-//! no reuse) — simple and obviously correct.
+//! The compiler stays faithful to the tree-walker's evaluation order and exact diagnostic
+//! text/spans, because the differential oracle compares full `RunResult`s. Registers are
+//! allocated monotonically (one per value, no reuse) — simple and obviously correct.
 
 use std::collections::{HashMap, HashSet};
 
@@ -38,8 +41,11 @@ use lang_ast::{
 };
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
-    AttributeRecord, BoolSide, Builtin, Chunk, Const, MethodEntry, Module, Op, Reg,
+    AttributeRecord, BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, Op, Reg,
 };
+
+mod freevars;
+use freevars::FnBody;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
@@ -85,11 +91,13 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         tojson_derives: Vec::new(),
         manifest: Vec::new(),
         types: HashMap::new(),
+        module_globals: HashMap::new(),
     };
+    module.register_globals(program);
     module.register_types(program);
     module.compile_methods(program)?;
     let main = {
-        let mut fc = FnCompiler::new(&mut module, true, None);
+        let mut fc = FnCompiler::new(&mut module, true, None, Vec::new(), Vec::new());
         for stmt in &program.stmts {
             fc.stmt(stmt)?;
         }
@@ -139,9 +147,42 @@ struct ModuleCompiler {
     tojson_derives: Vec<String>,
     manifest: Vec<AttributeRecord>,
     types: HashMap<String, TypeInfo>,
+    /// Every top-level value global's name and whether it is mutable. Computed before any body
+    /// is compiled so a nested function can resolve a global (and check its mutability on
+    /// assignment) and so the free-variable analysis can tell a global from a captured local.
+    module_globals: HashMap<String, bool>,
 }
 
 impl ModuleCompiler {
+    /// Pre-pass: collect every top-level value global (a binding or `fn`/native-module name) and
+    /// its mutability, so functions can resolve and assign globals and the capture analysis can
+    /// distinguish a global from an enclosing local.
+    fn register_globals(&mut self, program: &Program) {
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Binding { mut_decl, name, .. } => {
+                    self.module_globals.insert(name.clone(), *mut_decl);
+                }
+                Stmt::Fn(decl) => {
+                    self.module_globals.insert(decl.name.clone(), false);
+                }
+                Stmt::Use { path, names, .. } => {
+                    for imported in names {
+                        if is_native_module(path, &imported.name) {
+                            self.module_globals.insert(imported.name.clone(), false);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// The set of top-level global names (for the free-variable analysis' globals argument).
+    fn global_names(&self) -> HashSet<String> {
+        self.module_globals.keys().cloned().collect()
+    }
+
     /// Record a declaration's `#[...]` data attributes into the build manifest, in source order.
     fn record_attributes(&mut self, type_name: &str, attrs: &[lang_ast::Attribute]) {
         for attr in attrs {
@@ -254,7 +295,8 @@ impl ModuleCompiler {
                     Some(MethodCtx {
                         fields: field_set.clone(),
                     }),
-                    HashSet::new(),
+                    Vec::new(),
+                    Vec::new(),
                 )?;
                 self.protos[proto as usize] = chunk;
             }
@@ -272,7 +314,8 @@ impl ModuleCompiler {
                     Some(MethodCtx {
                         fields: field_set.clone(),
                     }),
-                    HashSet::new(),
+                    Vec::new(),
+                    Vec::new(),
                 )?;
                 self.protos[proto as usize] = chunk;
             }
@@ -281,19 +324,43 @@ impl ModuleCompiler {
     }
 
     /// Compile one function/closure/method body into a [`Chunk`]. A `method` context reserves
-    /// register 0 for the receiver (`self`) and resolves the class's field names against it;
-    /// `forbidden` names (an enclosing function's locals, for a nested closure) make any
-    /// capture `Unsupported`.
+    /// register 0 for the receiver (`self`) and resolves the class's field names against it.
+    /// `upvalues` are the names (and mutability) this function captures from enclosing functions,
+    /// in the order its parent will supply the cells; `enclosing_locals` are the enclosing
+    /// functions' capturable local names (outermost first), so the function can lower its own
+    /// nested closures.
     fn compile_fn_body(
         &mut self,
         params: &[Param],
         body: Body<'_>,
         method: Option<MethodCtx>,
-        forbidden: HashSet<String>,
+        upvalues: Vec<(String, bool)>,
+        enclosing_locals: Vec<HashSet<String>>,
     ) -> Result<Chunk, Unsupported> {
         let is_method = method.is_some();
-        let mut fc = FnCompiler::new(self, false, method);
-        fc.captures_forbidden = forbidden;
+        let globals = self.global_names();
+        let fn_body = match body {
+            Body::Block(stmts) => FnBody::Block(stmts),
+            Body::Arrow(expr) => FnBody::Arrow(expr),
+        };
+        let analysis = freevars::analyze(params, fn_body, &enclosing_locals, &globals);
+
+        // The capturable layer this function exposes to its own nested closures. A method also
+        // exposes `self`/its fields, but capturing them is left unsupported this slice — they go
+        // into `forbidden` so a nested closure that reaches for one is skipped, not miscompiled.
+        let mut local_layer = analysis.local.clone();
+        let mut forbidden = HashSet::new();
+        if let Some(ctx) = &method {
+            forbidden.insert("self".to_string());
+            forbidden.extend(ctx.fields.iter().cloned());
+            local_layer.extend(forbidden.iter().cloned());
+        }
+
+        let mut fc = FnCompiler::new(self, false, method, upvalues, enclosing_locals);
+        fc.celled = analysis.celled;
+        fc.local_layer = local_layer;
+        fc.forbidden = forbidden;
+
         // A method reserves register 0 for the receiver; ordinary functions do not.
         if is_method {
             fc.alloc_reg();
@@ -301,11 +368,17 @@ impl ModuleCompiler {
         fc.scopes.push(HashMap::new());
         for param in params {
             let reg = fc.alloc_reg();
+            let celled = fc.celled.contains(&param.name);
+            // A captured parameter is boxed into a cell so the closure shares the live binding.
+            if celled {
+                fc.code.push(Op::MakeCell { dst: reg, src: reg });
+            }
             fc.scopes.last_mut().unwrap().insert(
                 param.name.clone(),
                 Var {
                     reg,
                     mutable: false,
+                    celled,
                 },
             );
         }
@@ -327,23 +400,30 @@ impl ModuleCompiler {
         Ok(fc.into_chunk(num_params))
     }
 
-    /// Compile a top-level `fn` body into a fresh prototype and return its index.
-    fn add_function(&mut self, params: &[Param], body: Body<'_>) -> Result<u32, Unsupported> {
-        let chunk = self.compile_fn_body(params, body, None, HashSet::new())?;
+    /// Compile a `fn` body into a fresh prototype and return its index.
+    fn add_function(
+        &mut self,
+        params: &[Param],
+        body: Body<'_>,
+        upvalues: Vec<(String, bool)>,
+        enclosing_locals: Vec<HashSet<String>>,
+    ) -> Result<u32, Unsupported> {
+        let chunk = self.compile_fn_body(params, body, None, upvalues, enclosing_locals)?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
     }
 
-    /// Compile an arrow closure body into a fresh prototype, forbidding capture of `forbidden`
-    /// (the enclosing function's locals/fields), and return its index.
+    /// Compile an arrow closure body into a fresh prototype and return its index.
     fn add_closure(
         &mut self,
         params: &[Param],
         body: &Expr,
-        forbidden: HashSet<String>,
+        upvalues: Vec<(String, bool)>,
+        enclosing_locals: Vec<HashSet<String>>,
     ) -> Result<u32, Unsupported> {
-        let chunk = self.compile_fn_body(params, Body::Arrow(body), None, forbidden)?;
+        let chunk =
+            self.compile_fn_body(params, Body::Arrow(body), None, upvalues, enclosing_locals)?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
@@ -399,16 +479,31 @@ struct FnCompiler<'m> {
     is_main: bool,
     /// When compiling a class method, the receiver's field names (resolved against register 0).
     method: Option<MethodCtx>,
-    /// Names bound in an enclosing function (when compiling a nested closure). Referencing one
-    /// is an upvalue capture, which the VM does not model yet — so it makes the closure (and
-    /// thus the program) [`Unsupported`]. Empty for top-level functions/methods and `main`.
-    captures_forbidden: HashSet<String>,
+    /// This function's captured upvalues: name → index, indexed into the frame's upvalue cells.
+    upvalue_index: HashMap<String, u16>,
+    /// Whether each captured upvalue (by index) is mutable in its defining scope — governs
+    /// whether an `x = v` reassignment through the upvalue is allowed or raises E0006.
+    upvalue_mut: Vec<bool>,
+    /// The names of this function's own locals that an inner closure captures, so they are
+    /// stored as cells (computed by the free-variable analysis before lowering).
+    celled: HashSet<String>,
+    /// Names a nested closure must not capture from here (a method's `self`/fields): capturing
+    /// one is left unsupported this slice, so it is skipped rather than miscompiled.
+    forbidden: HashSet<String>,
+    /// The enclosing functions' capturable locals (outermost first) — for lowering this
+    /// function's own nested closures.
+    enclosing_locals: Vec<HashSet<String>>,
+    /// This function's own capturable locals (the layer it exposes to its nested closures).
+    local_layer: HashSet<String>,
 }
 
 #[derive(Clone, Copy)]
 struct Var {
     reg: Reg,
     mutable: bool,
+    /// Whether this local lives in a cell (it is captured by an inner closure). A celled local
+    /// is read with `CellGet`, written with `CellSet`, and shared with the capturing closure.
+    celled: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -416,17 +511,24 @@ struct GlobalInfo {
     mutable: bool,
 }
 
+/// A nested closure's resolved captures: its ordered upvalue list (each name and whether it is
+/// mutable, for the child's reassignment check) paired with the `CaptureFrom` source the building
+/// frame uses to supply each cell. The two vectors are index-aligned.
+type CaptureLayout = (Vec<(String, bool)>, Vec<CaptureFrom>);
+
 /// How a name resolves at a use site.
 enum Resolved {
-    /// A frame-local register.
+    /// A frame-local register holding the value directly.
     Local(Reg),
+    /// A frame-local register holding a cell (a captured local); read/written through it.
+    CelledLocal(Reg),
     /// The method receiver (`self`) — register 0 in a method body.
     SelfRecv,
     /// A field of the method receiver, loaded via `LoadField` from register 0.
     Field,
-    /// A name bound in an *enclosing* function — a closure upvalue. Not yet supported, so a
-    /// closure that references one is skipped (the program falls outside the VM subset).
-    Capture,
+    /// An upvalue captured from an enclosing function (read via its index). Reassignment goes
+    /// through `binding`, which checks the upvalue's mutability separately.
+    Upvalue(u16),
     /// A global, read via `LoadGlobal` (the name may or may not exist at runtime).
     Global,
     /// A prelude value/builtin — not yet modeled by the VM, so the program is skipped.
@@ -438,7 +540,15 @@ impl<'m> FnCompiler<'m> {
         module: &'m mut ModuleCompiler,
         is_main: bool,
         method: Option<MethodCtx>,
+        upvalues: Vec<(String, bool)>,
+        enclosing_locals: Vec<HashSet<String>>,
     ) -> FnCompiler<'m> {
+        let mut upvalue_index = HashMap::new();
+        let mut upvalue_mut = Vec::with_capacity(upvalues.len());
+        for (i, (name, mutable)) in upvalues.into_iter().enumerate() {
+            upvalue_index.insert(name, i as u16);
+            upvalue_mut.push(mutable);
+        }
         FnCompiler {
             module,
             code: Vec::new(),
@@ -449,23 +559,21 @@ impl<'m> FnCompiler<'m> {
             next_reg: 0,
             is_main,
             method,
-            captures_forbidden: HashSet::new(),
+            upvalue_index,
+            upvalue_mut,
+            celled: HashSet::new(),
+            forbidden: HashSet::new(),
+            enclosing_locals,
+            local_layer: HashSet::new(),
         }
     }
 
-    /// The names bound in this function that a nested closure must not capture (the VM has no
-    /// upvalues yet): every register scope, plus a method's fields and `self`, plus anything
-    /// already forbidden to *this* function (so the restriction accumulates through nesting).
-    fn enclosing_local_names(&self) -> HashSet<String> {
-        let mut names = self.captures_forbidden.clone();
-        for scope in &self.scopes {
-            names.extend(scope.keys().cloned());
-        }
-        if let Some(ctx) = &self.method {
-            names.extend(ctx.fields.iter().cloned());
-            names.insert("self".to_string());
-        }
-        names
+    /// The enclosing-locals chain to pass to one of *this* function's nested closures: the chain
+    /// we were given, extended with our own capturable layer.
+    fn child_enclosing(&self) -> Vec<HashSet<String>> {
+        let mut chain = self.enclosing_locals.clone();
+        chain.push(self.local_layer.clone());
+        chain
     }
 
     fn into_chunk(self, num_params: u16) -> Chunk {
@@ -511,7 +619,11 @@ impl<'m> FnCompiler<'m> {
 
     fn resolve(&self, name: &str) -> Resolved {
         if let Some(var) = self.lookup_local(name) {
-            return Resolved::Local(var.reg);
+            return if var.celled {
+                Resolved::CelledLocal(var.reg)
+            } else {
+                Resolved::Local(var.reg)
+            };
         }
         // Inside a method, `self` and the class's fields resolve against the receiver. Locals
         // (parameters) are checked first, so a parameter shadows a same-named field — matching
@@ -524,11 +636,11 @@ impl<'m> FnCompiler<'m> {
                 return Resolved::Field;
             }
         }
-        // A name bound in an enclosing function is an upvalue capture (not yet modeled). This
-        // is checked before globals/prelude: the tree-walker captures the nearest lexical
-        // binding, so a same-named global must not silently take its place.
-        if self.captures_forbidden.contains(name) {
-            return Resolved::Capture;
+        // A name captured from an enclosing function resolves to an upvalue cell. Checked before
+        // globals/prelude: the tree-walker captures the nearest lexical binding, so a same-named
+        // global must not silently take its place.
+        if let Some(&index) = self.upvalue_index.get(name) {
+            return Resolved::Upvalue(index);
         }
         if self.is_main && self.globals.contains_key(name) {
             return Resolved::Global;
@@ -538,6 +650,43 @@ impl<'m> FnCompiler<'m> {
         }
         // Unknown in `main` (→ runtime E0005), or a forward/global reference inside a function.
         Resolved::Global
+    }
+
+    /// Compute, for a nested closure/`fn` with the given params and body, the ordered upvalue
+    /// list (name + mutability) it captures and the matching `CaptureFrom` source for each (in
+    /// this — the building — function's terms). Returns `Unsupported` if a capture reaches a
+    /// method's `self`/field or cannot be sourced (e.g. a forward capture of a not-yet-declared
+    /// local), so such a program is skipped rather than miscompiled.
+    fn resolve_captures(
+        &self,
+        params: &[Param],
+        body: FnBody<'_>,
+    ) -> Result<CaptureLayout, Unsupported> {
+        let globals = self.module.global_names();
+        let enclosing = self.child_enclosing();
+        let free = freevars::free_vars(params, body, &enclosing, &globals);
+        let mut upvalues = Vec::with_capacity(free.len());
+        let mut captures = Vec::with_capacity(free.len());
+        for name in free {
+            if self.forbidden.contains(&name) {
+                return unsupported("a closure inside a method capturing `self` or a field");
+            }
+            if let Some(var) = self.lookup_local(&name) {
+                if !var.celled {
+                    return unsupported("a forward capture of a not-yet-celled local");
+                }
+                upvalues.push((name, var.mutable));
+                captures.push(CaptureFrom::Local(var.reg));
+            } else if let Some(&index) = self.upvalue_index.get(&name) {
+                upvalues.push((name, self.upvalue_mut[index as usize]));
+                captures.push(CaptureFrom::Upvalue(index));
+            } else {
+                // A free name the analysis flagged but that is neither a live celled local nor an
+                // upvalue here (e.g. captured before its binding was lowered) — skip the program.
+                return unsupported("a capture that could not be sourced from the enclosing frame");
+            }
+        }
+        Ok((upvalues, captures))
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
@@ -606,23 +755,71 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// `fn name(params) { body }` — compile the body to a prototype, then bind `name` to a
-    /// closure over it. Only top-level functions are supported (they capture only globals);
-    /// a `fn` nested inside another function could capture a local, so it is unsupported.
+    /// closure over it. A top-level `fn` is a global capturing only globals. A nested `fn` is a
+    /// local that may capture enclosing locals as upvalues; if it (or a sibling) captures the
+    /// `fn` itself, the binding is celled — and the cell is created *before* the closure is built
+    /// so a self-recursive `fn` can capture its own (still-unset) cell.
     fn declare_fn(&mut self, decl: &FnDecl) -> Result<(), Unsupported> {
-        if !self.at_global_depth() {
-            return unsupported("nested function declaration (may capture a non-global local)");
+        if self.at_global_depth() {
+            let proto = self.module.add_function(
+                &decl.params,
+                Body::Block(&decl.body),
+                Vec::new(),
+                Vec::new(),
+            )?;
+            let t = self.alloc_reg();
+            self.code.push(Op::MakeClosure {
+                dst: t,
+                proto,
+                captures: Box::new([]),
+            });
+            self.globals
+                .insert(decl.name.clone(), GlobalInfo { mutable: false });
+            self.code.push(Op::StoreGlobal {
+                name: decl.name.clone(),
+                src: t,
+            });
+            return Ok(());
         }
-        let proto = self
-            .module
-            .add_function(&decl.params, Body::Block(&decl.body))?;
+
+        let celled = self.celled.contains(&decl.name);
+        let reg = self.alloc_reg();
+        if celled {
+            // Pre-create the cell (holding unit) and bind the name, so the body's references to
+            // itself source this cell; the closure value is stored into it once built.
+            let unit = self.alloc_reg();
+            let k = self.add_const(Const::Unit);
+            self.code.push(Op::LoadConst { dst: unit, k });
+            self.code.push(Op::MakeCell {
+                dst: reg,
+                src: unit,
+            });
+            self.scopes.last_mut().unwrap().insert(
+                decl.name.clone(),
+                Var {
+                    reg,
+                    mutable: false,
+                    celled: true,
+                },
+            );
+        }
+        let (upvalues, captures) =
+            self.resolve_captures(&decl.params, FnBody::Block(&decl.body))?;
+        let enclosing = self.child_enclosing();
+        let proto =
+            self.module
+                .add_function(&decl.params, Body::Block(&decl.body), upvalues, enclosing)?;
         let t = self.alloc_reg();
-        self.code.push(Op::MakeClosure { dst: t, proto });
-        self.globals
-            .insert(decl.name.clone(), GlobalInfo { mutable: false });
-        self.code.push(Op::StoreGlobal {
-            name: decl.name.clone(),
-            src: t,
+        self.code.push(Op::MakeClosure {
+            dst: t,
+            proto,
+            captures: captures.into_boxed_slice(),
         });
+        if celled {
+            self.code.push(Op::CellSet { cell: reg, src: t });
+        } else {
+            self.declare_local(&decl.name, t, false);
+        }
         Ok(())
     }
 
@@ -781,11 +978,18 @@ impl<'m> FnCompiler<'m> {
     /// [`FnCompiler::declare_local`] this emits no `Move`: the element/destructure op has
     /// already written the value into `reg`.
     fn bind_loop_var(&mut self, name: &str, reg: Reg) {
+        let celled = self.celled.contains(name);
+        // A captured loop variable is boxed in place; the `MakeCell` sits inside the loop body, so
+        // each iteration captures a distinct cell (matching the tree-walker's per-iteration scope).
+        if celled {
+            self.code.push(Op::MakeCell { dst: reg, src: reg });
+        }
         self.scopes.last_mut().unwrap().insert(
             name.to_string(),
             Var {
                 reg,
                 mutable: false,
+                celled,
             },
         );
     }
@@ -843,15 +1047,35 @@ impl<'m> FnCompiler<'m> {
             return Ok(());
         }
 
-        // A bare `x = v`: reassign the nearest existing binding, else declare anew.
+        // A bare `x = v`: reassign the nearest existing binding (searching local scopes, then
+        // captured upvalues, then globals — mirroring the tree-walker's outward `Scope::assign`),
+        // else declare a fresh local.
         if let Some(var) = self.lookup_local(name) {
             let t = self.alloc_reg();
             self.expr(value, t)?;
-            if var.mutable {
+            if !var.mutable {
+                let idx = self.add_diag(immutable_diag(name, name_span));
+                self.code.push(Op::Raise { idx });
+            } else if var.celled {
+                self.code.push(Op::CellSet {
+                    cell: var.reg,
+                    src: t,
+                });
+            } else {
                 self.code.push(Op::Move {
                     dst: var.reg,
                     src: t,
                 });
+            }
+            return Ok(());
+        }
+
+        // A captured upvalue: reassign through its cell, enforcing the source binding's mutability.
+        if let Some(&index) = self.upvalue_index.get(name) {
+            let t = self.alloc_reg();
+            self.expr(value, t)?;
+            if self.upvalue_mut[index as usize] {
+                self.code.push(Op::UpvalueSet { index, src: t });
             } else {
                 let idx = self.add_diag(immutable_diag(name, name_span));
                 self.code.push(Op::Raise { idx });
@@ -859,17 +1083,17 @@ impl<'m> FnCompiler<'m> {
             return Ok(());
         }
 
-        if !self.is_main {
-            // Inside a function, a bare assign to a non-local could (in the tree-walker)
-            // reach outward and reassign a global — runtime-dependent. No corpus function
-            // does this; skip rather than risk diverging.
-            return unsupported("assignment to a non-local binding inside a function");
-        }
-
-        if let Some(info) = self.globals.get(name).copied() {
+        // A global: in `main` only the globals declared so far are visible (matching the
+        // tree-walker's not-yet-declared lookups); inside a function every module global is.
+        let global_mut = if self.is_main {
+            self.globals.get(name).map(|info| info.mutable)
+        } else {
+            self.module.module_globals.get(name).copied()
+        };
+        if let Some(mutable) = global_mut {
             let t = self.alloc_reg();
             self.expr(value, t)?;
-            if info.mutable {
+            if mutable {
                 self.code.push(Op::StoreGlobal {
                     name: name.to_string(),
                     src: t,
@@ -898,17 +1122,29 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// Bind `name` to a fresh local register initialized from `src`, reusing the slot if the
-    /// name already exists in the innermost scope (a re-`mut` shadow).
+    /// name already exists in the innermost scope (a re-`mut` shadow). A captured (celled) local
+    /// boxes `src` into a fresh cell instead — re-run each time the binding executes (e.g. per
+    /// loop iteration), so each entry gets a distinct cell, matching the tree-walker's fresh
+    /// per-iteration scope.
     fn declare_local(&mut self, name: &str, src: Reg, mutable: bool) {
+        let celled = self.celled.contains(name);
         let reg = match self.scopes.last().unwrap().get(name) {
             Some(v) => v.reg,
             None => self.alloc_reg(),
         };
-        self.code.push(Op::Move { dst: reg, src });
-        self.scopes
-            .last_mut()
-            .unwrap()
-            .insert(name.to_string(), Var { reg, mutable });
+        if celled {
+            self.code.push(Op::MakeCell { dst: reg, src });
+        } else {
+            self.code.push(Op::Move { dst: reg, src });
+        }
+        self.scopes.last_mut().unwrap().insert(
+            name.to_string(),
+            Var {
+                reg,
+                mutable,
+                celled,
+            },
+        );
     }
 
     /// Lower `expr` so its value ends up in register `dst`.
@@ -932,6 +1168,8 @@ impl<'m> FnCompiler<'m> {
             }
             Expr::Ident { name, span } => match self.resolve(name) {
                 Resolved::Local(reg) => self.code.push(Op::Move { dst, src: reg }),
+                Resolved::CelledLocal(reg) => self.code.push(Op::CellGet { dst, cell: reg }),
+                Resolved::Upvalue(index) => self.code.push(Op::UpvalueGet { dst, index }),
                 Resolved::SelfRecv => self.code.push(Op::Move { dst, src: 0 }),
                 Resolved::Field => self.code.push(Op::LoadField {
                     dst,
@@ -954,20 +1192,19 @@ impl<'m> FnCompiler<'m> {
                     });
                 }
                 Resolved::Prelude => return unsupported("reference to a prelude value/builtin"),
-                Resolved::Capture => {
-                    return unsupported(
-                        "closure captures an enclosing local (upvalues unsupported)",
-                    );
-                }
             },
             Expr::Closure { params, body, .. } => {
-                // A nested closure is allowed as long as it captures nothing from an enclosing
-                // function — its free variables must all be globals/prelude. The forbidden set
-                // (enclosing locals/fields/`self`) makes any capture `Unsupported` (no upvalues
-                // yet). A top-level closure has an empty forbidden set, so it is unrestricted.
-                let forbidden = self.enclosing_local_names();
-                let proto = self.module.add_closure(params, body, forbidden)?;
-                self.code.push(Op::MakeClosure { dst, proto });
+                // Resolve the closure's captures in this (the building) frame's terms, then
+                // compile its body with the matching upvalue layout and emit `MakeClosure` so the
+                // VM threads the captured cells into the new closure.
+                let (upvalues, captures) = self.resolve_captures(params, FnBody::Arrow(body))?;
+                let enclosing = self.child_enclosing();
+                let proto = self.module.add_closure(params, body, upvalues, enclosing)?;
+                self.code.push(Op::MakeClosure {
+                    dst,
+                    proto,
+                    captures: captures.into_boxed_slice(),
+                });
             }
             Expr::List { items, .. } => {
                 let mut regs = Vec::with_capacity(items.len());
@@ -1445,7 +1682,11 @@ impl<'m> FnCompiler<'m> {
             arg_regs.push(r);
         }
         let callee = self.alloc_reg();
-        self.code.push(Op::MakeClosure { dst: callee, proto });
+        self.code.push(Op::MakeClosure {
+            dst: callee,
+            proto,
+            captures: Box::new([]),
+        });
         self.code.push(Op::Call {
             dst,
             callee,

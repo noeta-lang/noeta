@@ -1,0 +1,11 @@
+// A capture threads through an intermediate closure: the innermost reads `a` two levels up.
+// expect: stdout "6"
+// expect: stdout "111"
+// expect: exit 0
+fn outer(a) {
+    return fn(b) => fn(c) => a + b + c;
+}
+f = outer(1);
+g = f(2);
+echo g(3);
+echo outer(100)(10)(1);

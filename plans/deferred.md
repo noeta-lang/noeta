@@ -19,15 +19,24 @@ a **perf** optimization that is invisible to `RunResult`, or a **hardening** tas
 
 The compiler returns [`Unsupported`] for these, and the differential harness *skips* such a
 program. No corpus case exercises any of them today, so the gate holds — but the moment a
-program does, that program silently leaves the differential. These four share one root: the
-VM has **no upvalue machinery** (M1.2 closures capture globals, read live).
+program does, that program silently leaves the differential.
+
+**Closed by slice F1 (`plans/followups/slice-f1-upvalues.md`)** — the VM now has real upvalue
+machinery (closed cells; see [`lang_compiler::freevars`]):
+
+| Item | Source | Status |
+|---|---|---|
+| ~~True upvalues — a nested closure capturing an enclosing **function's local**~~ | M1.2, M1.5 | **Done (F1)** — `closures/capture_param`, `transitive_capture` |
+| ~~Nested `fn` declarations inside a function body~~ | M1.2 | **Done (F1)** — `closures/counter_nested_fn`, `recursive_nested_fn` |
+| ~~Bare `x = expr` non-local reassignment **inside a function**~~ | M1.2, M1.5 | **Done (F1)** — captured-local + global reassignment (`closures/global_mutate_from_fn`) |
+
+Still open (narrowed from the original cluster):
 
 | Item | Source | Trigger to implement |
 |---|---|---|
-| True upvalues — a nested closure capturing an enclosing **function's local** | M1.2, M1.5 | A program/corpus case with a non-global capture; or the async/closure-heavy M2 work needing it |
-| Nested `fn` declarations inside a function body | M1.2 | Same as upvalues (shares the capture machinery) |
-| Bare `x = expr` new-local / non-local reassignment **inside a function** | M1.2, M1.5 | A function that rebinds an outer/global name; needs the new-local-vs-outer disambiguation |
-| A **reference** to a prelude value/builtin as a value (e.g. storing `len`/`map` in a variable) | M1.2 | Higher-order use of a builtin by value; needs the builtin closed over as an upvalue |
+| A closure **inside a method** capturing `self` or a field (method-context capture) | M1.2, F1 | A closure in a method body that reads `self`/a field; needs `self` threaded as a capturable upvalue |
+| A **reference** to a prelude value/builtin as a value (e.g. storing `len`/`map` in a variable) | M1.2 | Higher-order use of a builtin by value; needs first-class native-function values (slice F2) |
+| Forward / mutual capture among nested `fn`s (a closure capturing a local declared *after* it) | F1 | A program with forward references between nested closures; needs pre-declared cells for all celled locals |
 
 ## Type checker / inference hardening
 

@@ -1,0 +1,12 @@
+// Reassigning an immutable captured local through a closure raises E0006, like any other
+// immutable reassignment. The `count` written inside `bump` is on line 8, column 9.
+// expect: error E0006 at 8:9
+// expect: exit 1
+fn run() {
+    count = 0;
+    fn bump() {
+        count = count + 1;
+    }
+    bump();
+}
+run();

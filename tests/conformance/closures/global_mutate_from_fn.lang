@@ -1,0 +1,10 @@
+// A function reassigns a top-level `mut` global (a non-local bare assignment).
+// expect: stdout "15"
+// expect: exit 0
+mut total = 0;
+fn add_to_total(n) {
+    total = total + n;
+}
+add_to_total(5);
+add_to_total(10);
+echo total;

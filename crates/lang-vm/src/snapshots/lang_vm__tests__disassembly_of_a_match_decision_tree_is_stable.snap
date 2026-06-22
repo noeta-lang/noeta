@@ -9,7 +9,7 @@ params: 0, registers: 6
 constants:
   k0 = 7
 code:
-    0  MakeClosure r0 <- proto 1
+    0  MakeClosure r0 <- proto 1 [0 captures]
     1  StoreGlobal "describe" <- r0
     2  LoadGlobal  r2 <- "describe"
     3  LoadConst   r4 <- k0

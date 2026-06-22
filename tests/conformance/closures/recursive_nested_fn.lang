@@ -1,0 +1,15 @@
+// A nested `fn` calls itself: it captures its own (celled) binding as an upvalue. After the
+// enclosing call returns, the closure→cell→closure cycle is unreachable and only the cycle
+// collector can reclaim it.
+// expect: stdout "120"
+// expect: exit 0
+fn compute() {
+    fn fact(n) {
+        if n <= 1 {
+            return 1;
+        }
+        return n * fact(n - 1);
+    }
+    return fact(5);
+}
+echo compute();

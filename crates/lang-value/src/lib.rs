@@ -95,9 +95,45 @@ impl Value {
     }
 
     /// A heap closure (refcount 1) referencing function prototype `proto` in the module's
-    /// proto table. M1.2 closures capture only globals (read live), so there are no upvalues.
-    pub fn closure(proto: u32) -> Value {
-        heap::alloc(Payload::Closure(proto))
+    /// proto table, capturing `upvalues` (the cells for enclosing-function locals it reads;
+    /// empty for a top-level `fn`/closure). Ownership of one reference to each cell transfers
+    /// in, like [`Value::list`]'s elements.
+    pub fn closure(proto: u32, upvalues: Vec<Value>) -> Value {
+        heap::alloc(Payload::Closure { proto, upvalues })
+    }
+
+    /// A heap cell (refcount 1) holding `inner` — the shared storage for a captured local.
+    /// Ownership of one reference to `inner` transfers in (the cell releases it when freed).
+    pub fn cell(inner: Value) -> Value {
+        heap::alloc(Payload::Cell(inner))
+    }
+
+    /// Read the value held in a cell. The caller must have checked [`Value::is_cell`].
+    pub fn cell_get(self) -> Value {
+        heap::cell_get(self)
+    }
+
+    /// Overwrite a cell's contents (retain new, release old). The caller must have checked
+    /// [`Value::is_cell`].
+    pub fn cell_set(self, value: Value) {
+        heap::cell_set(self, value);
+    }
+
+    /// Whether this is a heap cell (captured-local storage; never user-visible).
+    pub fn is_cell(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Cell(_)))
+    }
+
+    /// The captured upvalue cell at `index` of a closure. The caller must have checked
+    /// [`Value::as_closure`].
+    pub fn closure_upvalue(self, index: usize) -> Value {
+        heap::closure_upvalue(self, index)
+    }
+
+    /// How many upvalue cells this closure captured. The caller must have checked
+    /// [`Value::as_closure`].
+    pub fn closure_upvalue_count(self) -> usize {
+        heap::closure_upvalue_count(self)
     }
 
     /// A heap list (refcount 1). The list takes ownership of one reference to each element,
@@ -242,7 +278,7 @@ impl Value {
     pub fn as_closure(self) -> Option<u32> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Closure(proto) => Some(*proto),
+                Payload::Closure { proto, .. } => Some(*proto),
                 _ => None,
             })
         } else {
@@ -457,7 +493,10 @@ impl Value {
                 Payload::Str(s) => s.clone(),
                 Payload::Int(i) => i.to_string(),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"`.
-                Payload::Closure(_) => "<fn>".to_string(),
+                Payload::Closure { .. } => "<fn>".to_string(),
+                // A cell is internal capture storage and never reaches a display site (the
+                // compiler derefs it first); render transparently as its contents if it ever does.
+                Payload::Cell(inner) => inner.display(),
                 // Collections render their elements with `repr` (strings quoted), exactly
                 // like the M0 tree-walker's `Value::List`/`Value::Map` display.
                 Payload::List(items) => {
@@ -558,7 +597,8 @@ impl Value {
                         .collect();
                     format!("{{{}}}", parts.join(","))
                 }
-                Payload::Closure(_) => json_string("<fn>"),
+                Payload::Closure { .. } => json_string("<fn>"),
+                Payload::Cell(inner) => inner.to_json(),
                 Payload::Enum { shape, .. } => {
                     json_string(shape.variant.as_deref().unwrap_or(&shape.name))
                 }
@@ -857,7 +897,7 @@ mod tests {
 
     #[test]
     fn closures_round_trip_and_free() {
-        let v = Value::closure(7);
+        let v = Value::closure(7, Vec::new());
         assert_eq!(v.as_closure(), Some(7));
         assert_eq!(v.type_name(), "function");
         assert_eq!(v.display(), "<fn>");
@@ -881,6 +921,36 @@ mod tests {
         assert_eq!(list.list_len(), Some(3));
         assert!(list.dec_ref());
         list.free();
+    }
+
+    #[test]
+    fn cells_box_and_update_their_contents() {
+        let cell = Value::cell(Value::int(1));
+        assert!(cell.is_cell());
+        assert_eq!(cell.cell_get().as_int(), Some(1));
+        // `cell_set` retains the new occupant for the cell and releases the old; the caller still
+        // owns its own reference (as a VM register would), so release it here.
+        let s = Value::string("two");
+        cell.cell_set(s);
+        if s.dec_ref() {
+            s.free();
+        }
+        assert_eq!(cell.cell_get().as_string().as_deref(), Some("two"));
+        assert!(cell.dec_ref());
+        cell.free();
+    }
+
+    #[test]
+    fn closure_owns_its_upvalue_cells() {
+        let cell = Value::cell(Value::int(42));
+        // The closure takes ownership of one reference to the cell.
+        let closure = Value::closure(3, vec![cell]);
+        assert_eq!(closure.as_closure(), Some(3));
+        assert_eq!(closure.closure_upvalue_count(), 1);
+        assert_eq!(closure.closure_upvalue(0).cell_get().as_int(), Some(42));
+        // Freeing the closure releases its upvalue cell (and the int the cell held).
+        assert!(closure.dec_ref());
+        closure.free();
     }
 
     #[test]

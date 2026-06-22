@@ -39,10 +39,10 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `lang-backend` | The `Backend` trait + `RunResult` — the seam both runtimes implement. |
 | `lang-eval` | AST → `RunResult` (M0 tree-walker, retained as the **differential oracle**). |
 | `lang-object` | Shapes (hidden classes): `Shape`/`ShapeKind`, the flat-slot layout descriptor for records/classes/enums. Pure data; sits *below* `lang-value` (which holds `Rc<Shape>`). |
-| `lang-value` | The M1 NaN-boxed `Value` + operator semantics; heap strings, closures, lists/maps, shaped objects/enums, and the M2.5 `Payload::FileHandle` (a GC-leaf wrapper around the shared `lang_stdlib::FileHandle`, so it depends on `lang-stdlib`). **The one crate with `unsafe`** (miri-gated). |
-| `lang-gc` | Refcount/`__destruct` GC policy over `lang-value`. |
-| `lang-bytecode` | The register IR: `Op`, `Chunk` (a function prototype), `Module` (the proto table + shape/method tables), disassembler (pure data). |
-| `lang-compiler` | AST → `Module` (returns `Unsupported` outside the VM's current subset). |
+| `lang-value` | The M1 NaN-boxed `Value` + operator semantics; heap strings, closures, lists/maps, shaped objects/enums, the M2.5 `Payload::FileHandle` (a GC-leaf wrapper around the shared `lang_stdlib::FileHandle`, so it depends on `lang-stdlib`), and the F1 `Payload::Cell` + closure upvalue cells (closures are now GC *nodes* — a closure→cell cycle is reclaimed by the collector). **The one crate with `unsafe`** (miri-gated). |
+| `lang-gc` | Refcount/`__destruct` GC policy + Bacon–Rajan cycle collector over `lang-value` (now exercises closure/cell cycles). |
+| `lang-bytecode` | The register IR: `Op` (incl. F1 `MakeCell`/`CellGet`/`CellSet`/`UpvalueGet`/`UpvalueSet` and `MakeClosure` captures), `Chunk` (a function prototype), `Module` (the proto table + shape/method tables), disassembler (pure data). |
+| `lang-compiler` | AST → `Module` (returns `Unsupported` outside the VM's current subset). Closure conversion (celled locals + upvalue layout) lives in `freevars.rs`. |
 | `lang-vm` | `Module` → `RunResult` (M1 frame-based register VM, `VmBackend`). Add VM behavior here. |
 | `lang-builtins` | The prelude. |
 | `lang-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`, `--differential`). |

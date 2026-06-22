@@ -25,6 +25,17 @@ pub enum BoolSide {
     Right,
 }
 
+/// Where a closure's upvalue cell comes from, in the frame that builds the closure
+/// (`MakeClosure`): either a celled local in one of the building frame's registers, or one of
+/// the building frame's own upvalues (forwarding a capture down another level).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureFrom {
+    /// The cell currently in register `0` (the field is the register index).
+    Local(Reg),
+    /// The building frame's `index`-th upvalue cell.
+    Upvalue(u16),
+}
+
 /// A prelude collection builtin, called directly by name (`len(x)`, `map(xs, f)`). These
 /// are never first-class values in the M1.3 subset — a program that passes one around
 /// (rather than calling it) is left unsupported — so they ride in a dedicated `CallBuiltin`
@@ -100,10 +111,41 @@ pub enum Op {
         name: String,
         src: Reg,
     },
-    /// `dst = <closure over proto>` — materialize a function value referencing `proto`.
+    /// `dst = <closure over proto>` — materialize a function value referencing `proto` and
+    /// capturing one cell per entry of `captures` (in order), each becoming an upvalue of the
+    /// new closure. A top-level `fn`/closure captures nothing (`captures` is empty).
     MakeClosure {
         dst: Reg,
         proto: u32,
+        captures: Box<[CaptureFrom]>,
+    },
+    /// `dst = <cell holding src>` — box a value into a fresh mutable cell, the storage for a
+    /// local that an inner closure captures. Reads/writes of that local go through the cell, so
+    /// the closure and the defining frame share one live binding (matching the tree-walker's
+    /// `Rc`-captured scope chain).
+    MakeCell {
+        dst: Reg,
+        src: Reg,
+    },
+    /// `dst = *cell` — read the value out of a cell held in register `cell`.
+    CellGet {
+        dst: Reg,
+        cell: Reg,
+    },
+    /// `*cell = src` — write into a cell held in register `cell` (release old, retain new).
+    CellSet {
+        cell: Reg,
+        src: Reg,
+    },
+    /// `dst = *upvalues[index]` — read through this frame's `index`-th captured cell.
+    UpvalueGet {
+        dst: Reg,
+        index: u16,
+    },
+    /// `*upvalues[index] = src` — write through this frame's `index`-th captured cell.
+    UpvalueSet {
+        index: u16,
+        src: Reg,
     },
     /// `dst = [items...]` — build a heap list, retaining each element into it.
     MakeList {
@@ -547,7 +589,19 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Move { dst, src } => format!("Move        r{dst} <- r{src}"),
         Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {name:?}"),
         Op::StoreGlobal { name, src } => format!("StoreGlobal {name:?} <- r{src}"),
-        Op::MakeClosure { dst, proto } => format!("MakeClosure r{dst} <- proto {proto}"),
+        Op::MakeClosure {
+            dst,
+            proto,
+            captures,
+        } => format!(
+            "MakeClosure r{dst} <- proto {proto} [{} captures]",
+            captures.len()
+        ),
+        Op::MakeCell { dst, src } => format!("MakeCell    r{dst} <- cell(r{src})"),
+        Op::CellGet { dst, cell } => format!("CellGet     r{dst} <- *r{cell}"),
+        Op::CellSet { cell, src } => format!("CellSet     *r{cell} <- r{src}"),
+        Op::UpvalueGet { dst, index } => format!("UpvalueGet  r{dst} <- *upvalue[{index}]"),
+        Op::UpvalueSet { index, src } => format!("UpvalueSet  *upvalue[{index}] <- r{src}"),
         Op::MakeList { dst, items } => {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
             format!("MakeList    r{dst} <- [{}]", items.join(", "))

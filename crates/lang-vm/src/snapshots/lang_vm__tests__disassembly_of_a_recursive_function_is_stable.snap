@@ -7,7 +7,7 @@ params: 0, registers: 5
 constants:
   k0 = 6
 code:
-    0  MakeClosure r0 <- proto 1
+    0  MakeClosure r0 <- proto 1 [0 captures]
     1  StoreGlobal "fib" <- r0
     2  LoadGlobal  r2 <- "fib"
     3  LoadConst   r3 <- k0

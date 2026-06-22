@@ -51,9 +51,8 @@ pub enum Color {
 /// The heap payloads. Strings are the heap string type; `Int` boxes an `i64` that does
 /// not fit the 48-bit immediate small-int range, so full i64 wrapping semantics are kept
 /// (the differential oracle checks `i64::MAX + 1`). `Closure` holds a function-prototype
-/// index into the compiled module's proto table — M1.2 functions capture only globals
-/// (read live from the global environment), so a closure needs no upvalue array yet; that
-/// arrives with non-global capture in a later slice.
+/// index into the compiled module's proto table plus the captured upvalue cells (see the
+/// variant doc); a top-level function captures only globals (read live) and so has none.
 ///
 /// `List` and `Map` are the M1.3 heap collections. A collection **owns one reference to
 /// each value it holds** (the list's elements, the map's values; map keys are plain owned
@@ -68,7 +67,18 @@ pub enum Color {
 pub(crate) enum Payload {
     Str(String),
     Int(i64),
-    Closure(u32),
+    /// A function value: a prototype index plus the captured upvalue cells (empty for a
+    /// top-level `fn`/closure, which captures only globals). The closure **owns one reference
+    /// to each upvalue cell**, so it is a GC node — a closure capturing a cell that captures
+    /// the closure forms a cycle the trial-deletion collector reclaims.
+    Closure {
+        proto: u32,
+        upvalues: Vec<Value>,
+    },
+    /// A mutable single-slot box: the shared storage for a local that an inner closure
+    /// captures. It **owns one reference** to the value it holds (released in [`free`], traced
+    /// by [`children`]), so the defining frame and every capturing closure see one live binding.
+    Cell(Value),
     List(Vec<Value>),
     /// A set, stored as its canonical (sorted, de-duplicated) element vector — so iteration,
     /// display, and equality are deterministic and identical to the tree-walker. It owns one
@@ -174,11 +184,13 @@ pub(crate) fn free(value: Value) {
                 release_child(element);
             }
         }
-        Payload::Str(_)
-        | Payload::Int(_)
-        | Payload::Closure(_)
-        | Payload::NativeModule(_)
-        | Payload::FileHandle(_) => {}
+        Payload::Closure { upvalues, .. } => {
+            for &cell in upvalues {
+                release_child(cell);
+            }
+        }
+        Payload::Cell(inner) => release_child(*inner),
+        Payload::Str(_) | Payload::Int(_) | Payload::NativeModule(_) | Payload::FileHandle(_) => {}
     }
     drop(boxed);
 }
@@ -251,11 +263,9 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),
-        Payload::Str(_)
-        | Payload::Int(_)
-        | Payload::Closure(_)
-        | Payload::NativeModule(_)
-        | Payload::FileHandle(_) => {}
+        Payload::Closure { upvalues, .. } => upvalues.iter().copied().for_each(&mut push),
+        Payload::Cell(inner) => push(*inner),
+        Payload::Str(_) | Payload::Int(_) | Payload::NativeModule(_) | Payload::FileHandle(_) => {}
     }
     out
 }
@@ -291,6 +301,49 @@ pub(crate) fn with_file_handle_mut<R>(value: Value, f: impl FnOnce(&mut FileHand
         panic!("with_file_handle_mut on a non-handle value");
     };
     f(handle)
+}
+
+/// Read the value held in a cell, returning a borrowed (not retained) copy. The caller must
+/// have checked the value is a `Cell`.
+pub(crate) fn cell_get(cell: Value) -> Value {
+    let obj = unsafe { &*obj_ptr(cell) };
+    let Payload::Cell(inner) = &obj.payload else {
+        panic!("cell_get on a non-cell value");
+    };
+    *inner
+}
+
+/// Overwrite a cell's contents, retaining the new occupant and releasing the old (the cell
+/// owns one reference to whatever it holds). The caller must have checked the value is a `Cell`.
+pub(crate) fn cell_set(cell: Value, value: Value) {
+    let obj = unsafe { &mut *obj_ptr(cell) };
+    let Payload::Cell(inner) = &mut obj.payload else {
+        panic!("cell_set on a non-cell value");
+    };
+    value.inc_ref();
+    let old = std::mem::replace(inner, value);
+    if old.dec_ref() {
+        old.free();
+    }
+}
+
+/// The captured upvalue cell at `index` of a closure, returning a borrowed (not retained)
+/// copy. The caller must have checked the value is a `Closure`.
+pub(crate) fn closure_upvalue(closure: Value, index: usize) -> Value {
+    let obj = unsafe { &*obj_ptr(closure) };
+    let Payload::Closure { upvalues, .. } = &obj.payload else {
+        panic!("closure_upvalue on a non-closure value");
+    };
+    upvalues[index]
+}
+
+/// How many upvalue cells a closure captured. The caller must have checked it is a `Closure`.
+pub(crate) fn closure_upvalue_count(closure: Value) -> usize {
+    let obj = unsafe { &*obj_ptr(closure) };
+    let Payload::Closure { upvalues, .. } = &obj.payload else {
+        panic!("closure_upvalue_count on a non-closure value");
+    };
+    upvalues.len()
 }
 
 /// Overwrite object slot `index` with `value`, retaining the new occupant and releasing the

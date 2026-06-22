@@ -15,9 +15,9 @@ code:
     2  LoadConst   r6 <- k2
     3  LoadConst   r7 <- k3
     4  MakeList    r3 <- [r4, r5, r6, r7]
-    5  MakeClosure r8 <- proto 1
+    5  MakeClosure r8 <- proto 1 [0 captures]
     6  CallBuiltin r2 <- filter(r3, r8)
-    7  MakeClosure r9 <- proto 2
+    7  MakeClosure r9 <- proto 2 [0 captures]
     8  CallBuiltin r1 <- map(r2, r9)
     9  CallBuiltin r0 <- sum(r1)
    10  Stringify   r10 <- display(r0)
