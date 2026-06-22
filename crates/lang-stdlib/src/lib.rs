@@ -20,11 +20,13 @@
 
 pub mod env;
 pub mod fs;
+pub mod handle;
 pub mod host;
 pub mod json;
 pub mod math;
 pub mod random;
 
+pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush};
 pub use host::{Host, SandboxHost};
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

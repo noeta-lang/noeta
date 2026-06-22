@@ -193,6 +193,11 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.native_module_name(), right.native_module_name()) {
         return a == b;
     }
+    // File handles compare by their full shared state (path, mode, cursor, buffer, closed),
+    // matching the tree-walker's `Value::FileHandle` equality by construction.
+    if left.is_file_handle() && right.is_file_handle() {
+        return left.with_file_handle(|a| right.with_file_handle(|b| a == b));
+    }
     false
 }
 

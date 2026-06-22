@@ -10,6 +10,10 @@ rust-version.workspace = true
 lang-ast = { workspace = true }
 lang-diagnostics = { workspace = true }
 lang-object = { workspace = true }
+# The M2.5 file handle stores `lang_stdlib::FileHandle` directly so its cursor logic is shared
+# verbatim with the tree-walker (differential-by-construction). lang-stdlib has no internal deps,
+# so this adds no dependency cycle.
+lang-stdlib = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

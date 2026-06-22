@@ -111,6 +111,8 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Map(a), Value::Map(b)) => a == b,
         (Value::Enum(a), Value::Enum(b)) => a == b,
         (Value::Object(a), Value::Object(b)) => a == b,
+        // File handles compare by their full shared state, matching the VM's `values_equal`.
+        (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
         (Value::Unit, Value::Unit) => true,
         _ => false,
     }

@@ -14,6 +14,7 @@ use std::ptr;
 use std::rc::Rc;
 
 use lang_object::Shape;
+use lang_stdlib::FileHandle;
 
 use crate::Value;
 
@@ -85,6 +86,11 @@ pub(crate) enum Payload {
     /// A Ring 2 native module (`use std.{json}`), identified by its surface name. A leaf with
     /// no child values; dispatched by `lang-vm` (which maps the name to the module).
     NativeModule(String),
+    /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
+    /// pending write buffer. The whole state machine lives in `lang_stdlib::FileHandle` so it is
+    /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
+    /// is a GC leaf like `Str`.
+    FileHandle(FileHandle),
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
@@ -168,7 +174,11 @@ pub(crate) fn free(value: Value) {
                 release_child(element);
             }
         }
-        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) | Payload::NativeModule(_) => {}
+        Payload::Str(_)
+        | Payload::Int(_)
+        | Payload::Closure(_)
+        | Payload::NativeModule(_)
+        | Payload::FileHandle(_) => {}
     }
     drop(boxed);
 }
@@ -241,7 +251,11 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),
-        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) | Payload::NativeModule(_) => {}
+        Payload::Str(_)
+        | Payload::Int(_)
+        | Payload::Closure(_)
+        | Payload::NativeModule(_)
+        | Payload::FileHandle(_) => {}
     }
     out
 }
@@ -256,6 +270,27 @@ pub(crate) fn free_shallow(value: Value) {
     // the (already independently freed) child objects — though dropping a `Value` is a no-op
     // regardless, this documents that ownership was surrendered.
     drop(boxed);
+}
+
+/// Read a file handle under a closure (it borrows the handle, so no reference escapes). The
+/// caller must have checked the value is a `FileHandle`.
+pub(crate) fn with_file_handle<R>(value: Value, f: impl FnOnce(&FileHandle) -> R) -> R {
+    let obj = unsafe { &*obj_ptr(value) };
+    let Payload::FileHandle(handle) = &obj.payload else {
+        panic!("with_file_handle on a non-handle value");
+    };
+    f(handle)
+}
+
+/// Mutate a file handle under a closure — the cursor-advancing primitive for `read_line`/`read`/
+/// `write`/`close`. Like [`set_slot`], this is single-threaded interior mutation of a heap object;
+/// the handle holds no child `Value`s, so no retain/release bookkeeping is needed.
+pub(crate) fn with_file_handle_mut<R>(value: Value, f: impl FnOnce(&mut FileHandle) -> R) -> R {
+    let obj = unsafe { &mut *obj_ptr(value) };
+    let Payload::FileHandle(handle) = &mut obj.payload else {
+        panic!("with_file_handle_mut on a non-handle value");
+    };
+    f(handle)
 }
 
 /// Overwrite object slot `index` with `value`, retaining the new occupant and releasing the

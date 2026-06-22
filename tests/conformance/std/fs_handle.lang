@@ -1,0 +1,33 @@
+// fs.open cursor handles (M2.5): a mutable streaming handle, identical on both backends. Write
+// through a handle and close to flush, stream a file back line by line and by character count, then
+// append through a handle. `read_line`/`read` return an option (`none` at EOF), unwrapped with `??`.
+// expect: stdout "alpha"
+// expect: stdout "beta"
+// expect: stdout "<eof>"
+// expect: stdout "alpha"
+// expect: stdout "[\"alpha\", \"beta\", \"gamma\"]"
+// expect: exit 0
+use std.{fs};
+
+// Write mode buffers until close, which flushes to the (sandbox) host.
+out = fs.open("notes.txt", "w");
+out.write("alpha\n");
+out.write("beta\n");
+out.close();
+
+// Read mode snapshots the file; read_line advances the cursor and returns none at EOF.
+reader = fs.open("notes.txt", "r");
+echo reader.read_line() ?? "<eof>";
+echo reader.read_line() ?? "<eof>";
+echo reader.read_line() ?? "<eof>";
+
+// read(n) takes up to n characters from the cursor.
+chars = fs.open("notes.txt", "r");
+echo chars.read(5) ?? "<eof>";
+chars.close();
+
+// Append mode grows the file on close; read_lines confirms the new line is there.
+log = fs.open("notes.txt", "a");
+log.write("gamma\n");
+log.close();
+echo fs.read_lines("notes.txt");

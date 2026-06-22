@@ -10,9 +10,12 @@
 //! could loop forever. We print functions opaquely and treat them as never structurally
 //! equal.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
+
+use lang_stdlib::FileHandle;
 
 use crate::{Builtin, Closure, EnumDef, EnumValue, ObjectValue, TypeDef};
 
@@ -48,6 +51,10 @@ pub enum Value {
     /// A Ring 2 native module (e.g. `json`), bound by `use std.{...}`; `module.func(args)`
     /// dispatches to native code.
     NativeModule(lang_stdlib::NativeModule),
+    /// An `fs.open` file handle (M2.5): a mutable cursor. `Rc<RefCell<…>>` gives the shared,
+    /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
+    /// same shared type both backends advance, so behavior is identical by construction.
+    FileHandle(Rc<RefCell<FileHandle>>),
 }
 
 impl Value {
@@ -84,6 +91,8 @@ impl Value {
             Value::Type(def) => format!("<type {}>", def.name()),
             Value::Object(object) => object.display(),
             Value::NativeModule(module) => format!("<module {}>", module.name()),
+            // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
+            Value::FileHandle(handle) => handle.borrow().display(),
         }
     }
 
@@ -113,6 +122,7 @@ impl Value {
             Value::Type(_) => "type",
             Value::Object(_) => "object",
             Value::NativeModule(_) => "module",
+            Value::FileHandle(_) => "file handle",
         }
     }
 }
@@ -135,6 +145,7 @@ impl fmt::Debug for Value {
             Value::Type(def) => write!(f, "Type({})", def.name()),
             Value::Object(object) => write!(f, "Object({})", object.display()),
             Value::NativeModule(module) => write!(f, "NativeModule({})", module.name()),
+            Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
         }
     }
 }
@@ -153,6 +164,8 @@ impl PartialEq for Value {
             (Value::Enum(a), Value::Enum(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::NativeModule(a), Value::NativeModule(b)) => a == b,
+            // File handles compare by their full shared state, matching the VM by construction.
+            (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
             // Functions and types are not structurally comparable.
             _ => false,
         }

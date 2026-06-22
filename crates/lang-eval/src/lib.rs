@@ -1401,6 +1401,14 @@ impl Interpreter {
         {
             return self.call_set_method(method, items, name, &args, span);
         }
+        // File-handle methods (read_line/read/write/close) — the shared `FileHandleMethod` enum
+        // keeps the two backends in lockstep, like the collection methods above.
+        if let Value::FileHandle(handle) = &receiver
+            && let Some(method) = lang_stdlib::FileHandleMethod::from_name(name)
+        {
+            let handle = Rc::clone(handle);
+            return self.call_file_handle_method(method, &handle, name, &args, span);
+        }
         // Ring 1 map methods (keys/values/has).
         if let Value::Map(entries) = &receiver
             && let Some(method) = lang_stdlib::MapMethod::from_name(name)
@@ -1714,9 +1722,108 @@ impl Interpreter {
                 let path = self.expect_std_string(func, &args[0], span)?;
                 Ok(Value::Bool(self.host.fs_is_dir(path)))
             }
+            // `open(path, mode)` → a cursor file handle. Read mode snapshots the file (a missing
+            // file is the same E0021 as `fs.read`); write/append buffer until `close`. Mirrors the
+            // VM's `call_fs` "open" arm.
+            "open" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?.to_string();
+                let mode_spec = self.expect_std_string(func, &args[1], span)?.to_string();
+                let Some(mode) = lang_stdlib::FileMode::parse(&mode_spec) else {
+                    let error = lang_stdlib::handle::unknown_mode_error(&mode_spec);
+                    return Err(self.runtime_error(
+                        std_error_code(error.kind),
+                        span,
+                        error.message,
+                    ));
+                };
+                let handle = match mode {
+                    lang_stdlib::FileMode::Read => match self.host.fs_read(&path) {
+                        Ok(content) => lang_stdlib::FileHandle::open_read(&path, content),
+                        Err(error) => {
+                            return Err(self.runtime_error(
+                                std_error_code(error.kind),
+                                span,
+                                error.message,
+                            ));
+                        }
+                    },
+                    lang_stdlib::FileMode::Write => lang_stdlib::FileHandle::open_write(&path),
+                    lang_stdlib::FileMode::Append => lang_stdlib::FileHandle::open_append(&path),
+                };
+                Ok(Value::FileHandle(Rc::new(RefCell::new(handle))))
+            }
             _ => {
                 let error = lang_stdlib::no_function_error("fs", func);
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Dispatch a file-handle method (`read_line`/`read`/`write`/`close`). Mirrors the VM's
+    /// `call_file_handle_method`: the cursor logic lives in the shared `FileHandle`, so the two
+    /// backends differ only in value glue (building `some`/`none`, routing the close flush through
+    /// `self.host`).
+    fn call_file_handle_method(
+        &mut self,
+        method: lang_stdlib::FileHandleMethod,
+        handle: &Rc<RefCell<lang_stdlib::FileHandle>>,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        use lang_stdlib::FileHandleMethod as M;
+        match method {
+            M::ReadLine => {
+                self.expect_std_arity(name, args, 0, span)?;
+                match handle.borrow_mut().read_line() {
+                    Ok(Some(line)) => Ok(builtin_enum("Option", "some", vec![Value::Str(line)])),
+                    Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            M::Read => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let count = self.expect_std_int(name, &args[0], span)?;
+                match handle.borrow_mut().read(count) {
+                    Ok(Some(chunk)) => Ok(builtin_enum("Option", "some", vec![Value::Str(chunk)])),
+                    Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            M::Write => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let chunk = self.expect_std_string(name, &args[0], span)?.to_string();
+                match handle.borrow_mut().write(&chunk) {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            M::Close => {
+                self.expect_std_arity(name, args, 0, span)?;
+                // Take the flush instruction first (the borrow ends), then hit the host.
+                let flush = handle.borrow_mut().close();
+                let result = match flush {
+                    None => Ok(()),
+                    Some(lang_stdlib::Flush::Write { path, content }) => {
+                        self.host.fs_write(&path, &content)
+                    }
+                    Some(lang_stdlib::Flush::Append { path, content }) => {
+                        self.host.fs_append(&path, &content)
+                    }
+                };
+                match result {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
             }
         }
     }

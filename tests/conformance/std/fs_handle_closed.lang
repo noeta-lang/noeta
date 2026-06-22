@@ -1,0 +1,6 @@
+// Operating on a closed handle is a runtime E0021, identical on both backends.
+// expect: error E0021 at 6:1
+use std.{fs};
+handle = fs.open("scratch.txt", "w");
+handle.close();
+handle.write("too late");

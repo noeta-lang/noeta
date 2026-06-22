@@ -30,6 +30,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use lang_object::Shape;
+use lang_stdlib::FileHandle;
 
 use heap::Payload;
 
@@ -111,6 +112,28 @@ impl Value {
     /// and equality. Ownership of one reference to each element transfers in, like [`Value::list`].
     pub fn set(items: Vec<Value>) -> Value {
         heap::alloc(Payload::Set(items))
+    }
+
+    /// An `fs.open` file handle value (refcount 1). The handle owns only `String`s, so unlike a
+    /// collection it takes no child-value references.
+    pub fn file_handle(handle: FileHandle) -> Value {
+        heap::alloc(Payload::FileHandle(handle))
+    }
+
+    /// Whether this is a file handle.
+    pub fn is_file_handle(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::FileHandle(_)))
+    }
+
+    /// Read this file handle under a closure. The caller must have checked [`Value::is_file_handle`].
+    pub fn with_file_handle<R>(self, f: impl FnOnce(&FileHandle) -> R) -> R {
+        heap::with_file_handle(self, f)
+    }
+
+    /// Mutate this file handle under a closure (advance the cursor / buffer a write / close). The
+    /// caller must have checked [`Value::is_file_handle`].
+    pub fn with_file_handle_mut<R>(self, f: impl FnOnce(&mut FileHandle) -> R) -> R {
+        heap::with_file_handle_mut(self, f)
     }
 
     /// A Ring 2 native module value (refcount 1), identified by its surface name (e.g. `"json"`).
@@ -485,6 +508,8 @@ impl Value {
                     }
                 }
                 Payload::NativeModule(name) => format!("<module {name}>"),
+                // `<file "path" (mode)>`, rendered by the shared handle so both backends match.
+                Payload::FileHandle(handle) => handle.display(),
             })
         } else {
             // The unit value (and any other singleton) displays as empty, as in M0.
@@ -538,6 +563,8 @@ impl Value {
                     json_string(shape.variant.as_deref().unwrap_or(&shape.name))
                 }
                 Payload::NativeModule(name) => json_string(&format!("<module {name}>")),
+                // A handle has no JSON analog; fall back to its quoted display form, like a closure.
+                Payload::FileHandle(handle) => json_string(&handle.display()),
             })
         } else {
             "null".to_string()
@@ -579,6 +606,8 @@ impl Value {
                 "enum"
             } else if self.native_module_name().is_some() {
                 "module"
+            } else if self.is_file_handle() {
+                "file handle"
             } else {
                 "string"
             }

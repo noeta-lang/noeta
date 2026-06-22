@@ -805,6 +805,7 @@ dependencies = [
  "lang-ast",
  "lang-diagnostics",
  "lang-object",
+ "lang-stdlib",
  "proptest",
 ]
 

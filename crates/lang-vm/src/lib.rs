@@ -625,9 +625,102 @@ impl<'m> Vm<'m> {
                 let path = self.stdlib_string(func, args[0], span)?;
                 Ok(Value::bool(self.host.fs_is_dir(&path)))
             }
+            // `open(path, mode)` → a cursor file handle. Read mode snapshots the file (a missing
+            // file is the same E0021 as `fs.read`); write/append buffer until `close`.
+            "open" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                let mode_spec = self.stdlib_string(func, args[1], span)?;
+                let Some(mode) = lang_stdlib::FileMode::parse(&mode_spec) else {
+                    let error = lang_stdlib::handle::unknown_mode_error(&mode_spec);
+                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                };
+                let handle = match mode {
+                    lang_stdlib::FileMode::Read => match self.host.fs_read(&path) {
+                        Ok(content) => lang_stdlib::FileHandle::open_read(&path, content),
+                        Err(error) => {
+                            return Err(self.error(
+                                stdlib_error_code(error.kind),
+                                span,
+                                error.message,
+                            ));
+                        }
+                    },
+                    lang_stdlib::FileMode::Write => lang_stdlib::FileHandle::open_write(&path),
+                    lang_stdlib::FileMode::Append => lang_stdlib::FileHandle::open_append(&path),
+                };
+                Ok(Value::file_handle(handle))
+            }
             _ => {
                 let error = lang_stdlib::no_function_error("fs", func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Dispatch a file-handle method. Mirrors the tree-walker's `call_file_handle_method`: the
+    /// cursor logic lives in the shared `FileHandle`, so the two backends differ only in value glue
+    /// (building `some`/`none`, routing the close flush through `self.host`).
+    fn call_file_handle_method(
+        &mut self,
+        recv: Value,
+        method: lang_stdlib::FileHandleMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        use lang_stdlib::FileHandleMethod as M;
+        match method {
+            M::ReadLine => {
+                self.stdlib_arity(name, args, 0, span)?;
+                match recv.with_file_handle_mut(|handle| handle.read_line()) {
+                    Ok(Some(line)) => Ok(make_some(Value::string(&line))),
+                    Ok(None) => Ok(make_none()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            M::Read => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let count = self.stdlib_int(name, args[0], span)?;
+                match recv.with_file_handle_mut(|handle| handle.read(count)) {
+                    Ok(Some(chunk)) => Ok(make_some(Value::string(&chunk))),
+                    Ok(None) => Ok(make_none()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            M::Write => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let chunk = self.stdlib_string(name, args[0], span)?;
+                match recv.with_file_handle_mut(|handle| handle.write(&chunk)) {
+                    Ok(()) => Ok(Value::unit()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            M::Close => {
+                self.stdlib_arity(name, args, 0, span)?;
+                // Take the flush instruction first (the handle borrow ends), then hit the host.
+                let flush = recv.with_file_handle_mut(|handle| handle.close());
+                let result = match flush {
+                    None => Ok(()),
+                    Some(lang_stdlib::Flush::Write { path, content }) => {
+                        self.host.fs_write(&path, &content)
+                    }
+                    Some(lang_stdlib::Flush::Append { path, content }) => {
+                        self.host.fs_append(&path, &content)
+                    }
+                };
+                match result {
+                    Ok(()) => Ok(Value::unit()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
             }
         }
     }
@@ -1299,6 +1392,25 @@ impl<'m> Vm<'m> {
                             args.iter().map(|r| frames[top].regs[*r as usize]).collect();
                         let value =
                             self.call_set_method(v, set_method, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    // File-handle methods (read_line/read/write/close) — the shared
+                    // `FileHandleMethod` enum keeps the two backends in lockstep.
+                    if v.is_file_handle()
+                        && let Some(handle_method) =
+                            lang_stdlib::FileHandleMethod::from_name(method)
+                    {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        let value = self.call_file_handle_method(
+                            v,
+                            handle_method,
+                            method,
+                            &arg_values,
+                            *span,
+                        )?;
                         set_reg(&mut frames[top].regs, *dst, value);
                         frames[top].pc += 1;
                         continue;
