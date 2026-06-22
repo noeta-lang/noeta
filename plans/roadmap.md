@@ -55,6 +55,8 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 **Deferred follow-ups (cluster 1 complete, but revisit in a later M2 pass):**
 - **Lazy real-disk reads behind the `fs.open` handle.** M2.5's read handle takes a *snapshot* (`host.fs_read` at open) rather than holding a live `tokio` file, so a large file is loaded whole. This was deliberate — a live OS file can't be a differential-safe *value* (which must clone/compare/display identically across backends). The handle *surface* (`read_line`/`read`/`close`) is already final, so making `RealHost` stream lazily is a **pure-internal optimization** behind it: no surface, sandbox, or differential change. Trigger to do it: real workloads reading files too large to buffer. See `m2/slice-05-handles-directories.md` Outcome.
 
+> The full cross-milestone deferral registry lives in [`deferred.md`](deferred.md) — every item a done slice pushed to later (latent VM-completeness gaps like true upvalues, the M1.7b static immutability check, the M1.8 traits/generics tail, perf caches), each with its source slice and a concrete trigger.
+
 ## M0 slices
 
 Each links to its file in `m0/`. Pick the lowest-numbered `todo`.
