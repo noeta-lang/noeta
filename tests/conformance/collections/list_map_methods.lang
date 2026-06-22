@@ -1,0 +1,21 @@
+// Ring 1 list/map methods — Value-specific, implemented per backend, kept in lockstep by
+// the shared ListMethod/MapMethod enums and the differential oracle.
+// expect: stdout "[2, 1, 3]"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "a-b-c"
+// expect: stdout "1,2,3"
+// expect: stdout "[\"a\", \"b\"]"
+// expect: stdout "[1, 2]"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+echo [3, 1, 2].reverse();
+echo [1, 2, 3].contains(2);
+echo [1, 2, 3].contains(9);
+echo ["a", "b", "c"].join("-");
+echo [1, 2, 3].join(",");
+echo {"b": 2, "a": 1}.keys();
+echo {"b": 2, "a": 1}.values();
+echo {"a": 1}.has("a");
+echo {"a": 1}.has("z");

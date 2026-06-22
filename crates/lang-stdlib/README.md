@@ -21,7 +21,7 @@ Strings are the canonical case. Both backends store a string as a Rust `String` 
 
 Each backend is reduced to thin glue: project args onto `Arg`, call `string_method`, lift `Output`. No compiler or bytecode change is involved — a method call already lowers generically and is resolved at runtime (the same dispatch site that handles `count`/`enumerate`).
 
-Collection methods (list/map/set) manipulate backend-specific value representations and so cannot live here wholesale; they are implemented per backend with the differential as the guard, sharing value-agnostic helpers where possible.
+Collection methods (list/map/set) manipulate backend-specific value representations and so cannot live here wholesale; they are implemented per backend with the differential as the guard. What *does* live here for them is the method **set** — the [`ListMethod`] and [`MapMethod`] enums — so each backend's dispatch `match` is exhaustive: a method one backend offers, the other must handle or fail to compile. Their misuse also routes through the shared [`arity_error`]/[`type_error`] builders, so the two backends' diagnostics stay identical.
 
 ## The Ring 1 string surface
 
@@ -42,7 +42,7 @@ Determinism is a hard requirement across the whole stdlib: no wall-clock, no has
 ## Status
 
 - **M1.10.1 — done:** this crate + the Ring 1 string surface, shared by both backends.
-- **M1.10.2 — todo:** Ring 1 list/map/set methods.
+- **M1.10.2 — in progress:** Ring 1 list `reverse`/`contains`/`join` and map `keys`/`values`/`has` done (per backend, gated by the shared `ListMethod`/`MapMethod` enums); list `sorted`/`slice`/`first`/`last` and a possible `Set` remain.
 - **M1.10.3 — todo:** Ring 2 modules (json/math/seeded-random first; file IO and time pending a differential-oracle design decision).
 
 See `plans/m1/slice-10-stdlib.md`.

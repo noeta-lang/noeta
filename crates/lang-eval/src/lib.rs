@@ -1353,6 +1353,20 @@ impl Interpreter {
                 lang_stdlib::Dispatch::Unknown => {}
             }
         }
+        // Ring 1 list methods (reverse/contains/join) — Value-specific, so implemented per
+        // backend, but the method set is the shared `ListMethod` enum: a non-exhaustive `match`
+        // here would not compile, so the VM cannot omit a method this backend offers.
+        if let Value::List(items) = &receiver
+            && let Some(method) = lang_stdlib::ListMethod::from_name(name)
+        {
+            return self.call_list_method(method, items, name, &args, span);
+        }
+        // Ring 1 map methods (keys/values/has).
+        if let Value::Map(entries) = &receiver
+            && let Some(method) = lang_stdlib::MapMethod::from_name(name)
+        {
+            return self.call_map_method(method, entries, name, &args, span);
+        }
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
@@ -1380,6 +1394,95 @@ impl Interpreter {
                 span,
                 format!("no method `{name}` on {}", receiver.type_name()),
             )),
+        }
+    }
+
+    /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the VM's `call_list_method`;
+    /// arity/type misuse is reported through the shared `lang-stdlib` error builders so both
+    /// backends produce identical diagnostics.
+    fn call_list_method(
+        &mut self,
+        method: lang_stdlib::ListMethod,
+        items: &[Value],
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        match method {
+            lang_stdlib::ListMethod::Reverse => {
+                self.expect_std_arity(name, args, 0, span)?;
+                let mut reversed = items.to_vec();
+                reversed.reverse();
+                Ok(Value::List(Rc::new(reversed)))
+            }
+            lang_stdlib::ListMethod::Contains => {
+                self.expect_std_arity(name, args, 1, span)?;
+                Ok(Value::Bool(items.iter().any(|item| *item == args[0])))
+            }
+            lang_stdlib::ListMethod::Join => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let separator = self.expect_std_string(name, &args[0], span)?.to_string();
+                let joined = items
+                    .iter()
+                    .map(Value::display)
+                    .collect::<Vec<_>>()
+                    .join(&separator);
+                Ok(Value::Str(joined))
+            }
+        }
+    }
+
+    /// A Ring 1 map method (`keys`/`values`/`has`). Mirrors the VM's `call_map_method`.
+    fn call_map_method(
+        &mut self,
+        method: lang_stdlib::MapMethod,
+        entries: &BTreeMap<String, Value>,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        match method {
+            lang_stdlib::MapMethod::Keys => {
+                self.expect_std_arity(name, args, 0, span)?;
+                let keys = entries.keys().map(|k| Value::Str(k.clone())).collect();
+                Ok(Value::List(Rc::new(keys)))
+            }
+            lang_stdlib::MapMethod::Values => {
+                self.expect_std_arity(name, args, 0, span)?;
+                Ok(Value::List(Rc::new(entries.values().cloned().collect())))
+            }
+            lang_stdlib::MapMethod::Has => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let key = self.expect_std_string(name, &args[0], span)?;
+                Ok(Value::Bool(entries.contains_key(key)))
+            }
+        }
+    }
+
+    /// Enforce a collection method's arity, raising the shared `lang-stdlib` arity error.
+    fn expect_std_arity(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        expected: usize,
+        span: Span,
+    ) -> Eval<()> {
+        if args.len() == expected {
+            Ok(())
+        } else {
+            let error = lang_stdlib::arity_error(name, expected, args.len());
+            Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+        }
+    }
+
+    /// Read a string argument for a collection method, raising the shared `lang-stdlib` type error.
+    fn expect_std_string<'a>(&mut self, name: &str, value: &'a Value, span: Span) -> Eval<&'a str> {
+        match value {
+            Value::Str(s) => Ok(s),
+            _ => {
+                let error = lang_stdlib::type_error(name, "string");
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
         }
     }
 

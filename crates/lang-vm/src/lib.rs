@@ -244,6 +244,111 @@ impl<'m> Vm<'m> {
         Abort
     }
 
+    /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the tree-walker's
+    /// `call_list_method`; the result is a freshly-owned value (refcount 1). The receiver's
+    /// elements shared from `list_items` are not retained, so any element placed into a *new*
+    /// list must be retained first (the list then owns that reference).
+    fn call_list_method(
+        &mut self,
+        list: Value,
+        method: lang_stdlib::ListMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        let items = list.list_items().expect("list receiver");
+        match method {
+            lang_stdlib::ListMethod::Reverse => {
+                self.stdlib_arity(name, args, 0, span)?;
+                let mut reversed = items;
+                reversed.reverse();
+                for &element in &reversed {
+                    retain(element);
+                }
+                Ok(Value::list(reversed))
+            }
+            lang_stdlib::ListMethod::Contains => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let target = args[0];
+                let found = items.iter().any(|&item| {
+                    apply_binary(BinaryOp::Eq, item, target)
+                        .ok()
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false)
+                });
+                Ok(Value::bool(found))
+            }
+            lang_stdlib::ListMethod::Join => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let separator = self.stdlib_string(name, args[0], span)?;
+                let joined = items
+                    .iter()
+                    .map(|v| v.display())
+                    .collect::<Vec<_>>()
+                    .join(&separator);
+                Ok(Value::string(&joined))
+            }
+        }
+    }
+
+    /// A Ring 1 map method (`keys`/`values`/`has`). Mirrors the tree-walker's `call_map_method`.
+    fn call_map_method(
+        &mut self,
+        map: Value,
+        method: lang_stdlib::MapMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        match method {
+            lang_stdlib::MapMethod::Keys => {
+                self.stdlib_arity(name, args, 0, span)?;
+                let keys = map.map_keys().expect("map receiver");
+                Ok(Value::list(keys.iter().map(|k| Value::string(k)).collect()))
+            }
+            lang_stdlib::MapMethod::Values => {
+                self.stdlib_arity(name, args, 0, span)?;
+                let values = map.map_values().expect("map receiver");
+                for &element in &values {
+                    retain(element);
+                }
+                Ok(Value::list(values))
+            }
+            lang_stdlib::MapMethod::Has => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let key = self.stdlib_string(name, args[0], span)?;
+                Ok(Value::bool(map.map_get(&key).is_some()))
+            }
+        }
+    }
+
+    /// Enforce a collection method's arity, raising the shared `lang-stdlib` arity error.
+    fn stdlib_arity(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        expected: usize,
+        span: Span,
+    ) -> Result<(), Abort> {
+        if args.len() == expected {
+            Ok(())
+        } else {
+            let error = lang_stdlib::arity_error(name, expected, args.len());
+            Err(self.error(stdlib_error_code(error.kind), span, error.message))
+        }
+    }
+
+    /// Read a string argument for a collection method, raising the shared `lang-stdlib` type error.
+    fn stdlib_string(&mut self, name: &str, value: Value, span: Span) -> Result<String, Abort> {
+        match value.as_string() {
+            Some(s) => Ok(s),
+            None => {
+                let error = lang_stdlib::type_error(name, "string");
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
     /// Release a value that may be the *last* reference to a destructor-carrying object. If so,
     /// the `destruct` block runs synchronously (with the instance's fields in scope) before the
     /// object is freed — the deterministic destruction the spec requires. Used at the global
@@ -705,6 +810,32 @@ impl<'m> Vm<'m> {
                             }
                             lang_stdlib::Dispatch::Unknown => {}
                         }
+                    }
+                    // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
+                    // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
+                    // method this backend lacks.
+                    if v.list_len().is_some()
+                        && let Some(list_method) = lang_stdlib::ListMethod::from_name(method)
+                    {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        let value =
+                            self.call_list_method(v, list_method, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    // Ring 1 map methods (keys/values/has).
+                    if v.is_map()
+                        && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
+                    {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        let value =
+                            self.call_map_method(v, map_method, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
                     }
                     // Built-in zero-argument methods on lists/maps/strings.
                     let result = if !args.is_empty() {

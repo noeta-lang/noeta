@@ -152,31 +152,38 @@ fn want_arity(method: &str, args: &[Arg], expected: usize) -> Result<(), StdErro
     if args.len() == expected {
         Ok(())
     } else {
-        Err(StdError {
-            kind: ErrorKind::Arity,
-            message: format!(
-                "method `{method}` takes {expected} argument(s) but {} were supplied",
-                args.len()
-            ),
-        })
+        Err(arity_error(method, expected, args.len()))
     }
 }
 
 fn want_str<'a>(method: &str, args: &[Arg<'a>], index: usize) -> Result<&'a str, StdError> {
     match args[index] {
         Arg::Str(value) => Ok(value),
-        _ => Err(arg_type_error(method, "string")),
+        _ => Err(type_error(method, "string")),
     }
 }
 
 fn want_int(method: &str, args: &[Arg], index: usize) -> Result<i64, StdError> {
     match args[index] {
         Arg::Int(value) => Ok(value),
-        _ => Err(arg_type_error(method, "int")),
+        _ => Err(type_error(method, "int")),
     }
 }
 
-fn arg_type_error(method: &str, expected: &str) -> StdError {
+/// Build the canonical "wrong number of arguments" error. Public so the collection methods
+/// (implemented per backend over their own value types) report misuse with text identical to
+/// the string surface — keeping both backends' diagnostics in lockstep.
+pub fn arity_error(method: &str, expected: usize, got: usize) -> StdError {
+    StdError {
+        kind: ErrorKind::Arity,
+        message: format!("method `{method}` takes {expected} argument(s) but {got} were supplied"),
+    }
+}
+
+/// Build the canonical "wrong argument type" error. `expected` is the type noun (`"string"`,
+/// `"int"`, `"list of strings"`, ...); the article is chosen for readability. Public for the
+/// same reason as [`arity_error`].
+pub fn type_error(method: &str, expected: &str) -> StdError {
     StdError {
         kind: ErrorKind::ArgType,
         message: format!("method `{method}` expects {} argument", an(expected)),
@@ -190,6 +197,53 @@ fn an(noun: &str) -> String {
         _ => "a",
     };
     format!("{article} {noun}")
+}
+
+/// The Ring 1 list methods that manipulate backend-specific values, so each backend implements
+/// the value work itself. They are enumerated here (rather than matched as strings in each
+/// backend) so a `match` over [`ListMethod`] is exhaustive: adding a method will not compile
+/// until *both* backends handle it — the differential's static guard.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListMethod {
+    /// `reverse()` → a new list with the elements in reverse order.
+    Reverse,
+    /// `contains(x)` → `bool`, by structural value equality.
+    Contains,
+    /// `join(sep)` → a string of the elements' display forms separated by `sep`.
+    Join,
+}
+
+impl ListMethod {
+    pub fn from_name(name: &str) -> Option<ListMethod> {
+        match name {
+            "reverse" => Some(ListMethod::Reverse),
+            "contains" => Some(ListMethod::Contains),
+            "join" => Some(ListMethod::Join),
+            _ => None,
+        }
+    }
+}
+
+/// The Ring 1 map methods. See [`ListMethod`] for why these are an enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MapMethod {
+    /// `keys()` → a list of the map's keys (sorted, since maps iterate in key order).
+    Keys,
+    /// `values()` → a list of the map's values, in key order.
+    Values,
+    /// `has(key)` → `bool`, whether `key` is present.
+    Has,
+}
+
+impl MapMethod {
+    pub fn from_name(name: &str) -> Option<MapMethod> {
+        match name {
+            "keys" => Some(MapMethod::Keys),
+            "values" => Some(MapMethod::Values),
+            "has" => Some(MapMethod::Has),
+            _ => None,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -293,5 +347,32 @@ mod tests {
             Dispatch::Err(error) => assert_eq!(error.kind, ErrorKind::ArgType),
             other => panic!("expected Err, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn collection_method_names_resolve() {
+        assert_eq!(ListMethod::from_name("reverse"), Some(ListMethod::Reverse));
+        assert_eq!(
+            ListMethod::from_name("contains"),
+            Some(ListMethod::Contains)
+        );
+        assert_eq!(ListMethod::from_name("join"), Some(ListMethod::Join));
+        assert_eq!(ListMethod::from_name("nope"), None);
+        assert_eq!(MapMethod::from_name("keys"), Some(MapMethod::Keys));
+        assert_eq!(MapMethod::from_name("values"), Some(MapMethod::Values));
+        assert_eq!(MapMethod::from_name("has"), Some(MapMethod::Has));
+        assert_eq!(MapMethod::from_name("nope"), None);
+    }
+
+    #[test]
+    fn error_builders_render_canonically() {
+        assert_eq!(
+            arity_error("reverse", 0, 2).message,
+            "method `reverse` takes 0 argument(s) but 2 were supplied"
+        );
+        assert_eq!(
+            type_error("has", "string").message,
+            "method `has` expects a string argument"
+        );
     }
 }

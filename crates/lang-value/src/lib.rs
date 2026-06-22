@@ -291,6 +291,19 @@ impl Value {
         }
     }
 
+    /// A map's keys in sorted order, if this is a map. Keys are plain owned strings (not heap
+    /// values), so no refcounting is involved.
+    pub fn map_keys(self) -> Option<Vec<String>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => Some(entries.keys().cloned().collect()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Whether this is a shaped object (record/class/opaque instance).
     pub fn is_object(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Object { .. }))

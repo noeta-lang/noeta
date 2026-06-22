@@ -1,0 +1,4 @@
+// A collection method misused (wrong argument type) is a runtime E0007, identical in both
+// backends — exercising the shared lang-stdlib error builders from the collection path.
+// expect: error E0007 at 4:6
+echo [1, 2].join(5);
