@@ -1,0 +1,4 @@
+// Sorting values with no common order (a mix of int and string) is a runtime E0007, identical
+// in both backends.
+// expect: error E0007 at 4:6
+echo [1, "two", 3].sorted();

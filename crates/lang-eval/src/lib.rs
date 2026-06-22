@@ -1429,6 +1429,42 @@ impl Interpreter {
                     .join(&separator);
                 Ok(Value::Str(joined))
             }
+            lang_stdlib::ListMethod::Sorted => {
+                self.expect_std_arity(name, args, 0, span)?;
+                // Every element must be mutually orderable with the first (homogeneous numbers
+                // or strings); otherwise there is no total order to sort by. A stable sort then
+                // keeps equal elements in input order, matching the VM exactly.
+                if items
+                    .iter()
+                    .any(|item| compare_primitive(&items[0], item).is_none())
+                {
+                    let error = lang_stdlib::unorderable_error();
+                    return Err(self.runtime_error(
+                        std_error_code(error.kind),
+                        span,
+                        error.message,
+                    ));
+                }
+                let mut sorted = items.to_vec();
+                sorted.sort_by(|a, b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                Ok(Value::List(Rc::new(sorted)))
+            }
+            lang_stdlib::ListMethod::Slice => {
+                self.expect_std_arity(name, args, 2, span)?;
+                let start = self.expect_std_int(name, &args[0], span)?;
+                let end = self.expect_std_int(name, &args[1], span)?;
+                let len = items.len();
+                if start < 0 || end < start || end as usize > len {
+                    let error = lang_stdlib::slice_bounds_error(start, end, len);
+                    return Err(self.runtime_error(
+                        std_error_code(error.kind),
+                        span,
+                        error.message,
+                    ));
+                }
+                let slice = items[start as usize..end as usize].to_vec();
+                Ok(Value::List(Rc::new(slice)))
+            }
         }
     }
 
@@ -1481,6 +1517,17 @@ impl Interpreter {
             Value::Str(s) => Ok(s),
             _ => {
                 let error = lang_stdlib::type_error(name, "string");
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Read an int argument for a collection method, raising the shared `lang-stdlib` type error.
+    fn expect_std_int(&mut self, name: &str, value: &Value, span: Span) -> Eval<i64> {
+        match value {
+            Value::Int(i) => Ok(*i),
+            _ => {
+                let error = lang_stdlib::type_error(name, "int");
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }
@@ -1975,9 +2022,15 @@ fn output_to_value(output: lang_stdlib::Output) -> Value {
     }
 }
 
-/// Both stdlib misuse kinds surface as a `TypeMismatch` (wrong arity or wrong argument type).
-fn std_error_code(_kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
-    DiagnosticCode::TypeMismatch
+/// Map a stdlib misuse kind onto a diagnostic code: arity/argument-type mistakes are a
+/// `TypeMismatch`; an out-of-range index/range is an `IndexOutOfBounds`.
+fn std_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
+    match kind {
+        lang_stdlib::ErrorKind::Arity | lang_stdlib::ErrorKind::ArgType => {
+            DiagnosticCode::TypeMismatch
+        }
+        lang_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
+    }
 }
 
 /// Field-wise (declared order) ordering of two same-type objects, the behavior synthesized by

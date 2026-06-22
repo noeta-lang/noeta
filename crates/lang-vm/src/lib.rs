@@ -288,6 +288,40 @@ impl<'m> Vm<'m> {
                     .join(&separator);
                 Ok(Value::string(&joined))
             }
+            lang_stdlib::ListMethod::Sorted => {
+                self.stdlib_arity(name, args, 0, span)?;
+                // Mutual orderability check against the first element (homogeneous numbers or
+                // strings); a stable sort then matches the tree-walker element-for-element.
+                if items
+                    .iter()
+                    .any(|&item| compare_primitive(items[0], item).is_none())
+                {
+                    let error = lang_stdlib::unorderable_error();
+                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                }
+                let mut sorted = items;
+                sorted
+                    .sort_by(|&a, &b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
+                for &element in &sorted {
+                    retain(element);
+                }
+                Ok(Value::list(sorted))
+            }
+            lang_stdlib::ListMethod::Slice => {
+                self.stdlib_arity(name, args, 2, span)?;
+                let start = self.stdlib_int(name, args[0], span)?;
+                let end = self.stdlib_int(name, args[1], span)?;
+                let len = items.len();
+                if start < 0 || end < start || end as usize > len {
+                    let error = lang_stdlib::slice_bounds_error(start, end, len);
+                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                }
+                let slice: Vec<Value> = items[start as usize..end as usize].to_vec();
+                for &element in &slice {
+                    retain(element);
+                }
+                Ok(Value::list(slice))
+            }
         }
     }
 
@@ -344,6 +378,19 @@ impl<'m> Vm<'m> {
             Some(s) => Ok(s),
             None => {
                 let error = lang_stdlib::type_error(name, "string");
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Read an int argument for a collection method, raising the shared `lang-stdlib` type error.
+    /// `as_int` is `None` for a float, so `slice(1.0, 2)` is a type error — matching the
+    /// tree-walker, which accepts only `Value::Int`.
+    fn stdlib_int(&mut self, name: &str, value: Value, span: Span) -> Result<i64, Abort> {
+        match value.as_int() {
+            Some(i) => Ok(i),
+            None => {
+                let error = lang_stdlib::type_error(name, "int");
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
@@ -1810,10 +1857,15 @@ fn stdlib_output_to_value(output: lang_stdlib::Output) -> Value {
     }
 }
 
-/// Both stdlib misuse kinds surface as a `TypeMismatch` (wrong arity or wrong argument type),
-/// matching the tree-walker.
-fn stdlib_error_code(_kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
-    DiagnosticCode::TypeMismatch
+/// Map a stdlib misuse kind onto a diagnostic code, matching the tree-walker: arity/argument-type
+/// mistakes are a `TypeMismatch`; an out-of-range index/range is an `IndexOutOfBounds`.
+fn stdlib_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
+    match kind {
+        lang_stdlib::ErrorKind::Arity | lang_stdlib::ErrorKind::ArgType => {
+            DiagnosticCode::TypeMismatch
+        }
+        lang_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
+    }
 }
 
 /// Build a built-in `Ordering` enum value (`Ordering.Less`/`Equal`/`Greater`) with a fresh shape.

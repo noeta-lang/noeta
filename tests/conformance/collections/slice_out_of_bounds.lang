@@ -1,0 +1,4 @@
+// A slice past the end of the list is a runtime E0016 (index out of bounds), identical in
+// both backends.
+// expect: error E0016 at 4:6
+echo [1, 2, 3].slice(0, 9);

@@ -44,6 +44,8 @@ pub enum ErrorKind {
     Arity,
     /// An argument was the wrong type.
     ArgType,
+    /// An index/range argument fell outside the collection's bounds.
+    Bounds,
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it
@@ -190,6 +192,24 @@ pub fn type_error(method: &str, expected: &str) -> StdError {
     }
 }
 
+/// Build the canonical "cannot order" error for `sorted()` over values that are not mutually
+/// orderable (mixed kinds, or a non-orderable element). Maps to `E0007` like other type misuse.
+pub fn unorderable_error() -> StdError {
+    StdError {
+        kind: ErrorKind::ArgType,
+        message: "method `sorted` cannot order values of mixed or non-orderable types".to_string(),
+    }
+}
+
+/// Build the canonical "slice out of bounds" error for `slice(start, end)` on a list of
+/// length `len`. Public so both backends render the bounds error identically (→ `IndexOutOfBounds`).
+pub fn slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
+    StdError {
+        kind: ErrorKind::Bounds,
+        message: format!("slice [{start}..{end}] is out of bounds for list of length {len}"),
+    }
+}
+
 /// "a string" / "an int" — pick the article so messages read naturally.
 fn an(noun: &str) -> String {
     let article = match noun.chars().next() {
@@ -211,6 +231,11 @@ pub enum ListMethod {
     Contains,
     /// `join(sep)` → a string of the elements' display forms separated by `sep`.
     Join,
+    /// `sorted()` → a new list sorted by the primitive ordering (homogeneous numbers or
+    /// strings); a non-orderable or mixed-kind element is an error.
+    Sorted,
+    /// `slice(start, end)` → the sublist `[start, end)`; out-of-range bounds are an error.
+    Slice,
 }
 
 impl ListMethod {
@@ -219,6 +244,8 @@ impl ListMethod {
             "reverse" => Some(ListMethod::Reverse),
             "contains" => Some(ListMethod::Contains),
             "join" => Some(ListMethod::Join),
+            "sorted" => Some(ListMethod::Sorted),
+            "slice" => Some(ListMethod::Slice),
             _ => None,
         }
     }
