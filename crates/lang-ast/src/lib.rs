@@ -373,8 +373,8 @@ pub enum Expr {
         index: Box<Expr>,
         span: Span,
     },
-    /// An interpolated string: `"Hello {name}"` becomes a sequence of literal and
-    /// embedded-expression parts. A string with no holes stays a plain [`Expr::Str`].
+    /// An interpolated string: `"Hello ${name}"` becomes a sequence of literal and
+    /// embedded-expression parts. A string with no `${...}` holes stays a plain [`Expr::Str`].
     Interp { parts: Vec<StrPart>, span: Span },
     /// `match scrutinee { pattern => body, ... }`.
     Match {
@@ -478,7 +478,7 @@ impl Pattern {
 pub enum StrPart {
     /// Literal text (already unescaped).
     Literal(String),
-    /// An embedded `{expr}` hole.
+    /// An embedded `${expr}` hole.
     Hole(Expr),
 }
 

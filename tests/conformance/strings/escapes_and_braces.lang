@@ -1,5 +1,5 @@
-// String escapes (`\"`, `\\`, `\t`) and doubled braces (`{{`/`}}`) produce literal
-// characters; interpolation still works alongside them.
+// String escapes (`\"`, `\\`, `\t`); bare braces are literal (no escaping); `${expr}`
+// interpolation works alongside them.
 // expect: stdout "say \"hi\""
 // expect: stdout "back\\slash"
 // expect: stdout "a\tb"
@@ -8,4 +8,4 @@
 echo "say \"hi\"";
 echo "back\\slash";
 echo "a\tb";
-echo "{{literal}} and {1 + 2}";
+echo "{literal} and ${1 + 2}";

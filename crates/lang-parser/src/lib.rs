@@ -1253,27 +1253,22 @@ fn parse_string_literal(ctx: Ctx<'_>, span: Span) -> Expr {
                     Some((_, 't')) => '\t',
                     Some((_, '"')) => '"',
                     Some((_, '\\')) => '\\',
-                    Some((_, '{')) => '{',
-                    Some((_, '}')) => '}',
+                    // `\$` is a literal `$` — the one escape interpolation needs, so a literal
+                    // `${` is written `\${`. Bare `{`/`}`/`$` are already literal (no escaping).
+                    Some((_, '$')) => '$',
                     Some((_, other)) => other,
                     None => '\\',
                 };
                 literal.push(escaped);
             }
-            '{' if chars.peek().map(|(_, c)| *c) == Some('{') => {
-                chars.next();
-                literal.push('{');
-            }
-            '}' if chars.peek().map(|(_, c)| *c) == Some('}') => {
-                chars.next();
-                literal.push('}');
-            }
-            '{' => {
+            // `${ expr }` is the only interpolation trigger; a bare `{`, `}`, or `$` is literal.
+            '$' if chars.peek().map(|(_, c)| *c) == Some('{') => {
+                chars.next(); // consume the `{`
                 if !literal.is_empty() {
                     parts.push(StrPart::Literal(std::mem::take(&mut literal)));
                 }
-                // The hole content begins right after this `{`.
-                let hole_start = offset + 1;
+                // The hole content begins right after `${`.
+                let hole_start = offset + 2;
                 let hole_end = find_hole_end(inner, hole_start);
                 let hole_text = &inner[hole_start..hole_end];
                 let expr = parse_hole(ctx, hole_text, base + hole_start as u32);
@@ -1423,7 +1418,7 @@ mod tests {
     #[test]
     fn string_interpolation_parses_to_parts() {
         // A hole's inner expression carries absolute source spans.
-        insta::assert_snapshot!(pretty("echo \"Order #{id} by {user.name}\";"));
+        insta::assert_snapshot!(pretty("echo \"Order #${id} by ${user.name}\";"));
     }
 
     #[test]

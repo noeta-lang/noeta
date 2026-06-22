@@ -35,10 +35,10 @@ usd3 = Money.new(3, "USD");
 eur1 = Money.new(1, "EUR");
 
 echo match combined(usd5, usd3) {
-    Ok(m) => "{m.amount}",
+    Ok(m) => "${m.amount}",
     Err(e) => "mismatch",
 };
 echo match combined(usd5, eur1) {
-    Ok(m) => "{m.amount}",
+    Ok(m) => "${m.amount}",
     Err(e) => "mismatch",
 };

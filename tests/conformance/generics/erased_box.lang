@@ -21,4 +21,4 @@ bi = Box.new(42);
 bs = Box.new("hello");
 echo bi.get();
 echo bs.value;
-echo "{bi.value} and {bs.value}";
+echo "${bi.value} and ${bs.value}";

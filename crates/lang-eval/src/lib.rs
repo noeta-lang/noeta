@@ -596,8 +596,8 @@ impl Interpreter {
             // `namespace` is a no-op in M0 (no module scoping yet); `use` registers each
             // imported name as an opaque stub so references resolve.
             Stmt::Namespace { .. } => Ok(Flow::Normal),
-            Stmt::Use { names, .. } => {
-                self.declare_use(names);
+            Stmt::Use { path, names, .. } => {
+                self.declare_use(path, names);
                 Ok(Flow::Normal)
             }
             Stmt::Return { value, .. } => {
@@ -800,20 +800,28 @@ impl Interpreter {
     /// Register the names imported by a `use` declaration. Real module loading is M1; in
     /// M0 each imported name resolves to an *opaque stub type* so references and all-fields
     /// literals (`User { name: ... }`) work even though the type's real shape is unknown.
-    fn declare_use(&mut self, names: &[lang_ast::UseName]) {
+    fn declare_use(&mut self, path: &[String], names: &[lang_ast::UseName]) {
+        // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; other
+        // imports (and unrecognized `std` names) fall back to the opaque-stub binding.
+        let is_std = path == ["std"];
         for imported in names {
-            let def = TypeDef {
-                name: imported.name.clone(),
-                fields: Vec::new(),
-                methods: HashMap::new(),
-                destructor: None,
-                is_record: false,
-                derives_comparable: false,
-                derives_tojson: false,
-                opaque: true,
+            let value = if is_std
+                && let Some(module) = lang_stdlib::NativeModule::from_name(&imported.name)
+            {
+                Value::NativeModule(module)
+            } else {
+                Value::Type(Rc::new(TypeDef {
+                    name: imported.name.clone(),
+                    fields: Vec::new(),
+                    methods: HashMap::new(),
+                    destructor: None,
+                    is_record: false,
+                    derives_comparable: false,
+                    derives_tojson: false,
+                    opaque: true,
+                }))
             };
-            self.scope
-                .declare(imported.name.clone(), Value::Type(Rc::new(def)), false);
+            self.scope.declare(imported.name.clone(), value, false);
         }
     }
 
@@ -1278,6 +1286,10 @@ impl Interpreter {
         if let Value::EnumType(def) = &receiver {
             return self.make_variant(&Rc::clone(def), name, args, span);
         }
+        // `json.parse(...)` — a Ring 2 native module function call.
+        if let Value::NativeModule(module) = &receiver {
+            return self.call_native_module(*module, name, &args, span);
+        }
         // `Order.new(...)` — an associated function (no instance); call it directly.
         if let Value::Type(def) = &receiver {
             return match def.methods.get(name) {
@@ -1550,6 +1562,47 @@ impl Interpreter {
             Value::Set(items) => Ok(items),
             _ => {
                 let error = lang_stdlib::type_error(name, "set");
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Dispatch a Ring 2 native module function call (`json.parse(...)`). Mirrors the VM's
+    /// `call_native_module`.
+    fn call_native_module(
+        &mut self,
+        module: lang_stdlib::NativeModule,
+        func: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        match module {
+            lang_stdlib::NativeModule::Json => self.call_json(func, args, span),
+        }
+    }
+
+    /// The `json` module: `parse(text) -> value` and `stringify(value) -> string`. Parsing goes
+    /// through the shared `lang-stdlib` parser (so both backends build identical values);
+    /// stringifying reuses the structural `value_to_json`.
+    fn call_json(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        match func {
+            "parse" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let text = self.expect_std_string(func, &args[0], span)?;
+                match lang_stdlib::json::parse(text) {
+                    Ok(json) => Ok(json_to_value(json)),
+                    Err(detail) => {
+                        let error = lang_stdlib::invalid_json_error(&detail);
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "stringify" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                Ok(Value::Str(value_to_json(&args[0])))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("json", func);
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }
@@ -2118,6 +2171,7 @@ fn std_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
             DiagnosticCode::TypeMismatch
         }
         lang_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
+        lang_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
     }
 }
 
@@ -2246,6 +2300,27 @@ fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
     canonical.sort_by(|a, b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
     canonical.dedup_by(|a, b| compare_primitive(a, b) == Some(std::cmp::Ordering::Equal));
     Some(canonical)
+}
+
+/// Convert a parsed JSON tree into a tree-walker value: arrays become lists, objects become
+/// sorted-key maps, `null` becomes unit. Mirrors the VM's `json_to_value` so `json.parse` builds
+/// identical values in both backends.
+fn json_to_value(json: lang_stdlib::json::Json) -> Value {
+    use lang_stdlib::json::Json;
+    match json {
+        Json::Null => Value::Unit,
+        Json::Bool(b) => Value::Bool(b),
+        Json::Int(i) => Value::Int(i),
+        Json::Float(f) => Value::Float(f),
+        Json::Str(s) => Value::Str(s),
+        Json::Array(items) => Value::List(Rc::new(items.into_iter().map(json_to_value).collect())),
+        Json::Object(entries) => Value::Map(Rc::new(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k, json_to_value(v)))
+                .collect(),
+        )),
+    }
 }
 
 /// At a function-call boundary, turn a `?`-induced early return into the call's value;
@@ -2501,12 +2576,12 @@ mod tests {
     #[test]
     fn string_interpolation() {
         assert_eq!(
-            run("name = \"Niro\"; echo \"Hello {name}\";").stdout,
+            run("name = \"Niro\"; echo \"Hello ${name}\";").stdout,
             "Hello Niro\n"
         );
-        assert_eq!(run("echo \"sum is {1 + 2 * 3}\";").stdout, "sum is 7\n");
+        assert_eq!(run("echo \"sum is ${1 + 2 * 3}\";").stdout, "sum is 7\n");
         assert_eq!(
-            run("id = 1; echo \"Order #{id} ready\";").stdout,
+            run("id = 1; echo \"Order #${id} ready\";").stdout,
             "Order #1 ready\n"
         );
     }
@@ -2514,7 +2589,10 @@ mod tests {
     #[test]
     fn interpolation_escapes_and_literal_braces() {
         assert_eq!(run("echo \"a\\tb\";").stdout, "a\tb\n");
-        assert_eq!(run("echo \"{{literal}}\";").stdout, "{literal}\n");
+        // Bare braces are literal now (no `{{`/`}}` escaping); only `${` triggers interpolation.
+        assert_eq!(run("echo \"{literal}\";").stdout, "{literal}\n");
+        // A literal `${` is escaped as `\${`.
+        assert_eq!(run("echo \"\\${x}\";").stdout, "${x}\n");
     }
 
     #[test]
@@ -2525,7 +2603,7 @@ mod tests {
 
     #[test]
     fn algebraic_enum_binds_data() {
-        let src = "enum E { Empty; Code(n: int); } x = E.Code(42); echo match x { E.Empty => \"empty\", E.Code(n) => \"code {n}\" };";
+        let src = "enum E { Empty; Code(n: int); } x = E.Code(42); echo match x { E.Empty => \"empty\", E.Code(n) => \"code ${n}\" };";
         assert_eq!(run(src).stdout, "code 42\n");
     }
 
@@ -2653,13 +2731,13 @@ mod tests {
     fn destructors_run_in_reverse_declaration_order_at_program_end() {
         // A `destruct` block runs when the last reference to an instance drops; top-level
         // bindings are destroyed at program end in reverse declaration order.
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close {name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
         assert_eq!(run(src).stdout, "body\nclose b\nclose a\n");
     }
 
     #[test]
     fn reassignment_destroys_the_displaced_instance() {
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close {name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
         assert_eq!(run(src).stdout, "close first\nmid\nclose second\n");
     }
 
@@ -2770,15 +2848,15 @@ mod tests {
         // `E.Bad(index: 5)` — the `index:` label is surface sugar in M0; the value binds by
         // position, so the variant's single field gets `5`.
         let src = "enum E { Bad(index: int); } x = E.Bad(index: 5); \
-                   echo match x { E.Bad(i) => \"bad {i}\" };";
+                   echo match x { E.Bad(i) => \"bad ${i}\" };";
         assert_eq!(run(src).stdout, "bad 5\n");
     }
 
     #[test]
     fn result_and_option_participate_in_match() {
         let src = "fn run_it(b): int { if b { return Ok(1); } return Err(\"no\"); } \
-                   echo match run_it(true) { Ok(n) => \"ok {n}\", Err(e) => \"err {e}\" }; \
-                   echo match run_it(false) { Ok(n) => \"ok {n}\", Err(e) => \"err {e}\" };";
+                   echo match run_it(true) { Ok(n) => \"ok ${n}\", Err(e) => \"err ${e}\" }; \
+                   echo match run_it(false) { Ok(n) => \"ok ${n}\", Err(e) => \"err ${e}\" };";
         assert_eq!(run(src).stdout, "ok 1\nerr no\n");
     }
 }

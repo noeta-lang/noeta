@@ -8,5 +8,5 @@ fn pick(hit): ?int {
     return none;
 }
 
-echo match pick(true) { some(n) => "found {n}", none => "absent" };
-echo match pick(false) { some(n) => "found {n}", none => "absent" };
+echo match pick(true) { some(n) => "found ${n}", none => "absent" };
+echo match pick(false) { some(n) => "found ${n}", none => "absent" };

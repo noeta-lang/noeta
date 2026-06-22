@@ -25,7 +25,7 @@ class Config {
 
     impl Index {
         fn get(key: string): string {
-            return "{key}: {currency}";
+            return "${key}: ${currency}";
         }
     }
 }

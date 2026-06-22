@@ -26,8 +26,8 @@ class Order {
 
     fn label(): string {
         return match status {
-            Status.Pending => "Order #{id} awaiting payment",
-            Status.Paid => "Order #{id} paid",
+            Status.Pending => "Order #${id} awaiting payment",
+            Status.Paid => "Order #${id} paid",
         };
     }
 }

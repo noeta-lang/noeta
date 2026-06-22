@@ -14,10 +14,10 @@ class Point {
 
     impl Display {
         fn to_string(): string {
-            return "Point({x}, {y})";
+            return "Point(${x}, ${y})";
         }
     }
 }
 
 echo Point.new(1, 2);
-echo "here: {Point.new(3, 4)}";
+echo "here: ${Point.new(3, 4)}";

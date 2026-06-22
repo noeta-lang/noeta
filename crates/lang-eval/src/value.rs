@@ -45,6 +45,9 @@ pub enum Value {
     Type(Rc<TypeDef>),
     /// A record or class *instance* — a bag of named field values.
     Object(Rc<ObjectValue>),
+    /// A Ring 2 native module (e.g. `json`), bound by `use std.{...}`; `module.func(args)`
+    /// dispatches to native code.
+    NativeModule(lang_stdlib::NativeModule),
 }
 
 impl Value {
@@ -80,6 +83,7 @@ impl Value {
             Value::Enum(value) => value.display(),
             Value::Type(def) => format!("<type {}>", def.name()),
             Value::Object(object) => object.display(),
+            Value::NativeModule(module) => format!("<module {}>", module.name()),
         }
     }
 
@@ -108,6 +112,7 @@ impl Value {
             Value::Enum(_) => "enum",
             Value::Type(_) => "type",
             Value::Object(_) => "object",
+            Value::NativeModule(_) => "module",
         }
     }
 }
@@ -129,6 +134,7 @@ impl fmt::Debug for Value {
             Value::Enum(value) => write!(f, "Enum({})", value.display()),
             Value::Type(def) => write!(f, "Type({})", def.name()),
             Value::Object(object) => write!(f, "Object({})", object.display()),
+            Value::NativeModule(module) => write!(f, "NativeModule({})", module.name()),
         }
     }
 }
@@ -146,6 +152,7 @@ impl PartialEq for Value {
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Enum(a), Value::Enum(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => a == b,
+            (Value::NativeModule(a), Value::NativeModule(b)) => a == b,
             // Functions and types are not structurally comparable.
             _ => false,
         }

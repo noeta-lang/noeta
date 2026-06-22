@@ -1990,6 +1990,7 @@ fn stdlib_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
             DiagnosticCode::TypeMismatch
         }
         lang_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
+        lang_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
     }
 }
 
@@ -2185,7 +2186,7 @@ mod tests {
     #[test]
     fn destructors_run_at_program_end_in_reverse_declaration_order() {
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close {name}\"; }\n}\na = R.new(\"a\");\nb = R.new(\"b\");\necho \"body\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\na = R.new(\"a\");\nb = R.new(\"b\");\necho \"body\";\n",
         );
         // Globals destroyed in reverse declaration order: b before a.
         assert_eq!(r.stdout, "body\nclose b\nclose a\n");
@@ -2195,7 +2196,7 @@ mod tests {
     #[test]
     fn reassigning_a_binding_destroys_the_displaced_value() {
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close {name}\"; }\n}\nmut x = R.new(\"first\");\nx = R.new(\"second\");\necho \"mid\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nmut x = R.new(\"first\");\nx = R.new(\"second\");\necho \"mid\";\n",
         );
         // "first" is destroyed at the reassignment; "second" at program end.
         assert_eq!(r.stdout, "close first\nmid\nclose second\n");
@@ -2416,7 +2417,7 @@ mod tests {
     fn echo_dispatches_to_display_trait() {
         // `echo o` and `"{o}"` route to the class's `Display::to_string` (the `Stringify` op).
         let r = run(
-            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#{n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is {p}\";\n",
+            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#${n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is ${p}\";\n",
         );
         assert_eq!(r.stdout, "P#7\nit is P#7\n");
         assert_eq!(r.exit_code, 0);
@@ -2483,7 +2484,7 @@ mod tests {
     #[test]
     fn match_over_enums_binds_variant_data() {
         let r = run(
-            "enum E { Empty; Code(n: int); }\nx = E.Code(42);\necho match x { E.Empty => \"empty\", E.Code(n) => \"code {n}\" };\n",
+            "enum E { Empty; Code(n: int); }\nx = E.Code(42);\necho match x { E.Empty => \"empty\", E.Code(n) => \"code ${n}\" };\n",
         );
         assert_eq!(r.stdout, "code 42\n");
         assert_eq!(r.exit_code, 0);
@@ -2562,7 +2563,7 @@ mod tests {
 
     #[test]
     fn string_interpolation_concatenates_display_forms() {
-        let r = run("name = \"Niro\";\necho \"Hello {name}\";\necho \"sum is {1 + 2 * 3}\";\n");
+        let r = run("name = \"Niro\";\necho \"Hello ${name}\";\necho \"sum is ${1 + 2 * 3}\";\n");
         assert_eq!(r.stdout, "Hello Niro\nsum is 7\n");
         assert_eq!(r.exit_code, 0);
     }
@@ -2750,7 +2751,7 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.lang",
-            "enum E { Empty; Code(n: int); }\nfn describe(e): string {\n  return match e {\n    E.Empty => \"empty\",\n    E.Code(n) => \"code {n}\",\n  };\n}\necho describe(E.Code(7));\n",
+            "enum E { Empty; Code(n: int); }\nfn describe(e): string {\n  return match e {\n    E.Empty => \"empty\",\n    E.Code(n) => \"code ${n}\",\n  };\n}\necho describe(E.Code(7));\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

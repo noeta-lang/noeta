@@ -13,6 +13,12 @@
 //! so cannot live here wholesale; they are implemented per backend with the differential
 //! as the guard. Determinism is a hard requirement throughout (no wall clock, no
 //! hash-order, seeded PRNG) — see `plans/m1/slice-10-stdlib.md`.
+//!
+//! Ring 2 native modules (`json`, …) are imported with `use std.{name}` and dispatched as
+//! `name.func(args)`. The shared half lives here ([`NativeModule`], [`json`]); each backend
+//! binds the module value and converts results into its own values.
+
+pub mod json;
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
 /// stdlib introspects. Each backend cheaply projects its own `Value` onto this; anything
@@ -46,6 +52,8 @@ pub enum ErrorKind {
     ArgType,
     /// An index/range argument fell outside the collection's bounds.
     Bounds,
+    /// A name that does not exist (e.g. an unknown function on a native module).
+    UnknownName,
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it
@@ -211,6 +219,46 @@ pub fn slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
     StdError {
         kind: ErrorKind::Bounds,
         message: format!("slice [{start}..{end}] is out of bounds for list of length {len}"),
+    }
+}
+
+/// A Ring 2 native module, imported via `use std.{name}` and dispatched as `name.func(args)`.
+/// The variants grow as modules land (`json` first; `math`, `random`, IO/time to follow).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeModule {
+    Json,
+}
+
+impl NativeModule {
+    /// Resolve a `use std.{name}` leaf to its native module, if `name` names one.
+    pub fn from_name(name: &str) -> Option<NativeModule> {
+        match name {
+            "json" => Some(NativeModule::Json),
+            _ => None,
+        }
+    }
+
+    /// The module's surface name, for display and diagnostics.
+    pub fn name(self) -> &'static str {
+        match self {
+            NativeModule::Json => "json",
+        }
+    }
+}
+
+/// Build the canonical "no such function on a native module" error (→ `E0005`).
+pub fn no_function_error(module: &str, func: &str) -> StdError {
+    StdError {
+        kind: ErrorKind::UnknownName,
+        message: format!("module `{module}` has no function `{func}`"),
+    }
+}
+
+/// Build the canonical "invalid JSON" error for `json.parse` (→ `E0007`).
+pub fn invalid_json_error(detail: &str) -> StdError {
+    StdError {
+        kind: ErrorKind::ArgType,
+        message: format!("invalid JSON: {detail}"),
     }
 }
 

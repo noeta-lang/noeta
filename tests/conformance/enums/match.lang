@@ -24,7 +24,7 @@ echo label(Status.Paid);
 fn describe(e: OrderError): string {
     return match e {
         OrderError.Empty => "empty order",
-        OrderError.NegativePrice(i) => "item {i} is negative",
+        OrderError.NegativePrice(i) => "item ${i} is negative",
     };
 }
 echo describe(OrderError.NegativePrice(2));

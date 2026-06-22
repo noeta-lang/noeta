@@ -13,6 +13,6 @@ echo [].first();
 echo [].last();
 echo ["hi"].first();
 echo match [5].first() {
-    some(x) => "got {x}",
+    some(x) => "got ${x}",
     none => "empty",
 };

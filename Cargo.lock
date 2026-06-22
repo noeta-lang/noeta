@@ -654,6 +654,9 @@ dependencies = [
 [[package]]
 name = "lang-stdlib"
 version = "0.0.0"
+dependencies = [
+ "serde_json",
+]
 
 [[package]]
 name = "lang-types"

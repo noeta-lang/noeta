@@ -42,9 +42,9 @@ class Order {
 
     fn label(): string {
         return match status {
-            Status.Pending  => "Order #{id} awaiting payment",
-            Status.Paid     => "Order #{id} paid: {customer.name}",
-            Status.Refunded => "Order #{id} refunded",
+            Status.Pending  => "Order #${id} awaiting payment",
+            Status.Paid     => "Order #${id} paid: ${customer.name}",
+            Status.Refunded => "Order #${id} refunded",
         };
     }
 }
@@ -73,7 +73,7 @@ fn describe(items: List<Item>, customer: User): string {
         Ok(order)  => order.label(),
         Err(error) => match error {
             OrderError.Empty            => "Cannot place an empty order",
-            OrderError.NegativePrice(i) => "Item {i} has a negative price",
+            OrderError.NegativePrice(i) => "Item ${i} has a negative price",
         },
     };
 }
@@ -83,7 +83,7 @@ items = [Item { price: 9.99, qty: 2 }, Item { price: 4.50, qty: 1 }];
 
 order = place(items, customer);
 echo match order {
-    Ok(o)  => "Placed: {o.label()}",
+    Ok(o)  => "Placed: ${o.label()}",
     Err(e) => "Failed",
 };
 echo describe(items, customer);

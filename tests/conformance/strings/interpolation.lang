@@ -4,6 +4,6 @@
 // expect: stdout "{not a hole}"
 // expect: exit 0
 name = "Niro";
-echo "Hello {name}";
-echo "sum is {1 + 2 * 3}";
-echo "{{not a hole}}";
+echo "Hello ${name}";
+echo "sum is ${1 + 2 * 3}";
+echo "{not a hole}";
