@@ -3,7 +3,7 @@
 // expect: stdout "ada"
 // expect: stdout "guest"
 // expect: exit 0
-fn find(hit): ?User {
+fn find(hit): ?string {
     if hit { return some("ada"); }
     return none;
 }

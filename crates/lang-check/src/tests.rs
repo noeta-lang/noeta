@@ -84,12 +84,32 @@ fn try_on_result_is_clean() {
 }
 
 #[test]
-fn undeclared_type_annotation_is_not_flagged_yet() {
-    // Unknown-type checking (E0013) is deferred to M1.9: until module resolution exists, an
-    // undeclared annotation cannot be told from a valid-but-unresolved one, so the checker must
-    // stay silent (M0 runs such programs fine — see results/coalesce_default.lang's `?User`).
-    assert!(codes("fn f(x: Nope): int { return 0; }\n").is_empty());
-    assert!(codes("fn find(hit): ?User { return none; }\n").is_empty());
+fn undeclared_type_annotation_is_e0013() {
+    // M1.9 lit up unknown-type checking: an annotation naming nothing declared, imported, or
+    // built-in is now a hard error, on the offending name.
+    assert_eq!(codes("fn f(x: Nope): int { return 0; }\n"), ["E0013"]);
+    assert_eq!(codes("fn find(hit): ?User { return none; }\n"), ["E0013"]);
+    // The unknown name inside a generic argument is flagged too.
+    assert_eq!(
+        codes("fn f(xs: List<Ghost>): int { return 0; }\n"),
+        ["E0013"]
+    );
+}
+
+#[test]
+fn imported_type_annotation_is_not_flagged() {
+    // A name brought in by `use` is a legal referent — the linker either merged its real
+    // declaration or left an opaque stub, but either way the annotation resolves.
+    let src = "use App.Models.User;\nfn find(): ?User { return none; }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn generic_parameter_is_a_legal_type() {
+    // A class's `<T>` is an in-scope type within its own field and method annotations, but is
+    // erased — unknown outside the declaration.
+    let src = "class Box<T> {\n  value: T\n  fn get(): T { return value; }\n}\n";
+    assert!(codes(src).is_empty());
 }
 
 #[test]

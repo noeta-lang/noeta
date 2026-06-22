@@ -26,12 +26,14 @@
 //!   non-numeric operand (e.g. `1 + true`). Reuses the existing runtime `TypeMismatch` code at
 //!   the same span, so the static error reads identically to the old runtime one.
 //!
-//! **Unknown-type checking (`E0013`) is deliberately deferred to M1.9.** A type annotation can
-//! name a type that is neither declared nor imported and yet run fine under M0 (annotations are
-//! unchecked there) — the corpus's `?User` return annotation is exactly this. Until `use`/module
-//! resolution (M1.9) gives type names real referents, "undeclared" cannot be told apart from
-//! "valid but not-yet-resolved", so flagging it would be a false positive. The `E0013` code is
-//! reserved in the catalog; its emitter lands with M1.9.
+//! - **Unknown type (`E0013`)** — a type annotation (a parameter, return, field, enum backing,
+//!   or generic argument) naming a type that resolves to nothing: not a built-in, not a declared
+//!   record/class/enum, not a name brought in by a `use`, and not a generic type parameter in
+//!   scope. This was deferred until M1.9 for a reason — before module resolution, "undeclared"
+//!   could not be told apart from "valid but imported", so flagging it risked a false positive on
+//!   e.g. a `?User` annotation whose `User` came from a `use`. Now that the loader merges resolved
+//!   imports into the program and leaves opaque-stub `use`s in place, both referents are visible
+//!   to [`collect`], so an unresolvable name is genuinely unknown.
 //!
 //! Inference is intentionally best-effort (a conservative, name-first gradual pass), not yet a
 //! full Hindley–Milner solver with unification and let-generalization. The lattice and the
@@ -92,6 +94,15 @@ struct Checker {
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
     records: HashMap<String, Vec<(String, Type)>>,
+    /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
+    /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
+    /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
+    /// separately (a built-in via [`Type::is_builtin_name`], a parameter via [`Self::type_params`]).
+    types: HashSet<String>,
+    /// The generic type parameters in scope while checking the current declaration's annotations
+    /// (a class/record/enum's `<T, ...>`). Empty at top level; saved and restored around each
+    /// generic declaration.
+    type_params: HashSet<String>,
     diags: Vec<Diagnostic>,
 }
 
@@ -108,6 +119,7 @@ impl Checker {
                         .map(|f| (f.name.clone(), field_type(&f.ty)))
                         .collect();
                     self.records.insert(r.name.clone(), fields);
+                    self.types.insert(r.name.clone());
                 }
                 Stmt::Class(c) => {
                     let fields = c
@@ -116,6 +128,7 @@ impl Checker {
                         .map(|f| (f.name.clone(), field_type(&f.ty)))
                         .collect();
                     self.records.insert(c.name.clone(), fields);
+                    self.types.insert(c.name.clone());
                 }
                 Stmt::Enum(e) => {
                     let variants = e
@@ -127,10 +140,18 @@ impl Checker {
                         })
                         .collect();
                     self.enums.insert(e.name.clone(), variants);
+                    self.types.insert(e.name.clone());
                 }
                 Stmt::Fn(f) => {
                     let ret = f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
                     self.functions.insert(f.name.clone(), FnSig { ret });
+                }
+                // An imported name (whether the linker merged its declaration or left an opaque
+                // stub) is a legal referent for an annotation — register it as a known type.
+                Stmt::Use { names, .. } => {
+                    for name in names {
+                        self.types.insert(name.name.clone());
+                    }
                 }
                 _ => {}
             }
@@ -207,6 +228,10 @@ impl Checker {
     /// Check a function (or method) body. `extra` seeds the body scope with additional bindings
     /// (a class's fields, when checking a method).
     fn check_fn(&mut self, decl: &FnDecl, env: &mut Env, extra: &[(String, Type)]) {
+        for p in &decl.params {
+            self.check_type_opt(&p.ty);
+        }
+        self.check_type_opt(&decl.ret);
         env.push(HashMap::new());
         for (name, ty) in extra {
             bind(env, name, ty.clone());
@@ -221,18 +246,25 @@ impl Checker {
     }
 
     fn check_record(&mut self, r: &RecordDecl) {
-        // Field type annotations are resolved (and unknown-type-checked) from M1.9; nothing to
-        // verify here until then. Records introduce no body to infer, but they may carry derives.
+        let saved = self.enter_type_params(&r.type_params);
+        for f in &r.fields {
+            self.check_type_opt(&f.ty);
+        }
         self.check_derives(&r.derives);
         self.check_attrs(&r.attrs);
+        self.type_params = saved;
     }
 
     fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
+        let saved = self.enter_type_params(&c.type_params);
         let fields: Vec<(String, Type)> = c
             .fields
             .iter()
             .map(|f| (f.name.clone(), field_type(&f.ty)))
             .collect();
+        for f in &c.fields {
+            self.check_type_opt(&f.ty);
+        }
         self.check_derives(&c.derives);
         self.check_attrs(&c.attrs);
         for block in &c.impls {
@@ -251,12 +283,66 @@ impl Checker {
             }
             env.pop();
         }
+        self.type_params = saved;
     }
 
     fn check_enum(&mut self, e: &EnumDecl) {
-        // Backing/variant type annotations are unknown-type-checked from M1.9 (see module docs).
+        let saved = self.enter_type_params(&e.type_params);
+        self.check_type_opt(&e.backing);
+        for variant in &e.variants {
+            for field in &variant.fields {
+                self.check_type_opt(&field.ty);
+            }
+        }
         self.check_derives(&e.derives);
         self.check_attrs(&e.attrs);
+        self.type_params = saved;
+    }
+
+    // ----- unknown-type resolution (E0013) -----
+
+    /// Install `params` as the in-scope generic type parameters and return the previous set (to
+    /// restore once the declaration is checked). Generic parameters are erased at runtime but are
+    /// legal referents for annotations within their declaration.
+    fn enter_type_params(&mut self, params: &[String]) -> HashSet<String> {
+        std::mem::replace(&mut self.type_params, params.iter().cloned().collect())
+    }
+
+    fn check_type_opt(&mut self, ty: &Option<TypeRef>) {
+        if let Some(ty) = ty {
+            self.check_type_ref(ty);
+        }
+    }
+
+    /// Verify that every named type in an annotation resolves: a built-in, a declared/imported
+    /// type, or a generic parameter in scope. An unresolvable name is `E0013`. Generic arguments
+    /// are checked recursively, so `List<Ghost>` flags `Ghost`.
+    fn check_type_ref(&mut self, ty: &TypeRef) {
+        match ty {
+            TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
+            TypeRef::Named { name, args, span } => {
+                if !Type::is_builtin_name(name)
+                    && !PRELUDE_TYPES.contains(&name.as_str())
+                    && !self.type_params.contains(name)
+                    && !self.types.contains(name)
+                {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::UnknownType,
+                            *span,
+                            format!("unknown type `{name}`"),
+                        )
+                        .with_help(
+                            "name a declared type, one imported with `use`, a generic parameter, \
+                             or a built-in",
+                        ),
+                    );
+                }
+                for arg in args {
+                    self.check_type_ref(arg);
+                }
+            }
+        }
     }
 
     // ----- traits: impl coherence and derive validation (M1.8) -----
@@ -707,6 +793,12 @@ impl Checker {
             .is_some_and(|vs| vs.iter().any(|v| v.name == variant))
     }
 }
+
+/// Surface type names the language provides that are *not* lattice built-ins (so they are not in
+/// [`Type::is_builtin_name`]): the bare, untyped collection spellings and the prelude `Ordering`
+/// enum that `compare` returns and `Comparable` maps to a bool. They resolve to no distinct
+/// [`Type`] variant but are legal annotations, so the unknown-type check (`E0013`) accepts them.
+const PRELUDE_TYPES: &[&str] = &["list", "map", "set", "Ordering"];
 
 /// The declared type of a field, or `Unknown` when unannotated.
 fn field_type(ty: &Option<TypeRef>) -> Type {

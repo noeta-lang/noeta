@@ -1,0 +1,9 @@
+// A type annotation naming a type that resolves to nothing — not declared, not imported with
+// `use`, not a built-in, not a generic parameter in scope — is a compile-time error (E0013).
+// M1.9's module resolution is what lets the checker tell a genuinely-unknown name apart from a
+// valid-but-imported one, so the diagnostic only lights up now.
+// expect: error E0013 at 7:18
+// expect: exit 1
+fn process(item: Widget): int {
+    return 0;
+}
