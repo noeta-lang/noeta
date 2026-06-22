@@ -1588,6 +1588,8 @@ impl Interpreter {
             lang_stdlib::NativeModule::Random => self.call_random(func, args, span),
             lang_stdlib::NativeModule::Fs => self.call_fs(func, args, span),
             lang_stdlib::NativeModule::Time => self.call_time(func, args, span),
+            lang_stdlib::NativeModule::Env => self.call_env(func, args, span),
+            lang_stdlib::NativeModule::Args => self.call_args(func, args, span),
         }
     }
 
@@ -1653,6 +1655,50 @@ impl Interpreter {
             }
             _ => {
                 let error = lang_stdlib::no_function_error("time", func);
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `env` module: host environment introspection over the host's fixed sandbox fixture.
+    /// `get(key)` returns the value or an `E0021` if absent (mirroring `fs.read`); `keys()` is
+    /// sorted. Mirrors the VM's `call_env`.
+    fn call_env(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        match func {
+            "get" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let key = self.expect_std_string(func, &args[0], span)?.to_string();
+                match self.host.env_get(&key) {
+                    Some(value) => Ok(Value::Str(value)),
+                    None => {
+                        let error = lang_stdlib::env::not_found_error(&key);
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "keys" => {
+                self.expect_std_arity(func, args, 0, span)?;
+                let keys = self.host.env_keys().into_iter().map(Value::Str).collect();
+                Ok(Value::List(Rc::new(keys)))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("env", func);
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `args` module: the program's argument vector. `all()` returns it as a list. Mirrors the
+    /// VM's `call_args`.
+    fn call_args(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        match func {
+            "all" => {
+                self.expect_std_arity(func, args, 0, span)?;
+                let all = self.host.args().into_iter().map(Value::Str).collect();
+                Ok(Value::List(Rc::new(all)))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("args", func);
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }

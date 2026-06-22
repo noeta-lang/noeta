@@ -8,7 +8,7 @@ The single source of "what's next / what's done". Milestones are distilled from 
 |---|---|---|
 | **M0 — Walking skeleton** | Run simple programs via a tree-walking evaluator; prove the syntax feels right; stand up the test harness and crate seams. | **done** |
 | **M1 — Real language core** | Replace tree-walker with register-based bytecode + VM; NaN-boxed values; shape-based object model + inline caches; refcount+cycle GC; type checker + inference (salsa query graph); generics/ADTs/traits/derives; modules; layered stdlib (Ring 1/2). | **done** |
-| **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface (incl. semantic role tags); baseline DB; packed value types. | cluster 1 in progress (M2.0–M2.1 done) |
+| **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface (incl. semantic role tags); baseline DB; packed value types. | cluster 1 in progress (M2.0–M2.2 done) |
 | **M3 — Long tail** | WASM target; Tauri desktop; background-work extensions; JIT; editor grammars + VS Code ext; reactive persistence; p2p/local-first; extension system + stable host ABI; startup cache; editions. | not started |
 
 Detailed M2–M3 decomposition is deferred to a dedicated planning pass when each milestone is reached. M0 and M1 are sliced below. **M2 cluster 1** (host IO & async foundation — the first planning pass) is sliced in `m2/`; the rest of M2 (persistent runtime + bundled server, async/await surface, signals, LSP, toolchain, AOT/DCE, Tier-1, HMR, observability, MCP/agentic surface, baseline DB, packed types) awaits its own later passes.
@@ -45,7 +45,7 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 |---|---|---|---|
 | 0 | [Benchmark harness + hot-path baselines (criterion)](m2/slice-00-benchmarks.md) | — | done (criterion benches over dispatch/property/allocation; differential unchanged 88/0/100%) |
 | 1 | [Host capability boundary (sandbox/host split)](m2/slice-01-host-boundary.md) | — (after 0 for a clean baseline) | done (`Host` trait + `SandboxHost` in lang-stdlib; both backends hold `Box<dyn Host>`; pure refactor, differential unchanged 88/0/100%) |
-| 2 | [Host env/args (injected sandbox + real)](m2/slice-02-env-args.md) | 1 | todo |
+| 2 | [Host env/args (injected sandbox + real)](m2/slice-02-env-args.md) | 1 | done (`use std.{env}` get/keys + `use std.{args}` all; fixed sandbox fixture; missing key → E0021; differential 91/0/100%) |
 | 3 | [Async-first IO runtime foundation (per-isolate tokio)](m2/slice-03-async-runtime.md) | 1 | todo |
 | 4 | [Real-disk + streaming filesystem](m2/slice-04-realdisk-streaming-fs.md) | 1 + 3 | todo |
 

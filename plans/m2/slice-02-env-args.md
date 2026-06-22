@@ -1,6 +1,6 @@
 # Slice M2.2 — Host env/args (injected sandbox + real)
 
-Status: todo
+Status: **done**
 
 > **Cluster:** M2 cluster 1 (host IO & async foundation). **Depends on:** M2.1 (the `Host` boundary). **Determinism posture:** the differential runs `SandboxHost` with an **injected** env map + args list (deterministic, both backends identical); `RealHost` reads the real process environment only on `lang run`/REPL and is *not* differential-tested.
 
@@ -33,6 +33,19 @@ M1.10 omitted env/args because *"reading real environment is non-deterministic a
 - fmt/clippy clean; no new `unsafe`.
 
 ## Notes / traps
-- `env.vars()` **must** be sorted — unsorted host iteration order is the classic determinism leak.
-- Default the sandbox env/args to **empty**, not to the host's, so an un-injected conformance run can never accidentally read the real environment.
+- `env.keys()` **must** be sorted — unsorted host iteration order is the classic determinism leak.
+- The sandbox env/args is a **fixed fixture** the host owns, never the real host's, so a conformance run can never accidentally read the real environment.
 - Diagnostic code: a missing env key is arguably `IoError` (E0021) territory; if the semantics differ enough, add the next append-only `E00xx` rather than overloading — the catalog is append-only.
+
+## Outcome (done)
+
+Landed `crates/lang-stdlib/src/env.rs` plus two `NativeModule` variants (`Env`, `Args`) — which is all it takes to wire `use std.{env}` / `use std.{args}` end-to-end, since the compiler's `is_native_module` and both backends' binding defer to `NativeModule::from_name`. The `Host` trait gained `env_get`/`env_keys`/`args`; `SandboxHost` gained `env`/`args` fields. Both backends got `call_env`/`call_args` at the `call_native_module` seam, mirroring `call_fs`/`call_time` exactly.
+
+**Surface:** `env.get(key)` → the value (or `E0021` if absent); `env.keys()` → sorted `List<string>` of variable names; `args.all()` → `List<string>`.
+
+**Three judgment calls (deviations from the slice sketch, recorded):**
+- **`env.keys()` instead of `env.vars()`.** A sorted list of names (reusing the `fs.list` `Vec<String>` → list pattern) is minimal and idiomatic — combined with `env.get` it covers iteration without constructing a backend-specific `Map` from native code. A map can come later if a use case demands it.
+- **Missing key → `E0021 IoError`, not a new code.** Reading absent host state is an IO failure, exactly mirroring `fs.read` on a missing file (shared `env::not_found_error`, `ErrorKind::Io`). No new diagnostic code; the negative case `std/env_missing_key.lang` asserts `E0021`. (The arity/type misuse path still routes to `E0007` like every native module.)
+- **Fixed fixture, not harness-time injection.** The sandbox presents a *fixed, deterministic* env (`HOME=/home/sandbox`, `USER=lang`) and args (`["lang", "run"]`) baked into `SandboxHost` — exactly analogous to the logical clock starting at 0 and the PRNG's `DEFAULT_SEED`. This keeps M2.2 self-contained (no backend-API change); the *real* host environment is read by `RealHost` (M2.3), constructed by the CLI and never in the differential.
+
+**Verification:** conformance **97 passed / 0 failed** (`std/env.lang`, `std/args.lang`, negative `std/env_missing_key.lang` → E0021); `lang test --differential` **91 matched / 0 skipped / 100% / backends agree** (up from 88 — the two positive cases plus the runtime-error case all run identically on both backends); `cargo test --workspace` **312 passed / 0 failed** (incl. new `env.rs` unit tests); fmt/clippy clean; no `unsafe`.

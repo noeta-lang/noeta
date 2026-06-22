@@ -1,0 +1,5 @@
+// Reading an environment variable absent from the sandbox fixture is a runtime E0021 (IoError),
+// identical in both backends — mirroring fs.read on a missing file.
+// expect: error E0021 at 5:6
+use std.{env};
+echo env.get("DOES_NOT_EXIST");

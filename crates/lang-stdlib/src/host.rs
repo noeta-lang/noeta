@@ -14,8 +14,10 @@
 //! trait makes the sandbox/host split structural rather than test-arranged.
 
 use crate::StdError;
+use crate::env;
 use crate::fs::Vfs;
 use crate::random;
+use std::collections::BTreeMap;
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam.
 ///
@@ -39,6 +41,12 @@ pub trait Host {
     // without blocking (deterministic, no wall-clock).
     fn clock_monotonic(&mut self) -> u64;
     fn clock_sleep(&mut self, ms: i64);
+
+    // Host introspection (M2.2). `env_keys` is sorted. The sandbox presents a fixed
+    // fixture; a real host reads the real environment/args (later M2 slices).
+    fn env_get(&self, key: &str) -> Option<String>;
+    fn env_keys(&self) -> Vec<String>;
+    fn args(&self) -> Vec<String>;
 }
 
 /// The deterministic sandbox: in-memory VFS, seeded SplitMix64 state, and a logical
@@ -50,16 +58,21 @@ pub struct SandboxHost {
     fs: Vfs,
     rng: u64,
     clock: u64,
+    env: BTreeMap<String, String>,
+    args: Vec<String>,
 }
 
 impl SandboxHost {
-    /// A fresh sandbox: empty filesystem, default PRNG seed, clock at zero —
-    /// matching the loose fields both backends used before M2.1.
+    /// A fresh sandbox: empty filesystem, default PRNG seed, clock at zero, and the
+    /// fixed `env`/`args` fixture — matching the deterministic defaults both backends
+    /// used before M2.1 plus the M2.2 host-introspection fixture.
     pub fn new() -> SandboxHost {
         SandboxHost {
             fs: Vfs::new(),
             rng: random::DEFAULT_SEED,
             clock: 0,
+            env: env::sandbox_vars(),
+            args: env::sandbox_args(),
         }
     }
 }
@@ -115,5 +128,17 @@ impl Host for SandboxHost {
 
     fn clock_sleep(&mut self, ms: i64) {
         self.clock = self.clock.saturating_add(ms.max(0) as u64);
+    }
+
+    fn env_get(&self, key: &str) -> Option<String> {
+        self.env.get(key).cloned()
+    }
+
+    fn env_keys(&self) -> Vec<String> {
+        self.env.keys().cloned().collect()
+    }
+
+    fn args(&self) -> Vec<String> {
+        self.args.clone()
     }
 }

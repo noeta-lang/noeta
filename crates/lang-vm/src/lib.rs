@@ -452,6 +452,8 @@ impl<'m> Vm<'m> {
             Some(lang_stdlib::NativeModule::Random) => self.call_random(func, args, span),
             Some(lang_stdlib::NativeModule::Fs) => self.call_fs(func, args, span),
             Some(lang_stdlib::NativeModule::Time) => self.call_time(func, args, span),
+            Some(lang_stdlib::NativeModule::Env) => self.call_env(func, args, span),
+            Some(lang_stdlib::NativeModule::Args) => self.call_args(func, args, span),
             // Only valid module names are ever bound, so this is unreachable in practice.
             None => {
                 let error = lang_stdlib::no_function_error(module, func);
@@ -573,6 +575,55 @@ impl<'m> Vm<'m> {
             }
             _ => {
                 let error = lang_stdlib::no_function_error("time", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `env` module: host environment introspection over the host's fixed sandbox fixture.
+    /// `get(key)` returns the value or an `E0021` if absent (mirroring `fs.read`); `keys()` is
+    /// sorted. Mirrors the tree-walker's `call_env`.
+    fn call_env(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        match func {
+            "get" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let key = self.stdlib_string(func, args[0], span)?;
+                match self.host.env_get(&key) {
+                    Some(value) => Ok(Value::string(&value)),
+                    None => {
+                        let error = lang_stdlib::env::not_found_error(&key);
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "keys" => {
+                self.stdlib_arity(func, args, 0, span)?;
+                let keys = self
+                    .host
+                    .env_keys()
+                    .iter()
+                    .map(|k| Value::string(k))
+                    .collect();
+                Ok(Value::list(keys))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("env", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `args` module: the program's argument vector. `all()` returns it as a list. Mirrors the
+    /// tree-walker's `call_args`.
+    fn call_args(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        match func {
+            "all" => {
+                self.stdlib_arity(func, args, 0, span)?;
+                let all = self.host.args().iter().map(|a| Value::string(a)).collect();
+                Ok(Value::list(all))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("args", func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }

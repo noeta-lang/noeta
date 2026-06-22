@@ -18,6 +18,7 @@
 //! `name.func(args)`. The shared half lives here ([`NativeModule`], [`json`]); each backend
 //! binds the module value and converts results into its own values.
 
+pub mod env;
 pub mod fs;
 pub mod host;
 pub mod json;
@@ -241,6 +242,8 @@ pub enum NativeModule {
     Random,
     Fs,
     Time,
+    Env,
+    Args,
 }
 
 impl NativeModule {
@@ -252,6 +255,8 @@ impl NativeModule {
             "random" => Some(NativeModule::Random),
             "fs" => Some(NativeModule::Fs),
             "time" => Some(NativeModule::Time),
+            "env" => Some(NativeModule::Env),
+            "args" => Some(NativeModule::Args),
             _ => None,
         }
     }
@@ -264,6 +269,8 @@ impl NativeModule {
             NativeModule::Random => "random",
             NativeModule::Fs => "fs",
             NativeModule::Time => "time",
+            NativeModule::Env => "env",
+            NativeModule::Args => "args",
         }
     }
 }

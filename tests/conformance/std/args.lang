@@ -1,0 +1,12 @@
+// The Ring 2 `args` module (use std.{args}): the program's argument vector as a real, iterable
+// list, identical across backends over the sandbox's fixed fixture.
+// expect: stdout "[\"lang\", \"run\"]"
+// expect: stdout "lang"
+// expect: stdout "run"
+// expect: exit 0
+use std.{args};
+
+echo args.all();
+for a in args.all() {
+    echo a;
+}
