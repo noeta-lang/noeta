@@ -19,9 +19,12 @@
 //! binds the module value and converts results into its own values.
 
 pub mod fs;
+pub mod host;
 pub mod json;
 pub mod math;
 pub mod random;
+
+pub use host::{Host, SandboxHost};
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
 /// stdlib introspects. Each backend cheaply projects its own `Value` onto this; anything

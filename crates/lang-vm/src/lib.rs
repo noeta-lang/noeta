@@ -155,15 +155,11 @@ struct Vm<'m> {
     global_order: Vec<String>,
     /// The deterministic `next_id()` counter, seeded at 1 (matching the M0 `IdGen`).
     next_id: u64,
-    /// The `random` module's PRNG state, threaded through the shared SplitMix64 stepper. Starts
-    /// at [`lang_stdlib::random::DEFAULT_SEED`] so un-seeded use matches the tree-walker.
-    rng: u64,
-    /// The `fs` module's sandboxed in-memory filesystem — fresh per run, isolated and identical
-    /// to the tree-walker by construction.
-    fs: lang_stdlib::fs::Vfs,
-    /// The `time` module's logical clock (a deterministic monotonic counter). See the eval
-    /// backend's field of the same name.
-    clock: u64,
+    /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
+    /// [`lang_stdlib::Host`] seam. The conformance harness constructs a deterministic
+    /// [`lang_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
+    /// this struct. See the eval backend's field of the same name.
+    host: Box<dyn lang_stdlib::Host>,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
 }
@@ -214,9 +210,7 @@ fn execute(module: &Module) -> RunResult {
         globals: HashMap::new(),
         global_order: Vec::new(),
         next_id: 1,
-        rng: lang_stdlib::random::DEFAULT_SEED,
-        fs: lang_stdlib::fs::Vfs::new(),
-        clock: 0,
+        host: Box::new(lang_stdlib::SandboxHost::new()),
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -482,25 +476,23 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// The `random` module: a seeded PRNG whose state is `self.rng`, threaded through the shared
-    /// stepper so the stream matches the tree-walker for a given seed. Mirrors `call_random` there.
+    /// The `random` module: a seeded PRNG whose state lives in the host (`self.host`), threaded
+    /// through the shared stepper so the stream matches the tree-walker for a given seed. Mirrors
+    /// `call_random` there.
     fn call_random(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
         match func {
             "seed" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let n = self.stdlib_int(func, args[0], span)?;
-                self.rng = lang_stdlib::random::seed_state(n);
+                self.host.rng_seed(n);
                 Ok(Value::unit())
             }
             "int" => {
                 self.stdlib_arity(func, args, 2, span)?;
                 let lo = self.stdlib_int(func, args[0], span)?;
                 let hi = self.stdlib_int(func, args[1], span)?;
-                match lang_stdlib::random::int(self.rng, lo, hi) {
-                    Ok((next_state, value)) => {
-                        self.rng = next_state;
-                        Ok(Value::int(value))
-                    }
+                match self.host.rng_int(lo, hi) {
+                    Ok(value) => Ok(Value::int(value)),
                     Err(error) => {
                         Err(self.error(stdlib_error_code(error.kind), span, error.message))
                     }
@@ -508,9 +500,7 @@ impl<'m> Vm<'m> {
             }
             "float" => {
                 self.stdlib_arity(func, args, 0, span)?;
-                let (next_state, value) = lang_stdlib::random::float(self.rng);
-                self.rng = next_state;
-                Ok(Value::float(value))
+                Ok(Value::float(self.host.rng_float()))
             }
             _ => {
                 let error = lang_stdlib::no_function_error("random", func);
@@ -527,13 +517,13 @@ impl<'m> Vm<'m> {
                 self.stdlib_arity(func, args, 2, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;
                 let content = self.stdlib_string(func, args[1], span)?;
-                self.fs.write(&path, &content);
+                self.host.fs_write(&path, &content);
                 Ok(Value::unit())
             }
             "read" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;
-                match self.fs.read(&path) {
+                match self.host.fs_read(&path) {
                     Ok(content) => Ok(Value::string(&content)),
                     Err(error) => {
                         Err(self.error(stdlib_error_code(error.kind), span, error.message))
@@ -543,16 +533,21 @@ impl<'m> Vm<'m> {
             "exists" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;
-                Ok(Value::bool(self.fs.exists(&path)))
+                Ok(Value::bool(self.host.fs_exists(&path)))
             }
             "remove" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;
-                Ok(Value::bool(self.fs.remove(&path)))
+                Ok(Value::bool(self.host.fs_remove(&path)))
             }
             "list" => {
                 self.stdlib_arity(func, args, 0, span)?;
-                let paths = self.fs.list().iter().map(|p| Value::string(p)).collect();
+                let paths = self
+                    .host
+                    .fs_list()
+                    .iter()
+                    .map(|p| Value::string(p))
+                    .collect();
                 Ok(Value::list(paths))
             }
             _ => {
@@ -567,14 +562,13 @@ impl<'m> Vm<'m> {
         match func {
             "monotonic" => {
                 self.stdlib_arity(func, args, 0, span)?;
-                let now = self.clock;
-                self.clock += 1;
+                let now = self.host.clock_monotonic();
                 Ok(Value::int(now as i64))
             }
             "sleep" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let ms = self.stdlib_int(func, args[0], span)?;
-                self.clock = self.clock.saturating_add(ms.max(0) as u64);
+                self.host.clock_sleep(ms);
                 Ok(Value::unit())
             }
             _ => {

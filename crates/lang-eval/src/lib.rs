@@ -483,16 +483,11 @@ struct Interpreter {
     diagnostics: Vec<Diagnostic>,
     ids: IdGen,
     scope: Rc<Scope>,
-    /// The `random` module's PRNG state — a single `u64` threaded through the shared SplitMix64
-    /// stepper. Defaults to [`lang_stdlib::random::DEFAULT_SEED`] so un-seeded use is still
-    /// deterministic and identical to the VM; `random.seed(n)` re-seeds it.
-    rng: u64,
-    /// The `fs` module's sandboxed in-memory filesystem — fresh per run, so file IO is isolated
-    /// and identical to the VM by construction.
-    fs: lang_stdlib::fs::Vfs,
-    /// The `time` module's logical clock (a deterministic monotonic counter, not wall-clock).
-    /// Starts at 0; `time.monotonic()` reads-then-increments, `time.sleep(ms)` advances it.
-    clock: u64,
+    /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
+    /// [`lang_stdlib::Host`] seam. Conformance constructs a deterministic
+    /// [`lang_stdlib::SandboxHost`] so file IO, PRNG, and clock stay isolated and identical to
+    /// the VM by construction; a real host (later M2 slices) swaps in without touching this struct.
+    host: Box<dyn lang_stdlib::Host>,
 }
 
 impl Interpreter {
@@ -513,9 +508,7 @@ impl Interpreter {
             diagnostics: Vec::new(),
             ids: IdGen::new(seed),
             scope: global,
-            rng: lang_stdlib::random::DEFAULT_SEED,
-            fs: lang_stdlib::fs::Vfs::new(),
-            clock: 0,
+            host: Box::new(lang_stdlib::SandboxHost::new()),
         }
     }
 
@@ -1607,13 +1600,13 @@ impl Interpreter {
                 self.expect_std_arity(func, args, 2, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?.to_string();
                 let content = self.expect_std_string(func, &args[1], span)?.to_string();
-                self.fs.write(&path, &content);
+                self.host.fs_write(&path, &content);
                 Ok(Value::Unit)
             }
             "read" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?;
-                match self.fs.read(path) {
+                match self.host.fs_read(path) {
                     Ok(content) => Ok(Value::Str(content)),
                     Err(error) => {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -1623,16 +1616,16 @@ impl Interpreter {
             "exists" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?;
-                Ok(Value::Bool(self.fs.exists(path)))
+                Ok(Value::Bool(self.host.fs_exists(path)))
             }
             "remove" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?.to_string();
-                Ok(Value::Bool(self.fs.remove(&path)))
+                Ok(Value::Bool(self.host.fs_remove(&path)))
             }
             "list" => {
                 self.expect_std_arity(func, args, 0, span)?;
-                let paths = self.fs.list().into_iter().map(Value::Str).collect();
+                let paths = self.host.fs_list().into_iter().map(Value::Str).collect();
                 Ok(Value::List(Rc::new(paths)))
             }
             _ => {
@@ -1649,14 +1642,13 @@ impl Interpreter {
         match func {
             "monotonic" => {
                 self.expect_std_arity(func, args, 0, span)?;
-                let now = self.clock;
-                self.clock += 1;
+                let now = self.host.clock_monotonic();
                 Ok(Value::Int(now as i64))
             }
             "sleep" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let ms = self.expect_std_int(func, &args[0], span)?;
-                self.clock = self.clock.saturating_add(ms.max(0) as u64);
+                self.host.clock_sleep(ms);
                 Ok(Value::Unit)
             }
             _ => {
@@ -1684,26 +1676,23 @@ impl Interpreter {
     }
 
     /// The `random` module: a seeded PRNG. Stepping is shared (`lang-stdlib::random`); the state
-    /// lives in `self.rng`, threaded through each draw so a given seed yields the same stream the
-    /// VM produces. `seed(n)` re-seeds, `int(lo, hi)` and `float()` advance. Mirrors the VM's
-    /// `call_random`.
+    /// lives in the host (`self.host`), threaded through each draw so a given seed yields the same
+    /// stream the VM produces. `seed(n)` re-seeds, `int(lo, hi)` and `float()` advance. Mirrors the
+    /// VM's `call_random`.
     fn call_random(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
         match func {
             "seed" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let n = self.expect_std_int(func, &args[0], span)?;
-                self.rng = lang_stdlib::random::seed_state(n);
+                self.host.rng_seed(n);
                 Ok(Value::Unit)
             }
             "int" => {
                 self.expect_std_arity(func, args, 2, span)?;
                 let lo = self.expect_std_int(func, &args[0], span)?;
                 let hi = self.expect_std_int(func, &args[1], span)?;
-                match lang_stdlib::random::int(self.rng, lo, hi) {
-                    Ok((next_state, value)) => {
-                        self.rng = next_state;
-                        Ok(Value::Int(value))
-                    }
+                match self.host.rng_int(lo, hi) {
+                    Ok(value) => Ok(Value::Int(value)),
                     Err(error) => {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                     }
@@ -1711,9 +1700,7 @@ impl Interpreter {
             }
             "float" => {
                 self.expect_std_arity(func, args, 0, span)?;
-                let (next_state, value) = lang_stdlib::random::float(self.rng);
-                self.rng = next_state;
-                Ok(Value::Float(value))
+                Ok(Value::Float(self.host.rng_float()))
             }
             _ => {
                 let error = lang_stdlib::no_function_error("random", func);
