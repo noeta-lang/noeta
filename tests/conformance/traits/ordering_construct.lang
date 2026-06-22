@@ -1,0 +1,39 @@
+// `Ordering` is a namable built-in enum: its variants can be constructed directly (not only
+// received from `.compare()`), matched, and returned from a hand-written `compare`.
+// expect: stdout "Ordering.Less"
+// expect: stdout "lt"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+echo Ordering.Less;
+
+o = Ordering.Less;
+echo match o {
+    Ordering.Less => "lt",
+    Ordering.Equal => "eq",
+    Ordering.Greater => "gt",
+};
+
+// A class whose `compare` returns explicit `Ordering` variants (descending by amount).
+class Desc {
+    amount: int
+
+    fn new(a: int): Desc {
+        return Desc { amount: a };
+    }
+
+    impl Comparable {
+        fn compare(other: Desc): Ordering {
+            if amount > other.amount {
+                return Ordering.Less;
+            }
+            if amount < other.amount {
+                return Ordering.Greater;
+            }
+            return Ordering.Equal;
+        }
+    }
+}
+
+echo Desc.new(9) < Desc.new(2);
+echo Desc.new(1) < Desc.new(5);

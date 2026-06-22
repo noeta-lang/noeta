@@ -53,7 +53,7 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 
 | Item | Source | Trigger |
 |---|---|---|
-| User-facing `Ordering.Less` construction; register `Ordering` as a namable prelude enum | M1.8 | A program constructing/matching `Ordering` values directly (dispatch already delegates via `.compare()`) |
+| ~~User-facing `Ordering.Less` construction; register `Ordering` as a namable prelude enum~~ | M1.8 | **Done (F3)** — `Ordering` registered as a built-in enum in both backends (`traits/ordering_construct`); construction builds the same value `.compare()` returns |
 | Standalone top-level `impl Attribute for X {}` + the `#[Foo(...)]`-requires-`Attribute` gate | M1.8 | Gating *which* records may be used as data attributes; needs the top-level `impl` construct (our `impl`s are class-body-nested) |
 | Nested-object fields in derived `Comparable` (recurse into sub-objects) | M1.8 | A `@derive(Comparable)` type whose fields are themselves objects |
 | `Callable` (`a(...)`), `Members` / `DynamicCall` protocols routed to user objects | M1.8 | Objects used as functions / dynamic member dispatch (agentic/proxy surface) |

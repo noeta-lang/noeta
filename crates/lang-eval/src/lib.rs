@@ -517,6 +517,23 @@ impl Interpreter {
             builtin_enum("Option", "none", vec![]),
             false,
         );
+        // The built-in `Ordering` enum is namable like any other, so `Ordering.Less` can be
+        // constructed directly (not only received from `.compare()`); its variants carry no data
+        // and build the same `EnumValue` `compare` returns.
+        global.declare(
+            "Ordering".to_string(),
+            Value::EnumType(Rc::new(EnumDef {
+                name: "Ordering".to_string(),
+                variants: ["Less", "Equal", "Greater"]
+                    .into_iter()
+                    .map(|name| VariantInfo {
+                        name: name.to_string(),
+                        field_names: Vec::new(),
+                    })
+                    .collect(),
+            })),
+            false,
+        );
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),

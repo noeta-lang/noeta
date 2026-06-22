@@ -197,6 +197,18 @@ impl ModuleCompiler {
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
+        // The built-in `Ordering` enum is namable like any other (so `Ordering.Less` can be
+        // constructed, not only received from `.compare()`); registered first so a user `enum
+        // Ordering` would shadow it. Its variants carry no data, matching `make_ordering`.
+        self.types.insert(
+            "Ordering".to_string(),
+            TypeInfo::Enum {
+                variants: ["Less", "Equal", "Greater"]
+                    .into_iter()
+                    .map(|v| (v.to_string(), Vec::new()))
+                    .collect(),
+            },
+        );
         for stmt in &program.stmts {
             match stmt {
                 Stmt::Record(decl) => {
