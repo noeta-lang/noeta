@@ -142,6 +142,8 @@ cargo llvm-cov --workspace --html           # browsable report under target/llvm
 
 Setup if missing: `rustup component add llvm-tools-preview && cargo install cargo-llvm-cov`. Treat a coverage drop on a touched file as a regression to fix, not to ignore.
 
+**Benchmarks (M2.0+).** `cargo bench -p lang-vm` runs the `criterion` benches over the VM hot paths (dispatch loop, property access through inline caches, allocation) in `crates/lang-vm/benches/vm.rs`. VM-touching changes should check no regression against the baseline; positioned as the last/scheduled CI gate (implementation-plan §6.6/§6.7).
+
 ### Version Control and Continuous Work
 
 Commit as you go and always implement features in full, no stubs or todos unless deferring entire subsystems. When a task is clear, work independently and verify changes using the comprehensive test suite.

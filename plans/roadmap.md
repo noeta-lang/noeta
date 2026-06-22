@@ -8,7 +8,7 @@ The single source of "what's next / what's done". Milestones are distilled from 
 |---|---|---|
 | **M0 — Walking skeleton** | Run simple programs via a tree-walking evaluator; prove the syntax feels right; stand up the test harness and crate seams. | **done** |
 | **M1 — Real language core** | Replace tree-walker with register-based bytecode + VM; NaN-boxed values; shape-based object model + inline caches; refcount+cycle GC; type checker + inference (salsa query graph); generics/ADTs/traits/derives; modules; layered stdlib (Ring 1/2). | **done** |
-| **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface (incl. semantic role tags); baseline DB; packed value types. | cluster 1 sliced (planning); implementation not started |
+| **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface (incl. semantic role tags); baseline DB; packed value types. | cluster 1 in progress (M2.0 done) |
 | **M3 — Long tail** | WASM target; Tauri desktop; background-work extensions; JIT; editor grammars + VS Code ext; reactive persistence; p2p/local-first; extension system + stable host ABI; startup cache; editions. | not started |
 
 Detailed M2–M3 decomposition is deferred to a dedicated planning pass when each milestone is reached. M0 and M1 are sliced below. **M2 cluster 1** (host IO & async foundation — the first planning pass) is sliced in `m2/`; the rest of M2 (persistent runtime + bundled server, async/await surface, signals, LSP, toolchain, AOT/DCE, Tier-1, HMR, observability, MCP/agentic surface, baseline DB, packed types) awaits its own later passes.
@@ -43,7 +43,7 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 
 | # | Slice | Depends on | Status |
 |---|---|---|---|
-| 0 | [Benchmark harness + hot-path baselines (criterion)](m2/slice-00-benchmarks.md) | — | todo |
+| 0 | [Benchmark harness + hot-path baselines (criterion)](m2/slice-00-benchmarks.md) | — | done (criterion benches over dispatch/property/allocation; differential unchanged 88/0/100%) |
 | 1 | [Host capability boundary (sandbox/host split)](m2/slice-01-host-boundary.md) | — (after 0 for a clean baseline) | todo |
 | 2 | [Host env/args (injected sandbox + real)](m2/slice-02-env-args.md) | 1 | todo |
 | 3 | [Async-first IO runtime foundation (per-isolate tokio)](m2/slice-03-async-runtime.md) | 1 | todo |
@@ -80,7 +80,7 @@ A test-hardening pass closed coverage gaps the slices left (commits `5b285a5`, `
 ## Standing requirements (every slice)
 
 - **Tests grow continuously.** Every slice adds conformance cases (the iron rule). Coverage of the feature set by the corpus is tracked here as slices complete.
-- **Benchmarks.** `criterion` perf-regression gates are M1+ (no hot VM path to guard in M0); `benches/` is reserved now. When the M1 VM lands, every VM-touching slice adds/maintains a bench over the hot paths (dispatch loop, property access through inline caches, allocation).
+- **Benchmarks.** `criterion` perf-regression gates are M1+ (no hot VM path to guard in M0). **Landed in M2.0:** `crates/lang-vm/benches/vm.rs` benches the three hot paths (dispatch loop, property access through inline caches, allocation); run with `cargo bench -p lang-vm`. VM-touching slices add/maintain a bench and check no regression vs. the M2.0 baseline.
 - **Determinism.** No time-, hash-order-, or thread-scheduling-dependent output. Seed RNGs, sort map iteration in test mode, `next_id()` is a seeded counter.
 - **Zero `unsafe` in M0.** `#![forbid(unsafe_code)]` in every crate; the first `unsafe` appears with the M1 `vm`/`gc` crates, quarantined and `miri`-checked.
 

@@ -47,6 +47,7 @@ insta = "1"
 proptest = "1"
 assert_cmd = "2"
 predicates = "3"
+criterion = { version = "0.5", default-features = false }
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may
