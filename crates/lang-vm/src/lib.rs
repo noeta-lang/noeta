@@ -1063,6 +1063,10 @@ impl<'m> Vm<'m> {
                     frames[top].upvalues[*index as usize].cell_set(v);
                     frames[top].pc += 1;
                 }
+                Op::LoadNativeFn { dst, func } => {
+                    set_reg(&mut frames[top].regs, *dst, Value::native_fn(*func));
+                    frames[top].pc += 1;
+                }
                 Op::MakeList { dst, items } => {
                     let mut elements = Vec::with_capacity(items.len());
                     for &r in items.iter() {
@@ -2196,13 +2200,25 @@ impl<'m> Vm<'m> {
                                 upvalues,
                             });
                         }
-                        None => {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("{} is not callable", callee_val.type_name()),
-                            ));
-                        }
+                        None => match callee_val.as_native_fn() {
+                            // An indirect call of a first-class builtin (`f = len; f(xs)`). The
+                            // arguments stay owned by their registers (the helper borrows them);
+                            // the result is freshly owned.
+                            Some(func) => {
+                                let arg_vals: Vec<Value> =
+                                    args.iter().map(|&r| frames[top].regs[r as usize]).collect();
+                                let result = self.call_native_fn(func, &arg_vals, *span)?;
+                                set_reg(&mut frames[top].regs, *dst, result);
+                                frames[top].pc += 1;
+                            }
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!("{} is not callable", callee_val.type_name()),
+                                ));
+                            }
+                        },
                     }
                 }
                 Op::Return { src } => {
@@ -2297,18 +2313,70 @@ impl<'m> Vm<'m> {
                     upvalues,
                 }])
             }
-            None => {
-                let type_name = callee.type_name();
-                for a in args {
-                    release(a);
+            None => match callee.as_native_fn() {
+                // A first-class builtin passed as the callee (e.g. `map(xs, len)`). The args are
+                // owned here, so release them after the borrowing helper returns.
+                Some(func) => {
+                    let result = self.call_native_fn(func, &args, span);
+                    for a in &args {
+                        release(*a);
+                    }
+                    result
                 }
-                Err(self.error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!("{type_name} is not callable"),
-                ))
+                None => {
+                    let type_name = callee.type_name();
+                    for a in args {
+                        release(a);
+                    }
+                    Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("{type_name} is not callable"),
+                    ))
+                }
+            },
+        }
+    }
+
+    /// Dispatch a first-class prelude builtin called indirectly. Reuses `call_builtin` (so the
+    /// arity/error text matches the direct `CallBuiltin` path exactly), except `len` on a user
+    /// object, which re-enters that object's `Length` (`len`) method — mirroring the `CallBuiltin`
+    /// object case. Arguments are borrowed; the result is freshly owned.
+    fn call_native_fn(
+        &mut self,
+        func: Builtin,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if func == Builtin::Len && args.len() == 1 && args[0].is_object() {
+            let recv = args[0];
+            let type_name = recv.shape().unwrap().name.clone();
+            if let Some(&proto) = self.methods.get(&(type_name, "len".to_string())) {
+                let chunk = &self.module.protos[proto as usize];
+                if chunk.num_params != 1 {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "this method takes {} argument(s) but 0 were supplied",
+                            chunk.num_params - 1
+                        ),
+                    ));
+                }
+                let mut regs = vec![Value::unit(); chunk.num_registers as usize];
+                retain(recv);
+                regs[0] = recv;
+                return self.run(vec![Frame {
+                    proto,
+                    regs,
+                    pc: 0,
+                    ret_dst: 0,
+                    ret_transform: RetTransform::None,
+                    upvalues: Vec::new(),
+                }]);
             }
         }
+        self.call_builtin(func, args, span)
     }
 
     /// Dispatch a prelude collection builtin. Arguments are borrowed (their registers retain

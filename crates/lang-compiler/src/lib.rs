@@ -1191,7 +1191,14 @@ impl<'m> FnCompiler<'m> {
                         args: Box::new([]),
                     });
                 }
-                Resolved::Prelude => return unsupported("reference to a prelude value/builtin"),
+                // A bare reference to a collection builtin becomes a first-class native-function
+                // value (a direct call still uses `CallBuiltin`). Other prelude names used as
+                // values (the `Ok`/`Err`/`some` constructors, `panic`, `next_id`) are not yet
+                // first-class, so they remain unsupported.
+                Resolved::Prelude => match Builtin::from_name(name) {
+                    Some(func) => self.code.push(Op::LoadNativeFn { dst, func }),
+                    None => return unsupported("reference to a prelude value/builtin"),
+                },
             },
             Expr::Closure { params, body, .. } => {
                 // Resolve the closure's captures in this (the building) frame's terms, then

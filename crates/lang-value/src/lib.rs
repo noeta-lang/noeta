@@ -29,6 +29,7 @@ pub use ops::{OpError, apply_binary, apply_unary, compare_primitive, structural_
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use lang_bytecode::Builtin;
 use lang_object::Shape;
 use lang_stdlib::FileHandle;
 
@@ -122,6 +123,23 @@ impl Value {
     /// Whether this is a heap cell (captured-local storage; never user-visible).
     pub fn is_cell(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Cell(_)))
+    }
+
+    /// A first-class prelude builtin value (`len`/`map`/`filter`/`sum`).
+    pub fn native_fn(func: Builtin) -> Value {
+        heap::alloc(Payload::NativeFn(func))
+    }
+
+    /// The builtin this value dispatches on, if it is a first-class prelude function.
+    pub fn as_native_fn(self) -> Option<Builtin> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::NativeFn(func) => Some(*func),
+                _ => None,
+            })
+        } else {
+            None
+        }
     }
 
     /// The captured upvalue cell at `index` of a closure. The caller must have checked
@@ -492,8 +510,8 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => s.clone(),
                 Payload::Int(i) => i.to_string(),
-                // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"`.
-                Payload::Closure { .. } => "<fn>".to_string(),
+                // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
+                Payload::Closure { .. } | Payload::NativeFn(_) => "<fn>".to_string(),
                 // A cell is internal capture storage and never reaches a display site (the
                 // compiler derefs it first); render transparently as its contents if it ever does.
                 Payload::Cell(inner) => inner.display(),
@@ -597,7 +615,7 @@ impl Value {
                         .collect();
                     format!("{{{}}}", parts.join(","))
                 }
-                Payload::Closure { .. } => json_string("<fn>"),
+                Payload::Closure { .. } | Payload::NativeFn(_) => json_string("<fn>"),
                 Payload::Cell(inner) => inner.to_json(),
                 Payload::Enum { shape, .. } => {
                     json_string(shape.variant.as_deref().unwrap_or(&shape.name))
@@ -632,7 +650,7 @@ impl Value {
             // Boxed ints were already caught by `as_int` above, so a pointer here is a
             // closure, list, map, or string. M0 names both user functions and builtins
             // "function".
-            if self.as_closure().is_some() {
+            if self.as_closure().is_some() || self.as_native_fn().is_some() {
                 "function"
             } else if self.is_list() {
                 "list"
@@ -951,6 +969,34 @@ mod tests {
         // Freeing the closure releases its upvalue cell (and the int the cell held).
         assert!(closure.dec_ref());
         closure.free();
+    }
+
+    #[test]
+    fn native_fn_values_round_trip_and_compare_by_builtin() {
+        let len = Value::native_fn(Builtin::Len);
+        let len2 = Value::native_fn(Builtin::Len);
+        let map = Value::native_fn(Builtin::Map);
+        assert_eq!(len.as_native_fn(), Some(Builtin::Len));
+        assert_eq!(len.type_name(), "function");
+        assert_eq!(len.display(), "<fn>");
+        // Same builtin compares equal; different builtins do not (matches `Value::Builtin`).
+        // `apply_binary` borrows its operands, so each value is freed explicitly below.
+        assert!(
+            crate::ops::apply_binary(lang_ast::BinaryOp::Eq, len, len2)
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+        assert!(
+            !crate::ops::apply_binary(lang_ast::BinaryOp::Eq, len, map)
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+        for v in [len, len2, map] {
+            assert!(v.dec_ref());
+            v.free();
+        }
     }
 
     #[test]

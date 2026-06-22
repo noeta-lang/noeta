@@ -198,6 +198,11 @@ fn values_equal(left: Value, right: Value) -> bool {
     if left.is_file_handle() && right.is_file_handle() {
         return left.with_file_handle(|a| right.with_file_handle(|b| a == b));
     }
+    // First-class prelude builtins compare by identity of the builtin (matching the tree-walker's
+    // `Value::Builtin(a) == Value::Builtin(b)`).
+    if let (Some(a), Some(b)) = (left.as_native_fn(), right.as_native_fn()) {
+        return a == b;
+    }
     false
 }
 

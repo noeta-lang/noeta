@@ -803,6 +803,7 @@ name = "lang-value"
 version = "0.0.0"
 dependencies = [
  "lang-ast",
+ "lang-bytecode",
  "lang-diagnostics",
  "lang-object",
  "lang-stdlib",

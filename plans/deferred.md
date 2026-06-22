@@ -35,7 +35,7 @@ Still open (narrowed from the original cluster):
 | Item | Source | Trigger to implement |
 |---|---|---|
 | A closure **inside a method** capturing `self` or a field (method-context capture) | M1.2, F1 | A closure in a method body that reads `self`/a field; needs `self` threaded as a capturable upvalue |
-| A **reference** to a prelude value/builtin as a value (e.g. storing `len`/`map` in a variable) | M1.2 | Higher-order use of a builtin by value; needs first-class native-function values (slice F2) |
+| ~~A **reference** to a prelude collection builtin (`len`/`map`/`filter`/`sum`) as a value~~ | M1.2 | **Done (F2)** — `Payload::NativeFn`; `closures/builtin_as_value`, `builtin_value_on_object`. Still open: the `Ok`/`Err`/`some` constructors, `panic`, `next_id` as first-class *values* (exotic; need hand-matched runtime arity/error text) |
 | Forward / mutual capture among nested `fn`s (a closure capturing a local declared *after* it) | F1 | A program with forward references between nested closures; needs pre-declared cells for all celled locals |
 
 ## Type checker / inference hardening

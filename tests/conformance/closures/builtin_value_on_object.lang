@@ -1,0 +1,22 @@
+// `len` used as a first-class value still dispatches to a user object's `Length` method when
+// called indirectly (not just at a direct `len(o)` call site).
+// expect: stdout "2"
+// expect: stdout "5"
+// expect: exit 0
+class Stack {
+    items: list
+
+    fn new(items: list): Stack {
+        return Stack { items: items };
+    }
+
+    impl Length {
+        fn len(): int {
+            return len(items);
+        }
+    }
+}
+
+size = len;
+echo size(Stack.new([10, 20]));
+echo size([1, 2, 3, 4, 5]);

@@ -1,0 +1,17 @@
+// Prelude collection builtins are first-class values: bound to a name, then called indirectly.
+// expect: stdout "3"
+// expect: stdout "6"
+// expect: stdout "[1, 2]"
+// expect: stdout "[3, 4]"
+// expect: exit 0
+length = len;
+total = sum;
+echo length([1, 2, 3]);
+echo total([1, 2, 3]);
+
+// A builtin passed as the function argument of another builtin.
+echo map([["a"], ["b", "c"]], len);
+
+// `filter` itself stored, applied with a closure predicate.
+keep = filter;
+echo keep([1, 2, 3, 4], fn(x) => x > 2);

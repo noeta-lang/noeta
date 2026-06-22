@@ -147,6 +147,13 @@ pub enum Op {
         index: u16,
         src: Reg,
     },
+    /// `dst = <native function value>` — materialize a first-class prelude builtin (`len`/`map`/
+    /// `filter`/`sum`) so it can be stored, passed, and called indirectly. A direct call still
+    /// uses `CallBuiltin`; this is only for a bare reference to the builtin.
+    LoadNativeFn {
+        dst: Reg,
+        func: Builtin,
+    },
     /// `dst = [items...]` — build a heap list, retaining each element into it.
     MakeList {
         dst: Reg,
@@ -597,6 +604,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             "MakeClosure r{dst} <- proto {proto} [{} captures]",
             captures.len()
         ),
+        Op::LoadNativeFn { dst, func } => format!("LoadNativeFn r{dst} <- {}", func.name()),
         Op::MakeCell { dst, src } => format!("MakeCell    r{dst} <- cell(r{src})"),
         Op::CellGet { dst, cell } => format!("CellGet     r{dst} <- *r{cell}"),
         Op::CellSet { cell, src } => format!("CellSet     *r{cell} <- r{src}"),

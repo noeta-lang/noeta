@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::ptr;
 use std::rc::Rc;
 
+use lang_bytecode::Builtin;
 use lang_object::Shape;
 use lang_stdlib::FileHandle;
 
@@ -96,6 +97,9 @@ pub(crate) enum Payload {
     /// A Ring 2 native module (`use std.{json}`), identified by its surface name. A leaf with
     /// no child values; dispatched by `lang-vm` (which maps the name to the module).
     NativeModule(String),
+    /// A first-class prelude builtin (`len`/`map`/`filter`/`sum`) used as a value. A leaf (the
+    /// `Builtin` id is plain data); `lang-vm` dispatches it at an indirect call site.
+    NativeFn(Builtin),
     /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
     /// pending write buffer. The whole state machine lives in `lang_stdlib::FileHandle` so it is
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
@@ -190,7 +194,11 @@ pub(crate) fn free(value: Value) {
             }
         }
         Payload::Cell(inner) => release_child(*inner),
-        Payload::Str(_) | Payload::Int(_) | Payload::NativeModule(_) | Payload::FileHandle(_) => {}
+        Payload::Str(_)
+        | Payload::Int(_)
+        | Payload::NativeModule(_)
+        | Payload::NativeFn(_)
+        | Payload::FileHandle(_) => {}
     }
     drop(boxed);
 }
@@ -265,7 +273,11 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),
         Payload::Closure { upvalues, .. } => upvalues.iter().copied().for_each(&mut push),
         Payload::Cell(inner) => push(*inner),
-        Payload::Str(_) | Payload::Int(_) | Payload::NativeModule(_) | Payload::FileHandle(_) => {}
+        Payload::Str(_)
+        | Payload::Int(_)
+        | Payload::NativeModule(_)
+        | Payload::NativeFn(_)
+        | Payload::FileHandle(_) => {}
     }
     out
 }

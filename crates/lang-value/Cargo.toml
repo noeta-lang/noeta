@@ -8,6 +8,9 @@ rust-version.workspace = true
 
 [dependencies]
 lang-ast = { workspace = true }
+# A first-class prelude builtin value (`Payload::NativeFn`) stores the `Builtin` id it dispatches
+# on. lang-bytecode does not depend on lang-value, so this adds no dependency cycle.
+lang-bytecode = { workspace = true }
 lang-diagnostics = { workspace = true }
 lang-object = { workspace = true }
 # The M2.5 file handle stores `lang_stdlib::FileHandle` directly so its cursor logic is shared
