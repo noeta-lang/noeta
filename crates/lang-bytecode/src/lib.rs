@@ -68,6 +68,9 @@ pub enum Const {
     Int(i64),
     Float(f64),
     Str(String),
+    /// A Ring 2 native module, by surface name (`use std.{json}` lowers to loading this then
+    /// storing it into the named global).
+    NativeModule(String),
 }
 
 /// One register-machine instruction.
@@ -534,6 +537,7 @@ fn const_repr(c: &Const) -> String {
         Const::Int(i) => i.to_string(),
         Const::Float(f) => format!("{f:?}"),
         Const::Str(s) => format!("{s:?}"),
+        Const::NativeModule(name) => format!("module {name}"),
     }
 }
 

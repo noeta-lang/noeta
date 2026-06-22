@@ -1,0 +1,17 @@
+// The Ring 2 `json` module (use std.{json}): parse and stringify, identical on both backends.
+// Note the JSON object literals need no brace-escaping now that interpolation is ${...}.
+// expect: stdout "[1,2,3]"
+// expect: stdout "{\"a\":1,\"b\":2}"
+// expect: stdout "Niro"
+// expect: stdout "3"
+// expect: stdout "{\"age\":3,\"name\":\"Niro\"}"
+// expect: stdout "null"
+// expect: exit 0
+use std.{json};
+echo json.stringify([1, 2, 3]);
+echo json.stringify({"b": 2, "a": 1});
+v = json.parse("{\"name\": \"Niro\", \"age\": 3}");
+echo v["name"];
+echo v["age"];
+echo json.stringify(v);
+echo json.stringify(json.parse("null"));

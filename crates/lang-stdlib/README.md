@@ -43,6 +43,6 @@ Determinism is a hard requirement across the whole stdlib: no wall-clock, no has
 
 - **M1.10.1 — done:** this crate + the Ring 1 string surface, shared by both backends.
 - **M1.10.2 — done:** the full Ring 1 collection surface — list `reverse`/`contains`/`join`/`sorted`/`slice`/`first`/`last`/`to_set`, map `keys`/`values`/`has`, and a `Set` type (`contains`/`union`/`intersection`) — implemented per backend and gated by the shared `ListMethod`/`MapMethod`/`SetMethod` enums. `first`/`last` return a built-in `Option`; a `Set` is a canonical sorted+deduped heap value type rendering `{1, 2, 3}`, constructed via `[..].to_set()`. All differential-identical.
-- **M1.10.3 — todo:** Ring 2 modules (json/math/seeded-random first; file IO and time pending a differential-oracle design decision).
+- **M1.10.3 — in progress:** Ring 2 modules via `use std.{...}` (explicit imports, so unused modules tree-shake). `json` (`parse`/`stringify`) is done — parsing lives here (shared `json::Json` tree via `serde_json`), the module value is `Value::NativeModule`/`Const::NativeModule`, dispatched through `call_method`. Remaining: `math`, seeded `random`, and file IO + monotonic time behind a deterministic harness sandbox.
 
 See `plans/m1/slice-10-stdlib.md`.

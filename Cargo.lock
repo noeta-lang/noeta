@@ -534,6 +534,7 @@ dependencies = [
  "lang-diagnostics",
  "lang-object",
  "lang-span",
+ "lang-stdlib",
 ]
 
 [[package]]

@@ -113,6 +113,23 @@ impl Value {
         heap::alloc(Payload::Set(items))
     }
 
+    /// A Ring 2 native module value (refcount 1), identified by its surface name (e.g. `"json"`).
+    pub fn native_module(name: &str) -> Value {
+        heap::alloc(Payload::NativeModule(name.to_string()))
+    }
+
+    /// The native module's surface name, if this is a native module value.
+    pub fn native_module_name(self) -> Option<String> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::NativeModule(name) => Some(name.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// A heap map (refcount 1), keyed by owned strings, iterating in sorted-key order. As
     /// with [`Value::list`], the map takes ownership of one reference to each value.
     pub fn map(entries: BTreeMap<String, Value>) -> Value {
@@ -467,6 +484,7 @@ impl Value {
                         format!("{head}({})", parts.join(", "))
                     }
                 }
+                Payload::NativeModule(name) => format!("<module {name}>"),
             })
         } else {
             // The unit value (and any other singleton) displays as empty, as in M0.
@@ -519,6 +537,7 @@ impl Value {
                 Payload::Enum { shape, .. } => {
                     json_string(shape.variant.as_deref().unwrap_or(&shape.name))
                 }
+                Payload::NativeModule(name) => json_string(&format!("<module {name}>")),
             })
         } else {
             "null".to_string()
@@ -558,6 +577,8 @@ impl Value {
                 "object"
             } else if self.is_enum() {
                 "enum"
+            } else if self.native_module_name().is_some() {
+                "module"
             } else {
                 "string"
             }

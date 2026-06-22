@@ -82,6 +82,9 @@ pub(crate) enum Payload {
         shape: Rc<Shape>,
         data: Vec<Value>,
     },
+    /// A Ring 2 native module (`use std.{json}`), identified by its surface name. A leaf with
+    /// no child values; dispatched by `lang-vm` (which maps the name to the module).
+    NativeModule(String),
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
@@ -165,7 +168,7 @@ pub(crate) fn free(value: Value) {
                 release_child(element);
             }
         }
-        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) => {}
+        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) | Payload::NativeModule(_) => {}
     }
     drop(boxed);
 }
@@ -238,7 +241,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),
-        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) => {}
+        Payload::Str(_) | Payload::Int(_) | Payload::Closure(_) | Payload::NativeModule(_) => {}
     }
     out
 }

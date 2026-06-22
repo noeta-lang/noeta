@@ -189,6 +189,10 @@ fn values_equal(left: Value, right: Value) -> bool {
     if left.is_set() && right.is_set() {
         return slices_equal(&left.set_items().unwrap(), &right.set_items().unwrap());
     }
+    // Native modules compare equal when they name the same module.
+    if let (Some(a), Some(b)) = (left.native_module_name(), right.native_module_name()) {
+        return a == b;
+    }
     false
 }
 

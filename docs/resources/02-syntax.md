@@ -22,7 +22,7 @@ A core design discipline runs through everything: **every powerful feature has a
 | `['a' => 1]` (dual-purpose array) | `[1, 2]` list / `{"a": 1}` map | Distinct types end the list/map conflation. `:` for map keys frees `=>`. |
 | `=>` (keys, arrows, match arms) | `:` for map keys; `=>` only for arrows/match | One symbol, one job. |
 | `readonly` everywhere | immutable by default; `mut` to opt in | The keyword you write is the *rare* case, not the common one. |
-| `"Hello $name"` | `"Hello {name}"` | Explicit interpolation without the sigil. |
+| `"Hello $name"` / `"{$expr}"` | `"Hello ${name}"` | One interpolation form, `${expr}`; a bare `{`, `}`, or `$` is literal (so JSON/regex need no escaping). The `$name` shorthand is deliberately omitted. |
 | `if (): ... endif;` | braces only | The templating-era alternative syntax is dropped. |
 
 Braces, semicolons, and common keyword names (`class`, `enum`, `match`, `return`, `for`, `if`, `echo`) are **kept** — not for PHP familiarity per se, but because they are clear, unambiguous, and keep the powerful constructs legible.
@@ -48,11 +48,14 @@ The error message for assigning to a non-`mut` binding is a first-class concern:
 ## 3. Strings and interpolation
 
 ```
-greeting = "Hello {name}";              // brace interpolation
+greeting = "Hello ${name}";             // ${expr} interpolation (bare braces are literal)
 path = "users/" ~ id ~ "/profile";      // `~` concatenation
+literal = "a {json} blob and a \${escaped} dollar-brace";  // both literal
 raw = `multi
-line`;                                   // backtick multiline (also supports {expr})
+line`;                                   // backtick multiline (also supports ${expr})
 ```
+
+Interpolation triggers only on `${ expr }`; a bare `{`, `}`, or `$` is a literal character, so JSON, regex, and currency strings need no escaping. The one escape is `\${` for a literal dollar-brace. (There is no `$name` shorthand — `${name}` is always written in full, which keeps a stray `$` in prose harmless.)
 
 ---
 

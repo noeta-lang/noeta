@@ -63,6 +63,12 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
     })
 }
 
+/// Whether `use <path>.{name}` imports a Ring 2 native module (`use std.{json}`) rather than a
+/// sibling-module declaration. Such names are bound as global values, not opaque types.
+fn is_native_module(path: &[String], name: &str) -> bool {
+    path == ["std"] && lang_stdlib::NativeModule::from_name(name).is_some()
+}
+
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.
 ///
 /// Three passes: (1) register every top-level type so forward references resolve and shapes
@@ -215,8 +221,13 @@ impl ModuleCompiler {
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Enum { variants });
                 }
-                Stmt::Use { names, .. } => {
+                Stmt::Use { path, names, .. } => {
                     for imported in names {
+                        // A `use std.{json}` native module resolves as a global value (bound at
+                        // the `use` site), not an opaque type, so it is not registered here.
+                        if is_native_module(path, &imported.name) {
+                            continue;
+                        }
                         self.types.insert(imported.name.clone(), TypeInfo::Opaque);
                     }
                 }
@@ -572,12 +583,25 @@ impl<'m> FnCompiler<'m> {
             }
             // Type declarations are registered in the pre-pass and class methods compiled
             // separately; as statements they emit no code (the tree-walker likewise just
-            // records them in scope). `namespace` is a no-op; `use` registers opaque stubs.
-            Stmt::Record(_)
-            | Stmt::Class(_)
-            | Stmt::Enum(_)
-            | Stmt::Namespace { .. }
-            | Stmt::Use { .. } => Ok(()),
+            // records them in scope). `namespace` is a no-op; a non-`std` `use` registers
+            // opaque stubs (also at compile time).
+            Stmt::Record(_) | Stmt::Class(_) | Stmt::Enum(_) | Stmt::Namespace { .. } => Ok(()),
+            // `use std.{json, ...}` binds each native module as a global value (mirroring the
+            // tree-walker's `declare_use`); other imports emit nothing.
+            Stmt::Use { path, names, .. } => {
+                for imported in names {
+                    if is_native_module(path, &imported.name) {
+                        let value = self.alloc_reg();
+                        let k = self.add_const(Const::NativeModule(imported.name.clone()));
+                        self.code.push(Op::LoadConst { dst: value, k });
+                        self.code.push(Op::StoreGlobal {
+                            name: imported.name.clone(),
+                            src: value,
+                        });
+                    }
+                }
+                Ok(())
+            }
         }
     }
 

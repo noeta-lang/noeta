@@ -1,0 +1,4 @@
+// Calling a function the native module does not provide is a runtime E0005.
+// expect: error E0005 at 4:6
+use std.{json};
+echo json.frobnicate("x");

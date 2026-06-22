@@ -1,0 +1,4 @@
+// Invalid JSON is a runtime E0007, identical in both backends.
+// expect: error E0007 at 4:6
+use std.{json};
+echo json.parse("{not json}");

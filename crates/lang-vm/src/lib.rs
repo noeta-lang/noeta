@@ -431,6 +431,51 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Dispatch a Ring 2 native module function call (`json.parse(...)`). Mirrors the
+    /// tree-walker's `call_native_module`.
+    fn call_native_module(
+        &mut self,
+        module: &str,
+        func: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        match lang_stdlib::NativeModule::from_name(module) {
+            Some(lang_stdlib::NativeModule::Json) => self.call_json(func, args, span),
+            // Only valid module names are ever bound, so this is unreachable in practice.
+            None => {
+                let error = lang_stdlib::no_function_error(module, func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `json` module: `parse(text) -> value` and `stringify(value) -> string`. Parsing goes
+    /// through the shared `lang-stdlib` parser; stringifying reuses the structural `to_json`.
+    fn call_json(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        match func {
+            "parse" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let text = self.stdlib_string(func, args[0], span)?;
+                match lang_stdlib::json::parse(&text) {
+                    Ok(json) => Ok(json_to_value(json)),
+                    Err(detail) => {
+                        let error = lang_stdlib::invalid_json_error(&detail);
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "stringify" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                Ok(Value::string(&args[0].to_json()))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("json", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
     /// A Ring 1 map method (`keys`/`values`/`has`). Mirrors the tree-walker's `call_map_method`.
     fn call_map_method(
         &mut self,
@@ -836,6 +881,17 @@ impl<'m> Vm<'m> {
                     span,
                 } => {
                     let v = frames[top].regs[*recv as usize];
+                    // `json.parse(...)` — a Ring 2 native module function call, dispatched before
+                    // the object/collection paths.
+                    if let Some(module_name) = v.native_module_name() {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        let value =
+                            self.call_native_module(&module_name, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // An object dispatches to a user method through the type's method table;
                     // anything else falls to the built-in `count`/`enumerate` methods.
                     if v.is_object() {
@@ -2038,6 +2094,27 @@ fn make_none() -> Value {
     Value::enum_value(shape, Vec::new())
 }
 
+/// Convert a parsed JSON tree into a VM value: arrays become lists, objects become sorted-key
+/// maps, `null` becomes unit. Each value is freshly built (refcount 1), so the containers own
+/// their children without extra retains. Mirrors the tree-walker's `json_to_value`.
+fn json_to_value(json: lang_stdlib::json::Json) -> Value {
+    use lang_stdlib::json::Json;
+    match json {
+        Json::Null => Value::unit(),
+        Json::Bool(b) => Value::bool(b),
+        Json::Int(i) => Value::int(i),
+        Json::Float(f) => Value::float(f),
+        Json::Str(s) => Value::string(&s),
+        Json::Array(items) => Value::list(items.into_iter().map(json_to_value).collect()),
+        Json::Object(entries) => Value::map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k, json_to_value(v)))
+                .collect(),
+        ),
+    }
+}
+
 /// Turn a compile-time constant into a freshly-owned runtime value.
 fn materialize(c: &Const) -> Value {
     match c {
@@ -2046,6 +2123,7 @@ fn materialize(c: &Const) -> Value {
         Const::Int(i) => Value::int(*i),
         Const::Float(f) => Value::float(*f),
         Const::Str(s) => Value::string(s),
+        Const::NativeModule(name) => Value::native_module(name),
     }
 }
 
