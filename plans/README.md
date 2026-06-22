@@ -9,7 +9,7 @@ The language is built almost entirely by AI agents over a multi-year effort. Wor
 ## Layout
 
 - `roadmap.md` — the milestone map (M0–M3) and the single source of "what's next / what's done". Re-scan it at the start of every work session to pick the next unit.
-- `m0/` — one file per M0 work unit (a "slice"). Each slice is a vertical cut through the pipeline that is independently testable.
+- `m0/`, `m1/`, `m2/` — one file per work unit (a "slice"), grouped by milestone. Each slice is a vertical cut through the pipeline that is independently testable. M0 and M1 are complete; `m2/` holds M2 cluster 1 (host IO & async foundation), sliced but not yet implemented.
 - `done/` — completed slice files are moved here once their definition-of-done is met (and recorded in `roadmap.md`). Keep the trail; do not delete.
 
 ## Slice file shape

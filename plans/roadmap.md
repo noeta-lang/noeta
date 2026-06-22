@@ -8,10 +8,10 @@ The single source of "what's next / what's done". Milestones are distilled from 
 |---|---|---|
 | **M0 — Walking skeleton** | Run simple programs via a tree-walking evaluator; prove the syntax feels right; stand up the test harness and crate seams. | **done** |
 | **M1 — Real language core** | Replace tree-walker with register-based bytecode + VM; NaN-boxed values; shape-based object model + inline caches; refcount+cycle GC; type checker + inference (salsa query graph); generics/ADTs/traits/derives; modules; layered stdlib (Ring 1/2). | **done** |
-| **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface (incl. semantic role tags); baseline DB; packed value types. | not started |
+| **M2 — Differentiators** | Persistent runtime + isolates; async/structured concurrency + TaskScope; bundled HTTP/WS server; signals; embedded LSP; native toolchain; AOT + DCE; Tier-1 specializing interpreter; HMR; observability; agentic MCP surface (incl. semantic role tags); baseline DB; packed value types. | cluster 1 sliced (planning); implementation not started |
 | **M3 — Long tail** | WASM target; Tauri desktop; background-work extensions; JIT; editor grammars + VS Code ext; reactive persistence; p2p/local-first; extension system + stable host ABI; startup cache; editions. | not started |
 
-Detailed M2–M3 decomposition is deferred to a dedicated planning pass when each milestone is reached. M0 and M1 are sliced below.
+Detailed M2–M3 decomposition is deferred to a dedicated planning pass when each milestone is reached. M0 and M1 are sliced below. **M2 cluster 1** (host IO & async foundation — the first planning pass) is sliced in `m2/`; the rest of M2 (persistent runtime + bundled server, async/await surface, signals, LSP, toolchain, AOT/DCE, Tier-1, HMR, observability, MCP/agentic surface, baseline DB, packed types) awaits its own later passes.
 
 ## M1 slices
 
@@ -36,6 +36,20 @@ The differential oracle is the spine: `TreeWalkBackend` (M0, frozen) and the new
 **Thrust A gate (✅ met at M1.5):** `VmBackend` runs 100% of the M0 corpus, every case differential-identical to the tree-walker — including the full §14 demo. The tree-walker is now frozen as the pure oracle; the conformance suite asserts `skipped == 0`, so any new feature must land in both backends (or be explicitly oracle-exempt). **Thrust B gate:** every static-error class has a negative conformance case. New `unsafe` is quarantined to `lang-value`/`lang-gc`/`lang-vm`, miri-gated.
 
 **Thrust C gate (✅ met at M1.10) — M1 complete:** modules resolve through the salsa-queried loader/linker and a layered Ring 1/Ring 2 stdlib ships, all routed through `lang-stdlib` so the differential holds by construction. The full corpus (94 cases) runs differential-identical on both backends (88 compiled programs compared, 0 skipped, 100% coverage, zero divergence); determinism gates hold throughout (seeded PRNG, logical clock, sorted/canonical iteration, no wall-clock in output). M1 — the real language core: bytecode VM, NaN-boxed values + shapes + cycle GC, salsa type checker, traits/derives/generics, modules, stdlib — is done. M2 (async-first IO internals, real-disk/streaming filesystem, host `env`/`args`, benchmarks) is the next planning pass.
+
+## M2 slices
+
+**M2 cluster 1 — host IO & async foundation (+ benchmarks).** The first M2 planning pass, decomposed in `m2/`. The cluster's spine: add real host IO **without surrendering the differential oracle**. Both backends gain one `Host` capability seam with two impls — a deterministic **`SandboxHost`** (in-memory VFS, injected `env`/`args`, logical clock, seeded RNG) that conformance + `--differential` always run, and a **`RealHost`** (real disk async, real `std::env`) the CLI/REPL/server run and that is *never* differential-tested (integration-tested outside the corpus, so `skipped` stays 0). Async is **internals/foundation only** this pass — a per-isolate tokio runtime with sync-looking boundaries; the `async`/`await` + `concurrent { }` + `TaskScope` surface (architecture §7.1–§7.2) is a separate later pass. Pick the lowest-numbered `todo`.
+
+| # | Slice | Depends on | Status |
+|---|---|---|---|
+| 0 | [Benchmark harness + hot-path baselines (criterion)](m2/slice-00-benchmarks.md) | — | todo |
+| 1 | [Host capability boundary (sandbox/host split)](m2/slice-01-host-boundary.md) | — (after 0 for a clean baseline) | todo |
+| 2 | [Host env/args (injected sandbox + real)](m2/slice-02-env-args.md) | 1 | todo |
+| 3 | [Async-first IO runtime foundation (per-isolate tokio)](m2/slice-03-async-runtime.md) | 1 | todo |
+| 4 | [Real-disk + streaming filesystem](m2/slice-04-realdisk-streaming-fs.md) | 1 + 3 | todo |
+
+**Cluster gate:** every slice keeps `--differential` at ≥ 88 matched / **0 skipped** / 100% / zero divergence on the sandbox path; real-host fidelity is integration-tested outside the differential; benchmarks show no dispatch/property/allocation regression vs. the M2.0 baseline; fmt/clippy clean; new crates (`lang-runtime`, the `Host`/`SandboxHost`/`RealHost` additions to `lang-stdlib`) are `unsafe`-free.
 
 ## M0 slices
 
