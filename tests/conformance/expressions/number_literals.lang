@@ -1,0 +1,19 @@
+// Integer and float literal forms: `_` digit separators, 0x/0o/0b radix prefixes, and
+// scientific-notation floats. Lexed identically for both backends (no runtime change).
+// expect: stdout "1000000"
+// expect: stdout "255"
+// expect: stdout "10"
+// expect: stdout "493"
+// expect: stdout "57005"
+// expect: stdout "1500.0"
+// expect: stdout "0.02"
+// expect: stdout "3.141592"
+// expect: exit 0
+echo 1_000_000;
+echo 0xFF;
+echo 0b1010;
+echo 0o755;
+echo 0xDE_AD;
+echo 1.5e3;
+echo 2e-2;
+echo 3.141_592;

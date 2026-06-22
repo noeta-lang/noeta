@@ -338,7 +338,7 @@ where
         let int = just(T::IntLit).map_with(move |_, e| {
             let span = to_span(e.span());
             Pattern::Int {
-                value: ctx.source.slice(span).parse().unwrap_or(0),
+                value: parse_int_literal(ctx.source.slice(span)).unwrap_or(0),
                 span,
             }
         });
@@ -421,7 +421,7 @@ where
         let int = just(T::IntLit).map_with(move |_, e| {
             let span = to_span(e.span());
             let text = ctx.source.slice(span);
-            let value = text.parse::<i64>().unwrap_or_else(|_| {
+            let value = parse_int_literal(text).unwrap_or_else(|_| {
                 ctx.diags.borrow_mut().push(Diagnostic::error(
                     DiagnosticCode::UnexpectedToken,
                     span,
@@ -434,7 +434,7 @@ where
         let float = just(T::FloatLit).map_with(move |_, e| {
             let span = to_span(e.span());
             Expr::Float {
-                value: ctx.source.slice(span).parse().unwrap_or(0.0),
+                value: parse_float_literal(ctx.source.slice(span)),
                 span,
             }
         });
@@ -1325,6 +1325,30 @@ fn parse_raw_string(ctx: Ctx<'_>, span: Span) -> Expr {
         }
     }
     Expr::Str { value, span }
+}
+
+/// Parse an integer literal's source text into an `i64`. Handles `0x`/`0o`/`0b` radix prefixes
+/// and `_` digit separators (the lexer guarantees the shape; this strips separators and applies
+/// the radix). Returns the parse error (e.g. out of range) for the caller to report.
+fn parse_int_literal(text: &str) -> Result<i64, std::num::ParseIntError> {
+    let cleaned: String = text.chars().filter(|&c| c != '_').collect();
+    let lower = cleaned.to_ascii_lowercase();
+    if let Some(hex) = lower.strip_prefix("0x") {
+        i64::from_str_radix(hex, 16)
+    } else if let Some(oct) = lower.strip_prefix("0o") {
+        i64::from_str_radix(oct, 8)
+    } else if let Some(bin) = lower.strip_prefix("0b") {
+        i64::from_str_radix(bin, 2)
+    } else {
+        cleaned.parse::<i64>()
+    }
+}
+
+/// Parse a float literal's source text into an `f64`, stripping `_` digit separators. The lexer
+/// guarantees a well-formed decimal/scientific shape, so `f64::from_str` always succeeds.
+fn parse_float_literal(text: &str) -> f64 {
+    let cleaned: String = text.chars().filter(|&c| c != '_').collect();
+    cleaned.parse().unwrap_or(0.0)
 }
 
 /// Parse a single interpolation hole's expression. The hole text is lexed and parsed

@@ -71,9 +71,18 @@ pub enum TokenKind {
     /// including `{`, `$`, and `\n`, is literal. Ideal for regex, paths, and JSON blobs.
     #[regex(r#"'([^'\\]|\\.)*'"#)]
     RawStr,
-    #[regex(r"[0-9]+\.[0-9]+")]
+    /// A float literal: a decimal with a fractional part and/or a scientific exponent. `_` digit
+    /// separators are allowed and stripped by the parser. Examples: `4.2`, `1_000.5`, `1.5e-3`,
+    /// `2e10`. (A bare `42` with no `.`/`e` is an [`TokenKind::IntLit`].)
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?")]
+    #[regex(r"[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*")]
     FloatLit,
-    #[regex(r"[0-9]+")]
+    /// An integer literal: decimal, or `0x`/`0o`/`0b` radix-prefixed, with optional `_` digit
+    /// separators (stripped by the parser). Examples: `42`, `1_000_000`, `0xDE_AD`, `0o755`, `0b1010`.
+    #[regex(r"[0-9][0-9_]*")]
+    #[regex(r"0[xX][0-9A-Fa-f][0-9A-Fa-f_]*")]
+    #[regex(r"0[oO][0-7][0-7_]*")]
+    #[regex(r"0[bB][01][01_]*")]
     IntLit,
     #[regex(r"[A-Za-z_][A-Za-z0-9_]*")]
     Ident,
@@ -417,6 +426,25 @@ mod tests {
                 .diagnostics
                 .iter()
                 .any(|d| d.code == DiagnosticCode::UnexpectedCharacter)
+        );
+    }
+
+    #[test]
+    fn lexes_numeric_literal_forms() {
+        let (_source, lexed) = lex_str("1_000 0xFF 0o755 0b1010 4.2 1.5e3 2e-2");
+        assert!(lexed.diagnostics.is_empty());
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::IntLit,   // 1_000 — decimal with separator
+                TokenKind::IntLit,   // 0xFF  — hex
+                TokenKind::IntLit,   // 0o755 — octal
+                TokenKind::IntLit,   // 0b1010 — binary
+                TokenKind::FloatLit, // 4.2
+                TokenKind::FloatLit, // 1.5e3 — scientific
+                TokenKind::FloatLit, // 2e-2  — scientific, no fractional part
+            ]
         );
     }
 
