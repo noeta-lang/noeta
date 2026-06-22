@@ -1,0 +1,24 @@
+// Derived `Comparable` recurses into nested-object fields: a `Release` orders first by its
+// `Version` sub-object (structurally, major-then-minor), then by its own `build` field.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+@derive(Comparable)
+type Version = { major: int, minor: int };
+
+@derive(Comparable)
+type Release = { version: Version, build: int };
+
+a = Release { version: Version { major: 1, minor: 9 }, build: 5 };
+b = Release { version: Version { major: 1, minor: 10 }, build: 0 };
+c = Release { version: Version { major: 1, minor: 9 }, build: 7 };
+
+// nested Version decides: 1.9 < 1.10
+echo a < b;
+echo b < a;
+// equal nested Version, so the `build` field breaks the tie: 5 < 7
+echo a < c;
+// reflexive-ish sanity through the nested path
+echo Release { version: Version { major: 2, minor: 0 }, build: 0 } > b;

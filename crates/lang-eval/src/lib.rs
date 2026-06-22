@@ -2573,12 +2573,22 @@ fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::c
     for f in &left.def.fields {
         let a = left.fields.get(&f.name)?;
         let b = rb.fields.get(&f.name)?;
-        match compare_primitive(a, b)? {
+        match compare_field(a, b)? {
             std::cmp::Ordering::Equal => continue,
             other => return Some(other),
         }
     }
     Some(std::cmp::Ordering::Equal)
+}
+
+/// Compare one field of two structurally-compared objects: a nested object recurses (matching the
+/// VM's `compare_field`), anything else goes through [`compare_primitive`]. `None` is an
+/// incomparable pairing, which the caller turns into a runtime type error.
+fn compare_field(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
+    match a {
+        Value::Object(la) => object_structural_compare(la, b),
+        _ => compare_primitive(a, b),
+    }
 }
 
 /// The JSON encoding synthesized by `@derive(ToJson)`. The byte-for-byte mirror of the VM's

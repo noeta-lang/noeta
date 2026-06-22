@@ -55,7 +55,7 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 |---|---|---|
 | ~~User-facing `Ordering.Less` construction; register `Ordering` as a namable prelude enum~~ | M1.8 | **Done (F3)** — `Ordering` registered as a built-in enum in both backends (`traits/ordering_construct`); construction builds the same value `.compare()` returns |
 | Standalone top-level `impl Attribute for X {}` + the `#[Foo(...)]`-requires-`Attribute` gate | M1.8 | Gating *which* records may be used as data attributes; needs the top-level `impl` construct (our `impl`s are class-body-nested) |
-| Nested-object fields in derived `Comparable` (recurse into sub-objects) | M1.8 | A `@derive(Comparable)` type whose fields are themselves objects |
+| ~~Nested-object fields in derived `Comparable` (recurse into sub-objects)~~ | M1.8 | **Done (F3)** — `compare_field` recurses into object fields in both backends (`traits/derive_comparable_nested`); non-object/non-primitive fields (e.g. lists) still bail |
 | `Callable` (`a(...)`), `Members` / `DynamicCall` protocols routed to user objects | M1.8 | Objects used as functions / dynamic member dispatch (agentic/proxy surface) |
 | Monomorphic shape specialization + bounded type parameters (`<T: Comparable>`) — generics are erased-for-storage today | M1.8 | **Bounded params fold into the inferred-static type-system track** (enforced statically, not at runtime); monomorphic specialization is the packed/perf reification path it then unlocks (M2 "packed value types") |
 | Richer record-valued `#[attr(...)]` arguments (identifiers only today) | M1.8 | A data attribute needing structured (non-identifier) arguments |

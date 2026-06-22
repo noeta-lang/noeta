@@ -121,12 +121,24 @@ pub fn structural_compare(left: Value, right: Value) -> Option<Ordering> {
         return None;
     }
     for (a, b) in la.iter().zip(lb.iter()) {
-        match compare_primitive(*a, *b)? {
+        match compare_field(*a, *b)? {
             Ordering::Equal => continue,
             other => return Some(other),
         }
     }
     Some(Ordering::Equal)
+}
+
+/// Compare one field of two structurally-compared objects: a nested object recurses (so derived
+/// `Comparable` orders objects-of-objects lexicographically all the way down), anything else
+/// goes through [`compare_primitive`]. Returns `None` for an incomparable pairing (the caller
+/// turns that into a runtime type error).
+fn compare_field(a: Value, b: Value) -> Option<Ordering> {
+    if a.is_object() && b.is_object() {
+        structural_compare(a, b)
+    } else {
+        compare_primitive(a, b)
+    }
 }
 
 fn compare(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError> {
