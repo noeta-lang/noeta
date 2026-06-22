@@ -1,0 +1,24 @@
+// fs directory hierarchy (M2.5): nested paths make parent directories exist implicitly, `mkdir`
+// creates an empty one, `is_dir` classifies a path, and `list(dir)` returns sorted immediate
+// children. All over the sandbox VFS, so identical on both backends.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "[\"a.txt\", \"b.txt\", \"empty\", \"sub\"]"
+// expect: stdout "[\"deep.txt\"]"
+// expect: exit 0
+use std.{fs};
+
+fs.write("logs/a.txt", "1");
+fs.write("logs/b.txt", "2");
+fs.write("logs/sub/deep.txt", "3");
+fs.mkdir("logs/empty");
+
+// A directory exists implicitly under its files; a file is not a directory.
+echo fs.is_dir("logs");
+echo fs.is_dir("logs/a.txt");
+echo fs.is_dir("logs/empty");
+
+// Listing a directory yields its immediate children (files and subdirectories), sorted.
+echo fs.list("logs");
+echo fs.list("logs/sub");

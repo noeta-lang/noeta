@@ -17,19 +17,26 @@
 //! in-memory VFS gets it structurally, with no disk flakiness or cleanup, which is why it is
 //! preferred here. Real-disk / streaming IO is an M2 concern — see the slice plan.)
 //!
-//! Paths are opaque string keys; the VFS imposes no directory hierarchy (a flat namespace is all
-//! the Ring 2 surface needs). Listing is sorted (the backing map is a `BTreeMap`), so `fs.list()`
-//! is deterministic.
+//! Paths are `/`-separated keys. The namespace is flat at heart — a file is just a key in a map —
+//! but the surface presents a **directory hierarchy** (M2.5): a path's parent directories exist
+//! implicitly whenever it holds a file, and `mkdir` records explicit (possibly empty) directories.
+//! `list_dir` returns a directory's immediate children, and `is_dir` reports whether a path names a
+//! directory. Listing is sorted (the backing stores are ordered), so every `fs` query is
+//! deterministic and identical across backends.
 
 use crate::{ErrorKind, StdError};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-/// A sandboxed in-memory filesystem: a flat map from path to file contents. Each interpreter
-/// owns one, fresh per run, so file IO is isolated and deterministic. Cloning is cheap-ish and
-/// only used in tests.
+/// A sandboxed in-memory filesystem: a flat map from path to file contents plus the set of
+/// explicitly-created directories. Each interpreter owns one, fresh per run, so file IO is isolated
+/// and deterministic. Cloning is cheap-ish and only used in tests.
 #[derive(Debug, Default, Clone)]
 pub struct Vfs {
     files: BTreeMap<String, String>,
+    /// Directories created with [`Vfs::mkdir`]. A directory also exists *implicitly* whenever a
+    /// file lives under it (so `write("a/b.txt", …)` makes `a` a directory without a `mkdir`); this
+    /// set records the *empty* ones that would otherwise leave no trace.
+    dirs: BTreeSet<String>,
 }
 
 impl Vfs {
@@ -69,9 +76,73 @@ impl Vfs {
         self.files.remove(path).is_some()
     }
 
-    /// Every path in the sandbox, sorted (deterministic, since the backing store is ordered).
+    /// Every file path in the sandbox, sorted (deterministic, since the backing store is ordered).
     pub fn list(&self) -> Vec<String> {
         self.files.keys().cloned().collect()
+    }
+
+    /// Create directory `path` (and any missing ancestors, like `mkdir -p`). Idempotent; making a
+    /// directory that already exists implicitly (because a file lives under it) is a harmless no-op.
+    pub fn mkdir(&mut self, path: &str) {
+        let path = path.trim_end_matches('/');
+        if path.is_empty() {
+            return;
+        }
+        let mut acc = String::new();
+        for segment in path.split('/') {
+            if !acc.is_empty() {
+                acc.push('/');
+            }
+            acc.push_str(segment);
+            self.dirs.insert(acc.clone());
+        }
+    }
+
+    /// Whether `path` names a directory: the root, an explicitly-created directory, or a prefix
+    /// under which some file or directory lives.
+    pub fn is_dir(&self, path: &str) -> bool {
+        let path = path.trim_end_matches('/');
+        if path.is_empty() {
+            return true;
+        }
+        if self.dirs.contains(path) {
+            return true;
+        }
+        let prefix = format!("{path}/");
+        self.files.keys().any(|key| key.starts_with(&prefix))
+            || self.dirs.iter().any(|dir| dir.starts_with(&prefix))
+    }
+
+    /// The immediate children (file or subdirectory base names) of directory `dir`, sorted and
+    /// de-duplicated. `""`/`"."` is the root. A path with no children (missing or empty) yields an
+    /// empty list — the deterministic, allocation-free reading the sandbox prefers over an error.
+    pub fn list_dir(&self, dir: &str) -> Vec<String> {
+        let prefix = dir_prefix(dir);
+        let mut children: BTreeSet<String> = BTreeSet::new();
+        for key in self.files.keys().chain(self.dirs.iter()) {
+            let Some(rest) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            if rest.is_empty() {
+                continue;
+            }
+            let name = match rest.find('/') {
+                Some(slash) => &rest[..slash],
+                None => rest,
+            };
+            children.insert(name.to_string());
+        }
+        children.into_iter().collect()
+    }
+}
+
+/// The lookup prefix for a directory's children: empty for the root (`""`/`"."`), else `"dir/"`.
+fn dir_prefix(dir: &str) -> String {
+    let dir = dir.trim_end_matches('/');
+    if dir.is_empty() || dir == "." {
+        String::new()
+    } else {
+        format!("{dir}/")
     }
 }
 
@@ -136,5 +207,54 @@ mod tests {
         vfs.write("a", "1");
         vfs.write("b", "2");
         assert_eq!(vfs.list(), vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn directories_exist_implicitly_under_files() {
+        let mut vfs = Vfs::new();
+        vfs.write("logs/app.txt", "x");
+        vfs.write("logs/sub/deep.txt", "y");
+        // The parent path is a directory even without a `mkdir`.
+        assert!(vfs.is_dir("logs"));
+        assert!(vfs.is_dir("logs/sub"));
+        // A file is not a directory; a missing path is not a directory.
+        assert!(!vfs.is_dir("logs/app.txt"));
+        assert!(!vfs.is_dir("nope"));
+        // The root is always a directory.
+        assert!(vfs.is_dir(""));
+    }
+
+    #[test]
+    fn mkdir_creates_empty_dirs_with_ancestors() {
+        let mut vfs = Vfs::new();
+        vfs.mkdir("a/b/c");
+        assert!(vfs.is_dir("a"));
+        assert!(vfs.is_dir("a/b"));
+        assert!(vfs.is_dir("a/b/c"));
+        // Idempotent.
+        vfs.mkdir("a/b");
+        assert!(vfs.is_dir("a/b"));
+    }
+
+    #[test]
+    fn list_dir_returns_sorted_immediate_children() {
+        let mut vfs = Vfs::new();
+        vfs.write("top.txt", "0");
+        vfs.write("logs/b.txt", "2");
+        vfs.write("logs/a.txt", "1");
+        vfs.write("logs/sub/deep.txt", "3");
+        vfs.mkdir("logs/empty");
+        // Root lists files and the top-level directory once.
+        assert_eq!(vfs.list_dir(""), vec!["logs", "top.txt"]);
+        // A directory lists its files and subdirectories (each once), sorted.
+        assert_eq!(vfs.list_dir("logs"), vec!["a.txt", "b.txt", "empty", "sub"]);
+        // A trailing slash is accepted.
+        assert_eq!(
+            vfs.list_dir("logs/"),
+            vec!["a.txt", "b.txt", "empty", "sub"]
+        );
+        // A missing/empty directory has no children.
+        assert!(vfs.list_dir("logs/empty").is_empty());
+        assert!(vfs.list_dir("ghost").is_empty());
     }
 }

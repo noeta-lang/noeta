@@ -35,6 +35,12 @@ pub trait Host {
     fn fs_remove(&mut self, path: &str) -> Result<bool, StdError>;
     fn fs_list(&self) -> Result<Vec<String>, StdError>;
 
+    // Directory hierarchy (M2.5). `fs_list_dir` returns a directory's immediate children (sorted);
+    // `fs_mkdir` creates a directory and its ancestors; `fs_is_dir` reports whether a path is one.
+    fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError>;
+    fn fs_mkdir(&mut self, path: &str) -> Result<(), StdError>;
+    fn fs_is_dir(&self, path: &str) -> bool;
+
     // Seeded PRNG — the host owns the state; the SplitMix64 stepper stays pure.
     fn rng_seed(&mut self, seed: i64);
     fn rng_int(&mut self, lo: i64, hi: i64) -> Result<i64, StdError>;
@@ -111,6 +117,19 @@ impl Host for SandboxHost {
 
     fn fs_list(&self) -> Result<Vec<String>, StdError> {
         Ok(self.fs.list())
+    }
+
+    fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError> {
+        Ok(self.fs.list_dir(dir))
+    }
+
+    fn fs_mkdir(&mut self, path: &str) -> Result<(), StdError> {
+        self.fs.mkdir(path);
+        Ok(())
+    }
+
+    fn fs_is_dir(&self, path: &str) -> bool {
+        self.fs.is_dir(path)
     }
 
     fn rng_seed(&mut self, seed: i64) {

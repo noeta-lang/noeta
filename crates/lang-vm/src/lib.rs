@@ -587,9 +587,20 @@ impl<'m> Vm<'m> {
                     }
                 }
             }
+            // `list()` lists every file; `list(dir)` lists a directory's immediate children.
             "list" => {
-                self.stdlib_arity(func, args, 0, span)?;
-                match self.host.fs_list() {
+                let result = match args.len() {
+                    0 => self.host.fs_list(),
+                    1 => {
+                        let dir = self.stdlib_string(func, args[0], span)?;
+                        self.host.fs_list_dir(&dir)
+                    }
+                    n => {
+                        let error = lang_stdlib::arity_error(func, 1, n);
+                        return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                    }
+                };
+                match result {
                     Ok(paths) => {
                         let paths = paths.iter().map(|p| Value::string(p)).collect();
                         Ok(Value::list(paths))
@@ -598,6 +609,21 @@ impl<'m> Vm<'m> {
                         Err(self.error(stdlib_error_code(error.kind), span, error.message))
                     }
                 }
+            }
+            "mkdir" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                match self.host.fs_mkdir(&path) {
+                    Ok(()) => Ok(Value::unit()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "is_dir" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                Ok(Value::bool(self.host.fs_is_dir(&path)))
             }
             _ => {
                 let error = lang_stdlib::no_function_error("fs", func);

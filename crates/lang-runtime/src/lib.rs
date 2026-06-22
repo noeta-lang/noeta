@@ -16,9 +16,10 @@
 //! later `async`/`await` surface (a separate M2 pass) is an additive change — these
 //! `tokio::fs` calls get `await`ed instead of `block_on`-ed — rather than a rewrite.
 //!
-//! The filesystem here is a **flat** real-disk surface (paths relative to the process
-//! working directory), mirroring the sandbox VFS's flat namespace. A directory
-//! hierarchy and streaming handles are M2.4.
+//! The filesystem is a real-disk surface (paths relative to the process working
+//! directory) with a directory hierarchy (M2.5): `fs_list_dir`/`fs_mkdir`/`fs_is_dir`
+//! map onto `tokio::fs`'s `read_dir`/`create_dir_all` and `Path::is_dir`, mirroring the
+//! sandbox VFS's directory model.
 
 use lang_stdlib::{ErrorKind, Host, StdError};
 use tokio::runtime::Runtime;
@@ -46,6 +47,26 @@ impl RealHost {
             runtime,
             rng: lang_stdlib::random::DEFAULT_SEED,
             clock: 0,
+        })
+    }
+
+    /// The sorted base names of the entries in directory `dir` — the real-disk analogue of the
+    /// sandbox `Vfs::list`/`list_dir`. Shared by `fs_list` (cwd) and `fs_list_dir` (any path).
+    fn read_dir_names(&self, dir: &str) -> Result<Vec<String>, StdError> {
+        self.runtime.block_on(async {
+            let mut entries = tokio::fs::read_dir(dir)
+                .await
+                .map_err(|e| io_error(format!("cannot list directory `{dir}`: {e}")))?;
+            let mut names = Vec::new();
+            while let Some(entry) = entries
+                .next_entry()
+                .await
+                .map_err(|e| io_error(format!("cannot read directory entry: {e}")))?
+            {
+                names.push(entry.file_name().to_string_lossy().into_owned());
+            }
+            names.sort();
+            Ok(names)
         })
     }
 }
@@ -101,21 +122,23 @@ impl Host for RealHost {
     }
 
     fn fs_list(&self) -> Result<Vec<String>, StdError> {
-        self.runtime.block_on(async {
-            let mut dir = tokio::fs::read_dir(".")
-                .await
-                .map_err(|e| io_error(format!("cannot list directory: {e}")))?;
-            let mut names = Vec::new();
-            while let Some(entry) = dir
-                .next_entry()
-                .await
-                .map_err(|e| io_error(format!("cannot read directory entry: {e}")))?
-            {
-                names.push(entry.file_name().to_string_lossy().into_owned());
-            }
-            names.sort();
-            Ok(names)
-        })
+        self.read_dir_names(".")
+    }
+
+    fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError> {
+        // A directory's immediate children, by base name — the sandbox `list_dir` shape.
+        let dir = if dir.is_empty() { "." } else { dir };
+        self.read_dir_names(dir)
+    }
+
+    fn fs_mkdir(&mut self, path: &str) -> Result<(), StdError> {
+        self.runtime
+            .block_on(tokio::fs::create_dir_all(path))
+            .map_err(|e| io_error(format!("cannot create directory `{path}`: {e}")))
+    }
+
+    fn fs_is_dir(&self, path: &str) -> bool {
+        std::path::Path::new(path).is_dir()
     }
 
     fn rng_seed(&mut self, seed: i64) {
@@ -183,6 +206,33 @@ mod tests {
         assert_eq!(host.fs_read(&path).unwrap_err().kind, ErrorKind::Io);
         // Removing a missing file reports "did not exist", not an error.
         assert!(!host.fs_remove(&path).unwrap());
+    }
+
+    #[test]
+    fn real_host_directory_hierarchy() {
+        let mut host = RealHost::new().unwrap();
+        let mut root = std::env::temp_dir();
+        root.push("lang_runtime_dirs_test");
+        let root = root.to_string_lossy().into_owned();
+        // Start clean.
+        let _ = std::fs::remove_dir_all(&root);
+
+        let nested = format!("{root}/logs/sub");
+        host.fs_mkdir(&nested).unwrap();
+        assert!(host.fs_is_dir(&format!("{root}/logs")));
+        assert!(host.fs_is_dir(&nested));
+
+        host.fs_write(&format!("{root}/logs/a.txt"), "1").unwrap();
+        host.fs_write(&format!("{root}/logs/b.txt"), "2").unwrap();
+        // A directory lists its immediate children, sorted by base name.
+        assert_eq!(
+            host.fs_list_dir(&format!("{root}/logs")).unwrap(),
+            vec!["a.txt".to_string(), "b.txt".to_string(), "sub".to_string()]
+        );
+        // A file is not a directory.
+        assert!(!host.fs_is_dir(&format!("{root}/logs/a.txt")));
+
+        std::fs::remove_dir_all(&root).unwrap();
     }
 
     #[test]
