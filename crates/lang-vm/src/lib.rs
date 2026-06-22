@@ -56,15 +56,27 @@ impl VmBackend {
     /// Compile and run a program, or report that it falls outside the supported subset.
     pub fn try_run(&self, program: &Program) -> Result<RunResult, Unsupported> {
         let module = compile(program)?;
-        Ok(execute(&module))
+        Ok(execute(&module, Box::new(lang_stdlib::SandboxHost::new())))
     }
 
     /// Execute an already-compiled [`Module`]. This is the seam the salsa graph (`lang-db`)
     /// drives: it produces the `Module` via the memoized `bytecode` query, then hands it here.
     /// Splitting compilation from execution is what lets the VM "consume `chunk(db)`" (M1.1)
-    /// without the VM crate depending on the database.
+    /// without the VM crate depending on the database. Runs against a deterministic
+    /// [`lang_stdlib::SandboxHost`] — the host the conformance differential always uses.
     pub fn run_module(&self, module: &Module) -> RunResult {
-        execute(module)
+        execute(module, Box::new(lang_stdlib::SandboxHost::new()))
+    }
+
+    /// Execute a module against a caller-provided [`lang_stdlib::Host`] (M2.3). The CLI/REPL pass
+    /// a real host here; the conformance harness keeps using the sandbox default via
+    /// [`VmBackend::run_module`], so the differential stays deterministic.
+    pub fn run_module_with_host(
+        &self,
+        module: &Module,
+        host: Box<dyn lang_stdlib::Host>,
+    ) -> RunResult {
+        execute(module, host)
     }
 }
 
@@ -191,7 +203,7 @@ fn try_classify(v: Value) -> Option<TryOutcome> {
 }
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.
-fn execute(module: &Module) -> RunResult {
+fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
     let methods = module
         .methods
         .iter()
@@ -210,7 +222,7 @@ fn execute(module: &Module) -> RunResult {
         globals: HashMap::new(),
         global_order: Vec::new(),
         next_id: 1,
-        host: Box::new(lang_stdlib::SandboxHost::new()),
+        host,
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -519,8 +531,12 @@ impl<'m> Vm<'m> {
                 self.stdlib_arity(func, args, 2, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;
                 let content = self.stdlib_string(func, args[1], span)?;
-                self.host.fs_write(&path, &content);
-                Ok(Value::unit())
+                match self.host.fs_write(&path, &content) {
+                    Ok(()) => Ok(Value::unit()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             "read" => {
                 self.stdlib_arity(func, args, 1, span)?;
@@ -540,17 +556,24 @@ impl<'m> Vm<'m> {
             "remove" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;
-                Ok(Value::bool(self.host.fs_remove(&path)))
+                match self.host.fs_remove(&path) {
+                    Ok(existed) => Ok(Value::bool(existed)),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             "list" => {
                 self.stdlib_arity(func, args, 0, span)?;
-                let paths = self
-                    .host
-                    .fs_list()
-                    .iter()
-                    .map(|p| Value::string(p))
-                    .collect();
-                Ok(Value::list(paths))
+                match self.host.fs_list() {
+                    Ok(paths) => {
+                        let paths = paths.iter().map(|p| Value::string(p)).collect();
+                        Ok(Value::list(paths))
+                    }
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             _ => {
                 let error = lang_stdlib::no_function_error("fs", func);

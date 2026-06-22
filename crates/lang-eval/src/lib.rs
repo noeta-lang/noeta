@@ -47,6 +47,14 @@ impl TreeWalkBackend {
     pub fn with_seed(seed: u64) -> TreeWalkBackend {
         TreeWalkBackend { seed }
     }
+
+    /// Run against a caller-provided [`lang_stdlib::Host`] (M2.3) instead of the deterministic
+    /// sandbox. The CLI uses this to give `lang run` the real host (real `env`/`args`, real disk);
+    /// the [`Backend::run`] path keeps the sandbox so the conformance differential stays
+    /// deterministic.
+    pub fn run_with_host(&self, program: &Program, host: Box<dyn lang_stdlib::Host>) -> RunResult {
+        Interpreter::with_host(self.seed, host).run(program)
+    }
 }
 
 impl Default for TreeWalkBackend {
@@ -492,6 +500,12 @@ struct Interpreter {
 
 impl Interpreter {
     fn new(seed: u64) -> Interpreter {
+        Interpreter::with_host(seed, Box::new(lang_stdlib::SandboxHost::new()))
+    }
+
+    /// Build an interpreter against a caller-provided [`lang_stdlib::Host`] (M2.3). `new` uses the
+    /// deterministic sandbox (what the differential needs); the CLI/REPL pass a real host here.
+    fn with_host(seed: u64, host: Box<dyn lang_stdlib::Host>) -> Interpreter {
         let global = Scope::global();
         for &builtin in Builtin::PRELUDE {
             global.declare(builtin.name().to_string(), Value::Builtin(builtin), false);
@@ -508,7 +522,7 @@ impl Interpreter {
             diagnostics: Vec::new(),
             ids: IdGen::new(seed),
             scope: global,
-            host: Box::new(lang_stdlib::SandboxHost::new()),
+            host,
         }
     }
 
@@ -1602,8 +1616,12 @@ impl Interpreter {
                 self.expect_std_arity(func, args, 2, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?.to_string();
                 let content = self.expect_std_string(func, &args[1], span)?.to_string();
-                self.host.fs_write(&path, &content);
-                Ok(Value::Unit)
+                match self.host.fs_write(&path, &content) {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             "read" => {
                 self.expect_std_arity(func, args, 1, span)?;
@@ -1623,12 +1641,24 @@ impl Interpreter {
             "remove" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?.to_string();
-                Ok(Value::Bool(self.host.fs_remove(&path)))
+                match self.host.fs_remove(&path) {
+                    Ok(existed) => Ok(Value::Bool(existed)),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             "list" => {
                 self.expect_std_arity(func, args, 0, span)?;
-                let paths = self.host.fs_list().into_iter().map(Value::Str).collect();
-                Ok(Value::List(Rc::new(paths)))
+                match self.host.fs_list() {
+                    Ok(paths) => {
+                        let paths = paths.into_iter().map(Value::Str).collect();
+                        Ok(Value::List(Rc::new(paths)))
+                    }
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
             }
             _ => {
                 let error = lang_stdlib::no_function_error("fs", func);

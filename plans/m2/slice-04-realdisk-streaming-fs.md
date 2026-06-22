@@ -1,21 +1,23 @@
-# Slice M2.4 — Real-disk + streaming filesystem
+# Slice M2.4 — Streaming + directory-hierarchy filesystem
 
 Status: todo
 
-> **Cluster:** M2 cluster 1 (host IO & async foundation). **Depends on:** M2.1 (the `Host` boundary) **and** M2.3 (the async runtime). **Determinism posture:** `use std.{fs}` programs stay differential-covered on the **sandbox** in-memory VFS (now the sandbox impl of one shared fs model); **real disk** is `RealHost`-only, async, integration-tested outside the differential.
+> **Boundary note (post-M2.3):** *flat* real-disk fs (`read`/`write`/`exists`/`remove`/`list`, async on the runtime, paths relative to cwd) **already landed in M2.3** — it was the concrete async IO the tokio runtime needed to drive, and it brought the fallible `Host` fs methods with it. So M2.4 is now scoped to the genuinely new surface it always implied: **streaming handles** and a **directory/path hierarchy** model. The cluster's "real-disk/streaming filesystem" goal is split M2.3 (flat real disk) + M2.4 (streaming + directories).
+
+> **Cluster:** M2 cluster 1 (host IO & async foundation). **Depends on:** M2.1 (the `Host` boundary) **and** M2.3 (the async runtime + flat real disk). **Determinism posture:** `use std.{fs}` programs stay differential-covered on the **sandbox** in-memory VFS (the sandbox impl of one shared fs model); **real disk** is `RealHost`-only, async, integration-tested outside the differential.
 
 ## Goal
-Give `RealHost` a real-disk filesystem (async, on the M2.3 runtime) and add **streaming** IO (chunked read/write over a handle), completing the "real-disk/streaming filesystem" half of the cluster — while the in-memory VFS remains the sandbox implementation of the *same* fs interface so the oracle still covers `fs`.
+Add **streaming** IO (chunked read/write over a handle) and a real **directory/path hierarchy** to the fs surface, richening the flat namespace M2.3 shipped — while the in-memory VFS remains the sandbox implementation of the *same* fs interface so the oracle still covers `fs`.
 
 ## Why both impls share one model
 M1.10.3 shipped `fs` as a flat in-memory `BTreeMap<path, content>` VFS, explicitly noting *"real-disk/streaming IO is deferred to M2."* Real disk has directories, real paths, metadata, and large files that should not be slurped whole. To keep `use std.{fs}` programs identical across sandbox (conformance) and real disk (CLI), both must implement **one richer fs model**: a path/directory hierarchy and a streaming surface. The in-memory VFS becomes the deterministic sandbox impl of that model; `RealHost`'s disk impl is the real one. The differential covers the sandbox path; real-disk fidelity is integration-tested.
 
 ## Scope
 - In:
-  - Richen the fs model behind the `Host` trait to a real **path/directory hierarchy** (not a flat map); update `SandboxHost`'s VFS to that model so it still resolves deterministically.
-  - **`RealHost` disk fs:** real `read`/`write`/`exists`/`remove`/`list` over actual files, async on the M2.3 runtime, blocked-on at the VM boundary.
+  - Richen the fs model behind the `Host` trait to a real **path/directory hierarchy** (not a flat map); update `SandboxHost`'s VFS to that model so it still resolves deterministically, and make `RealHost`'s `fs_list` honor a path argument (M2.3 lists cwd only).
   - **Streaming surface:** `fs.open(path, mode)` → a handle; chunked `read`/`write` (and `lines()`/iterator form) so large files stream rather than load whole. Works over both the sandbox VFS and real disk.
-  - Extend the **`E0021 IoError`** family for real-disk failures (not-found, permission, etc.), keeping codes append-only.
+  - Extend the **`E0021 IoError`** family for the new failure modes, keeping codes append-only.
+- Already done in M2.3 (not re-done here): flat `RealHost` real-disk `read`/`write`/`exists`/`remove`/`list` async on the runtime; the fallible `Host` fs methods.
 - Out: file watching/notify; symlink/permission/metadata APIs beyond what streaming needs; network filesystems; the bundled HTTP/WS server (§9.5, later M2); async *surface* (`await` over a stream — later M2 pass).
 
 ## Checklist (vertical slice)

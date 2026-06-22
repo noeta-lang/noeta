@@ -25,12 +25,14 @@ use std::collections::BTreeMap;
 /// substituted without re-touching their internals. IO is never a hot path, so
 /// the dynamic dispatch is immaterial.
 pub trait Host {
-    // Filesystem — M1.10 sandbox semantics; real disk + streaming arrive in M2.4.
-    fn fs_write(&mut self, path: &str, content: &str);
+    // Filesystem. The methods that touch storage are fallible so a real host (M2.3+)
+    // can surface disk errors; the in-memory `SandboxHost` simply never errors.
+    // Directory hierarchy + streaming arrive in M2.4.
+    fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_read(&self, path: &str) -> Result<String, StdError>;
     fn fs_exists(&self, path: &str) -> bool;
-    fn fs_remove(&mut self, path: &str) -> bool;
-    fn fs_list(&self) -> Vec<String>;
+    fn fs_remove(&mut self, path: &str) -> Result<bool, StdError>;
+    fn fs_list(&self) -> Result<Vec<String>, StdError>;
 
     // Seeded PRNG — the host owns the state; the SplitMix64 stepper stays pure.
     fn rng_seed(&mut self, seed: i64);
@@ -84,8 +86,9 @@ impl Default for SandboxHost {
 }
 
 impl Host for SandboxHost {
-    fn fs_write(&mut self, path: &str, content: &str) {
+    fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError> {
         self.fs.write(path, content);
+        Ok(())
     }
 
     fn fs_read(&self, path: &str) -> Result<String, StdError> {
@@ -96,12 +99,12 @@ impl Host for SandboxHost {
         self.fs.exists(path)
     }
 
-    fn fs_remove(&mut self, path: &str) -> bool {
-        self.fs.remove(path)
+    fn fs_remove(&mut self, path: &str) -> Result<bool, StdError> {
+        Ok(self.fs.remove(path))
     }
 
-    fn fs_list(&self) -> Vec<String> {
-        self.fs.list()
+    fn fs_list(&self) -> Result<Vec<String>, StdError> {
+        Ok(self.fs.list())
     }
 
     fn rng_seed(&mut self, seed: i64) {

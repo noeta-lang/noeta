@@ -1,6 +1,6 @@
 # Slice M2.3 — Async-first IO runtime foundation (per-isolate tokio)
 
-Status: todo
+Status: **done**
 
 > **Cluster:** M2 cluster 1 (host IO & async foundation). **Depends on:** M2.1 (the `Host` boundary). **Determinism posture:** conformance keeps running `SandboxHost`, which resolves synchronously, so **async never enters the differential**. The async runtime exists only behind `RealHost` for `lang run`/REPL/server.
 
@@ -39,3 +39,13 @@ Architecture §7 makes the runtime an isolate model: *"Each unit of concurrency 
 - **No `async` leaks into the surface or the differential.** If a conformance case would behave differently sync-vs-async, the boundary blocking is wrong.
 - `current_thread` (not multi-thread) per isolate is deliberate — it matches the shared-nothing, non-atomic-refcount isolate model (§7); a multi-thread runtime would invite the `Arc<Mutex>` data races §7 explicitly keeps out of userland.
 - This slice's value is entirely in *not having to rewrite IO later*. Keep `RealHost`'s sync-looking boundary thin so M2.4 (real disk + streaming) and the future server slice extend it rather than fight it.
+
+## Outcome (done)
+
+Landed the **`lang-runtime`** crate (`lang-runtime → lang-stdlib`, back-edge-free; `unsafe`-free) with **`RealHost`**: a per-isolate `tokio` `current_thread` runtime that drives real-disk file IO via `tokio::fs`, **blocked-on at the leaf** so the `Host` surface stays synchronous and no opcode/surface learns about futures. Real `env`/`args` read `std::env`; PRNG/clock stay deterministic (real time/entropy is a deliberate later choice, not a side effect of this slice).
+
+**Host injection plumbing.** Both backends gained a host-injecting entry point next to the sandbox default: `VmBackend::run_module_with_host` and `TreeWalkBackend::run_with_host` (and `Interpreter::with_host`); the VM's `execute` now takes the host. The default paths (`run_module`/`Backend::run`) still build a fresh `SandboxHost`, so the conformance differential is byte-for-byte unchanged. `lang run` (`run_linked`) constructs `RealHost` and runs on it.
+
+**Boundary adjustment from the original sketch (recorded).** The sketch deferred *all* real disk to M2.4, which would have left this slice's tokio runtime driving nothing real. To make the runtime earn its place, **flat** real-disk fs (`read`/`write`/`exists`/`remove`/`list`, paths relative to cwd) landed here — that is the concrete async IO the runtime drives. This required making the `Host` fs methods that touch storage **fallible** (`fs_write`/`fs_remove`/`fs_list` now return `Result`, `SandboxHost` always `Ok`); both backends' `call_fs` handle the `Result` (sandbox never errors, so the differential is unchanged). **M2.4 keeps** the genuinely new surface: streaming handles + a directory/path hierarchy model (richening the flat namespace).
+
+**Verification:** `cargo test --workspace` **316 passed / 0 failed** — including two `lang-runtime` unit tests (real-disk round-trip in a temp dir; deterministic PRNG) and two CLI integration tests proving `lang run` reads the **real** environment (injected via the child's env) and writes to the **real** disk (a temp working dir), both *outside* the differential. `lang test --differential` **unchanged at 91 matched / 0 skipped / 100% / backends agree**; conformance 97 passed; M2.0 hot-path benches unchanged (~29.6/1.49/1.34 ms); fmt/clippy `--all-targets` clean; no `unsafe`.

@@ -12,7 +12,7 @@ use std::process::ExitCode;
 use clap::{Parser, Subcommand};
 use lang_conformance::{Stage, run_corpus, run_differential};
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
-use lang_eval::{Backend, Session, SessionOutput, TreeWalkBackend};
+use lang_eval::{Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::lex;
 use lang_loader::Linked;
 use lang_parser::parse;
@@ -86,7 +86,16 @@ fn run_linked(linked: &Linked) -> i32 {
         return 1;
     }
 
-    let result = TreeWalkBackend::new().run(&linked.program);
+    // `lang run` executes against the real host (real `env`/`args`, real-disk IO) on a per-isolate
+    // tokio runtime (M2.3). The conformance differential keeps the deterministic sandbox, so this
+    // real-host path is never compared backend-to-backend.
+    let result = match lang_runtime::RealHost::new() {
+        Ok(host) => TreeWalkBackend::new().run_with_host(&linked.program, Box::new(host)),
+        Err(err) => {
+            eprintln!("lang: cannot start the runtime: {err}");
+            return 1;
+        }
+    };
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     emit_diagnostics(&linked.entry, result.diagnostics.iter());

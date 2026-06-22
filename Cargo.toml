@@ -34,10 +34,13 @@ lang-check = { path = "crates/lang-check" }
 # M1 modules (Thrust C)
 lang-loader = { path = "crates/lang-loader" }
 lang-stdlib = { path = "crates/lang-stdlib" }
+# M2 runtime (host-coupled IO: real disk async + real env/args)
+lang-runtime = { path = "crates/lang-runtime" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
 salsa = "0.27"
+tokio = { version = "1", features = ["rt", "fs"] }
 chumsky = { version = "1.0.0-alpha.8", features = ["pratt"] }
 ariadne = "0.6"
 clap = { version = "4", features = ["derive"] }

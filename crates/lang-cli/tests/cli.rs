@@ -72,6 +72,48 @@ fn run_missing_file_exits_2() {
         .stderr(predicate::str::contains("cannot read"));
 }
 
+// --- M2.3: `lang run` uses the real host (real env/args + real-disk IO) ------------
+
+#[test]
+fn run_reads_the_real_environment() {
+    // `env.get` reads the REAL process environment (RealHost), not the sandbox fixture —
+    // proven by injecting a variable the child process sees. (Conformance still runs the
+    // sandbox fixture; only `lang run` is on the real host.)
+    let file = temp_program("run_env", "use std.{env};\necho env.get(\"LANG_E2E_VAR\");");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .env("LANG_E2E_VAR", "from-host")
+        .assert()
+        .success()
+        .stdout("from-host\n");
+}
+
+#[test]
+fn run_does_real_disk_io() {
+    // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
+    let dir = std::env::temp_dir().join("lang_cli_realfs_dir");
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    let _ = std::fs::remove_file(dir.join("e2e.txt"));
+    let file = temp_program(
+        "run_realfs",
+        "use std.{fs};\nfs.write(\"e2e.txt\", \"on disk\");\necho fs.read(\"e2e.txt\");",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .stdout("on disk\n");
+    // The file really landed on disk (not an in-memory sandbox).
+    assert_eq!(
+        std::fs::read_to_string(dir.join("e2e.txt")).expect("file on disk"),
+        "on disk"
+    );
+    let _ = std::fs::remove_file(dir.join("e2e.txt"));
+}
+
 #[test]
 fn run_orders_example_produces_the_headline_output() {
     lang()
