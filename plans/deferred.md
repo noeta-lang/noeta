@@ -76,5 +76,5 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 
 ## Notes
 
-- **Stale code comments to tidy when next in the area** (not deferrals — already done, but the comments read like live "not yet" items): `lang-eval/src/lib.rs` "Comparisons stay built-in for now (M1.8b)" (Comparable/Ordering shipped in M1.8b) and `lang-ast/src/lib.rs` "return type … not yet checked in M0" (checked since M1.7).
+- ~~**Stale code comments to tidy**~~ — **Done (F3)**: corrected the `lang-eval` operator-dispatch comment (comparisons *do* trait-dispatch via `Comparable`, and `Ordering` is now a namable type) and the `lang-ast` "return type not yet checked in M0" / "is M1.8b" comments (checked since M1.7; the trait wiring shipped).
 - The roadmap's **M2 "Deferred follow-ups"** bullet duplicates the lazy-`fs.open` row above by design — the roadmap is the milestone index; this file is the complete cross-milestone registry.

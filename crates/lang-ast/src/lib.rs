@@ -267,7 +267,7 @@ pub struct FnDecl {
     /// default; meaningless for a method (only top-level declarations are importable).
     pub is_public: bool,
     pub params: Vec<Param>,
-    /// The declared return type, if any. Parsed but not yet checked in M0.
+    /// The declared return type, if any. Checked by the M1 type checker (M1.7).
     pub ret: Option<TypeRef>,
     pub body: Vec<Stmt>,
     pub span: Span,
@@ -569,8 +569,8 @@ impl BinaryOp {
     /// The trait method a user object's class implements to overload this operator, if the
     /// operator is overloadable. `a + b` dispatches to `a`'s `add(b)` when `a` is an object whose
     /// type defines that method; otherwise the built-in semantics apply. Comparisons, equality,
-    /// and the logical operators are *not* overloadable here (their trait wiring — `Equatable`,
-    /// `Comparable`, returning `bool`/`Ordering` — is M1.8b); they return `None`.
+    /// and the logical operators are *not* overloadable here (their `Equatable`/`Comparable` trait
+    /// wiring lives in `equatable_negation`/`comparable_method`); they return `None`.
     pub fn overload_method(self) -> Option<&'static str> {
         match self {
             BinaryOp::Add => Some("add"),

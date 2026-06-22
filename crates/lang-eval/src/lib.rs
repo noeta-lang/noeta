@@ -2396,8 +2396,9 @@ impl Interpreter {
         let right = self.eval_expr(rhs)?;
         // Operator-trait dispatch on a user object: an arithmetic/concat operator (`Add` for `+`,
         // …) calls the matching method and uses its result directly; `==`/`!=` dispatch to the
-        // `Equatable` `eq` method (`!=` negating the bool). Comparisons (`Comparable`) stay
-        // built-in for now — they return `Ordering`, which is not a language type yet (M1.8b).
+        // `Equatable` `eq` method (`!=` negating the bool); and `< <= > >=` dispatch to the
+        // `Comparable` `compare` method, mapping the returned `Ordering` variant to this operator's
+        // bool.
         if let Value::Object(object) = &left {
             if let Some(method_name) = op.overload_method()
                 && let Some(method) = object.def.methods.get(method_name)
