@@ -54,17 +54,17 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 | Item | Source | Trigger |
 |---|---|---|
 | ~~User-facing `Ordering.Less` construction; register `Ordering` as a namable prelude enum~~ | M1.8 | **Done (F3)** — `Ordering` registered as a built-in enum in both backends (`traits/ordering_construct`); construction builds the same value `.compare()` returns |
-| Standalone top-level `impl Attribute for X {}` + the `#[Foo(...)]`-requires-`Attribute` gate | M1.8 | Gating *which* records may be used as data attributes; needs the top-level `impl` construct (our `impl`s are class-body-nested) |
+| Standalone top-level `impl Attribute for X {}` + the `#[Foo(...)]`-requires-`Attribute` gate | M1.8 | **Folded into a deliberate "attribute system" pass** (with richer args below + how the manifest feeds the agentic/MCP tooling). Parser/grammar work; the manifest is *not* in `RunResult`, so the differential can't cover it — design it holistically rather than piecemeal |
 | ~~Nested-object fields in derived `Comparable` (recurse into sub-objects)~~ | M1.8 | **Done (F3)** — `compare_field` recurses into object fields in both backends (`traits/derive_comparable_nested`); non-object/non-primitive fields (e.g. lists) still bail |
 | `Callable` (`a(...)`), `Members` / `DynamicCall` protocols routed to user objects | M1.8 | Objects used as functions / dynamic member dispatch (agentic/proxy surface) |
 | Monomorphic shape specialization + bounded type parameters (`<T: Comparable>`) — generics are erased-for-storage today | M1.8 | **Bounded params fold into the inferred-static type-system track** (enforced statically, not at runtime); monomorphic specialization is the packed/perf reification path it then unlocks (M2 "packed value types") |
-| Richer record-valued `#[attr(...)]` arguments (identifiers only today) | M1.8 | A data attribute needing structured (non-identifier) arguments |
+| Richer record-valued `#[attr(...)]` arguments (identifiers only today) | M1.8 | **Folded into the "attribute system" pass** (with the `impl Attribute` gate above). Parser + manifest change with no `RunResult` (oracle) coverage — design with the manifest's tooling consumers |
 
 ## Diagnostics source attribution
 
 | Item | Source | Trigger |
 |---|---|---|
-| `SourceMap` / global-coordinate spans for a **check/runtime** diagnostic landing inside a merged-in cross-module declaration body (latent — also noted in the roadmap M1.9 row) | M1.9 | A real cross-module *body* error to surface (every negative case so far is raised against the entry source, where it renders correctly) |
+| `SourceMap` / global-coordinate spans for a **check/runtime** diagnostic landing inside a merged-in cross-module declaration body (latent — also noted in the roadmap M1.9 row) | M1.9 | **Confirmed real & severe** (a sibling-module `1/0` renders against `main.lang:2:85`, inside a comment). The fix is a *global-coordinate re-architecture*: a full mutable AST span-shift visitor (`lang-ast`) re-bases every merged-in span; a new `SourceMap` (`lang-span`) maps global offset → (source, local); the loader assigns per-module bases + carries the map on `Linked`; `lang-conformance`/`lang-cli` resolve each diagnostic's span through it. **Not differential-covered** (both backends produce the same wrong offset and agree) — covered only by hand-written multi-file conformance fixtures. A real ~5-crate slice, not a quick fix; sequence as its own pass. Repro: an entry that `use`s a sibling whose method body does `x / y` with `y == 0`. |
 
 ## Performance (invisible to `RunResult` — behavior is already correct)
 
