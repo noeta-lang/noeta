@@ -43,6 +43,15 @@ Determinism is a hard requirement across the whole stdlib: no wall-clock, no has
 
 - **M1.10.1 — done:** this crate + the Ring 1 string surface, shared by both backends.
 - **M1.10.2 — done:** the full Ring 1 collection surface — list `reverse`/`contains`/`join`/`sorted`/`slice`/`first`/`last`/`to_set`, map `keys`/`values`/`has`, and a `Set` type (`contains`/`union`/`intersection`) — implemented per backend and gated by the shared `ListMethod`/`MapMethod`/`SetMethod` enums. `first`/`last` return a built-in `Option`; a `Set` is a canonical sorted+deduped heap value type rendering `{1, 2, 3}`, constructed via `[..].to_set()`. All differential-identical.
-- **M1.10.3 — in progress:** Ring 2 modules via `use std.{...}` (explicit imports, so unused modules tree-shake). Done: `json` (`parse`/`stringify` — parsing lives here as the shared `json::Json` tree via `serde_json`); `math` (`sqrt`/`pow`/`abs`/`floor`/`ceil`/`round`/`min`/`max`/`pi`/`e` — pure scalar functions, so their semantics live here once in [`math::call`] and both backends are project/lift glue, bit-identical); and `random` (`seed`/`int`/`float` — a seeded SplitMix64 **pure stepper** in [`random`], so a given seed yields the identical stream in both runtimes; each backend holds the `u64` state and threads it through). The module value is `Value::NativeModule`/`Const::NativeModule`, dispatched through `call_method`. Remaining: file IO + monotonic time behind a deterministic harness sandbox.
+- **M1.10.3 — done:** Ring 2 modules via `use std.{...}` (explicit imports, so unused modules tree-shake). The module value is `Value::NativeModule`/`Const::NativeModule`, dispatched through `call_method`. All five:
+  - `json` — `parse`/`stringify`; parsing lives here as the shared `json::Json` tree via `serde_json`.
+  - `math` — `sqrt`/`pow`/`abs`/`floor`/`ceil`/`round`/`min`/`max`/`pi`/`e`; pure scalar functions, so their semantics live here once in [`math::call`] and both backends are project/lift glue, bit-identical.
+  - `random` — `seed`/`int`/`float`; a seeded SplitMix64 **pure stepper** in [`random`], so a given seed yields the identical stream in both runtimes (each backend holds the `u64` state and threads it through; it defaults to a fixed seed so even un-seeded use is reproducible).
+  - `fs` — `write`/`read`/`exists`/`remove`/`list`; file IO over a sandboxed **in-memory** [`fs::Vfs`] each interpreter owns, fresh per run. In-memory rather than a real temp dir so isolation and cross-backend identity are *structural* (no disk flakiness, no cleanup); reading a missing path is `E0021`. Real-disk/streaming IO is an M2 concern.
+  - `time` — `monotonic`/`sleep`; a **logical** monotonic clock (a per-backend counter, not wall-clock) so output is reproducible and identical across backends.
+
+  (`env`/`args` process introspection is intentionally not in M1 — reading real environment is non-deterministic; deferred with the other host-coupled IO.)
+
+**M1.10 — and with it M1 — is complete.**
 
 See `plans/m1/slice-10-stdlib.md`.

@@ -1,0 +1,21 @@
+// The Ring 2 `time` module (use std.{time}): a deterministic *logical* monotonic clock (no
+// wall-clock, so output is reproducible and identical on both backends). `monotonic()` reads then
+// advances by one tick; `sleep(ms)` advances the clock without actually blocking.
+// expect: stdout "0"
+// expect: stdout "true"
+// expect: stdout "7"
+// expect: exit 0
+use std.{time};
+
+t0 = time.monotonic();
+echo t0;
+
+// The clock only moves forward.
+t1 = time.monotonic();
+echo t1 > t0;
+
+// sleep advances the logical clock deterministically. After the two reads above the clock is at
+// 2; sleep(5) takes it to 7; the next monotonic() reads 7 (then bumps to 8). The pinned value
+// locks that arithmetic — proof the clock is a reproducible counter, not wall-clock.
+time.sleep(5);
+echo time.monotonic();

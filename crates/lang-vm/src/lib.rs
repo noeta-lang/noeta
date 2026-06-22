@@ -158,6 +158,12 @@ struct Vm<'m> {
     /// The `random` module's PRNG state, threaded through the shared SplitMix64 stepper. Starts
     /// at [`lang_stdlib::random::DEFAULT_SEED`] so un-seeded use matches the tree-walker.
     rng: u64,
+    /// The `fs` module's sandboxed in-memory filesystem — fresh per run, isolated and identical
+    /// to the tree-walker by construction.
+    fs: lang_stdlib::fs::Vfs,
+    /// The `time` module's logical clock (a deterministic monotonic counter). See the eval
+    /// backend's field of the same name.
+    clock: u64,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
 }
@@ -209,6 +215,8 @@ fn execute(module: &Module) -> RunResult {
         global_order: Vec::new(),
         next_id: 1,
         rng: lang_stdlib::random::DEFAULT_SEED,
+        fs: lang_stdlib::fs::Vfs::new(),
+        clock: 0,
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -448,6 +456,8 @@ impl<'m> Vm<'m> {
             Some(lang_stdlib::NativeModule::Json) => self.call_json(func, args, span),
             Some(lang_stdlib::NativeModule::Math) => self.call_math(func, args, span),
             Some(lang_stdlib::NativeModule::Random) => self.call_random(func, args, span),
+            Some(lang_stdlib::NativeModule::Fs) => self.call_fs(func, args, span),
+            Some(lang_stdlib::NativeModule::Time) => self.call_time(func, args, span),
             // Only valid module names are ever bound, so this is unreachable in practice.
             None => {
                 let error = lang_stdlib::no_function_error(module, func);
@@ -504,6 +514,71 @@ impl<'m> Vm<'m> {
             }
             _ => {
                 let error = lang_stdlib::no_function_error("random", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `fs` module: file IO over the sandboxed in-memory [`lang_stdlib::fs::Vfs`]. Shared VFS
+    /// semantics make this identical to the tree-walker's `call_fs` by construction.
+    fn call_fs(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        match func {
+            "write" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                let content = self.stdlib_string(func, args[1], span)?;
+                self.fs.write(&path, &content);
+                Ok(Value::unit())
+            }
+            "read" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                match self.fs.read(&path) {
+                    Ok(content) => Ok(Value::string(&content)),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "exists" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                Ok(Value::bool(self.fs.exists(&path)))
+            }
+            "remove" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                Ok(Value::bool(self.fs.remove(&path)))
+            }
+            "list" => {
+                self.stdlib_arity(func, args, 0, span)?;
+                let paths = self.fs.list().iter().map(|p| Value::string(p)).collect();
+                Ok(Value::list(paths))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("fs", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `time` module: a deterministic logical clock. Mirrors the tree-walker's `call_time`.
+    fn call_time(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        match func {
+            "monotonic" => {
+                self.stdlib_arity(func, args, 0, span)?;
+                let now = self.clock;
+                self.clock += 1;
+                Ok(Value::int(now as i64))
+            }
+            "sleep" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let ms = self.stdlib_int(func, args[0], span)?;
+                self.clock = self.clock.saturating_add(ms.max(0) as u64);
+                Ok(Value::unit())
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("time", func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
@@ -2124,6 +2199,7 @@ fn stdlib_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
         }
         lang_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
         lang_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
+        lang_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
     }
 }
 

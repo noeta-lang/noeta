@@ -62,6 +62,10 @@ pub enum DiagnosticCode {
     /// An imported name collides with another top-level name in the entry: a second import of the
     /// same name, or a local declaration of it. The reference would be ambiguous, so it is rejected.
     NameCollision,
+    /// A Ring 2 IO operation failed at runtime — e.g. `fs.read` of a path that does not exist in
+    /// the sandbox. Distinct from the static name/type errors: the program is well-formed, the
+    /// failure is in the environment it acts on.
+    IoError,
 }
 
 impl DiagnosticCode {
@@ -88,6 +92,7 @@ impl DiagnosticCode {
         DiagnosticCode::KeyNotFound,
         DiagnosticCode::UnresolvedImport,
         DiagnosticCode::NameCollision,
+        DiagnosticCode::IoError,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -114,6 +119,7 @@ impl DiagnosticCode {
             DiagnosticCode::KeyNotFound => "E0018",
             DiagnosticCode::UnresolvedImport => "E0019",
             DiagnosticCode::NameCollision => "E0020",
+            DiagnosticCode::IoError => "E0021",
         }
     }
 

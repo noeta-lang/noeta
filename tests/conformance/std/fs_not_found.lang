@@ -1,0 +1,4 @@
+// Reading a path absent from the sandbox is a runtime E0021 (IoError), identical in both backends.
+// expect: error E0021 at 4:6
+use std.{fs};
+echo fs.read("ghost.txt");

@@ -1,0 +1,26 @@
+// The Ring 2 `fs` module (use std.{fs}): file IO over a sandboxed in-memory filesystem, fresh
+// per run and identical on both backends by construction. Write/read round-trips, existence,
+// removal, and a sorted listing.
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "hello, sandbox"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "[\"a.txt\", \"b.txt\", \"c.txt\"]"
+// expect: exit 0
+use std.{fs};
+
+echo fs.exists("notes.txt");
+fs.write("notes.txt", "hello, sandbox");
+echo fs.exists("notes.txt");
+echo fs.read("notes.txt");
+
+// Remove reports whether the file existed.
+echo fs.remove("notes.txt");
+echo fs.exists("notes.txt");
+
+// Listing is sorted and deterministic.
+fs.write("c.txt", "3");
+fs.write("a.txt", "1");
+fs.write("b.txt", "2");
+echo fs.list();

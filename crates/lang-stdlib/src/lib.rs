@@ -18,6 +18,7 @@
 //! `name.func(args)`. The shared half lives here ([`NativeModule`], [`json`]); each backend
 //! binds the module value and converts results into its own values.
 
+pub mod fs;
 pub mod json;
 pub mod math;
 pub mod random;
@@ -58,6 +59,8 @@ pub enum ErrorKind {
     Bounds,
     /// A name that does not exist (e.g. an unknown function on a native module).
     UnknownName,
+    /// A Ring 2 IO operation failed (e.g. reading a path absent from the sandbox).
+    Io,
 }
 
 /// A stdlib misuse error. The `message` is rendered here so both backends report it
@@ -233,6 +236,8 @@ pub enum NativeModule {
     Json,
     Math,
     Random,
+    Fs,
+    Time,
 }
 
 impl NativeModule {
@@ -242,6 +247,8 @@ impl NativeModule {
             "json" => Some(NativeModule::Json),
             "math" => Some(NativeModule::Math),
             "random" => Some(NativeModule::Random),
+            "fs" => Some(NativeModule::Fs),
+            "time" => Some(NativeModule::Time),
             _ => None,
         }
     }
@@ -252,6 +259,8 @@ impl NativeModule {
             NativeModule::Json => "json",
             NativeModule::Math => "math",
             NativeModule::Random => "random",
+            NativeModule::Fs => "fs",
+            NativeModule::Time => "time",
         }
     }
 }

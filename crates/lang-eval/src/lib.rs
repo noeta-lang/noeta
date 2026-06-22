@@ -487,6 +487,12 @@ struct Interpreter {
     /// stepper. Defaults to [`lang_stdlib::random::DEFAULT_SEED`] so un-seeded use is still
     /// deterministic and identical to the VM; `random.seed(n)` re-seeds it.
     rng: u64,
+    /// The `fs` module's sandboxed in-memory filesystem — fresh per run, so file IO is isolated
+    /// and identical to the VM by construction.
+    fs: lang_stdlib::fs::Vfs,
+    /// The `time` module's logical clock (a deterministic monotonic counter, not wall-clock).
+    /// Starts at 0; `time.monotonic()` reads-then-increments, `time.sleep(ms)` advances it.
+    clock: u64,
 }
 
 impl Interpreter {
@@ -508,6 +514,8 @@ impl Interpreter {
             ids: IdGen::new(seed),
             scope: global,
             rng: lang_stdlib::random::DEFAULT_SEED,
+            fs: lang_stdlib::fs::Vfs::new(),
+            clock: 0,
         }
     }
 
@@ -1585,6 +1593,76 @@ impl Interpreter {
             lang_stdlib::NativeModule::Json => self.call_json(func, args, span),
             lang_stdlib::NativeModule::Math => self.call_math(func, args, span),
             lang_stdlib::NativeModule::Random => self.call_random(func, args, span),
+            lang_stdlib::NativeModule::Fs => self.call_fs(func, args, span),
+            lang_stdlib::NativeModule::Time => self.call_time(func, args, span),
+        }
+    }
+
+    /// The `fs` module: file IO over the sandboxed in-memory [`lang_stdlib::fs::Vfs`]. The VFS
+    /// semantics are shared, so the two backends are identical by construction. Mirrors the VM's
+    /// `call_fs`.
+    fn call_fs(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        match func {
+            "write" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?.to_string();
+                let content = self.expect_std_string(func, &args[1], span)?.to_string();
+                self.fs.write(&path, &content);
+                Ok(Value::Unit)
+            }
+            "read" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?;
+                match self.fs.read(path) {
+                    Ok(content) => Ok(Value::Str(content)),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "exists" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?;
+                Ok(Value::Bool(self.fs.exists(path)))
+            }
+            "remove" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?.to_string();
+                Ok(Value::Bool(self.fs.remove(&path)))
+            }
+            "list" => {
+                self.expect_std_arity(func, args, 0, span)?;
+                let paths = self.fs.list().into_iter().map(Value::Str).collect();
+                Ok(Value::List(Rc::new(paths)))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("fs", func);
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// The `time` module: a deterministic logical clock (no wall-clock, so output stays
+    /// reproducible and identical to the VM). `monotonic()` reads-then-increments; `sleep(ms)`
+    /// advances the clock without actually blocking. Mirrors the VM's `call_time`.
+    fn call_time(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        match func {
+            "monotonic" => {
+                self.expect_std_arity(func, args, 0, span)?;
+                let now = self.clock;
+                self.clock += 1;
+                Ok(Value::Int(now as i64))
+            }
+            "sleep" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let ms = self.expect_std_int(func, &args[0], span)?;
+                self.clock = self.clock.saturating_add(ms.max(0) as u64);
+                Ok(Value::Unit)
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("time", func);
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
         }
     }
 
@@ -2236,6 +2314,7 @@ fn std_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
         }
         lang_stdlib::ErrorKind::Bounds => DiagnosticCode::IndexOutOfBounds,
         lang_stdlib::ErrorKind::UnknownName => DiagnosticCode::UnknownName,
+        lang_stdlib::ErrorKind::Io => DiagnosticCode::IoError,
     }
 }
 
