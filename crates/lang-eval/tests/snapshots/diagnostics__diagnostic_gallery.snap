@@ -24,12 +24,12 @@ expression: out
 ───╯
 
 ================ E0003 unexpected token ================
-[E0003] Error: found '`;`' expected '`-`', '`!`', 'an integer literal', 'a float literal', 'a string literal', 'a raw string literal', '`true`', '`false`', '`fn`', '`match`', '`[`', '`{`', 'an identifier', or '`(`'
+[E0003] Error: found '`;`' expected '`-`', '`!`', 'an integer literal', 'a float literal', 'a string literal', 'a raw string literal', '`true`', '`false`', '`fn`', '`match`', '`[`', '`{`', '`#`', 'an identifier', or '`(`'
    ╭─[ snippet.lang:1:6 ]
    │
  1 │ echo ;
    │      ┬  
-   │      ╰── found '`;`' expected '`-`', '`!`', 'an integer literal', 'a float literal', 'a string literal', 'a raw string literal', '`true`', '`false`', '`fn`', '`match`', '`[`', '`{`', 'an identifier', or '`(`'
+   │      ╰── found '`;`' expected '`-`', '`!`', 'an integer literal', 'a float literal', 'a string literal', 'a raw string literal', '`true`', '`false`', '`fn`', '`match`', '`[`', '`{`', '`#`', 'an identifier', or '`(`'
 ───╯
 
 ================ E0004 unexpected end of input ================

@@ -1,0 +1,20 @@
+// The `#{...}` set literal — sugar for `[...].to_set()`, so it sorts + de-duplicates, `#{}` is
+// the empty set (distinct from the empty map `{}`), and it is equal to the `.to_set()` form.
+// Desugars at parse time, so both backends run it identically.
+// expect: stdout "{1, 2, 3}"
+// expect: stdout "{}"
+// expect: stdout "true"
+// expect: stdout "{1, 2, 3, 4}"
+// expect: stdout "2"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "3"
+// expect: exit 0
+echo #{3, 1, 2, 1};
+echo #{};
+echo #{1, 2, 3} == [3, 2, 1].to_set();
+echo #{1, 2}.union(#{3, 4});
+echo len(#{7, 7, 9});
+for x in #{3, 1, 2} {
+    echo x;
+}

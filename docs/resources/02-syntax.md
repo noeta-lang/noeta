@@ -184,14 +184,18 @@ The spread fills every field you do not name, so the full-initialization guarant
 
 ## 7. Collections
 
-Distinct list and map literals and types.
+Distinct list, map, and set literals and types.
 
 ```
-nums: List<int> = [1, 2, 3];
-prices: Map<string, float> = {"usd": 1.0, "eur": 0.92};
+nums: List<int> = [1, 2, 3];                         // list
+prices: Map<string, float> = {"usd": 1.0, "eur": 0.92};  // map (string keys; keys are expressions)
+tags = #{"a", "b", "a"};                             // set literal → {"a", "b"} (sorted, de-duplicated)
+empty = #{};                                         // the empty set (an empty `{}` is the empty map)
 
 doubled = nums |> map(fn(n) => n * 2);
 ```
+
+A set is an ordered, de-duplicated collection of a single orderable primitive (int, float, or string). The `#{...}` literal is sugar for `[...].to_set()`; sets support `contains`/`union`/`intersection`, `len`, and `for` iteration in sorted order. Maps are string-keyed and their keys are *expressions* evaluated to strings (`{key: 1}` uses the value of `key`), so an anonymous *record* is written with its type name (`Point { x: 1 }`), not a bare brace.
 
 ---
 

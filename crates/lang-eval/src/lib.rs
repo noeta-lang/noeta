@@ -2610,6 +2610,14 @@ mod tests {
     }
 
     #[test]
+    fn set_literal_desugars_to_to_set() {
+        // `#{...}` is `[...].to_set()`: sorted, de-duplicated, `#{}` empty.
+        assert_eq!(run("echo #{3, 1, 2, 1};").stdout, "{1, 2, 3}\n");
+        assert_eq!(run("echo #{};").stdout, "{}\n");
+        assert_eq!(run("echo #{1, 2} == [2, 1, 2].to_set();").stdout, "true\n");
+    }
+
+    #[test]
     fn plain_enum_and_match() {
         let src = "enum Color { Red; Green; Blue; } c = Color.Green; echo match c { Color.Red => \"r\", Color.Green => \"g\", Color.Blue => \"b\" };";
         assert_eq!(run(src).stdout, "g\n");

@@ -559,6 +559,33 @@ where
                 entries,
                 span: to_span(e.span()),
             });
+        // A set literal `#{a, b, c}` is pure sugar for `[a, b, c].to_set()` — it lowers to the
+        // same AST, so it reuses the existing `to_set` machinery and is differential-safe with no
+        // backend change. `#{}` is the empty set (unambiguous, unlike a bare `{}`, which is the
+        // empty map).
+        let set = just(T::Hash)
+            .ignore_then(
+                expr.clone()
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(|items, e| {
+                let span = to_span(e.span());
+                let list = Expr::List { items, span };
+                let to_set = Expr::Member {
+                    receiver: Box::new(list),
+                    name: "to_set".to_string(),
+                    name_span: span,
+                    span,
+                };
+                Expr::Call {
+                    callee: Box::new(to_set),
+                    args: Vec::new(),
+                    span,
+                }
+            });
 
         let paren = expr.clone().delimited_by(just(T::LParen), just(T::RParen));
 
@@ -572,6 +599,7 @@ where
             match_,
             list,
             map,
+            set,
             obj_or_ident,
             paren,
         ))
