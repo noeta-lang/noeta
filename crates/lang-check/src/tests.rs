@@ -311,3 +311,58 @@ fn a_nested_fn_return_does_not_clobber_the_enclosing_one() {
     let src = "fn outer(): int {\n  fn inner(): string { return \"s\"; }\n  return 1;\n}\n";
     assert!(codes(src).is_empty());
 }
+
+// ----- stdlib type knowledge (S3a) -----
+//
+// Each of these only fails (E0007) if the method/prelude/module/index/user-method result is typed
+// concretely; if it were `Unknown` the return-type check would be suppressed. So they double as a
+// proof that the type flows, against the return-type expectation from S2.
+
+#[test]
+fn string_and_list_methods_are_typed() {
+    assert_eq!(codes("fn f(): int { return \"ab\".upper(); }\n"), ["E0007"]); // upper -> string
+    assert!(codes("fn f(): string { return \"ab\".upper(); }\n").is_empty());
+    assert_eq!(
+        codes("fn f(): int { return [1, 2].sorted(); }\n"),
+        ["E0007"]
+    ); // sorted -> List<int>
+    assert_eq!(codes("fn f(): int { return [1].first(); }\n"), ["E0007"]); // first -> Option<int>
+    // Chaining flows the type through: split -> List<string>, count -> int.
+    assert!(codes("fn f(): int { return \"a b\".split(\" \").count(); }\n").is_empty());
+}
+
+#[test]
+fn prelude_functions_are_typed() {
+    assert!(codes("fn f(): int { return len([1, 2, 3]); }\n").is_empty()); // len -> int
+    assert_eq!(codes("fn f(): string { return len([1]); }\n"), ["E0007"]);
+    assert!(codes("fn f(): int { return sum([1, 2]); }\n").is_empty()); // sum(List<int>) -> int
+}
+
+#[test]
+fn module_calls_are_typed() {
+    // math.sqrt -> float, not int.
+    let bad = "use std.{math};\nfn f(): int { return math.sqrt(4.0); }\n";
+    assert_eq!(codes(bad), ["E0007"]);
+    let good = "use std.{math};\nfn f(): float { return math.sqrt(4.0); }\n";
+    assert!(codes(good).is_empty());
+    // fs.read -> string.
+    let fs = "use std.{fs};\nfn f(): int { return fs.read(\"p\"); }\n";
+    assert_eq!(codes(fs), ["E0007"]);
+}
+
+#[test]
+fn indexing_is_typed() {
+    // xs[0] is a string element, not an int.
+    assert_eq!(
+        codes("fn f(xs: List<string>): int { return xs[0]; }\n"),
+        ["E0007"]
+    );
+    assert!(codes("fn f(xs: List<int>): int { return xs[0]; }\n").is_empty());
+}
+
+#[test]
+fn user_method_returns_are_typed() {
+    let src = "class C {\n  x: int\n  fn label(): string { return \"c\"; }\n}\n\
+               fn f(c: C): int { return c.label(); }\n";
+    assert_eq!(codes(src), ["E0007"]); // label() -> string, not int
+}

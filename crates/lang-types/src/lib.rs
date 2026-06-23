@@ -196,11 +196,12 @@ impl Type {
                     "List" => Type::List(Box::new(arg(0))),
                     "Map" => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
                     "Set" => Type::Set(Box::new(arg(0))),
-                    // The bare lowercase collection spellings are "collection of anything" — the
-                    // untyped collection, modeled as a collection of the dynamic top.
-                    "list" => Type::List(Box::new(Type::Dyn)),
-                    "map" => Type::Map(Box::new(Type::Dyn), Box::new(Type::Dyn)),
-                    "set" => Type::Set(Box::new(Type::Dyn)),
+                    // The bare lowercase collection spellings leave the element type *unspecified*
+                    // — an inference hole, tolerated by the gradual checker. The strict flip later
+                    // forces these to be made explicit (`List<int>` / `List<dyn>`).
+                    "list" => Type::List(Box::new(Type::Unknown)),
+                    "map" => Type::Map(Box::new(Type::Unknown), Box::new(Type::Unknown)),
+                    "set" => Type::Set(Box::new(Type::Unknown)),
                     "Option" => Type::Option(Box::new(arg(0))),
                     "Result" => Type::Result(Box::new(arg(0)), Box::new(arg(1))),
                     _ => Type::Named(name.clone()),
@@ -301,14 +302,15 @@ mod tests {
 
     #[test]
     fn collection_spellings_desugar() {
-        // Bare lowercase collections are "collection of dyn"; capitalized carry their argument.
+        // Bare lowercase collections leave the element unspecified (an inference hole);
+        // capitalized spellings carry their explicit argument.
         assert_eq!(
             Type::from_ref(&named("list", vec![])),
-            Type::List(Box::new(Type::Dyn))
+            Type::List(Box::new(Type::Unknown))
         );
         assert_eq!(
             Type::from_ref(&named("set", vec![])),
-            Type::Set(Box::new(Type::Dyn))
+            Type::Set(Box::new(Type::Unknown))
         );
         assert_eq!(
             Type::from_ref(&named("Set", vec![named("int", vec![])])),

@@ -75,6 +75,8 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 use lang_types::{BuiltinTrait, Type};
 
+mod stdlib;
+
 /// Type-check a program and return every diagnostic found, in source order. An empty result
 /// means the program is well-typed (as far as the gradual checker can determine).
 pub fn check(program: &Program) -> Vec<Diagnostic> {
@@ -118,6 +120,12 @@ struct Checker {
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
     records: HashMap<String, Vec<(String, Type)>>,
+    /// User-defined methods: (type name, method name) → declared return type. Populated from class
+    /// methods and `impl`-block methods so a method call on a user object resolves to a real type.
+    methods: HashMap<(String, String), Type>,
+    /// Names bound to a Ring 2 stdlib module by a `use std.{…}` import (`json`, `fs`, …). A call
+    /// `m.f(args)` on such a name resolves through [`stdlib::module_return`].
+    modules: HashSet<String>,
     /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
     /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
@@ -158,6 +166,16 @@ impl Checker {
                         .collect();
                     self.records.insert(c.name.clone(), fields);
                     self.types.insert(c.name.clone());
+                    // Record each method's declared return type (class methods and impl-block
+                    // methods alike), so `obj.method(...)` resolves to a concrete type.
+                    let methods = c
+                        .methods
+                        .iter()
+                        .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
+                    for m in methods {
+                        let ret = m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                        self.methods.insert((c.name.clone(), m.name.clone()), ret);
+                    }
                 }
                 Stmt::Enum(e) => {
                     let variants = e
@@ -175,11 +193,17 @@ impl Checker {
                     let ret = f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
                     self.functions.insert(f.name.clone(), FnSig { ret });
                 }
-                // An imported name (whether the linker merged its declaration or left an opaque
-                // stub) is a legal referent for an annotation — register it as a known type.
-                Stmt::Use { names, .. } => {
+                // A `use std.{json, …}` import binds a Ring 2 module value (tracked in `modules`);
+                // any other imported name (whether the linker merged its declaration or left an
+                // opaque stub) is a legal referent for an annotation — registered as a known type.
+                Stmt::Use { path, names, .. } => {
+                    let is_std = path.len() == 1 && path[0] == "std";
                     for name in names {
-                        self.types.insert(name.name.clone());
+                        if is_std && stdlib::STD_MODULES.contains(&name.name.as_str()) {
+                            self.modules.insert(name.name.clone());
+                        } else {
+                            self.types.insert(name.name.clone());
+                        }
                     }
                 }
                 _ => {}
@@ -618,10 +642,8 @@ impl Checker {
             }
             Expr::Binary { op, lhs, rhs, span } => self.synth_binary(*op, lhs, rhs, *span, env),
             Expr::Call { callee, args, .. } => {
-                for arg in args {
-                    self.synth(arg, env);
-                }
-                self.synth_call(callee, env)
+                let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
+                self.synth_call(callee, &arg_types, env)
             }
             Expr::Closure { params, body, .. } => {
                 env.push(HashMap::new());
@@ -661,12 +683,10 @@ impl Checker {
             Expr::Index {
                 receiver, index, ..
             } => {
-                // Recurse so nested checks (exhaustiveness, `?`-typing) still fire inside an
-                // index expression. The element type is gradual: a list element or an `Index`
-                // impl's return are not statically tracked yet.
-                self.synth(receiver, env);
+                // Index into the receiver: a list element, a map value, a string char, or `dyn`.
+                let recv = self.synth(receiver, env);
                 self.synth(index, env);
-                Type::Unknown
+                stdlib::index_return(&recv).unwrap_or(Type::Unknown)
             }
             Expr::Match {
                 scrutinee,
@@ -764,32 +784,55 @@ impl Checker {
         }
     }
 
-    fn synth_call(&mut self, callee: &Expr, env: &mut Env) -> Type {
+    fn synth_call(&mut self, callee: &Expr, args: &[Type], env: &mut Env) -> Type {
         match callee {
-            Expr::Ident { name, .. } => match name.as_str() {
-                "Ok" => Type::Result(Box::new(Type::Unknown), Box::new(Type::Unknown)),
-                "Err" => Type::Result(Box::new(Type::Unknown), Box::new(Type::Unknown)),
-                "some" => Type::Option(Box::new(Type::Unknown)),
-                _ => self
-                    .functions
-                    .get(name)
-                    .map(|sig| sig.ret.clone())
-                    .unwrap_or(Type::Unknown),
-            },
-            // `Type.Variant(args)` — an algebraic enum constructor applied to its data.
+            // A plain `name(args)` call: a user function, else a prelude free function.
+            Expr::Ident { name, .. } => {
+                if let Some(sig) = self.functions.get(name) {
+                    return sig.ret.clone();
+                }
+                stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
+            }
             Expr::Member { receiver, name, .. } => {
+                // `Type.Variant(args)` — an algebraic enum constructor applied to its data.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && self.is_enum_variant(tn, name)
                 {
                     return Type::Named(tn.clone());
                 }
-                Type::Unknown
+                // `module.func(args)` — a Ring 2 stdlib module call.
+                if let Expr::Ident { name: m, .. } = receiver.as_ref()
+                    && self.modules.contains(m)
+                {
+                    return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
+                }
+                // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
+                // receiver) a runtime-dispatched call that stays deferred.
+                let recv = self.synth(receiver, env);
+                self.method_call_return(&recv, name)
             }
             _ => {
                 self.synth(callee, env);
                 Type::Unknown
             }
         }
+    }
+
+    /// The return type of a method call `recv.name(...)`: a built-in method, a user-declared
+    /// method, or — when the receiver defers to runtime (`dyn`/hole) — the deferred type itself.
+    fn method_call_return(&self, recv: &Type, name: &str) -> Type {
+        if let Some(t) = stdlib::method_return(recv, name) {
+            return t;
+        }
+        if let Type::Named(n) = recv
+            && let Some(ret) = self.methods.get(&(n.clone(), name.to_string()))
+        {
+            return ret.clone();
+        }
+        if recv.defers_to_runtime() {
+            return recv.clone();
+        }
+        Type::Unknown
     }
 
     fn synth_member(&mut self, receiver: &Expr, name: &str, env: &mut Env) -> Type {
@@ -805,6 +848,10 @@ impl Checker {
             && let Some((_, ty)) = fields.iter().find(|(fname, _)| fname == name)
         {
             return ty.clone();
+        }
+        // A field/member access on a `dyn` (or hole) receiver stays deferred.
+        if recv.defers_to_runtime() {
+            return recv;
         }
         Type::Unknown
     }
