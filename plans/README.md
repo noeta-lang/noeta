@@ -11,6 +11,7 @@ The language is built almost entirely by AI agents over a multi-year effort. Wor
 - `roadmap.md` — the milestone map (M0–M3) and the single source of "what's next / what's done". Re-scan it at the start of every work session to pick the next unit.
 - `deferred.md` — the cross-milestone **deferral registry**: every non-gate item a done slice pushed to later, with its source slice and a concrete trigger. Scan it when planning a new pass so nothing slips between milestones.
 - `m0/`, `m1/`, `m2/` — one file per work unit (a "slice"), grouped by milestone. Each slice is a vertical cut through the pipeline that is independently testable. M0, M1, and M2 cluster 1 (host IO & async foundation) are complete; later M2 clusters await their own planning passes.
+- `types/` — the milestone-scale **inferred-static type-system track** (redirecting the checker from gradual to inferred-static + explicit `dyn`; bidirectional checking, not HM). See `types/README.md` for the slice map; gates the later packed-types/SIMD perf work.
 - `followups/` — cross-milestone slices that close items from `deferred.md` (e.g. `slice-f1-upvalues.md` adds the VM upvalue machinery deferred since M1.2). Same slice shape as the milestone folders.
 - `done/` — completed slice files are moved here once their definition-of-done is met (and recorded in `roadmap.md`). Keep the trail; do not delete.
 
