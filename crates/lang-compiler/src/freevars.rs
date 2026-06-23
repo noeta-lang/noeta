@@ -56,6 +56,16 @@ pub fn free_vars(
         }
         FnBody::Arrow(expr) => collect_refs_expr(expr, &inner_enclosing, globals, &mut referenced),
     }
+    // A parameter's default value is evaluated in the function's *definition* scope, not against
+    // its own parameters/locals, so its references are collected one layer out (`enclosing_locals`,
+    // not `inner_enclosing`). This is what lets a closure capture a variable used only by a default
+    // (e.g. `fn(x, step = base) => ...` where the body never names `base`): the captured `base`
+    // must be in the closure's upvalue set for the VM's default thunk to read it.
+    for p in params {
+        if let Some(default) = &p.default {
+            collect_refs_expr(default, enclosing_locals, globals, &mut referenced);
+        }
+    }
 
     referenced
         .into_iter()

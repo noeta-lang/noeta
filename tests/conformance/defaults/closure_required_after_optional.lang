@@ -1,0 +1,6 @@
+// The trailing-only rule (E0026) applies to closures too: a required parameter cannot follow a
+// defaulted one.
+// expect: error E0026 at 5:20
+// expect: exit 1
+g = fn(a: int = 1, b: int) => a + b;
+echo g(1, 2);

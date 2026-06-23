@@ -900,3 +900,25 @@ fn method_default_omitted_at_call_is_clean() {
                d = C.from(10);\necho d.bump();\necho d.bump(5);\n";
     assert!(codes(src).is_empty());
 }
+
+#[test]
+fn closure_parameter_default_is_clean() {
+    // A closure may default a trailing parameter; omitting it at the call is well-typed.
+    let src = "g = fn(n: int, bump: int = 10) => n + bump;\necho g(5);\necho g(5, 1);\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn closure_required_after_optional_is_e0026() {
+    // The trailing-only rule applies to closures too.
+    let src = "g = fn(a: int = 1, b: int) => a + b;\necho g(1, 2);\n";
+    assert_eq!(codes(src), ["E0026"]);
+}
+
+#[test]
+fn closure_default_may_reference_a_captured_variable() {
+    // A closure default is checked in the captured (enclosing) scope, so referencing a captured
+    // binding is clean (capture-aware) — unlike a named function's globals-only default.
+    let src = "fn make(tag: string): dyn {\n  return fn(s: string, label: string = tag) => label ~ s;\n}\necho 1;\n";
+    assert!(codes(src).is_empty());
+}

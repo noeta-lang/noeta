@@ -1,0 +1,8 @@
+// A closure parameter may carry a default, just like a named function. The call omits or supplies
+// it; the closure fills it in. Both backends agree.
+// expect: stdout "15"
+// expect: stdout "6"
+// expect: exit 0
+g = fn(n: int, bump: int = 10) => n + bump;
+echo g(5);
+echo g(5, 1);

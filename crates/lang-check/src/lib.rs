@@ -548,9 +548,10 @@ impl Checker {
         self.check_type_opt(&decl.ret);
         // Validate parameter defaults: trailing-only (`E0026`) and each default's type against its
         // parameter (`E0007`). Checked here, before the parameter frame is pushed, so a default is
-        // evaluated against globals only — not other parameters/fields/`self` (mirroring how both
-        // backends evaluate it). `self.type_params` already includes this function's own.
-        self.check_param_defaults(decl, env);
+        // evaluated against the definition scope — for a named function/method that is globals only
+        // (mirroring how both backends evaluate it). `self.type_params` already includes this
+        // function's own.
+        self.validate_param_defaults(&decl.params, env);
         // The body's `return`s are checked against the declared return type; `Unknown` when
         // unannotated (already an `E0022`), so the check stays a no-op there. Saved/restored so a
         // nested function does not clobber the enclosing one's expectation.
@@ -579,15 +580,17 @@ impl Checker {
         self.type_params = saved_type_params;
     }
 
-    /// Validate a named callable's parameter defaults. Two rules: defaults must be **trailing-only**
-    /// — a required parameter after a defaulted one is `E0026` — and each default's type must be
-    /// assignable to its parameter (`E0007`). The default expression is synthesized in `env`, which
-    /// at the call site (before the parameter frame is pushed) holds only globals, so a default
-    /// that reaches for another parameter resolves to nothing (a runtime `E0005`, as elsewhere in
-    /// the language) rather than silently capturing it.
-    fn check_param_defaults(&mut self, decl: &FnDecl, env: &mut Env) {
+    /// Validate a callable's parameter defaults. Two rules: defaults must be **trailing-only** — a
+    /// required parameter after a defaulted one is `E0026` — and each default's type must be
+    /// assignable to its parameter (`E0007`). The default expression is synthesized in `env` *before
+    /// the parameter frame is pushed*, so it sees the function's **definition scope** but not its own
+    /// parameters: for a top-level function or method that scope is the module's globals; for a
+    /// closure it is the captured enclosing scope (so a closure default may use captured variables,
+    /// exactly like the closure body). A default that reaches for a sibling parameter resolves to
+    /// nothing — a runtime `E0005`, as elsewhere in the language — rather than silently capturing it.
+    fn validate_param_defaults(&mut self, params: &[Param], env: &mut Env) {
         let mut seen_default = false;
-        for p in &decl.params {
+        for p in params {
             if p.default.is_some() {
                 seen_default = true;
             } else if seen_default {
@@ -607,7 +610,7 @@ impl Checker {
             }
         }
         let tps: HashSet<String> = self.type_params.keys().cloned().collect();
-        for p in &decl.params {
+        for p in params {
             let Some(default) = &p.default else { continue };
             let actual = self.synth(default, env);
             // Skip the type check when the parameter has no annotation (already an `E0022`) or its
@@ -974,6 +977,9 @@ impl Checker {
                 else {
                     unreachable!()
                 };
+                // A closure default is evaluated in the captured (enclosing) scope, so validate it
+                // against `env` before the parameter frame is pushed.
+                self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
                 for (i, p) in params.iter().enumerate() {
                     let pty = p.ty.as_ref().map(Type::from_ref).unwrap_or_else(|| {
@@ -1068,6 +1074,7 @@ impl Checker {
                 self.synth_call(callee, &arg_types, env)
             }
             Expr::Closure { params, body, .. } => {
+                self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
                 for p in params {
                     bind(env, &p.name, param_type(p));

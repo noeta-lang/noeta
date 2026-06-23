@@ -1,0 +1,14 @@
+// A closure default is evaluated in the closure's captured (definition) scope, so it may reference
+// a captured variable — even one the body never otherwise names. Here `label` defaults to the
+// captured `tag`, which the body only uses through the default. The tree-walker evaluates it in the
+// captured scope; the VM's default thunk shares the closure's upvalue layout and reads the captured
+// `tag` cell, so the two backends agree.
+// expect: stdout "X:a"
+// expect: stdout "Y:a"
+// expect: exit 0
+fn make_tagger(tag: string): dyn {
+    return fn(s: string, label: string = tag) => label ~ ":" ~ s;
+}
+t = make_tagger("X");
+echo t("a");
+echo t("a", "Y");

@@ -88,7 +88,7 @@ fn total(items: List<Item>): float {
 adder = fn(a, b) => a + b;
 ```
 
-**Optional parameters with default values.** A trailing parameter may carry a default (`= expr`); a call can then omit it. Defaults are **trailing-only** — a required parameter after a defaulted one is a compile error (`E0026`) — and a default's type must match its parameter. A default value is evaluated against module-level names only (not other parameters, `self`, or fields), and is re-evaluated on each call that omits the argument. Defaults are allowed on free functions, associated functions, and methods, but not on closure parameters.
+**Optional parameters with default values.** A trailing parameter may carry a default (`= expr`); a call can then omit it. Defaults are **trailing-only** — a required parameter after a defaulted one is a compile error (`E0026`) — and a default's type must match its parameter. A default is evaluated in the function's *definition* scope (not where it is called) and does not see the function's own parameters: for a top-level function or method that is the module scope; for a closure it is the captured scope, so a closure default may reference a captured variable, like the closure body. Defaults are re-evaluated on each call that omits the argument, and are allowed on free functions, associated functions, methods, and closures.
 
 ```
 fn greet(name: string, greeting: string = "Hello"): string {

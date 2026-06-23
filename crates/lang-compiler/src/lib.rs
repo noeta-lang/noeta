@@ -368,16 +368,25 @@ impl ModuleCompiler {
             local_layer.extend(forbidden.iter().cloned());
         }
 
-        // Compile each defaulted parameter's default value into a globals-only zero-argument thunk
-        // prototype, recording the `(parameter register, thunk proto)` pair. Parameter registers are
-        // fixed by declaration order — a method reserves register 0 for the receiver, so its
-        // parameters start at 1 — which lets the VM fill an omitted argument's register from its
-        // thunk. Compiled before the body's `FnCompiler` borrows `self`.
+        // Compile each defaulted parameter's default value into a zero-argument thunk prototype,
+        // recording the `(parameter register, thunk proto)` pair. Parameter registers are fixed by
+        // declaration order — a method reserves register 0 for the receiver, so its parameters start
+        // at 1 — which lets the VM fill an omitted argument's register from its thunk. The thunk is
+        // compiled with **this function's own upvalue layout**, so a default that references a
+        // captured variable resolves to the same upvalue index the body would use; at call time the
+        // VM hands the thunk the closure's upvalue cells. For a top-level function or method
+        // `upvalues` is empty, so the thunk resolves globals only. Compiled before the body's
+        // `FnCompiler` borrows `self`.
         let base: u16 = if is_method { 1 } else { 0 };
         let mut defaults: Vec<(u16, u32)> = Vec::new();
         for (j, param) in params.iter().enumerate() {
             if let Some(default) = &param.default {
-                let proto = self.add_function(&[], Body::Arrow(default), Vec::new(), Vec::new())?;
+                let proto = self.add_function(
+                    &[],
+                    Body::Arrow(default),
+                    upvalues.clone(),
+                    enclosing_locals.clone(),
+                )?;
                 defaults.push((base + j as u16, proto));
             }
         }

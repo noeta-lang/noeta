@@ -580,9 +580,10 @@ where
                     },
                 });
 
-        // Anonymous function: `fn(params) => expr`. Closure parameters may not carry defaults.
+        // Anonymous function: `fn(params) => expr`. A closure parameter may carry a default; it is
+        // evaluated in the closure's captured (definition) scope, like the closure body.
         let closure = just(T::FnKw)
-            .ignore_then(params_parser(ctx, expr.clone(), false))
+            .ignore_then(params_parser(ctx, expr.clone(), true))
             .then_ignore(just(T::FatArrow))
             .then(expr.clone())
             .map_with(move |(params, body), e| Expr::Closure {
@@ -1788,14 +1789,19 @@ mod tests {
     }
 
     #[test]
-    fn closure_parameters_reject_defaults() {
-        // Defaults are only for named callables; a closure parameter's `= expr` does not parse as a
-        // default (the `=` is left dangling), so the program fails to parse cleanly.
-        let parsed = parse_str("f = fn(x: int = 1) => x;");
-        assert!(
-            !parsed.diagnostics.is_empty(),
-            "a closure default must not parse"
-        );
+    fn closure_parameters_accept_defaults() {
+        // A closure parameter may carry a default (evaluated in the captured scope), so this parses
+        // cleanly and the default lands in `Param.default`.
+        let parsed = parse_str("f = fn(x: int, y: int = 1) => x + y;");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Binding { value, .. } = &parsed.program.stmts[0] else {
+            panic!("expected a binding");
+        };
+        let Expr::Closure { params, .. } = value else {
+            panic!("expected a closure");
+        };
+        assert!(params[0].default.is_none());
+        assert!(params[1].default.is_some());
     }
 
     #[test]

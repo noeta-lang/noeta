@@ -1381,10 +1381,12 @@ impl<'m> Vm<'m> {
                         // Fill any omitted trailing parameters from their default thunks. The
                         // receiver and supplied args occupy registers `0..=args.len()`, so a default
                         // register at or beyond that was not supplied.
+                        // A method frame carries no upvalues (it is defined at module scope), so its
+                        // default thunks resolve globals only.
                         let filled = args.len() + 1;
                         for (reg, proto) in &defaults {
                             if *reg as usize >= filled {
-                                let value = self.run_thunk(*proto)?;
+                                let value = self.run_thunk(*proto, &[])?;
                                 new_regs[*reg as usize] = value;
                             }
                         }
@@ -2227,6 +2229,14 @@ impl<'m> Vm<'m> {
                                 retain(v);
                                 new_regs[i] = v;
                             }
+                            // The closure's captured upvalue cells, carried into the frame (one owned
+                            // reference each, released at teardown) so the body can read/write
+                            // through them — and handed to each default thunk, which shares the
+                            // closure's upvalue layout, so a capture-referencing default reads the
+                            // right cell.
+                            let count = callee_val.closure_upvalue_count();
+                            let cells: Vec<Value> =
+                                (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
                             // Fill any omitted trailing parameters from their default thunks: a
                             // default whose register is at or beyond the supplied count was not
                             // passed. (An associated function carries a synthetic unit receiver in
@@ -2234,17 +2244,12 @@ impl<'m> Vm<'m> {
                             let filled = args.len();
                             for (reg, proto) in &defaults {
                                 if *reg as usize >= filled {
-                                    let value = self.run_thunk(*proto)?;
+                                    let value = self.run_thunk(*proto, &cells)?;
                                     new_regs[*reg as usize] = value;
                                 }
                             }
-                            // Carry the closure's captured upvalue cells into the frame (one owned
-                            // reference each, released at teardown), so the body can read/write
-                            // through them.
-                            let count = callee_val.closure_upvalue_count();
                             let mut upvalues = Vec::with_capacity(count);
-                            for i in 0..count {
-                                let cell = callee_val.closure_upvalue(i);
+                            for &cell in &cells {
                                 retain(cell);
                                 upvalues.push(cell);
                             }
@@ -2356,19 +2361,20 @@ impl<'m> Vm<'m> {
                 for (i, v) in args.into_iter().enumerate() {
                     regs[i] = v;
                 }
+                // A first-class closure may capture upvalues; carry its cells into the re-entrant
+                // frame (one owned reference each) and hand them to each default thunk, which shares
+                // the closure's upvalue layout so a capture-referencing default reads the right cell.
+                let count = callee.closure_upvalue_count();
+                let cells: Vec<Value> = (0..count).map(|i| callee.closure_upvalue(i)).collect();
                 // Fill any omitted trailing parameters from their default thunks.
                 for (reg, dproto) in &defaults {
                     if *reg as usize >= filled {
-                        let value = self.run_thunk(*dproto)?;
+                        let value = self.run_thunk(*dproto, &cells)?;
                         regs[*reg as usize] = value;
                     }
                 }
-                // A first-class closure passed to `map`/`filter` may capture upvalues; carry its
-                // cells into the re-entrant frame (one owned reference each).
-                let count = callee.closure_upvalue_count();
                 let mut upvalues = Vec::with_capacity(count);
-                for i in 0..count {
-                    let cell = callee.closure_upvalue(i);
+                for &cell in &cells {
                     retain(cell);
                     upvalues.push(cell);
                 }
@@ -2407,17 +2413,25 @@ impl<'m> Vm<'m> {
     }
 
     /// Run a defaulted parameter's zero-argument thunk prototype to its value, on a fresh frame
-    /// stack (the same re-entry `map`/`filter` callbacks use). The thunk resolves only globals, so
-    /// it needs no caller state; the returned value owns one reference, transferred to its register.
-    fn run_thunk(&mut self, proto: u32) -> Result<Value, Abort> {
+    /// stack (the same re-entry `map`/`filter` callbacks use). `upvalues` are the calling closure's
+    /// captured cells — the thunk is compiled with that same upvalue layout, so a default that
+    /// references a captured variable reads the right cell; for a top-level function or method this
+    /// is empty and the thunk resolves globals only. Each cell is retained for the thunk frame (and
+    /// released at its teardown). The returned value owns one reference, transferred to its register.
+    fn run_thunk(&mut self, proto: u32, upvalues: &[Value]) -> Result<Value, Abort> {
         let num_registers = self.module.protos[proto as usize].num_registers as usize;
+        let mut ups = Vec::with_capacity(upvalues.len());
+        for &cell in upvalues {
+            retain(cell);
+            ups.push(cell);
+        }
         self.run(vec![Frame {
             proto,
             regs: vec![Value::unit(); num_registers],
             pc: 0,
             ret_dst: 0,
             ret_transform: RetTransform::None,
-            upvalues: Vec::new(),
+            upvalues: ups,
         }])
     }
 
@@ -3499,5 +3513,17 @@ mod tests {
         let parsed = parse(&source, &lexed.tokens);
         let module = compile(&parsed.program).unwrap();
         insta::assert_snapshot!(module.disassemble());
+    }
+
+    #[test]
+    fn closure_default_reads_a_captured_cell() {
+        // A closure default that references a captured variable the body never otherwise names: the
+        // default thunk shares the closure's upvalue layout and reads the captured cell. Exercises
+        // the run_thunk upvalue-retain path (miri verifies no leak / double-free).
+        let r = run(
+            "fn make(tag: string): dyn {\n  return fn(s: string, label: string = tag) => label ~ \":\" ~ s;\n}\nt = make(\"X\");\necho t(\"a\");\necho t(\"a\", \"Y\");\n",
+        );
+        assert_eq!(r.stdout, "X:a\nY:a\n");
+        assert_eq!(r.exit_code, 0);
     }
 }
