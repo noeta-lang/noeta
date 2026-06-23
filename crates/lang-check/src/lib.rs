@@ -662,13 +662,30 @@ impl Checker {
                 self.synth(right, env);
                 Type::Unknown
             }
-            Expr::List { items, .. } => {
+            Expr::List { items, span } => {
+                // Synthesize a single element type by unifying the items. Concretely incompatible
+                // elements (e.g. `[1, "two"]`) are a static error here in *synthesis* position;
+                // a mixed list is written explicitly as `List<dyn>` (in which case the checker
+                // arrives through `check`, element-by-element against `dyn`, not here).
                 let mut elem = Type::Unknown;
+                let mut heterogeneous = false;
                 for item in items {
                     let t = self.synth(item, env);
-                    if elem.is_gradual() {
-                        elem = t;
+                    match unify_element(&elem, &t) {
+                        Some(u) => elem = u,
+                        None => heterogeneous = true,
                     }
+                }
+                if heterogeneous {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            "list elements have differing types",
+                        )
+                        .with_help("make the elements one type, or annotate a `List<dyn>` for a mixed list"),
+                    );
+                    elem = Type::Dyn; // recover as a mixed list
                 }
                 Type::List(Box::new(elem))
             }
@@ -681,12 +698,28 @@ impl Checker {
             }
             Expr::Member { receiver, name, .. } => self.synth_member(receiver, name, env),
             Expr::Index {
-                receiver, index, ..
+                receiver,
+                index,
+                span,
             } => {
                 // Index into the receiver: a list element, a map value, a string char, or `dyn`.
                 let recv = self.synth(receiver, env);
                 self.synth(index, env);
-                stdlib::index_return(&recv).unwrap_or(Type::Unknown)
+                match stdlib::index_return(&recv) {
+                    Some(t) => t,
+                    None => {
+                        // A concrete primitive cannot be indexed (`42[0]`). A `Named` type may
+                        // implement `Index`, and a hole/`dyn` defers — neither errors here.
+                        if matches!(recv, Type::Int | Type::Float | Type::Bool | Type::Unit) {
+                            self.diags.push(Diagnostic::error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("cannot index into `{recv}`"),
+                            ));
+                        }
+                        Type::Unknown
+                    }
+                }
             }
             Expr::Match {
                 scrutinee,
@@ -999,6 +1032,29 @@ impl Checker {
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
 const PRELUDE_TYPES: &[&str] = &["Ordering"];
+
+/// Unify a running element type with the next element's type, for synthesizing a list literal's
+/// element type. Returns the unified type, or `None` if the two are concretely incompatible (a
+/// heterogeneous list). A deferred type (hole / `dyn`) is compatible with anything; two numeric
+/// types unify to `float` (the int/float promotion the runtime performs).
+fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
+    if acc.defers_to_runtime() {
+        return Some(next.clone());
+    }
+    if next.defers_to_runtime() {
+        return Some(acc.clone());
+    }
+    if Type::subtype(next, acc) {
+        return Some(acc.clone());
+    }
+    if Type::subtype(acc, next) {
+        return Some(next.clone());
+    }
+    if acc.is_numeric() && next.is_numeric() {
+        return Some(Type::Float);
+    }
+    None
+}
 
 /// The declared type of a field, or `Unknown` when unannotated.
 fn field_type(ty: &Option<TypeRef>) -> Type {

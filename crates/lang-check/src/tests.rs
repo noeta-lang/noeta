@@ -366,3 +366,28 @@ fn user_method_returns_are_typed() {
                fn f(c: C): int { return c.label(); }\n";
     assert_eq!(codes(src), ["E0007"]); // label() -> string, not int
 }
+
+// ----- strict checks now possible with stdlib types (S3b) -----
+
+#[test]
+fn heterogeneous_list_literal_is_rejected() {
+    // Concretely-incompatible elements in synthesis position are a static error.
+    assert_eq!(codes("echo [1, \"two\", 3];\n"), ["E0007"]);
+    // Homogeneous and numeric-promoting lists are fine.
+    assert!(codes("echo [1, 2, 3];\n").is_empty());
+    assert!(codes("echo [1, 2.5];\n").is_empty());
+    assert!(codes("echo [\"a\", \"b\"];\n").is_empty());
+    // An empty list has no conflicting elements.
+    assert!(codes("echo [];\n").is_empty());
+    // A mixed list is allowed when checked against an explicit `List<dyn>`.
+    assert!(codes("fn f(): List<dyn> { return [1, \"two\"]; }\n").is_empty());
+}
+
+#[test]
+fn indexing_a_primitive_is_rejected() {
+    assert_eq!(codes("echo 42[0];\n"), ["E0007"]);
+    assert_eq!(codes("echo true[0];\n"), ["E0007"]);
+    // Indexable receivers are fine.
+    assert!(codes("echo [1, 2][0];\n").is_empty());
+    assert!(codes("echo \"hi\"[0];\n").is_empty());
+}
