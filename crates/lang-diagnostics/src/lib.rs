@@ -71,6 +71,12 @@ pub enum DiagnosticCode {
     /// boundaries (annotations stay optional only for locals and closures, which inference
     /// reconstructs).
     MissingSignature,
+    /// A binding's type cannot be inferred and is not annotated — an immutable binding to a
+    /// context-free polymorphic literal (`x = []`, `m = {}`, `x = none`) whose element/payload type
+    /// nothing determines. Under inferred-static typing this is a compile error rather than a silent
+    /// hole; the fix is an annotation (`x: List<int> = []`) or, for a built-up collection, a `mut`
+    /// accumulator whose later writes supply the type.
+    CannotInfer,
 }
 
 impl DiagnosticCode {
@@ -99,6 +105,7 @@ impl DiagnosticCode {
         DiagnosticCode::NameCollision,
         DiagnosticCode::IoError,
         DiagnosticCode::MissingSignature,
+        DiagnosticCode::CannotInfer,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -127,6 +134,7 @@ impl DiagnosticCode {
             DiagnosticCode::NameCollision => "E0020",
             DiagnosticCode::IoError => "E0021",
             DiagnosticCode::MissingSignature => "E0022",
+            DiagnosticCode::CannotInfer => "E0023",
         }
     }
 

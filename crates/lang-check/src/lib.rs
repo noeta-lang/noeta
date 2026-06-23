@@ -285,6 +285,24 @@ impl Checker {
                     }
                     None => {
                         let vty = self.check(value, &Type::Unknown, env);
+                        // An *immutable* binding to a context-free polymorphic literal (`x = []`,
+                        // `m = {}`, `x = none`) can never be reassigned (that would be `E0006`), so
+                        // its element/payload type is fixed yet undeterminable — `E0023`, fixable
+                        // with an annotation. A `mut` binding is exempt: it is an accumulator whose
+                        // later writes supply the type (L3).
+                        if !*mut_decl && is_uninferable_literal(value) {
+                            self.diags.push(
+                                Diagnostic::error(
+                                    DiagnosticCode::CannotInfer,
+                                    value.span(),
+                                    format!("cannot infer the type of `{name}`"),
+                                )
+                                .with_help(
+                                    "annotate it (e.g. `x: List<int> = []`), or use a `mut` binding \
+                                     whose later writes determine the type",
+                                ),
+                            );
+                        }
                         // `mut x = …` is a fresh declaration (innermost frame, even if it shadows);
                         // a bare `x = …` reassigns an existing binding in its declaring scope so a
                         // refinement persists past a nested scope, else introduces a fresh binding.
@@ -1298,6 +1316,20 @@ fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
         return Some(Type::Float);
     }
     None
+}
+
+/// Whether an expression is a **context-free polymorphic literal** — one whose type carries an
+/// unconstrained hole that only context can fill: an empty list `[]`, an empty map `{}`, or `none`.
+/// (A non-empty literal infers its elements; `some(x)`/`Ok(x)` carry a payload type. This is the
+/// syntactic trigger for `E0023` on an immutable, un-annotated binding, so a hole inherited from a
+/// call result is never mistaken for one.)
+fn is_uninferable_literal(expr: &Expr) -> bool {
+    match expr {
+        Expr::List { items, .. } => items.is_empty(),
+        Expr::Map { entries, .. } => entries.is_empty(),
+        Expr::Ident { name, .. } => name == "none",
+        _ => false,
+    }
 }
 
 /// The declared type of a field, or `Unknown` when unannotated.

@@ -442,6 +442,35 @@ fn concat_result_flows_through_a_signature() {
     assert_eq!(codes("fn f(): string { return [1] ~ [2]; }\n"), ["E0007"]);
 }
 
+// ----- E0023 cannot-infer endpoint (S3c.4) -----
+
+#[test]
+fn immutable_context_free_literal_binding_is_e0023() {
+    // An immutable binding to a zero-information literal has no way to fix its type and is not
+    // annotated — `E0023`.
+    assert_eq!(codes("xs = [];\n"), ["E0023"]);
+    assert_eq!(codes("m = {};\n"), ["E0023"]);
+    assert_eq!(codes("x = none;\n"), ["E0023"]);
+}
+
+#[test]
+fn e0023_is_fixed_by_an_annotation_or_a_mut_accumulator() {
+    // An annotation resolves the element/payload type.
+    assert!(codes("xs: List<int> = [];\n").is_empty());
+    assert!(codes("m: Map<string, int> = {};\n").is_empty());
+    assert!(codes("x: ?int = none;\n").is_empty());
+    // A `mut` accumulator is exempt — its later writes supply the type.
+    assert!(codes("mut acc = [];\nfor i in [1, 2] { acc = acc ~ [i]; }\necho acc;\n").is_empty());
+}
+
+#[test]
+fn e0023_does_not_fire_in_expression_position_or_on_typed_values() {
+    // Empty collections in expression position are fine — only a *binding* commits to a type.
+    assert!(codes("echo [];\necho len([]);\necho [].first();\n").is_empty());
+    // A non-empty literal infers its elements; a typed value carries its type — neither is E0023.
+    assert!(codes("xs = [1, 2, 3];\nm = {\"a\": 1};\n").is_empty());
+}
+
 // ----- assignment updates the declaring scope; accumulators infer (L3) -----
 
 #[test]

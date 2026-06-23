@@ -1,0 +1,8 @@
+// An immutable binding to a context-free polymorphic literal (`[]`) has no way to determine its
+// element type and is not annotated — a compile-time `E0023`. The fix is an annotation
+// (`xs: List<int> = []`) or a `mut` accumulator whose later writes supply the type. Both backends
+// reject it identically (the checker is shared).
+// expect: error E0023 at 7:6
+// expect: exit 1
+xs = [];
+echo xs;
