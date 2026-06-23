@@ -1,0 +1,11 @@
+# Workspace Cargo configuration.
+
+[env]
+# Silence miri's exposed-provenance warning. The value representation (`crates/lang-value`)
+# NaN-boxes pointers, which requires an int<->pointer round-trip through the exposed-provenance
+# API (`expose_provenance` / `with_exposed_provenance_mut`). That is the miri-sound way to stash a
+# pointer's address in a tagged `u64` and recover it, but miri's strict-provenance checker still
+# emits an informational warning for the exposed-provenance model. This flag acknowledges the
+# deliberate, sound use so miri runs are quiet by default. (Set `MIRIFLAGS` in the environment to
+# override — an explicit value wins over this one.)
+MIRIFLAGS = "-Zmiri-permissive-provenance"
