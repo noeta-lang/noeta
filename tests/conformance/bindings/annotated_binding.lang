@@ -1,0 +1,10 @@
+// Optional binding type annotations (`name: Type = value`). The annotation is the boundary the
+// value is checked against; it is erased at runtime, so both backends run identically.
+// expect: stdout "3"
+// expect: exit 0
+xs: List<int> = [1, 2, 3];
+mut total: int = 0;
+for x in xs {
+    total = total + x;
+}
+echo len(xs);

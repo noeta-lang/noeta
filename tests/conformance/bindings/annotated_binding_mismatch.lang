@@ -1,0 +1,6 @@
+// A binding value that does not satisfy its type annotation is a static mismatch — the annotation
+// is a real checked boundary, not a comment.
+// expect: error E0007 at 5:14
+// expect: exit 1
+count: int = "lots";
+echo count;

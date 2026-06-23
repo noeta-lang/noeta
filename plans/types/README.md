@@ -30,7 +30,7 @@ The checker is **shared** by both backends (one `lang_check::check`), so any new
 | S3a | Type the stdlib/method/prelude/index surface | **done** |
 | S3b | Argument checking + flip concrete corpus cases | **done** |
 | S3c.1 | Forward contextual propagation + map-literal inference | **done** |
-| S3c.2 | Optional binding type annotations | todo |
+| S3c.2 | Optional binding type annotations | **done** |
 | S3c.3 | Local backward-inference solver (reuse `Type::Var`) | todo |
 | S3c.4 | Hard E0023 CannotInfer + conflict warning + finalize | todo |
 | S4 | Explicit bounded generics, statically enforced (E0024) | todo |

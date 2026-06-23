@@ -798,13 +798,15 @@ where
 
         let mut_binding = just(T::MutKw)
             .ignore_then(id.clone())
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then_ignore(just(T::Eq))
             .then(expr.clone())
             .then_ignore(just(T::Semicolon))
-            .map_with(move |((name, name_span), value), e| Stmt::Binding {
+            .map_with(move |(((name, name_span), ty), value), e| Stmt::Binding {
                 mut_decl: true,
                 name,
                 name_span,
+                ty,
                 value,
                 span: ctx.to_span(e.span()),
             });
@@ -1125,13 +1127,16 @@ where
                 build_use(first, first_span, tails, ctx.to_span(e.span()))
             });
 
-        // A bare expression, optionally an assignment `name = expr`. Whether `name = …`
-        // introduces or reassigns a binding is a runtime decision (see `lang-eval`).
+        // A bare expression, optionally an assignment `name = expr` carrying an optional type
+        // annotation (`name: List<int> = expr`). Whether `name = …` introduces or reassigns a
+        // binding is a runtime decision (see `lang-eval`); the annotation is only meaningful on a
+        // fresh `name: T = value` binding.
         let assign_or_expr = expr
             .clone()
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(just(T::Eq).ignore_then(expr.clone()).or_not())
             .then_ignore(just(T::Semicolon))
-            .map_with(move |(lhs, rhs), e| {
+            .map_with(move |((lhs, ty), rhs), e| {
                 let span = ctx.to_span(e.span());
                 match rhs {
                     Some(value) => match lhs {
@@ -1142,6 +1147,7 @@ where
                             mut_decl: false,
                             name,
                             name_span,
+                            ty,
                             value,
                             span,
                         },
@@ -1154,7 +1160,17 @@ where
                             Stmt::Expr { expr: other, span }
                         }
                     },
-                    None => Stmt::Expr { expr: lhs, span },
+                    None => {
+                        // `name: T;` with no value is not a binding — an annotation needs a value.
+                        if ty.is_some() {
+                            ctx.diags.borrow_mut().push(Diagnostic::error(
+                                DiagnosticCode::UnexpectedToken,
+                                lhs.span(),
+                                "a type annotation requires a value: write `name: Type = value`",
+                            ));
+                        }
+                        Stmt::Expr { expr: lhs, span }
+                    }
                 }
             });
 

@@ -251,9 +251,24 @@ impl Checker {
             Stmt::Echo { value, .. } => {
                 self.check(value, &Type::Unknown, env);
             }
-            Stmt::Binding { name, value, .. } => {
-                let ty = self.check(value, &Type::Unknown, env);
-                bind(env, name, ty);
+            Stmt::Binding {
+                name, ty, value, ..
+            } => {
+                // An annotated binding (`x: T = …`) is checked against `T` and bound at `T`; the
+                // annotation is the boundary the value must satisfy and the way to fix an otherwise
+                // un-inferable value. Un-annotated bindings stay inference-only (open expectation).
+                match ty {
+                    Some(ty) => {
+                        self.check_type_ref(ty);
+                        let expected = Type::from_ref(ty);
+                        self.check(value, &expected, env);
+                        bind(env, name, expected);
+                    }
+                    None => {
+                        let ty = self.check(value, &Type::Unknown, env);
+                        bind(env, name, ty);
+                    }
+                }
             }
             Stmt::Expr { expr, .. } => {
                 self.check(expr, &Type::Unknown, env);

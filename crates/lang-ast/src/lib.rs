@@ -36,6 +36,11 @@ pub enum Stmt {
         mut_decl: bool,
         name: String,
         name_span: Span,
+        /// An optional type annotation (`x: List<int> = …`). Bindings are inference-only by
+        /// default — inference reconstructs the type — but an explicit annotation is the boundary
+        /// the value is checked against and the way to resolve an otherwise un-inferable value
+        /// (e.g. `acc: List<int> = []`). Absent for the common un-annotated `x = …` form.
+        ty: Option<TypeRef>,
         value: Expr,
         span: Span,
     },

@@ -422,6 +422,38 @@ fn generic_method_arguments_are_not_false_positives() {
     assert!(codes(src).is_empty());
 }
 
+// ----- optional binding annotations (S3c.2) -----
+
+#[test]
+fn annotated_binding_checks_its_value_against_the_annotation() {
+    assert!(codes("x: int = 5;\n").is_empty());
+    assert_eq!(codes("x: int = \"s\";\n"), ["E0007"]);
+    // The annotation resolves an otherwise context-free literal: `[]` against `List<int>`.
+    assert!(codes("xs: List<int> = [];\n").is_empty());
+    assert!(codes("mut acc: List<string> = [];\n").is_empty());
+}
+
+#[test]
+fn binding_annotation_is_resolved_like_any_type() {
+    // An unknown type in a binding annotation is the same `E0013` as anywhere else; the value is
+    // then also checked against it (an int is not assignable to an unknown `Ghost`).
+    assert_eq!(codes("x: Ghost = 5;\n"), ["E0013", "E0007"]);
+}
+
+#[test]
+fn annotated_binding_type_flows_to_later_uses() {
+    // The binding is bound at its annotated type, so a later concrete misuse is caught: a
+    // `string`-typed binding flowing into an `int`-annotated one is a mismatch.
+    assert_eq!(codes("s: string = \"hi\";\nn: int = s;\n"), ["E0007"]);
+    assert!(codes("s: string = \"hi\";\nt: string = s;\n").is_empty());
+    // The method result still flows: `upper()` keeps it a string.
+    assert!(codes("s: string = \"hi\";\nu: string = s.upper();\n").is_empty());
+    assert_eq!(
+        codes("s: string = \"hi\";\nu: int = s.upper();\n"),
+        ["E0007"]
+    );
+}
+
 // ----- contextual propagation + map inference (S3c.1) -----
 
 #[test]
