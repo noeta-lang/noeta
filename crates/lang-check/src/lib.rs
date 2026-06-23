@@ -1163,8 +1163,13 @@ impl Checker {
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                 // A `dyn` operand defers to runtime dispatch (its sanctioned semantics), so it is
-                // accepted like an inference hole — only a concretely non-numeric operand errors.
-                let bad = |t: &Type| !t.is_numeric() && !t.defers_to_runtime();
+                // accepted like an inference hole — only a concretely non-numeric operand errors. A
+                // user `Named` type is also accepted: it may `impl Add`/`Sub`/… and dispatch the
+                // operator at runtime, the same leniency method calls on a `Named` receiver get
+                // (verifying the impl statically is the separate operator-trait-checking gap).
+                let bad = |t: &Type| {
+                    !t.is_numeric() && !t.defers_to_runtime() && !matches!(t, Type::Named(_))
+                };
                 if bad(&lt) || bad(&rt) {
                     // A concretely non-numeric operand: the same error the M0 runtime raised,
                     // now caught statically. Span is the binary expression (matches the runtime
@@ -1249,9 +1254,29 @@ impl Checker {
                     }
                     return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
                 }
+                // `Type.assoc(args)` — an associated function / static call on a known user type
+                // (`Box.new(1)`). Resolve to the type's method signature so the result is precisely
+                // typed (a constructor result is `Box`, not a hole) and a generic class enforces its
+                // bounds at construction. Guard on the receiver naming a type that is not shadowed
+                // by a local variable.
+                if let Expr::Ident { name: tn, .. } = receiver.as_ref()
+                    && lookup(env, tn).is_none()
+                    && self.types.contains(tn)
+                    && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string())).cloned()
+                {
+                    return self.call_user_method(name, &sig, args, span);
+                }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);
+                // A user-declared instance method resolves through the same path as a static call
+                // (generic methods instantiate + enforce bounds); a built-in method or a deferred
+                // receiver falls through below.
+                if let Type::Named(n) = &recv
+                    && let Some(sig) = self.methods.get(&(n.clone(), name.to_string())).cloned()
+                {
+                    return self.call_user_method(name, &sig, args, span);
+                }
                 self.check_method_args(&recv, name, args, span);
                 let ret = self.method_call_return(&recv, name);
                 // A method call on a concrete primitive with no such built-in method is an error,
@@ -1275,6 +1300,18 @@ impl Checker {
                 Type::Unknown
             }
         }
+    }
+
+    /// Check a call to a resolved user method or associated function (`Box.new(...)`, `obj.m(...)`).
+    /// A generic one (a method of a generic class) instantiates and enforces its bounds through the
+    /// shared [`Self::check_generic_call`]; a non-generic one checks arguments against its
+    /// (erased) parameter types and returns its declared return type.
+    fn call_user_method(&mut self, name: &str, sig: &FnSig, args: &[Type], span: Span) -> Type {
+        if let Some(generic) = &sig.generic {
+            return self.check_generic_call(name, generic, args, span);
+        }
+        self.check_args(&sig.params, args, span, name);
+        sig.ret.clone()
     }
 
     /// Arity- and type-check a method call's arguments against the resolved parameter signature

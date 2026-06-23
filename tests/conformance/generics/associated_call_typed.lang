@@ -1,0 +1,11 @@
+// `Box.new(1)` now types precisely as `Box` (it used to be an untyped hole), so a constructor
+// result flows into a generic function's bound check: `Box` does not satisfy `Comparable`, so the
+// call is rejected at compile time (`E0025`) instead of running and failing at runtime on `a > b`.
+// expect: error E0025 at 11:6
+// expect: exit 1
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+}
+fn max<T: Comparable>(a: T, b: T): T { if a > b { return a; } return b; }
+echo max(Box.new(1), Box.new(2));

@@ -156,6 +156,16 @@ fn generic_call_instantiates_return_type() {
 }
 
 #[test]
+fn associated_call_is_typed_precisely() {
+    // `Box.new(1)` resolves to `Box` (not a hole), so passing it where an `int` is expected is a
+    // concrete mismatch — proving the associated-call result is the constructor's return type.
+    let src = "class Box<T> {\n  value: T\n  fn new(v: T): Box<T> { return Box { value: v }; }\n}\n\
+               fn need_int(n: int): int { return n; }\n\
+               echo need_int(Box.new(1));\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
 fn generic_call_with_satisfied_primitive_bound_is_clean() {
     let src = "fn max<T: Comparable>(a: T, b: T): T { if a > b { return a; } return b; }\n\
                echo max(1, 2);\n";
