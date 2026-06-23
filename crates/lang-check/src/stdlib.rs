@@ -97,16 +97,110 @@ fn file_handle_method(name: &str) -> Option<Type> {
     })
 }
 
+/// The parameter types a **built-in** method expects (for arity + argument checking), given the
+/// receiver kind — or `None` if `name` is not a known built-in method on that kind.
+pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
+    if name == "compare" {
+        return Some(vec![Type::Dyn]); // compares against any value
+    }
+    match receiver {
+        Type::String => string_params(name),
+        Type::List(elem) => list_params(name, elem),
+        Type::Set(elem) => set_params(name, elem),
+        Type::Map(_, val) => map_params(name, val),
+        Type::Named(n) if n == FILE_HANDLE => file_handle_params(name),
+        _ => None,
+    }
+}
+
+fn string_params(name: &str) -> Option<Vec<Type>> {
+    Some(match name {
+        "upper" | "lower" | "trim" | "count" => vec![],
+        "contains" | "starts_with" | "ends_with" | "split" => vec![Type::String],
+        "replace" => vec![Type::String, Type::String],
+        "repeat" => vec![Type::Int],
+        _ => return None,
+    })
+}
+
+fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
+    Some(match name {
+        "reverse" | "sorted" | "count" | "first" | "last" | "to_set" | "enumerate" => vec![],
+        "contains" => vec![elem.clone()],
+        "join" => vec![Type::String],
+        "slice" => vec![Type::Int, Type::Int],
+        _ => return None,
+    })
+}
+
+fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
+    Some(match name {
+        "count" => vec![],
+        "contains" => vec![elem.clone()],
+        "union" | "intersection" => vec![set(elem.clone())],
+        _ => return None,
+    })
+}
+
+fn map_params(name: &str, _val: &Type) -> Option<Vec<Type>> {
+    Some(match name {
+        "keys" | "values" | "count" => vec![],
+        "has" => vec![Type::String], // runtime map keys are strings
+        _ => return None,
+    })
+}
+
+fn file_handle_params(name: &str) -> Option<Vec<Type>> {
+    Some(match name {
+        "read_line" | "close" => vec![],
+        "read" => vec![Type::Int],
+        "write" => vec![Type::String],
+        _ => return None,
+    })
+}
+
+/// The parameter types a Ring 2 module function expects, or `None` if unknown. Numeric-polymorphic
+/// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or
+/// `float` argument is accepted without a spurious mismatch.
+pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
+    Some(match (module, name) {
+        ("json", "parse") => vec![Type::String],
+        ("json", "stringify") => vec![Type::Dyn],
+        ("math", "pi" | "e") => vec![],
+        ("math", "sqrt" | "floor" | "ceil" | "round") => vec![Type::Float],
+        ("math", "pow") => vec![Type::Float, Type::Float],
+        ("math", "abs") => vec![Type::Dyn],
+        ("math", "min" | "max") => vec![Type::Dyn, Type::Dyn],
+        ("random", "seed") => vec![Type::Int],
+        ("random", "int") => vec![Type::Int, Type::Int],
+        ("random", "float") => vec![],
+        ("fs", "write" | "append") => vec![Type::String, Type::String],
+        ("fs", "read" | "read_lines" | "exists" | "remove" | "is_dir" | "mkdir") => {
+            vec![Type::String]
+        }
+        ("fs", "open") => vec![Type::String, Type::String],
+        // `fs.list` takes an optional dir argument (0 or 1) — not arity-checked.
+        ("fs", "list") => return None,
+        ("time", "monotonic") => vec![],
+        ("time", "sleep") => vec![Type::Int],
+        ("env", "get") => vec![Type::String],
+        ("env", "keys") => vec![],
+        ("args", "all") => vec![],
+        _ => return None,
+    })
+}
+
 /// The return type of a prelude free-function call `name(args)`, given the argument types — or
 /// `None` if `name` is not a prelude function.
 pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
     Some(match name {
         "len" | "next_id" => Type::Int,
-        // Numeric: `int` if the list is concretely `List<int>`, `float` if `List<float>`, else dyn.
+        // Numeric: `int` if the list is concretely `List<int>`, `float` if `List<float>`, else a
+        // numeric hole (the element type is not yet known — gradual, not the `dyn` escape).
         "sum" => match args.first() {
             Some(Type::List(e)) if **e == Type::Int => Type::Int,
             Some(Type::List(e)) if **e == Type::Float => Type::Float,
-            _ => Type::Dyn,
+            _ => Type::Unknown,
         },
         // `map(list, f) -> List<ret(f)>`; the element type is the closure's synthesized return.
         "map" => match args.get(1) {
@@ -172,13 +266,13 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
 }
 
 /// Kind-preserving numeric result (`math.abs`/`min`/`max`): `int` if every argument is concretely
-/// `int`, `float` if any is `float`, else `dyn` (mixed / not statically known).
+/// `int`, `float` if any is `float`, else a numeric hole (not yet known — gradual, not `dyn`).
 fn numeric_preserving(args: &[Type]) -> Type {
     if args.iter().all(|t| *t == Type::Int) {
         Type::Int
     } else if args.contains(&Type::Float) {
         Type::Float
     } else {
-        Type::Dyn
+        Type::Unknown // unknown args → numeric hole (gradual), not the `dyn` escape
     }
 }

@@ -391,3 +391,43 @@ fn indexing_a_primitive_is_rejected() {
     assert!(codes("echo [1, 2][0];\n").is_empty());
     assert!(codes("echo \"hi\"[0];\n").is_empty());
 }
+
+#[test]
+fn argument_arity_is_checked() {
+    assert_eq!(codes("echo \"hi\".upper(\"extra\");\n"), ["E0007"]); // upper takes 0
+    assert!(codes("echo \"hi\".upper();\n").is_empty());
+    // User functions are arity-checked too.
+    assert_eq!(
+        codes("fn add(a: int, b: int): int { return a + b; }\necho add(1);\n"),
+        ["E0007"]
+    );
+    assert!(codes("fn add(a: int, b: int): int { return a + b; }\necho add(1, 2);\n").is_empty());
+}
+
+#[test]
+fn argument_types_are_checked() {
+    assert_eq!(codes("echo [1, 2].join(5);\n"), ["E0007"]); // join wants a string
+    assert!(codes("echo [1, 2].join(\", \");\n").is_empty());
+    // Numeric widening: an int argument is accepted for a float parameter.
+    let m = "use std.{math};\n";
+    assert!(codes(&format!("{m}echo math.sqrt(4);\n")).is_empty());
+    assert_eq!(codes(&format!("{m}echo math.sqrt(\"x\");\n")), ["E0007"]);
+}
+
+#[test]
+fn generic_method_arguments_are_not_false_positives() {
+    // A generic parameter is erased to `dyn`, so any concrete argument is accepted.
+    let src = "class Box<T> {\n  value: T\n  fn set(v: T): void { value = v; }\n}\n\
+               fn f(b: Box<int>): void { b.set(5); }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn pipeline_threads_the_piped_value_as_first_arg() {
+    // `5 |> add(10)` is `add(5, 10)` — not a one-argument call, so no arity error.
+    let src = "fn add(a: int, b: int): int { return a + b; }\necho 5 |> add(10);\n";
+    assert!(codes(src).is_empty());
+    // `5 |> inc` is `inc(5)`.
+    let src2 = "fn inc(n: int): int { return n + 1; }\necho 5 |> inc;\n";
+    assert!(codes(src2).is_empty());
+}

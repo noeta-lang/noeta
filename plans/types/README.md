@@ -1,6 +1,6 @@
 # Type-system track — inferred-static typing with explicit `dyn`
 
-Status: **in-progress** (S0–S3a done)
+Status: **in-progress** (S0–S3b done)
 
 This directory is the milestone-scale track that redirects the checker from **gradual / `Unknown`-tolerant** typing to **inferred-static** typing with an explicit `dyn` escape — Rust-like: every expression has an inferable static type, an un-inferable one is a *compile error* (never a silent `Unknown`), and `dyn`/`Any` is the only sanctioned dynamic boundary. The inference engine is **bidirectional checking + local inference, NOT Hindley–Milner** (subtyping via `dyn` widening, directional method resolution, and record width is load-bearing and defeats HM's unification core; bidirectional also decomposes cleanly into salsa queries). Rationale lives in the `type-system-direction` memory and `plans/deferred.md` (the superseded "checker hardening" / "static E0006" / "bounded generics" rows).
 
@@ -28,7 +28,8 @@ The checker is **shared** by both backends (one `lang_check::check`), so any new
 | S1 | Bidirectional engine rewrite at parity | **done** |
 | S2 | Signature requirement + return checking (E0022) | **done** |
 | S3a | Type the stdlib/method/prelude/index surface | **done** |
-| S3b | Kill gradual suppression — the strict flip (E0023) | todo |
+| S3b | Argument checking + flip concrete corpus cases | **done** |
+| S3c | Hole-elimination endpoint (E0023 CannotInfer) | todo |
 | S4 | Explicit bounded generics, statically enforced (E0024) | todo |
 | S5 | Trait coherence — orphan/overlap rules (E0025) | todo |
 | S6 | `dyn` operations + checked narrowing (`x.as<T>()`) | todo |

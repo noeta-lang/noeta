@@ -93,9 +93,11 @@ struct VariantInfo {
     fields: Vec<Type>,
 }
 
-/// A top-level function signature, as far as annotations reveal it.
-#[derive(Clone)]
+/// A callable signature, as far as annotations reveal it: the parameter types (for arity +
+/// argument checking) and the return type. Used for both top-level functions and user methods.
+#[derive(Clone, Default)]
 struct FnSig {
+    params: Vec<Type>,
     ret: Type,
 }
 
@@ -120,9 +122,10 @@ struct Checker {
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
     records: HashMap<String, Vec<(String, Type)>>,
-    /// User-defined methods: (type name, method name) → declared return type. Populated from class
-    /// methods and `impl`-block methods so a method call on a user object resolves to a real type.
-    methods: HashMap<(String, String), Type>,
+    /// User-defined methods: (type name, method name) → signature. Populated from class methods and
+    /// `impl`-block methods so a method call on a user object resolves to a real type, with the
+    /// owning class's generic parameters erased to `dyn` (they accept any argument).
+    methods: HashMap<(String, String), FnSig>,
     /// Names bound to a Ring 2 stdlib module by a `use std.{…}` import (`json`, `fs`, …). A call
     /// `m.f(args)` on such a name resolves through [`stdlib::module_return`].
     modules: HashSet<String>,
@@ -166,15 +169,27 @@ impl Checker {
                         .collect();
                     self.records.insert(c.name.clone(), fields);
                     self.types.insert(c.name.clone());
-                    // Record each method's declared return type (class methods and impl-block
-                    // methods alike), so `obj.method(...)` resolves to a concrete type.
+                    // Record each method's signature (class methods and impl-block methods alike),
+                    // so `obj.method(...)` resolves to a concrete type and its arguments are
+                    // checked. The class's generic parameters are erased to `dyn` (erased at
+                    // runtime, they accept any argument).
+                    let tps: HashSet<String> = c.type_params.iter().cloned().collect();
                     let methods = c
                         .methods
                         .iter()
                         .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
                     for m in methods {
-                        let ret = m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
-                        self.methods.insert((c.name.clone(), m.name.clone()), ret);
+                        let params = m
+                            .params
+                            .iter()
+                            .map(|p| erase_type_params(param_type(p), &tps))
+                            .collect();
+                        let ret = erase_type_params(
+                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            &tps,
+                        );
+                        self.methods
+                            .insert((c.name.clone(), m.name.clone()), FnSig { params, ret });
                     }
                 }
                 Stmt::Enum(e) => {
@@ -190,8 +205,9 @@ impl Checker {
                     self.types.insert(e.name.clone());
                 }
                 Stmt::Fn(f) => {
+                    let params = f.params.iter().map(param_type).collect();
                     let ret = f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
-                    self.functions.insert(f.name.clone(), FnSig { ret });
+                    self.functions.insert(f.name.clone(), FnSig { params, ret });
                 }
                 // A `use std.{json, …}` import binds a Ring 2 module value (tracked in `modules`);
                 // any other imported name (whether the linker merged its declaration or left an
@@ -658,9 +674,9 @@ impl Checker {
                 }
             }
             Expr::Pipeline { left, right, .. } => {
-                self.synth(left, env);
-                self.synth(right, env);
-                Type::Unknown
+                // `left |> right` threads `left` as the first argument of `right`.
+                let piped = self.synth(left, env);
+                self.synth_piped(right, piped, env)
             }
             Expr::List { items, span } => {
                 // Synthesize a single element type by unifying the items. Concretely incompatible
@@ -817,13 +833,37 @@ impl Checker {
         }
     }
 
+    /// Synthesize a pipeline right-hand side `left |> right`, where `piped` is the type of `left`,
+    /// threaded as `right`'s first argument. `right` may be a call (`add(10)` → `add(left, 10)`)
+    /// or a bare callee (`inc` → `inc(left)`).
+    fn synth_piped(&mut self, right: &Expr, piped: Type, env: &mut Env) -> Type {
+        match right {
+            Expr::Call { callee, args, .. } => {
+                let mut arg_types = vec![piped];
+                arg_types.extend(args.iter().map(|a| self.synth(a, env)));
+                self.synth_call(callee, &arg_types, env)
+            }
+            Expr::Ident { .. } | Expr::Member { .. } => self.synth_call(right, &[piped], env),
+            other => {
+                self.synth(other, env);
+                Type::Unknown
+            }
+        }
+    }
+
     fn synth_call(&mut self, callee: &Expr, args: &[Type], env: &mut Env) -> Type {
+        let span = callee.span();
         match callee {
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
                 if let Some(sig) = self.functions.get(name) {
-                    return sig.ret.clone();
+                    let params = sig.params.clone();
+                    let ret = sig.ret.clone();
+                    self.check_args(&params, args, span, name);
+                    return ret;
                 }
+                // Prelude functions are polymorphic/variadic — their result is typed, but their
+                // arguments are not arity-checked here.
                 stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
             }
             Expr::Member { receiver, name, .. } => {
@@ -837,16 +877,61 @@ impl Checker {
                 if let Expr::Ident { name: m, .. } = receiver.as_ref()
                     && self.modules.contains(m)
                 {
+                    if let Some(params) = stdlib::module_params(m, name) {
+                        self.check_args(&params, args, span, name);
+                    }
                     return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);
+                self.check_method_args(&recv, name, args, span);
                 self.method_call_return(&recv, name)
             }
             _ => {
                 self.synth(callee, env);
                 Type::Unknown
+            }
+        }
+    }
+
+    /// Arity- and type-check a method call's arguments against the resolved parameter signature
+    /// (a built-in method or a user method); a deferred receiver or an unknown method is not
+    /// checked.
+    fn check_method_args(&mut self, recv: &Type, name: &str, args: &[Type], span: Span) {
+        if let Some(params) = stdlib::method_params(recv, name) {
+            self.check_args(&params, args, span, name);
+        } else if let Type::Named(n) = recv
+            && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
+        {
+            let params = sig.params.clone();
+            self.check_args(&params, args, span, name);
+        }
+    }
+
+    /// Check a call's argument count and types against the callable's parameter types, reporting
+    /// at `span`. Lenient where either side defers to runtime (`dyn`/hole) and on numeric widening
+    /// (`int` where `float` is expected), so polymorphic and numeric calls are not false positives.
+    fn check_args(&mut self, params: &[Type], args: &[Type], span: Span, callee: &str) {
+        if params.len() != args.len() {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`{callee}` expects {} argument(s), found {}",
+                    params.len(),
+                    args.len()
+                ),
+            ));
+            return;
+        }
+        for (param, arg) in params.iter().zip(args) {
+            if !arg_compatible(arg, param) {
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("argument of type `{arg}` is not assignable to `{param}`"),
+                ));
             }
         }
     }
@@ -858,9 +943,9 @@ impl Checker {
             return t;
         }
         if let Type::Named(n) = recv
-            && let Some(ret) = self.methods.get(&(n.clone(), name.to_string()))
+            && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
         {
-            return ret.clone();
+            return sig.ret.clone();
         }
         if recv.defers_to_runtime() {
             return recv.clone();
@@ -1032,6 +1117,37 @@ impl Checker {
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
 const PRELUDE_TYPES: &[&str] = &["Ordering"];
+
+/// Whether an argument of type `arg` may be passed where `param` is expected. Subtyping, plus two
+/// leniencies that keep dynamic and numeric calls free of false positives: a `dyn`/hole on either
+/// side defers, and a numeric argument is accepted for a numeric parameter (`int` widens to
+/// `float`).
+fn arg_compatible(arg: &Type, param: &Type) -> bool {
+    Type::subtype(arg, param)
+        || arg.defers_to_runtime()
+        || param.defers_to_runtime()
+        || (arg.is_numeric() && param.is_numeric())
+}
+
+/// Replace each generic type parameter (a `Named` whose name is in `params`) with `dyn`, deeply.
+/// Generic parameters are erased at runtime, so a method like `set(v: T)` accepts any argument —
+/// erasing `T` to `dyn` keeps argument checking from a false positive against the erased name.
+fn erase_type_params(ty: Type, params: &HashSet<String>) -> Type {
+    let erase = |t: Type| erase_type_params(t, params);
+    match ty {
+        Type::Named(n) if params.contains(&n) => Type::Dyn,
+        Type::List(t) => Type::List(Box::new(erase(*t))),
+        Type::Set(t) => Type::Set(Box::new(erase(*t))),
+        Type::Map(k, v) => Type::Map(Box::new(erase(*k)), Box::new(erase(*v))),
+        Type::Option(t) => Type::Option(Box::new(erase(*t))),
+        Type::Result(t, e) => Type::Result(Box::new(erase(*t)), Box::new(erase(*e))),
+        Type::Fn { params: ps, ret } => Type::Fn {
+            params: ps.into_iter().map(erase).collect(),
+            ret: Box::new(erase(*ret)),
+        },
+        other => other,
+    }
+}
 
 /// Unify a running element type with the next element's type, for synthesizing a list literal's
 /// element type. Returns the unified type, or `None` if the two are concretely incompatible (a
