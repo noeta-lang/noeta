@@ -364,6 +364,14 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `type_of(value)` where the checker resolved the operand's **concrete** static type: `dst` is
+    /// the full-fidelity [`lang_ast::reflect::TypeRepr`] baked as a constant (`Type.List(Type.Int)`),
+    /// recovering the element/argument types runtime erasure drops. The operand is still evaluated
+    /// (for its side effects) but its register is unused. (`type_of` fidelity A, P2.3.)
+    TypeOfStatic {
+        dst: Reg,
+        repr: lang_ast::reflect::TypeRepr,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -777,6 +785,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             format!("AttributesOf r{dst} <- attributes_of::<{type_name}>()")
         }
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
+        Op::TypeOfStatic { dst, repr } => format!("TypeOfStatic r{dst} <- {repr:?}"),
         Op::IsType { dst, src, target } => {
             format!("IsType      r{dst} <- r{src} is {target:?}")
         }

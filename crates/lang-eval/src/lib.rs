@@ -513,6 +513,11 @@ struct Interpreter {
     /// by the *same* `lang_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
     reflection: lang_ast::reflect::ReflectionInfo,
+    /// The concrete static type the checker resolved for each `type_of(value)` site (keyed by the
+    /// `Expr::TypeOf` span), harvested via `lang_check::resolve_type_of_sites` from the *same*
+    /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
+    /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
+    type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
 }
 
 impl Interpreter {
@@ -558,11 +563,13 @@ impl Interpreter {
             scope: global,
             host,
             reflection: lang_ast::reflect::ReflectionInfo::default(),
+            type_of_sites: std::collections::HashMap::new(),
         }
     }
 
     fn run(mut self, program: &Program) -> RunResult {
         self.reflection = lang_ast::reflect::build(program);
+        self.type_of_sites = lang_check::resolve_type_of_sites(program);
         for stmt in &program.stmts {
             match self.exec_stmt(stmt) {
                 Ok(Flow::Normal) => {}
@@ -1356,9 +1363,15 @@ impl Interpreter {
                 };
                 Ok(self.materialize_attributes(type_name))
             }
-            Expr::TypeOf { value, .. } => {
+            Expr::TypeOf { value, span } => {
+                // Evaluate the operand for its side effects in both fidelities. A concrete static
+                // type resolved by the checker builds the precise `Type` constant (fidelity A);
+                // otherwise classify the runtime value's head constructor (fidelity B).
                 let v = self.eval_expr(value)?;
-                Ok(build_type_value(&eval_type_repr(&v)))
+                match self.type_of_sites.get(span) {
+                    Some(repr) => Ok(build_type_value(repr)),
+                    None => Ok(build_type_value(&eval_type_repr(&v))),
+                }
             }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();

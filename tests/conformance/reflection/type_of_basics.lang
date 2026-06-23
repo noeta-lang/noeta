@@ -8,7 +8,7 @@
 // expect: stdout "list"
 // expect: stdout "Point"
 // expect: stdout "option"
-// expect: stdout "dyn"
+// expect: stdout "int"
 // expect: exit 0
 type Point = { x: int };
 
@@ -31,9 +31,11 @@ echo label(type_of([1, 2, 3]));
 echo label(type_of(Point { x: 1 }));
 echo label(type_of(some(7)));
 
-// The erased element type of a runtime list is `Dyn` (fidelity B): match the inner `Type`.
+// The list literal's element type is statically known, so it is recovered (fidelity A, P2.3):
+// `type_of([1, 2, 3])` is `Type.List(Type.Int)`, not `List(Dyn)`. (The `dyn`-operand fallback to
+// the erased `List(Dyn)` is exercised in `type_of_static_fidelity.lang`.)
 elem = match type_of([1, 2, 3]) {
-    Type.List(inner) => match inner { Type.Dyn => "dyn", _ => "?" },
+    Type.List(inner) => match inner { Type.Int => "int", _ => "?" },
     _ => "?",
 };
 echo elem;

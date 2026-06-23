@@ -13,6 +13,7 @@ lang-ast = { workspace = true }
 lang-builtins = { workspace = true }
 lang-backend = { workspace = true }
 lang-stdlib = { workspace = true }
+lang-check = { workspace = true }
 
 [dev-dependencies]
 # Front-end crates, for end-to-end convenience in unit tests only (no production

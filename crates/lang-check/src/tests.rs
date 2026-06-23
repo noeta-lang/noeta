@@ -2,10 +2,23 @@
 //! exactly what the pipeline produces. Conformance `.lang` cases (positive + negative) carry
 //! the end-to-end coverage; these pin specific rules in isolation.
 
-use super::check;
+use super::{check, resolve_type_of_sites};
+use lang_ast::reflect::TypeRepr;
 use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId};
+
+/// Parse `text` and return the resolved full-fidelity `TypeRepr`s for its `type_of` sites, in no
+/// particular order (one program under test has a single site, so order is irrelevant).
+fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
+    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    resolve_type_of_sites(&parsed.program)
+        .into_values()
+        .collect()
+}
 
 /// Parse `text` and return the checker's diagnostic codes (wire form), in order.
 fn codes(text: &str) -> Vec<String> {
@@ -438,6 +451,24 @@ fn attributes_of_on_a_non_attribute_is_rejected() {
     // The capability gate, mirroring a `#[Foo]` use: the type argument must implement `Attribute`.
     let src = "type Plain = { path: string };\nrs = attributes_of::<Plain>();\n";
     assert_eq!(codes(src), ["E0029"]);
+}
+
+#[test]
+fn type_of_resolves_concrete_operand_to_full_fidelity_repr() {
+    // A list literal's element type is statically known, so the site resolves to the precise
+    // recursive `TypeRepr` (List(Int)) the backends bake as a constant (fidelity A).
+    assert_eq!(
+        type_of_reprs("x = type_of([1, 2, 3]);\n"),
+        vec![TypeRepr::List(Box::new(TypeRepr::Int))]
+    );
+}
+
+#[test]
+fn type_of_on_a_dyn_operand_has_no_static_resolution() {
+    // A `dyn`-typed operand carries no fixed head constructor to bake, so the site is absent from
+    // the map and falls back to the runtime head-constructor path (fidelity B).
+    let src = "fn as_dyn(v: dyn): dyn { return v; }\nx = type_of(as_dyn(5));\n";
+    assert!(type_of_reprs(src).is_empty());
 }
 
 #[test]

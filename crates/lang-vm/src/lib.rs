@@ -2024,6 +2024,11 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::TypeOfStatic { dst, repr } => {
+                    let result = build_type_value(repr);
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::MatchInt { src, value, fail } => {
                     if frames[top].regs[*src as usize].as_int() == Some(*value) {
                         frames[top].pc += 1;

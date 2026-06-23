@@ -1,0 +1,29 @@
+// `type_of` full fidelity (A): when the checker knows the operand's concrete static type, the
+// reflected `Type` recovers the element/argument types runtime erasure drops — `[1, 2, 3]` is
+// `List(Int)`, not `List(Dyn)`. An operand whose static type is `dyn` has no fixed head to bake, so
+// it falls back to the runtime head constructor (`List(Dyn)`). Both backends harvest the checker's
+// per-site resolution from the same program, so they emit identical `Type` values.
+// expect: stdout "int"
+// expect: stdout "int"
+// expect: stdout "dyn"
+// expect: exit 0
+
+fn elem(t: Type): string {
+    return match t {
+        Type.List(inner) => match inner {
+            Type.Int => "int",
+            Type.Dyn => "dyn",
+            _ => "?",
+        },
+        _ => "not-a-list",
+    };
+}
+
+fn as_dyn(v: dyn): dyn { return v; }
+
+echo elem(type_of([1, 2, 3]));   // A: literal inferred List<int> -> Type.List(Type.Int)
+
+xs = [10, 20];
+echo elem(type_of(xs));          // A: xs: List<int> -> Type.List(Type.Int)
+
+echo elem(type_of(as_dyn([1, 2, 3])));  // B: operand static type dyn -> runtime List(Dyn)

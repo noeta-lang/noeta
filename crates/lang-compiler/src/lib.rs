@@ -91,6 +91,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         tojson_derives: Vec::new(),
         types: HashMap::new(),
         module_globals: HashMap::new(),
+        type_of_sites: lang_check::resolve_type_of_sites(program),
     };
     module.register_globals(program);
     module.register_types(program);
@@ -151,6 +152,11 @@ struct ModuleCompiler {
     /// is compiled so a nested function can resolve a global (and check its mutability on
     /// assignment) and so the free-variable analysis can tell a global from a captured local.
     module_globals: HashMap<String, bool>,
+    /// The concrete static type the checker resolved for each `type_of(value)` site (keyed by the
+    /// `Expr::TypeOf` span), harvested from the *same* program the tree-walker harvests, so both
+    /// backends bake identical full-fidelity `Type` constants (`type_of` fidelity A, P2.3). A site
+    /// absent here lowers to the runtime head-constructor op instead.
+    type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
 }
 
 impl ModuleCompiler {
@@ -1475,10 +1481,19 @@ impl<'m> FnCompiler<'m> {
                 };
                 self.code.push(Op::AttributesOf { dst, type_name });
             }
-            Expr::TypeOf { value, .. } => {
+            Expr::TypeOf { value, span } => {
+                // Evaluate the operand for its side effects in both fidelities. When the checker
+                // resolved a concrete static type for this site, bake the precise `Type` constant
+                // (fidelity A); otherwise classify the runtime value's head constructor (fidelity B).
                 let src = self.alloc_reg();
                 self.expr(value, src)?;
-                self.code.push(Op::TypeOf { dst, src });
+                match self.module.type_of_sites.get(span) {
+                    Some(repr) => self.code.push(Op::TypeOfStatic {
+                        dst,
+                        repr: repr.clone(),
+                    }),
+                    None => self.code.push(Op::TypeOf { dst, src }),
+                }
             }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,

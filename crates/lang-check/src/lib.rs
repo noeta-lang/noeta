@@ -87,6 +87,58 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
     checker.diags
 }
 
+/// Resolve the precise static type of every `type_of(value)` whose operand is concretely typed,
+/// keyed by the `Expr::TypeOf` span — the input both backends use to bake a full-fidelity `Type`
+/// constant (`type_of([1])` ⇒ `Type.List(Type.Int)`) instead of the erased runtime head constructor
+/// (P2.3 fidelity A). Runs the same inference as [`check`] (diagnostics discarded) and is **pure**,
+/// so both backends harvest identical maps on the same program — the differential holds. A
+/// `dyn`/union/un-inferred operand is omitted, leaving that site on the runtime path (fidelity B).
+pub fn resolve_type_of_sites(program: &Program) -> HashMap<Span, lang_ast::reflect::TypeRepr> {
+    let mut checker = Checker::default();
+    checker.register_prelude();
+    checker.collect(program);
+    checker.check_program(program);
+    checker.type_of_sites
+}
+
+/// Project a checker [`Type`] onto the reflection [`TypeRepr`] for a **concrete** `type_of` operand,
+/// or `None` when the site must stay on the runtime path: a `dyn`/union/un-inferred (`Unknown`) top
+/// type carries no fixed head constructor to bake (a union's runtime value is more precise — its
+/// actual member — than `Type.Union` would be).
+fn type_to_repr_top(ty: &Type) -> Option<lang_ast::reflect::TypeRepr> {
+    match ty {
+        Type::Dyn | Type::Unknown | Type::Union(_) => None,
+        concrete => Some(type_to_repr(concrete)),
+    }
+}
+
+/// Total projection of a checker [`Type`] onto a reflection [`TypeRepr`], used for the nested
+/// element/argument types once a concrete head is committed. A nested hole, `dyn`, or union erases
+/// to [`TypeRepr::Dyn`] (the runtime erases generics anyway; nested-union fidelity is out of scope).
+fn type_to_repr(ty: &Type) -> lang_ast::reflect::TypeRepr {
+    use lang_ast::reflect::TypeRepr;
+    match ty {
+        Type::Int => TypeRepr::Int,
+        Type::Float => TypeRepr::Float,
+        Type::Bool => TypeRepr::Bool,
+        Type::String => TypeRepr::Str,
+        Type::Unit => TypeRepr::Unit,
+        Type::List(e) => TypeRepr::List(Box::new(type_to_repr(e))),
+        Type::Set(e) => TypeRepr::Set(Box::new(type_to_repr(e))),
+        Type::Option(e) => TypeRepr::Option(Box::new(type_to_repr(e))),
+        Type::Map(k, v) => TypeRepr::Map(Box::new(type_to_repr(k)), Box::new(type_to_repr(v))),
+        Type::Result(o, e) => {
+            TypeRepr::Result(Box::new(type_to_repr(o)), Box::new(type_to_repr(e)))
+        }
+        Type::Named(n, args) => TypeRepr::Named(n.clone(), args.iter().map(type_to_repr).collect()),
+        Type::Fn { params, ret } => TypeRepr::Fn(
+            params.iter().map(type_to_repr).collect(),
+            Box::new(type_to_repr(ret)),
+        ),
+        Type::Union(_) | Type::Dyn | Type::Unknown => TypeRepr::Dyn,
+    }
+}
+
 /// One enum variant: its name and the types of its positional data fields.
 #[derive(Clone)]
 struct VariantInfo {
@@ -196,6 +248,12 @@ struct Checker {
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
+    /// Each `type_of(value)` site (keyed by the `Expr::TypeOf` span) whose operand has a **concrete**
+    /// static type, mapped to the precise [`TypeRepr`] the backends bake as a constant (`type_of`
+    /// full fidelity, P2.3). A `dyn`/union/un-inferred operand is absent here — those fall back to
+    /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
+    /// on the same program, so they emit identical `Type` values by construction.
+    type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     diags: Vec<Diagnostic>,
 }
 
@@ -1637,10 +1695,15 @@ impl Checker {
                     vec![target],
                 )))
             }
-            Expr::TypeOf { value, .. } => {
-                // Check the operand (it can be any value); the result is the prelude `Type` enum
-                // regardless. At this fidelity the runtime builds a head-constructor `Type`.
-                self.synth(value, env);
+            Expr::TypeOf { value, span } => {
+                // Synthesize the operand's static type; the result of `type_of` is always the
+                // prelude `Type` enum. When the operand is concretely typed, record the precise
+                // `TypeRepr` so the backends bake a full-fidelity `Type` constant (A); otherwise the
+                // site stays absent and falls back to the runtime head-constructor path (B).
+                let operand = self.synth(value, env);
+                if let Some(repr) = type_to_repr_top(&operand) {
+                    self.type_of_sites.insert(*span, repr);
+                }
                 Type::Named("Type".to_string(), Vec::new())
             }
         }
