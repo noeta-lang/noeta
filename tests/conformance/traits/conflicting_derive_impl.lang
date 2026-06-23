@@ -1,0 +1,11 @@
+// Trait coherence: `@derive(Display)` synthesizes `to_string`, and an `impl Display` writes one by
+// hand — two competing implementations of one trait. The later one (the `impl`) is reported (E0027).
+// expect: error E0027 at 8:10
+// expect: exit 1
+@derive(Display)
+class Point {
+    x: int
+    impl Display {
+        fn to_string(): string { return "Point"; }
+    }
+}

@@ -469,6 +469,8 @@ class Point {
 // field-wise ==, ordering, string form, and copy are synthesized
 ```
 
+**Trait coherence** — a type implements each trait **at most once**, counting both a `@derive(T)` and an `impl T { }` as an implementation. Deriving a trait *and* writing an `impl` for the same trait, deriving it twice, or writing two `impl` blocks for it is a compile error (`E0027`): the two implementations would compete for the same operator/protocol dispatch. The complementary orphan rule needs no syntax of its own — every trait is built-in and an `impl` block lives only inside the class it applies to, so you can never implement a trait for a type you do not own. Coherence is what lets a generic bound like `<T: Comparable>` be checked with a single, unambiguous answer to "does `T` implement `Comparable`".
+
 **Fallible operators** use the `Try*` variants returning `Result`, so an operation that can fail is a typed error rather than a crash:
 
 ```

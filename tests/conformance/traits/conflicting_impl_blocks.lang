@@ -1,0 +1,14 @@
+// Trait coherence: a type may not provide two `impl` blocks for the same trait — that is two
+// implementations of `Add`, so dispatch of `+` would be ambiguous. The second block is reported
+// (E0027).
+// expect: error E0027 at 11:10
+// expect: exit 1
+class Money {
+    amount: int
+    impl Add {
+        fn add(other: Money): Money { return other; }
+    }
+    impl Add {
+        fn add(other: Money): Money { return other; }
+    }
+}

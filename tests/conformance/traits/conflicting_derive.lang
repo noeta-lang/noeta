@@ -1,0 +1,8 @@
+// Trait coherence: a trait may be implemented at most once per type. Naming `Comparable` twice in
+// one `@derive(...)` is two implementations of the same trait (E0027), reported at the duplicate.
+// expect: error E0027 at 5:21
+// expect: exit 1
+@derive(Comparable, Comparable)
+class Point {
+    x: int
+}

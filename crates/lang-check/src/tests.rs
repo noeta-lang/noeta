@@ -326,6 +326,34 @@ fn deriving_an_unknown_trait_is_reported() {
 }
 
 #[test]
+fn deriving_the_same_trait_twice_is_conflicting() {
+    // Coherence: a trait may be implemented at most once per type.
+    let src = "@derive(Comparable, Comparable)\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0027"]);
+}
+
+#[test]
+fn deriving_and_impl_of_same_trait_conflict() {
+    // `@derive(Display)` synthesizes `to_string`; an `impl Display` writes one by hand — two
+    // competing implementations of one trait.
+    let src = "@derive(Display)\nclass P {\n  x: int\n  impl Display {\n    fn to_string(): string { return \"P\"; }\n  }\n}\n";
+    assert_eq!(codes(src), ["E0027"]);
+}
+
+#[test]
+fn two_impl_blocks_for_same_trait_conflict() {
+    let src = "class P {\n  x: int\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n}\n";
+    assert_eq!(codes(src), ["E0027"]);
+}
+
+#[test]
+fn deriving_distinct_traits_with_an_impl_is_coherent() {
+    // Different traits never conflict — only a repeated one does.
+    let src = "@derive(Equatable, Comparable)\nclass P {\n  x: int\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn old_derive_attribute_spelling_is_reported() {
     // `#[derive(...)]` is the old codegen spelling; it is now `@derive(...)`.
     let src = "#[derive(Equatable)]\nclass P {\n  x: int\n}\n";

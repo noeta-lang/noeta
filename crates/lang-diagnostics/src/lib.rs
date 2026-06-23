@@ -91,6 +91,13 @@ pub enum DiagnosticCode {
     /// later parameter is also defaulted — otherwise omitting it would leave a required parameter
     /// unfilled. Defaults must therefore be trailing-only.
     RequiredAfterOptional,
+    /// A type provides more than one implementation of the same trait — a `@derive(T)` and an
+    /// `impl T { }` for the same `T`, two `impl T` blocks, or a trait named twice in `@derive(...)`.
+    /// Trait coherence requires each `(type, trait)` pair to have exactly one implementation, so
+    /// bound satisfaction and dispatch are unambiguous. (The orphan half of coherence is enforced
+    /// structurally: `impl` blocks live only inside a class body, so a trait can only be
+    /// implemented for the type that owns it.)
+    ConflictingTraitImpl,
 }
 
 impl DiagnosticCode {
@@ -123,6 +130,7 @@ impl DiagnosticCode {
         DiagnosticCode::LoopControlOutsideLoop,
         DiagnosticCode::TraitBoundNotSatisfied,
         DiagnosticCode::RequiredAfterOptional,
+        DiagnosticCode::ConflictingTraitImpl,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -155,6 +163,7 @@ impl DiagnosticCode {
             DiagnosticCode::LoopControlOutsideLoop => "E0024",
             DiagnosticCode::TraitBoundNotSatisfied => "E0025",
             DiagnosticCode::RequiredAfterOptional => "E0026",
+            DiagnosticCode::ConflictingTraitImpl => "E0027",
         }
     }
 

@@ -667,6 +667,7 @@ impl Checker {
             self.check_type_opt(&f.ty);
         }
         self.check_derives(&r.derives);
+        self.check_coherence(&r.derives, &[]);
         self.check_attrs(&r.attrs);
         self.type_params = saved;
     }
@@ -682,6 +683,7 @@ impl Checker {
             self.check_type_opt(&f.ty);
         }
         self.check_derives(&c.derives);
+        self.check_coherence(&c.derives, &c.impls);
         self.check_attrs(&c.attrs);
         for block in &c.impls {
             self.check_impl(block);
@@ -711,6 +713,7 @@ impl Checker {
             }
         }
         self.check_derives(&e.derives);
+        self.check_coherence(&e.derives, &[]);
         self.check_attrs(&e.attrs);
         self.type_params = saved;
     }
@@ -838,6 +841,45 @@ impl Checker {
                 ),
             )),
             Some(_) => {}
+        }
+    }
+
+    /// Enforce **trait coherence** (overlap/uniqueness) on a single type: a trait may be
+    /// implemented at most once, counting both a `@derive(T)` directive and an `impl T { }` block
+    /// as implementations. A second implementation of an already-implemented trait — whether
+    /// `@derive(T)` twice, two `impl T` blocks, or a `@derive(T)` alongside an `impl T` — is
+    /// reported as `E0027 ConflictingTraitImpl`, pointing at the later occurrence and naming where
+    /// the first one is. This keeps each `(type, trait)` pair single-implementation, so
+    /// [`Self::satisfies`] and runtime dispatch are unambiguous.
+    ///
+    /// The orphan half of coherence needs no check: `impl` blocks are syntactically confined to a
+    /// class body, so a trait can only ever be implemented for the type that owns it, and every
+    /// trait is a built-in. Records and enums carry no `impl` blocks (pass an empty slice).
+    fn check_coherence(&mut self, derives: &[(String, Span)], impls: &[ImplBlock]) {
+        // Source order is derives-then-impls: `@derive(...)` directives lead the declaration,
+        // `impl` blocks sit in the body, so this scan reports the textually-later duplicate.
+        let mut seen: HashMap<&str, Span> = HashMap::new();
+        let occurrences = derives
+            .iter()
+            .map(|(name, span)| (name.as_str(), *span))
+            .chain(impls.iter().map(|b| (b.trait_name.as_str(), b.trait_span)));
+        for (name, span) in occurrences {
+            match seen.get(name) {
+                Some(_first) => self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::ConflictingTraitImpl,
+                        span,
+                        format!("trait `{name}` is implemented more than once for this type"),
+                    )
+                    .with_help(format!(
+                        "`{name}` is already implemented above; a type may implement each trait \
+                         only once (via one `@derive` or one `impl` block, not both)"
+                    )),
+                ),
+                None => {
+                    seen.insert(name, span);
+                }
+            }
         }
     }
 
