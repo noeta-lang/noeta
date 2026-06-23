@@ -138,18 +138,18 @@ pub struct RecordDecl {
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
     /// across all directive lines. Validated by the checker; drives compiler codegen.
     pub derives: Vec<(String, Span)>,
-    /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; the
-    /// manifest that consumes them arrives with M1.8b.
+    /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected
+    /// into the compiler-built manifest, and gated by the checker (each must name a record/class
+    /// marked `impl Attribute`, and its arguments must construct it).
     pub attrs: Vec<Attribute>,
     pub span: Span,
 }
 
 /// A **data attribute** in annotation position (`#[Route("/x")]`, `#[lint(level: warn)]`). The
-/// surface is a name with optional identifier arguments; semantically it is a record instance
-/// attached as metadata, discovered via the compiler-built manifest and acted on by a consumer
-/// (router, DI, lint runner). It carries no codegen meaning — code generation is the separate
-/// `@derive(...)` directive (a type declaration's `derives` list). Richer record-valued
-/// attributes and the manifest are M1.8b.
+/// surface is a name with optional literal arguments (positional or named); semantically it is a
+/// record instance attached as metadata, discovered via the compiler-built manifest and acted on
+/// by a consumer (router, DI, lint runner). It carries no codegen meaning — code generation is the
+/// separate `@derive(...)` directive (a type declaration's `derives` list).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Attribute {
     pub name: String,

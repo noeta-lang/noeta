@@ -95,8 +95,9 @@ pub enum DiagnosticCode {
     /// `impl T { }` for the same `T`, two `impl T` blocks, or a trait named twice in `@derive(...)`.
     /// Trait coherence requires each `(type, trait)` pair to have exactly one implementation, so
     /// bound satisfaction and dispatch are unambiguous. (The orphan half of coherence is enforced
-    /// structurally: `impl` blocks live only inside a class body, so a trait can only be
-    /// implemented for the type that owns it.)
+    /// separately: an in-body `impl` block can only name its own class, and a standalone
+    /// `impl Trait for T {}` must target a type declared in the same module — so a trait is only
+    /// ever implemented for a local type.)
     ConflictingTraitImpl,
     /// A checked narrowing (`x.as<T>()`) was applied to a value whose static type is already
     /// concrete (not `dyn`). Narrowing converts the open top `dyn` back to a `?T`; a value that is

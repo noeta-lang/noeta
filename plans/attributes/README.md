@@ -1,6 +1,6 @@
 # Attribute system — Pass 1 (`impl Trait for T` · attribute parameters · the `#[…]` gate)
 
-Status: **in progress**. Branch `types-inferred-static`.
+Status: **pass 1 complete** (commits A1 `3cb663e` · A2 `9ea9e2d` · A3 `a70380e`). Conformance 182 / differential 176 matched / 0 skipped / backends agree. Branch `types-inferred-static`. Pass 2 (runtime read-back) not started.
 
 The attribute machinery is largely built already — `#[…]` parses, type-checks loosely, and lands in the compiler manifest; `@derive(…)` codegen for `Comparable`/`ToJson` runs in both backends. What is missing is the part the three deferred items (`plans/deferred.md`) folded into a deliberate "attribute system" pass: a record/class can't yet *declare* it is usable as an attribute, attribute arguments are identifier-only, and nothing validates a `#[Foo(…)]` use against the record it names.
 
