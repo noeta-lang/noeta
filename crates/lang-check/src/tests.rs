@@ -442,6 +442,26 @@ fn concat_result_flows_through_a_signature() {
     assert_eq!(codes("fn f(): string { return [1] ~ [2]; }\n"), ["E0007"]);
 }
 
+// ----- assignment updates the declaring scope; accumulators infer (L3) -----
+
+#[test]
+fn accumulator_element_type_infers_and_persists_past_the_loop() {
+    // `mut acc = []` starts as a list of an unknown element; the loop-body reassignment
+    // `acc = acc ~ [x]` refines it to `List<int>` in acc's *declaring* scope, so the post-loop
+    // `return acc` satisfies a `List<int>` signature and violates a `List<string>` one.
+    let ok = "fn build(xs: List<int>): List<int> {\n  mut acc = [];\n  for x in xs { acc = acc ~ [x]; }\n  return acc;\n}\n";
+    assert!(codes(ok).is_empty());
+    let bad = "fn build(xs: List<int>): List<string> {\n  mut acc = [];\n  for x in xs { acc = acc ~ [x]; }\n  return acc;\n}\n";
+    assert_eq!(codes(bad), ["E0007"]);
+}
+
+#[test]
+fn nested_reassignment_updates_the_outer_binding() {
+    // A reassignment inside an `if` updates the outer binding's type, not a block-local shadow.
+    let src = "mut x = 1;\nif true { x = \"now a string\"; }\ns: string = x;\n";
+    assert!(codes(src).is_empty());
+}
+
 // ----- list spread `[..xs, x]` (L2, desugars to `~`) -----
 
 #[test]

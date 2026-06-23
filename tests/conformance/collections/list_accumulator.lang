@@ -1,0 +1,24 @@
+// The accumulator idiom, now expressible (L1 `~` / L2 spread) and inferred (L3): `mut acc = []`
+// starts empty, the loop refines its element type, and the post-loop value flows to the declared
+// return type. Both backends agree.
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[1, 2, 3]"
+// expect: exit 0
+fn doubled(xs: List<int>): List<int> {
+    mut acc = [];
+    for x in xs {
+        acc = acc ~ [x * 2];
+    }
+    return acc;
+}
+
+fn pushed(xs: List<int>): List<int> {
+    mut acc = [];
+    for x in xs {
+        acc = [..acc, x];
+    }
+    return acc;
+}
+
+echo doubled([1, 2, 3]);
+echo pushed([1, 2, 3]);

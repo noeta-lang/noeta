@@ -114,6 +114,21 @@ fn bind(env: &mut Env, name: &str, ty: Type) {
     }
 }
 
+/// Bind the result of an *assignment* `name = value` (not a `mut`/annotated declaration). If the
+/// name already exists in an enclosing frame it is a reassignment — update the type *there*, so a
+/// refinement made inside a nested scope (an accumulator built up in a loop body, `acc = acc ~
+/// [x]`) persists after that scope rather than reverting to the pre-loop type. Only a name not yet
+/// in scope is a fresh binding, placed in the innermost frame.
+fn assign(env: &mut Env, name: &str, ty: Type) {
+    for frame in env.iter_mut().rev() {
+        if frame.contains_key(name) {
+            frame.insert(name.to_string(), ty);
+            return;
+        }
+    }
+    bind(env, name, ty);
+}
+
 #[derive(Default)]
 struct Checker {
     /// User-declared enums: name → variants.
@@ -252,7 +267,11 @@ impl Checker {
                 self.check(value, &Type::Unknown, env);
             }
             Stmt::Binding {
-                name, ty, value, ..
+                mut_decl,
+                name,
+                ty,
+                value,
+                ..
             } => {
                 // An annotated binding (`x: T = …`) is checked against `T` and bound at `T`; the
                 // annotation is the boundary the value must satisfy and the way to fix an otherwise
@@ -262,11 +281,18 @@ impl Checker {
                         self.check_type_ref(ty);
                         let expected = Type::from_ref(ty);
                         self.check(value, &expected, env);
-                        bind(env, name, expected);
+                        bind(env, name, expected); // annotated = a fresh declaration
                     }
                     None => {
-                        let ty = self.check(value, &Type::Unknown, env);
-                        bind(env, name, ty);
+                        let vty = self.check(value, &Type::Unknown, env);
+                        // `mut x = …` is a fresh declaration (innermost frame, even if it shadows);
+                        // a bare `x = …` reassigns an existing binding in its declaring scope so a
+                        // refinement persists past a nested scope, else introduces a fresh binding.
+                        if *mut_decl {
+                            bind(env, name, vty);
+                        } else {
+                            assign(env, name, vty);
+                        }
                     }
                 }
             }
