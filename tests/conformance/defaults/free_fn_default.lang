@@ -1,0 +1,11 @@
+// A free function may give a trailing parameter a default value (`greeting: string = "Hello"`); a
+// call can then omit that argument and the callee fills it in. Supplying it overrides the default.
+// Both backends agree (the default is evaluated identically — against globals only).
+// expect: stdout "Hello, Ada!"
+// expect: stdout "Hi, Ada!"
+// expect: exit 0
+fn greet(name: string, greeting: string = "Hello"): string {
+    return greeting ~ ", " ~ name ~ "!";
+}
+echo greet("Ada");
+echo greet("Ada", "Hi");

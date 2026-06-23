@@ -1,0 +1,8 @@
+// A defaulted parameter widens the accepted arity to a range. `f` requires `a` and defaults `b`, so
+// it accepts 1 or 2 arguments; calling with 0 is below the minimum — `E0007` with the range form.
+// expect: error E0007 at 8:6
+// expect: exit 1
+fn f(a: int, b: int = 1): int {
+    return a + b;
+}
+echo f();

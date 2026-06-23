@@ -86,6 +86,11 @@ pub enum DiagnosticCode {
     /// argument). The bound promises the body may use the trait's operations, so an instantiation
     /// that breaks the promise is a compile error.
     TraitBoundNotSatisfied,
+    /// A required parameter (one without a default value) follows an optional one (a parameter with
+    /// a default). Because arguments bind positionally, a default is only meaningful when every
+    /// later parameter is also defaulted — otherwise omitting it would leave a required parameter
+    /// unfilled. Defaults must therefore be trailing-only.
+    RequiredAfterOptional,
 }
 
 impl DiagnosticCode {
@@ -117,6 +122,7 @@ impl DiagnosticCode {
         DiagnosticCode::CannotInfer,
         DiagnosticCode::LoopControlOutsideLoop,
         DiagnosticCode::TraitBoundNotSatisfied,
+        DiagnosticCode::RequiredAfterOptional,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -148,6 +154,7 @@ impl DiagnosticCode {
             DiagnosticCode::CannotInfer => "E0023",
             DiagnosticCode::LoopControlOutsideLoop => "E0024",
             DiagnosticCode::TraitBoundNotSatisfied => "E0025",
+            DiagnosticCode::RequiredAfterOptional => "E0026",
         }
     }
 

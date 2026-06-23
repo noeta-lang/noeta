@@ -101,6 +101,10 @@ struct VariantInfo {
 struct FnSig {
     params: Vec<Type>,
     ret: Type,
+    /// The number of leading parameters that are *required* — those without a default value. A
+    /// call may supply anywhere from `required` to `params.len()` arguments; the trailing
+    /// (defaulted) ones the callee fills in. Equals `params.len()` for a function with no defaults.
+    required: usize,
     /// Generic instantiation data for a generic free function; `None` for non-generic functions
     /// and for methods (whose bound enforcement is deferred — see slice S4).
     generic: Option<GenericInfo>,
@@ -268,6 +272,7 @@ impl Checker {
                             FnSig {
                                 params,
                                 ret,
+                                required: required_params(&m.params),
                                 generic,
                             },
                         );
@@ -319,6 +324,7 @@ impl Checker {
                         FnSig {
                             params,
                             ret,
+                            required: required_params(&f.params),
                             generic,
                         },
                     );
@@ -540,6 +546,11 @@ impl Checker {
             self.check_type_opt(&p.ty);
         }
         self.check_type_opt(&decl.ret);
+        // Validate parameter defaults: trailing-only (`E0026`) and each default's type against its
+        // parameter (`E0007`). Checked here, before the parameter frame is pushed, so a default is
+        // evaluated against globals only — not other parameters/fields/`self` (mirroring how both
+        // backends evaluate it). `self.type_params` already includes this function's own.
+        self.check_param_defaults(decl, env);
         // The body's `return`s are checked against the declared return type; `Unknown` when
         // unannotated (already an `E0022`), so the check stays a no-op there. Saved/restored so a
         // nested function does not clobber the enclosing one's expectation.
@@ -566,6 +577,54 @@ impl Checker {
         self.current_ret = saved_ret;
         self.loop_depth = saved_loop_depth;
         self.type_params = saved_type_params;
+    }
+
+    /// Validate a named callable's parameter defaults. Two rules: defaults must be **trailing-only**
+    /// — a required parameter after a defaulted one is `E0026` — and each default's type must be
+    /// assignable to its parameter (`E0007`). The default expression is synthesized in `env`, which
+    /// at the call site (before the parameter frame is pushed) holds only globals, so a default
+    /// that reaches for another parameter resolves to nothing (a runtime `E0005`, as elsewhere in
+    /// the language) rather than silently capturing it.
+    fn check_param_defaults(&mut self, decl: &FnDecl, env: &mut Env) {
+        let mut seen_default = false;
+        for p in &decl.params {
+            if p.default.is_some() {
+                seen_default = true;
+            } else if seen_default {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::RequiredAfterOptional,
+                        p.name_span,
+                        format!(
+                            "required parameter `{}` cannot follow a parameter with a default value",
+                            p.name
+                        ),
+                    )
+                    .with_help(
+                        "give this parameter a default too, or move it before the optional ones",
+                    ),
+                );
+            }
+        }
+        let tps: HashSet<String> = self.type_params.keys().cloned().collect();
+        for p in &decl.params {
+            let Some(default) = &p.default else { continue };
+            let actual = self.synth(default, env);
+            // Skip the type check when the parameter has no annotation (already an `E0022`) or its
+            // type is generic/`dyn` (erases to `dyn`, which accepts any default).
+            if p.ty.is_some() {
+                let expected = erase_type_params(param_type(p), &tps);
+                if !arg_compatible(&actual, &expected) {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::TypeMismatch,
+                        default.span(),
+                        format!(
+                            "default value of type `{actual}` is not assignable to parameter type `{expected}`"
+                        ),
+                    ));
+                }
+            }
+        }
     }
 
     /// Inferred-static requires a full signature on every **named** function or method: a type on
@@ -1352,15 +1411,16 @@ impl Checker {
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
                 if let Some(sig) = self.functions.get(name) {
+                    let required = sig.required;
                     // A generic function is instantiated per call: bind its type parameters from the
                     // argument types, check arguments against the substituted parameters, enforce
                     // the bounds (E0025), and return the substituted result type.
                     if let Some(generic) = sig.generic.clone() {
-                        return self.check_generic_call(name, &generic, args, span, &[]);
+                        return self.check_generic_call(name, &generic, required, args, span, &[]);
                     }
                     let params = sig.params.clone();
                     let ret = sig.ret.clone();
-                    self.check_args(&params, args, span, name);
+                    self.check_args(&params, required, args, span, name);
                     return ret;
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
@@ -1379,7 +1439,8 @@ impl Checker {
                     && self.modules.contains(m)
                 {
                     if let Some(params) = stdlib::module_params(m, name) {
-                        self.check_args(&params, args, span, name);
+                        let n = params.len();
+                        self.check_args(&params, n, args, span, name);
                     }
                     return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
                 }
@@ -1447,9 +1508,9 @@ impl Checker {
         recv_args: &[Type],
     ) -> Type {
         if let Some(generic) = &sig.generic {
-            return self.check_generic_call(name, generic, args, span, recv_args);
+            return self.check_generic_call(name, generic, sig.required, args, span, recv_args);
         }
-        self.check_args(&sig.params, args, span, name);
+        self.check_args(&sig.params, sig.required, args, span, name);
         sig.ret.clone()
     }
 
@@ -1458,31 +1519,47 @@ impl Checker {
     /// checked.
     fn check_method_args(&mut self, recv: &Type, name: &str, args: &[Type], span: Span) {
         if let Some(params) = stdlib::method_params(recv, name) {
-            self.check_args(&params, args, span, name);
+            let n = params.len();
+            self.check_args(&params, n, args, span, name);
         } else if let Type::Named(n, _) = recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
         {
             let params = sig.params.clone();
-            self.check_args(&params, args, span, name);
+            let required = sig.required;
+            self.check_args(&params, required, args, span, name);
         }
     }
 
     /// Check a call's argument count and types against the callable's parameter types, reporting
     /// at `span`. Lenient where either side defers to runtime (`dyn`/hole) and on numeric widening
     /// (`int` where `float` is expected), so polymorphic and numeric calls are not false positives.
-    fn check_args(&mut self, params: &[Type], args: &[Type], span: Span, callee: &str) {
-        if params.len() != args.len() {
+    fn check_args(
+        &mut self,
+        params: &[Type],
+        required: usize,
+        args: &[Type],
+        span: Span,
+        callee: &str,
+    ) {
+        if args.len() < required || args.len() > params.len() {
+            let expected = if required == params.len() {
+                format!("{}", params.len())
+            } else {
+                format!("between {required} and {}", params.len())
+            };
             self.diags.push(Diagnostic::error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!(
-                    "`{callee}` expects {} argument(s), found {}",
-                    params.len(),
+                    "`{callee}` expects {expected} argument(s), found {}",
                     args.len()
                 ),
             ));
             return;
         }
+        // Only the supplied arguments are type-checked; the omitted trailing parameters are
+        // filled by their defaults (already checked against their parameter types at the
+        // declaration), so `zip` stopping at the shorter side is exactly right.
         for (param, arg) in params.iter().zip(args) {
             if !arg_compatible(arg, param) {
                 self.diags.push(Diagnostic::error(
@@ -1517,18 +1594,23 @@ impl Checker {
         &mut self,
         name: &str,
         generic: &GenericInfo,
+        required: usize,
         args: &[Type],
         span: Span,
         recv_args: &[Type],
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
-        if generic.raw_params.len() != args.len() {
+        if args.len() < required || args.len() > generic.raw_params.len() {
+            let expected = if required == generic.raw_params.len() {
+                format!("{}", generic.raw_params.len())
+            } else {
+                format!("between {required} and {}", generic.raw_params.len())
+            };
             self.diags.push(Diagnostic::error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!(
-                    "`{name}` expects {} argument(s), found {}",
-                    generic.raw_params.len(),
+                    "`{name}` expects {expected} argument(s), found {}",
                     args.len()
                 ),
             ));
@@ -2045,6 +2127,16 @@ fn field_type(ty: &Option<TypeRef>) -> Type {
 /// The declared type of a parameter, or `Unknown` when unannotated.
 fn param_type(p: &Param) -> Type {
     p.ty.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown)
+}
+
+/// The number of *required* parameters: the leading run with no default value. With defaults
+/// enforced trailing-only (`E0026`), this is the index of the first defaulted parameter (or the
+/// full length when none have defaults). A call must supply at least this many arguments.
+fn required_params(params: &[Param]) -> usize {
+    params
+        .iter()
+        .position(|p| p.default.is_some())
+        .unwrap_or(params.len())
 }
 
 #[cfg(test)]

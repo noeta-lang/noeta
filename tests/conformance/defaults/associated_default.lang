@@ -1,0 +1,15 @@
+// An associated function (here a constructor) may carry a default. `Counter.from()` omits the
+// argument and gets `0`; `Counter.from(10)` supplies it. The default is filled by the callee, so it
+// works through the static-call path on both backends.
+// expect: stdout "0"
+// expect: stdout "10"
+// expect: exit 0
+class Counter {
+    start: int
+
+    fn from(start: int = 0): Counter {
+        return Counter { start: start };
+    }
+}
+echo Counter.from().start;
+echo Counter.from(10).start;

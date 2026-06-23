@@ -439,6 +439,12 @@ pub struct Chunk {
     /// Parameters occupy registers `0..num_params` on entry.
     pub num_params: u16,
     pub num_registers: u16,
+    /// Optional parameters with defaults: each `(register, thunk_proto)` pairs a trailing parameter
+    /// register with the zero-argument prototype that computes its default value (against globals
+    /// only). When a call omits that argument, the VM runs the thunk to fill the register. Empty for
+    /// a function with no defaults; the entries are the trailing parameters, so the lowest legal
+    /// argument count is `num_params - defaults.len()` (less the receiver for a method).
+    pub defaults: Vec<(u16, u32)>,
 }
 
 impl Chunk {
@@ -451,6 +457,7 @@ impl Chunk {
             diagnostics: Vec::new(),
             num_params: 0,
             num_registers: 0,
+            defaults: Vec::new(),
         }
     }
 
@@ -462,6 +469,12 @@ impl Chunk {
             "params: {}, registers: {}",
             self.num_params, self.num_registers
         );
+        if !self.defaults.is_empty() {
+            out.push_str("defaults:\n");
+            for (reg, proto) in &self.defaults {
+                let _ = writeln!(out, "  r{reg} = thunk proto {proto}");
+            }
+        }
         if !self.consts.is_empty() {
             out.push_str("constants:\n");
             for (i, c) in self.consts.iter().enumerate() {

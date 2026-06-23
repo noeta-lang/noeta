@@ -1,0 +1,11 @@
+// A default value is evaluated in a globals-only scope, so it may reference a module-level binding.
+// Omitting the argument runs the default and reads the global `DEFAULT`.
+// expect: stdout "42"
+// expect: stdout "7"
+// expect: exit 0
+DEFAULT = 42;
+fn get(x: int = DEFAULT): int {
+    return x;
+}
+echo get();
+echo get(7);

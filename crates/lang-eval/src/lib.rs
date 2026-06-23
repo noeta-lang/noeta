@@ -367,6 +367,11 @@ impl PartialEq for ObjectValue {
 /// defined in (captured for closures and recursion).
 pub struct Closure {
     params: Vec<String>,
+    /// Each parameter's default-value expression, parallel to `params` (`None` for a required
+    /// parameter). A call that omits a trailing argument evaluates the matching default in the
+    /// closure's `captured` (definition/global) scope — never seeing other parameters or fields,
+    /// matching the VM's globals-only default thunks.
+    defaults: Vec<Option<Expr>>,
     body: FnBody,
     captured: Rc<Scope>,
 }
@@ -832,6 +837,7 @@ impl Interpreter {
     fn declare_fn(&mut self, decl: &FnDecl) {
         let closure = Closure {
             params: decl.params.iter().map(|p| p.name.clone()).collect(),
+            defaults: decl.params.iter().map(|p| p.default.clone()).collect(),
             body: FnBody::Block(decl.body.clone()),
             captured: Rc::clone(&self.scope),
         };
@@ -929,6 +935,7 @@ impl Interpreter {
             .map(|m| {
                 let closure = Closure {
                     params: m.params.iter().map(|p| p.name.clone()).collect(),
+                    defaults: m.params.iter().map(|p| p.default.clone()).collect(),
                     body: FnBody::Block(m.body.clone()),
                     captured: Rc::clone(&self.scope),
                 };
@@ -1144,6 +1151,9 @@ impl Interpreter {
             Expr::Binary { op, lhs, rhs, span } => self.eval_binary(*op, lhs, rhs, *span),
             Expr::Closure { params, body, .. } => Ok(Value::Function(Rc::new(Closure {
                 params: params.iter().map(|p| p.name.clone()).collect(),
+                // Closure parameters cannot declare defaults (the parser forbids it), so these are
+                // all `None`; kept parallel to `params` for a uniform call path.
+                defaults: params.iter().map(|p| p.default.clone()).collect(),
                 body: FnBody::Arrow((**body).clone()),
                 captured: Rc::clone(&self.scope),
             }))),
@@ -2230,20 +2240,24 @@ impl Interpreter {
     }
 
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
-        if args.len() != closure.params.len() {
+        let required = required_count(&closure.defaults);
+        if args.len() < required || args.len() > closure.params.len() {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                format!(
-                    "this function takes {} argument(s) but {} were supplied",
-                    closure.params.len(),
-                    args.len()
-                ),
+                arity_message("function", required, closure.params.len(), args.len()),
             ));
         }
+        let supplied = args.len();
         let call_scope = Scope::child(&closure.captured);
         for (param, arg) in closure.params.iter().zip(args) {
             call_scope.declare(param.clone(), arg, false);
+        }
+        // Fill any omitted trailing parameters from their defaults, each evaluated in the closure's
+        // captured (definition/global) scope — never seeing the call's other arguments.
+        for i in supplied..closure.params.len() {
+            let value = self.eval_default(closure, i)?;
+            call_scope.declare(closure.params[i].clone(), value, false);
         }
         let saved = std::mem::replace(&mut self.scope, call_scope);
         let result = match &closure.body {
@@ -2265,17 +2279,15 @@ impl Interpreter {
         args: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        if args.len() != method.params.len() {
+        let required = required_count(&method.defaults);
+        if args.len() < required || args.len() > method.params.len() {
             return Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
-                format!(
-                    "this method takes {} argument(s) but {} were supplied",
-                    method.params.len(),
-                    args.len()
-                ),
+                arity_message("method", required, method.params.len(), args.len()),
             ));
         }
+        let supplied = args.len();
         let call_scope = Scope::child(&method.captured);
         for (name, value) in &object.fields {
             call_scope.declare(name.clone(), value.clone(), false);
@@ -2284,6 +2296,12 @@ impl Interpreter {
         for (param, arg) in method.params.iter().zip(args) {
             call_scope.declare(param.clone(), arg, false);
         }
+        // Omitted trailing parameters take their defaults, evaluated in the method's captured
+        // (definition/global) scope — not against the receiver's fields, `self`, or other arguments.
+        for i in supplied..method.params.len() {
+            let value = self.eval_default(method, i)?;
+            call_scope.declare(method.params[i].clone(), value, false);
+        }
         let saved = std::mem::replace(&mut self.scope, call_scope);
         let result = match &method.body {
             FnBody::Arrow(expr) => self.eval_expr(expr),
@@ -2291,6 +2309,21 @@ impl Interpreter {
         };
         self.scope = saved;
         catch_return(result)
+    }
+
+    /// Evaluate parameter `i`'s default value in `closure`'s captured (definition/global) scope.
+    /// Isolating it there is what keeps a default from reaching the call's other arguments, the
+    /// receiver's fields, or `self` — so the tree-walker and the VM (whose default thunks run
+    /// against globals only) compute the same value.
+    fn eval_default(&mut self, closure: &Rc<Closure>, i: usize) -> Eval<Value> {
+        let default = closure.defaults[i]
+            .as_ref()
+            .expect("an omitted argument must correspond to a defaulted parameter");
+        let scope = Scope::child(&closure.captured);
+        let saved = std::mem::replace(&mut self.scope, scope);
+        let result = self.eval_expr(default);
+        self.scope = saved;
+        result
     }
 
     fn exec_fn_body(&mut self, stmts: &[Stmt]) -> Eval<Value> {
@@ -2803,6 +2836,27 @@ fn catch_return(result: Eval<Value>) -> Eval<Value> {
     match result {
         Err(Unwind::Return(value)) => Ok(value),
         other => other,
+    }
+}
+
+/// The number of required (non-defaulted) parameters: the leading run with no default value.
+/// `defaults` is parallel to a closure's parameter list, so this is the lowest legal argument count.
+fn required_count(defaults: &[Option<Expr>]) -> usize {
+    defaults
+        .iter()
+        .position(Option::is_some)
+        .unwrap_or(defaults.len())
+}
+
+/// The arity-mismatch message, worded identically to the VM's (so the differential matches). `kind`
+/// is `"function"` or `"method"`; the range form appears only when some parameters are defaulted.
+fn arity_message(kind: &str, required: usize, total: usize, supplied: usize) -> String {
+    if required == total {
+        format!("this {kind} takes {total} argument(s) but {supplied} were supplied")
+    } else {
+        format!(
+            "this {kind} takes between {required} and {total} argument(s) but {supplied} were supplied"
+        )
     }
 }
 

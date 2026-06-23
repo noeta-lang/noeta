@@ -1,0 +1,20 @@
+// An instance method may carry a default. `d.bump()` omits the argument (so `by` is `1`);
+// `d.bump(5)` supplies it. The default is evaluated against globals only — not the receiver's
+// fields — so both the tree-walker and the VM's default thunk compute the same value.
+// expect: stdout "11"
+// expect: stdout "15"
+// expect: exit 0
+class Counter {
+    start: int
+
+    fn from(start: int): Counter {
+        return Counter { start: start };
+    }
+
+    fn bump(by: int = 1): int {
+        return start + by;
+    }
+}
+d = Counter.from(10);
+echo d.bump();
+echo d.bump(5);

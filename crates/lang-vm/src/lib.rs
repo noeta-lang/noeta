@@ -1356,25 +1356,37 @@ impl<'m> Vm<'m> {
                         };
                         let chunk = &module.protos[proto as usize];
                         // The prototype takes the receiver in register 0 and the user arguments
-                        // after it, so its declared arity is one more than the supplied args.
-                        if args.len() + 1 != chunk.num_params as usize {
+                        // after it, so its declared arity is one more than the supplied args. A
+                        // method may have trailing defaulted parameters, so the supplied count is a
+                        // range `[total - defaults, total]` (all less the receiver).
+                        let total = chunk.num_params as usize - 1;
+                        let required = total - chunk.defaults.len();
+                        if args.len() < required || args.len() > total {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!(
-                                    "this method takes {} argument(s) but {} were supplied",
-                                    chunk.num_params - 1,
-                                    args.len()
-                                ),
+                                arity_message("method", required, total, args.len()),
                             ));
                         }
-                        let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                        let num_registers = chunk.num_registers as usize;
+                        let defaults = chunk.defaults.clone();
+                        let mut new_regs = vec![Value::unit(); num_registers];
                         retain(v);
                         new_regs[0] = v;
                         for (i, &arg_reg) in args.iter().enumerate() {
                             let a = frames[top].regs[arg_reg as usize];
                             retain(a);
                             new_regs[i + 1] = a;
+                        }
+                        // Fill any omitted trailing parameters from their default thunks. The
+                        // receiver and supplied args occupy registers `0..=args.len()`, so a default
+                        // register at or beyond that was not supplied.
+                        let filled = args.len() + 1;
+                        for (reg, proto) in &defaults {
+                            if *reg as usize >= filled {
+                                let value = self.run_thunk(*proto)?;
+                                new_regs[*reg as usize] = value;
+                            }
                         }
                         frames[top].pc += 1;
                         frames.push(Frame {
@@ -2196,25 +2208,35 @@ impl<'m> Vm<'m> {
                     match callee_val.as_closure() {
                         Some(proto_idx) => {
                             let callee_chunk = &module.protos[proto_idx as usize];
-                            if args.len() != callee_chunk.num_params as usize {
+                            let num_params = callee_chunk.num_params as usize;
+                            let required = num_params - callee_chunk.defaults.len();
+                            if args.len() < required || args.len() > num_params {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
-                                    format!(
-                                        "this function takes {} argument(s) but {} were supplied",
-                                        callee_chunk.num_params,
-                                        args.len()
-                                    ),
+                                    arity_message("function", required, num_params, args.len()),
                                 ));
                             }
+                            let num_registers = callee_chunk.num_registers as usize;
+                            let defaults = callee_chunk.defaults.clone();
                             // Move the arguments into the new frame's leading registers, each
                             // owning a fresh reference.
-                            let mut new_regs =
-                                vec![Value::unit(); callee_chunk.num_registers as usize];
+                            let mut new_regs = vec![Value::unit(); num_registers];
                             for (i, &arg_reg) in args.iter().enumerate() {
                                 let v = frames[top].regs[arg_reg as usize];
                                 retain(v);
                                 new_regs[i] = v;
+                            }
+                            // Fill any omitted trailing parameters from their default thunks: a
+                            // default whose register is at or beyond the supplied count was not
+                            // passed. (An associated function carries a synthetic unit receiver in
+                            // register 0, already counted among the supplied args.)
+                            let filled = args.len();
+                            for (reg, proto) in &defaults {
+                                if *reg as usize >= filled {
+                                    let value = self.run_thunk(*proto)?;
+                                    new_regs[*reg as usize] = value;
+                                }
                             }
                             // Carry the closure's captured upvalue cells into the frame (one owned
                             // reference each, released at teardown), so the body can read/write
@@ -2314,8 +2336,11 @@ impl<'m> Vm<'m> {
         match callee.as_closure() {
             Some(proto) => {
                 let chunk = &self.module.protos[proto as usize];
-                let (num_params, num_registers) = (chunk.num_params, chunk.num_registers);
-                if args.len() != num_params as usize {
+                let num_params = chunk.num_params as usize;
+                let num_registers = chunk.num_registers as usize;
+                let required = num_params - chunk.defaults.len();
+                let defaults = chunk.defaults.clone();
+                if args.len() < required || args.len() > num_params {
                     let supplied = args.len();
                     for a in args {
                         release(a);
@@ -2323,14 +2348,20 @@ impl<'m> Vm<'m> {
                     return Err(self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
-                        format!(
-                            "this function takes {num_params} argument(s) but {supplied} were supplied"
-                        ),
+                        arity_message("function", required, num_params, supplied),
                     ));
                 }
-                let mut regs = vec![Value::unit(); num_registers as usize];
+                let filled = args.len();
+                let mut regs = vec![Value::unit(); num_registers];
                 for (i, v) in args.into_iter().enumerate() {
                     regs[i] = v;
+                }
+                // Fill any omitted trailing parameters from their default thunks.
+                for (reg, dproto) in &defaults {
+                    if *reg as usize >= filled {
+                        let value = self.run_thunk(*dproto)?;
+                        regs[*reg as usize] = value;
+                    }
                 }
                 // A first-class closure passed to `map`/`filter` may capture upvalues; carry its
                 // cells into the re-entrant frame (one owned reference each).
@@ -2373,6 +2404,21 @@ impl<'m> Vm<'m> {
                 }
             },
         }
+    }
+
+    /// Run a defaulted parameter's zero-argument thunk prototype to its value, on a fresh frame
+    /// stack (the same re-entry `map`/`filter` callbacks use). The thunk resolves only globals, so
+    /// it needs no caller state; the returned value owns one reference, transferred to its register.
+    fn run_thunk(&mut self, proto: u32) -> Result<Value, Abort> {
+        let num_registers = self.module.protos[proto as usize].num_registers as usize;
+        self.run(vec![Frame {
+            proto,
+            regs: vec![Value::unit(); num_registers],
+            pc: 0,
+            ret_dst: 0,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        }])
     }
 
     /// Dispatch a first-class prelude builtin called indirectly. Reuses `call_builtin` (so the
@@ -2657,6 +2703,19 @@ fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
 fn make_ordering(variant: &str) -> Value {
     let shape = Rc::new(Shape::enum_variant("Ordering", variant, Vec::new(), false));
     Value::enum_value(shape, Vec::new())
+}
+
+/// The arity-mismatch message, worded identically to the tree-walker's (so the differential
+/// matches). `kind` is `"function"` or `"method"`; the range form appears only when some
+/// parameters are defaulted (`required < total`).
+fn arity_message(kind: &str, required: usize, total: usize, supplied: usize) -> String {
+    if required == total {
+        format!("this {kind} takes {total} argument(s) but {supplied} were supplied")
+    } else {
+        format!(
+            "this {kind} takes between {required} and {total} argument(s) but {supplied} were supplied"
+        )
+    }
 }
 
 /// Build the built-in `Option::some(value)` with a fresh shape (the `builtin_result_option` flag

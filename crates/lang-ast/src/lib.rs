@@ -307,12 +307,17 @@ pub struct FnDecl {
     pub span: Span,
 }
 
-/// A function parameter: a name and an optional type annotation (unchecked in M0).
+/// A function parameter: a name, an optional type annotation (unchecked in M0), and an optional
+/// default value (`name: T = expr`). A default makes the parameter optional at the call site; the
+/// checker enforces that defaults are trailing-only and that a default's type matches the
+/// parameter type. Defaults are only parsed for named callables (free functions, associated
+/// functions, methods) — never for closure parameters or enum-variant fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub name_span: Span,
     pub ty: Option<TypeRef>,
+    pub default: Option<Expr>,
     pub span: Span,
 }
 

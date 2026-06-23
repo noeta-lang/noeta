@@ -1,0 +1,8 @@
+// Supplying more arguments than parameters is still an error, even with defaults present: `f`
+// accepts 1 or 2 arguments, so three is above the maximum — `E0007` with the range form.
+// expect: error E0007 at 8:6
+// expect: exit 1
+fn f(a: int, b: int = 1): int {
+    return a + b;
+}
+echo f(1, 2, 3);

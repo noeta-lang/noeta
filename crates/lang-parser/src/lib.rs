@@ -363,18 +363,34 @@ where
     })
 }
 
-/// A parenthesised parameter list: `(name: T, name2, ...)`. Trailing commas are not
-/// permitted (matching the surface grammar).
-fn params_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Vec<Param>, Extra<'src>> + Clone
+/// A parenthesised parameter list: `(name: T, name2, name3: T = default, ...)`. Trailing commas
+/// are not permitted (matching the surface grammar). `allow_defaults` controls whether a
+/// `= expr` default value is accepted — it is for named callables (free functions, associated
+/// functions, methods) but not for closure parameters or enum-variant fields, which pass `false`.
+/// `expr` is the expression parser used to parse a default's value (threaded in to avoid a
+/// parser-construction cycle, since the expression grammar itself contains parameter lists).
+fn params_parser<'src, I, P>(
+    ctx: Ctx<'src>,
+    expr: P,
+    allow_defaults: bool,
+) -> impl Parser<'src, I, Vec<Param>, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    P: Parser<'src, I, Expr, Extra<'src>> + Clone + 'src,
 {
+    let default = if allow_defaults {
+        just(T::Eq).ignore_then(expr).or_not().boxed()
+    } else {
+        empty().to(None).boxed()
+    };
     let param = ident_parser(ctx)
         .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
-        .map_with(move |((name, name_span), ty), e| Param {
+        .then(default)
+        .map_with(move |(((name, name_span), ty), default), e| Param {
             name,
             name_span,
             ty,
+            default,
             span: ctx.to_span(e.span()),
         });
     param
@@ -564,9 +580,9 @@ where
                     },
                 });
 
-        // Anonymous function: `fn(params) => expr`.
+        // Anonymous function: `fn(params) => expr`. Closure parameters may not carry defaults.
         let closure = just(T::FnKw)
-            .ignore_then(params_parser(ctx))
+            .ignore_then(params_parser(ctx, expr.clone(), false))
             .then_ignore(just(T::FatArrow))
             .then(expr.clone())
             .map_with(move |(params, body), e| Expr::Closure {
@@ -1003,7 +1019,7 @@ where
             .then_ignore(just(T::FnKw))
             .then(id.clone())
             .then(type_params.clone())
-            .then(params_parser(ctx))
+            .then(params_parser(ctx, expr.clone(), true))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
@@ -1025,7 +1041,7 @@ where
         let variant = id
             .clone()
             .then(choice((
-                params_parser(ctx).map(|fields| (fields, None)),
+                params_parser(ctx, expr.clone(), false).map(|fields| (fields, None)),
                 just(T::Eq)
                     .ignore_then(expr.clone())
                     .map(|value| (Vec::new(), Some(value))),
@@ -1122,7 +1138,7 @@ where
         // A bare `fn ...` declaration, shared by plain class methods and `impl`-block methods.
         let method = just(T::FnKw)
             .ignore_then(id.clone())
-            .then(params_parser(ctx))
+            .then(params_parser(ctx, expr.clone(), true))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(move |(((name_pair, params), ret), body), e| FnDecl {
@@ -1749,6 +1765,37 @@ mod tests {
         let parsed = parse_str("fn add(a: int, b: int): int { return a + b; }");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         assert!(matches!(parsed.program.stmts[0], Stmt::Fn(_)));
+    }
+
+    #[test]
+    fn parses_parameter_default_value() {
+        // A named function's parameter may carry a `= expr` default; it lands in `Param.default`.
+        let parsed = parse_str(
+            "fn greet(name: string, greeting: string = \"Hi\"): string { return greeting; }",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Fn(decl) = &parsed.program.stmts[0] else {
+            panic!("expected a function declaration");
+        };
+        assert!(
+            decl.params[0].default.is_none(),
+            "first parameter is required"
+        );
+        assert!(
+            decl.params[1].default.is_some(),
+            "second parameter is defaulted"
+        );
+    }
+
+    #[test]
+    fn closure_parameters_reject_defaults() {
+        // Defaults are only for named callables; a closure parameter's `= expr` does not parse as a
+        // default (the `=` is left dangling), so the program fails to parse cleanly.
+        let parsed = parse_str("f = fn(x: int = 1) => x;");
+        assert!(
+            !parsed.diagnostics.is_empty(),
+            "a closure default must not parse"
+        );
     }
 
     #[test]

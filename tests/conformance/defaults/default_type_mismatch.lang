@@ -1,0 +1,8 @@
+// A default value's type must be assignable to its parameter's declared type. A `string` parameter
+// defaulted to `5` is a static `E0007`, reported at the default expression.
+// expect: error E0007 at 5:18
+// expect: exit 1
+fn f(x: string = 5): string {
+    return x;
+}
+echo f();

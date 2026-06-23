@@ -853,3 +853,50 @@ fn pipeline_threads_the_piped_value_as_first_arg() {
     let src2 = "fn inc(n: int): int { return n + 1; }\necho 5 |> inc;\n";
     assert!(codes(src2).is_empty());
 }
+
+#[test]
+fn parameter_default_omitted_at_call_is_clean() {
+    // A trailing default makes its argument optional: the call may omit it or supply it.
+    let src = "fn greet(name: string, greeting: string = \"Hi\"): string { return greeting ~ name; }\n\
+               echo greet(\"a\");\necho greet(\"a\", \"Yo\");\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn required_parameter_after_optional_is_e0026() {
+    // Defaults must be trailing-only — a required parameter after a defaulted one is rejected.
+    let src = "fn f(a: int = 1, b: int): int { return a + b; }\necho f(1, 2);\n";
+    assert_eq!(codes(src), ["E0026"]);
+}
+
+#[test]
+fn default_value_type_must_match_parameter() {
+    // A `string` parameter defaulted to an `int` is a static `E0007`.
+    let src = "fn f(x: string = 5): string { return x; }\necho f();\n";
+    assert_eq!(codes(src), ["E0007"]);
+    // A matching default is clean.
+    assert!(codes("fn g(x: int = 5): int { return x; }\necho g();\n").is_empty());
+}
+
+#[test]
+fn call_below_minimum_arity_is_rejected() {
+    // `f` requires `a` and defaults `b`, so it accepts 1 or 2 arguments; zero is too few.
+    let src = "fn f(a: int, b: int = 1): int { return a + b; }\necho f();\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn call_above_maximum_arity_is_rejected() {
+    // The same `f` accepts at most 2 arguments; three is too many.
+    let src = "fn f(a: int, b: int = 1): int { return a + b; }\necho f(1, 2, 3);\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn method_default_omitted_at_call_is_clean() {
+    // An instance method may carry a default; omitting it at the call site is well-typed.
+    let src = "class C {\n  start: int\n  fn from(start: int): C { return C { start: start }; }\n  \
+               fn bump(by: int = 1): int { return start + by; }\n}\n\
+               d = C.from(10);\necho d.bump();\necho d.bump(5);\n";
+    assert!(codes(src).is_empty());
+}

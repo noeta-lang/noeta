@@ -1,0 +1,8 @@
+// Defaults must be trailing-only: a required parameter (`b`) cannot follow a defaulted one (`a`),
+// because arguments bind positionally. This is `E0026`, reported at the offending parameter.
+// expect: error E0026 at 5:18
+// expect: exit 1
+fn f(a: int = 1, b: int): int {
+    return a + b;
+}
+echo f(1, 2);

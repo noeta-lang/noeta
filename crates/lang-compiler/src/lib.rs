@@ -102,7 +102,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
             fc.stmt(stmt)?;
         }
         fc.code.push(Op::Halt);
-        fc.into_chunk(0)
+        fc.into_chunk(0, Vec::new())
     };
     module.protos[0] = main;
     Ok(Module {
@@ -368,6 +368,20 @@ impl ModuleCompiler {
             local_layer.extend(forbidden.iter().cloned());
         }
 
+        // Compile each defaulted parameter's default value into a globals-only zero-argument thunk
+        // prototype, recording the `(parameter register, thunk proto)` pair. Parameter registers are
+        // fixed by declaration order — a method reserves register 0 for the receiver, so its
+        // parameters start at 1 — which lets the VM fill an omitted argument's register from its
+        // thunk. Compiled before the body's `FnCompiler` borrows `self`.
+        let base: u16 = if is_method { 1 } else { 0 };
+        let mut defaults: Vec<(u16, u32)> = Vec::new();
+        for (j, param) in params.iter().enumerate() {
+            if let Some(default) = &param.default {
+                let proto = self.add_function(&[], Body::Arrow(default), Vec::new(), Vec::new())?;
+                defaults.push((base + j as u16, proto));
+            }
+        }
+
         let mut fc = FnCompiler::new(self, false, method, upvalues, enclosing_locals);
         fc.celled = analysis.celled;
         fc.local_layer = local_layer;
@@ -409,7 +423,7 @@ impl ModuleCompiler {
         // A block body that falls off the end implicitly returns unit (M0's `exec_fn_body`).
         fc.code.push(Op::Halt);
         let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
-        Ok(fc.into_chunk(num_params))
+        Ok(fc.into_chunk(num_params, defaults))
     }
 
     /// Compile a `fn` body into a fresh prototype and return its index.
@@ -602,13 +616,14 @@ impl<'m> FnCompiler<'m> {
         chain
     }
 
-    fn into_chunk(self, num_params: u16) -> Chunk {
+    fn into_chunk(self, num_params: u16, defaults: Vec<(u16, u32)>) -> Chunk {
         Chunk {
             code: self.code,
             consts: self.consts,
             diagnostics: self.diags,
             num_params,
             num_registers: self.next_reg,
+            defaults,
         }
     }
 

@@ -88,6 +88,17 @@ fn total(items: List<Item>): float {
 adder = fn(a, b) => a + b;
 ```
 
+**Optional parameters with default values.** A trailing parameter may carry a default (`= expr`); a call can then omit it. Defaults are **trailing-only** — a required parameter after a defaulted one is a compile error (`E0026`) — and a default's type must match its parameter. A default value is evaluated against module-level names only (not other parameters, `self`, or fields), and is re-evaluated on each call that omits the argument. Defaults are allowed on free functions, associated functions, and methods, but not on closure parameters.
+
+```
+fn greet(name: string, greeting: string = "Hello"): string {
+    return greeting ~ ", " ~ name ~ "!";
+}
+
+greet("Ada");        // "Hello, Ada!"
+greet("Ada", "Hi");  // "Hi, Ada!"
+```
+
 ---
 
 ## 5. Types, records, enums

@@ -1,0 +1,10 @@
+// A default value is evaluated against globals only — never the call's other arguments. A default
+// that names another parameter (`b: int = a`) therefore resolves to nothing and fails at runtime
+// with `E0005`, exactly as any unknown name does (the checker leaves it deferred, like the rest of
+// the language's name resolution).
+// expect: error E0005 at 7:23
+// expect: exit 1
+fn f(a: int, b: int = a): int {
+    return b;
+}
+echo f(1);
