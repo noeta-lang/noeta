@@ -78,6 +78,13 @@ pub enum Type {
     /// An inference variable, resolved during checking. (Unused by the conservative gradual
     /// pass today; reserved for the unification front that hardens inference.)
     Var(u32),
+    /// A declared **union** `A | B | …` — a *closed* `dyn` whose membership is a static, finite
+    /// set. A value of any member widens into it (`A <: A | B`); narrowing back out is the checked
+    /// `x.as<T>()`. **Declared-only — never produced by inference** (inference joins conflicts to
+    /// `dyn`, never to a union). Always built through [`Type::union`], which keeps the invariant
+    /// that the vector holds **≥2 distinct, non-`dyn`, non-`Union` members** (flattened, deduped;
+    /// a `dyn` member absorbs the whole thing; a singleton collapses to the bare member).
+    Union(Vec<Type>),
 }
 
 impl Type {
@@ -131,6 +138,12 @@ impl Type {
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
             (Dyn, _) => false,
+            // A union is a subtype of `sup` only if *every* arm is (`int | string <: dyn` already
+            // held above; `int | string <: A` needs both). Checked before the member rule so
+            // `(A|B) <: (C|D)` decomposes arm-by-arm on the left first.
+            (Union(members), _) => members.iter().all(|m| Type::subtype(m, sup)),
+            // A type widens into a union if it is a subtype of *any* member.
+            (_, Union(members)) => members.iter().any(|m| Type::subtype(sub, m)),
             (List(a), List(b)) => Type::subtype(a, b),
             (Set(a), Set(b)) => Type::subtype(a, b),
             (Map(ak, av), Map(bk, bv)) => Type::subtype(ak, bk) && Type::subtype(av, bv),
@@ -190,6 +203,46 @@ impl Type {
                 | "Option"
                 | "Result"
         )
+    }
+
+    /// Build a union from its members, **normalizing**: flatten nested unions, drop structural
+    /// duplicates, preserve first-seen order. Two collapses keep the [`Type::Union`] invariant
+    /// (≥2 distinct, non-`dyn`, non-`Union` members) so equality / [`Display`] / [`Self::subtype`]
+    /// stay simple:
+    ///
+    /// - **`dyn` absorbs**: a union that includes the open top *is* the open top (`int | dyn` = `dyn`).
+    /// - **singleton collapses**: one distinct member is just that member (`int | int` = `int`).
+    ///
+    /// This is the only constructor for a union; nothing builds the variant directly. An empty
+    /// input is [`Type::Unknown`] (a degenerate case the parser cannot produce — a union always
+    /// has members — but defined for totality).
+    pub fn union(members: impl IntoIterator<Item = Type>) -> Type {
+        let mut flat: Vec<Type> = Vec::new();
+        for m in members {
+            match m {
+                Type::Dyn => return Type::Dyn,
+                Type::Union(inner) => {
+                    for t in inner {
+                        if t == Type::Dyn {
+                            return Type::Dyn;
+                        }
+                        if !flat.contains(&t) {
+                            flat.push(t);
+                        }
+                    }
+                }
+                other => {
+                    if !flat.contains(&other) {
+                        flat.push(other);
+                    }
+                }
+            }
+        }
+        match flat.len() {
+            0 => Type::Unknown,
+            1 => flat.pop().unwrap(),
+            _ => Type::Union(flat),
+        }
     }
 
     /// Desugar a surface [`TypeRef`] into a lattice [`Type`]. `?T` becomes `Option<T>`; the
@@ -263,6 +316,15 @@ impl std::fmt::Display for Type {
                 write!(f, ") -> {ret}")
             }
             Type::Var(n) => write!(f, "?{n}"),
+            Type::Union(members) => {
+                for (i, m) in members.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(" | ")?;
+                    }
+                    write!(f, "{m}")?;
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -400,6 +462,54 @@ mod tests {
         assert!(Type::subtype(&Type::Unknown, &Type::Int));
         assert!(Type::subtype(&Type::Int, &Type::Unknown));
         assert!(Type::subtype(&Type::Var(0), &Type::String));
+    }
+
+    #[test]
+    fn union_normalizes_members() {
+        // Flatten nested unions, dedupe, preserve first-seen order.
+        assert_eq!(
+            Type::union([
+                Type::Int,
+                Type::union([Type::String, Type::Int]),
+                Type::String,
+            ]),
+            Type::Union(vec![Type::Int, Type::String])
+        );
+        // A single distinct member collapses to the bare type.
+        assert_eq!(Type::union([Type::Int, Type::Int]), Type::Int);
+        // `dyn` absorbs the whole union (a union including the open top *is* the open top).
+        assert_eq!(Type::union([Type::Int, Type::Dyn]), Type::Dyn);
+        assert_eq!(
+            Type::union([Type::union([Type::Int, Type::Dyn]), Type::String]),
+            Type::Dyn
+        );
+        // An empty union degenerates to the inference hole (parser cannot produce this).
+        assert_eq!(Type::union([]), Type::Unknown);
+    }
+
+    #[test]
+    fn union_display() {
+        assert_eq!(
+            Type::union([Type::Int, Type::String, Type::Bool]).to_string(),
+            "int | string | bool"
+        );
+    }
+
+    #[test]
+    fn union_subtyping_both_directions() {
+        let int_or_str = Type::union([Type::Int, Type::String]);
+        // A member widens into the union.
+        assert!(Type::subtype(&Type::Int, &int_or_str));
+        assert!(Type::subtype(&Type::String, &int_or_str));
+        // A non-member does not.
+        assert!(!Type::subtype(&Type::Bool, &int_or_str));
+        // A union is a subtype only if every arm is — `int | string <: dyn`, but not `<: int`.
+        assert!(Type::subtype(&int_or_str, &Type::Dyn));
+        assert!(!Type::subtype(&int_or_str, &Type::Int));
+        // A union widens into a wider union (every arm is a member of the right).
+        let int_str_bool = Type::union([Type::Int, Type::String, Type::Bool]);
+        assert!(Type::subtype(&int_or_str, &int_str_bool));
+        assert!(!Type::subtype(&int_str_bool, &int_or_str));
     }
 
     #[test]
