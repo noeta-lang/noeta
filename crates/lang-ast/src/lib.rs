@@ -52,6 +52,11 @@ pub enum Stmt {
     Record(RecordDecl),
     /// A class declaration: `class Order { fields... methods... }`.
     Class(ClassDecl),
+    /// A standalone `impl Trait for Type { ... }` declaration — implementing a built-in trait
+    /// for a type from *outside* its declaration. This is how a bodiless record (`type Route =
+    /// {...}`) declares a capability such as `impl Attribute for Route {}`; it works uniformly
+    /// for classes too. The target must be a type declared in the same module (the orphan rule).
+    Impl(ImplDecl),
     /// `namespace App.Orders;` — declares the file's namespace. M0 records the path but
     /// otherwise treats it as a no-op (real module scoping is M1).
     Namespace { path: Vec<String>, span: Span },
@@ -111,6 +116,7 @@ impl Stmt {
             Stmt::Enum(decl) => decl.span,
             Stmt::Record(decl) => decl.span,
             Stmt::Class(decl) => decl.span,
+            Stmt::Impl(decl) => decl.span,
         }
     }
 }
@@ -181,6 +187,24 @@ pub struct TypeParam {
 pub struct ImplBlock {
     pub trait_name: String,
     pub trait_span: Span,
+    pub methods: Vec<FnDecl>,
+    pub span: Span,
+}
+
+/// A standalone `impl Trait for Type { ... }` declaration (top-level, not inside a class body).
+/// Implements a built-in trait for a type from outside its declaration — the mechanism by which
+/// a bodiless record declares a capability (`impl Attribute for Route {}`). The checker validates
+/// the trait, requires `target` to be a type declared in the same module (orphan rule), records
+/// the satisfaction for bound/gate checks, and folds it into the target's trait coherence.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImplDecl {
+    pub trait_name: String,
+    pub trait_span: Span,
+    pub target: String,
+    pub target_span: Span,
+    /// Methods written in the impl body. Empty for a marker/capability trait (e.g. `Attribute`);
+    /// a non-empty body is parsed but only validated for arity in pass 1 (runtime dispatch of
+    /// standalone-impl methods is a later slice).
     pub methods: Vec<FnDecl>,
     pub span: Span,
 }

@@ -809,7 +809,13 @@ impl<'m> FnCompiler<'m> {
             // separately; as statements they emit no code (the tree-walker likewise just
             // records them in scope). `namespace` is a no-op; a non-`std` `use` registers
             // opaque stubs (also at compile time).
-            Stmt::Record(_) | Stmt::Class(_) | Stmt::Enum(_) | Stmt::Namespace { .. } => Ok(()),
+            // A standalone `impl Trait for T {}` is a compile-time capability declaration (checked
+            // in the front end); a marker/capability impl emits no code.
+            Stmt::Record(_)
+            | Stmt::Class(_)
+            | Stmt::Enum(_)
+            | Stmt::Impl(_)
+            | Stmt::Namespace { .. } => Ok(()),
             // `use std.{json, ...}` binds each native module as a global value (mirroring the
             // tree-walker's `declare_use`); other imports emit nothing.
             Stmt::Use { path, names, .. } => {

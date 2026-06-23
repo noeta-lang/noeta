@@ -1301,6 +1301,33 @@ where
         let class_destructor = just(T::DestructKw)
             .ignore_then(block.clone())
             .map(ClassMember::Destructor);
+        // `impl Trait for Type { ... }` — a *standalone* (top-level) trait implementation, the
+        // mechanism by which a bodiless record declares a capability (`impl Attribute for Route
+        // {}`). The `for Type` is what distinguishes it from the class-body `impl Trait { ... }`
+        // above. The checker requires `Type` to be declared in the same module (orphan rule).
+        let standalone_impl = just(T::ImplKw)
+            .ignore_then(id.clone())
+            .then_ignore(just(T::ForKw))
+            .then(id.clone())
+            .then(
+                method
+                    .clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(
+                move |(((trait_name, trait_span), (target, target_span)), methods), e| {
+                    Stmt::Impl(lang_ast::ImplDecl {
+                        trait_name,
+                        trait_span,
+                        target,
+                        target_span,
+                        methods,
+                        span: ctx.to_span(e.span()),
+                    })
+                },
+            );
         let class_decl = just(T::ClassKw)
             .ignore_then(id.clone())
             .then(type_params.clone())
@@ -1558,6 +1585,7 @@ where
             break_,
             continue_,
             fn_decl,
+            standalone_impl,
             attributed_type_decl,
             namespace_decl,
             use_decl,
@@ -2080,6 +2108,13 @@ mod tests {
     fn coalesce_assign_desugars_to_coalesce() {
         // `x ??= y` desugars to `x = x ?? y`, reusing the `Coalesce` node (so it short-circuits).
         insta::assert_snapshot!(pretty("x ??= compute();"));
+    }
+
+    #[test]
+    fn standalone_impl_parses() {
+        // A top-level `impl Trait for Type { ... }` — the `for Type` distinguishes it from the
+        // class-body `impl Trait { ... }`. A marker capability impl has an empty body.
+        insta::assert_snapshot!(pretty("impl Attribute for Route {}"));
     }
 
     #[test]

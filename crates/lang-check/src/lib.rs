@@ -66,8 +66,8 @@
 use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
-    Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock, MatchArm, Param,
-    Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef, UnaryOp,
+    Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock, ImplDecl,
+    MatchArm, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef, UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -177,6 +177,10 @@ struct Checker {
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
     /// separately (a built-in via [`Type::is_builtin_name`], a parameter via [`Self::type_params`]).
     types: HashSet<String>,
+    /// Standalone `impl Trait for T {}` declarations, grouped by target type name, as
+    /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
+    /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
+    standalone_impls: HashMap<String, Vec<(String, Span)>>,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": ["Comparable"]}`). Empty at top
     /// level; saved and restored around each generic declaration. The bounds drive body-side
@@ -340,6 +344,19 @@ impl Checker {
                             self.types.insert(name.name.clone());
                         }
                     }
+                }
+                // A standalone `impl Trait for T {}` registers `T` as satisfying the trait (for
+                // bound/gate checks) and records the occurrence so the target's coherence check
+                // counts it. Validity (orphan rule, trait, body) is checked in pass 2.
+                Stmt::Impl(decl) => {
+                    self.record_trait_impls(
+                        &decl.target,
+                        std::iter::once(decl.trait_name.as_str()),
+                    );
+                    self.standalone_impls
+                        .entry(decl.target.clone())
+                        .or_default()
+                        .push((decl.trait_name.clone(), decl.trait_span));
                 }
                 _ => {}
             }
@@ -536,6 +553,7 @@ impl Checker {
             Stmt::Record(r) => self.check_record(r),
             Stmt::Class(c) => self.check_class(c, env),
             Stmt::Enum(e) => self.check_enum(e),
+            Stmt::Impl(decl) => self.check_standalone_impl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
         }
     }
@@ -680,9 +698,16 @@ impl Checker {
             self.check_type_opt(&f.ty);
         }
         self.check_derives(&r.derives);
-        self.check_coherence(&r.derives, &[]);
+        let standalone = self.standalone_for(&r.name);
+        self.check_coherence(&r.derives, &[], &standalone);
         self.check_attrs(&r.attrs);
         self.type_params = saved;
+    }
+
+    /// The `(trait, span)` occurrences of every standalone `impl Trait for <name> {}`, cloned so a
+    /// `&mut self` coherence check can borrow them without conflicting with `self.standalone_impls`.
+    fn standalone_for(&self, name: &str) -> Vec<(String, Span)> {
+        self.standalone_impls.get(name).cloned().unwrap_or_default()
     }
 
     fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
@@ -696,7 +721,8 @@ impl Checker {
             self.check_type_opt(&f.ty);
         }
         self.check_derives(&c.derives);
-        self.check_coherence(&c.derives, &c.impls);
+        let standalone = self.standalone_for(&c.name);
+        self.check_coherence(&c.derives, &c.impls, &standalone);
         self.check_attrs(&c.attrs);
         for block in &c.impls {
             self.check_impl(block);
@@ -726,7 +752,8 @@ impl Checker {
             }
         }
         self.check_derives(&e.derives);
-        self.check_coherence(&e.derives, &[]);
+        let standalone = self.standalone_for(&e.name);
+        self.check_coherence(&e.derives, &[], &standalone);
         self.check_attrs(&e.attrs);
         self.type_params = saved;
     }
@@ -818,16 +845,24 @@ impl Checker {
 
     // ----- traits: impl coherence and derive validation (M1.8) -----
 
-    /// Validate an `impl Trait { ... }` block: the trait must be a known built-in, and the block
-    /// must provide the trait's required method with the right arity. The impl's method *bodies*
-    /// are checked separately (they are flattened into `ClassDecl::methods`).
+    /// Validate an in-body `impl Trait { ... }` block: the trait must be a known built-in, and the
+    /// block must provide the trait's required method with the right arity. The impl's method
+    /// *bodies* are checked separately (they are flattened into `ClassDecl::methods`).
     fn check_impl(&mut self, block: &ImplBlock) {
-        let Some(t) = BuiltinTrait::lookup(&block.trait_name) else {
+        self.check_trait_impl(&block.trait_name, block.trait_span, &block.methods);
+    }
+
+    /// The trait-side validation shared by in-body `impl` blocks and standalone `impl Trait for T`
+    /// declarations: the trait must be a known built-in, and a non-marker trait must be given its
+    /// required method with the right arity. (The orphan rule and the standalone-only body
+    /// restriction are enforced by the caller, [`Self::check_standalone_impl`].)
+    fn check_trait_impl(&mut self, trait_name: &str, trait_span: Span, methods: &[FnDecl]) {
+        let Some(t) = BuiltinTrait::lookup(trait_name) else {
             self.diags.push(
                 Diagnostic::error(
                     DiagnosticCode::UnknownTrait,
-                    block.trait_span,
-                    format!("unknown trait `{}`", block.trait_name),
+                    trait_span,
+                    format!("unknown trait `{trait_name}`"),
                 )
                 .with_help(
                     "only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)",
@@ -836,18 +871,17 @@ impl Checker {
             return;
         };
         let Some((req_name, req_arity)) = t.required_method else {
-            return; // a marker trait (e.g. `Clone`) imposes no hand-written method
+            return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
         };
-        match block.methods.iter().find(|m| m.name == req_name) {
+        match methods.iter().find(|m| m.name == req_name) {
             None => self.diags.push(
                 Diagnostic::error(
                     DiagnosticCode::InvalidImpl,
-                    block.trait_span,
-                    format!("`impl {}` must define `fn {req_name}`", block.trait_name),
+                    trait_span,
+                    format!("`impl {trait_name}` must define `fn {req_name}`"),
                 )
                 .with_help(format!(
-                    "the `{}` trait requires the `{req_name}` method",
-                    block.trait_name
+                    "the `{trait_name}` trait requires the `{req_name}` method"
                 )),
             ),
             Some(m) if m.params.len() != req_arity => self.diags.push(Diagnostic::error(
@@ -862,6 +896,47 @@ impl Checker {
         }
     }
 
+    /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
+    /// trait-side validation ([`Self::check_trait_impl`], also run): the **orphan rule** — `T` must
+    /// be a record/class/enum declared in this module, not a built-in or a `use`-imported name
+    /// (E0013) — and the **pass-1 body restriction** — only empty-body marker/capability impls are
+    /// supported (a body with methods needs runtime dispatch in both backends, a later slice).
+    /// Coherence is enforced together with the target's `@derive`s/in-body impls in
+    /// [`Self::check_coherence`].
+    fn check_standalone_impl(&mut self, decl: &ImplDecl) {
+        if !self.records.contains_key(&decl.target) && !self.enums.contains_key(&decl.target) {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::UnknownType,
+                    decl.target_span,
+                    format!(
+                        "cannot implement a trait for `{}`: it is not a record, class, or enum \
+                         declared in this module",
+                        decl.target
+                    ),
+                )
+                .with_help(
+                    "a standalone `impl` may only target a type you declare — implement the trait \
+                     where the type is defined",
+                ),
+            );
+        }
+        if !decl.methods.is_empty() {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::InvalidImpl,
+                    decl.span,
+                    "a standalone `impl` with methods is not yet supported",
+                )
+                .with_help(
+                    "only an empty-body capability impl (e.g. `impl Attribute for X {}`) is \
+                     supported here; write trait methods inside the type's own `class` body",
+                ),
+            );
+        }
+        self.check_trait_impl(&decl.trait_name, decl.trait_span, &decl.methods);
+    }
+
     /// Enforce **trait coherence** (overlap/uniqueness) on a single type: a trait may be
     /// implemented at most once, counting both a `@derive(T)` directive and an `impl T { }` block
     /// as implementations. A second implementation of an already-implemented trait — whether
@@ -870,17 +945,26 @@ impl Checker {
     /// the first one is. This keeps each `(type, trait)` pair single-implementation, so
     /// [`Self::satisfies`] and runtime dispatch are unambiguous.
     ///
-    /// The orphan half of coherence needs no check: `impl` blocks are syntactically confined to a
-    /// class body, so a trait can only ever be implemented for the type that owns it, and every
-    /// trait is a built-in. Records and enums carry no `impl` blocks (pass an empty slice).
-    fn check_coherence(&mut self, derives: &[(String, Span)], impls: &[ImplBlock]) {
-        // Source order is derives-then-impls: `@derive(...)` directives lead the declaration,
-        // `impl` blocks sit in the body, so this scan reports the textually-later duplicate.
+    /// The orphan half of coherence is enforced separately: an in-body `impl` block can only name
+    /// the type that owns it, and a standalone `impl Trait for T {}` is required (in
+    /// [`Self::check_standalone_impl`]) to target a type declared in the same module — so a trait
+    /// is still only ever implemented for a local type, and every trait is a built-in. Records and
+    /// enums carry no in-body `impl` blocks (pass an empty slice); `standalone` carries the
+    /// `(trait, span)` of every standalone impl targeting this type.
+    fn check_coherence(
+        &mut self,
+        derives: &[(String, Span)],
+        impls: &[ImplBlock],
+        standalone: &[(String, Span)],
+    ) {
+        // Source order is derives, then in-body impls, then standalone impls: this scan reports the
+        // textually-later duplicate and names where the first one is.
         let mut seen: HashMap<&str, Span> = HashMap::new();
         let occurrences = derives
             .iter()
             .map(|(name, span)| (name.as_str(), *span))
-            .chain(impls.iter().map(|b| (b.trait_name.as_str(), b.trait_span)));
+            .chain(impls.iter().map(|b| (b.trait_name.as_str(), b.trait_span)))
+            .chain(standalone.iter().map(|(name, span)| (name.as_str(), *span)));
         for (name, span) in occurrences {
             match seen.get(name) {
                 Some(_first) => self.diags.push(

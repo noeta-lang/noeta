@@ -1,0 +1,5 @@
+// The orphan rule: a standalone `impl` may only target a type declared in this module. `Widget`
+// is never declared, so implementing a trait for it is rejected (E0013).
+// expect: error E0013 at 5:20
+// expect: exit 1
+impl Attribute for Widget {}

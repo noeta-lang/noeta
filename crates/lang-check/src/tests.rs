@@ -396,6 +396,36 @@ fn two_impl_blocks_for_same_trait_conflict() {
 }
 
 #[test]
+fn standalone_marker_impl_is_accepted() {
+    // A bodiless record declares a capability via a same-module standalone `impl` — the mechanism
+    // that lets a record (which has no body) participate in a trait. No diagnostics.
+    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn standalone_impl_for_undeclared_type_is_orphan() {
+    // The orphan rule: a standalone `impl` may only target a type declared in this module.
+    let src = "impl Attribute for Widget {}\n";
+    assert_eq!(codes(src), ["E0013"]);
+}
+
+#[test]
+fn standalone_impl_counts_toward_coherence() {
+    // Coherence spans all three implementation forms: a `@derive` and a standalone `impl` of the
+    // same trait for one type conflict, just like two derives or two in-body impls.
+    let src = "@derive(Clone)\ntype Route = { path: string };\nimpl Clone for Route {}\n";
+    assert_eq!(codes(src), ["E0027"]);
+}
+
+#[test]
+fn standalone_impl_with_methods_is_unsupported() {
+    // Pass 1 supports only empty-body capability impls; a body with methods is rejected (E0015).
+    let src = "type Route = { path: string };\nimpl Attribute for Route {\n  fn extra(): int { return 1; }\n}\n";
+    assert_eq!(codes(src), ["E0015"]);
+}
+
+#[test]
 fn deriving_distinct_traits_with_an_impl_is_coherent() {
     // Different traits never conflict — only a repeated one does.
     let src = "@derive(Equatable, Comparable)\nclass P {\n  x: int\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n}\n";

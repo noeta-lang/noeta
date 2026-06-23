@@ -1,0 +1,6 @@
+---
+source: crates/lang-parser/src/lib.rs
+expression: "pretty(\"impl Attribute for Route {}\")"
+---
+(program @0..27
+  (impl Attribute for Route @0..27))

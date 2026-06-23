@@ -1,0 +1,7 @@
+// Coherence counts a standalone `impl` alongside `@derive`/in-body impls: implementing the same
+// capability twice for one type is rejected (E0027), pointing at the later occurrence.
+// expect: error E0027 at 7:6
+// expect: exit 1
+type Route = { path: string };
+impl Attribute for Route {}
+impl Attribute for Route {}

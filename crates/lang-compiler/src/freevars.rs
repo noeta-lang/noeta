@@ -173,6 +173,7 @@ fn collect_nested_frees_stmt(
         Stmt::Enum(_)
         | Stmt::Record(_)
         | Stmt::Class(_)
+        | Stmt::Impl(_)
         | Stmt::Namespace { .. }
         | Stmt::Use { .. }
         | Stmt::Break { .. }
@@ -363,6 +364,7 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
         Stmt::Enum(_)
         | Stmt::Record(_)
         | Stmt::Class(_)
+        | Stmt::Impl(_)
         | Stmt::Namespace { .. }
         | Stmt::Use { .. }
         | Stmt::Break { .. }
@@ -531,6 +533,7 @@ fn collect_refs_stmt(
         Stmt::Enum(_)
         | Stmt::Record(_)
         | Stmt::Class(_)
+        | Stmt::Impl(_)
         | Stmt::Namespace { .. }
         | Stmt::Use { .. }
         | Stmt::Break { .. }

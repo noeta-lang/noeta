@@ -646,6 +646,9 @@ impl Interpreter {
                 self.declare_class(decl);
                 Ok(Flow::Normal)
             }
+            // A standalone `impl Trait for T {}` is a compile-time capability declaration
+            // (validated by the checker); a marker/capability impl has no runtime effect.
+            Stmt::Impl(_) => Ok(Flow::Normal),
             // `namespace` is a no-op in M0 (no module scoping yet); `use` registers each
             // imported name as an opaque stub so references resolve.
             Stmt::Namespace { .. } => Ok(Flow::Normal),

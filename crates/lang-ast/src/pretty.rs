@@ -6,8 +6,8 @@
 //! parse→print→parse property test (Slice 9) builds on.
 
 use crate::{
-    ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program,
-    RecordDecl, Stmt, StrPart, TypeParam, TypeRef,
+    ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ImplDecl, ObjectLit, Param, Pattern,
+    Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef,
 };
 use lang_span::Span;
 
@@ -78,6 +78,7 @@ impl Pretty for Stmt {
             Stmt::Enum(decl) => decl.pretty(out, level),
             Stmt::Record(decl) => decl.pretty(out, level),
             Stmt::Class(decl) => decl.pretty(out, level),
+            Stmt::Impl(decl) => decl.pretty(out, level),
             Stmt::Namespace { path, span: s } => {
                 indent(out, level);
                 out.push_str(&format!("(namespace {} {})", path.join("."), span(*s)));
@@ -296,6 +297,23 @@ impl Pretty for ClassDecl {
             self.name,
             type_params_str(&self.type_params),
             fields.join(" "),
+            span(self.span)
+        ));
+        for method in &self.methods {
+            out.push('\n');
+            method.pretty(out, level + 1);
+        }
+        out.push(')');
+    }
+}
+
+impl Pretty for ImplDecl {
+    fn pretty(&self, out: &mut String, level: usize) {
+        indent(out, level);
+        out.push_str(&format!(
+            "(impl {} for {} {}",
+            self.trait_name,
+            self.target,
             span(self.span)
         ));
         for method in &self.methods {
