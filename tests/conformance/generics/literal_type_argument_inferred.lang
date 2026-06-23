@@ -1,0 +1,11 @@
+// A record/object literal now infers its type arguments from its field values: `Box { value: 5 }`
+// is `Box<int>`, so `b.value` is precisely `int` and passing it where an `int` is expected
+// type-checks and runs. Previously a literal's arguments were unspecified. Both backends agree.
+// expect: stdout "5"
+// expect: exit 0
+class Box<T> {
+    value: T
+}
+fn need_int(n: int): int { return n; }
+b = Box { value: 5 };
+echo need_int(b.value);

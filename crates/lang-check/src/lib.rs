@@ -1134,14 +1134,40 @@ impl Checker {
                 if let Some(spread) = &lit.spread {
                     self.synth(spread, env);
                 }
+                // Infer the type's arguments from the field values: match each field's declared
+                // type (which may be a type parameter) against the value's type, then read the
+                // parameters off in declaration order. `Box { value: 1 }` → `Box<int>`. With no
+                // generic parameters the result is the bare name; if nothing constrained any
+                // parameter the arguments stay empty (a wildcard, compatible with any instantiation).
+                let params = self
+                    .generic_types
+                    .get(&lit.type_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let decls = self
+                    .records
+                    .get(&lit.type_name)
+                    .cloned()
+                    .unwrap_or_default();
+                let pset: HashSet<String> = params.iter().cloned().collect();
+                let mut subst: HashMap<String, Type> = HashMap::new();
                 for f in &lit.fields {
-                    self.synth(&f.value, env);
+                    let vty = self.synth(&f.value, env);
+                    if !pset.is_empty()
+                        && let Some((_, declared)) = decls.iter().find(|(n, _)| n == &f.name)
+                    {
+                        bind_type_params(declared, &vty, &pset, &mut subst);
+                    }
                 }
-                // A record/object literal does not yet infer its type arguments from field values
-                // (e.g. `Box { value: 1 }` is `Box`, not `Box<int>`); constructors via an
-                // associated `fn` do carry precise arguments. Literal-argument inference is a noted
-                // follow-up (see `plans/deferred.md`).
-                Type::Named(lit.type_name.clone(), Vec::new())
+                let args = if subst.is_empty() {
+                    Vec::new()
+                } else {
+                    params
+                        .iter()
+                        .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
+                        .collect()
+                };
+                Type::Named(lit.type_name.clone(), args)
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);

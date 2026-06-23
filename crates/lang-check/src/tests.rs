@@ -166,6 +166,17 @@ fn associated_call_is_typed_precisely() {
 }
 
 #[test]
+fn literal_infers_its_type_arguments_from_fields() {
+    // `Box { value: <v> }` infers `T` from the field value, so the element type is tracked: a
+    // string-built box's field is a `string` (mismatch against `int`), an int-built one is clean.
+    let cls = "class Box<T> { value: T }\nfn need_int(n: int): int { return n; }\n";
+    let bad = format!("{cls}b = Box {{ value: \"hi\" }};\necho need_int(b.value);\n");
+    assert_eq!(codes(&bad), ["E0007"]);
+    let ok = format!("{cls}b = Box {{ value: 5 }};\necho need_int(b.value);\n");
+    assert!(codes(&ok).is_empty());
+}
+
+#[test]
 fn instance_keeps_its_type_argument() {
     // `Box<int>` tracks its element type through the instance: `b.get()` is `int` (passes where an
     // `int` is wanted), while `Box<string>.get()` is `string` (a mismatch against `int`).

@@ -1,0 +1,11 @@
+// The inferred argument is carried both ways: `Box { value: "hi" }` is `Box<string>`, so `b.value`
+// is `string`, and passing it to a function expecting `int` is a static error (`E0007`) — the
+// literal's element type is tracked, not erased.
+// expect: error E0007 at 11:6
+// expect: exit 1
+class Box<T> {
+    value: T
+}
+fn need_int(n: int): int { return n; }
+b = Box { value: "hi" };
+echo need_int(b.value);
