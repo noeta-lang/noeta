@@ -1,0 +1,15 @@
+// Materialization maps positional and named attribute arguments onto the record's fields, so a
+// multi-field attribute round-trips through the manifest into a correctly-built instance.
+// expect: stdout "60"
+// expect: stdout "true"
+// expect: exit 0
+type Cache = { ttl: int, eager: bool };
+impl Attribute for Cache {}
+
+#[Cache(ttl: 60, eager: true)]
+type Page = { id: int };
+
+for c in attributes_of::<Cache>() {
+    echo c.value.ttl;
+    echo c.value.eager;
+}

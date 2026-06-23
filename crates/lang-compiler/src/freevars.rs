@@ -197,6 +197,7 @@ fn collect_nested_frees_expr(
         | Expr::Str { .. }
         | Expr::Int { .. }
         | Expr::Float { .. }
+        | Expr::AttributesOf { .. }
         | Expr::Bool { .. } => {}
         Expr::Unary { operand, .. } => collect_nested_frees_expr(operand, enclosing, globals, out),
         Expr::Binary { lhs, rhs, .. }
@@ -453,6 +454,7 @@ fn collect_bindings_expr(expr: &Expr, local: &mut HashSet<String>) {
         | Expr::Int { .. }
         | Expr::Float { .. }
         | Expr::Bool { .. }
+        | Expr::AttributesOf { .. }
         | Expr::Ident { .. } => {}
     }
 }
@@ -633,6 +635,10 @@ fn collect_refs_expr(
             collect_refs_expr(value, enclosing, globals, out);
             collect_refs_expr(fallback, enclosing, globals, out);
         }
-        Expr::Str { .. } | Expr::Int { .. } | Expr::Float { .. } | Expr::Bool { .. } => {}
+        Expr::Str { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::AttributesOf { .. } => {}
     }
 }

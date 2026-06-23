@@ -1,0 +1,24 @@
+// `attributes_of::<T>()` materializes every `#[T(...)]` attribute from the build manifest into a
+// real `T` record, each paired with its target, as a `List<Attributed<T>>`. The query is resolved
+// at compile time (closed-world); both backends build the values from the shared reflection
+// artifact, so they agree by construction — this is the slice that brings the manifest under the
+// differential oracle.
+// expect: stdout "Users"
+// expect: stdout "/users"
+// expect: stdout "Orders"
+// expect: stdout "/orders"
+// expect: exit 0
+type Route = { path: string };
+impl Attribute for Route {}
+
+#[Route("/users")]
+type Users = { id: int };
+
+#[Route("/orders")]
+type Orders = { id: int };
+
+routes = attributes_of::<Route>();
+for r in routes {
+    echo r.target;
+    echo r.value.path;
+}

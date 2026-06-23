@@ -4,7 +4,7 @@
 //! the tree-walker and the VM **by construction** — there is no second walk to drift from the first.
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
-use crate::{AttrArg, Attribute, Program, Stmt};
+use crate::{AttrArg, AttrValue, Attribute, Program, Stmt};
 
 /// Everything reflection needs about a program, derived purely from its AST.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -117,6 +117,37 @@ pub fn build(program: &Program) -> ReflectionInfo {
         }
     }
     ReflectionInfo { manifest, types }
+}
+
+/// Resolve an attribute's arguments to its record's field values, in declaration order — the shared
+/// mapping both backends use to materialize the attribute instance, so they build identical values.
+/// Positional arguments fill fields left to right; named arguments bind by field name. The use-site
+/// construction check (E0009/E0007/E0005) guarantees a well-formed program supplies exactly one
+/// value per field, so a runnable program never leaves a field unresolved.
+pub fn materialize_args(attr: &AttributeRecord, fields: &[String]) -> Vec<AttrValue> {
+    let mut values: Vec<Option<AttrValue>> = vec![None; fields.len()];
+    let mut next_positional = 0usize;
+    for arg in &attr.args {
+        let idx = match &arg.name {
+            Some(fname) => fields.iter().position(|f| f == fname),
+            None => {
+                let i = next_positional;
+                next_positional += 1;
+                Some(i)
+            }
+        };
+        if let Some(i) = idx
+            && i < values.len()
+        {
+            values[i] = Some(arg.value.clone());
+        }
+    }
+    // A field with no supplied value cannot occur in a runnable program (the construction check
+    // rejects it); the `unit` fallback is unreachable defensive code.
+    values
+        .into_iter()
+        .map(|v| v.unwrap_or(AttrValue::Bool(false)))
+        .collect()
 }
 
 fn push_attrs(manifest: &mut Vec<AttributeRecord>, target: &str, attrs: &[Attribute]) {

@@ -509,6 +509,10 @@ struct Interpreter {
     /// [`lang_stdlib::SandboxHost`] so file IO, PRNG, and clock stay isolated and identical to
     /// the VM by construction; a real host (later M2 slices) swaps in without touching this struct.
     host: Box<dyn lang_stdlib::Host>,
+    /// The shared reflection artifact (attribute manifest + type registry), built from the program
+    /// by the *same* `lang_ast::reflect::build` the VM uses — so `attributes_of` materializes
+    /// identical values in both backends. Populated at the start of `run`.
+    reflection: lang_ast::reflect::ReflectionInfo,
 }
 
 impl Interpreter {
@@ -553,10 +557,12 @@ impl Interpreter {
             ids: IdGen::new(seed),
             scope: global,
             host,
+            reflection: lang_ast::reflect::ReflectionInfo::default(),
         }
     }
 
     fn run(mut self, program: &Program) -> RunResult {
+        self.reflection = lang_ast::reflect::build(program);
         for stmt in &program.stmts {
             match self.exec_stmt(stmt) {
                 Ok(Flow::Normal) => {}
@@ -966,6 +972,51 @@ impl Interpreter {
     /// Construct a record/class instance from an all-fields object literal. This is the
     /// full-initialization choke point: every declared field must end up set (by a named
     /// initializer or the `..` spread), or it is a [`DiagnosticCode::MissingField`] error.
+    /// Materialize the `#[type_name(...)]` attributes from the manifest into a `List<Attributed<T>>`
+    /// — each a real `T` record (built from its stored args) paired with its target. Builds fresh
+    /// `TypeDef`s from the shared reflection info; the VM builds the matching shapes the same way, so
+    /// the materialized values agree across backends by construction.
+    fn materialize_attributes(&self, type_name: &str) -> Value {
+        let info = self.reflection.type_named(type_name);
+        let fields: Vec<String> = info.map(|t| t.fields.clone()).unwrap_or_default();
+        let is_record = !matches!(
+            info.map(|t| t.kind),
+            Some(lang_ast::reflect::TypeKind::Class)
+        );
+        let attr_def = Rc::new(fresh_type_def(type_name, &fields, is_record));
+        let attributed_def = Rc::new(fresh_type_def(
+            "Attributed",
+            &["target".to_string(), "value".to_string()],
+            true,
+        ));
+        let items: Vec<Value> = self
+            .reflection
+            .manifest
+            .iter()
+            .filter(|a| a.name == type_name)
+            .map(|a| {
+                let values = lang_ast::reflect::materialize_args(a, &fields);
+                let t_fields: BTreeMap<String, Value> = fields
+                    .iter()
+                    .cloned()
+                    .zip(values.iter().map(attr_value_to_eval))
+                    .collect();
+                let t_value = Value::Object(Rc::new(ObjectValue {
+                    def: attr_def.clone(),
+                    fields: t_fields,
+                }));
+                let mut a_fields = BTreeMap::new();
+                a_fields.insert("target".to_string(), Value::Str(a.target.clone()));
+                a_fields.insert("value".to_string(), t_value);
+                Value::Object(Rc::new(ObjectValue {
+                    def: attributed_def.clone(),
+                    fields: a_fields,
+                }))
+            })
+            .collect();
+        Value::List(Rc::new(items))
+    }
+
     fn eval_object(&mut self, lit: &ObjectLit) -> Eval<Value> {
         let def = match self.scope.lookup(&lit.type_name) {
             Some(Value::Type(def)) => def,
@@ -1297,6 +1348,13 @@ impl Interpreter {
             Expr::TypeTest { expr, ty, .. } => {
                 let value = self.eval_expr(expr)?;
                 Ok(Value::Bool(runtime_matches(&value, ty)))
+            }
+            Expr::AttributesOf { ty, .. } => {
+                let type_name = match ty {
+                    TypeRef::Named { name, .. } => name.as_str(),
+                    _ => "",
+                };
+                Ok(self.materialize_attributes(type_name))
             }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
@@ -2648,6 +2706,39 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
         variant: variant.to_string(),
         data,
     }))
+}
+
+/// A minimal `TypeDef` for a reflection-materialized record (no methods, derives, or destructor) —
+/// the tree-walker counterpart to the VM's fresh `Shape`. Both carry only name + field names.
+fn fresh_type_def(name: &str, fields: &[String], is_record: bool) -> TypeDef {
+    TypeDef {
+        name: name.to_string(),
+        fields: fields
+            .iter()
+            .map(|f| FieldSpec {
+                name: f.clone(),
+                mutable: false,
+            })
+            .collect(),
+        methods: HashMap::new(),
+        destructor: None,
+        is_record,
+        derives_comparable: false,
+        derives_tojson: false,
+        opaque: false,
+    }
+}
+
+/// Convert a manifest attribute-argument literal to a tree-walker value. An identifier argument has
+/// no runtime value of its own, so it materializes as its name (a string) — matching the VM.
+fn attr_value_to_eval(value: &lang_ast::AttrValue) -> Value {
+    match value {
+        lang_ast::AttrValue::Str(s) => Value::Str(s.clone()),
+        lang_ast::AttrValue::Int(n) => Value::Int(*n),
+        lang_ast::AttrValue::Float(f) => Value::Float(*f),
+        lang_ast::AttrValue::Bool(b) => Value::Bool(*b),
+        lang_ast::AttrValue::Ident(name) => Value::Str(name.clone()),
+    }
 }
 
 /// Whether a runtime value matches a narrowing target type `ty` (`x.as<T>()`). Generics are

@@ -507,6 +507,10 @@ pub enum Expr {
         ty: TypeRef,
         span: Span,
     },
+    /// The reflection query `attributes_of::<T>()` — a compile-time-resolved lookup into the build
+    /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` record
+    /// paired with its annotated target). `ty` is the attribute type between the angle brackets.
+    AttributesOf { ty: TypeRef, span: Span },
     /// The type-test operator: `expr is T` is a `bool` — `true` if the runtime value is a `T`.
     /// Shares the runtime matcher with [`Expr::As`] (head-constructor match, generics erased) but
     /// yields a plain `bool` rather than `?T`. `ty` is the type written after `is`.
@@ -632,6 +636,7 @@ impl Expr {
             | Expr::Try { span, .. }
             | Expr::Coalesce { span, .. }
             | Expr::As { span, .. }
+            | Expr::AttributesOf { span, .. }
             | Expr::TypeTest { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }

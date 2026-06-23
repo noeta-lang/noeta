@@ -1,0 +1,8 @@
+// The capability gate: `attributes_of::<T>()` requires `T` to be a record/class implementing
+// `Attribute`. `Plain` is a record but is never marked, so the query is rejected (E0029).
+// expect: error E0029 at 7:10
+// expect: exit 1
+type Plain = { path: string };
+
+routes = attributes_of::<Plain>();
+echo routes;

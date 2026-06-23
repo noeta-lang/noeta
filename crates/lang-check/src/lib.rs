@@ -81,6 +81,7 @@ mod stdlib;
 /// in the module docs).
 pub fn check(program: &Program) -> Vec<Diagnostic> {
     let mut checker = Checker::default();
+    checker.register_prelude();
     checker.collect(program);
     checker.check_program(program);
     checker.diags
@@ -199,6 +200,27 @@ struct Checker {
 }
 
 impl Checker {
+    /// Register built-in prelude types the checker must know regardless of the program. Run before
+    /// `collect` so a user declaration of the same name shadows it (matching the backends, which
+    /// register `Ordering` the same way). `Attributed<T> { target: string, value: T }` is the
+    /// element type of `attributes_of::<T>()`'s result; it is an ordinary generic record so member
+    /// access (`a.target`, `a.value`) and `value`'s instantiation to `T` reuse the generic path.
+    fn register_prelude(&mut self) {
+        self.types.insert("Attributed".to_string());
+        self.records.insert(
+            "Attributed".to_string(),
+            vec![
+                ("target".to_string(), Type::String),
+                (
+                    "value".to_string(),
+                    Type::Named("T".to_string(), Vec::new()),
+                ),
+            ],
+        );
+        self.generic_types
+            .insert("Attributed".to_string(), vec!["T".to_string()]);
+    }
+
     /// Pass 1: register every top-level declaration so forward references resolve before any
     /// body is checked. Mirrors the compiler's "register types first" pass.
     fn collect(&mut self, program: &Program) {
@@ -1545,6 +1567,33 @@ impl Checker {
                 self.synth(expr, env);
                 self.check_type_ref(ty);
                 Type::Bool
+            }
+            Expr::AttributesOf { ty, span } => {
+                self.check_type_ref(ty);
+                let target = Type::from_ref(ty);
+                // The type argument must itself be an attribute — a record/class implementing
+                // `Attribute` (the same capability gate as a `#[T(...)]` use). Otherwise the
+                // manifest can hold no `T` to materialize.
+                let is_attribute = matches!(&target, Type::Named(n, _)
+                    if self.records.contains_key(n)
+                        && self.trait_impls.get(n).is_some_and(|ts| ts.contains("Attribute")));
+                if !is_attribute {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::NotAnAttribute,
+                            *span,
+                            format!("`attributes_of` requires an attribute type, but `{target}` is not one"),
+                        )
+                        .with_help(
+                            "name a record or class marked `impl Attribute for ` the type",
+                        ),
+                    );
+                    return Type::List(Box::new(Type::Dyn));
+                }
+                Type::List(Box::new(Type::Named(
+                    "Attributed".to_string(),
+                    vec![target],
+                )))
             }
         }
     }

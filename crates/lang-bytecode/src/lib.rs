@@ -350,6 +350,13 @@ pub enum Op {
         src: Reg,
         target: NarrowTarget,
     },
+    /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
+    /// module manifest, each materialized into a `T` record and paired with its target. `type_name`
+    /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
+    AttributesOf {
+        dst: Reg,
+        type_name: String,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -759,6 +766,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Narrow {
             dst, src, target, ..
         } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
+        Op::AttributesOf { dst, type_name } => {
+            format!("AttributesOf r{dst} <- attributes_of::<{type_name}>()")
+        }
         Op::IsType { dst, src, target } => {
             format!("IsType      r{dst} <- r{src} is {target:?}")
         }

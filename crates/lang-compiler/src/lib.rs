@@ -1466,6 +1466,15 @@ impl<'m> FnCompiler<'m> {
                 let target = narrow_target(ty);
                 self.code.push(Op::IsType { dst, src, target });
             }
+            Expr::AttributesOf { ty, .. } => {
+                // The attribute type is resolved at compile time (closed-world); the VM reads the
+                // matching manifest entries from `Module::reflection` and materializes them.
+                let type_name = match ty {
+                    TypeRef::Named { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                self.code.push(Op::AttributesOf { dst, type_name });
+            }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {

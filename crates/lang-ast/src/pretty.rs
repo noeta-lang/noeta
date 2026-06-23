@@ -566,6 +566,13 @@ impl Pretty for Expr {
                 expr.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::AttributesOf { ty, span: s } => {
+                out.push_str(&format!(
+                    "(attributes_of {} {})",
+                    type_ref_str(ty),
+                    span(*s)
+                ));
+            }
         }
     }
 }

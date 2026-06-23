@@ -760,6 +760,19 @@ where
                 desugar_if_then_else(cond, then_expr, else_expr, ctx.to_span(e.span()))
             });
 
+        // `attributes_of::<T>()` — the reflection manifest query. A keyword (so the type-argument
+        // turbofish parses unambiguously), `::<T>` carrying the attribute type, and a trailing `()`
+        // mirroring a call surface. Compile-time resolved; returns `List<Attributed<T>>`.
+        let attributes_of = just(T::AttributesOfKw)
+            .ignore_then(just(T::ColonColon))
+            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .then_ignore(just(T::LParen))
+            .then_ignore(just(T::RParen))
+            .map_with(move |ty, e| Expr::AttributesOf {
+                ty,
+                span: ctx.to_span(e.span()),
+            });
+
         let atom = choice((
             int,
             float,
@@ -770,6 +783,7 @@ where
             closure,
             if_then_else,
             match_,
+            attributes_of,
             list,
             map,
             set,
@@ -2147,6 +2161,13 @@ mod tests {
     fn coalesce_assign_desugars_to_coalesce() {
         // `x ??= y` desugars to `x = x ?? y`, reusing the `Coalesce` node (so it short-circuits).
         insta::assert_snapshot!(pretty("x ??= compute();"));
+    }
+
+    #[test]
+    fn attributes_of_parses() {
+        // `attributes_of::<T>()` — a keyword + turbofish type argument + `()` — parses to a
+        // dedicated reflection node carrying the attribute type.
+        insta::assert_snapshot!(pretty("x = attributes_of::<Route>();"));
     }
 
     #[test]

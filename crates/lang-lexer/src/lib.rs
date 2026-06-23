@@ -78,6 +78,11 @@ pub enum TokenKind {
     /// it parses unambiguously as an operator rather than an identifier.
     #[token("is")]
     IsKw,
+    /// The reflection keyword `attributes_of::<T>()` — a manifest query returning the materialized
+    /// `#[T(...)]` attributes (each paired with its target). A keyword so the type-argument form
+    /// parses unambiguously rather than as an identifier followed by comparisons.
+    #[token("attributes_of")]
+    AttributesOfKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -126,6 +131,9 @@ pub enum TokenKind {
     DotDot,
     #[token(".")]
     Dot,
+    // `::` must precede `:`; logos resolves the overlap by longest match.
+    #[token("::")]
+    ColonColon,
     #[token(":")]
     Colon,
     // `??=` / `??` must precede `?`; logos resolves the overlap by longest match.
@@ -236,6 +244,8 @@ impl TokenKind {
             TokenKind::PubKw => "PubKw",
             TokenKind::AsKw => "AsKw",
             TokenKind::IsKw => "IsKw",
+            TokenKind::AttributesOfKw => "AttributesOfKw",
+            TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
             TokenKind::TemplateStr => "TemplateStr",
@@ -316,6 +326,8 @@ impl TokenKind {
             TokenKind::PubKw => "`pub`",
             TokenKind::AsKw => "`as`",
             TokenKind::IsKw => "`is`",
+            TokenKind::AttributesOfKw => "`attributes_of`",
+            TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",
             TokenKind::TemplateStr => "a template string literal",

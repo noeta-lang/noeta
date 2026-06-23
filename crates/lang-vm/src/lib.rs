@@ -283,6 +283,44 @@ fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
 }
 
 impl<'m> Vm<'m> {
+    /// Materialize the `#[type_name(...)]` attributes from the module manifest into a
+    /// `List<Attributed<T>>` — each a real `T` record (built from its stored args) paired with its
+    /// target. Shapes are built fresh from the shared reflection info; because shape equality is
+    /// structural (name + fields), they match the tree-walker's by construction.
+    fn materialize_attributes(&self, type_name: &str) -> Value {
+        let attributed_shape = Rc::new(Shape::object(
+            ShapeKind::Record,
+            "Attributed",
+            vec!["target".to_string(), "value".to_string()],
+        ));
+        let info = self.module.reflection.type_named(type_name);
+        let fields: Vec<String> = info.map(|t| t.fields.clone()).unwrap_or_default();
+        let kind = match info.map(|t| t.kind) {
+            Some(lang_ast::reflect::TypeKind::Class) => ShapeKind::Class,
+            _ => ShapeKind::Record,
+        };
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .manifest
+            .iter()
+            .filter(|a| a.name == type_name)
+            .map(|a| {
+                let values: Vec<Value> = lang_ast::reflect::materialize_args(a, &fields)
+                    .iter()
+                    .map(attr_value_to_vm)
+                    .collect();
+                let t_shape = Rc::new(Shape::object(kind, type_name, fields.clone()));
+                let t_value = Value::object(t_shape, values);
+                Value::object(
+                    attributed_shape.clone(),
+                    vec![Value::string(&a.target), t_value],
+                )
+            })
+            .collect();
+        Value::list(items)
+    }
+
     /// Record a runtime diagnostic and produce the unwind token.
     fn error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Abort {
         self.diagnostics
@@ -1975,6 +2013,11 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::AttributesOf { dst, type_name } => {
+                    let result = self.materialize_attributes(type_name);
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::MatchInt { src, value, fail } => {
                     if frames[top].regs[*src as usize].as_int() == Some(*value) {
                         frames[top].pc += 1;
@@ -2765,6 +2808,19 @@ fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
 fn make_ordering(variant: &str) -> Value {
     let shape = Rc::new(Shape::enum_variant("Ordering", variant, Vec::new(), false));
     Value::enum_value(shape, Vec::new())
+}
+
+/// Convert a manifest attribute-argument literal to a VM value (for materializing an attribute
+/// record). An identifier argument has no runtime value of its own, so it materializes as its name
+/// (a string) — the same choice the tree-walker makes.
+fn attr_value_to_vm(value: &lang_ast::AttrValue) -> Value {
+    match value {
+        lang_ast::AttrValue::Str(s) => Value::string(s),
+        lang_ast::AttrValue::Int(n) => Value::int(*n),
+        lang_ast::AttrValue::Float(f) => Value::float(*f),
+        lang_ast::AttrValue::Bool(b) => Value::bool(*b),
+        lang_ast::AttrValue::Ident(name) => Value::string(name),
+    }
 }
 
 /// The arity-mismatch message, worded identically to the tree-walker's (so the differential

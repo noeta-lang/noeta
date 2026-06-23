@@ -426,6 +426,21 @@ fn standalone_impl_with_methods_is_unsupported() {
 }
 
 #[test]
+fn attributes_of_on_an_attribute_type_checks_clean() {
+    // `attributes_of::<Route>()` is `List<Attributed<Route>>`, so `r.target` is a string and
+    // `r.value` is a `Route` whose `.path` is a string — all resolve without diagnostics.
+    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route(\"/x\")]\ntype Users = { id: int };\nfor r in attributes_of::<Route>() {\n  echo r.target;\n  echo r.value.path;\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn attributes_of_on_a_non_attribute_is_rejected() {
+    // The capability gate, mirroring a `#[Foo]` use: the type argument must implement `Attribute`.
+    let src = "type Plain = { path: string };\nrs = attributes_of::<Plain>();\n";
+    assert_eq!(codes(src), ["E0029"]);
+}
+
+#[test]
 fn deriving_distinct_traits_with_an_impl_is_coherent() {
     // Different traits never conflict — only a repeated one does.
     let src = "@derive(Equatable, Comparable)\nclass P {\n  x: int\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n}\n";
