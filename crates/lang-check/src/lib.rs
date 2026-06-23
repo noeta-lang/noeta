@@ -1343,6 +1343,14 @@ impl Checker {
                 }
                 Type::Option(Box::new(target))
             }
+            Expr::TypeTest { expr, ty, .. } => {
+                // A type *test* is always well-formed on any source — even a concrete one (it is
+                // simply a constant `true`/`false`), unlike `.as<T>()` whose narrowing of a known
+                // concrete value is an `E0028`. We only validate the target type names something.
+                self.synth(expr, env);
+                self.check_type_ref(ty);
+                Type::Bool
+            }
         }
     }
 

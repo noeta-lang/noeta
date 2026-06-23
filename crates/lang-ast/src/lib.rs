@@ -458,6 +458,14 @@ pub enum Expr {
         ty: TypeRef,
         span: Span,
     },
+    /// The type-test operator: `expr is T` is a `bool` — `true` if the runtime value is a `T`.
+    /// Shares the runtime matcher with [`Expr::As`] (head-constructor match, generics erased) but
+    /// yields a plain `bool` rather than `?T`. `ty` is the type written after `is`.
+    TypeTest {
+        expr: Box<Expr>,
+        ty: TypeRef,
+        span: Span,
+    },
 }
 
 /// An all-fields object literal. `spread` (`..expr`) supplies values for fields not named
@@ -566,7 +574,8 @@ impl Expr {
             | Expr::Match { span, .. }
             | Expr::Try { span, .. }
             | Expr::Coalesce { span, .. }
-            | Expr::As { span, .. } => *span,
+            | Expr::As { span, .. }
+            | Expr::TypeTest { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }
     }

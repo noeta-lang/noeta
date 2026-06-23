@@ -746,6 +746,19 @@ where
                     span: ctx.to_span(e.span()),
                 },
             ),
+            // `operand is T` — the type-test, a `bool`. A postfix consuming a type, at the
+            // comparison tier (bp 5): `a + b is int` is `(a + b) is int`, `x is int && y` is
+            // `(x is int) && y`. A union type is allowed (`x is int | string`); `|` is the type
+            // union separator, distinct from `||` (which stops the type and resumes as `Or`).
+            postfix(
+                5,
+                just(T::IsKw).ignore_then(type_parser(ctx)),
+                move |operand, ty, e| Expr::TypeTest {
+                    expr: Box::new(operand),
+                    ty,
+                    span: ctx.to_span(e.span()),
+                },
+            ),
             postfix(
                 10,
                 just(T::Dot).ignore_then(id),
@@ -1970,6 +1983,16 @@ mod tests {
         // printer renders). `?` binds tighter than `|`, so `?int | string` is `(?int) | string`.
         insta::assert_snapshot!(pretty(
             "fn f(x: dyn): dyn { a = x.as<int | string>(); b = x.as<?int | string>(); return a; }"
+        ));
+    }
+
+    #[test]
+    fn type_test_operator() {
+        // `x is T` parses as a postfix `TypeTest` node at the comparison tier: `x is int && y`
+        // is `(x is int) && y`, and a union target `int | string` is accepted (the `|` is the
+        // type-union separator, distinct from `||`).
+        insta::assert_snapshot!(pretty(
+            "fn f(x: dyn): bool { return x is int && x is List<int> || x is int | string; }"
         ));
     }
 

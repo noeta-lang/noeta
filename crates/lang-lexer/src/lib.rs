@@ -69,6 +69,10 @@ pub enum TokenKind {
     /// (not an identifier) so `.as<T>()` is unambiguous against member access + comparison.
     #[token("as")]
     AsKw,
+    /// The type-test keyword: `x is T` is a `bool` ("is the runtime value a `T`?"). A keyword so
+    /// it parses unambiguously as an operator rather than an identifier.
+    #[token("is")]
+    IsKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -223,6 +227,7 @@ impl TokenKind {
             TokenKind::UseKw => "UseKw",
             TokenKind::PubKw => "PubKw",
             TokenKind::AsKw => "AsKw",
+            TokenKind::IsKw => "IsKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
             TokenKind::TemplateStr => "TemplateStr",
@@ -300,6 +305,7 @@ impl TokenKind {
             TokenKind::UseKw => "`use`",
             TokenKind::PubKw => "`pub`",
             TokenKind::AsKw => "`as`",
+            TokenKind::IsKw => "`is`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",
             TokenKind::TemplateStr => "a template string literal",

@@ -403,6 +403,23 @@ fn narrowing_to_an_unknown_type_is_reported() {
 }
 
 #[test]
+fn type_test_synthesizes_bool() {
+    use lang_types::Type;
+    // `x is T` is a `bool` regardless of the source — it satisfies a `bool` expectation and
+    // violates a non-`bool` one (the same E0007 path). A concrete source is fine (no E0028).
+    assert!(check_value_against("5 is int", Type::Bool).is_empty());
+    assert!(check_value_against("\"hi\" is int", Type::Bool).is_empty());
+    assert_eq!(check_value_against("5 is int", Type::Int), ["E0007"]);
+}
+
+#[test]
+fn type_test_against_an_unknown_type_is_reported() {
+    // The tested type is validated like any annotation — an undeclared name is E0013.
+    let src = "fn f(x: dyn): bool {\n  return x is Bogus;\n}\n";
+    assert_eq!(codes(src), ["E0013"]);
+}
+
+#[test]
 fn old_derive_attribute_spelling_is_reported() {
     // `#[derive(...)]` is the old codegen spelling; it is now `@derive(...)`.
     let src = "#[derive(Equatable)]\nclass P {\n  x: int\n}\n";

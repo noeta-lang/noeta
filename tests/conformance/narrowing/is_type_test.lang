@@ -1,0 +1,29 @@
+// `x is T` is a `bool` — `true` when the runtime value's head constructor is a `T`. It shares the
+// erased head-constructor matcher with `x.as<T>()` but yields a plain bool (no `Option`). Unlike
+// `.as<T>()`, a type *test* is well-formed even on a concrete source (it is just a constant), and
+// it works on a `dyn` source, a union source, and against a user type. One shared op drives both
+// backends, so M0 and M1 agree.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+type Point = { x: int, y: int };
+
+fn is_int(v: dyn): bool { return v is int; }
+fn is_list(v: dyn): bool { return v is List<int>; }
+fn is_point(v: dyn): bool { return v is Point; }
+fn either_is_string(v: int | string): bool { return v is string; }
+
+echo is_int(42);           // true
+echo is_int("nope");       // false
+echo is_list([1, 2, 3]);   // true
+echo is_list(42);          // false
+echo is_point(Point { x: 1, y: 2 });  // true
+echo either_is_string("hi");          // true
+echo either_is_string(7);             // false
+echo 5 is int;             // true — a concrete source is allowed (constant test)

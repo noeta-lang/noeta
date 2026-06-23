@@ -542,6 +542,11 @@ impl Pretty for Expr {
                 expr.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::TypeTest { expr, ty, span: s } => {
+                out.push_str(&format!("(is {} {}\n", type_ref_str(ty), span(*s)));
+                expr.pretty(out, level + 1);
+                out.push(')');
+            }
         }
     }
 }

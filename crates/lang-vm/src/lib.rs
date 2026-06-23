@@ -1969,6 +1969,12 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::IsType { dst, src, target } => {
+                    let v = frames[top].regs[*src as usize];
+                    let result = Value::bool(narrow_matches(v, target));
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::MatchInt { src, value, fail } => {
                     if frames[top].regs[*src as usize].as_int() == Some(*value) {
                         frames[top].pc += 1;

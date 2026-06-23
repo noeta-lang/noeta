@@ -342,6 +342,14 @@ pub enum Op {
         some_shape: u32,
         none_shape: u32,
     },
+    /// The `is` type-test: `dst = bool` — `true` if `src`'s runtime head constructor matches
+    /// `target`. Shares the matcher with [`Op::Narrow`] but yields a plain `bool` (no `Option`
+    /// allocation); it cannot fail, so it carries no span.
+    IsType {
+        dst: Reg,
+        src: Reg,
+        target: NarrowTarget,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -764,6 +772,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Narrow {
             dst, src, target, ..
         } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
+        Op::IsType { dst, src, target } => {
+            format!("IsType      r{dst} <- r{src} is {target:?}")
+        }
         Op::MatchInt { src, value, fail } => {
             format!("MatchInt    r{src} == {value} else -> {fail}")
         }

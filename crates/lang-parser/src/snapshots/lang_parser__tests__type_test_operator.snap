@@ -1,0 +1,15 @@
+---
+source: crates/lang-parser/src/lib.rs
+expression: "pretty(\"fn f(x: dyn): bool { return x is int && x is List<int> || x is int | string; }\")"
+---
+(program @0..78
+  (fn f [x] @0..78
+    (return @21..76
+      (binary "||" @28..75
+        (binary "&&" @28..54
+          (is int @28..36
+            (ident x @28..29))
+          (is List<int> @40..54
+            (ident x @40..41)))
+        (is int | string @58..75
+          (ident x @58..59))))))

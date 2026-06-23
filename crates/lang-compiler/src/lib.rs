@@ -1469,6 +1469,12 @@ impl<'m> FnCompiler<'m> {
                     none_shape,
                 });
             }
+            Expr::TypeTest { expr, ty, .. } => {
+                let src = self.alloc_reg();
+                self.expr(expr, src)?;
+                let target = narrow_target(ty);
+                self.code.push(Op::IsType { dst, src, target });
+            }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {

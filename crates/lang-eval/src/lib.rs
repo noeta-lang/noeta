@@ -1291,6 +1291,10 @@ impl Interpreter {
                     Ok(builtin_enum("Option", "none", vec![]))
                 }
             }
+            Expr::TypeTest { expr, ty, .. } => {
+                let value = self.eval_expr(expr)?;
+                Ok(Value::Bool(runtime_matches(&value, ty)))
+            }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
