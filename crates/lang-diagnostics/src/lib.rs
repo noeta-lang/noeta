@@ -81,6 +81,11 @@ pub enum DiagnosticCode {
     /// meaningful inside a `for`/`while` body; elsewhere there is nothing to break out of or
     /// continue, so it is a compile error.
     LoopControlOutsideLoop,
+    /// A generic call instantiates a type parameter with a type that does not satisfy one of the
+    /// parameter's declared trait bounds (`fn max<T: Comparable>` called with a non-`Comparable`
+    /// argument). The bound promises the body may use the trait's operations, so an instantiation
+    /// that breaks the promise is a compile error.
+    TraitBoundNotSatisfied,
 }
 
 impl DiagnosticCode {
@@ -111,6 +116,7 @@ impl DiagnosticCode {
         DiagnosticCode::MissingSignature,
         DiagnosticCode::CannotInfer,
         DiagnosticCode::LoopControlOutsideLoop,
+        DiagnosticCode::TraitBoundNotSatisfied,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -141,6 +147,7 @@ impl DiagnosticCode {
             DiagnosticCode::MissingSignature => "E0022",
             DiagnosticCode::CannotInfer => "E0023",
             DiagnosticCode::LoopControlOutsideLoop => "E0024",
+            DiagnosticCode::TraitBoundNotSatisfied => "E0025",
         }
     }
 

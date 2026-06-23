@@ -1,0 +1,15 @@
+// A user type that `@derive(Comparable)` *does* satisfy the bound, so `max` instantiates at it
+// cleanly and runs: the derived structural ordering is what `>` dispatches to at runtime. This is
+// the user-type half of the satisfaction model (primitives are the built-in half). Identical on
+// both backends.
+// expect: stdout "2"
+// expect: exit 0
+@derive(Comparable)
+class Box {
+    n: int
+}
+fn max<T: Comparable>(a: T, b: T): T {
+    if a > b { return a; }
+    return b;
+}
+echo max(Box { n: 1 }, Box { n: 2 }).n;

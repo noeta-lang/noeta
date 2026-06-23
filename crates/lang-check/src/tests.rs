@@ -146,6 +146,48 @@ fn generic_function_parameter_is_out_of_scope_outside_its_body() {
 }
 
 #[test]
+fn generic_call_instantiates_return_type() {
+    // `id(x)` returns the substituted `T`, not `dyn`: passing a `string` result where an `int` is
+    // expected is a concrete mismatch (proving instantiation, since `dyn` would defer silently).
+    let src = "fn id<T>(x: T): T { return x; }\n\
+               fn need_int(n: int): int { return n; }\n\
+               echo need_int(id(\"x\"));\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn generic_call_with_satisfied_primitive_bound_is_clean() {
+    let src = "fn max<T: Comparable>(a: T, b: T): T { if a > b { return a; } return b; }\n\
+               echo max(1, 2);\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn generic_call_violating_a_bound_is_reported() {
+    // A record literal has the concrete type `P`, which does not satisfy `Comparable`: `E0025`.
+    let src = "type P = { x: int };\n\
+               fn max<T: Comparable>(a: T, b: T): T { return a; }\n\
+               echo max(P { x: 1 }, P { x: 2 });\n";
+    assert_eq!(codes(src), ["E0025"]);
+}
+
+#[test]
+fn generic_call_argument_mismatch_after_binding_is_reported() {
+    // The first argument pins `T = int`; the second (`string`) is checked against `int`: `E0007`.
+    let src = "fn max<T: Comparable>(a: T, b: T): T { return a; }\n\
+               echo max(3, \"x\");\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn user_type_deriving_the_bound_satisfies_it() {
+    let src = "@derive(Comparable)\nclass B { n: int }\n\
+               fn max<T: Comparable>(a: T, b: T): T { return a; }\n\
+               echo max(B { n: 1 }, B { n: 2 });\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn annotations_do_not_produce_false_positives() {
     let src = "type Item = { price: float };\n\
                fn f(xs: List<Item>): Result<void, string> { return Ok(); }\n";

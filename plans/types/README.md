@@ -1,6 +1,6 @@
 # Type-system track — inferred-static typing with explicit `dyn`
 
-Status: **in-progress** (S0–S3c done, incl. list-building L1–L3; S4 underway — S4.1 declaration syntax done, S4.2 enforcement next)
+Status: **in-progress** (S0–S3c done, incl. list-building L1–L3; **S4 done** — bounded generics, E0025; S5 next)
 
 This directory is the milestone-scale track that redirects the checker from **gradual / `Unknown`-tolerant** typing to **inferred-static** typing with an explicit `dyn` escape — Rust-like: every expression has an inferable static type, an un-inferable one is a *compile error* (never a silent `Unknown`), and `dyn`/`Any` is the only sanctioned dynamic boundary. The inference engine is **bidirectional checking + local inference, NOT Hindley–Milner** (subtyping via `dyn` widening, directional method resolution, and record width is load-bearing and defeats HM's unification core; bidirectional also decomposes cleanly into salsa queries). Rationale lives in the `type-system-direction` memory and `plans/deferred.md` (the superseded "checker hardening" / "static E0006" / "bounded generics" rows).
 
@@ -36,13 +36,13 @@ The checker is **shared** by both backends (one `lang_check::check`), so any new
 | L3 | Assignment updates the declaring scope (accumulators infer) | **done** |
 | L4 | Compound assignment `+= -= *= /= %= ~=` (parser sugar) | **done** |
 | S3c.4 | Hard E0023 CannotInfer (fixable via annotation) + finalize | **done** |
-| S4 | Explicit bounded generics, statically enforced (E0025) | **in-progress** (S4.1 done; S4.2 next) |
-| S5 | Trait coherence — orphan/overlap rules (E0025) | todo |
+| S4 | Explicit bounded generics, statically enforced (E0025) | **done** |
+| S5 | Trait coherence — orphan/overlap rules (E0026) | todo |
 | S6 | `dyn` operations + checked narrowing (`x.as<T>()`) | todo |
 | S8 | Declared union / intersection types ("closed `dyn`") | planned |
 | S7 | Migration finalize + cleanup | todo |
 
-Dependency order is strict-linear S0 → S3c.2 → L1 → L2 → L3 → L4 → S3c.4, then S4 → S5 → S6 → S8 → S7 (S6 may land in parallel with S4/S5 — narrowing is independent of bounds; S8 is gated after S6, since a declared union is a *closed* `dyn` discriminated by the `x.as<T>()` narrowing). S3c grew from a single "hole-elimination" slice once the corpus audit showed a naive hole→error flip is both unsound (rejects valid `return none`) and unfixable today (bindings carried no annotation). The plan then split into propagation (S3c.1) + binding annotations (S3c.2), and a deeper finding followed: the language had *no* list-building at all (immutable lists, no append; `~` only display-concatenated), so the accumulator/backward-inference story was moot. Rather than design the type system around that gap, **L1–L4 add list-building** (concatenation, spread, declaring-scope assignment, compound assignment) so accumulators are both expressible and infer their element type by *forward* inference — which is why no backward-inference solver is needed. `E0023` (S3c.4) then fires only for a genuinely never-constrained binding, fixable via the S3c.2 annotation. Diagnostic codes are append-only; **E0024** is `LoopControlOutsideLoop` (a `break`/`continue` outside any loop — added with the `break`/`continue` feature), so the next free is **E0025** (reserved for S4 bounded generics).
+Dependency order is strict-linear S0 → S3c.2 → L1 → L2 → L3 → L4 → S3c.4, then S4 → S5 → S6 → S8 → S7 (S6 may land in parallel with S4/S5 — narrowing is independent of bounds; S8 is gated after S6, since a declared union is a *closed* `dyn` discriminated by the `x.as<T>()` narrowing). S3c grew from a single "hole-elimination" slice once the corpus audit showed a naive hole→error flip is both unsound (rejects valid `return none`) and unfixable today (bindings carried no annotation). The plan then split into propagation (S3c.1) + binding annotations (S3c.2), and a deeper finding followed: the language had *no* list-building at all (immutable lists, no append; `~` only display-concatenated), so the accumulator/backward-inference story was moot. Rather than design the type system around that gap, **L1–L4 add list-building** (concatenation, spread, declaring-scope assignment, compound assignment) so accumulators are both expressible and infer their element type by *forward* inference — which is why no backward-inference solver is needed. `E0023` (S3c.4) then fires only for a genuinely never-constrained binding, fixable via the S3c.2 annotation. Diagnostic codes are append-only; **E0024** is `LoopControlOutsideLoop` (a `break`/`continue` outside any loop — added with the `break`/`continue` feature), **E0025** is `TraitBoundNotSatisfied` (a generic call instantiating a type parameter with a type that does not satisfy its bound — added with S4), so the next free is **E0026** (reserved for S5 trait coherence).
 
 ## Known gaps (deferred within the track)
 

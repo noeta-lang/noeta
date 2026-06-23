@@ -1,6 +1,6 @@
 # Slice S4 — Explicit bounded generics, statically enforced (E0025)
 
-Status: **in-progress** (S4.1 done; S4.2 next)
+Status: **done** (S4.1 + S4.2 landed)
 
 > **Track:** inferred-static type system (see `plans/types/README.md`). **Depends on:** S3c.4 (the inference endpoint) + the bidirectional engine (S1) + argument checking (S3b). **Determinism / oracle posture:** bounds are a *static* layer — checked at compile time, **erased at runtime** exactly like the type parameters they constrain. The runtime representation and dispatch are untouched (generics stay fully erased), so both backends run every accepted program identically and `--differential` stays at **0 skipped**. The only observable effect is that *more programs are rejected at compile time* (a new `E0025`), and generic-function calls now infer a *precise* return type instead of leaking `dyn`.
 
@@ -45,7 +45,7 @@ Purely additive: the grammar grows bounds, functions become generic, and bound *
 
 **Pretty.** `type_params_str` renders bounds (`<T: Comparable>`); unbounded params render `<T>` unchanged, so existing generic snapshots are byte-identical.
 
-### S4.2 — Instantiation + bound enforcement (E0025) — **todo**
+### S4.2 — Instantiation + bound enforcement (E0025) — **done**
 
 The semantics. At a **generic-function call site** the checker performs local instantiation (no global solver — the inferred-static engine's local inference):
 
@@ -62,6 +62,12 @@ The semantics. At a **generic-function call site** the checker performs local in
 **Diagnostic.** `DiagnosticCode::TraitBoundNotSatisfied -> E0025` (append-only: enum, `ALL`, `code()`).
 
 **Conformance.** `generics/bounded_ok.lang` (the `max` program, runs on both backends), `generics/bound_violated.lang` (`E0025`), `generics/bound_arg_mismatch.lang` (`E0007` from the substituted second arg), `generics/unknown_bound.lang` (`E0014`). Checker unit tests for the binding/satisfaction matrix.
+
+## Outcome (S4.2)
+
+Landed as designed: `synth_call`'s function-call arm branches on a new `FnSig.generic` (`GenericInfo`: the type parameters with bounds, plus the un-erased parameter/return types). `check_generic_call` binds each parameter left-to-right from the argument types (`bind_type_params`, a deferred argument never pins a parameter so a later concrete one can), checks each argument against its substituted parameter (`E0007`), enforces bounds via `satisfies` (`E0025`), and returns the substituted result (residual parameters erased to `dyn`). `satisfies` consults a `(type → traits)` index built from `@derive`/`impl` (new `trait_impls` map) for user types and a fixed `builtin_satisfies` table for built-ins. Conformance **138 / differential 132 matched / 0 skipped / backends agree**; 5 new checker unit tests, 4 new conformance cases.
+
+**Finding — a static-method call (`Box.new(1)`) currently types as a hole**, because a bare type name in receiver position is not resolved as a value, so `recv` is `Unknown` and the call defers. Consequently a generic call whose arguments come from constructors is *not* bound (its parameters stay unconstrained → no `E0025`, result `dyn`), and the program would only fail at runtime. The conformance/unit cases therefore exercise `E0025` through **record/object literals** (which do type concretely) rather than constructors. Typing associated/static calls precisely is a separate front-end gap (independent of bounds) — a candidate follow-up that would *widen* where enforcement bites; recorded here, not silently absorbed.
 
 ## Deferred within S4 (noted, not silently dropped)
 

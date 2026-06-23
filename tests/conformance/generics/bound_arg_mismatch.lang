@@ -1,0 +1,10 @@
+// The first argument pins `T = int`; the second argument (`string`) is then checked against the
+// now-substituted parameter type `int` and rejected (`E0007`) — even though `string` would, on its
+// own, satisfy `Comparable`. Instantiation makes a generic call's later arguments concrete.
+// expect: error E0007 at 10:6
+// expect: exit 1
+fn max<T: Comparable>(a: T, b: T): T {
+    if a > b { return a; }
+    return b;
+}
+echo max(3, "x");

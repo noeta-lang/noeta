@@ -95,10 +95,27 @@ struct VariantInfo {
 
 /// A callable signature, as far as annotations reveal it: the parameter types (for arity +
 /// argument checking) and the return type. Used for both top-level functions and user methods.
+/// `params`/`ret` are **erased** (generic parameters replaced by `dyn`); a generic *function* also
+/// carries [`GenericInfo`] so a call site can instantiate it precisely and enforce its bounds.
 #[derive(Clone, Default)]
 struct FnSig {
     params: Vec<Type>,
     ret: Type,
+    /// Generic instantiation data for a generic free function; `None` for non-generic functions
+    /// and for methods (whose bound enforcement is deferred — see slice S4).
+    generic: Option<GenericInfo>,
+}
+
+/// What a generic free function needs at its call sites: the type parameters with their bounds, and
+/// the **un-erased** parameter/return types (with `Named("T")` preserved) so the checker can bind
+/// each `T` from the argument types, check arguments against the substituted parameters, enforce
+/// bounds, and return the substituted result type.
+#[derive(Clone)]
+struct GenericInfo {
+    /// `(type-parameter name, trait bounds)` in declaration order.
+    params: Vec<(String, Vec<String>)>,
+    raw_params: Vec<Type>,
+    raw_ret: Type,
 }
 
 /// A lexical scope stack: each frame maps a name to its inferred type. Inner frames shadow.
@@ -141,6 +158,10 @@ struct Checker {
     /// `impl`-block methods so a method call on a user object resolves to a real type, with the
     /// owning class's generic parameters erased to `dyn` (they accept any argument).
     methods: HashMap<(String, String), FnSig>,
+    /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
+    /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
+    /// generic call's trait bounds (S4.2).
+    trait_impls: HashMap<String, HashSet<String>>,
     /// Names bound to a Ring 2 stdlib module by a `use std.{…}` import (`json`, `fs`, …). A call
     /// `m.f(args)` on such a name resolves through [`stdlib::module_return`].
     modules: HashSet<String>,
@@ -178,6 +199,7 @@ impl Checker {
                         .collect();
                     self.records.insert(r.name.clone(), fields);
                     self.types.insert(r.name.clone());
+                    self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
                 }
                 Stmt::Class(c) => {
                     let fields = c
@@ -187,6 +209,15 @@ impl Checker {
                         .collect();
                     self.records.insert(c.name.clone(), fields);
                     self.types.insert(c.name.clone());
+                    // A class satisfies a trait it `@derive`s or `impl`s; record both for bound
+                    // enforcement (the `impl`/`derive` *names* are validated elsewhere).
+                    self.record_trait_impls(
+                        &c.name,
+                        c.derives
+                            .iter()
+                            .map(|(n, _)| n.as_str())
+                            .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
+                    );
                     // Record each method's signature (class methods and impl-block methods alike),
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
@@ -207,8 +238,14 @@ impl Checker {
                             m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
                             &tps,
                         );
-                        self.methods
-                            .insert((c.name.clone(), m.name.clone()), FnSig { params, ret });
+                        self.methods.insert(
+                            (c.name.clone(), m.name.clone()),
+                            FnSig {
+                                params,
+                                ret,
+                                generic: None,
+                            },
+                        );
                     }
                 }
                 Stmt::Enum(e) => {
@@ -222,24 +259,40 @@ impl Checker {
                         .collect();
                     self.enums.insert(e.name.clone(), variants);
                     self.types.insert(e.name.clone());
+                    self.record_trait_impls(&e.name, e.derives.iter().map(|(n, _)| n.as_str()));
                 }
                 Stmt::Fn(f) => {
-                    // A generic function's own parameters are erased to `dyn` in its registered
-                    // signature, exactly like a generic class's methods — so a call type-checks
-                    // (arguments accepted, result `dyn`) until S4.2 replaces this with proper
-                    // per-call instantiation and bound enforcement.
+                    // The registered signature is **erased** (generic parameters → `dyn`): the
+                    // arity check and the non-generic fast path use it. A generic function also
+                    // carries un-erased `GenericInfo` so a call site can instantiate it precisely
+                    // and enforce its bounds (S4.2); a non-generic function carries `None`.
                     let tps: HashSet<String> =
                         f.type_params.iter().map(|p| p.name.clone()).collect();
-                    let params = f
-                        .params
+                    let raw_params: Vec<Type> = f.params.iter().map(param_type).collect();
+                    let raw_ret = f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                    let params = raw_params
                         .iter()
-                        .map(|p| erase_type_params(param_type(p), &tps))
+                        .cloned()
+                        .map(|t| erase_type_params(t, &tps))
                         .collect();
-                    let ret = erase_type_params(
-                        f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
-                        &tps,
+                    let ret = erase_type_params(raw_ret.clone(), &tps);
+                    let generic = (!f.type_params.is_empty()).then(|| GenericInfo {
+                        params: f
+                            .type_params
+                            .iter()
+                            .map(|p| (p.name.clone(), p.bounds.clone()))
+                            .collect(),
+                        raw_params,
+                        raw_ret,
+                    });
+                    self.functions.insert(
+                        f.name.clone(),
+                        FnSig {
+                            params,
+                            ret,
+                            generic,
+                        },
                     );
-                    self.functions.insert(f.name.clone(), FnSig { params, ret });
                 }
                 // A `use std.{json, …}` import binds a Ring 2 module value (tracked in `modules`);
                 // any other imported name (whether the linker merged its declaration or left an
@@ -1165,6 +1218,12 @@ impl Checker {
             // A plain `name(args)` call: a user function, else a prelude free function.
             Expr::Ident { name, .. } => {
                 if let Some(sig) = self.functions.get(name) {
+                    // A generic function is instantiated per call: bind its type parameters from the
+                    // argument types, check arguments against the substituted parameters, enforce
+                    // the bounds (E0025), and return the substituted result type.
+                    if let Some(generic) = sig.generic.clone() {
+                        return self.check_generic_call(name, &generic, args, span);
+                    }
                     let params = sig.params.clone();
                     let ret = sig.ret.clone();
                     self.check_args(&params, args, span, name);
@@ -1257,6 +1316,95 @@ impl Checker {
                 ));
             }
         }
+    }
+
+    /// Record that user type `name` satisfies each of `traits` (its `@derive`/`impl` names). Only
+    /// real built-in trait names matter for bound enforcement; unknown ones are reported elsewhere
+    /// and harmlessly recorded here.
+    fn record_trait_impls<'a>(&mut self, name: &str, traits: impl Iterator<Item = &'a str>) {
+        let entry = self.trait_impls.entry(name.to_string()).or_default();
+        for t in traits {
+            entry.insert(t.to_string());
+        }
+    }
+
+    /// Instantiate and check a generic function call. Binds each type parameter from the argument
+    /// types (left to right, first concrete argument wins), checks every argument against its
+    /// substituted parameter type (`E0007`), enforces each parameter's trait bounds (`E0025`), and
+    /// returns the substituted result type (any type parameter the arguments left unbound erases to
+    /// `dyn`). Arity mismatch is reported exactly as a non-generic call's.
+    fn check_generic_call(
+        &mut self,
+        name: &str,
+        generic: &GenericInfo,
+        args: &[Type],
+        span: Span,
+    ) -> Type {
+        let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
+        if generic.raw_params.len() != args.len() {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`{name}` expects {} argument(s), found {}",
+                    generic.raw_params.len(),
+                    args.len()
+                ),
+            ));
+            return erase_type_params(generic.raw_ret.clone(), &tps);
+        }
+        let mut subst: HashMap<String, Type> = HashMap::new();
+        for (raw, arg) in generic.raw_params.iter().zip(args) {
+            bind_type_params(raw, arg, &tps, &mut subst);
+            let expected = apply_subst(raw, &subst);
+            if !arg_compatible(arg, &expected) {
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("argument of type `{arg}` is not assignable to `{expected}`"),
+                ));
+            }
+        }
+        for (pname, bounds) in &generic.params {
+            let Some(concrete) = subst.get(pname) else {
+                continue; // unconstrained by the arguments — nothing concrete to check against
+            };
+            for bound in bounds {
+                if !self.satisfies(concrete, bound) {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::TraitBoundNotSatisfied,
+                            span,
+                            format!(
+                                "type `{concrete}` does not satisfy the bound `{bound}` on type \
+                                 parameter `{pname}` of `{name}`"
+                            ),
+                        )
+                        .with_help(format!(
+                            "`{concrete}` must `@derive` or `impl {bound}` to be used here"
+                        )),
+                    );
+                }
+            }
+        }
+        erase_type_params(apply_subst(&generic.raw_ret, &subst), &tps)
+    }
+
+    /// Whether `ty` satisfies the built-in trait `trait_name`. A `dyn`/inference-hole satisfies
+    /// every bound (deferred to runtime / no information — never a false positive). A user type
+    /// satisfies a trait it `@derive`s or `impl`s; a built-in type satisfies the traits the
+    /// backends actually dispatch for it ([`builtin_satisfies`]).
+    fn satisfies(&self, ty: &Type, trait_name: &str) -> bool {
+        if ty.defers_to_runtime() {
+            return true;
+        }
+        if let Type::Named(n) = ty {
+            return self
+                .trait_impls
+                .get(n)
+                .is_some_and(|s| s.contains(trait_name));
+        }
+        builtin_satisfies(ty, trait_name)
     }
 
     /// The return type of a method call `recv.name(...)`: a built-in method, a user-declared
@@ -1469,6 +1617,102 @@ fn erase_type_params(ty: Type, params: &HashSet<String>) -> Type {
             ret: Box::new(erase(*ret)),
         },
         other => other,
+    }
+}
+
+/// Bind generic type parameters by structurally matching a (possibly un-erased) parameter type
+/// `raw` against a concrete argument type `arg`, filling `subst`. Only **unbound** parameters are
+/// filled (the first concrete argument that constrains a parameter wins); a deferred argument
+/// (`dyn`/hole) never pins a parameter, so a later concrete argument can. Matching descends into
+/// containers, options/results, and function arrows.
+fn bind_type_params(
+    raw: &Type,
+    arg: &Type,
+    params: &HashSet<String>,
+    subst: &mut HashMap<String, Type>,
+) {
+    match (raw, arg) {
+        // A deferred argument (`dyn`/hole) never pins a parameter, so a later concrete argument can.
+        (Type::Named(n), _) if params.contains(n) && !arg.defers_to_runtime() => {
+            subst.entry(n.clone()).or_insert_with(|| arg.clone());
+        }
+        (Type::List(r), Type::List(a)) => bind_type_params(r, a, params, subst),
+        (Type::Set(r), Type::Set(a)) => bind_type_params(r, a, params, subst),
+        (Type::Option(r), Type::Option(a)) => bind_type_params(r, a, params, subst),
+        (Type::Map(rk, rv), Type::Map(ak, av)) => {
+            bind_type_params(rk, ak, params, subst);
+            bind_type_params(rv, av, params, subst);
+        }
+        (Type::Result(rt, re), Type::Result(at, ae)) => {
+            bind_type_params(rt, at, params, subst);
+            bind_type_params(re, ae, params, subst);
+        }
+        (
+            Type::Fn {
+                params: rp,
+                ret: rr,
+            },
+            Type::Fn {
+                params: ap,
+                ret: ar,
+            },
+        ) => {
+            for (r, a) in rp.iter().zip(ap) {
+                bind_type_params(r, a, params, subst);
+            }
+            bind_type_params(rr, ar, params, subst);
+        }
+        _ => {}
+    }
+}
+
+/// Substitute resolved type parameters into a type, deeply. An unresolved parameter is left as its
+/// `Named` form (the caller erases any residue to `dyn`).
+fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
+    match ty {
+        Type::Named(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        Type::List(t) => Type::List(Box::new(apply_subst(t, subst))),
+        Type::Set(t) => Type::Set(Box::new(apply_subst(t, subst))),
+        Type::Map(k, v) => Type::Map(
+            Box::new(apply_subst(k, subst)),
+            Box::new(apply_subst(v, subst)),
+        ),
+        Type::Option(t) => Type::Option(Box::new(apply_subst(t, subst))),
+        Type::Result(t, e) => Type::Result(
+            Box::new(apply_subst(t, subst)),
+            Box::new(apply_subst(e, subst)),
+        ),
+        Type::Fn { params, ret } => Type::Fn {
+            params: params.iter().map(|p| apply_subst(p, subst)).collect(),
+            ret: Box::new(apply_subst(ret, subst)),
+        },
+        other => other.clone(),
+    }
+}
+
+/// Whether a **built-in** type satisfies a built-in trait — the static mirror of what the backends
+/// actually dispatch. The scalars are ordered/equatable; both numerics are arithmetic; `string`
+/// and `list` concatenate; almost everything displays. (User types satisfy traits only via an
+/// explicit `@derive`/`impl`, handled in [`Checker::satisfies`].)
+fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
+    use Type::*;
+    match trait_name {
+        "Comparable" | "Equatable" => matches!(ty, Int | Float | String | Bool),
+        "Add" | "Sub" | "Mul" | "Div" => matches!(ty, Int | Float),
+        "Concat" => matches!(ty, String | List(_)),
+        "Display" => matches!(
+            ty,
+            Int | Float
+                | String
+                | Bool
+                | Unit
+                | List(_)
+                | Map(..)
+                | Set(_)
+                | Option(_)
+                | Result(..)
+        ),
+        _ => false,
     }
 }
 
