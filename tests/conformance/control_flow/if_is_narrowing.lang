@@ -1,0 +1,17 @@
+// Statement-`if` flow-narrowing: `if x is int { … }` sees `x` as `int` in the body. The union
+// `int | string` is not numeric, so `x + 1` would be E0007 on the un-narrowed `x` — this program
+// only type-checks (and runs) *because* the `is int` guard narrows `x` to `int` in the block. The
+// else path keeps the declared union type. Narrowing is a checker concern; both backends run the
+// same code, so M0 and M1 agree.
+// expect: stdout "6"
+// expect: stdout "fell through"
+// expect: exit 0
+fn bump(x: int | string): string {
+    if x is int {
+        return "${x + 1}";
+    }
+    return "fell through";
+}
+
+echo bump(5);
+echo bump("hi");

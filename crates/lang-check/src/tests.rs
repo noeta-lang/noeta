@@ -103,6 +103,24 @@ fn type_pattern_arm_narrows_the_scrutinee() {
 }
 
 #[test]
+fn statement_if_is_guard_narrows_the_then_body() {
+    // A union is not numeric, so `x + 1` is E0007 on the bare `x` (the baseline) but clean inside
+    // an `if x is int { … }` guard, where `x` is narrowed to `int`.
+    let bare = "fn f(x: int | string): int { return x + 1; }\n";
+    assert_eq!(codes(bare), ["E0007"]);
+    let guarded = "fn f(x: int | string): int { if x is int { return x + 1; } return 0; }\n";
+    assert!(codes(guarded).is_empty());
+}
+
+#[test]
+fn statement_if_narrowing_does_not_escape_the_guard() {
+    // The narrowing is scoped to the then-body: after the `if`, `x` is the union again, so the
+    // `x + 1` outside the guard is E0007.
+    let src = "fn f(x: int | string): int { if x is int { return 0; } return x + 1; }\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
 fn try_on_int_is_invalid() {
     let src = "fn f(): int { return 5?; }\n";
     assert_eq!(codes(src), ["E0012"]);

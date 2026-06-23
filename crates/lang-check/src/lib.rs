@@ -474,7 +474,21 @@ impl Checker {
                 ..
             } => {
                 self.synth(cond, env);
-                self.check_block(then_body, env);
+                // Flow-narrowing: `if ident is T { … }` sees `ident` as `T` in the then-body —
+                // but only when the body never reassigns it (a write could invalidate the
+                // narrowing). The else-body keeps the declared type (negative narrowing is not
+                // done). Mirrors the per-arm narrowing in `synth_match`.
+                if let Expr::TypeTest { expr, ty, .. } = cond
+                    && let Expr::Ident { name, .. } = expr.as_ref()
+                    && !reassigns(then_body, name)
+                {
+                    env.push(HashMap::new());
+                    bind(env, name, Type::from_ref(ty));
+                    self.check_block(then_body, env);
+                    env.pop();
+                } else {
+                    self.check_block(then_body, env);
+                }
                 if let Some(else_body) = else_body {
                     self.check_block(else_body, env);
                 }
