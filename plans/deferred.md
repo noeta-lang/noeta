@@ -73,6 +73,7 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 | Inline caches for member access and trait-method call sites (currently a hashmap/shape lookup) | M1.4, M1.8 | A benchmark showing dispatch/property lookup as a hot spot vs. the M2.0 baseline |
 | `gc-arena` tracing path for `__destruct`-free classes (refcount is the only path today) | M1.6 | A benchmark demonstrating refcount overhead that tracing would remove |
 | Lazy real-disk reads behind the `fs.open` handle (M2.5 snapshots the file at open; surface is final) | M2.5 | Real workloads reading files too large to buffer whole |
+| Copy-on-write / unique-owner in-place list append (the `~` concat operator copies the whole left `Vec` each time, so an accumulator loop `acc = acc ~ [x]` / `acc ~= [x]` is **O(n²)**) | L1 (list-building) | A workload building a large list in a loop. **Approach:** when the left operand holds the *only* reference to its list, mutate the backing buffer in place instead of copying (Swift/OCaml/Roc-style COW) — same immutable semantics, append becomes O(1) amortized, the loop O(n). Tree-walker side is straightforward (lists are `Rc<Vec>` → gate on `Rc::strong_count == 1` / `Rc::get_mut`); the VM side needs uniqueness info from its heap allocator (ties into the `gc-arena` row above). Alternatives if COW proves insufficient: a persistent vector (RRB / `im::Vector`, O(log n) with structural sharing) or a mutable `.push` (O(1) but makes lists the second mutable heap type — the change L1 deliberately avoided). |
 
 ## Notes
 

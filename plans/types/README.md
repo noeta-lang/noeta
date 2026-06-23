@@ -34,6 +34,7 @@ The checker is **shared** by both backends (one `lang_check::check`), so any new
 | L1 | List concatenation via `~` (both runtimes) | **done** |
 | L2 | List spread `[..xs, x]` (parser sugar over `~`) | **done** |
 | L3 | Assignment updates the declaring scope (accumulators infer) | **done** |
+| L4 | Compound assignment `+= -= *= /= %= ~=` (parser sugar) | **done** |
 | S3c.4 | Hard E0023 CannotInfer (fixable via annotation) + finalize | **done** |
 | S4 | Explicit bounded generics, statically enforced (E0024) | todo |
 | S5 | Trait coherence — orphan/overlap rules (E0025) | todo |

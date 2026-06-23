@@ -1,0 +1,22 @@
+// Compound assignment `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`.
+// With `~=` it is the ergonomic list-append in a loop (`acc ~= [x]`), threading through the same
+// accumulator inference as `acc = acc ~ [x]`. Pure parser sugar — both backends agree.
+// expect: stdout "24"
+// expect: stdout "[10, 20, 30]"
+// expect: stdout "ab"
+// expect: exit 0
+mut n = 10;
+n += 5;
+n -= 3;
+n *= 2;
+echo n;
+
+mut acc = [];
+for x in [1, 2, 3] {
+    acc ~= [x * 10];
+}
+echo acc;
+
+mut s = "a";
+s ~= "b";
+echo s;

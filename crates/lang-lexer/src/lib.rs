@@ -133,6 +133,18 @@ pub enum TokenKind {
     LtEq,
     #[token(">=")]
     GtEq,
+    #[token("+=")]
+    PlusEq,
+    #[token("-=")]
+    MinusEq,
+    #[token("*=")]
+    StarEq,
+    #[token("/=")]
+    SlashEq,
+    #[token("%=")]
+    PercentEq,
+    #[token("~=")]
+    TildeEq,
     #[token("&&")]
     AmpAmp,
     #[token("||")]
@@ -213,6 +225,12 @@ impl TokenKind {
             TokenKind::NotEq => "NotEq",
             TokenKind::LtEq => "LtEq",
             TokenKind::GtEq => "GtEq",
+            TokenKind::PlusEq => "PlusEq",
+            TokenKind::MinusEq => "MinusEq",
+            TokenKind::StarEq => "StarEq",
+            TokenKind::SlashEq => "SlashEq",
+            TokenKind::PercentEq => "PercentEq",
+            TokenKind::TildeEq => "TildeEq",
             TokenKind::AmpAmp => "AmpAmp",
             TokenKind::PipePipe => "PipePipe",
             TokenKind::Eq => "Eq",
@@ -277,6 +295,12 @@ impl TokenKind {
             TokenKind::NotEq => "`!=`",
             TokenKind::LtEq => "`<=`",
             TokenKind::GtEq => "`>=`",
+            TokenKind::PlusEq => "`+=`",
+            TokenKind::MinusEq => "`-=`",
+            TokenKind::StarEq => "`*=`",
+            TokenKind::SlashEq => "`/=`",
+            TokenKind::PercentEq => "`%=`",
+            TokenKind::TildeEq => "`~=`",
             TokenKind::AmpAmp => "`&&`",
             TokenKind::PipePipe => "`||`",
             TokenKind::Eq => "`=`",

@@ -485,6 +485,16 @@ fn accumulator_element_type_infers_and_persists_past_the_loop() {
 }
 
 #[test]
+fn compound_assignment_accumulator_infers_like_plain_concat() {
+    // `acc ~= [x]` desugars to `acc = acc ~ [x]`, so it threads the same accumulator inference:
+    // `acc` resolves to `List<int>` and is checked against the declared return.
+    let ok = "fn build(xs: List<int>): List<int> {\n  mut acc = [];\n  for x in xs { acc ~= [x]; }\n  return acc;\n}\n";
+    assert!(codes(ok).is_empty());
+    let bad = "fn build(xs: List<int>): List<string> {\n  mut acc = [];\n  for x in xs { acc ~= [x]; }\n  return acc;\n}\n";
+    assert_eq!(codes(bad), ["E0007"]);
+}
+
+#[test]
 fn nested_reassignment_updates_the_outer_binding() {
     // A reassignment inside an `if` updates the outer binding's type, not a block-local shadow.
     let src = "mut x = 1;\nif true { x = \"now a string\"; }\ns: string = x;\n";

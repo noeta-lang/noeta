@@ -1181,29 +1181,55 @@ where
             });
 
         // A bare expression, optionally an assignment `name = expr` carrying an optional type
-        // annotation (`name: List<int> = expr`). Whether `name = …` introduces or reassigns a
-        // binding is a runtime decision (see `lang-eval`); the annotation is only meaningful on a
-        // fresh `name: T = value` binding.
+        // annotation (`name: List<int> = expr`), or a compound assignment `name OP= expr` (`+=`,
+        // `-=`, `*=`, `/=`, `%=`, `~=`) that desugars to `name = name OP expr`. Whether `name = …`
+        // introduces or reassigns a binding is a runtime decision (see `lang-eval`); the annotation
+        // is only meaningful on a fresh `name: T = value` binding.
+        let assign_op = choice((
+            just(T::Eq).to(None),
+            just(T::PlusEq).to(Some(BinaryOp::Add)),
+            just(T::MinusEq).to(Some(BinaryOp::Sub)),
+            just(T::StarEq).to(Some(BinaryOp::Mul)),
+            just(T::SlashEq).to(Some(BinaryOp::Div)),
+            just(T::PercentEq).to(Some(BinaryOp::Rem)),
+            just(T::TildeEq).to(Some(BinaryOp::Concat)),
+        ));
         let assign_or_expr = expr
             .clone()
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
-            .then(just(T::Eq).ignore_then(expr.clone()).or_not())
+            .then(assign_op.then(expr.clone()).or_not())
             .then_ignore(just(T::Semicolon))
-            .map_with(move |((lhs, ty), rhs), e| {
+            .map_with(move |((lhs, ty), tail), e| {
                 let span = ctx.to_span(e.span());
-                match rhs {
-                    Some(value) => match lhs {
+                match tail {
+                    Some((op, rhs)) => match lhs {
                         Expr::Ident {
                             name,
                             span: name_span,
-                        } => Stmt::Binding {
-                            mut_decl: false,
-                            name,
-                            name_span,
-                            ty,
-                            value,
-                            span,
-                        },
+                        } => {
+                            // A compound `name OP= rhs` desugars to `name = name OP rhs`; a plain
+                            // `=` binds the value directly.
+                            let value = match op {
+                                None => rhs,
+                                Some(binop) => Expr::Binary {
+                                    op: binop,
+                                    lhs: Box::new(Expr::Ident {
+                                        name: name.clone(),
+                                        span: name_span,
+                                    }),
+                                    rhs: Box::new(rhs),
+                                    span,
+                                },
+                            };
+                            Stmt::Binding {
+                                mut_decl: false,
+                                name,
+                                name_span,
+                                ty,
+                                value,
+                                span,
+                            }
+                        }
                         other => {
                             ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
