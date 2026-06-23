@@ -115,6 +115,9 @@ impl Session {
             }
             match self.interp.exec_stmt(stmt) {
                 Ok(Flow::Normal) => {}
+                // `break`/`continue` cannot occur at the top level (the checker rejects them
+                // outside a loop); treat as a no-op for exhaustiveness.
+                Ok(Flow::Break) | Ok(Flow::Continue) => {}
                 Ok(Flow::Return(_)) | Err(_) => break,
             }
         }
@@ -483,6 +486,11 @@ type Eval<T> = Result<T, Unwind>;
 enum Flow {
     Normal,
     Return(Value),
+    /// `break` — unwinds to the innermost loop, which stops. Never escapes a loop (the checker
+    /// rejects `break`/`continue` outside a loop, so it always meets one).
+    Break,
+    /// `continue` — unwinds to the innermost loop, which proceeds to its next iteration.
+    Continue,
 }
 
 /// One program's worth of evaluation state.
@@ -547,6 +555,9 @@ impl Interpreter {
         for stmt in &program.stmts {
             match self.exec_stmt(stmt) {
                 Ok(Flow::Normal) => {}
+                // `break`/`continue` cannot occur at the top level (the checker rejects them
+                // outside a loop); treat as a no-op for exhaustiveness.
+                Ok(Flow::Break) | Ok(Flow::Continue) => {}
                 // A top-level `return`, a `?` short-circuit, or a runtime error all stop
                 // the program. A `?`-induced return records no diagnostic, so exit stays 0.
                 Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => break,
@@ -675,6 +686,8 @@ impl Interpreter {
                 span,
             } => self.exec_for(pattern, iterable, body, *span),
             Stmt::While { cond, body, span } => self.exec_while(cond, body, *span),
+            Stmt::Break { .. } => Ok(Flow::Break),
+            Stmt::Continue { .. } => Ok(Flow::Continue),
             Stmt::Expr { expr, .. } => {
                 self.eval_expr(expr)?;
                 Ok(Flow::Normal)
@@ -691,11 +704,13 @@ impl Interpreter {
         result
     }
 
-    /// Execute statements in the current scope, stopping at the first `return`.
+    /// Execute statements in the current scope, stopping at the first non-local flow (`return`,
+    /// `break`, `continue`) and propagating it to the enclosing function or loop.
     fn exec_stmts(&mut self, stmts: &[Stmt]) -> Eval<Flow> {
         for stmt in stmts {
-            if let Flow::Return(value) = self.exec_stmt(stmt)? {
-                return Ok(Flow::Return(value));
+            let flow = self.exec_stmt(stmt)?;
+            if !matches!(flow, Flow::Normal) {
+                return Ok(flow);
             }
         }
         Ok(Flow::Normal)
@@ -744,8 +759,11 @@ impl Interpreter {
             let saved = std::mem::replace(&mut self.scope, child);
             let flow = self.exec_stmts(body);
             self.scope = saved;
-            if let Flow::Return(value) = flow? {
-                return Ok(Flow::Return(value));
+            match flow? {
+                Flow::Return(value) => return Ok(Flow::Return(value)),
+                Flow::Break => break,
+                // `continue` ends this iteration; `Normal` falls through to the same place.
+                Flow::Continue | Flow::Normal => {}
             }
         }
         Ok(Flow::Normal)
@@ -773,8 +791,10 @@ impl Interpreter {
             if !taken {
                 return Ok(Flow::Normal);
             }
-            if let Flow::Return(value) = self.exec_block(body)? {
-                return Ok(Flow::Return(value));
+            match self.exec_block(body)? {
+                Flow::Return(value) => return Ok(Flow::Return(value)),
+                Flow::Break => return Ok(Flow::Normal),
+                Flow::Continue | Flow::Normal => {}
             }
         }
     }
@@ -2276,7 +2296,9 @@ impl Interpreter {
     fn exec_fn_body(&mut self, stmts: &[Stmt]) -> Eval<Value> {
         match self.exec_stmts(stmts)? {
             Flow::Return(value) => Ok(value),
-            Flow::Normal => Ok(Value::Unit),
+            // A bare `break`/`continue` cannot escape to a function boundary (the checker rejects
+            // one outside a loop, and a loop intercepts its own); fall through like `Normal`.
+            Flow::Normal | Flow::Break | Flow::Continue => Ok(Value::Unit),
         }
     }
 

@@ -158,6 +158,9 @@ struct Checker {
     /// function with no return annotation (so the check is a no-op there). Saved and restored
     /// around each function so nested declarations do not clobber the enclosing one.
     current_ret: Type,
+    /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
+    /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
+    loop_depth: usize,
     diags: Vec<Diagnostic>,
 }
 
@@ -384,16 +387,35 @@ impl Checker {
                 let iter_ty = self.synth(iterable, env);
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);
+                self.loop_depth += 1;
                 for stmt in body {
                     self.check_stmt(stmt, env);
                 }
+                self.loop_depth -= 1;
                 env.pop();
             }
             Stmt::While { cond, body, .. } => {
                 // Like `if`, the condition's bool-ness is enforced at runtime (`RequireCondBool`,
                 // identical on both backends); synth it for nested checks and check the body.
                 self.synth(cond, env);
+                self.loop_depth += 1;
                 self.check_block(body, env);
+                self.loop_depth -= 1;
+            }
+            Stmt::Break { span } | Stmt::Continue { span } => {
+                // A loop-control statement is only meaningful inside a `for`/`while` body.
+                if self.loop_depth == 0 {
+                    let kw = if matches!(stmt, Stmt::Break { .. }) {
+                        "break"
+                    } else {
+                        "continue"
+                    };
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::LoopControlOutsideLoop,
+                        *span,
+                        format!("`{kw}` outside of a loop"),
+                    ));
+                }
             }
             Stmt::Fn(decl) => self.check_fn(decl, env, &[]),
             Stmt::Record(r) => self.check_record(r),
@@ -420,6 +442,9 @@ impl Checker {
             .map(Type::from_ref)
             .unwrap_or(Type::Unknown);
         let saved_ret = std::mem::replace(&mut self.current_ret, ret);
+        // A function body is a fresh control-flow context: `break`/`continue` inside it cannot
+        // target a loop the *enclosing* code is in, so reset the depth (restored after).
+        let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
         env.push(HashMap::new());
         for (name, ty) in extra {
             bind(env, name, ty.clone());
@@ -432,6 +457,7 @@ impl Checker {
         }
         env.pop();
         self.current_ret = saved_ret;
+        self.loop_depth = saved_loop_depth;
     }
 
     /// Inferred-static requires a full signature on every **named** function or method: a type on

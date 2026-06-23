@@ -893,6 +893,17 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        let break_ = just(T::BreakKw)
+            .then_ignore(just(T::Semicolon))
+            .map_with(move |_, e| Stmt::Break {
+                span: ctx.to_span(e.span()),
+            });
+        let continue_ = just(T::ContinueKw)
+            .then_ignore(just(T::Semicolon))
+            .map_with(move |_, e| Stmt::Continue {
+                span: ctx.to_span(e.span()),
+            });
+
         let for_pattern = choice((
             just(T::LParen)
                 .ignore_then(id.clone())
@@ -1370,6 +1381,8 @@ where
             if_,
             for_,
             while_,
+            break_,
+            continue_,
             fn_decl,
             attributed_type_decl,
             namespace_decl,
@@ -1771,6 +1784,13 @@ mod tests {
     #[test]
     fn while_loop_parses() {
         insta::assert_snapshot!(pretty("mut i = 0; while i < 3 { echo i; i += 1; }"));
+    }
+
+    #[test]
+    fn break_and_continue_parse() {
+        insta::assert_snapshot!(pretty(
+            "for i in 0..3 { if i == 1 { continue; } if i == 2 { break; } }"
+        ));
     }
 
     #[test]

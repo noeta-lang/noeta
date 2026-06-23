@@ -169,6 +169,14 @@ impl Pretty for Stmt {
                 }
                 out.push(')');
             }
+            Stmt::Break { span: s } => {
+                indent(out, level);
+                out.push_str(&format!("(break {})", span(*s)));
+            }
+            Stmt::Continue { span: s } => {
+                indent(out, level);
+                out.push_str(&format!("(continue {})", span(*s)));
+            }
             Stmt::Expr { expr, span: s } => {
                 indent(out, level);
                 out.push_str(&format!("(expr-stmt {}\n", span(*s)));

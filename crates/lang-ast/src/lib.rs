@@ -85,6 +85,10 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// `break;` — exit the innermost enclosing loop.
+    Break { span: Span },
+    /// `continue;` — skip to the next iteration of the innermost enclosing loop.
+    Continue { span: Span },
     /// A bare expression used for its effect: `expr;`.
     Expr { expr: Expr, span: Span },
 }
@@ -100,6 +104,8 @@ impl Stmt {
             | Stmt::If { span, .. }
             | Stmt::For { span, .. }
             | Stmt::While { span, .. }
+            | Stmt::Break { span }
+            | Stmt::Continue { span }
             | Stmt::Expr { span, .. } => *span,
             Stmt::Fn(decl) => decl.span,
             Stmt::Enum(decl) => decl.span,

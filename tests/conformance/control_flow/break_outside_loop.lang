@@ -1,0 +1,7 @@
+// `break` (and `continue`) are only meaningful inside a `for`/`while` body. Outside any loop there
+// is nothing to break out of, so it is a compile-time `E0024`. The checker is shared, so both
+// backends reject it identically.
+// expect: error E0024 at 6:1
+// expect: exit 1
+break;
+echo "unreachable";

@@ -77,6 +77,10 @@ pub enum DiagnosticCode {
     /// hole; the fix is an annotation (`x: List<int> = []`) or, for a built-up collection, a `mut`
     /// accumulator whose later writes supply the type.
     CannotInfer,
+    /// A `break` or `continue` statement appears outside any loop. Loop-control statements are only
+    /// meaningful inside a `for`/`while` body; elsewhere there is nothing to break out of or
+    /// continue, so it is a compile error.
+    LoopControlOutsideLoop,
 }
 
 impl DiagnosticCode {
@@ -106,6 +110,7 @@ impl DiagnosticCode {
         DiagnosticCode::IoError,
         DiagnosticCode::MissingSignature,
         DiagnosticCode::CannotInfer,
+        DiagnosticCode::LoopControlOutsideLoop,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -135,6 +140,7 @@ impl DiagnosticCode {
             DiagnosticCode::IoError => "E0021",
             DiagnosticCode::MissingSignature => "E0022",
             DiagnosticCode::CannotInfer => "E0023",
+            DiagnosticCode::LoopControlOutsideLoop => "E0024",
         }
     }
 

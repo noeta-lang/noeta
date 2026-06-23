@@ -164,7 +164,9 @@ fn collect_nested_frees_stmt(
         | Stmt::Record(_)
         | Stmt::Class(_)
         | Stmt::Namespace { .. }
-        | Stmt::Use { .. } => {}
+        | Stmt::Use { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
     }
 }
 
@@ -350,7 +352,9 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
         | Stmt::Record(_)
         | Stmt::Class(_)
         | Stmt::Namespace { .. }
-        | Stmt::Use { .. } => {}
+        | Stmt::Use { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
     }
 }
 
@@ -513,7 +517,9 @@ fn collect_refs_stmt(
         | Stmt::Record(_)
         | Stmt::Class(_)
         | Stmt::Namespace { .. }
-        | Stmt::Use { .. } => {}
+        | Stmt::Use { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. } => {}
     }
 }
 

@@ -570,6 +570,22 @@ fn range_types_as_a_list_of_int() {
 }
 
 #[test]
+fn break_continue_outside_a_loop_is_e0024() {
+    // Inside a loop (including a nested `if`) they are fine.
+    assert!(codes("for i in 0..3 { if i == 1 { continue; } echo i; }\n").is_empty());
+    assert!(codes("mut n = 0;\nwhile n < 3 { n += 1; break; }\n").is_empty());
+    // Outside any loop, each is E0024.
+    assert_eq!(codes("break;\n"), ["E0024"]);
+    assert_eq!(codes("continue;\n"), ["E0024"]);
+    // A loop does not leak across a function boundary: `break` in a nested `fn` is still outside a
+    // loop, even when the `fn` is declared inside one.
+    assert_eq!(
+        codes("for i in 0..3 { fn f(): int { break; return 0; } }\n"),
+        ["E0024"]
+    );
+}
+
+#[test]
 fn spreading_a_non_list_is_rejected() {
     // `...` requires a list operand; a concrete non-list is an error (not display-concatenation).
     // It still resolves list-shaped, so there is no cascading second diagnostic.

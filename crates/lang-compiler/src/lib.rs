@@ -507,6 +507,19 @@ struct FnCompiler<'m> {
     enclosing_locals: Vec<HashSet<String>>,
     /// This function's own capturable locals (the layer it exposes to its nested closures).
     local_layer: HashSet<String>,
+    /// Enclosing-loop jump-patch sites, innermost last. Each `break`/`continue` records a pending
+    /// `Jump` here; the loop patches them to its exit / continue target once those are known.
+    loops: Vec<LoopCtx>,
+}
+
+/// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
+#[derive(Default)]
+struct LoopCtx {
+    /// Code positions of `break` jumps — patched to the instruction after the loop.
+    breaks: Vec<usize>,
+    /// Code positions of `continue` jumps — patched to the loop's continue target (the `while`
+    /// condition re-test, or the `for` index increment).
+    continues: Vec<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -577,6 +590,7 @@ impl<'m> FnCompiler<'m> {
             forbidden: HashSet::new(),
             enclosing_locals,
             local_layer: HashSet::new(),
+            loops: Vec::new(),
         }
     }
 
@@ -738,6 +752,29 @@ impl<'m> FnCompiler<'m> {
                 span,
             } => self.for_stmt(pattern, iterable, body, *span),
             Stmt::While { cond, body, span } => self.while_stmt(cond, body, *span),
+            // `break`/`continue` emit a placeholder `Jump` recorded on the innermost loop, which
+            // patches it once its exit / continue target is known. The checker guarantees a loop is
+            // present, so `loops` is non-empty here.
+            Stmt::Break { .. } => {
+                let site = self.code.len();
+                self.code.push(Op::Jump { target: 0 });
+                self.loops
+                    .last_mut()
+                    .expect("`break` inside a loop (checker-enforced)")
+                    .breaks
+                    .push(site);
+                Ok(())
+            }
+            Stmt::Continue { .. } => {
+                let site = self.code.len();
+                self.code.push(Op::Jump { target: 0 });
+                self.loops
+                    .last_mut()
+                    .expect("`continue` inside a loop (checker-enforced)")
+                    .continues
+                    .push(site);
+                Ok(())
+            }
             Stmt::Expr { expr, .. } => {
                 // Evaluated for its side effects (and any error); the value is discarded.
                 let t = self.alloc_reg();
@@ -947,6 +984,7 @@ impl<'m> FnCompiler<'m> {
             index,
         });
         self.scopes.push(HashMap::new());
+        self.loops.push(LoopCtx::default());
         let result = (|| {
             match pattern {
                 ForPattern::Single { name, .. } => {
@@ -970,9 +1008,15 @@ impl<'m> FnCompiler<'m> {
             }
             Ok(())
         })();
+        let ctx = self.loops.pop().expect("loop context");
         self.scopes.pop();
         result?;
 
+        // `continue` skips to the index increment (so the loop still advances), which begins here.
+        let increment = self.code.len() as u32;
+        for site in ctx.continues {
+            self.patch_jump(site, increment);
+        }
         // Advance the index and loop back; patch the exit once the end is known.
         self.code.push(Op::Binary {
             op: BinaryOp::Add,
@@ -984,6 +1028,10 @@ impl<'m> FnCompiler<'m> {
         self.code.push(Op::Jump { target: loop_top });
         let end = self.code.len() as u32;
         self.patch_jump(exit_jump, end);
+        // `break` lands past the back-edge.
+        for site in ctx.breaks {
+            self.patch_jump(site, end);
+        }
         Ok(())
     }
 
@@ -999,11 +1047,22 @@ impl<'m> FnCompiler<'m> {
         let exit_jump = self.code.len();
         self.code.push(Op::JumpIfFalse { reg: rc, target: 0 });
 
-        self.block(body)?;
+        self.loops.push(LoopCtx::default());
+        let result = self.block(body);
+        let ctx = self.loops.pop().expect("loop context");
+        result?;
 
+        // `continue` re-tests the condition, so it targets the loop top.
+        for site in ctx.continues {
+            self.patch_jump(site, loop_top);
+        }
         self.code.push(Op::Jump { target: loop_top });
         let end = self.code.len() as u32;
         self.patch_jump(exit_jump, end);
+        // `break` lands just past the back-edge.
+        for site in ctx.breaks {
+            self.patch_jump(site, end);
+        }
         Ok(())
     }
 
