@@ -89,6 +89,7 @@
 |---|---|---|---|---|
 | Reactive persistence / reactive ORM | §9.12 | — | M3 | Credible layer can land late M2. |
 | Collaborative / local-first / p2p (p2panda) | §9.15 | — | M3 | CRDTs + p2panda; opt-in. |
+| Checked semantic-edit MCP tool | §12.8 (R&D half) | — | M3 | Node-targeted, hash-guarded edits computed onto authoritative text; prototype vs. `check_snippet` baseline. Gated on stable node-identity-over-text-edits. |
 
 ## Developer experience & agentic tooling
 
@@ -100,6 +101,7 @@
 | Built-in MCP server | §12.4 | §13 (tool registration) | M2 | Dev-default, prod allowlist; the agent's surface. |
 | App/framework-registered tools (free-form, typed) | §12.4 | §13 | M2 | Mechanism standard, tool set free-form. |
 | Compiler-as-syntax-oracle (`check_snippet`) | §12.5 | — | M2 | Antidote to no-training-data. |
+| Text-authoritative authoring (decided) | §12.8 (decided half) | — | M2 | Source text *is* the program; the semantic graph is a queryable derivation. Realized by the §12.5 oracle. Contrast: graph-as-source. |
 | `lang init` scaffolding (AGENTS.md + primer) | §12.6 | — | M2 | Toolchain-generated, version-matched. |
 | Semantic role tags (`SemanticRole` → typed `Role` → MCP graph queries) | §12.7 | §9.7 | M2 | Attribute-conferred roles label the call graph; `list_roles`/`trace_from`/`flows_between`; composition over manifest §9.13 + call graph §9.17 + MCP §12.4. |
 | tree-sitter grammar (standalone artifact) | — (tooling artifact) | — | M3 (can land early) | Syntactic highlighting; consumed directly by Neovim/Helix/Zed/GitHub, and bundled by the VS Code extension. |
@@ -133,7 +135,7 @@
 These `—`s are deliberate; listing them so they are not mistaken for gaps:
 - **Internal runtime mechanisms** (value representation, object model, memory management, execution) have **no Syntax** surface — they are not user-visible language constructs.
 - **Library/runtime surfaces** (bundled server, observability, WASM target) have **no Syntax** entry — they are APIs/build targets, not language syntax.
-- **R&D directions** (§9.12, §9.15) have **no Syntax** — their surfaces (e.g. `synced_signal`, the reactive query builder) are sketched in the architecture brainstorms but not finalized into the syntax spec, deliberately, until the designs settle.
+- **R&D directions** (§9.12, §9.15, §12.8) have **no Syntax** — their surfaces (e.g. `synced_signal`, the reactive query builder, the semantic-edit MCP tool) are sketched in the architecture brainstorms but not finalized into the syntax spec, deliberately, until the designs settle. The semantic-edit tool is an MCP surface, not language syntax, so its `—` is permanent rather than provisional.
 - **Application notes** (games §9.16) and **synthesis** (coherence §12) have no Syntax/Plan — they are framing, not features.
 - **`fmt`, `lint`, server, observability, extensions** have no Syntax entry because they are toolchain/runtime/config surfaces, not language syntax. Lint *rule authoring* is ordinary code (so it uses general syntax), and lint *config* is declarative manifest (not language syntax).
 
