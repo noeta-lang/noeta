@@ -1,0 +1,17 @@
+// `match` over a union with `is T` type-patterns. The union is a *closed* domain, so covering
+// every member is exhaustive with **no `_`** — the closed-world guarantee a union buys over `dyn`.
+// Each `is` arm narrows the scrutinee identifier, so `${x}` is the member type inside the arm
+// (here `int` / `string`). Type-patterns lower to the shared `is` test in both backends, so M0 and
+// M1 agree.
+// expect: stdout "int 7"
+// expect: stdout "len 2"
+// expect: exit 0
+fn describe(x: int | string): string {
+    return match x {
+        is int => "int ${x}",
+        is string => "len ${len(x)}",
+    };
+}
+
+echo describe(7);
+echo describe("hi");

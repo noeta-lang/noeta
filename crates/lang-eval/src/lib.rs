@@ -2978,6 +2978,9 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
             }
             Some(all)
         }
+        // `is T` matches on the head constructor (same erased test as `x.as<T>()`), binding
+        // nothing — the narrowed value is referred to by the scrutinee's own name.
+        Pattern::IsType { ty, .. } => runtime_matches(value, ty).then(Vec::new),
     }
 }
 

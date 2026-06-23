@@ -528,6 +528,13 @@ pub enum Pattern {
         bindings: Vec<Pattern>,
         span: Span,
     },
+    /// `is T` — a type-pattern: matches when the runtime value's head constructor is a `T`. The
+    /// primary use is discriminating a `dyn`/union scrutinee; the checker narrows an identifier
+    /// scrutinee to `T` inside the arm. Binds nothing (the narrowed value is used by name).
+    IsType {
+        ty: TypeRef,
+        span: Span,
+    },
 }
 
 impl Pattern {
@@ -538,7 +545,8 @@ impl Pattern {
             | Pattern::Int { span, .. }
             | Pattern::Str { span, .. }
             | Pattern::Bool { span, .. }
-            | Pattern::Variant { span, .. } => *span,
+            | Pattern::Variant { span, .. }
+            | Pattern::IsType { span, .. } => *span,
         }
     }
 }

@@ -469,7 +469,8 @@ fn pattern_names(pattern: &Pattern, out: &mut HashSet<String>) {
         Pattern::Wildcard { .. }
         | Pattern::Int { .. }
         | Pattern::Str { .. }
-        | Pattern::Bool { .. } => {}
+        | Pattern::Bool { .. }
+        | Pattern::IsType { .. } => {}
     }
 }
 

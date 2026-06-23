@@ -2040,6 +2040,21 @@ impl<'m> FnCompiler<'m> {
                     self.emit_pattern(sub, dr, fail_jumps);
                 }
             }
+            // `is T` — test the head constructor with the shared matcher into a temp bool, then
+            // fall through on `true` / jump to the next arm on `false`. Binds nothing.
+            Pattern::IsType { ty, .. } => {
+                let test = self.alloc_reg();
+                self.code.push(Op::IsType {
+                    dst: test,
+                    src: reg,
+                    target: narrow_target(ty),
+                });
+                fail_jumps.push(self.code.len());
+                self.code.push(Op::JumpIfFalse {
+                    reg: test,
+                    target: 0,
+                });
+            }
         }
     }
 

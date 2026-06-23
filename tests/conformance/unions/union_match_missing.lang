@@ -1,0 +1,11 @@
+// A `match` over a union that omits a member is non-exhaustive (E0011) — the closed domain makes
+// the missing case statically detectable, exactly like an enum match. `bool` is uncovered here.
+// expect: error E0011 at 6:12
+// expect: exit 1
+fn describe(x: int | string | bool): string {
+    return match x {
+        is int => "int",
+        is string => "str",
+    };
+}
+echo describe(true);

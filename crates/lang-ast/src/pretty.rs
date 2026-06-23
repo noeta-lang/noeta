@@ -354,6 +354,7 @@ fn pattern_str(pattern: &Pattern) -> String {
                 format!("{head}({})", inner.join(", "))
             }
         }
+        Pattern::IsType { ty, .. } => format!("is {}", type_ref_str(ty)),
     }
 }
 

@@ -1,0 +1,12 @@
+// A `dyn` scrutinee is the *open* top: a finite set of `is T` arms can never exhaust it, so a
+// type-pattern `match` on a `dyn` requires a `_` catch-all (E0011 without one). This is the
+// operational difference between a union (closed) and `dyn` (open).
+// expect: error E0011 at 7:12
+// expect: exit 1
+fn describe(x: dyn): string {
+    return match x {
+        is int => "int",
+        is string => "str",
+    };
+}
+echo describe(42);

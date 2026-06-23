@@ -488,6 +488,14 @@ where
                 bindings: binds,
                 span: ctx.to_span(e.span()),
             });
+        // `is T` — a type-pattern discriminating a `dyn`/union scrutinee.
+        let is_type = just(T::IsKw)
+            .ignore_then(type_parser(ctx))
+            .map_with(move |ty, e| Pattern::IsType {
+                ty,
+                span: ctx.to_span(e.span()),
+            });
+
         // A bare lowercase name binds; `_` matches anything.
         let plain = id.map(|(name, span)| {
             if name == "_" {
@@ -497,7 +505,7 @@ where
             }
         });
 
-        choice((int, str_, bool_, qualified, unqualified, plain)).boxed()
+        choice((int, str_, bool_, is_type, qualified, unqualified, plain)).boxed()
     })
 }
 
@@ -1993,6 +2001,15 @@ mod tests {
         // type-union separator, distinct from `||`).
         insta::assert_snapshot!(pretty(
             "fn f(x: dyn): bool { return x is int && x is List<int> || x is int | string; }"
+        ));
+    }
+
+    #[test]
+    fn type_pattern_in_match() {
+        // `is T` parses as a `Pattern::IsType` arm, alongside the existing literal/variant
+        // patterns. A union target is rendered by the pretty printer.
+        insta::assert_snapshot!(pretty(
+            "x = match v { is int => 1, is List<int> => 2, is int | string => 3, _ => 0 };"
         ));
     }
 

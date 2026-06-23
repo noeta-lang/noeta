@@ -1827,10 +1827,19 @@ impl Checker {
     ) -> Type {
         let scrut = self.synth(scrutinee, env);
         self.check_exhaustive(&scrut, arms, span);
+        // Flow-narrowing: an `is T` arm sees the scrutinee narrowed to `T`, but only when the
+        // scrutinee is a bare identifier (there is then a name to re-type in the arm scope).
+        let scrut_ident = match scrutinee {
+            Expr::Ident { name, .. } => Some(name.as_str()),
+            _ => None,
+        };
         let mut result = Type::Unknown;
         for arm in arms {
             env.push(HashMap::new());
             self.bind_pattern(&arm.pattern, &scrut, env);
+            if let (Some(name), Pattern::IsType { ty, .. }) = (scrut_ident, &arm.pattern) {
+                bind(env, name, Type::from_ref(ty));
+            }
             let t = self.synth(&arm.body, env);
             env.pop();
             if result.is_gradual() {
@@ -1852,6 +1861,39 @@ impl Checker {
                 Pattern::Wildcard { .. } | Pattern::Binding { .. }
             )
         }) {
+            return;
+        }
+        // A type-pattern match (`is T` arms): the domain is *types*, not variant names. A union is
+        // a closed domain — exhaustive iff every member is covered by some `is` arm; `dyn` is the
+        // open top — a finite set of `is` arms can never exhaust it, so it needs a `_`.
+        let type_targets: Vec<Type> = arms
+            .iter()
+            .filter_map(|a| match &a.pattern {
+                Pattern::IsType { ty, .. } => Some(Type::from_ref(ty)),
+                _ => None,
+            })
+            .collect();
+        if !type_targets.is_empty() {
+            let missing: Vec<String> = match scrut {
+                Type::Union(members) => members
+                    .iter()
+                    .filter(|m| !type_targets.iter().any(|t| Type::subtype(m, t)))
+                    .map(|m| m.to_string())
+                    .collect(),
+                Type::Dyn => vec!["a `dyn` value (open type domain)".into()],
+                // A concrete or gradual scrutinee with `is` arms is not exhaustiveness-checked.
+                _ => return,
+            };
+            if !missing.is_empty() {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::NonExhaustiveMatch,
+                        span,
+                        format!("non-exhaustive `match`: missing {}", missing.join(", ")),
+                    )
+                    .with_help("add an `is T` arm for each missing type, or a `_` catch-all"),
+                );
+            }
             return;
         }
         let all: Vec<String> = match scrut {
@@ -1907,7 +1949,9 @@ impl Checker {
             Pattern::Wildcard { .. }
             | Pattern::Int { .. }
             | Pattern::Str { .. }
-            | Pattern::Bool { .. } => {}
+            | Pattern::Bool { .. }
+            // `is T` binds no name here — `synth_match` narrows the scrutinee identifier instead.
+            | Pattern::IsType { .. } => {}
             Pattern::Binding { name, .. } => bind(env, name, ty.clone()),
             Pattern::Variant {
                 variant, bindings, ..

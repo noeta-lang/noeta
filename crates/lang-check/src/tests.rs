@@ -72,6 +72,37 @@ fn match_on_open_domain_scrutinee_is_not_flagged() {
 }
 
 #[test]
+fn exhaustive_union_type_pattern_match_is_clean() {
+    // A union is a closed domain: covering every member with `is T` arms is exhaustive, no `_`.
+    let src = "fn f(x: int | string): int { return match x { is int => 1, is string => 2 }; }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn non_exhaustive_union_type_pattern_match_is_reported() {
+    // Omitting a union member from a type-pattern match is E0011.
+    let src =
+        "fn f(x: int | string | bool): int { return match x { is int => 1, is string => 2 }; }\n";
+    assert_eq!(codes(src), ["E0011"]);
+}
+
+#[test]
+fn dyn_type_pattern_match_without_wildcard_is_reported() {
+    // `dyn` is the open top — a finite set of `is T` arms cannot exhaust it, so a `_` is required.
+    let src = "fn f(x: dyn): int { return match x { is int => 1, is string => 2 }; }\n";
+    assert_eq!(codes(src), ["E0011"]);
+}
+
+#[test]
+fn type_pattern_arm_narrows_the_scrutinee() {
+    // Inside an `is int` arm the identifier scrutinee is seen as `int`, so an `int`-only use type-
+    // checks; a `string` member used as `int` would not. Clean here proves the narrowing applies.
+    let src =
+        "fn f(x: int | string): int { return match x { is int => x + 1, is string => 0 }; }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn try_on_int_is_invalid() {
     let src = "fn f(): int { return 5?; }\n";
     assert_eq!(codes(src), ["E0012"]);
