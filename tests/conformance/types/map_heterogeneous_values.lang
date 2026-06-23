@@ -1,0 +1,5 @@
+// A map literal whose values concretely disagree (int and string) is a static type mismatch — the
+// map analogue of a heterogeneous list. Write `Map<string, dyn>` for a deliberately mixed map.
+// expect: error E0007 at 5:6
+// expect: exit 1
+echo {"a": 1, "b": "two"};

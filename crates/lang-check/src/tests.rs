@@ -422,6 +422,65 @@ fn generic_method_arguments_are_not_false_positives() {
     assert!(codes(src).is_empty());
 }
 
+// ----- contextual propagation + map inference (S3c.1) -----
+
+#[test]
+fn option_constructors_check_their_payload_against_the_expectation() {
+    // `some(x)` adopts an expected `Option<T>` and checks `x` against `T`.
+    assert_eq!(
+        codes("fn f(): Option<int> { return some(\"x\"); }\n"),
+        ["E0007"]
+    );
+    assert!(codes("fn f(): Option<int> { return some(1); }\n").is_empty());
+    // `?T` is the same expectation.
+    assert!(codes("fn f(): ?int { return some(1); }\n").is_empty());
+}
+
+#[test]
+fn none_resolves_against_an_option_expectation() {
+    // `none` adopts `?T`/`Option<T>` instead of leaking a hole — no mismatch.
+    assert!(codes("fn f(): ?int { return none; }\n").is_empty());
+    assert!(codes("fn f(): Option<string> { return none; }\n").is_empty());
+}
+
+#[test]
+fn result_constructors_check_each_slot_against_the_expectation() {
+    // `Ok(x)` checks `x` against the ok slot; `Err(e)` against the err slot.
+    assert_eq!(
+        codes("fn f(): Result<int, string> { return Ok(\"x\"); }\n"),
+        ["E0007"]
+    );
+    assert!(codes("fn f(): Result<int, string> { return Ok(1); }\n").is_empty());
+    assert_eq!(
+        codes("fn f(): Result<int, string> { return Err(1); }\n"),
+        ["E0007"]
+    );
+    assert!(codes("fn f(): Result<int, string> { return Err(\"e\"); }\n").is_empty());
+    // `Ok()` carries a unit payload — well typed against `Result<void, E>`.
+    assert!(codes("fn f(): Result<void, string> { return Ok(); }\n").is_empty());
+}
+
+#[test]
+fn map_literal_infers_its_element_types() {
+    use lang_types::Type;
+    let map = |k, v| Type::Map(Box::new(k), Box::new(v));
+    // `{"a": 1}` synthesizes `Map<string, int>` — it satisfies that expectation and violates others.
+    assert!(check_value_against("{\"a\": 1}", map(Type::String, Type::Int)).is_empty());
+    assert_eq!(
+        check_value_against("{\"a\": 1}", map(Type::String, Type::String)),
+        ["E0007"]
+    );
+}
+
+#[test]
+fn heterogeneous_map_values_are_rejected() {
+    // Concretely-disagreeing values are a static error (the map analogue of heterogeneous lists).
+    assert_eq!(codes("echo {\"a\": 1, \"b\": \"two\"};\n"), ["E0007"]);
+    // Homogeneous and empty maps are fine.
+    assert!(codes("echo {\"a\": 1, \"b\": 2};\n").is_empty());
+    assert!(codes("echo {};\n").is_empty());
+}
+
 #[test]
 fn pipeline_threads_the_piped_value_as_first_arg() {
     // `5 |> add(10)` is `add(5, 10)` — not a one-argument call, so no arity error.

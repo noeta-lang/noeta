@@ -578,6 +578,60 @@ impl Checker {
                 }
                 Type::List(elem.clone())
             }
+            // An empty map literal absorbs an expected `Map<K, V>` (the map analogue of the list
+            // arm); a non-empty map synthesizes its own element types and is then subsumed.
+            Expr::Map { entries, .. }
+                if entries.is_empty() && matches!(expected, Type::Map(..)) =>
+            {
+                expected.clone()
+            }
+            // `none` absorbs an expected `Option<T>` (`?T`): it carries no payload, so it simply
+            // adopts the expectation instead of leaking an inference hole.
+            Expr::Ident { name, .. } if name == "none" && matches!(expected, Type::Option(_)) => {
+                expected.clone()
+            }
+            // The polymorphic constructors absorb their expected algebraic type and check their
+            // payload against the corresponding slot — so `some("x")` against `Option<int>` or
+            // `Ok("x")` against `Result<int, _>` is now caught instead of deferring to a hole.
+            Expr::Call { callee, args, .. }
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "some")
+                    && args.len() == 1
+                    && matches!(expected, Type::Option(_)) =>
+            {
+                let Type::Option(inner) = expected else {
+                    unreachable!()
+                };
+                self.check(&args[0], inner, env);
+                expected.clone()
+            }
+            Expr::Call { callee, args, .. }
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "Ok")
+                    && args.len() <= 1
+                    && matches!(expected, Type::Result(..)) =>
+            {
+                let Type::Result(ok, _) = expected else {
+                    unreachable!()
+                };
+                match args.first() {
+                    Some(arg) => {
+                        self.check(arg, ok, env);
+                    }
+                    // `Ok()` carries a unit payload (`Result<void, E>`).
+                    None => self.subsume(&Type::Unit, ok, expr.span()),
+                }
+                expected.clone()
+            }
+            Expr::Call { callee, args, .. }
+                if matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "Err")
+                    && args.len() == 1
+                    && matches!(expected, Type::Result(..)) =>
+            {
+                let Type::Result(_, err) = expected else {
+                    unreachable!()
+                };
+                self.check(&args[0], err, env);
+                expected.clone()
+            }
             // A closure absorbs an expected function type: an explicit parameter annotation wins,
             // otherwise the parameter adopts the expected type; the body is checked against the
             // expected return.
@@ -705,12 +759,37 @@ impl Checker {
                 }
                 Type::List(Box::new(elem))
             }
-            Expr::Map { entries, .. } => {
+            Expr::Map { entries, span } => {
+                // Synthesize key/value types by unifying the entries (mirroring the list path).
+                // Runtime map keys are always strings, so keys unify trivially in practice; values
+                // that concretely disagree (`{"a": 1, "b": "two"}`) are a static error, recovering
+                // as a `Map<_, dyn>`. An empty `{}` leaves both unspecified (an inference hole).
+                let mut key_ty = Type::Unknown;
+                let mut val_ty = Type::Unknown;
+                let mut heterogeneous = false;
                 for (k, v) in entries {
-                    self.synth(k, env);
-                    self.synth(v, env);
+                    let kt = self.synth(k, env);
+                    let vt = self.synth(v, env);
+                    key_ty = unify_element(&key_ty, &kt).unwrap_or(Type::Dyn);
+                    match unify_element(&val_ty, &vt) {
+                        Some(u) => val_ty = u,
+                        None => heterogeneous = true,
+                    }
                 }
-                Type::Map(Box::new(Type::Unknown), Box::new(Type::Unknown))
+                if heterogeneous {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            "map values have differing types",
+                        )
+                        .with_help(
+                            "make the values one type, or annotate a `Map<string, dyn>` for a mixed map",
+                        ),
+                    );
+                    val_ty = Type::Dyn; // recover as a mixed map
+                }
+                Type::Map(Box::new(key_ty), Box::new(val_ty))
             }
             Expr::Member { receiver, name, .. } => self.synth_member(receiver, name, env),
             Expr::Index {

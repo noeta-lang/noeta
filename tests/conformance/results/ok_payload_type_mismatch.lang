@@ -1,0 +1,8 @@
+// `Ok(x)` checks its payload against the expected ok slot of the declared `Result`: a string
+// where an int is expected is a static type mismatch, caught at compile time in both backends.
+// expect: error E0007 at 6:15
+// expect: exit 1
+fn f(): Result<int, string> {
+    return Ok("x");
+}
+echo f();
