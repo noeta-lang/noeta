@@ -138,23 +138,29 @@ Regular (non-`packed`) records and classes remain shaped, heap-allocated dynamic
 **The dynamic escape (`dyn`) and checked narrowing.** Every expression has an inferable static type; the single sanctioned dynamic boundary is the nameable top type `dyn` (spelled `dyn` or `Any`). Every type *widens* into it implicitly (`T` is a `dyn`), but narrowing back *out* is never implicit — you ask for it explicitly with `x.as<T>()`, which returns `?T`: `some(x)` if the runtime value is a `T`, `none` if not.
 
 ```
-fn describe(x: dyn): string {
-    if x.as<int>()    != none { return "int"; }
-    if x.as<string>() != none { return "string"; }
-    return "other";
-}
-
 n = x.as<int>() ?? 0;               // narrow, then unwrap with a fallback
 ```
 
 The check is on the **head constructor** — generics are erased, so `x.as<List<int>>()` tests "is a list" and trusts the element type from the annotation. Narrowing a value whose static type is already concrete (there is nothing dynamic to narrow) is a compile error (`E0028`). This is the only place runtime type dispatch survives; everywhere else the static type is known.
 
-**Union types (a *closed* `dyn`).** A union `A | B` is a `dyn` whose membership is a static, finite set — written only where you declare it, never produced by inference. A value of any member widens into it; you narrow back out with the same `x.as<T>()`.
+**Testing a type and narrowing (`is`).** When you only need a yes/no test, `x is T` is a `bool` — "is the runtime value a `T`?" (the same head-constructor check as `.as<T>()`, without the `?T` wrapper). Unlike `.as<T>()`, a test is well-formed even on an already-concrete value. An `is` test that guards a block or a `match` arm also **narrows**: inside the guard, the value is seen at the tested type, so no re-cast is needed.
+
+```
+fn describe(x: dyn): string {
+    if x is int    { return "int ${x}"; }      // x is an `int` in here
+    if x is string { return "len ${len(x)}"; }
+    return "other";
+}
+```
+
+**Union types (a *closed* `dyn`).** A union `A | B` is a `dyn` whose membership is a static, finite set — written only where you declare it, never produced by inference. A value of any member widens into it; you narrow back out with `.as<T>()`, `is`, or an `is`-pattern `match`. Because the member set is *closed*, a `match` with an `is T` arm per member is **exhaustive with no `_`** — the closed-world guarantee a union buys over `dyn` (a `dyn` match, being open, still needs a `_`).
 
 ```
 fn label(x: int | string): string {
-    if x.as<int>() != none { return "number"; }
-    return "text";
+    return match x {
+        is int    => "number ${x}",   // x narrowed to int
+        is string => "text ${x}",     // x narrowed to string
+    };
 }
 
 label(42);            // ok — int is a member
@@ -163,6 +169,8 @@ label("hi");          // ok — string is a member
 ```
 
 `|` is the loosest type combinator, so `?A | B` reads as `(?A) | B`, and a union may appear inside generics (`List<int | string>`). Unions carry no runtime cost — the value is just its concrete `int`/`string`. Prefer a single concrete type, `dyn`, or a tagged enum/`Result`/`Option`; reach for a union only when a bounded-`dyn` is genuinely what you mean. (Intersection is expressed as trait bounds — `<T: Comparable + Display>` — not a first-class `A & B`.)
+
+**Conditional expressions (`if…then…else`) and `??=`.** Statement `if` uses braces (`if c { … }`); the *expression* form uses `then`/`else` and yields a value: `y = if c then a else b` (and `if x is int then a else b` narrows `x` in the `then` arm). It is sugar for a two-arm `match`. For the common "default a variable if it is absent" case, `x ??= y` is the coalescing assignment — sugar for `x = x ?? y`, so it fills `x` only when it is `none` and skips evaluating `y` otherwise.
 
 ---
 
