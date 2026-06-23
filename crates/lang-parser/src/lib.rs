@@ -187,6 +187,43 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
 /// list-concat operator (L1). Each spread operand is wrapped in `...` ([`UnaryOp::Spread`]) — a
 /// runtime-identity marker the checker uses to require the operand be a list (else `E0007`); the
 /// fold starts from an empty list so the result is always list-shaped.
+/// Desugar `if cond then a else b` into a two-arm `match`. A `cond is T` test becomes a
+/// type-pattern match over the tested value (so the `then` arm narrows the scrutinee identifier,
+/// and the `_` arm is the `else`); any other condition becomes a `true`/`false` match. The whole
+/// conditional carries `span`; the synthetic patterns reuse it.
+fn desugar_if_then_else(cond: Expr, then_expr: Expr, else_expr: Expr, span: Span) -> Expr {
+    // A `cond is T` test narrows in the `then` arm: match the tested value on `is T` / `_`.
+    // Any other condition is a plain boolean: match it on `true` / `false`.
+    let (scrutinee, then_pat, else_pat) = match cond {
+        Expr::TypeTest { expr, ty, .. } => (
+            expr,
+            Pattern::IsType { ty, span },
+            Pattern::Wildcard { span },
+        ),
+        other => (
+            Box::new(other),
+            Pattern::Bool { value: true, span },
+            Pattern::Bool { value: false, span },
+        ),
+    };
+    Expr::Match {
+        scrutinee,
+        arms: vec![
+            MatchArm {
+                pattern: then_pat,
+                body: then_expr,
+                span,
+            },
+            MatchArm {
+                pattern: else_pat,
+                body: else_expr,
+                span,
+            },
+        ],
+        span,
+    }
+}
+
 fn desugar_list_literal(elems: Vec<(bool, Expr)>, span: Span) -> Expr {
     if !elems.iter().any(|(is_spread, _)| *is_spread) {
         return Expr::List {
@@ -698,6 +735,21 @@ where
 
         let paren = expr.clone().delimited_by(just(T::LParen), just(T::RParen));
 
+        // `if cond then a else b` — a conditional *expression*. The `then` keyword forks it from
+        // the statement `if cond { … }` (which uses a brace). It desugars to a `match`: a
+        // `cond is T` test becomes a type-pattern match (so the `then` arm narrows the scrutinee),
+        // and any other condition becomes a `true`/`false` match. The else-arm extends maximally to
+        // the right (ML-style), since the whole form is an atom whose else-branch is a full `expr`.
+        let if_then_else = just(T::IfKw)
+            .ignore_then(expr.clone())
+            .then_ignore(just(T::ThenKw))
+            .then(expr.clone())
+            .then_ignore(just(T::ElseKw))
+            .then(expr.clone())
+            .map_with(move |((cond, then_expr), else_expr), e| {
+                desugar_if_then_else(cond, then_expr, else_expr, ctx.to_span(e.span()))
+            });
+
         let atom = choice((
             int,
             float,
@@ -706,6 +758,7 @@ where
             template,
             bool_,
             closure,
+            if_then_else,
             match_,
             list,
             map,
@@ -2001,6 +2054,16 @@ mod tests {
         // type-union separator, distinct from `||`).
         insta::assert_snapshot!(pretty(
             "fn f(x: dyn): bool { return x is int && x is List<int> || x is int | string; }"
+        ));
+    }
+
+    #[test]
+    fn if_then_else_desugars_to_match() {
+        // A plain condition lowers to a `true`/`false` match; a `cond is T` condition lowers to a
+        // type-pattern match over the tested value (so the `then` arm narrows). Both are atoms, so
+        // the `else` arm extends to the right.
+        insta::assert_snapshot!(pretty(
+            "a = if n > 0 then 1 else 2; b = if v is int then v else 0;"
         ));
     }
 

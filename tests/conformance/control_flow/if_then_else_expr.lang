@@ -1,0 +1,21 @@
+// `if cond then a else b` is a conditional *expression* (the statement `if cond { … }` is
+// unchanged — `then` vs `{` forks them). It desugars to a two-arm `match`, so it is an ordinary
+// value usable as a binding RHS, a `return`, a call argument, and nested. A `cond is T` form
+// narrows the scrutinee in the `then` arm. One desugar drives both backends, so M0 and M1 agree.
+// expect: stdout "big"
+// expect: stdout "small"
+// expect: stdout "int 7"
+// expect: stdout "other"
+// expect: stdout "9"
+// expect: exit 0
+fn size(n: int): string { return if n > 10 then "big" else "small"; }
+fn describe(x: dyn): string { return if x is int then "int ${x}" else "other"; }
+
+echo size(20);
+echo size(3);
+echo describe(7);
+echo describe("hi");
+
+// nested as a subexpression, and bound to a name
+label = if size(50) == "big" then 9 else 0;
+echo label;

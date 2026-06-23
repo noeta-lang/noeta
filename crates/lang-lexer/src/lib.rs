@@ -35,6 +35,11 @@ pub enum TokenKind {
     ReturnKw,
     #[token("if")]
     IfKw,
+    /// The conditional-expression keyword: `if cond then a else b`. Forks the grammar from the
+    /// statement `if cond { … }` (which uses a brace), so `if` is both a statement and an
+    /// expression without lookahead.
+    #[token("then")]
+    ThenKw,
     #[token("else")]
     ElseKw,
     #[token("for")]
@@ -211,6 +216,7 @@ impl TokenKind {
             TokenKind::FnKw => "FnKw",
             TokenKind::ReturnKw => "ReturnKw",
             TokenKind::IfKw => "IfKw",
+            TokenKind::ThenKw => "ThenKw",
             TokenKind::ElseKw => "ElseKw",
             TokenKind::ForKw => "ForKw",
             TokenKind::WhileKw => "WhileKw",
@@ -289,6 +295,7 @@ impl TokenKind {
             TokenKind::FnKw => "`fn`",
             TokenKind::ReturnKw => "`return`",
             TokenKind::IfKw => "`if`",
+            TokenKind::ThenKw => "`then`",
             TokenKind::ElseKw => "`else`",
             TokenKind::ForKw => "`for`",
             TokenKind::WhileKw => "`while`",
