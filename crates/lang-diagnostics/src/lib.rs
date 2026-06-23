@@ -102,6 +102,11 @@ pub enum DiagnosticCode {
     /// concrete (not `dyn`). Narrowing converts the open top `dyn` back to a `?T`; a value that is
     /// already a known concrete type has nothing dynamic to narrow, so the `as` is a mistake.
     InvalidNarrow,
+    /// A `#[Foo(...)]` data attribute names a type that is not usable in annotation position — `Foo`
+    /// is not a record/class, or it does not implement the marker trait `Attribute`
+    /// (`impl Attribute for Foo {}`). Attributes are ordinary records/classes marked with the
+    /// capability, so an unmarked or non-existent type cannot be attached as metadata.
+    NotAnAttribute,
 }
 
 impl DiagnosticCode {
@@ -136,6 +141,7 @@ impl DiagnosticCode {
         DiagnosticCode::RequiredAfterOptional,
         DiagnosticCode::ConflictingTraitImpl,
         DiagnosticCode::InvalidNarrow,
+        DiagnosticCode::NotAnAttribute,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -170,6 +176,7 @@ impl DiagnosticCode {
             DiagnosticCode::RequiredAfterOptional => "E0026",
             DiagnosticCode::ConflictingTraitImpl => "E0027",
             DiagnosticCode::InvalidNarrow => "E0028",
+            DiagnosticCode::NotAnAttribute => "E0029",
         }
     }
 

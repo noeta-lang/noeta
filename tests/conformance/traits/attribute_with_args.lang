@@ -1,8 +1,15 @@
 // Attribute parameters: a `#[...]` attribute may carry literal arguments — positional
-// (`"/users"`) and named (`method: "GET"`, `ttl: 60`). They are inert at runtime (collected into
-// the build manifest, never executed), so the program runs identically in both backends.
+// (`"/users"`) and named (`method: "GET"`, `ttl: 60`) — which must construct the attribute record
+// (`path` positional, `method`/`ttl` named). They are inert at runtime (collected into the build
+// manifest, never executed), so the program runs identically in both backends.
 // expect: stdout "1"
 // expect: exit 0
+type Route = { path: string, method: string };
+impl Attribute for Route {}
+
+type Cache = { ttl: int };
+impl Attribute for Cache {}
+
 #[Route("/users", method: "GET")]
 #[Cache(ttl: 60)]
 type Users = { id: int };

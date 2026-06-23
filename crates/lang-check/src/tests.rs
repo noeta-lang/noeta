@@ -506,10 +506,32 @@ fn old_derive_attribute_spelling_is_reported() {
 }
 
 #[test]
-fn data_attribute_is_accepted() {
-    // A non-`derive` `#[...]` attribute attaches as data and is not (yet) validated.
-    let src = "#[Route]\nclass P {\n  x: int\n}\n";
+fn data_attribute_marked_with_capability_is_accepted() {
+    // `#[Route(...)]` is valid when `Route` is a record/class marked `impl Attribute for Route`,
+    // and the arguments construct it (the positional value fills `path`).
+    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route(\"/x\")]\nclass P {\n  x: int\n}\n";
     assert!(codes(src).is_empty());
+}
+
+#[test]
+fn unmarked_attribute_is_rejected() {
+    // The capability gate: a `#[Foo]` whose `Foo` does not implement `Attribute` is E0029.
+    let src = "#[Route]\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0029"]);
+}
+
+#[test]
+fn attribute_missing_field_is_reported() {
+    // The construction check: `#[Route]` with no argument leaves `path` unset (E0009).
+    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route]\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0009"]);
+}
+
+#[test]
+fn attribute_argument_type_mismatch_is_reported() {
+    // The construction check: a literal whose type does not match its field is E0007.
+    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route(42)]\nclass P {\n  x: int\n}\n";
+    assert_eq!(codes(src), ["E0007"]);
 }
 
 // ----- bidirectional check-mode (white-box) -----

@@ -66,8 +66,9 @@
 use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
-    Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock, ImplDecl,
-    MatchArm, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef, UnaryOp,
+    AttrValue, Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock,
+    ImplDecl, MatchArm, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef,
+    UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -1011,10 +1012,13 @@ impl Checker {
         }
     }
 
-    /// Validate the `#[...]` data attributes on a declaration. These reduce to records in the
-    /// manifest (M1.8b) and carry no codegen meaning. The one error checked now is the migration
-    /// case: `#[derive(...)]` is the old codegen spelling, which is now the `@derive(...)`
-    /// directive. (The `Attribute`-trait gate on `#[Foo(...)]` usage lands with the manifest.)
+    /// Validate the `#[...]` data attributes on a declaration. An attribute reduces to a record
+    /// constructed in annotation position, so two things are checked: the **capability gate** —
+    /// `#[Foo(...)]` requires `Foo` to be a record/class implementing the marker trait `Attribute`
+    /// (`impl Attribute for Foo {}`) — and, when it is, the **construction** — the arguments must
+    /// build a valid `Foo` (every field set once, each literal assignable to its field), the same
+    /// all-fields-literal contract any record construction obeys. The old `#[derive(...)]` codegen
+    /// spelling is still rejected up front (E0017).
     fn check_attrs(&mut self, attrs: &[Attribute]) {
         for attr in attrs {
             if attr.name == "derive" {
@@ -1029,6 +1033,99 @@ impl Checker {
                          data attributes only",
                     ),
                 );
+                continue;
+            }
+            // The capability gate: only a record/class marked `impl Attribute for Foo {}` may be
+            // used as `#[Foo(...)]`.
+            let is_attribute = self.records.contains_key(&attr.name)
+                && self
+                    .trait_impls
+                    .get(&attr.name)
+                    .is_some_and(|ts| ts.contains("Attribute"));
+            if !is_attribute {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::NotAnAttribute,
+                        attr.name_span,
+                        format!("`{}` cannot be used as an attribute", attr.name),
+                    )
+                    .with_help(
+                        "an attribute is a record or class marked with the capability — declare \
+                         `impl Attribute for ` the type",
+                    ),
+                );
+                continue;
+            }
+            self.check_attribute_construction(attr);
+        }
+    }
+
+    /// Check that a `#[Foo(...)]` attribute's arguments construct a valid `Foo` — the all-fields
+    /// contract of any record literal, applied to the literal arguments. Positional arguments bind
+    /// to fields in declaration order, named arguments by name; each field must be set exactly once
+    /// (unset → `E0009`, unknown/overflowing → `E0005`) and each literal value must be assignable
+    /// to its field's type (`E0007`). An identifier argument carries no static type, so its value
+    /// is not type-checked (only its field binding is).
+    fn check_attribute_construction(&mut self, attr: &Attribute) {
+        let fields = self.records.get(&attr.name).cloned().unwrap_or_default();
+        let mut filled = vec![false; fields.len()];
+        let mut next_positional = 0usize;
+        for arg in &attr.args {
+            let target = match &arg.name {
+                None => {
+                    let i = next_positional;
+                    next_positional += 1;
+                    if i < fields.len() { Some(i) } else { None }
+                }
+                Some(fname) => fields.iter().position(|(n, _)| n == fname),
+            };
+            let Some(i) = target else {
+                let what = match &arg.name {
+                    Some(fname) => format!("has no field `{fname}`"),
+                    None => format!("declares only {} field(s)", fields.len()),
+                };
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::UnknownName,
+                    arg.span,
+                    format!("attribute `{}` {what}", attr.name),
+                ));
+                continue;
+            };
+            if filled[i] {
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::UnknownName,
+                    arg.span,
+                    format!(
+                        "field `{}` of attribute `{}` is set twice",
+                        fields[i].0, attr.name
+                    ),
+                ));
+                continue;
+            }
+            filled[i] = true;
+            if let Some(vty) = attr_value_type(&arg.value)
+                && !arg_compatible(&vty, &fields[i].1)
+            {
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::TypeMismatch,
+                    arg.span,
+                    format!(
+                        "value of type `{vty}` is not assignable to field `{}: {}`",
+                        fields[i].0, fields[i].1
+                    ),
+                ));
+            }
+        }
+        for (i, (fname, fty)) in fields.iter().enumerate() {
+            if !filled[i] {
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::MissingField,
+                    attr.span,
+                    format!(
+                        "attribute `{}` is missing field `{fname}: {fty}`",
+                        attr.name
+                    ),
+                ));
             }
         }
     }
@@ -2113,6 +2210,18 @@ fn arg_compatible(arg: &Type, param: &Type) -> bool {
         || arg.defers_to_runtime()
         || param.defers_to_runtime()
         || (arg.is_numeric() && param.is_numeric())
+}
+
+/// The static type of an attribute-argument literal, or `None` for a bare identifier (which has no
+/// statically-known type, so its assignability to a field is not checked).
+fn attr_value_type(value: &AttrValue) -> Option<Type> {
+    match value {
+        AttrValue::Str(_) => Some(Type::String),
+        AttrValue::Int(_) => Some(Type::Int),
+        AttrValue::Float(_) => Some(Type::Float),
+        AttrValue::Bool(_) => Some(Type::Bool),
+        AttrValue::Ident(_) => None,
+    }
 }
 
 /// The built-in trait an operand of `op` must satisfy, for the trait-backed operators: arithmetic
