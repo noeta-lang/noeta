@@ -1,0 +1,33 @@
+// `while <cond> { body }` repeats while the condition is true. A bare reassignment in the body
+// (a counter `i += 1`, or an accumulator `acc = acc ~ [..]`) updates the enclosing binding through
+// the scope chain, so the condition makes progress and the accumulator infers its element type.
+// `return` inside a `while` unwinds the enclosing function. Both backends agree (the loop lowers to
+// a top-tested jump in the VM, mirrored by the tree-walker).
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "[0, 10, 20]"
+// expect: stdout "16"
+// expect: exit 0
+mut i = 0;
+while i < 3 {
+    echo i;
+    i += 1;
+}
+
+mut acc = [];
+mut j = 0;
+while j < 3 {
+    acc = acc ~ [j * 10];
+    j += 1;
+}
+echo acc;
+
+fn first_power_at_least(limit: int): int {
+    mut n = 1;
+    while n < limit {
+        n *= 2;
+    }
+    return n;
+}
+echo first_power_at_least(10);

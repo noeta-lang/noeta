@@ -737,6 +737,7 @@ impl<'m> FnCompiler<'m> {
                 body,
                 span,
             } => self.for_stmt(pattern, iterable, body, *span),
+            Stmt::While { cond, body, span } => self.while_stmt(cond, body, *span),
             Stmt::Expr { expr, .. } => {
                 // Evaluated for its side effects (and any error); the value is discarded.
                 let t = self.alloc_reg();
@@ -980,6 +981,26 @@ impl<'m> FnCompiler<'m> {
             b: one_reg,
             span,
         });
+        self.code.push(Op::Jump { target: loop_top });
+        let end = self.code.len() as u32;
+        self.patch_jump(exit_jump, end);
+        Ok(())
+    }
+
+    /// `while <cond> { body }`, lowered to a top-tested loop: evaluate the condition, require it
+    /// be a bool, exit if false, run the body in a fresh scope, then jump back. Mirrors the
+    /// tree-walker — a bare reassignment in the body updates its enclosing binding's register, so
+    /// the condition makes progress.
+    fn while_stmt(&mut self, cond: &Expr, body: &[Stmt], span: Span) -> Result<(), Unsupported> {
+        let loop_top = self.code.len() as u32;
+        let rc = self.alloc_reg();
+        self.expr(cond, rc)?;
+        self.code.push(Op::RequireCondBool { reg: rc, span });
+        let exit_jump = self.code.len();
+        self.code.push(Op::JumpIfFalse { reg: rc, target: 0 });
+
+        self.block(body)?;
+
         self.code.push(Op::Jump { target: loop_top });
         let end = self.code.len() as u32;
         self.patch_jump(exit_jump, end);

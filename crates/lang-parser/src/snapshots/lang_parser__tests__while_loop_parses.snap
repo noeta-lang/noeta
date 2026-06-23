@@ -1,0 +1,17 @@
+---
+source: crates/lang-parser/src/lib.rs
+expression: "pretty(\"mut i = 0; while i < 3 { echo i; i += 1; }\")"
+---
+(program @0..42
+  (binding-mut i @0..10
+    (int 0 @8..9))
+  (while @11..42
+    (binary "<" @17..22
+      (ident i @17..18)
+      (int 3 @21..22))
+    (echo @25..32
+      (ident i @30..31))
+    (binding i @33..40
+      (binary "+" @33..40
+        (ident i @33..34)
+        (int 1 @38..39)))))

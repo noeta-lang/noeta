@@ -389,6 +389,12 @@ impl Checker {
                 }
                 env.pop();
             }
+            Stmt::While { cond, body, .. } => {
+                // Like `if`, the condition's bool-ness is enforced at runtime (`RequireCondBool`,
+                // identical on both backends); synth it for nested checks and check the body.
+                self.synth(cond, env);
+                self.check_block(body, env);
+            }
             Stmt::Fn(decl) => self.check_fn(decl, env, &[]),
             Stmt::Record(r) => self.check_record(r),
             Stmt::Class(c) => self.check_class(c, env),
@@ -1431,6 +1437,7 @@ fn child_stmt_bodies(stmt: &Stmt) -> Vec<&[Stmt]> {
             bodies
         }
         Stmt::For { body, .. } => vec![body.as_slice()],
+        Stmt::While { body, .. } => vec![body.as_slice()],
         Stmt::Fn(decl) => vec![decl.body.as_slice()],
         Stmt::Class(c) => c
             .methods

@@ -155,6 +155,20 @@ impl Pretty for Stmt {
                 }
                 out.push(')');
             }
+            Stmt::While {
+                cond,
+                body,
+                span: s,
+            } => {
+                indent(out, level);
+                out.push_str(&format!("(while {}\n", span(*s)));
+                cond.pretty(out, level + 1);
+                for stmt in body {
+                    out.push('\n');
+                    stmt.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
             Stmt::Expr { expr, span: s } => {
                 indent(out, level);
                 out.push_str(&format!("(expr-stmt {}\n", span(*s)));

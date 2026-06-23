@@ -483,6 +483,11 @@ fn never_reassigned_mut_context_free_literal_is_e0023() {
     assert!(codes("mut acc = [];\nfor x in [1, 2] { acc = acc ~ [x]; }\necho acc;\n").is_empty());
     // A reassignment in a nested `if` body also counts.
     assert!(codes("mut acc = [];\nif true { acc = [1]; }\necho acc;\n").is_empty());
+    // ...and one inside a `while` body — the gap-3 walk descends `while` like `if`/`for`.
+    assert!(
+        codes("mut acc = [];\nmut i = 0;\nwhile i < 3 { acc = acc ~ [i]; i += 1; }\necho acc;\n")
+            .is_empty()
+    );
     // An annotation resolves it without any reassignment.
     assert!(codes("mut acc: List<int> = [];\necho acc;\n").is_empty());
 }

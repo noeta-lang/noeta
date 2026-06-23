@@ -674,6 +674,7 @@ impl Interpreter {
                 body,
                 span,
             } => self.exec_for(pattern, iterable, body, *span),
+            Stmt::While { cond, body, span } => self.exec_while(cond, body, *span),
             Stmt::Expr { expr, .. } => {
                 self.eval_expr(expr)?;
                 Ok(Flow::Normal)
@@ -748,6 +749,34 @@ impl Interpreter {
             }
         }
         Ok(Flow::Normal)
+    }
+
+    /// `while <cond> { body }` — re-evaluate the condition (which must be a bool) before each
+    /// iteration, running the body in a fresh child scope. A bare reassignment in the body (e.g.
+    /// a loop counter `i += 1`) updates the enclosing binding through the scope chain, so the
+    /// condition can make progress.
+    fn exec_while(&mut self, cond: &Expr, body: &[Stmt], span: Span) -> Eval<Flow> {
+        loop {
+            let taken = match self.eval_expr(cond)? {
+                Value::Bool(b) => b,
+                other => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`while` condition must be a bool, found {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            };
+            if !taken {
+                return Ok(Flow::Normal);
+            }
+            if let Flow::Return(value) = self.exec_block(body)? {
+                return Ok(Flow::Return(value));
+            }
+        }
     }
 
     fn bind_for_pattern(

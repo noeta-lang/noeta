@@ -39,6 +39,8 @@ pub enum TokenKind {
     ElseKw,
     #[token("for")]
     ForKw,
+    #[token("while")]
+    WhileKw,
     #[token("in")]
     InKw,
     #[token("enum")]
@@ -190,6 +192,7 @@ impl TokenKind {
             TokenKind::IfKw => "IfKw",
             TokenKind::ElseKw => "ElseKw",
             TokenKind::ForKw => "ForKw",
+            TokenKind::WhileKw => "WhileKw",
             TokenKind::InKw => "InKw",
             TokenKind::EnumKw => "EnumKw",
             TokenKind::MatchKw => "MatchKw",
@@ -260,6 +263,7 @@ impl TokenKind {
             TokenKind::IfKw => "`if`",
             TokenKind::ElseKw => "`else`",
             TokenKind::ForKw => "`for`",
+            TokenKind::WhileKw => "`while`",
             TokenKind::InKw => "`in`",
             TokenKind::EnumKw => "`enum`",
             TokenKind::MatchKw => "`match`",

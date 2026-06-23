@@ -154,6 +154,12 @@ fn collect_nested_frees_stmt(
                 collect_nested_frees_stmt(s, enclosing, globals, out);
             }
         }
+        Stmt::While { cond, body, .. } => {
+            collect_nested_frees_expr(cond, enclosing, globals, out);
+            for s in body {
+                collect_nested_frees_stmt(s, enclosing, globals, out);
+            }
+        }
         Stmt::Enum(_)
         | Stmt::Record(_)
         | Stmt::Class(_)
@@ -306,6 +312,11 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
                     local.insert(second.clone());
                 }
             }
+            for s in body {
+                collect_bindings_stmt(s, outer, local);
+            }
+        }
+        Stmt::While { body, .. } => {
             for s in body {
                 collect_bindings_stmt(s, outer, local);
             }
@@ -479,6 +490,12 @@ fn collect_refs_stmt(
         }
         Stmt::For { iterable, body, .. } => {
             collect_refs_expr(iterable, enclosing, globals, out);
+            for s in body {
+                collect_refs_stmt(s, enclosing, globals, out);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            collect_refs_expr(cond, enclosing, globals, out);
             for s in body {
                 collect_refs_stmt(s, enclosing, globals, out);
             }

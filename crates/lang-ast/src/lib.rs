@@ -79,6 +79,12 @@ pub enum Stmt {
         body: Vec<Stmt>,
         span: Span,
     },
+    /// `while <cond> { ... }` — repeats the body while the condition is `true`.
+    While {
+        cond: Expr,
+        body: Vec<Stmt>,
+        span: Span,
+    },
     /// A bare expression used for its effect: `expr;`.
     Expr { expr: Expr, span: Span },
 }
@@ -93,6 +99,7 @@ impl Stmt {
             | Stmt::Return { span, .. }
             | Stmt::If { span, .. }
             | Stmt::For { span, .. }
+            | Stmt::While { span, .. }
             | Stmt::Expr { span, .. } => *span,
             Stmt::Fn(decl) => decl.span,
             Stmt::Enum(decl) => decl.span,

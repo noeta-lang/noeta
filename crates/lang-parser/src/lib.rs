@@ -908,6 +908,16 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `while <cond> { body }` — repeat the body while the condition holds.
+        let while_ = just(T::WhileKw)
+            .ignore_then(expr.clone())
+            .then(block.clone())
+            .map_with(move |(cond, body), e| Stmt::While {
+                cond,
+                body,
+                span: ctx.to_span(e.span()),
+            });
+
         // `else if` is an `else` whose body is a single nested `if`.
         let if_expr = expr.clone();
         let if_block = block.clone();
@@ -1345,6 +1355,7 @@ where
             return_,
             if_,
             for_,
+            while_,
             fn_decl,
             attributed_type_decl,
             namespace_decl,
@@ -1741,6 +1752,11 @@ mod tests {
         insta::assert_snapshot!(pretty(
             "for (i, x) in [10, 20].enumerate() { if i == 0 { echo x; } else { echo {\"k\": x}; } }"
         ));
+    }
+
+    #[test]
+    fn while_loop_parses() {
+        insta::assert_snapshot!(pretty("mut i = 0; while i < 3 { echo i; i += 1; }"));
     }
 
     #[test]
