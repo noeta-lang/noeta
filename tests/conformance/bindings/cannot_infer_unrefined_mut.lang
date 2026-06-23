@@ -1,0 +1,8 @@
+// A `mut` binding to an empty literal is exempt from E0023 only so an accumulator's later writes
+// can supply its element type. With no such write, the type stays an undeterminable hole — the
+// `mut` analogue of the immutable error, fixable by an annotation (`mut acc: List<int> = []`) or a
+// later assignment. The checker is shared, so both backends agree.
+// expect: error E0023 at 7:11
+// expect: exit 1
+mut acc = [];
+echo acc;

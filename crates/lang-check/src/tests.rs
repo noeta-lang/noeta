@@ -463,6 +463,28 @@ fn immutable_context_free_literal_binding_is_e0023() {
     assert_eq!(codes("xs = [];\n"), ["E0023"]);
     assert_eq!(codes("m = {};\n"), ["E0023"]);
     assert_eq!(codes("x = none;\n"), ["E0023"]);
+    // `Ok(x)`/`Err(e)` leave the opposite `Result` slot a hole, so an immutable, un-annotated
+    // binding to one is undeterminable just like the empties.
+    assert_eq!(codes("r = Ok(5);\n"), ["E0023"]);
+    assert_eq!(codes("r = Err(\"boom\");\n"), ["E0023"]);
+    // `some(x)` fully determines its `Option`, so it is not flagged.
+    assert!(codes("o = some(5);\n").is_empty());
+    // An annotation fixes the open slot.
+    assert!(codes("r: Result<int, string> = Ok(5);\n").is_empty());
+}
+
+#[test]
+fn never_reassigned_mut_context_free_literal_is_e0023() {
+    // A `mut` binding is exempt from E0023 only because a later write can supply its type. When no
+    // such write exists, its type stays an undeterminable hole — the `mut` analogue of the error.
+    assert_eq!(codes("mut acc = [];\necho acc;\n"), ["E0023"]);
+    assert_eq!(codes("mut r = Ok(5);\necho r;\n"), ["E0023"]);
+    // A later reassignment (here, inside a loop) resolves the type — exempt again.
+    assert!(codes("mut acc = [];\nfor x in [1, 2] { acc = acc ~ [x]; }\necho acc;\n").is_empty());
+    // A reassignment in a nested `if` body also counts.
+    assert!(codes("mut acc = [];\nif true { acc = [1]; }\necho acc;\n").is_empty());
+    // An annotation resolves it without any reassignment.
+    assert!(codes("mut acc: List<int> = [];\necho acc;\n").is_empty());
 }
 
 #[test]

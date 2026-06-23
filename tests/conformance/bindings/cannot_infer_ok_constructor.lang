@@ -1,0 +1,8 @@
+// `Ok(x)` synthesizes `Result<int, ?>` — the `Err` slot is an unfillable hole at the binding site,
+// so an immutable, un-annotated binding to it is undeterminable: `E0023`. The fix is to annotate
+// the full `Result<T, E>` (e.g. `r: Result<int, string> = Ok(5)`). `some(x)`, which fully
+// determines its `Option`, is not flagged. The checker is shared, so both backends agree.
+// expect: error E0023 at 7:5
+// expect: exit 1
+r = Ok(5);
+echo r;

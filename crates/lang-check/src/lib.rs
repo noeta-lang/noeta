@@ -248,6 +248,45 @@ impl Checker {
         for stmt in &program.stmts {
             self.check_stmt(stmt, &mut env);
         }
+        self.check_unrefined_muts(&program.stmts);
+    }
+
+    /// Flag a `mut` binding to a context-free polymorphic literal (`mut x = []`/`{}`/`none`/
+    /// `Ok(_)`/`Err(_)`) that is *never reassigned* in its lexical scope: its type stays an
+    /// undeterminable hole, so it is the `mut` analogue of the immutable `E0023` (which fires at
+    /// the binding site). The `mut` exemption exists so an accumulator's later writes can supply
+    /// the element type — when no such write exists, the exemption does not apply. Purely
+    /// syntactic (reachability + nesting), so it runs as a standalone pass over the merged AST.
+    fn check_unrefined_muts(&mut self, stmts: &[Stmt]) {
+        for (i, stmt) in stmts.iter().enumerate() {
+            if let Stmt::Binding {
+                mut_decl: true,
+                ty: None,
+                name,
+                value,
+                ..
+            } = stmt
+                && is_uninferable_literal(value)
+                && !reassigns(&stmts[i + 1..], name)
+            {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::CannotInfer,
+                        value.span(),
+                        format!("cannot infer the type of `{name}`"),
+                    )
+                    .with_help(
+                        "this `mut` binding is never assigned after its empty initializer, so its \
+                         type stays undeterminable — annotate it (e.g. `mut x: List<int> = []`) \
+                         or remove it",
+                    ),
+                );
+            }
+            // Recurse into nested statement bodies for `mut` bindings declared there.
+            for body in child_stmt_bodies(stmt) {
+                self.check_unrefined_muts(body);
+            }
+        }
     }
 
     fn check_block(&mut self, stmts: &[Stmt], env: &mut Env) {
@@ -1355,17 +1394,65 @@ fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
 }
 
 /// Whether an expression is a **context-free polymorphic literal** — one whose type carries an
-/// unconstrained hole that only context can fill: an empty list `[]`, an empty map `{}`, or `none`.
-/// (A non-empty literal infers its elements; `some(x)`/`Ok(x)` carry a payload type. This is the
-/// syntactic trigger for `E0023` on an immutable, un-annotated binding, so a hole inherited from a
-/// call result is never mistaken for one.)
+/// unconstrained hole that only context can fill: an empty list `[]`, an empty map `{}`, `none`,
+/// or an `Ok(x)`/`Err(e)` constructor (one constructor fills only one `Result` slot, so the other
+/// is always a hole). A non-empty list/map infers its elements and `some(x)` fully determines its
+/// `Option`, so those are *not* uninferable. This is the syntactic trigger for `E0023` on an
+/// immutable, un-annotated binding, so a hole inherited from an arbitrary call result is never
+/// mistaken for one.
 fn is_uninferable_literal(expr: &Expr) -> bool {
     match expr {
         Expr::List { items, .. } => items.is_empty(),
         Expr::Map { entries, .. } => entries.is_empty(),
         Expr::Ident { name, .. } => name == "none",
+        // `Ok(x)`/`Err(e)` synthesize `Result<T, ?>` / `Result<?, E>` — the opposite slot is an
+        // unfillable hole at the binding site (only context or an annotation supplies it).
+        Expr::Call { callee, .. } => {
+            matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "Ok" || name == "Err")
+        }
         _ => false,
     }
+}
+
+/// The child statement lists nested directly inside a statement — `if`/`for` bodies and a nested
+/// function's body — for the recursive `mut`-refinement and reassignment walks. Class/impl method
+/// bodies are included so a method-local `mut x = []` is covered too.
+fn child_stmt_bodies(stmt: &Stmt) -> Vec<&[Stmt]> {
+    match stmt {
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            let mut bodies = vec![then_body.as_slice()];
+            if let Some(b) = else_body {
+                bodies.push(b.as_slice());
+            }
+            bodies
+        }
+        Stmt::For { body, .. } => vec![body.as_slice()],
+        Stmt::Fn(decl) => vec![decl.body.as_slice()],
+        Stmt::Class(c) => c
+            .methods
+            .iter()
+            .chain(c.impls.iter().flat_map(|b| b.methods.iter()))
+            .map(|m| m.body.as_slice())
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Whether any statement in `stmts` (or a nested `if`/`for`/`fn` body) reassigns `name` via a bare
+/// `name = …` (an un-`mut` `Binding`). Distinguishes a never-refined `mut x = []` (undeterminable,
+/// `E0023`) from an accumulator whose later write resolves its element type. Conservative: an inner
+/// shadow's reassignment counts here, which can only *suppress* the diagnostic, never add one.
+fn reassigns(stmts: &[Stmt], name: &str) -> bool {
+    stmts.iter().any(|stmt| {
+        matches!(stmt, Stmt::Binding { mut_decl: false, name: n, .. } if n == name)
+            || child_stmt_bodies(stmt)
+                .iter()
+                .any(|body| reassigns(body, name))
+    })
 }
 
 /// The declared type of a field, or `Unknown` when unannotated.
