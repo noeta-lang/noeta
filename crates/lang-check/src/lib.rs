@@ -1032,7 +1032,22 @@ impl Checker {
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);
                 self.check_method_args(&recv, name, args, span);
-                self.method_call_return(&recv, name)
+                let ret = self.method_call_return(&recv, name);
+                // A method call on a concrete primitive with no such built-in method is an error,
+                // mirroring the non-indexable check (`42[0]`). `dyn`/holes defer (their result is
+                // the deferred type, not `Unknown`), and a user `Named` type may resolve the call
+                // through a trait at runtime — so both are left lenient; only the closed primitives
+                // are flagged.
+                if matches!(ret, Type::Unknown)
+                    && matches!(recv, Type::Int | Type::Float | Type::Bool | Type::Unit)
+                {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("type `{recv}` has no method `{name}`"),
+                    ));
+                }
+                ret
             }
             _ => {
                 self.synth(callee, env);

@@ -1,0 +1,5 @@
+// A concrete primitive has a closed method set, so calling a method it does not define is a static
+// error — the method analogue of the non-indexable check (`42[0]`). `dyn` receivers still defer.
+// expect: error E0007 at 5:6
+// expect: exit 1
+echo (42).upper();

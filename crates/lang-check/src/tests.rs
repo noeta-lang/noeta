@@ -393,6 +393,18 @@ fn indexing_a_primitive_is_rejected() {
 }
 
 #[test]
+fn calling_an_unknown_method_on_a_primitive_is_rejected() {
+    // Parallel to the non-indexable check: a concrete primitive has a closed method set.
+    assert_eq!(codes("echo (42).upper();\n"), ["E0007"]);
+    assert_eq!(codes("echo true.foo();\n"), ["E0007"]);
+    // `compare` is defined on every value (Comparable), so it resolves.
+    assert!(codes("echo (1).compare(2);\n").is_empty());
+    // Receivers with method tables and deferred receivers stay lenient here.
+    assert!(codes("echo \"hi\".upper();\n").is_empty());
+    assert!(codes("fn f(x: dyn): dyn { return x.whatever(); }\n").is_empty());
+}
+
+#[test]
 fn argument_arity_is_checked() {
     assert_eq!(codes("echo \"hi\".upper(\"extra\");\n"), ["E0007"]); // upper takes 0
     assert!(codes("echo \"hi\".upper();\n").is_empty());
