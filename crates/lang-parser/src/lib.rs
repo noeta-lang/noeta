@@ -1514,15 +1514,54 @@ where
                 traits,
             });
 
+        // A literal value in attribute-argument position: a string/int/float/bool, or a bare
+        // identifier. Attribute arguments construct the attribute record, so they are the
+        // all-fields-literal subset, not arbitrary expressions.
+        let attr_value = choice((
+            just(T::StringLit).map_with(move |_, e| {
+                let span = ctx.to_span(e.span());
+                let raw = ctx.source.slice(span);
+                let value = raw
+                    .strip_prefix('"')
+                    .and_then(|r| r.strip_suffix('"'))
+                    .unwrap_or(raw)
+                    .to_string();
+                lang_ast::AttrValue::Str(value)
+            }),
+            just(T::FloatLit).map_with(move |_, e| {
+                lang_ast::AttrValue::Float(parse_float_literal(
+                    ctx.source.slice(ctx.to_span(e.span())),
+                ))
+            }),
+            just(T::IntLit).map_with(move |_, e| {
+                lang_ast::AttrValue::Int(
+                    parse_int_literal(ctx.source.slice(ctx.to_span(e.span()))).unwrap_or(0),
+                )
+            }),
+            just(T::TrueKw).map(|_| lang_ast::AttrValue::Bool(true)),
+            just(T::FalseKw).map(|_| lang_ast::AttrValue::Bool(false)),
+            id.clone().map(|(name, _)| lang_ast::AttrValue::Ident(name)),
+        ));
+        // An attribute argument: optionally named (`ttl: 60`), then a literal value.
+        let attr_arg = id
+            .clone()
+            .then_ignore(just(T::Colon))
+            .or_not()
+            .then(attr_value)
+            .map_with(move |(name, value), e| lang_ast::AttrArg {
+                name: name.map(|(n, _)| n),
+                value,
+                span: ctx.to_span(e.span()),
+            });
+
         // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position. A record
-        // instance attached as metadata, consumed via the manifest (M1.8b). It carries no codegen
-        // meaning; code generation is `@derive`. Arguments are identifiers for now (richer
-        // record-valued attributes are M1.8b).
+        // instance attached as metadata, consumed via the manifest. It carries no codegen meaning;
+        // code generation is `@derive`. Arguments are literals (positional or named).
         let attribute = just(T::Hash)
             .ignore_then(just(T::LBracket))
             .ignore_then(id.clone())
             .then(
-                id.clone()
+                attr_arg
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()

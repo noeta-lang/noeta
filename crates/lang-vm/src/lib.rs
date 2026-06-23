@@ -3463,7 +3463,7 @@ mod tests {
 
     #[test]
     fn attribute_manifest_records_decorations() {
-        // `#[...]` data attributes (with identifier args) are collected into the queryable
+        // `#[...]` data attributes (with literal args) are collected into the queryable
         // build manifest, in source order, keyed by the decorated type.
         let source = Source::new(
             SourceId::FIRST,
@@ -3478,7 +3478,14 @@ mod tests {
         assert_eq!(attrs[0].name, "Entity");
         assert!(attrs[0].args.is_empty());
         assert_eq!(attrs[1].name, "Route");
-        assert_eq!(attrs[1].args, vec!["login".to_string(), "post".to_string()]);
+        let arg_values: Vec<_> = attrs[1].args.iter().map(|a| a.value.clone()).collect();
+        assert_eq!(
+            arg_values,
+            vec![
+                lang_bytecode::AttributeValue::Ident("login".to_string()),
+                lang_bytecode::AttributeValue::Ident("post".to_string()),
+            ]
+        );
         // A type with no attributes has no manifest entries.
         assert_eq!(module.attributes_for("Missing").count(), 0);
     }

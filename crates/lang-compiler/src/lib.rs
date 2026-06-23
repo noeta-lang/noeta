@@ -41,8 +41,8 @@ use lang_ast::{
 };
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
-    AttributeRecord, BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module,
-    NarrowTarget, Op, Reg,
+    AttributeArg, AttributeRecord, AttributeValue, BoolSide, Builtin, CaptureFrom, Chunk, Const,
+    MethodEntry, Module, NarrowTarget, Op, Reg,
 };
 
 mod freevars;
@@ -190,7 +190,7 @@ impl ModuleCompiler {
             self.manifest.push(AttributeRecord {
                 type_name: type_name.to_string(),
                 name: attr.name.clone(),
-                args: attr.args.iter().map(|(arg, _)| arg.clone()).collect(),
+                args: attr.args.iter().map(lower_attr_arg).collect(),
             });
         }
     }
@@ -2143,6 +2143,22 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
 /// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
 /// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
 /// name); generic arguments are dropped (erasure).
+/// Lower an AST attribute argument to its manifest form (the build-artifact mirror that tooling
+/// reads). A pure value translation — attributes carry no codegen meaning.
+fn lower_attr_arg(arg: &lang_ast::AttrArg) -> AttributeArg {
+    let value = match &arg.value {
+        lang_ast::AttrValue::Str(s) => AttributeValue::Str(s.clone()),
+        lang_ast::AttrValue::Int(n) => AttributeValue::Int(*n),
+        lang_ast::AttrValue::Float(f) => AttributeValue::Float(*f),
+        lang_ast::AttrValue::Bool(b) => AttributeValue::Bool(*b),
+        lang_ast::AttrValue::Ident(name) => AttributeValue::Ident(name.clone()),
+    };
+    AttributeArg {
+        name: arg.name.clone(),
+        value,
+    }
+}
+
 fn narrow_target(ty: &TypeRef) -> NarrowTarget {
     match ty {
         TypeRef::Union { members, .. } => {
@@ -2161,5 +2177,60 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             "Set" | "set" => NarrowTarget::Set,
             other => NarrowTarget::Named(other.to_string()),
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::compile;
+    use lang_bytecode::AttributeValue;
+    use lang_lexer::lex;
+    use lang_parser::parse;
+    use lang_span::{Source, SourceId};
+
+    /// Compile `src` and return its attribute manifest.
+    fn manifest(src: &str) -> Vec<lang_bytecode::AttributeRecord> {
+        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "test program must parse cleanly: {:?}",
+            parsed.diagnostics
+        );
+        compile(&parsed.program).expect("compiles").manifest
+    }
+
+    #[test]
+    fn bare_attribute_has_no_args() {
+        let m = manifest("#[Entity]\ntype User = { id: int };\n");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].type_name, "User");
+        assert_eq!(m[0].name, "Entity");
+        assert!(m[0].args.is_empty());
+    }
+
+    #[test]
+    fn positional_literal_args_reach_the_manifest() {
+        // The richer-argument case: a string literal survives end-to-end into the manifest as a
+        // typed value (not the identifier-only form of the earlier prototype).
+        let m = manifest("#[Route(\"/users\")]\ntype Users = { id: int };\n");
+        assert_eq!(m.len(), 1);
+        assert_eq!(m[0].args.len(), 1);
+        assert_eq!(m[0].args[0].name, None);
+        assert_eq!(
+            m[0].args[0].value,
+            AttributeValue::Str("/users".to_string())
+        );
+    }
+
+    #[test]
+    fn named_and_mixed_literal_args_reach_the_manifest() {
+        let m = manifest("#[Cache(ttl: 60, eager: true)]\ntype Page = { id: int };\n");
+        assert_eq!(m[0].args.len(), 2);
+        assert_eq!(m[0].args[0].name, Some("ttl".to_string()));
+        assert_eq!(m[0].args[0].value, AttributeValue::Int(60));
+        assert_eq!(m[0].args[1].name, Some("eager".to_string()));
+        assert_eq!(m[0].args[1].value, AttributeValue::Bool(true));
     }
 }

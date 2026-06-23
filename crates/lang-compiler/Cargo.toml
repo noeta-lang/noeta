@@ -15,5 +15,9 @@ lang-builtins = { workspace = true }
 lang-object = { workspace = true }
 lang-stdlib = { workspace = true }
 
+[dev-dependencies]
+lang-lexer = { workspace = true }
+lang-parser = { workspace = true }
+
 [lints]
 workspace = true

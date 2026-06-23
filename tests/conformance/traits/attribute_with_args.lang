@@ -1,0 +1,11 @@
+// Attribute parameters: a `#[...]` attribute may carry literal arguments — positional
+// (`"/users"`) and named (`method: "GET"`, `ttl: 60`). They are inert at runtime (collected into
+// the build manifest, never executed), so the program runs identically in both backends.
+// expect: stdout "1"
+// expect: exit 0
+#[Route("/users", method: "GET")]
+#[Cache(ttl: 60)]
+type Users = { id: int };
+
+u = Users { id: 1 };
+echo u.id;

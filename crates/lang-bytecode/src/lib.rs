@@ -542,14 +542,33 @@ pub struct MethodEntry {
 /// One `#[Name(args...)]` data attribute attached to a declaration, recorded in the build
 /// manifest. Attributes carry no codegen meaning (code generation is `@derive`) and the runtime
 /// ignores them; tooling queries them through the compiled module (see [`Module::attributes_for`]).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct AttributeRecord {
     /// The decorated declaration's type name.
     pub type_name: String,
     /// The attribute's name (e.g. `Route`).
     pub name: String,
-    /// The identifier arguments inside the parentheses; empty for a bare `#[Marker]`.
-    pub args: Vec<String>,
+    /// The arguments inside the parentheses; empty for a bare `#[Marker]`. Each is a literal,
+    /// positional or named — the data a consumer (router, DI, ORM) reads off the manifest.
+    pub args: Vec<AttributeArg>,
+}
+
+/// One argument of a manifest [`AttributeRecord`] — the build-artifact mirror of the AST's
+/// attribute argument. Positional (`name` is `None`) or named; the value is a literal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttributeArg {
+    pub name: Option<String>,
+    pub value: AttributeValue,
+}
+
+/// A literal value carried by a manifest attribute argument.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttributeValue {
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    Ident(String),
 }
 
 /// A compiled module: the prototype table plus the object-model side tables. `protos[0]` is

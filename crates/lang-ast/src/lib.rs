@@ -154,10 +154,34 @@ pub struct RecordDecl {
 pub struct Attribute {
     pub name: String,
     pub name_span: Span,
-    /// The identifier arguments inside the parentheses, each with its span. Empty for a bare
-    /// `#[Marker]`.
-    pub args: Vec<(String, Span)>,
+    /// The arguments inside the parentheses. Empty for a bare `#[Marker]`. Each argument is a
+    /// literal (positional `#[Route("/x")]` or named `#[Cache(ttl: 60)]`) — attribute arguments
+    /// construct the attribute record, so they are the all-fields-literal subset, not arbitrary
+    /// expressions.
+    pub args: Vec<AttrArg>,
     pub span: Span,
+}
+
+/// A single argument to a `#[...]` data attribute. Positional (`name` is `None`) or named
+/// (`#[Cache(ttl: 60)]`, `name` is `Some("ttl")`); the value is always a literal.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AttrArg {
+    /// The field name for a named argument; `None` for a positional argument.
+    pub name: Option<String>,
+    pub value: AttrValue,
+    pub span: Span,
+}
+
+/// A literal value in attribute-argument position — the all-fields-literal subset that may
+/// construct an attribute record. Richer than the identifier-only form of the earlier prototype.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AttrValue {
+    Str(String),
+    Int(i64),
+    Float(f64),
+    Bool(bool),
+    /// A bare identifier (e.g. an enum-like constant referenced by name).
+    Ident(String),
 }
 
 /// Whether a declaration's `@derive(...)` directives include `trait_name`. Used by both backends

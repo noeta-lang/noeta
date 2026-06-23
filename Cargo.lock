@@ -655,7 +655,9 @@ dependencies = [
  "lang-builtins",
  "lang-bytecode",
  "lang-diagnostics",
+ "lang-lexer",
  "lang-object",
+ "lang-parser",
  "lang-span",
  "lang-stdlib",
 ]
