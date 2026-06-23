@@ -1,0 +1,8 @@
+// Body-side bound requirement extends beyond ordering: `+` requires `Add`, so using it on an
+// unbounded type parameter is rejected at the definition (`E0025`). `<T: Add>` would license it.
+// expect: error E0025 at 6:12
+// expect: exit 1
+fn sum<T>(a: T, b: T): T {
+    return a + b;
+}
+echo sum(1, 2);

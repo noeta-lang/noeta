@@ -188,6 +188,37 @@ fn ordering_on_an_unbounded_type_parameter_is_reported() {
 }
 
 #[test]
+fn arithmetic_on_an_unbounded_type_parameter_is_reported() {
+    // The operator-trait check is not ordering-only: `+` on an unbounded `T` needs `Add`.
+    let unbounded = "fn sum<T>(a: T, b: T): T { return a + b; }\n";
+    assert_eq!(codes(unbounded), ["E0025"]);
+    let bounded = "fn sum<T: Add>(a: T, b: T): T { return a + b; }\n";
+    assert!(codes(bounded).is_empty());
+}
+
+#[test]
+fn arithmetic_on_a_concrete_type_without_the_trait_is_reported() {
+    // A concrete user type that does not `impl Add` cannot be used with `+`: `E0007` (the runtime's
+    // "cannot apply"), now caught statically. A type that *does* `impl Add` is accepted.
+    let bad = "type P = { x: int };\na = P { x: 1 };\nb = P { x: 2 };\necho a + b;\n";
+    assert_eq!(codes(bad), ["E0007"]);
+    let good = "class M { n: int\n  impl Add { fn add(o: M): M { return o; } } }\n\
+                a = M { n: 1 };\nb = M { n: 2 };\necho a + b;\n";
+    assert!(codes(good).is_empty());
+}
+
+#[test]
+fn ordering_on_a_concrete_non_comparable_type_is_reported() {
+    // Ordering now checks concrete types too: a record that does not derive/`impl Comparable` is
+    // `E0007`; a `@derive(Comparable)` type is accepted.
+    let bad = "type P = { x: int };\na = P { x: 1 };\nb = P { x: 2 };\necho a < b;\n";
+    assert_eq!(codes(bad), ["E0007"]);
+    let good = "@derive(Comparable)\nclass V { n: int }\n\
+                a = V { n: 1 };\nb = V { n: 2 };\necho a < b;\n";
+    assert!(codes(good).is_empty());
+}
+
+#[test]
 fn generic_call_with_satisfied_primitive_bound_is_clean() {
     let src = "fn max<T: Comparable>(a: T, b: T): T { if a > b { return a; } return b; }\n\
                echo max(1, 2);\n";

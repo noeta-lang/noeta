@@ -1181,23 +1181,17 @@ impl Checker {
                 }
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                // A `dyn` operand defers to runtime dispatch (its sanctioned semantics), so it is
-                // accepted like an inference hole — only a concretely non-numeric operand errors. A
-                // user `Named` type is also accepted: it may `impl Add`/`Sub`/… and dispatch the
-                // operator at runtime, the same leniency method calls on a `Named` receiver get
-                // (verifying the impl statically is the separate operator-trait-checking gap).
-                let bad = |t: &Type| {
-                    !t.is_numeric() && !t.defers_to_runtime() && !matches!(t, Type::Named(_))
+                // Arithmetic is trait-backed: `+`→`Add`, … (`%` has no trait — numerics only). An
+                // operand must satisfy that trait — a built-in numeric, a user type that `impl`s it,
+                // or a type parameter bounded by it; a `dyn`/hole defers. Otherwise it is rejected,
+                // statically catching what the runtime would (`cannot apply` / a missing bound).
+                let trait_name = required_operator_trait(op);
+                let acceptable = |this: &Self, t: &Type| match trait_name {
+                    Some(n) => this.operand_satisfies_operator(t, n),
+                    None => t.is_numeric() || t.defers_to_runtime(),
                 };
-                if bad(&lt) || bad(&rt) {
-                    // A concretely non-numeric operand: the same error the M0 runtime raised,
-                    // now caught statically. Span is the binary expression (matches the runtime
-                    // report site), so the diagnostic reads identically.
-                    self.diags.push(Diagnostic::error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("cannot apply `{}` to `{lt}` and `{rt}`", op.symbol()),
-                    ));
+                if !acceptable(self, &lt) || !acceptable(self, &rt) {
+                    self.report_operator_error(op, &lt, &rt, trait_name, span);
                     Type::Unknown
                 } else if lt == Type::Float || rt == Type::Float {
                     Type::Float
@@ -1207,42 +1201,84 @@ impl Checker {
                     Type::Unknown
                 }
             }
-            // Ordering comparisons require `Comparable`. Body-side, an operand that is an in-scope
-            // *unbounded* type parameter is rejected at the definition (the bound must license the
-            // operation); concrete types and `dyn`/holes are unaffected here.
+            // Ordering comparisons require `Comparable`: a built-in scalar, a user type that derives
+            // or `impl`s it, or a type parameter bounded by it. A concrete type that does not is
+            // `E0007` (the runtime's "cannot compare"); an unbounded type parameter is `E0025`.
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                // Report once for the comparison even if both operands are the same parameter.
-                if let Some(n) = self
-                    .unbounded_ordering_param(&lt)
-                    .or_else(|| self.unbounded_ordering_param(&rt))
+                if !self.operand_satisfies_operator(&lt, "Comparable")
+                    || !self.operand_satisfies_operator(&rt, "Comparable")
                 {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::TraitBoundNotSatisfied,
-                            span,
-                            format!(
-                                "operator `{}` requires `{n}: Comparable`, but `{n}` is an \
-                                 unbounded type parameter",
-                                op.symbol()
-                            ),
-                        )
-                        .with_help(format!("add the bound, e.g. `<{n}: Comparable>`")),
-                    );
+                    self.report_operator_error(op, &lt, &rt, Some("Comparable"), span);
                 }
                 Type::Bool
             }
+            // `==`/`!=` are universal (structural equality fallback) and the logical operators take
+            // bools; none impose a trait bound, so none is checked here.
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::And | BinaryOp::Or => Type::Bool,
         }
     }
 
-    /// Body-side bound requirement (S4.3c): if `operand` is an in-scope type parameter that lacks
-    /// the `Comparable` bound, return its name (the caller reports a single `E0025` for the
-    /// comparison). A concrete type or a `dyn`/hole is not a type parameter, so it returns `None`.
-    fn unbounded_ordering_param(&self, operand: &Type) -> Option<String> {
-        let Type::Named(n) = operand else { return None };
-        match self.type_params.get(n) {
-            Some(bounds) if !bounds.iter().any(|b| b == "Comparable") => Some(n.clone()),
+    /// Whether `operand` may be used with an operator requiring `trait_name`: a `dyn`/hole defers;
+    /// an in-scope **type parameter** is licensed only by its declared bounds; any other type by the
+    /// satisfaction model ([`Self::satisfies`] — built-in table + `@derive`/`impl` index).
+    fn operand_satisfies_operator(&self, operand: &Type, trait_name: &str) -> bool {
+        if operand.defers_to_runtime() {
+            return true;
+        }
+        if let Type::Named(n) = operand
+            && let Some(bounds) = self.type_params.get(n)
+        {
+            return bounds.iter().any(|b| b == trait_name);
+        }
+        self.satisfies(operand, trait_name)
+    }
+
+    /// The name of an in-scope type parameter (`operand`) that lacks `trait_name` among its bounds,
+    /// or `None` if `operand` is not such a parameter — used to pick the diagnostic flavor.
+    fn unbounded_type_param(&self, operand: &Type, trait_name: &str) -> Option<String> {
+        match operand {
+            Type::Named(n) => match self.type_params.get(n) {
+                Some(bounds) if !bounds.iter().any(|b| b == trait_name) => Some(n.clone()),
+                _ => None,
+            },
             _ => None,
+        }
+    }
+
+    /// Report a trait-backed operator applied to an unsupported operand: an unbounded type parameter
+    /// is `E0025` (a missing bound, fixable at the declaration); any other concrete mismatch is
+    /// `E0007` (the same "cannot apply" the runtime raised). Reported once for the operator.
+    fn report_operator_error(
+        &mut self,
+        op: BinaryOp,
+        lt: &Type,
+        rt: &Type,
+        trait_name: Option<&str>,
+        span: Span,
+    ) {
+        if let Some(tn) = trait_name
+            && let Some(n) = self
+                .unbounded_type_param(lt, tn)
+                .or_else(|| self.unbounded_type_param(rt, tn))
+        {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::TraitBoundNotSatisfied,
+                    span,
+                    format!(
+                        "operator `{}` requires `{n}: {tn}`, but `{n}` is an unbounded type \
+                         parameter",
+                        op.symbol()
+                    ),
+                )
+                .with_help(format!("add the bound, e.g. `<{n}: {tn}>`")),
+            );
+        } else {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("cannot apply `{}` to `{lt}` and `{rt}`", op.symbol()),
+            ));
         }
     }
 
@@ -1682,6 +1718,22 @@ fn arg_compatible(arg: &Type, param: &Type) -> bool {
         || arg.defers_to_runtime()
         || param.defers_to_runtime()
         || (arg.is_numeric() && param.is_numeric())
+}
+
+/// The built-in trait an operand of `op` must satisfy, for the trait-backed operators: arithmetic
+/// (`+ - * /` → `Add`/`Sub`/`Mul`/`Div`) and ordering (`< <= > >=` → `Comparable`). `%` (no trait —
+/// numerics only), `~`/`==`/`!=` (universal: display-concat / structural-equality fallbacks), and
+/// the logical operators map to `None`, so the checker imposes no trait requirement on them.
+fn required_operator_trait(op: BinaryOp) -> Option<&'static str> {
+    use BinaryOp::*;
+    match op {
+        Add => Some("Add"),
+        Sub => Some("Sub"),
+        Mul => Some("Mul"),
+        Div => Some("Div"),
+        Lt | Le | Gt | Ge => Some("Comparable"),
+        _ => None,
+    }
 }
 
 /// Replace each generic type parameter (a `Named` whose name is in `params`) with `dyn`, deeply.
