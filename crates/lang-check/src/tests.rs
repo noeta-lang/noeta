@@ -178,6 +178,16 @@ fn generic_class_enforces_its_bound_at_construction() {
 }
 
 #[test]
+fn ordering_on_an_unbounded_type_parameter_is_reported() {
+    // Body-side: `<` on an unbounded `T` is rejected at the definition (one diagnostic for the
+    // comparison); adding `: Comparable` licenses it.
+    let unbounded = "fn less<T>(a: T, b: T): bool { return a < b; }\n";
+    assert_eq!(codes(unbounded), ["E0025"]);
+    let bounded = "fn less<T: Comparable>(a: T, b: T): bool { return a < b; }\n";
+    assert!(codes(bounded).is_empty());
+}
+
+#[test]
 fn generic_call_with_satisfied_primitive_bound_is_clean() {
     let src = "fn max<T: Comparable>(a: T, b: T): T { if a > b { return a; } return b; }\n\
                echo max(1, 2);\n";

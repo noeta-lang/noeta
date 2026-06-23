@@ -1,0 +1,9 @@
+// Body-side bound requirement: the `<` operator requires `Comparable`, but `T` here is an
+// unbounded type parameter, so the comparison is rejected at the definition (`E0025`) — before any
+// call, Rust-style. Adding `<T: Comparable>` would license it.
+// expect: error E0025 at 7:12
+// expect: exit 1
+fn less<T>(a: T, b: T): bool {
+    return a < b;
+}
+echo less(1, 2);

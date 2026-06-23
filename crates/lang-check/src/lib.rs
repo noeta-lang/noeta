@@ -170,10 +170,11 @@ struct Checker {
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
     /// separately (a built-in via [`Type::is_builtin_name`], a parameter via [`Self::type_params`]).
     types: HashSet<String>,
-    /// The generic type parameters in scope while checking the current declaration's annotations
-    /// (a class/record/enum's `<T, ...>`). Empty at top level; saved and restored around each
-    /// generic declaration.
-    type_params: HashSet<String>,
+    /// The generic type parameters in scope while checking the current declaration, each mapped to
+    /// its declared trait **bounds** (`<T: Comparable>` → `{"T": ["Comparable"]}`). Empty at top
+    /// level; saved and restored around each generic declaration. The bounds drive body-side
+    /// enforcement (S4.3c — an operation on `T` is only allowed if a bound licenses it).
+    type_params: HashMap<String, Vec<String>>,
     /// The declared return type of the function whose body is currently being checked — the
     /// expectation each `return <value>` is checked against. `Unknown` at top level and inside a
     /// function with no return annotation (so the check is a no-op there). Saved and restored
@@ -514,8 +515,11 @@ impl Checker {
         // class's parameters; restored after the body. Bounds are validated here too.
         self.check_type_param_bounds(&decl.type_params);
         let saved_type_params = self.type_params.clone();
-        self.type_params
-            .extend(decl.type_params.iter().map(|p| p.name.clone()));
+        self.type_params.extend(
+            decl.type_params
+                .iter()
+                .map(|p| (p.name.clone(), p.bounds.clone())),
+        );
         for p in &decl.params {
             self.check_type_opt(&p.ty);
         }
@@ -639,11 +643,14 @@ impl Checker {
     /// restore once the declaration is checked). Generic parameters are erased at runtime but are
     /// legal referents for annotations within their declaration. Each parameter's trait bounds are
     /// validated here (an unknown trait in a bound is `E0014`).
-    fn enter_type_params(&mut self, params: &[TypeParam]) -> HashSet<String> {
+    fn enter_type_params(&mut self, params: &[TypeParam]) -> HashMap<String, Vec<String>> {
         self.check_type_param_bounds(params);
         std::mem::replace(
             &mut self.type_params,
-            params.iter().map(|p| p.name.clone()).collect(),
+            params
+                .iter()
+                .map(|p| (p.name.clone(), p.bounds.clone()))
+                .collect(),
         )
     }
 
@@ -688,7 +695,7 @@ impl Checker {
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name)
                     && !PRELUDE_TYPES.contains(&name.as_str())
-                    && !self.type_params.contains(name)
+                    && !self.type_params.contains_key(name)
                     && !self.types.contains(name)
                 {
                     self.diags.push(
@@ -1200,14 +1207,42 @@ impl Checker {
                     Type::Unknown
                 }
             }
-            BinaryOp::Eq
-            | BinaryOp::Ne
-            | BinaryOp::Lt
-            | BinaryOp::Le
-            | BinaryOp::Gt
-            | BinaryOp::Ge
-            | BinaryOp::And
-            | BinaryOp::Or => Type::Bool,
+            // Ordering comparisons require `Comparable`. Body-side, an operand that is an in-scope
+            // *unbounded* type parameter is rejected at the definition (the bound must license the
+            // operation); concrete types and `dyn`/holes are unaffected here.
+            BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                // Report once for the comparison even if both operands are the same parameter.
+                if let Some(n) = self
+                    .unbounded_ordering_param(&lt)
+                    .or_else(|| self.unbounded_ordering_param(&rt))
+                {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::TraitBoundNotSatisfied,
+                            span,
+                            format!(
+                                "operator `{}` requires `{n}: Comparable`, but `{n}` is an \
+                                 unbounded type parameter",
+                                op.symbol()
+                            ),
+                        )
+                        .with_help(format!("add the bound, e.g. `<{n}: Comparable>`")),
+                    );
+                }
+                Type::Bool
+            }
+            BinaryOp::Eq | BinaryOp::Ne | BinaryOp::And | BinaryOp::Or => Type::Bool,
+        }
+    }
+
+    /// Body-side bound requirement (S4.3c): if `operand` is an in-scope type parameter that lacks
+    /// the `Comparable` bound, return its name (the caller reports a single `E0025` for the
+    /// comparison). A concrete type or a `dyn`/hole is not a type parameter, so it returns `None`.
+    fn unbounded_ordering_param(&self, operand: &Type) -> Option<String> {
+        let Type::Named(n) = operand else { return None };
+        match self.type_params.get(n) {
+            Some(bounds) if !bounds.iter().any(|b| b == "Comparable") => Some(n.clone()),
+            _ => None,
         }
     }
 

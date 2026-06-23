@@ -36,7 +36,7 @@ The checker is **shared** by both backends (one `lang_check::check`), so any new
 | L3 | Assignment updates the declaring scope (accumulators infer) | **done** |
 | L4 | Compound assignment `+= -= *= /= %= ~=` (parser sugar) | **done** |
 | S3c.4 | Hard E0023 CannotInfer (fixable via annotation) + finalize | **done** |
-| S4 | Explicit bounded generics, statically enforced (E0025) | **done** |
+| S4 | Explicit bounded generics, statically enforced (E0025) | **done** (incl. S4.3 follow-up: associated-call typing, generic-class + body-side enforcement) |
 | S5 | Trait coherence — orphan/overlap rules (E0026) | todo |
 | S6 | `dyn` operations + checked narrowing (`x.as<T>()`) | todo |
 | S8 | Declared union / intersection types ("closed `dyn`") | planned |

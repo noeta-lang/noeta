@@ -1,6 +1,8 @@
 # Slice S4.3 — Complete generic enforcement (the items S4.2 deferred)
 
-Status: **in-progress** (S4.3a → S4.3b → S4.3c)
+Status: **done** (S4.3a + S4.3b + S4.3c landed)
+
+> **Outcome:** all three deferred items closed, conformance **142 / differential 132 matched / 0 skipped / backends agree**. (a) `synth_call`'s `Member` arm resolves `Type.method(args)` via a unified `call_user_method`, so a constructor result types precisely (and a latent gap — arithmetic on a `Named` that `impl Add` — was fixed by making arithmetic lenient on `Named` operands, matching method-call leniency). (b) generic-class methods carry `GenericInfo` (class params/bounds + un-erased method sig), so construction enforces bounds through the shared `check_generic_call`. (c) `Checker::type_params` became a `name → bounds` map; an ordering comparison on an in-scope unbounded type parameter is a single `E0025` at the definition. 6 new conformance cases + 4 checker unit tests across the three commits.
 
 > **Track:** inferred-static type system (see `plans/types/README.md`). **Follows:** S4.2. **Determinism / oracle posture:** still front-end only — the runtime stays erased, so every accepted program runs identically on both backends and `--differential` stays at **0 skipped**. The effect is *more* compile-time rejections (the `E0025` surface widens) and *more precise* typing of associated calls.
 
