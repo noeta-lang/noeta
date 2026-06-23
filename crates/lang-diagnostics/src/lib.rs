@@ -66,6 +66,11 @@ pub enum DiagnosticCode {
     /// the sandbox. Distinct from the static name/type errors: the program is well-formed, the
     /// failure is in the environment it acts on.
     IoError,
+    /// A named function or method is missing a required type annotation — a parameter without a
+    /// type, or no return type. Under inferred-static typing, signatures are mandatory at named
+    /// boundaries (annotations stay optional only for locals and closures, which inference
+    /// reconstructs).
+    MissingSignature,
 }
 
 impl DiagnosticCode {
@@ -93,6 +98,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnresolvedImport,
         DiagnosticCode::NameCollision,
         DiagnosticCode::IoError,
+        DiagnosticCode::MissingSignature,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -120,6 +126,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnresolvedImport => "E0019",
             DiagnosticCode::NameCollision => "E0020",
             DiagnosticCode::IoError => "E0021",
+            DiagnosticCode::MissingSignature => "E0022",
         }
     }
 

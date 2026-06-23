@@ -4,6 +4,6 @@
 // expect: stdout "100"
 // expect: exit 0
 base = 100;
-fn f(base) { return base; }
+fn f(base: int): int { return base; }
 echo f(5);
 echo base;

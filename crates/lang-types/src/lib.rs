@@ -38,12 +38,14 @@ mod traits;
 pub use traits::{BUILTIN_TRAITS, BuiltinTrait, operator_trait};
 
 /// A type in the lattice.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Type {
     /// The internal **inference hole**: *absence of information*, the fallback for anything not
     /// yet inferred. Named "Unknown" rather than "Any" to stress it is not a type the user can
     /// name — the nameable top is [`Type::Dyn`]. The gradual fallback to `Unknown` is being
-    /// removed across the inferred-static track (an unresolved hole becomes an error).
+    /// removed across the inferred-static track (an unresolved hole becomes an error). It is the
+    /// lattice's [`Default`] — the natural "nothing known yet" starting point.
+    #[default]
     Unknown,
     /// The explicit, user-nameable **top type** (`dyn` / `Any`) — the sole sanctioned dynamic
     /// escape. Every type widens into it (`T <: dyn`); narrowing out (`dyn → T`) is explicit and

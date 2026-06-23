@@ -2,7 +2,7 @@
 // expect: stdout "6"
 // expect: stdout "111"
 // expect: exit 0
-fn outer(a) {
+fn outer(a: int): dyn {
     return fn(b) => fn(c) => a + b + c;
 }
 f = outer(1);

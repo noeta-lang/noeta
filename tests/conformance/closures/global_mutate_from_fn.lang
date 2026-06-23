@@ -2,7 +2,7 @@
 // expect: stdout "15"
 // expect: exit 0
 mut total = 0;
-fn add_to_total(n) {
+fn add_to_total(n: int): void {
     total = total + n;
 }
 add_to_total(5);

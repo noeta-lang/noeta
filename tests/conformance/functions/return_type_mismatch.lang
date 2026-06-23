@@ -1,0 +1,8 @@
+// A `return` whose value does not match the declared return type is a static type mismatch:
+// the body is checked against the signature, not merely inferred.
+// expect: error E0007 at 6:12
+// expect: exit 1
+fn answer(): int {
+    return "forty-two";
+}
+echo answer();

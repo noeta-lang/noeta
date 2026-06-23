@@ -1,0 +1,8 @@
+// A named function with no return type is rejected: the return type is part of the mandatory
+// signature at a named boundary, even when the body returns nothing of interest.
+// expect: error E0022 at 5:4
+// expect: exit 1
+fn greet(name: string) {
+    echo "hi ${name}";
+}
+greet("ada");

@@ -3,7 +3,7 @@
 // expect: stdout "found 7"
 // expect: stdout "absent"
 // expect: exit 0
-fn pick(hit): ?int {
+fn pick(hit: bool): ?int {
     if hit { return some(7); }
     return none;
 }

@@ -34,7 +34,7 @@
 //! expectations (declared returns, required signatures) and remove the hole fallback, at which
 //! point an un-inferable type becomes a compile error rather than a silent pass.
 //!
-//! ## What it checks (M1.7)
+//! ## What it checks
 //!
 //! - **Exhaustive `match`** (`E0011`) — a `match` on a concretely-typed enum (or `Result`/
 //!   `Option`) that omits a variant and has no catch-all. This promotes M1.5's *runtime*
@@ -54,12 +54,16 @@
 //!   e.g. a `?User` annotation whose `User` came from a `use`. Now that the loader merges resolved
 //!   imports into the program and leaves opaque-stub `use`s in place, both referents are visible
 //!   to [`collect`], so an unresolvable name is genuinely unknown.
+//! - **Missing signature (`E0022`)** — a named function or method lacking a type on a parameter
+//!   or a return type. Inferred-static typing makes signatures mandatory at named boundaries
+//!   (only closures and local bindings stay inferred). Each `return <value>` is then checked
+//!   against the declared return type (an `E0007` mismatch on a concrete violation).
 //!
-//! Inference is intentionally best-effort (a conservative, name-first gradual pass), not yet a
-//! full Hindley–Milner solver with unification and let-generalization. The lattice and the
-//! `Var` variant are in place for that hardening; the *checks* above are already sound. Richer
-//! inference (and immutability/ownership analysis — the 7b half) layer on without changing the
-//! shared-front-end integration.
+//! The engine is bidirectional with local inference (see above), deliberately **not** classical
+//! Hindley–Milner: subtyping (`dyn` widening, directional method resolution, record width) is
+//! load-bearing and defeats HM's symmetric unification. The remaining gradual fallback to
+//! [`Type::Unknown`] is being removed in stages across the inferred-static track; until then an
+//! un-inferable interior type is tolerated rather than an error.
 
 use std::collections::{HashMap, HashSet};
 
@@ -123,6 +127,11 @@ struct Checker {
     /// (a class/record/enum's `<T, ...>`). Empty at top level; saved and restored around each
     /// generic declaration.
     type_params: HashSet<String>,
+    /// The declared return type of the function whose body is currently being checked — the
+    /// expectation each `return <value>` is checked against. `Unknown` at top level and inside a
+    /// function with no return annotation (so the check is a no-op there). Saved and restored
+    /// around each function so nested declarations do not clobber the enclosing one.
+    current_ret: Type,
     diags: Vec<Diagnostic>,
 }
 
@@ -211,7 +220,9 @@ impl Checker {
             }
             Stmt::Return { value, .. } => {
                 if let Some(value) = value {
-                    self.check(value, &Type::Unknown, env);
+                    // Check the returned value against the enclosing function's declared return.
+                    let expected = self.current_ret.clone();
+                    self.check(value, &expected, env);
                 }
             }
             Stmt::If {
@@ -251,10 +262,20 @@ impl Checker {
     /// Check a function (or method) body. `extra` seeds the body scope with additional bindings
     /// (a class's fields, when checking a method).
     fn check_fn(&mut self, decl: &FnDecl, env: &mut Env, extra: &[(String, Type)]) {
+        self.require_signature(decl);
         for p in &decl.params {
             self.check_type_opt(&p.ty);
         }
         self.check_type_opt(&decl.ret);
+        // The body's `return`s are checked against the declared return type; `Unknown` when
+        // unannotated (already an `E0022`), so the check stays a no-op there. Saved/restored so a
+        // nested function does not clobber the enclosing one's expectation.
+        let ret = decl
+            .ret
+            .as_ref()
+            .map(Type::from_ref)
+            .unwrap_or(Type::Unknown);
+        let saved_ret = std::mem::replace(&mut self.current_ret, ret);
         env.push(HashMap::new());
         for (name, ty) in extra {
             bind(env, name, ty.clone());
@@ -266,6 +287,38 @@ impl Checker {
             self.check_stmt(stmt, env);
         }
         env.pop();
+        self.current_ret = saved_ret;
+    }
+
+    /// Inferred-static requires a full signature on every **named** function or method: a type on
+    /// each parameter and a return type. (Closures and local bindings stay inferred — inference
+    /// reconstructs them.) Each missing piece is its own `E0022`.
+    fn require_signature(&mut self, decl: &FnDecl) {
+        for p in &decl.params {
+            if p.ty.is_none() {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::MissingSignature,
+                        p.name_span,
+                        format!("parameter `{}` needs a type annotation", p.name),
+                    )
+                    .with_help(
+                        "every parameter of a named function needs a type; only closures and \
+                         locals are inferred",
+                    ),
+                );
+            }
+        }
+        if decl.ret.is_none() {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::MissingSignature,
+                    decl.name_span,
+                    format!("function `{}` needs a return type", decl.name),
+                )
+                .with_help("annotate the return type after the parameters, e.g. `): int`"),
+            );
+        }
     }
 
     fn check_record(&mut self, r: &RecordDecl) {

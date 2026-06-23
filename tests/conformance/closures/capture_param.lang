@@ -2,7 +2,7 @@
 // expect: stdout "15"
 // expect: stdout "23"
 // expect: exit 0
-fn make_adder(n) {
+fn make_adder(n: int): dyn {
     return fn(x) => x + n;
 }
 add5 = make_adder(5);

@@ -3,8 +3,8 @@
 // collector can reclaim it.
 // expect: stdout "120"
 // expect: exit 0
-fn compute() {
-    fn fact(n) {
+fn compute(): int {
+    fn fact(n: int): int {
         if n <= 1 {
             return 1;
         }

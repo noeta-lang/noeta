@@ -2,9 +2,9 @@
 // immutable reassignment. The `count` written inside `bump` is on line 8, column 9.
 // expect: error E0006 at 8:9
 // expect: exit 1
-fn run() {
+fn run(): void {
     count = 0;
-    fn bump() {
+    fn bump(): void {
         count = count + 1;
     }
     bump();

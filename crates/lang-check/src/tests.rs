@@ -64,9 +64,10 @@ fn wildcard_makes_match_exhaustive() {
 }
 
 #[test]
-fn match_on_unknown_scrutinee_is_not_flagged() {
-    // A gradual scrutinee (here an unannotated parameter) has an unknown domain: never flagged.
-    let src = "fn f(x) { return match x { 1 => \"a\", 2 => \"b\" }; }\n";
+fn match_on_open_domain_scrutinee_is_not_flagged() {
+    // A `dyn` scrutinee has an open domain (not a closed enum / Result / Option), so the
+    // exhaustiveness check does not fire — no false positive.
+    let src = "fn f(x: dyn): string { return match x { 1 => \"a\", 2 => \"b\" }; }\n";
     assert!(codes(src).is_empty());
 }
 
@@ -88,7 +89,10 @@ fn undeclared_type_annotation_is_e0013() {
     // M1.9 lit up unknown-type checking: an annotation naming nothing declared, imported, or
     // built-in is now a hard error, on the offending name.
     assert_eq!(codes("fn f(x: Nope): int { return 0; }\n"), ["E0013"]);
-    assert_eq!(codes("fn find(hit): ?User { return none; }\n"), ["E0013"]);
+    assert_eq!(
+        codes("fn find(hit: bool): ?User { return none; }\n"),
+        ["E0013"]
+    );
     // The unknown name inside a generic argument is flagged too.
     assert_eq!(
         codes("fn f(xs: List<Ghost>): int { return 0; }\n"),
@@ -265,4 +269,45 @@ fn closure_expectation_propagates_param_and_return_types() {
         check_value_against("fn(x) => x", fn_int_to_string),
         ["E0007"]
     );
+}
+
+// ----- signature requirement + return checking (S2) -----
+
+#[test]
+fn unannotated_parameter_requires_a_signature() {
+    assert_eq!(codes("fn double(n): int { return n; }\n"), ["E0022"]);
+}
+
+#[test]
+fn missing_return_type_requires_a_signature() {
+    assert_eq!(codes("fn greet(name: string) { echo name; }\n"), ["E0022"]);
+}
+
+#[test]
+fn a_fully_annotated_named_fn_is_clean() {
+    assert!(codes("fn add(a: int, b: int): int { return a + b; }\n").is_empty());
+}
+
+#[test]
+fn closures_and_locals_do_not_require_annotations() {
+    // A closure parameter and a local binding stay inferred — only named boundaries are mandatory.
+    let src = "f = fn(x) => x + 1;\ng = 41;\necho f(g);\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn return_value_is_checked_against_the_declared_type() {
+    // A concrete return-type violation is `E0007`; a matching return is clean.
+    assert_eq!(codes("fn f(): int { return \"x\"; }\n"), ["E0007"]);
+    assert!(codes("fn f(): int { return 7; }\n").is_empty());
+    // A `dyn` return absorbs anything (the escape): no mismatch.
+    assert!(codes("fn f(): dyn { return \"x\"; }\n").is_empty());
+}
+
+#[test]
+fn a_nested_fn_return_does_not_clobber_the_enclosing_one() {
+    // The inner `fn inner(): string` and the outer `fn outer(): int` each check their own return;
+    // neither bleeds into the other (saved/restored `current_ret`).
+    let src = "fn outer(): int {\n  fn inner(): string { return \"s\"; }\n  return 1;\n}\n";
+    assert!(codes(src).is_empty());
 }

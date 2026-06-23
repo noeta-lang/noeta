@@ -1,9 +1,9 @@
 // A nested `fn` captures and mutates an enclosing `mut` local (a closure counter).
 // expect: stdout "3"
 // expect: exit 0
-fn make_counter() {
+fn make_counter(): int {
     mut count = 0;
-    fn bump() {
+    fn bump(): void {
         count = count + 1;
     }
     bump();
