@@ -884,6 +884,22 @@ impl Checker {
                 }
                 Type::List(Box::new(elem))
             }
+            Expr::Range {
+                start, end, span, ..
+            } => {
+                // A range builds a `List<int>`; both bounds must be `int` (a `dyn`/hole defers).
+                let st = self.synth(start, env);
+                let en = self.synth(end, env);
+                let bad = |t: &Type| !matches!(t, Type::Int) && !t.defers_to_runtime();
+                if bad(&st) || bad(&en) {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("range bounds must be `int`, found `{st}` and `{en}`"),
+                    ));
+                }
+                Type::List(Box::new(Type::Int))
+            }
             Expr::Map { entries, span } => {
                 // Synthesize key/value types by unifying the entries (mirroring the list path).
                 // Runtime map keys are always strings, so keys unify trivially in practice; values

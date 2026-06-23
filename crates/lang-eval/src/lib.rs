@@ -1139,6 +1139,34 @@ impl Interpreter {
                 }
                 Ok(Value::List(Rc::new(values)))
             }
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                span,
+            } => {
+                let lo = self.eval_expr(start)?;
+                let hi = self.eval_expr(end)?;
+                match (lo, hi) {
+                    (Value::Int(a), Value::Int(b)) => {
+                        // `..=` is exclusive with `upper = b + 1`; `saturating_add` keeps the
+                        // (unmaterializable) `i64::MAX` edge from panicking. An empty range yields
+                        // an empty list.
+                        let upper = if *inclusive { b.saturating_add(1) } else { b };
+                        let items: Vec<Value> = (a..upper).map(Value::Int).collect();
+                        Ok(Value::List(Rc::new(items)))
+                    }
+                    (a, b) => Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!(
+                            "range bounds must be ints, found {} and {}",
+                            a.type_name(),
+                            b.type_name()
+                        ),
+                    )),
+                }
+            }
             Expr::Map { entries, span } => {
                 let mut map = BTreeMap::new();
                 for (key_expr, value_expr) in entries {

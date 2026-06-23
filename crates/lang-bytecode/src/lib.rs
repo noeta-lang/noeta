@@ -159,6 +159,16 @@ pub enum Op {
         dst: Reg,
         items: Box<[Reg]>,
     },
+    /// `dst = start..end` (exclusive) or `start..=end` (inclusive) — eagerly build a `List<int>`
+    /// from two integer registers, raising E0007 at `span` if either bound is not an int. Mirrors
+    /// the tree-walker's eager materialization; an empty range yields an empty list.
+    MakeRange {
+        dst: Reg,
+        start: Reg,
+        end: Reg,
+        inclusive: bool,
+        span: Span,
+    },
     /// `dst = {key: value, ...}` — build a heap map (sorted-key), retaining each value. Keys
     /// are validated by a preceding `RequireMapKey`, so they are known strings here.
     MakeMap {
@@ -613,6 +623,16 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::MakeList { dst, items } => {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
             format!("MakeList    r{dst} <- [{}]", items.join(", "))
+        }
+        Op::MakeRange {
+            dst,
+            start,
+            end,
+            inclusive,
+            ..
+        } => {
+            let op = if *inclusive { "..=" } else { ".." };
+            format!("MakeRange   r{dst} <- r{start}{op}r{end}")
         }
         Op::MakeMap { dst, entries } => {
             let entries: Vec<String> = entries.iter().map(|(k, v)| format!("r{k}: r{v}")).collect();

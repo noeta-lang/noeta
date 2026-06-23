@@ -1258,6 +1258,24 @@ impl<'m> FnCompiler<'m> {
                     items: regs.into_boxed_slice(),
                 });
             }
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                span,
+            } => {
+                let start_reg = self.alloc_reg();
+                self.expr(start, start_reg)?;
+                let end_reg = self.alloc_reg();
+                self.expr(end, end_reg)?;
+                self.code.push(Op::MakeRange {
+                    dst,
+                    start: start_reg,
+                    end: end_reg,
+                    inclusive: *inclusive,
+                    span: *span,
+                });
+            }
             Expr::Map { entries, span } => {
                 // Evaluate each key, check it is a string (matching M0's per-entry error
                 // timing), then evaluate the value — then assemble the map.

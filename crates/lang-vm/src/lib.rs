@@ -1077,6 +1077,38 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, Value::list(elements));
                     frames[top].pc += 1;
                 }
+                Op::MakeRange {
+                    dst,
+                    start,
+                    end,
+                    inclusive,
+                    span,
+                } => {
+                    let lo = frames[top].regs[*start as usize];
+                    let hi = frames[top].regs[*end as usize];
+                    match (lo.as_int(), hi.as_int()) {
+                        (Some(a), Some(b)) => {
+                            // `..=` shifts the exclusive upper to `b + 1`; `saturating_add` keeps
+                            // the unmaterializable `i64::MAX` edge from panicking. The elements are
+                            // fresh int immediates (no refcount), so no retain is needed.
+                            let upper = if *inclusive { b.saturating_add(1) } else { b };
+                            let elements: Vec<Value> = (a..upper).map(Value::int).collect();
+                            set_reg(&mut frames[top].regs, *dst, Value::list(elements));
+                            frames[top].pc += 1;
+                        }
+                        _ => {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "range bounds must be ints, found {} and {}",
+                                    lo.type_name(),
+                                    hi.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
                 Op::MakeMap { dst, entries } => {
                     let mut map = BTreeMap::new();
                     for (key_reg, value_reg) in entries.iter() {

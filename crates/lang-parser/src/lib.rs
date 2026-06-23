@@ -745,6 +745,20 @@ where
             infix(left(6), just(T::Tilde), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Concat, l, r, e)
             }),
+            // Range operators sit alongside `~` — looser than arithmetic (so `0..n-1` is
+            // `0..(n-1)`), tighter than comparison. `..` is exclusive, `..=` inclusive.
+            infix(left(6), just(T::DotDot), move |l, _, r, e| Expr::Range {
+                start: Box::new(l),
+                end: Box::new(r),
+                inclusive: false,
+                span: ctx.to_span(e.span()),
+            }),
+            infix(left(6), just(T::DotDotEq), move |l, _, r, e| Expr::Range {
+                start: Box::new(l),
+                end: Box::new(r),
+                inclusive: true,
+                span: ctx.to_span(e.span()),
+            }),
             infix(left(5), just(T::Lt), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Lt, l, r, e)
             }),
@@ -1757,6 +1771,12 @@ mod tests {
     #[test]
     fn while_loop_parses() {
         insta::assert_snapshot!(pretty("mut i = 0; while i < 3 { echo i; i += 1; }"));
+    }
+
+    #[test]
+    fn range_operators_parse() {
+        // `..` binds looser than arithmetic, so `0..n - 1` is `0..(n - 1)`; `..=` is inclusive.
+        insta::assert_snapshot!(pretty("echo 0..n - 1; echo 1..=10;"));
     }
 
     #[test]

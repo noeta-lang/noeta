@@ -99,9 +99,12 @@ pub enum TokenKind {
     Semicolon,
     #[token(",")]
     Comma,
-    // `...` (spread) / `..` (range) / `.` overlap; logos resolves by longest match.
+    // `...` (spread) / `..=` (inclusive range) / `..` (exclusive range) / `.` overlap;
+    // logos resolves by longest match.
     #[token("...")]
     DotDotDot,
+    #[token("..=")]
+    DotDotEq,
     #[token("..")]
     DotDot,
     #[token(".")]
@@ -214,6 +217,7 @@ impl TokenKind {
             TokenKind::Semicolon => "Semicolon",
             TokenKind::Comma => "Comma",
             TokenKind::DotDotDot => "DotDotDot",
+            TokenKind::DotDotEq => "DotDotEq",
             TokenKind::DotDot => "DotDot",
             TokenKind::Dot => "Dot",
             TokenKind::Colon => "Colon",
@@ -286,6 +290,7 @@ impl TokenKind {
             TokenKind::Semicolon => "`;`",
             TokenKind::Comma => "`,`",
             TokenKind::DotDotDot => "`...`",
+            TokenKind::DotDotEq => "`..=`",
             TokenKind::DotDot => "`..`",
             TokenKind::Dot => "`.`",
             TokenKind::Colon => "`:`",

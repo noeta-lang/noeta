@@ -558,6 +558,18 @@ fn list_spread_types_as_the_unified_list() {
 }
 
 #[test]
+fn range_types_as_a_list_of_int() {
+    use lang_types::Type;
+    let li = |t| Type::List(Box::new(t));
+    // A range is a `List<int>`, so it satisfies a `List<int>` annotation and drives a for-loop.
+    assert!(codes("xs: List<int> = 0..5;\n").is_empty());
+    assert!(check_value_against("0..=10", li(Type::Int)).is_empty());
+    // Non-int bounds are a static error; `dyn` bounds defer.
+    assert_eq!(codes("echo 1.5..3;\n"), ["E0007"]);
+    assert!(codes("fn f(a: dyn, b: int): List<int> { return a..b; }\n").is_empty());
+}
+
+#[test]
 fn spreading_a_non_list_is_rejected() {
     // `...` requires a list operand; a concrete non-list is an error (not display-concatenation).
     // It still resolves list-shaped, so there is no cascading second diagnostic.

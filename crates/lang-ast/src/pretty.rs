@@ -418,6 +418,19 @@ impl Pretty for Expr {
                 }
                 out.push(')');
             }
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                span: s,
+            } => {
+                let op = if *inclusive { "range-incl" } else { "range" };
+                out.push_str(&format!("({op} {}\n", span(*s)));
+                start.pretty(out, level + 1);
+                out.push('\n');
+                end.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::Map { entries, span: s } => {
                 out.push_str(&format!("(map {}", span(*s)));
                 for (key, value) in entries {

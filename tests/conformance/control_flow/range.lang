@@ -1,0 +1,25 @@
+// Range operator: `start..end` (exclusive) and `start..=end` (inclusive) eagerly build a `List<int>`,
+// so `for i in 0..n` is the idiomatic count loop. Bounds may be arithmetic — `..` binds looser than
+// `+`/`-`, so `0..n-1` is `0..(n-1)`. An empty range (`5..2`) is the empty list. Both backends agree.
+// expect: stdout "[0, 1, 2, 3, 4]"
+// expect: stdout "[0, 1, 2, 3, 4, 5]"
+// expect: stdout "[]"
+// expect: stdout "0 1 2 "
+// expect: stdout "55"
+// expect: exit 0
+echo 0..5;
+echo 0..=5;
+echo 5..2;
+
+n = 4;
+mut line = "";
+for i in 0..n - 1 {
+    line = line ~ i ~ " ";
+}
+echo line;
+
+mut total = 0;
+for k in 1..=10 {
+    total = total + k;
+}
+echo total;

@@ -206,6 +206,10 @@ fn collect_nested_frees_expr(
                 collect_nested_frees_expr(it, enclosing, globals, out);
             }
         }
+        Expr::Range { start, end, .. } => {
+            collect_nested_frees_expr(start, enclosing, globals, out);
+            collect_nested_frees_expr(end, enclosing, globals, out);
+        }
         Expr::Map { entries, .. } => {
             for (k, v) in entries {
                 collect_nested_frees_expr(k, enclosing, globals, out);
@@ -386,6 +390,10 @@ fn collect_bindings_expr(expr: &Expr, local: &mut HashSet<String>) {
                 collect_bindings_expr(it, local);
             }
         }
+        Expr::Range { start, end, .. } => {
+            collect_bindings_expr(start, local);
+            collect_bindings_expr(end, local);
+        }
         Expr::Map { entries, .. } => {
             for (k, v) in entries {
                 collect_bindings_expr(k, local);
@@ -545,6 +553,10 @@ fn collect_refs_expr(
             for it in items {
                 collect_refs_expr(it, enclosing, globals, out);
             }
+        }
+        Expr::Range { start, end, .. } => {
+            collect_refs_expr(start, enclosing, globals, out);
+            collect_refs_expr(end, enclosing, globals, out);
         }
         Expr::Map { entries, .. } => {
             for (k, v) in entries {

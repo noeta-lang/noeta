@@ -365,6 +365,14 @@ pub enum Expr {
     },
     /// A list literal: `[a, b, c]`.
     List { items: Vec<Expr>, span: Span },
+    /// An integer range: `start..end` (exclusive) or `start..=end` (inclusive). Eagerly
+    /// materializes to a `List<int>` — `0..3` is `[0, 1, 2]`, `0..=3` is `[0, 1, 2, 3]`.
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+        inclusive: bool,
+        span: Span,
+    },
     /// A map literal: `{"a": 1, "b": 2}`.
     Map {
         entries: Vec<(Expr, Expr)>,
@@ -508,6 +516,7 @@ impl Expr {
             | Expr::Closure { span, .. }
             | Expr::Pipeline { span, .. }
             | Expr::List { span, .. }
+            | Expr::Range { span, .. }
             | Expr::Map { span, .. }
             | Expr::Member { span, .. }
             | Expr::Index { span, .. }
