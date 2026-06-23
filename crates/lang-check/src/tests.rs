@@ -166,6 +166,18 @@ fn associated_call_is_typed_precisely() {
 }
 
 #[test]
+fn generic_class_enforces_its_bound_at_construction() {
+    // `Pair<T: Comparable>` constructed with a non-`Comparable` record is `E0025`; with an `int`,
+    // clean. The class's bound is instantiated from the constructor argument.
+    let cls =
+        "class Pair<T: Comparable> { a: T\n  fn new(x: T): Pair<T> { return Pair { a: x }; } }\n";
+    let bad = format!("type Bad = {{ v: int }};\n{cls}p = Pair.new(Bad {{ v: 1 }});\n");
+    assert_eq!(codes(&bad), ["E0025"]);
+    let good = format!("{cls}p = Pair.new(7);\n");
+    assert!(codes(&good).is_empty());
+}
+
+#[test]
 fn generic_call_with_satisfied_primitive_bound_is_clean() {
     let src = "fn max<T: Comparable>(a: T, b: T): T { if a > b { return a; } return b; }\n\
                echo max(1, 2);\n";

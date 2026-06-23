@@ -1,0 +1,12 @@
+// A generic class can constrain its parameter: `Pair<T: Comparable>`. Constructing it with a type
+// that is not `Comparable` (a plain record) breaks the bound at the construction call, reported as
+// `E0025` — the class-level mirror of a generic function's call-site check.
+// expect: error E0025 at 11:5
+// expect: exit 1
+type Bad = { v: int };
+class Pair<T: Comparable> {
+    a: T
+    fn new(x: T): Pair<T> { return Pair { a: x }; }
+}
+p = Pair.new(Bad { v: 1 });
+echo "unreached";

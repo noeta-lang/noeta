@@ -1,0 +1,11 @@
+// A generic class whose bound is satisfied constructs and runs normally — `int` is `Comparable`,
+// the parameter is erased, and both backends run it identically.
+// expect: stdout "5"
+// expect: exit 0
+class Holder<T: Comparable> {
+    v: T
+    fn new(x: T): Holder<T> { return Holder { v: x }; }
+    fn value(): T { return v; }
+}
+h = Holder.new(5);
+echo h.value();

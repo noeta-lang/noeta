@@ -224,26 +224,38 @@ impl Checker {
                     // runtime, they accept any argument).
                     let tps: HashSet<String> =
                         c.type_params.iter().map(|p| p.name.clone()).collect();
+                    // A generic class's type parameters + bounds, shared by every method's
+                    // `GenericInfo` so a call instantiates the class's `T` from the arguments and
+                    // enforces its bounds (S4.3b) — the class-level mirror of a generic function.
+                    let class_generics: Vec<(String, Vec<String>)> = c
+                        .type_params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.bounds.clone()))
+                        .collect();
                     let methods = c
                         .methods
                         .iter()
                         .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
                     for m in methods {
-                        let params = m
-                            .params
+                        let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
+                        let raw_ret = m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                        let params = raw_params
                             .iter()
-                            .map(|p| erase_type_params(param_type(p), &tps))
+                            .cloned()
+                            .map(|t| erase_type_params(t, &tps))
                             .collect();
-                        let ret = erase_type_params(
-                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
-                            &tps,
-                        );
+                        let ret = erase_type_params(raw_ret.clone(), &tps);
+                        let generic = (!class_generics.is_empty()).then(|| GenericInfo {
+                            params: class_generics.clone(),
+                            raw_params,
+                            raw_ret,
+                        });
                         self.methods.insert(
                             (c.name.clone(), m.name.clone()),
                             FnSig {
                                 params,
                                 ret,
-                                generic: None,
+                                generic,
                             },
                         );
                     }
