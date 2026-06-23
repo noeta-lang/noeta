@@ -128,7 +128,9 @@ pub enum TokenKind {
     Dot,
     #[token(":")]
     Colon,
-    // `??` must be listed before `?`; logos resolves the overlap by longest match.
+    // `??=` / `??` must precede `?`; logos resolves the overlap by longest match.
+    #[token("??=")]
+    QuestionQuestionEq,
     #[token("??")]
     QuestionQuestion,
     #[token("?")]
@@ -247,6 +249,7 @@ impl TokenKind {
             TokenKind::DotDot => "DotDot",
             TokenKind::Dot => "Dot",
             TokenKind::Colon => "Colon",
+            TokenKind::QuestionQuestionEq => "QuestionQuestionEq",
             TokenKind::QuestionQuestion => "QuestionQuestion",
             TokenKind::Question => "Question",
             TokenKind::LParen => "LParen",
@@ -326,6 +329,7 @@ impl TokenKind {
             TokenKind::DotDot => "`..`",
             TokenKind::Dot => "`.`",
             TokenKind::Colon => "`:`",
+            TokenKind::QuestionQuestionEq => "`??=`",
             TokenKind::QuestionQuestion => "`??`",
             TokenKind::Question => "`?`",
             TokenKind::LParen => "`(`",
@@ -568,6 +572,24 @@ mod tests {
             vec![
                 TokenKind::Ident,
                 TokenKind::Question,
+                TokenKind::QuestionQuestion,
+                TokenKind::Ident
+            ]
+        );
+    }
+
+    #[test]
+    fn lexes_coalesce_assign_as_one_token() {
+        let (_source, lexed) = lex_str("a ??= b ?? c");
+        assert!(lexed.diagnostics.is_empty());
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        // `??=` is one token (longest match), distinct from `??` and `?`.
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident,
+                TokenKind::QuestionQuestionEq,
+                TokenKind::Ident,
                 TokenKind::QuestionQuestion,
                 TokenKind::Ident
             ]

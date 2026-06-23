@@ -1,0 +1,18 @@
+// `x ??= y` is the coalescing assignment — parser sugar for `x = x ?? y` ("fill x with y only if
+// it is `none`"). Because it lowers to `??`, it short-circuits: the right-hand side is evaluated
+// only when the value is absent. Here `compute()` runs for the `none` case but is skipped for the
+// `some` case (no "ran compute" before "5"). It reuses the existing `Coalesce` op, so both
+// backends agree.
+// expect: stdout "5"
+// expect: stdout "ran compute"
+// expect: stdout "99"
+// expect: exit 0
+fn compute(): int { echo "ran compute"; return 99; }
+
+mut present = some(5);
+present ??= compute();   // some(5) -> short-circuit, compute() NOT called
+echo present;            // 5
+
+mut absent = none;
+absent ??= compute();    // none -> compute() runs, fills with 99
+echo absent;             // 99

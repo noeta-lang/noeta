@@ -187,6 +187,16 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
 /// list-concat operator (L1). Each spread operand is wrapped in `...` ([`UnaryOp::Spread`]) — a
 /// runtime-identity marker the checker uses to require the operand be a list (else `E0007`); the
 /// fold starts from an empty list so the result is always list-shaped.
+/// The kind of an assignment operator, carried from the `assign_op` parser into the desugar. A
+/// plain `=` binds the value directly; a compound `OP=` desugars to `name = name OP rhs`; `??=`
+/// desugars to `name = name ?? rhs` (the coalesce, which is not a `BinaryOp`).
+#[derive(Clone)]
+enum AssignKind {
+    Plain,
+    Binary(BinaryOp),
+    Coalesce,
+}
+
 /// Desugar `if cond then a else b` into a two-arm `match`. A `cond is T` test becomes a
 /// type-pattern match over the tested value (so the `then` arm narrows the scrutinee identifier,
 /// and the `_` arm is the `else`); any other condition becomes a `true`/`false` match. The whole
@@ -1383,13 +1393,14 @@ where
         // introduces or reassigns a binding is a runtime decision (see `lang-eval`); the annotation
         // is only meaningful on a fresh `name: T = value` binding.
         let assign_op = choice((
-            just(T::Eq).to(None),
-            just(T::PlusEq).to(Some(BinaryOp::Add)),
-            just(T::MinusEq).to(Some(BinaryOp::Sub)),
-            just(T::StarEq).to(Some(BinaryOp::Mul)),
-            just(T::SlashEq).to(Some(BinaryOp::Div)),
-            just(T::PercentEq).to(Some(BinaryOp::Rem)),
-            just(T::TildeEq).to(Some(BinaryOp::Concat)),
+            just(T::Eq).to(AssignKind::Plain),
+            just(T::PlusEq).to(AssignKind::Binary(BinaryOp::Add)),
+            just(T::MinusEq).to(AssignKind::Binary(BinaryOp::Sub)),
+            just(T::StarEq).to(AssignKind::Binary(BinaryOp::Mul)),
+            just(T::SlashEq).to(AssignKind::Binary(BinaryOp::Div)),
+            just(T::PercentEq).to(AssignKind::Binary(BinaryOp::Rem)),
+            just(T::TildeEq).to(AssignKind::Binary(BinaryOp::Concat)),
+            just(T::QuestionQuestionEq).to(AssignKind::Coalesce),
         ));
         let assign_or_expr = expr
             .clone()
@@ -1404,17 +1415,25 @@ where
                             name,
                             span: name_span,
                         } => {
-                            // A compound `name OP= rhs` desugars to `name = name OP rhs`; a plain
-                            // `=` binds the value directly.
+                            // A compound `name OP= rhs` desugars to `name = name OP rhs`; `??=` to
+                            // `name = name ?? rhs`; a plain `=` binds the value directly.
                             let value = match op {
-                                None => rhs,
-                                Some(binop) => Expr::Binary {
+                                AssignKind::Plain => rhs,
+                                AssignKind::Binary(binop) => Expr::Binary {
                                     op: binop,
                                     lhs: Box::new(Expr::Ident {
                                         name: name.clone(),
                                         span: name_span,
                                     }),
                                     rhs: Box::new(rhs),
+                                    span,
+                                },
+                                AssignKind::Coalesce => Expr::Coalesce {
+                                    value: Box::new(Expr::Ident {
+                                        name: name.clone(),
+                                        span: name_span,
+                                    }),
+                                    fallback: Box::new(rhs),
                                     span,
                                 },
                             };
@@ -2055,6 +2074,12 @@ mod tests {
         insta::assert_snapshot!(pretty(
             "fn f(x: dyn): bool { return x is int && x is List<int> || x is int | string; }"
         ));
+    }
+
+    #[test]
+    fn coalesce_assign_desugars_to_coalesce() {
+        // `x ??= y` desugars to `x = x ?? y`, reusing the `Coalesce` node (so it short-circuits).
+        insta::assert_snapshot!(pretty("x ??= compute();"));
     }
 
     #[test]
