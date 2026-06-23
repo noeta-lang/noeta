@@ -511,6 +511,10 @@ pub enum Expr {
     /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` record
     /// paired with its annotated target). `ty` is the attribute type between the angle brackets.
     AttributesOf { ty: TypeRef, span: Span },
+    /// The reflection query `type_of(value)` — the runtime [`Type`] descriptor of a value. At this
+    /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
+    /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
+    TypeOf { value: Box<Expr>, span: Span },
     /// The type-test operator: `expr is T` is a `bool` — `true` if the runtime value is a `T`.
     /// Shares the runtime matcher with [`Expr::As`] (head-constructor match, generics erased) but
     /// yields a plain `bool` rather than `?T`. `ty` is the type written after `is`.
@@ -637,6 +641,7 @@ impl Expr {
             | Expr::Coalesce { span, .. }
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
+            | Expr::TypeOf { span, .. }
             | Expr::TypeTest { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }

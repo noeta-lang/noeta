@@ -573,6 +573,11 @@ impl Pretty for Expr {
                     span(*s)
                 ));
             }
+            Expr::TypeOf { value, span: s } => {
+                out.push_str(&format!("(type_of {}\n", span(*s)));
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
         }
     }
 }

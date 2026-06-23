@@ -357,6 +357,13 @@ pub enum Op {
         dst: Reg,
         type_name: String,
     },
+    /// `type_of(value)`: `dst = Type` — the runtime [`lang_ast::reflect`] head-constructor descriptor
+    /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
+    /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
+    TypeOf {
+        dst: Reg,
+        src: Reg,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -769,6 +776,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::AttributesOf { dst, type_name } => {
             format!("AttributesOf r{dst} <- attributes_of::<{type_name}>()")
         }
+        Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::IsType { dst, src, target } => {
             format!("IsType      r{dst} <- r{src} is {target:?}")
         }

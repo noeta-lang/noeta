@@ -1,0 +1,39 @@
+// `type_of(value)` returns the prelude `Type` ADT — the runtime *head constructor* of a value,
+// pattern-matchable like any enum. Generics are erased at runtime, so a list's element type is
+// `Dyn` (fidelity B). Both backends build the `Type` value from the shared `TypeRepr` descriptor,
+// so they agree by construction.
+// expect: stdout "int"
+// expect: stdout "string"
+// expect: stdout "bool"
+// expect: stdout "list"
+// expect: stdout "Point"
+// expect: stdout "option"
+// expect: stdout "dyn"
+// expect: exit 0
+type Point = { x: int };
+
+fn label(t: Type): string {
+    return match t {
+        Type.Int => "int",
+        Type.String => "string",
+        Type.Bool => "bool",
+        Type.List(_) => "list",
+        Type.Option(_) => "option",
+        Type.Named(name, _) => name,
+        _ => "other",
+    };
+}
+
+echo label(type_of(5));
+echo label(type_of("hi"));
+echo label(type_of(true));
+echo label(type_of([1, 2, 3]));
+echo label(type_of(Point { x: 1 }));
+echo label(type_of(some(7)));
+
+// The erased element type of a runtime list is `Dyn` (fidelity B): match the inner `Type`.
+elem = match type_of([1, 2, 3]) {
+    Type.List(inner) => match inner { Type.Dyn => "dyn", _ => "?" },
+    _ => "?",
+};
+echo elem;

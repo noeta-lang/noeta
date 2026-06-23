@@ -219,6 +219,48 @@ impl Checker {
         );
         self.generic_types
             .insert("Attributed".to_string(), vec!["T".to_string()]);
+        self.register_type_enum();
+    }
+
+    /// Register the prelude `Type` enum — the ADT `type_of` returns, mirroring the type lattice so
+    /// reflected types are pattern-matchable (`match type_of(x) { Type.List(e) => … }`). It is a
+    /// recursive enum: payload-carrying variants reference `Type` itself.
+    fn register_type_enum(&mut self) {
+        let ty = || Type::Named("Type".to_string(), Vec::new());
+        let list_of_ty = || Type::List(Box::new(ty()));
+        let mut variants = Vec::new();
+        for name in ["Int", "Float", "Bool", "String", "Unit", "Dyn"] {
+            variants.push(VariantInfo {
+                name: name.to_string(),
+                fields: Vec::new(),
+            });
+        }
+        for name in ["List", "Set", "Option"] {
+            variants.push(VariantInfo {
+                name: name.to_string(),
+                fields: vec![ty()],
+            });
+        }
+        for name in ["Map", "Result"] {
+            variants.push(VariantInfo {
+                name: name.to_string(),
+                fields: vec![ty(), ty()],
+            });
+        }
+        variants.push(VariantInfo {
+            name: "Named".to_string(),
+            fields: vec![Type::String, list_of_ty()],
+        });
+        variants.push(VariantInfo {
+            name: "Fn".to_string(),
+            fields: vec![list_of_ty(), ty()],
+        });
+        variants.push(VariantInfo {
+            name: "Union".to_string(),
+            fields: vec![list_of_ty()],
+        });
+        self.types.insert("Type".to_string());
+        self.enums.insert("Type".to_string(), variants);
     }
 
     /// Pass 1: register every top-level declaration so forward references resolve before any
@@ -1595,6 +1637,12 @@ impl Checker {
                     vec![target],
                 )))
             }
+            Expr::TypeOf { value, .. } => {
+                // Check the operand (it can be any value); the result is the prelude `Type` enum
+                // regardless. At this fidelity the runtime builds a head-constructor `Type`.
+                self.synth(value, env);
+                Type::Named("Type".to_string(), Vec::new())
+            }
         }
     }
 
@@ -2248,7 +2296,7 @@ impl Checker {
 /// maps to a bool. It resolves to a [`Type::Named`] but is a legal annotation, so the unknown-type
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
-const PRELUDE_TYPES: &[&str] = &["Ordering"];
+const PRELUDE_TYPES: &[&str] = &["Ordering", "Type"];
 
 /// Whether an argument of type `arg` may be passed where `param` is expected. Subtyping, plus two
 /// leniencies that keep dynamic and numeric calls free of false positives: a `dyn`/hole on either

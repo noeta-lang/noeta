@@ -441,6 +441,14 @@ fn attributes_of_on_a_non_attribute_is_rejected() {
 }
 
 #[test]
+fn type_of_synthesizes_the_prelude_type_enum() {
+    // `type_of(v)` is the prelude `Type` enum, pattern-matchable; its payload bindings carry `Type`
+    // (here `Type.List(e)` binds `e: Type`, matched again against `Type.Dyn`) — all check clean.
+    let src = "x = type_of(5);\nlabel = match x {\n  Type.Int => \"int\",\n  Type.List(e) => match e { Type.Dyn => \"dyn\", _ => \"?\" },\n  _ => \"other\",\n};\necho label;\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn deriving_distinct_traits_with_an_impl_is_coherent() {
     // Different traits never conflict — only a repeated one does.
     let src = "@derive(Equatable, Comparable)\nclass P {\n  x: int\n  impl Add {\n    fn add(other: P): P { return other; }\n  }\n}\n";

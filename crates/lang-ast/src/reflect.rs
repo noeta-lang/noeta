@@ -150,6 +150,63 @@ pub fn materialize_args(attr: &AttributeRecord, fields: &[String]) -> Vec<AttrVa
         .collect()
 }
 
+/// A backend-agnostic descriptor of the prelude `Type` ADT — the shared vocabulary `type_of`
+/// classifies a value into, mirroring the checker's type lattice. Both backends classify their
+/// native value into a `TypeRepr` and then build the prelude `Type` enum from it identically (the
+/// `Ordering` precedent), so the reflected `Type` value is the same across the differential by
+/// construction. The variant names returned by [`TypeRepr::variant_name`] are the canonical
+/// `Type.*` constructors users match on.
+///
+/// At runtime fidelity (B) generics are erased, so a container's element types are [`TypeRepr::Dyn`]
+/// (`type_of([1])` is `List(Dyn)`); the compile-time full-fidelity path (P2.3) builds a precise
+/// `TypeRepr` from the checker's inferred type and reuses the same construction.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeRepr {
+    Int,
+    Float,
+    Bool,
+    /// The `string` scalar (variant name `String`, mirroring the lattice).
+    Str,
+    Unit,
+    Dyn,
+    List(Box<TypeRepr>),
+    Set(Box<TypeRepr>),
+    Option(Box<TypeRepr>),
+    Map(Box<TypeRepr>, Box<TypeRepr>),
+    Result(Box<TypeRepr>, Box<TypeRepr>),
+    /// A declared type (record/class/enum) by name, with its type arguments (erased to `Dyn` at
+    /// runtime fidelity, precise at compile-time fidelity).
+    Named(String, Vec<TypeRepr>),
+    Fn(Vec<TypeRepr>, Box<TypeRepr>),
+    Union(Vec<TypeRepr>),
+}
+
+impl TypeRepr {
+    /// The `Type.*` enum variant name this descriptor constructs — the single source of truth for
+    /// the prelude enum's variant naming, shared by both backends and the checker registration.
+    pub fn variant_name(&self) -> &'static str {
+        match self {
+            TypeRepr::Int => "Int",
+            TypeRepr::Float => "Float",
+            TypeRepr::Bool => "Bool",
+            TypeRepr::Str => "String",
+            TypeRepr::Unit => "Unit",
+            TypeRepr::Dyn => "Dyn",
+            TypeRepr::List(_) => "List",
+            TypeRepr::Set(_) => "Set",
+            TypeRepr::Option(_) => "Option",
+            TypeRepr::Map(_, _) => "Map",
+            TypeRepr::Result(_, _) => "Result",
+            TypeRepr::Named(_, _) => "Named",
+            TypeRepr::Fn(_, _) => "Fn",
+            TypeRepr::Union(_) => "Union",
+        }
+    }
+}
+
+/// The `Type` prelude enum's name (the language type `type_of` returns and users match on).
+pub const TYPE_ENUM: &str = "Type";
+
 fn push_attrs(manifest: &mut Vec<AttributeRecord>, target: &str, attrs: &[Attribute]) {
     for attr in attrs {
         manifest.push(AttributeRecord {

@@ -83,6 +83,11 @@ pub enum TokenKind {
     /// parses unambiguously rather than as an identifier followed by comparisons.
     #[token("attributes_of")]
     AttributesOfKw,
+    /// The reflection keyword `type_of(value)` — the runtime [`Type`] descriptor of a value. A
+    /// keyword (rather than a plain builtin call) for symmetry with `attributes_of` and so the
+    /// reflection surface is lexically distinct.
+    #[token("type_of")]
+    TypeOfKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -245,6 +250,7 @@ impl TokenKind {
             TokenKind::AsKw => "AsKw",
             TokenKind::IsKw => "IsKw",
             TokenKind::AttributesOfKw => "AttributesOfKw",
+            TokenKind::TypeOfKw => "TypeOfKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
@@ -327,6 +333,7 @@ impl TokenKind {
             TokenKind::AsKw => "`as`",
             TokenKind::IsKw => "`is`",
             TokenKind::AttributesOfKw => "`attributes_of`",
+            TokenKind::TypeOfKw => "`type_of`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",

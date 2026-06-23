@@ -1475,6 +1475,11 @@ impl<'m> FnCompiler<'m> {
                 };
                 self.code.push(Op::AttributesOf { dst, type_name });
             }
+            Expr::TypeOf { value, .. } => {
+                let src = self.alloc_reg();
+                self.expr(value, src)?;
+                self.code.push(Op::TypeOf { dst, src });
+            }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {

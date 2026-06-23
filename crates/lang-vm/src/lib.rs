@@ -2018,6 +2018,12 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::TypeOf { dst, src } => {
+                    let repr = vm_type_repr(&frames[top].regs[*src as usize]);
+                    let result = build_type_value(&repr);
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::MatchInt { src, value, fail } => {
                     if frames[top].regs[*src as usize].as_int() == Some(*value) {
                         frames[top].pc += 1;
@@ -2808,6 +2814,75 @@ fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
 fn make_ordering(variant: &str) -> Value {
     let shape = Rc::new(Shape::enum_variant("Ordering", variant, Vec::new(), false));
     Value::enum_value(shape, Vec::new())
+}
+
+/// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
+/// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
+/// Mirrors the tree-walker's `eval_type_repr` exactly so both backends reflect identical `Type`
+/// values; the classification follows the same kind order as [`Value::type_name`].
+fn vm_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
+    use lang_ast::reflect::TypeRepr;
+    let v = *value;
+    let dyn_ = || Box::new(TypeRepr::Dyn);
+    let shape_name = || v.shape().map(|s| s.name.clone()).unwrap_or_default();
+    match v.type_name() {
+        "bool" => TypeRepr::Bool,
+        "int" => TypeRepr::Int,
+        "float" => TypeRepr::Float,
+        "string" => TypeRepr::Str,
+        "unit" => TypeRepr::Unit,
+        "list" => TypeRepr::List(dyn_()),
+        "set" => TypeRepr::Set(dyn_()),
+        "map" => TypeRepr::Map(dyn_(), dyn_()),
+        "function" => TypeRepr::Fn(Vec::new(), dyn_()),
+        "object" => TypeRepr::Named(shape_name(), Vec::new()),
+        "enum" => match shape_name().as_str() {
+            "Option" => TypeRepr::Option(dyn_()),
+            "Result" => TypeRepr::Result(dyn_(), dyn_()),
+            other => TypeRepr::Named(other.to_string(), Vec::new()),
+        },
+        // A module or file handle has no nameable lattice type: it reflects as the top.
+        _ => TypeRepr::Dyn,
+    }
+}
+
+/// Build the prelude `Type` enum value from a [`TypeRepr`], recursively. Each node is a freshly
+/// constructed enum value (refcount 1) owned by its parent, with an on-the-fly shape — structurally
+/// interchangeable with the tree-walker's, which keeps the differential identical.
+fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
+    use lang_ast::reflect::{TYPE_ENUM, TypeRepr};
+    let data: Vec<Value> = match repr {
+        TypeRepr::Int
+        | TypeRepr::Float
+        | TypeRepr::Bool
+        | TypeRepr::Str
+        | TypeRepr::Unit
+        | TypeRepr::Dyn => Vec::new(),
+        TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {
+            vec![build_type_value(t)]
+        }
+        TypeRepr::Map(k, v) | TypeRepr::Result(k, v) => {
+            vec![build_type_value(k), build_type_value(v)]
+        }
+        TypeRepr::Named(name, args) => vec![
+            Value::string(name),
+            Value::list(args.iter().map(build_type_value).collect()),
+        ],
+        TypeRepr::Fn(params, ret) => vec![
+            Value::list(params.iter().map(build_type_value).collect()),
+            build_type_value(ret),
+        ],
+        TypeRepr::Union(members) => {
+            vec![Value::list(members.iter().map(build_type_value).collect())]
+        }
+    };
+    let shape = Rc::new(Shape::enum_variant(
+        TYPE_ENUM,
+        repr.variant_name(),
+        Vec::new(),
+        false,
+    ));
+    Value::enum_value(shape, data)
 }
 
 /// Convert a manifest attribute-argument literal to a VM value (for materializing an attribute

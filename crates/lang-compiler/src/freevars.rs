@@ -269,6 +269,7 @@ fn collect_nested_frees_expr(
         Expr::Try { expr, .. } | Expr::As { expr, .. } | Expr::TypeTest { expr, .. } => {
             collect_nested_frees_expr(expr, enclosing, globals, out)
         }
+        Expr::TypeOf { value, .. } => collect_nested_frees_expr(value, enclosing, globals, out),
         Expr::Coalesce {
             value, fallback, ..
         } => {
@@ -444,6 +445,7 @@ fn collect_bindings_expr(expr: &Expr, local: &mut HashSet<String>) {
         Expr::Try { expr, .. } | Expr::As { expr, .. } | Expr::TypeTest { expr, .. } => {
             collect_bindings_expr(expr, local)
         }
+        Expr::TypeOf { value, .. } => collect_bindings_expr(value, local),
         Expr::Coalesce {
             value, fallback, ..
         } => {
@@ -629,6 +631,7 @@ fn collect_refs_expr(
         Expr::Try { expr, .. } | Expr::As { expr, .. } | Expr::TypeTest { expr, .. } => {
             collect_refs_expr(expr, enclosing, globals, out)
         }
+        Expr::TypeOf { value, .. } => collect_refs_expr(value, enclosing, globals, out),
         Expr::Coalesce {
             value, fallback, ..
         } => {

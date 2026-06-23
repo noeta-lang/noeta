@@ -1356,6 +1356,10 @@ impl Interpreter {
                 };
                 Ok(self.materialize_attributes(type_name))
             }
+            Expr::TypeOf { value, .. } => {
+                let v = self.eval_expr(value)?;
+                Ok(build_type_value(&eval_type_repr(&v)))
+            }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
@@ -2706,6 +2710,69 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
         variant: variant.to_string(),
         data,
     }))
+}
+
+/// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
+/// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
+/// Mirrors the VM's `vm_type_repr` exactly so both backends reflect identical `Type` values.
+fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
+    use lang_ast::reflect::TypeRepr;
+    let dyn_ = || Box::new(TypeRepr::Dyn);
+    match value {
+        Value::Bool(_) => TypeRepr::Bool,
+        Value::Int(_) => TypeRepr::Int,
+        Value::Float(_) => TypeRepr::Float,
+        Value::Str(_) => TypeRepr::Str,
+        Value::Unit => TypeRepr::Unit,
+        Value::List(_) => TypeRepr::List(dyn_()),
+        Value::Set(_) => TypeRepr::Set(dyn_()),
+        Value::Map(_) => TypeRepr::Map(dyn_(), dyn_()),
+        Value::Function(_) | Value::Builtin(_) => TypeRepr::Fn(Vec::new(), dyn_()),
+        Value::Enum(e) => match e.enum_name.as_str() {
+            "Option" => TypeRepr::Option(dyn_()),
+            "Result" => TypeRepr::Result(dyn_(), dyn_()),
+            other => TypeRepr::Named(other.to_string(), Vec::new()),
+        },
+        Value::Object(o) => TypeRepr::Named(o.def.name().to_string(), Vec::new()),
+        // A type value, module, file handle, or enum-type has no nameable lattice type → the top.
+        Value::EnumType(_) | Value::Type(_) | Value::NativeModule(_) | Value::FileHandle(_) => {
+            TypeRepr::Dyn
+        }
+    }
+}
+
+/// Build the prelude `Type` enum value from a [`TypeRepr`], recursively. Reuses the ordinary
+/// [`EnumValue`] representation (enum name `Type`), so the value participates in `match` like any
+/// enum and is structurally identical to the VM's `build_type_value`.
+fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
+    use lang_ast::reflect::{TYPE_ENUM, TypeRepr};
+    let list = |items: Vec<Value>| Value::List(Rc::new(items));
+    let data: Vec<Value> = match repr {
+        TypeRepr::Int
+        | TypeRepr::Float
+        | TypeRepr::Bool
+        | TypeRepr::Str
+        | TypeRepr::Unit
+        | TypeRepr::Dyn => Vec::new(),
+        TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {
+            vec![build_type_value(t)]
+        }
+        TypeRepr::Map(k, v) | TypeRepr::Result(k, v) => {
+            vec![build_type_value(k), build_type_value(v)]
+        }
+        TypeRepr::Named(name, args) => vec![
+            Value::Str(name.clone()),
+            list(args.iter().map(build_type_value).collect()),
+        ],
+        TypeRepr::Fn(params, ret) => vec![
+            list(params.iter().map(build_type_value).collect()),
+            build_type_value(ret),
+        ],
+        TypeRepr::Union(members) => {
+            vec![list(members.iter().map(build_type_value).collect())]
+        }
+    };
+    builtin_enum(TYPE_ENUM, repr.variant_name(), data)
 }
 
 /// A minimal `TypeDef` for a reflection-materialized record (no methods, derives, or destructor) —

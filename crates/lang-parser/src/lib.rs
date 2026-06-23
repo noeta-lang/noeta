@@ -773,6 +773,15 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `type_of(value)` — the runtime reflection query. A keyword + parenthesized operand (like a
+        // call surface), yielding the value's `Type` descriptor.
+        let type_of = just(T::TypeOfKw)
+            .ignore_then(expr.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |value, e| Expr::TypeOf {
+                value: Box::new(value),
+                span: ctx.to_span(e.span()),
+            });
+
         let atom = choice((
             int,
             float,
@@ -784,6 +793,7 @@ where
             if_then_else,
             match_,
             attributes_of,
+            type_of,
             list,
             map,
             set,
@@ -2168,6 +2178,13 @@ mod tests {
         // `attributes_of::<T>()` — a keyword + turbofish type argument + `()` — parses to a
         // dedicated reflection node carrying the attribute type.
         insta::assert_snapshot!(pretty("x = attributes_of::<Route>();"));
+    }
+
+    #[test]
+    fn type_of_parses() {
+        // `type_of(value)` — a keyword + parenthesized operand — parses to a dedicated reflection
+        // node carrying the operand expression.
+        insta::assert_snapshot!(pretty("x = type_of([1, 2]);"));
     }
 
     #[test]
