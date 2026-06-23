@@ -177,3 +177,92 @@ fn data_attribute_is_accepted() {
     let src = "#[Route]\nclass P {\n  x: int\n}\n";
     assert!(codes(src).is_empty());
 }
+
+// ----- bidirectional check-mode (white-box) -----
+//
+// Production callers pass an open (`Unknown`) expectation in this slice, so the check path is a
+// no-op end-to-end — these drive `Checker::check` directly with concrete expectations to prove
+// subsumption and inward propagation are wired (the machinery later slices feed real types into).
+
+/// Parse `__probe = <expr>;`, then check the binding's value against `expected`, returning the
+/// resulting diagnostic codes.
+fn check_value_against(expr: &str, expected: lang_types::Type) -> Vec<String> {
+    let text = format!("__probe = {expr};");
+    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "probe must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    let value = match &parsed.program.stmts[0] {
+        lang_ast::Stmt::Binding { value, .. } => value,
+        other => panic!("expected a binding, got {other:?}"),
+    };
+    let mut checker = super::Checker::default();
+    checker.collect(&parsed.program);
+    let mut env: super::Env = vec![std::collections::HashMap::new()];
+    checker.check(value, &expected, &mut env);
+    checker.diags.iter().map(|d| d.code.to_string()).collect()
+}
+
+#[test]
+fn subsumption_passes_on_identity_and_into_dyn() {
+    use lang_types::Type;
+    assert!(check_value_against("5", Type::Int).is_empty());
+    assert!(check_value_against("\"hi\"", Type::String).is_empty());
+    // Every type widens into the explicit top.
+    assert!(check_value_against("5", Type::Dyn).is_empty());
+}
+
+#[test]
+fn subsumption_fires_on_a_concrete_violation() {
+    use lang_types::Type;
+    // int is not a subtype of string → the same code the arithmetic mismatch path uses.
+    assert_eq!(check_value_against("5", Type::String), ["E0007"]);
+    assert_eq!(check_value_against("true", Type::Int), ["E0007"]);
+}
+
+#[test]
+fn subsumption_is_a_no_op_against_an_open_expectation() {
+    use lang_types::Type;
+    // The production default: an `Unknown` expectation never reports — the parity guarantee.
+    assert!(check_value_against("5", Type::Unknown).is_empty());
+    assert!(check_value_against("true", Type::Unknown).is_empty());
+}
+
+#[test]
+fn list_expectation_propagates_to_elements() {
+    use lang_types::Type;
+    // A `List<int>` expectation checks each element against `int`; the string element violates it.
+    assert_eq!(
+        check_value_against("[1, \"two\", 3]", Type::List(Box::new(Type::Int))),
+        ["E0007"]
+    );
+    // A homogeneous list satisfies the element expectation.
+    assert!(check_value_against("[1, 2, 3]", Type::List(Box::new(Type::Int))).is_empty());
+    // And every element widens into a `List<dyn>` expectation.
+    assert!(check_value_against("[1, \"two\"]", Type::List(Box::new(Type::Dyn))).is_empty());
+}
+
+#[test]
+fn closure_expectation_propagates_param_and_return_types() {
+    use lang_types::Type;
+    let fn_int_to_int = Type::Fn {
+        params: vec![Type::Int],
+        ret: Box::new(Type::Int),
+    };
+    // `|x| x` against `fn(int) -> int`: the param adopts `int`, the body (`x`) checks against the
+    // expected `int` return — well typed.
+    assert!(check_value_against("fn(x) => x", fn_int_to_int).is_empty());
+    // Same closure against `fn(int) -> string`: the body `x` is `int`, not `string`.
+    let fn_int_to_string = Type::Fn {
+        params: vec![Type::Int],
+        ret: Box::new(Type::String),
+    };
+    assert_eq!(
+        check_value_against("fn(x) => x", fn_int_to_string),
+        ["E0007"]
+    );
+}

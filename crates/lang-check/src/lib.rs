@@ -1,18 +1,38 @@
-//! The type checker: the gradual, static front-end between parsing and compilation.
+//! The type checker: the static front-end between parsing and compilation.
 //!
 //! [`check`] walks a [`Program`] and returns the type diagnostics it finds. It is exposed to
 //! the pipeline as the `checked` salsa query (`lang-db`), slotted between `ast` and `bytecode`.
 //!
-//! ## Gradual by construction
+//! ## Bidirectional, with local inference
 //!
-//! The checker infers a [`Type`] for every expression but treats [`Type::Unknown`] (the gradual
-//! top) as compatible with everything. Wherever it cannot infer a precise type — an unannotated
-//! parameter, a prelude call, a method result — it falls back to `Unknown`, and **every check
-//! suppresses itself when an operand is gradual**. The consequence is the property M1.7 must
-//! preserve: every program the M0 tree-walker runs still type-checks. A diagnostic fires only
-//! when types are *concretely* known and unambiguously wrong. This is what lets the checker run
-//! as a shared front-end for both backends without ever diverging the differential oracle — a
-//! rejected program is rejected identically by both, a gradual gap is an error in neither.
+//! The checker is **bidirectional** (the inferred-static engine; not Hindley–Milner — subtyping
+//! via `dyn`/records is load-bearing and defeats HM's unification core). It runs two mutually
+//! recursive judgments:
+//!
+//! - [`Checker::synth`] — *synthesis* mode: produce a [`Type`] for an expression bottom-up
+//!   (literals, operators, calls, members). The recursion among subexpressions is synthesis.
+//! - [`Checker::check`] — *checking* mode: check an expression against an `expected` type. Forms
+//!   that can absorb an expectation (a list against `List<T>`, a closure against a function type)
+//!   propagate it inward; everything else synthesizes and is then **subsumed**
+//!   ([`Checker::subsume`]: require `actual <: expected` via [`Type::subtype`]). Statement and
+//!   boundary positions enter through `check`.
+//!
+//! ## Gradual tolerance — being removed across this track
+//!
+//! Today the checker is still *gradual*: wherever it cannot infer a precise type — an unannotated
+//! parameter, a prelude call, a method result — it falls back to the inference hole
+//! [`Type::Unknown`], and [`Type::subtype`] treats a hole as compatible in both directions, so
+//! **subsumption never fires on missing information**. The consequence is the property M1.7
+//! established: every program the M0 tree-walker runs still type-checks. A diagnostic fires only
+//! when types are *concretely* known and unambiguously wrong — which is what lets the checker run
+//! as a shared front-end for both backends without ever diverging the differential oracle (a
+//! rejected program is rejected identically by both; a gradual gap is an error in neither).
+//!
+//! The inferred-static track tightens this in stages: the engine swap (synth/check) is
+//! behavior-preserving — statement positions enter `check` with an open (`Unknown`) expectation,
+//! so subsumption is a no-op and verdicts are identical — and later slices supply real
+//! expectations (declared returns, required signatures) and remove the hole fallback, at which
+//! point an un-inferable type becomes a compile error rather than a silent pass.
 //!
 //! ## What it checks (M1.7)
 //!
@@ -176,19 +196,22 @@ impl Checker {
 
     fn check_stmt(&mut self, stmt: &Stmt, env: &mut Env) {
         match stmt {
+            // Statement positions enter checking mode. The expectation is open (`Unknown`) until
+            // later slices supply real ones (a declared return type at `Return`), so subsumption
+            // is a no-op here and behavior is identical to bare synthesis — the parity guarantee.
             Stmt::Echo { value, .. } => {
-                self.infer(value, env);
+                self.check(value, &Type::Unknown, env);
             }
             Stmt::Binding { name, value, .. } => {
-                let ty = self.infer(value, env);
+                let ty = self.check(value, &Type::Unknown, env);
                 bind(env, name, ty);
             }
             Stmt::Expr { expr, .. } => {
-                self.infer(expr, env);
+                self.check(expr, &Type::Unknown, env);
             }
             Stmt::Return { value, .. } => {
                 if let Some(value) = value {
-                    self.infer(value, env);
+                    self.check(value, &Type::Unknown, env);
                 }
             }
             Stmt::If {
@@ -197,7 +220,7 @@ impl Checker {
                 else_body,
                 ..
             } => {
-                self.infer(cond, env);
+                self.synth(cond, env);
                 self.check_block(then_body, env);
                 if let Some(else_body) = else_body {
                     self.check_block(else_body, env);
@@ -209,7 +232,7 @@ impl Checker {
                 body,
                 ..
             } => {
-                let iter_ty = self.infer(iterable, env);
+                let iter_ty = self.synth(iterable, env);
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);
                 for stmt in body {
@@ -439,9 +462,81 @@ impl Checker {
         }
     }
 
-    // ----- inference -----
+    // ----- bidirectional judgments -----
 
-    fn infer(&mut self, expr: &Expr, env: &mut Env) -> Type {
+    /// *Checking* mode: check `expr` against the `expected` type, returning the expression's
+    /// actual type. Forms that can absorb an expectation propagate it inward (a list against
+    /// `List<T>` checks each element against `T`; a closure against a function type adopts the
+    /// expected parameter/return types); every other form synthesizes and is then subsumed.
+    ///
+    /// In this slice every caller passes an open (`Unknown`) expectation, so the propagation
+    /// arms below adopt no concrete type and [`Self::subsume`] never fires — `check` is
+    /// behavior-identical to [`Self::synth`]. Later slices pass real expectations (declared
+    /// returns, parameter types) and this is where they take effect.
+    fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
+        match expr {
+            // A list literal absorbs an expected `List<T>`: check each element against `T`.
+            Expr::List { items, .. } if matches!(expected, Type::List(_)) => {
+                let Type::List(elem) = expected else {
+                    unreachable!()
+                };
+                for item in items {
+                    self.check(item, elem, env);
+                }
+                Type::List(elem.clone())
+            }
+            // A closure absorbs an expected function type: an explicit parameter annotation wins,
+            // otherwise the parameter adopts the expected type; the body is checked against the
+            // expected return.
+            Expr::Closure { params, body, .. } if matches!(expected, Type::Fn { .. }) => {
+                let Type::Fn {
+                    params: expected_params,
+                    ret,
+                } = expected
+                else {
+                    unreachable!()
+                };
+                env.push(HashMap::new());
+                for (i, p) in params.iter().enumerate() {
+                    let pty = p.ty.as_ref().map(Type::from_ref).unwrap_or_else(|| {
+                        expected_params.get(i).cloned().unwrap_or(Type::Unknown)
+                    });
+                    bind(env, &p.name, pty);
+                }
+                let body_ty = self.check(body, ret, env);
+                env.pop();
+                Type::Fn {
+                    params: params.iter().map(param_type).collect(),
+                    ret: Box::new(body_ty),
+                }
+            }
+            // Default: synthesize the actual type, then require it to be a subtype of the
+            // expectation.
+            _ => {
+                let actual = self.synth(expr, env);
+                self.subsume(&actual, expected, expr.span());
+                actual
+            }
+        }
+    }
+
+    /// Subsumption: require `actual <: expected`. A violation is a type mismatch (`E0007`, the
+    /// same code the arithmetic/runtime mismatch path uses). An inference hole on either side
+    /// makes [`Type::subtype`] hold, so a not-yet-inferred type never produces a false positive —
+    /// the gradual-tolerance invariant this slice preserves.
+    fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
+        if !Type::subtype(actual, expected) {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("expected `{expected}`, found `{actual}`"),
+            ));
+        }
+    }
+
+    // ----- synthesis -----
+
+    fn synth(&mut self, expr: &Expr, env: &mut Env) -> Type {
         match expr {
             Expr::Str { .. } => Type::String,
             Expr::Int { .. } => Type::Int,
@@ -450,7 +545,7 @@ impl Checker {
             Expr::Interp { parts, .. } => {
                 for part in parts {
                     if let StrPart::Hole(e) = part {
-                        self.infer(e, env);
+                        self.synth(e, env);
                     }
                 }
                 Type::String
@@ -466,21 +561,21 @@ impl Checker {
             Expr::Unary { operand, .. } => {
                 // Unary type errors have no corpus case and the operand is often gradual; infer
                 // for nested checks but do not promote (kept conservative).
-                self.infer(operand, env)
+                self.synth(operand, env)
             }
-            Expr::Binary { op, lhs, rhs, span } => self.infer_binary(*op, lhs, rhs, *span, env),
+            Expr::Binary { op, lhs, rhs, span } => self.synth_binary(*op, lhs, rhs, *span, env),
             Expr::Call { callee, args, .. } => {
                 for arg in args {
-                    self.infer(arg, env);
+                    self.synth(arg, env);
                 }
-                self.infer_call(callee, env)
+                self.synth_call(callee, env)
             }
             Expr::Closure { params, body, .. } => {
                 env.push(HashMap::new());
                 for p in params {
                     bind(env, &p.name, param_type(p));
                 }
-                let ret = self.infer(body, env);
+                let ret = self.synth(body, env);
                 env.pop();
                 Type::Fn {
                     params: params.iter().map(param_type).collect(),
@@ -488,14 +583,14 @@ impl Checker {
                 }
             }
             Expr::Pipeline { left, right, .. } => {
-                self.infer(left, env);
-                self.infer(right, env);
+                self.synth(left, env);
+                self.synth(right, env);
                 Type::Unknown
             }
             Expr::List { items, .. } => {
                 let mut elem = Type::Unknown;
                 for item in items {
-                    let t = self.infer(item, env);
+                    let t = self.synth(item, env);
                     if elem.is_gradual() {
                         elem = t;
                     }
@@ -504,38 +599,38 @@ impl Checker {
             }
             Expr::Map { entries, .. } => {
                 for (k, v) in entries {
-                    self.infer(k, env);
-                    self.infer(v, env);
+                    self.synth(k, env);
+                    self.synth(v, env);
                 }
                 Type::Map(Box::new(Type::Unknown), Box::new(Type::Unknown))
             }
-            Expr::Member { receiver, name, .. } => self.infer_member(receiver, name, env),
+            Expr::Member { receiver, name, .. } => self.synth_member(receiver, name, env),
             Expr::Index {
                 receiver, index, ..
             } => {
                 // Recurse so nested checks (exhaustiveness, `?`-typing) still fire inside an
                 // index expression. The element type is gradual: a list element or an `Index`
                 // impl's return are not statically tracked yet.
-                self.infer(receiver, env);
-                self.infer(index, env);
+                self.synth(receiver, env);
+                self.synth(index, env);
                 Type::Unknown
             }
             Expr::Match {
                 scrutinee,
                 arms,
                 span,
-            } => self.infer_match(scrutinee, arms, *span, env),
+            } => self.synth_match(scrutinee, arms, *span, env),
             Expr::Object(lit) => {
                 if let Some(spread) = &lit.spread {
-                    self.infer(spread, env);
+                    self.synth(spread, env);
                 }
                 for f in &lit.fields {
-                    self.infer(&f.value, env);
+                    self.synth(&f.value, env);
                 }
                 Type::Named(lit.type_name.clone())
             }
             Expr::Try { expr, span } => {
-                let inner = self.infer(expr, env);
+                let inner = self.synth(expr, env);
                 match &inner {
                     Type::Result(ok, _) => (**ok).clone(),
                     Type::Option(some) => (**some).clone(),
@@ -558,8 +653,8 @@ impl Checker {
             Expr::Coalesce {
                 value, fallback, ..
             } => {
-                let v = self.infer(value, env);
-                self.infer(fallback, env);
+                let v = self.synth(value, env);
+                self.synth(fallback, env);
                 match v {
                     Type::Result(ok, _) => *ok,
                     Type::Option(some) => *some,
@@ -569,7 +664,7 @@ impl Checker {
         }
     }
 
-    fn infer_binary(
+    fn synth_binary(
         &mut self,
         op: BinaryOp,
         lhs: &Expr,
@@ -577,8 +672,8 @@ impl Checker {
         span: Span,
         env: &mut Env,
     ) -> Type {
-        let lt = self.infer(lhs, env);
-        let rt = self.infer(rhs, env);
+        let lt = self.synth(lhs, env);
+        let rt = self.synth(rhs, env);
         match op {
             BinaryOp::Concat => Type::String,
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
@@ -612,7 +707,7 @@ impl Checker {
         }
     }
 
-    fn infer_call(&mut self, callee: &Expr, env: &mut Env) -> Type {
+    fn synth_call(&mut self, callee: &Expr, env: &mut Env) -> Type {
         match callee {
             Expr::Ident { name, .. } => match name.as_str() {
                 "Ok" => Type::Result(Box::new(Type::Unknown), Box::new(Type::Unknown)),
@@ -634,20 +729,20 @@ impl Checker {
                 Type::Unknown
             }
             _ => {
-                self.infer(callee, env);
+                self.synth(callee, env);
                 Type::Unknown
             }
         }
     }
 
-    fn infer_member(&mut self, receiver: &Expr, name: &str, env: &mut Env) -> Type {
+    fn synth_member(&mut self, receiver: &Expr, name: &str, env: &mut Env) -> Type {
         // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type.
         if let Expr::Ident { name: tn, .. } = receiver
             && self.is_enum_variant(tn, name)
         {
             return Type::Named(tn.clone());
         }
-        let recv = self.infer(receiver, env);
+        let recv = self.synth(receiver, env);
         if let Type::Named(n) = &recv
             && let Some(fields) = self.records.get(n)
             && let Some((_, ty)) = fields.iter().find(|(fname, _)| fname == name)
@@ -657,20 +752,20 @@ impl Checker {
         Type::Unknown
     }
 
-    fn infer_match(
+    fn synth_match(
         &mut self,
         scrutinee: &Expr,
         arms: &[MatchArm],
         span: Span,
         env: &mut Env,
     ) -> Type {
-        let scrut = self.infer(scrutinee, env);
+        let scrut = self.synth(scrutinee, env);
         self.check_exhaustive(&scrut, arms, span);
         let mut result = Type::Unknown;
         for arm in arms {
             env.push(HashMap::new());
             self.bind_pattern(&arm.pattern, &scrut, env);
-            let t = self.infer(&arm.body, env);
+            let t = self.synth(&arm.body, env);
             env.pop();
             if result.is_gradual() {
                 result = t;
