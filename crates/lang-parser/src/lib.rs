@@ -707,6 +707,23 @@ where
                 args,
                 span: ctx.to_span(e.span()),
             }),
+            // `receiver.as<T>()` — checked narrowing of a `dyn` value to `?T`. `as` is a keyword,
+            // so this never collides with the member-access postfix below (which matches an
+            // identifier after the dot, not the keyword); the turbofish `<T>` is therefore
+            // unambiguous here. The trailing `()` mirrors a method-call surface.
+            postfix(
+                10,
+                just(T::Dot)
+                    .ignore_then(just(T::AsKw))
+                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                    .then_ignore(just(T::LParen))
+                    .then_ignore(just(T::RParen)),
+                move |receiver, ty, e| Expr::As {
+                    expr: Box::new(receiver),
+                    ty,
+                    span: ctx.to_span(e.span()),
+                },
+            ),
             postfix(
                 10,
                 just(T::Dot).ignore_then(id),
@@ -1912,6 +1929,16 @@ mod tests {
     fn try_and_coalesce_operators() {
         insta::assert_snapshot!(pretty(
             "fn place(items): int { validate(items)?; user = find(1) ?? guest(); return Ok(user); }"
+        ));
+    }
+
+    #[test]
+    fn narrowing_operator() {
+        // `x.as<T>()` parses as a postfix `As` node carrying the target type; `as` is a keyword,
+        // so the turbofish never collides with member access or comparison. The nested `<List<int>>`
+        // exercises the generic target (whose own `<...>` closes against the outer angle brackets).
+        insta::assert_snapshot!(pretty(
+            "fn f(x: dyn): ?int { a = x.as<int>(); b = x.as<List<int>>(); return a; }"
         ));
     }
 

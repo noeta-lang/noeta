@@ -354,6 +354,27 @@ fn deriving_distinct_traits_with_an_impl_is_coherent() {
 }
 
 #[test]
+fn narrowing_a_dyn_value_is_clean() {
+    // `x.as<int>()` on a `dyn` value is the sanctioned way out of the open top; it types as `?int`.
+    let src = "fn f(x: dyn): ?int {\n  return x.as<int>();\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn narrowing_a_concrete_value_is_rejected() {
+    // Narrowing only makes sense out of `dyn`; an already-concrete `int` has nothing to narrow.
+    let src = "fn f(n: int): ?int {\n  return n.as<int>();\n}\n";
+    assert_eq!(codes(src), ["E0028"]);
+}
+
+#[test]
+fn narrowing_to_an_unknown_type_is_reported() {
+    // The narrowing target is validated like any type annotation — an undeclared name is E0013.
+    let src = "fn f(x: dyn): void {\n  x.as<Bogus>();\n}\n";
+    assert_eq!(codes(src), ["E0013"]);
+}
+
+#[test]
 fn old_derive_attribute_spelling_is_reported() {
     // `#[derive(...)]` is the old codegen spelling; it is now `@derive(...)`.
     let src = "#[derive(Equatable)]\nclass P {\n  x: int\n}\n";

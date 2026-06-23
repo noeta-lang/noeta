@@ -14,7 +14,7 @@ use std::rc::Rc;
 
 use lang_ast::{
     BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, ObjectLit, Pattern, Program,
-    RecordDecl, Stmt, StrPart, UnaryOp,
+    RecordDecl, Stmt, StrPart, TypeRef, UnaryOp,
 };
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
@@ -1279,6 +1279,17 @@ impl Interpreter {
             } => {
                 let value = self.eval_expr(value)?;
                 self.eval_coalesce(value, fallback, *span)
+            }
+            // `expr.as<T>()` — checked narrowing: `some(value)` if the runtime value is a `T`,
+            // `none` otherwise. Generics are erased, so the match tests the head constructor only
+            // (`List<int>` checks "is a list"); the element type is trusted from the annotation.
+            Expr::As { expr, ty, .. } => {
+                let value = self.eval_expr(expr)?;
+                if runtime_matches(&value, ty) {
+                    Ok(builtin_enum("Option", "some", vec![value]))
+                } else {
+                    Ok(builtin_enum("Option", "none", vec![]))
+                }
             }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
@@ -2630,6 +2641,37 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
         variant: variant.to_string(),
         data,
     }))
+}
+
+/// Whether a runtime value matches a narrowing target type `ty` (`x.as<T>()`). Generics are
+/// erased, so only the **head constructor** is tested — `List<int>` checks "is a list", trusting
+/// the element type from the annotation. Keyed on the same canonical kind names the VM uses
+/// (`Value::type_name` and the enum/object shape name), so both backends decide identically.
+fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
+    match ty {
+        // `?T` is `Option<T>`: matches any `Option` value (its payload is not re-checked).
+        TypeRef::Optional { .. } => {
+            matches!(value, Value::Enum(e) if e.enum_name == "Option")
+        }
+        TypeRef::Named { name, .. } => match name.as_str() {
+            "int" => matches!(value, Value::Int(_)),
+            "float" => matches!(value, Value::Float(_)),
+            "bool" => matches!(value, Value::Bool(_)),
+            "string" => matches!(value, Value::Str(_)),
+            "void" | "unit" => matches!(value, Value::Unit),
+            // Narrowing to the open top is a no-op: every value is a `dyn`.
+            "dyn" | "Any" => true,
+            "List" | "list" => matches!(value, Value::List(_)),
+            "Map" | "map" => matches!(value, Value::Map(_)),
+            "Set" | "set" => matches!(value, Value::Set(_)),
+            // `Option`/`Result` are enums whose shape name is the type name, like a user enum.
+            other => match value {
+                Value::Object(object) => object.def.name() == other,
+                Value::Enum(enum_value) => enum_value.enum_name == other,
+                _ => false,
+            },
+        },
+    }
 }
 
 /// Project a tree-walker `Value` onto the backend-agnostic [`lang_stdlib::Arg`] the shared

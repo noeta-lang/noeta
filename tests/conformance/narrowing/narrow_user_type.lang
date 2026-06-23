@@ -1,0 +1,21 @@
+// Narrowing a `dyn` to a user type matches on the runtime type name: a `Point` value narrows to
+// `some(point)`, a value of any other type to `none`. The same machinery distinguishes user enums
+// (matched by their enum name) from records/classes.
+// expect: stdout "some(Point {x: 1, y: 2})"
+// expect: stdout "none"
+// expect: exit 0
+class Point {
+    x: int
+    y: int
+}
+
+class Other {
+    v: int
+}
+
+fn as_point(x: dyn): ?Point {
+    return x.as<Point>();
+}
+
+echo as_point(Point { x: 1, y: 2 });
+echo as_point(Other { v: 9 });

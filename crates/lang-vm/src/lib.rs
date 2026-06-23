@@ -36,7 +36,7 @@ use std::rc::Rc;
 
 use lang_ast::{BinaryOp, Program};
 use lang_backend::{Backend, RunResult};
-use lang_bytecode::{BoolSide, Builtin, CaptureFrom, Const, Module, Op};
+use lang_bytecode::{BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op};
 use lang_compiler::{Unsupported, compile};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_gc::{release, retain};
@@ -204,6 +204,28 @@ fn try_classify(v: Value) -> Option<TryOutcome> {
         ("Result", Some("Err")) | ("Option", Some("none")) => Some(TryOutcome::Empty),
         _ => None,
     }
+}
+
+/// Whether a value matches a narrowing target (`x.as<T>()`). Generics are erased, so only the
+/// runtime **head constructor** is tested. The primitive/collection kinds compare against
+/// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
+/// backends decide a narrowing identically; `Named` (a user record/class/enum, or the built-in
+/// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
+fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
+    let kind = match target {
+        NarrowTarget::Int => "int",
+        NarrowTarget::Float => "float",
+        NarrowTarget::Bool => "bool",
+        NarrowTarget::String => "string",
+        NarrowTarget::Unit => "unit",
+        NarrowTarget::List => "list",
+        NarrowTarget::Map => "map",
+        NarrowTarget::Set => "set",
+        NarrowTarget::Fn => "function",
+        NarrowTarget::Dyn => return true,
+        NarrowTarget::Named(name) => return v.shape().is_some_and(|s| &s.name == name),
+    };
+    v.type_name() == kind
 }
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.
@@ -1926,6 +1948,25 @@ impl<'m> Vm<'m> {
                             ));
                         }
                     }
+                }
+                Op::Narrow {
+                    dst,
+                    src,
+                    target,
+                    some_shape,
+                    none_shape,
+                } => {
+                    let v = frames[top].regs[*src as usize];
+                    let result = if narrow_matches(v, target) {
+                        retain(v);
+                        let shape = self.shapes[*some_shape as usize].clone();
+                        Value::enum_value(shape, vec![v])
+                    } else {
+                        let shape = self.shapes[*none_shape as usize].clone();
+                        Value::enum_value(shape, Vec::new())
+                    };
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
                 }
                 Op::MatchInt { src, value, fail } => {
                     if frames[top].regs[*src as usize].as_int() == Some(*value) {

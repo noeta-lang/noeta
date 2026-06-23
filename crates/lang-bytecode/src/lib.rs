@@ -84,6 +84,26 @@ pub enum Const {
     NativeModule(String),
 }
 
+/// The target of a checked narrowing (`x.as<T>()`) reduced to its runtime **head constructor**.
+/// Generics are erased, so only the constructor is retained — a `List<int>` target narrows on
+/// "is a list", trusting the element type from the static annotation. `Named` covers user
+/// records/classes/enums and the built-in `Option`/`Result` (matched by their shape name); `Dyn`
+/// always matches (narrowing to the open top is a no-op).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NarrowTarget {
+    Int,
+    Float,
+    Bool,
+    String,
+    Unit,
+    List,
+    Map,
+    Set,
+    Fn,
+    Dyn,
+    Named(String),
+}
+
 /// One register-machine instruction.
 #[derive(Debug, Clone)]
 pub enum Op {
@@ -308,6 +328,17 @@ pub enum Op {
         src: Reg,
         fallback: u32,
         span: Span,
+    },
+    /// `dst = src.as<T>()` — checked narrowing. `dst = some(src)` (built from `some_shape`) if
+    /// `src`'s runtime head constructor matches `target`; otherwise `dst = none` (`none_shape`).
+    /// The two `Option` shape indices are resolved at compile time, so the VM only tests and
+    /// constructs — the op cannot fail, so it carries no span.
+    Narrow {
+        dst: Reg,
+        src: Reg,
+        target: NarrowTarget,
+        some_shape: u32,
+        none_shape: u32,
     },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
@@ -728,6 +759,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Coalesce {
             dst, src, fallback, ..
         } => format!("Coalesce    r{dst} <- r{src} ?? -> {fallback}"),
+        Op::Narrow {
+            dst, src, target, ..
+        } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
         Op::MatchInt { src, value, fail } => {
             format!("MatchInt    r{src} == {value} else -> {fail}")
         }

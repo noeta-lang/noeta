@@ -98,6 +98,10 @@ pub enum DiagnosticCode {
     /// structurally: `impl` blocks live only inside a class body, so a trait can only be
     /// implemented for the type that owns it.)
     ConflictingTraitImpl,
+    /// A checked narrowing (`x.as<T>()`) was applied to a value whose static type is already
+    /// concrete (not `dyn`). Narrowing converts the open top `dyn` back to a `?T`; a value that is
+    /// already a known concrete type has nothing dynamic to narrow, so the `as` is a mistake.
+    InvalidNarrow,
 }
 
 impl DiagnosticCode {
@@ -131,6 +135,7 @@ impl DiagnosticCode {
         DiagnosticCode::TraitBoundNotSatisfied,
         DiagnosticCode::RequiredAfterOptional,
         DiagnosticCode::ConflictingTraitImpl,
+        DiagnosticCode::InvalidNarrow,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -164,6 +169,7 @@ impl DiagnosticCode {
             DiagnosticCode::TraitBoundNotSatisfied => "E0025",
             DiagnosticCode::RequiredAfterOptional => "E0026",
             DiagnosticCode::ConflictingTraitImpl => "E0027",
+            DiagnosticCode::InvalidNarrow => "E0028",
         }
     }
 

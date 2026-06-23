@@ -1,0 +1,10 @@
+// `.as<T>()` is the explicit way *out* of `dyn`. Applying it to a value whose static type is
+// already concrete (here the `int` parameter `n`) is a mistake — there is nothing dynamic to
+// narrow, so the checker rejects it (E0028) at the `as` expression.
+// expect: error E0028 at 7:12
+// expect: exit 1
+fn f(n: int): ?int {
+    return n.as<int>();
+}
+
+echo f(3);

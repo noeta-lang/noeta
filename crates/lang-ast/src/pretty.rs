@@ -7,7 +7,7 @@
 
 use crate::{
     ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program,
-    RecordDecl, Stmt, StrPart, TypeParam,
+    RecordDecl, Stmt, StrPart, TypeParam, TypeRef,
 };
 use lang_span::Span;
 
@@ -537,6 +537,23 @@ impl Pretty for Expr {
                 fallback.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::As { expr, ty, span: s } => {
+                out.push_str(&format!("(as {} {}\n", type_ref_str(ty), span(*s)));
+                expr.pretty(out, level + 1);
+                out.push(')');
+            }
+        }
+    }
+}
+
+/// Render a [`TypeRef`] back to its surface spelling (`int`, `List<int>`, `?User`) for snapshots.
+fn type_ref_str(ty: &TypeRef) -> String {
+    match ty {
+        TypeRef::Optional { inner, .. } => format!("?{}", type_ref_str(inner)),
+        TypeRef::Named { name, args, .. } if args.is_empty() => name.clone(),
+        TypeRef::Named { name, args, .. } => {
+            let args: Vec<String> = args.iter().map(type_ref_str).collect();
+            format!("{name}<{}>", args.join(", "))
         }
     }
 }

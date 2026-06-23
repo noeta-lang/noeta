@@ -135,6 +135,20 @@ points: List<Vec3> = [ Vec3 { x: 0, y: 0, z: 0 }, ... ];
 
 Regular (non-`packed`) records and classes remain shaped, heap-allocated dynamic objects (§6); `packed` is the opt-in for the numeric/throughput case.
 
+**The dynamic escape (`dyn`) and checked narrowing.** Every expression has an inferable static type; the single sanctioned dynamic boundary is the nameable top type `dyn` (spelled `dyn` or `Any`). Every type *widens* into it implicitly (`T` is a `dyn`), but narrowing back *out* is never implicit — you ask for it explicitly with `x.as<T>()`, which returns `?T`: `some(x)` if the runtime value is a `T`, `none` if not.
+
+```
+fn describe(x: dyn): string {
+    if x.as<int>()    != none { return "int"; }
+    if x.as<string>() != none { return "string"; }
+    return "other";
+}
+
+n = x.as<int>() ?? 0;               // narrow, then unwrap with a fallback
+```
+
+The check is on the **head constructor** — generics are erased, so `x.as<List<int>>()` tests "is a list" and trusts the element type from the annotation. Narrowing a value whose static type is already concrete (there is nothing dynamic to narrow) is a compile error (`E0028`). This is the only place runtime type dispatch survives; everywhere else the static type is known.
+
 ---
 
 ## 6. Classes

@@ -1311,6 +1311,31 @@ impl Checker {
                     _ => Type::Unknown,
                 }
             }
+            Expr::As { expr, ty, span } => {
+                let src = self.synth(expr, env);
+                self.check_type_ref(ty);
+                let target = Type::from_ref(ty);
+                // Narrowing is the explicit way *out* of `dyn`: it only makes sense when the source
+                // is the open top (or an un-inferred hole, which defers). A value whose static type
+                // is already concrete has nothing dynamic to narrow — that is an `E0028`.
+                if !src.defers_to_runtime() {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::InvalidNarrow,
+                            *span,
+                            format!(
+                                "`.as<{target}>()` can only narrow a `dyn` value, but this value \
+                                 is already `{src}`"
+                            ),
+                        )
+                        .with_help(
+                            "narrowing converts the dynamic top `dyn` to a checked `?T`; a value \
+                             with a known concrete type does not need it",
+                        ),
+                    );
+                }
+                Type::Option(Box::new(target))
+            }
         }
     }
 

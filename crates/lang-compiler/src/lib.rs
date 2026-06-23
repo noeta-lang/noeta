@@ -37,11 +37,12 @@
 use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
-    BinaryOp, Expr, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program, Stmt, StrPart,
+    BinaryOp, Expr, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program, Stmt, StrPart, TypeRef,
 };
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
-    AttributeRecord, BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, Op, Reg,
+    AttributeRecord, BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module,
+    NarrowTarget, Op, Reg,
 };
 
 mod freevars;
@@ -1454,6 +1455,20 @@ impl<'m> FnCompiler<'m> {
                 fallback,
                 span,
             } => self.coalesce(value, fallback, dst, *span)?,
+            Expr::As { expr, ty, .. } => {
+                let src = self.alloc_reg();
+                self.expr(expr, src)?;
+                let target = narrow_target(ty);
+                let some_shape = self.module.builtin_enum_shape("Option", "some");
+                let none_shape = self.module.builtin_enum_shape("Option", "none");
+                self.code.push(Op::Narrow {
+                    dst,
+                    src,
+                    target,
+                    some_shape,
+                    none_shape,
+                });
+            }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {
@@ -2095,4 +2110,26 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
         span,
         format!("type `{type_name}` has no field `{field}`"),
     )
+}
+
+/// Reduce a narrowing target type (`x.as<T>()`) to its runtime head constructor. Mirrors the
+/// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
+/// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
+/// name); generic arguments are dropped (erasure).
+fn narrow_target(ty: &TypeRef) -> NarrowTarget {
+    match ty {
+        TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
+        TypeRef::Named { name, .. } => match name.as_str() {
+            "int" => NarrowTarget::Int,
+            "float" => NarrowTarget::Float,
+            "bool" => NarrowTarget::Bool,
+            "string" => NarrowTarget::String,
+            "void" | "unit" => NarrowTarget::Unit,
+            "dyn" | "Any" => NarrowTarget::Dyn,
+            "List" | "list" => NarrowTarget::List,
+            "Map" | "map" => NarrowTarget::Map,
+            "Set" | "set" => NarrowTarget::Set,
+            other => NarrowTarget::Named(other.to_string()),
+        },
+    }
 }

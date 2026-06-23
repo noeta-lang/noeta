@@ -1,0 +1,29 @@
+// `x.as<T>()` narrows the dynamic top `dyn` to `?T`: `some(x)` when the runtime value's head
+// constructor is a `T`, `none` otherwise. Generics are erased, so the test is on the constructor
+// only (a `List<int>` target checks "is a list", trusting the element type). The narrowed value is
+// then usable at type `T` — here `?? fallback` unwraps it. One shared narrowing op drives both
+// backends, so M0 and M1 agree by construction.
+// expect: stdout "some(42)"
+// expect: stdout "none"
+// expect: stdout "some(hi)"
+// expect: stdout "some(true)"
+// expect: stdout "some(3.5)"
+// expect: stdout "some([1, 2, 3])"
+// expect: stdout "42"
+// expect: stdout "0"
+// expect: exit 0
+fn as_int(x: dyn): ?int { return x.as<int>(); }
+fn as_string(x: dyn): ?string { return x.as<string>(); }
+fn as_bool(x: dyn): ?bool { return x.as<bool>(); }
+fn as_float(x: dyn): ?float { return x.as<float>(); }
+fn as_list(x: dyn): ?List<int> { return x.as<List<int>>(); }
+fn int_or_zero(x: dyn): int { return x.as<int>() ?? 0; }
+
+echo as_int(42);
+echo as_int("nope");
+echo as_string("hi");
+echo as_bool(true);
+echo as_float(3.5);
+echo as_list([1, 2, 3]);
+echo int_or_zero(42);
+echo int_or_zero("nope");

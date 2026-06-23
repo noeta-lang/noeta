@@ -443,6 +443,15 @@ pub enum Expr {
         fallback: Box<Expr>,
         span: Span,
     },
+    /// The checked-narrowing operator: `expr.as<T>()` narrows a `dyn` value to `?T`, yielding
+    /// `some(expr)` if the runtime value is a `T` and `none` otherwise. Kept as its own node (not
+    /// desugared) so M1 types it as `Option<T>` and points diagnostics at the `as`. `ty` is the
+    /// target type written between the angle brackets.
+    As {
+        expr: Box<Expr>,
+        ty: TypeRef,
+        span: Span,
+    },
 }
 
 /// An all-fields object literal. `spread` (`..expr`) supplies values for fields not named
@@ -550,7 +559,8 @@ impl Expr {
             | Expr::Interp { span, .. }
             | Expr::Match { span, .. }
             | Expr::Try { span, .. }
-            | Expr::Coalesce { span, .. } => *span,
+            | Expr::Coalesce { span, .. }
+            | Expr::As { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }
     }

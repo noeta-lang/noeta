@@ -65,6 +65,10 @@ pub enum TokenKind {
     UseKw,
     #[token("pub")]
     PubKw,
+    /// The checked-narrowing keyword: `x.as<T>()` narrows a `dyn` value to `?T`. A keyword
+    /// (not an identifier) so `.as<T>()` is unambiguous against member access + comparison.
+    #[token("as")]
+    AsKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -214,6 +218,7 @@ impl TokenKind {
             TokenKind::NamespaceKw => "NamespaceKw",
             TokenKind::UseKw => "UseKw",
             TokenKind::PubKw => "PubKw",
+            TokenKind::AsKw => "AsKw",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
             TokenKind::TemplateStr => "TemplateStr",
@@ -289,6 +294,7 @@ impl TokenKind {
             TokenKind::NamespaceKw => "`namespace`",
             TokenKind::UseKw => "`use`",
             TokenKind::PubKw => "`pub`",
+            TokenKind::AsKw => "`as`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",
             TokenKind::TemplateStr => "a template string literal",
