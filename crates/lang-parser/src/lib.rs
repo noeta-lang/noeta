@@ -31,8 +31,8 @@ use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
     Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
-    ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef,
-    UnaryOp, UseName, VariantDecl,
+    ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam,
+    TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -963,26 +963,63 @@ where
                 })
         });
 
-        // `fn name(params): Ret { body }` — a declaration (the `name` distinguishes it
-        // from the `fn(...) =>` closure expression, which falls through to `expr`).
+        // Optional generic type parameters on a declaration: `<T>`, `<A, B>`, `<T: Comparable>`,
+        // `<T: Comparable + Display>`. Bounds are built-in trait names (validated + enforced by the
+        // checker); erased at runtime. In declaration position a `<` right after the type name is
+        // unambiguous — no comparison expression can appear there.
+        let type_param = id
+            .clone()
+            .then(
+                just(T::Colon)
+                    .ignore_then(
+                        id.clone()
+                            .map(|(name, _span)| name)
+                            .separated_by(just(T::Plus))
+                            .at_least(1)
+                            .collect::<Vec<_>>(),
+                    )
+                    .or_not()
+                    .map(Option::unwrap_or_default),
+            )
+            .map_with(move |((name, _name_span), bounds), e| TypeParam {
+                name,
+                bounds,
+                span: ctx.to_span(e.span()),
+            });
+        let type_params = type_param
+            .separated_by(just(T::Comma))
+            .at_least(1)
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::Lt), just(T::Gt))
+            .or_not()
+            .map(Option::unwrap_or_default);
+
+        // `fn name<T: Bound>(params): Ret { body }` — a declaration (the `name` distinguishes it
+        // from the `fn(...) =>` closure expression, which falls through to `expr`). Generic
+        // parameters are optional and only free functions carry them.
         let fn_decl = just(T::PubKw)
             .or_not()
             .then_ignore(just(T::FnKw))
             .then(id.clone())
+            .then(type_params.clone())
             .then(params_parser(ctx))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
-            .map_with(move |((((pub_kw, name_pair), params), ret), body), e| {
-                Stmt::Fn(FnDecl {
-                    name: name_pair.0,
-                    name_span: name_pair.1,
-                    is_public: pub_kw.is_some(),
-                    params,
-                    ret,
-                    body,
-                    span: ctx.to_span(e.span()),
-                })
-            });
+            .map_with(
+                move |(((((pub_kw, name_pair), type_params), params), ret), body), e| {
+                    Stmt::Fn(FnDecl {
+                        name: name_pair.0,
+                        name_span: name_pair.1,
+                        is_public: pub_kw.is_some(),
+                        type_params,
+                        params,
+                        ret,
+                        body,
+                        span: ctx.to_span(e.span()),
+                    })
+                },
+            );
 
         // Enum variant: plain `Red;`, algebraic `Code(n: int);`, or backed `P = "p";`.
         let variant = id
@@ -1004,20 +1041,6 @@ where
                     span: ctx.to_span(e.span()),
                 },
             );
-        // Optional generic type parameters on a declaration: `<T>`, `<A, B>`. Erased at runtime
-        // (retained for the checker). In declaration position a `<` right after the type name is
-        // unambiguous — no comparison expression can appear there.
-        let type_params = id
-            .clone()
-            .map(|(name, _span)| name)
-            .separated_by(just(T::Comma))
-            .at_least(1)
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just(T::Lt), just(T::Gt))
-            .or_not()
-            .map(Option::unwrap_or_default);
-
         let enum_decl = just(T::EnumKw)
             .ignore_then(id.clone())
             .then(type_params.clone())
@@ -1106,6 +1129,8 @@ where
                 name: name_pair.0,
                 name_span: name_pair.1,
                 is_public: false,
+                // Methods are generic over their enclosing class's parameters, not their own.
+                type_params: Vec::new(),
                 params,
                 ret,
                 body,
@@ -1797,6 +1822,17 @@ mod tests {
     fn range_operators_parse() {
         // `..` binds looser than arithmetic, so `0..n - 1` is `0..(n - 1)`; `..=` is inclusive.
         insta::assert_snapshot!(pretty("echo 0..n - 1; echo 1..=10;"));
+    }
+
+    #[test]
+    fn bounded_generics_parse() {
+        // A generic function with single and multi-bound parameters, plus a bounded generic class.
+        // Bounds render in the pretty form (`<T: Comparable + Display>`); unbounded params do not.
+        insta::assert_snapshot!(pretty(
+            "fn max<T: Comparable>(a: T, b: T): T { return a; }\n\
+             fn pick<A: Comparable + Display, B>(a: A, b: B): A { return a; }\n\
+             class Wrap<T: Display> { value: T }"
+        ));
     }
 
     #[test]

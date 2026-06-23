@@ -69,7 +69,7 @@ use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
     Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock, MatchArm, Param,
-    Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef, UnaryOp,
+    Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef, UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -191,7 +191,8 @@ impl Checker {
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
                     // runtime, they accept any argument).
-                    let tps: HashSet<String> = c.type_params.iter().cloned().collect();
+                    let tps: HashSet<String> =
+                        c.type_params.iter().map(|p| p.name.clone()).collect();
                     let methods = c
                         .methods
                         .iter()
@@ -223,8 +224,21 @@ impl Checker {
                     self.types.insert(e.name.clone());
                 }
                 Stmt::Fn(f) => {
-                    let params = f.params.iter().map(param_type).collect();
-                    let ret = f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                    // A generic function's own parameters are erased to `dyn` in its registered
+                    // signature, exactly like a generic class's methods — so a call type-checks
+                    // (arguments accepted, result `dyn`) until S4.2 replaces this with proper
+                    // per-call instantiation and bound enforcement.
+                    let tps: HashSet<String> =
+                        f.type_params.iter().map(|p| p.name.clone()).collect();
+                    let params = f
+                        .params
+                        .iter()
+                        .map(|p| erase_type_params(param_type(p), &tps))
+                        .collect();
+                    let ret = erase_type_params(
+                        f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                        &tps,
+                    );
                     self.functions.insert(f.name.clone(), FnSig { params, ret });
                 }
                 // A `use std.{json, …}` import binds a Ring 2 module value (tracked in `modules`);
@@ -429,6 +443,14 @@ impl Checker {
     /// (a class's fields, when checking a method).
     fn check_fn(&mut self, decl: &FnDecl, env: &mut Env, extra: &[(String, Type)]) {
         self.require_signature(decl);
+        // Bring the function's own generic parameters into scope for its body (a free function may
+        // be generic; a method is generic over its class's parameters, already in scope, and
+        // carries none of its own). Union with the current set so a method does not lose the
+        // class's parameters; restored after the body. Bounds are validated here too.
+        self.check_type_param_bounds(&decl.type_params);
+        let saved_type_params = self.type_params.clone();
+        self.type_params
+            .extend(decl.type_params.iter().map(|p| p.name.clone()));
         for p in &decl.params {
             self.check_type_opt(&p.ty);
         }
@@ -458,6 +480,7 @@ impl Checker {
         env.pop();
         self.current_ret = saved_ret;
         self.loop_depth = saved_loop_depth;
+        self.type_params = saved_type_params;
     }
 
     /// Inferred-static requires a full signature on every **named** function or method: a type on
@@ -549,9 +572,40 @@ impl Checker {
 
     /// Install `params` as the in-scope generic type parameters and return the previous set (to
     /// restore once the declaration is checked). Generic parameters are erased at runtime but are
-    /// legal referents for annotations within their declaration.
-    fn enter_type_params(&mut self, params: &[String]) -> HashSet<String> {
-        std::mem::replace(&mut self.type_params, params.iter().cloned().collect())
+    /// legal referents for annotations within their declaration. Each parameter's trait bounds are
+    /// validated here (an unknown trait in a bound is `E0014`).
+    fn enter_type_params(&mut self, params: &[TypeParam]) -> HashSet<String> {
+        self.check_type_param_bounds(params);
+        std::mem::replace(
+            &mut self.type_params,
+            params.iter().map(|p| p.name.clone()).collect(),
+        )
+    }
+
+    /// Validate each type parameter's trait bounds: a bound must name a built-in trait, else
+    /// `E0014 UnknownTrait` (reusing the `impl`/`@derive` name-validation path). The bound names
+    /// are what S4.2 enforces at instantiation; here we only check they refer to real traits.
+    fn check_type_param_bounds(&mut self, params: &[TypeParam]) {
+        for p in params {
+            for bound in &p.bounds {
+                if BuiltinTrait::lookup(bound).is_none() {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::UnknownTrait,
+                            p.span,
+                            format!(
+                                "unknown trait `{bound}` in bound on type parameter `{}`",
+                                p.name
+                            ),
+                        )
+                        .with_help(
+                            "a bound must name a built-in trait, e.g. `Comparable`, `Equatable`, \
+                             or `Display`",
+                        ),
+                    );
+                }
+            }
+        }
     }
 
     fn check_type_opt(&mut self, ty: &Option<TypeRef>) {

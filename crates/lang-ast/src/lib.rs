@@ -127,7 +127,7 @@ pub struct RecordDecl {
     pub is_public: bool,
     /// Generic type parameters (`type Pair<A, B> = {...}`). Erased at runtime — they exist for
     /// the checker; empty for a non-generic type.
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
     /// across all directive lines. Validated by the checker; drives compiler codegen.
@@ -161,6 +161,18 @@ pub fn derives_trait(derives: &[(String, Span)], trait_name: &str) -> bool {
     derives.iter().any(|(name, _)| name == trait_name)
 }
 
+/// A generic type parameter on a declaration: a name and its trait **bounds** (`<T: Comparable>`,
+/// `<T: Comparable + Display>`). Bounds are built-in trait names the checker validates and (S4.2)
+/// enforces where the generic is instantiated; an empty `bounds` is an unbounded `<T>`. Erased at
+/// runtime exactly like the parameter it constrains.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParam {
+    pub name: String,
+    /// Trait bounds, in source order; empty for an unbounded parameter.
+    pub bounds: Vec<String>,
+    pub span: Span,
+}
+
 /// An `impl Trait { ... }` block inside a class body. Implementing a built-in trait "lights up"
 /// its operator or protocol (e.g. `impl Add` enables `+`). The block's methods are flattened into
 /// [`ClassDecl::methods`] for execution; the block itself is retained here so the checker can
@@ -185,7 +197,7 @@ pub struct ClassDecl {
     pub is_public: bool,
     /// Generic type parameters (`class Box<T> {...}`). Erased at runtime — they exist for the
     /// checker; empty for a non-generic class.
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
     /// All callable methods, including the ones flattened out of `impl` blocks — so the existing
     /// `(type, method)` dispatch machinery resolves an operator's trait method with no change.
@@ -229,7 +241,7 @@ pub struct EnumDecl {
     pub is_public: bool,
     /// Generic type parameters (`enum Tree<T> {...}`). Erased at runtime — they exist for the
     /// checker; empty for a non-generic enum.
-    pub type_params: Vec<String>,
+    pub type_params: Vec<TypeParam>,
     /// The backing primitive type for a backed enum (`: string`), if any.
     pub backing: Option<TypeRef>,
     pub variants: Vec<VariantDecl>,
@@ -284,6 +296,10 @@ pub struct FnDecl {
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default; meaningless for a method (only top-level declarations are importable).
     pub is_public: bool,
+    /// Generic type parameters (`fn max<T: Comparable>(...)`). Erased at runtime — they exist for
+    /// the checker; empty for a non-generic function (the common case). A method's parameters are
+    /// the enclosing class's, not its own; only free functions carry their own here.
+    pub type_params: Vec<TypeParam>,
     pub params: Vec<Param>,
     /// The declared return type, if any. Checked by the M1 type checker (M1.7).
     pub ret: Option<TypeRef>,

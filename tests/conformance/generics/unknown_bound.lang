@@ -1,0 +1,9 @@
+// A trait bound must name a built-in trait. `Ordered` is not one, so the bound on `T` is rejected
+// as an unknown trait (`E0014`), exactly like an unknown trait in an `impl`/`@derive`.
+// expect: error E0014 at 5:13
+// expect: exit 1
+fn smallest<T: Ordered>(a: T, b: T): T {
+    if a > b { return b; }
+    return a;
+}
+echo smallest(1, 2);

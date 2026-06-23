@@ -7,7 +7,7 @@
 
 use crate::{
     ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program,
-    RecordDecl, Stmt, StrPart,
+    RecordDecl, Stmt, StrPart, TypeParam,
 };
 use lang_span::Span;
 
@@ -191,9 +191,10 @@ impl Pretty for FnDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
         out.push_str(&format!(
-            "(fn {}{} [{}] {}",
+            "(fn {}{}{} [{}] {}",
             pub_str(self.is_public),
             self.name,
+            type_params_str(&self.type_params),
             param_list(&self.params),
             span(self.span)
         ));
@@ -243,13 +244,24 @@ fn field_decl_str(field: &FieldDecl) -> String {
     }
 }
 
-/// Render a declaration's generic parameters as `<A, B>`, or the empty string when there are
-/// none (so non-generic declarations' pretty output is unchanged).
-fn type_params_str(params: &[String]) -> String {
+/// Render a declaration's generic parameters as `<A, B>` (or `<T: Comparable + Display>` when
+/// bounded), or the empty string when there are none (so non-generic declarations' pretty output
+/// is unchanged, as is any unbounded generic's).
+fn type_params_str(params: &[TypeParam]) -> String {
     if params.is_empty() {
         String::new()
     } else {
-        format!("<{}>", params.join(", "))
+        let parts: Vec<String> = params
+            .iter()
+            .map(|p| {
+                if p.bounds.is_empty() {
+                    p.name.clone()
+                } else {
+                    format!("{}: {}", p.name, p.bounds.join(" + "))
+                }
+            })
+            .collect();
+        format!("<{}>", parts.join(", "))
     }
 }
 

@@ -1,0 +1,13 @@
+// A generic *function* with a trait bound: `<T: Comparable>` constrains the type parameter, which
+// is erased at runtime, so both backends run `max` identically over int and string. The bound is
+// validated statically (S4.1); call-site enforcement of the bound arrives with S4.2.
+// expect: stdout "5"
+// expect: stdout "pear"
+// expect: exit 0
+fn max<T: Comparable>(a: T, b: T): T {
+    if a > b { return a; }
+    return b;
+}
+
+echo max(3, 5);
+echo max("apple", "pear");

@@ -1,6 +1,6 @@
 # Type-system track — inferred-static typing with explicit `dyn`
 
-Status: **in-progress** (S0–S3c done, incl. list-building L1–L3; S4 next)
+Status: **in-progress** (S0–S3c done, incl. list-building L1–L3; S4 underway — S4.1 declaration syntax done, S4.2 enforcement next)
 
 This directory is the milestone-scale track that redirects the checker from **gradual / `Unknown`-tolerant** typing to **inferred-static** typing with an explicit `dyn` escape — Rust-like: every expression has an inferable static type, an un-inferable one is a *compile error* (never a silent `Unknown`), and `dyn`/`Any` is the only sanctioned dynamic boundary. The inference engine is **bidirectional checking + local inference, NOT Hindley–Milner** (subtyping via `dyn` widening, directional method resolution, and record width is load-bearing and defeats HM's unification core; bidirectional also decomposes cleanly into salsa queries). Rationale lives in the `type-system-direction` memory and `plans/deferred.md` (the superseded "checker hardening" / "static E0006" / "bounded generics" rows).
 
@@ -36,7 +36,7 @@ The checker is **shared** by both backends (one `lang_check::check`), so any new
 | L3 | Assignment updates the declaring scope (accumulators infer) | **done** |
 | L4 | Compound assignment `+= -= *= /= %= ~=` (parser sugar) | **done** |
 | S3c.4 | Hard E0023 CannotInfer (fixable via annotation) + finalize | **done** |
-| S4 | Explicit bounded generics, statically enforced (E0025) | todo |
+| S4 | Explicit bounded generics, statically enforced (E0025) | **in-progress** (S4.1 done; S4.2 next) |
 | S5 | Trait coherence — orphan/overlap rules (E0025) | todo |
 | S6 | `dyn` operations + checked narrowing (`x.as<T>()`) | todo |
 | S8 | Declared union / intersection types ("closed `dyn`") | planned |

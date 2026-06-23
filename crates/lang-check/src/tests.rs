@@ -117,6 +117,35 @@ fn generic_parameter_is_a_legal_type() {
 }
 
 #[test]
+fn generic_function_with_bound_is_clean() {
+    // A free generic function `<T: Comparable>`: `T` is in scope for the parameters and return,
+    // the bound names a real built-in trait, and operations on `T` defer to runtime. Clean.
+    let src = "fn max<T: Comparable>(a: T, b: T): T {\n  if a > b { return a; }\n  return b;\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn unknown_bound_on_type_parameter_is_reported() {
+    // A bound must name a built-in trait; `Ordered` is not one, so it is `E0014`.
+    let src = "fn f<T: Ordered>(a: T): T { return a; }\n";
+    assert_eq!(codes(src), ["E0014"]);
+}
+
+#[test]
+fn multiple_bounds_on_a_type_parameter_are_accepted() {
+    // `<T: Comparable + Display>` — both bounds name built-in traits, so no diagnostic.
+    let src = "fn f<T: Comparable + Display>(a: T): T { return a; }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn generic_function_parameter_is_out_of_scope_outside_its_body() {
+    // `T` is erased and scoped to `f`; naming it in a sibling function's annotation is `E0013`.
+    let src = "fn f<T: Comparable>(a: T): T { return a; }\nfn g(x: T): T { return x; }\n";
+    assert_eq!(codes(src), ["E0013", "E0013"]);
+}
+
+#[test]
 fn annotations_do_not_produce_false_positives() {
     let src = "type Item = { price: float };\n\
                fn f(xs: List<Item>): Result<void, string> { return Ok(); }\n";

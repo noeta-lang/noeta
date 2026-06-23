@@ -1,0 +1,12 @@
+---
+source: crates/lang-parser/src/lib.rs
+expression: "pretty(\"fn max<T: Comparable>(a: T, b: T): T { return a; }\\n\\\n             fn pick<A: Comparable + Display, B>(a: A, b: B): A { return a; }\\n\\\n             class Wrap<T: Display> { value: T }\")"
+---
+(program @0..151
+  (fn max<T: Comparable> [a b] @0..50
+    (return @39..48
+      (ident a @46..47)))
+  (fn pick<A: Comparable + Display, B> [a b] @51..115
+    (return @104..113
+      (ident a @111..112)))
+  (class Wrap<T: Display> [value] @116..151))
