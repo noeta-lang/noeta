@@ -29,7 +29,7 @@ This is the sentence to repeat everywhere: README first line, first post, the pi
 **Is:**
 - A general-purpose, application-oriented language with a **persistent runtime** (not request-per-process).
 - **Reactive at the language level** — `signal`/`computed`/`effect` drive UI (web and desktop) and, as an R&D direction, persistence.
-- **Strongly, statically typed** with a gradual on-ramp — simple code stays simple; rigor is opt-in and composes upward.
+- **Inferred-static typing** with an explicit `dyn` escape — signatures are required at named boundaries, bodies are inferred, and `dyn` is the one opt-in dynamic on-ramp; simple code stays simple, rigor composes upward.
 - **Single-binary, any-surface** — CLI, web (bundled server), desktop (Tauri shell), plus shared-logic WASM for an existing JS/TS frontend.
 - Implemented in **Rust**, built **agentically**, with an executable conformance spec.
 

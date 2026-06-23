@@ -1,29 +1,30 @@
 //! The type lattice: the vocabulary the M1 checker reasons in.
 //!
 //! Pure data, no inference logic (that lives in `lang-check`). A [`Type`] is either a concrete
-//! type (`int`, `List<T>`, a named record/class/enum, a function), an *inference variable*
-//! (`Var`, filled in during checking), [`Type::Unknown`] — the internal **inference hole** — or
-//! [`Type::Dyn`], the explicit, user-nameable **top type**.
+//! type (`int`, `List<T>`, a named record/class/enum, a function), [`Type::Unknown`] — the
+//! internal **inference hole** — or [`Type::Dyn`], the explicit, user-nameable **top type**.
 //!
-//! ## Two tops, on purpose (the inferred-static redirection)
+//! ## Two tops, on purpose (the inferred-static design)
 //!
-//! The language is moving from gradual/`Unknown`-tolerant typing to **inferred-static** typing:
-//! every expression must have an inferable static type; an un-inferable one is a *compile error*,
-//! and the single sanctioned dynamic escape is the nameable `dyn`. That split is why there are two
-//! "top-like" types with deliberately different roles:
+//! The language is **inferred-static**: every expression has an inferable static type, an
+//! un-inferable one is a *compile error* rather than a silent pass, and the single sanctioned
+//! dynamic escape is the nameable `dyn`. That is why there are two "top-like" types with
+//! deliberately different roles:
 //!
-//! - [`Type::Unknown`] (and [`Type::Var`]) is an **inference hole** — *absence of information*,
-//!   never written by the user. Today the checker still falls back to it wherever it cannot infer
-//!   a precise type, which is what makes the checker *gradual* (an un-inferable expression never
-//!   errors). Under the inferred-static track this fallback is being removed: an unresolved hole
-//!   becomes an error rather than a silent pass.
+//! - [`Type::Unknown`] is the internal **inference hole** — *absence of information*, never
+//!   written by the user. The inferred-static track eliminates a hole at every boundary the design
+//!   fixes: a required signature (`E0022`) leaves no hole at a named parameter or return, arguments
+//!   and returns are checked against their declared types, and a hole that reaches a binding with
+//!   nothing to determine it is `E0023`. A residual tolerance remains *by design* for an *interior*
+//!   hole — where a precise type genuinely is not modeled (an un-typed prelude result, a numeric
+//!   hole) the checker stays lenient mid-expression rather than risk a false positive. That
+//!   conservatism is [`Self::is_gradual`]; it is a recorded design choice, not pending removal.
 //! - [`Type::Dyn`] is the **explicit top** the user *can* name (`dyn`/`Any`). Every type widens
 //!   into it (`T <: dyn`); narrowing back out (`dyn → T`) is explicit and checked (`x.as<T>()`).
-//!   `dyn` is the only place runtime trait dispatch survives. It is *not* yet produced by any
-//!   corpus program — this slice introduces the vocabulary; later slices wire it in.
+//!   `dyn` is the only place runtime trait dispatch survives.
 //!
-//! The checker still reports an error only when types are *concretely* known and unambiguously
-//! wrong; tightening that toward full inferred-static is staged across the type-system track.
+//! So the checker reports an error wherever a type is concretely known and unambiguously wrong, and
+//! tolerates only the interior holes above — never a hole at a typed boundary.
 //!
 //! ## `TypeId` interning — deferred
 //!
@@ -42,9 +43,11 @@ pub use traits::{BUILTIN_TRAITS, BuiltinTrait, operator_trait};
 pub enum Type {
     /// The internal **inference hole**: *absence of information*, the fallback for anything not
     /// yet inferred. Named "Unknown" rather than "Any" to stress it is not a type the user can
-    /// name — the nameable top is [`Type::Dyn`]. The gradual fallback to `Unknown` is being
-    /// removed across the inferred-static track (an unresolved hole becomes an error). It is the
-    /// lattice's [`Default`] — the natural "nothing known yet" starting point.
+    /// name — the nameable top is [`Type::Dyn`]. The inferred-static track eliminates a hole at
+    /// every typed boundary (required signatures, checked arguments/returns, the `E0023` binding
+    /// endpoint); only an *interior* hole is tolerated, and that conservatism is deliberate (see
+    /// the module docs and [`Self::is_gradual`]). It is the lattice's [`Default`] — the natural
+    /// "nothing known yet" starting point.
     #[default]
     Unknown,
     /// The explicit, user-nameable **top type** (`dyn` / `Any`) — the sole sanctioned dynamic
@@ -75,9 +78,6 @@ pub enum Type {
         params: Vec<Type>,
         ret: Box<Type>,
     },
-    /// An inference variable, resolved during checking. (Unused by the conservative gradual
-    /// pass today; reserved for the unification front that hardens inference.)
-    Var(u32),
     /// A declared **union** `A | B | …` — a *closed* `dyn` whose membership is a static, finite
     /// set. A value of any member widens into it (`A <: A | B`); narrowing back out is the checked
     /// `x.as<T>()`. **Declared-only — never produced by inference** (inference joins conflicts to
@@ -88,37 +88,40 @@ pub enum Type {
 }
 
 impl Type {
-    /// Whether arithmetic (`+ - * / %`) accepts this type: the two numeric types, or a
-    /// not-yet-known type (gradual — never the source of a false positive).
+    /// Whether this is one of the two numeric types arithmetic (`+ - * / %`) accepts. (The
+    /// checker separately lets an interior hole / `dyn` operand through via
+    /// [`Self::defers_to_runtime`], so this is the strict concrete test only.)
     pub fn is_numeric(&self) -> bool {
         matches!(self, Type::Int | Type::Float)
     }
 
-    /// Whether this type is an unresolved **inference hole** — the internal gradual top or an open
-    /// variable. Today the checker suppresses diagnostics when an operand is a hole, so inference
-    /// gaps never error; the inferred-static track removes that suppression. Note this is *not*
-    /// true of [`Type::Dyn`]: `dyn` is a concrete, user-written type, not missing information.
+    /// Whether this type is an unresolved **inference hole** — the internal "nothing known yet"
+    /// top. The checker suppresses operator/member/index/`?` diagnostics when an operand is a hole,
+    /// so an *interior* inference gap never produces a false positive; holes are instead eliminated
+    /// at typed boundaries (signatures, arguments, returns) and at the `E0023` binding endpoint.
+    /// Note this is *not* true of [`Type::Dyn`]: `dyn` is a concrete, user-written type, not
+    /// missing information.
     pub fn is_gradual(&self) -> bool {
-        matches!(self, Type::Unknown | Type::Var(_))
+        matches!(self, Type::Unknown)
     }
 
     /// Whether an operation on a value of this type is **not statically checked** but deferred to
-    /// the runtime — either because the type is an inference hole (`Unknown`/`Var`) or because it
-    /// is the dynamic escape (`Dyn`). Operator/member/index/`?` checks accept such a type without
-    /// a diagnostic: a hole because information is missing (gradual), `dyn` because dynamic
-    /// dispatch is exactly its sanctioned semantics. (Distinct from [`Self::is_gradual`], which is
-    /// holes only — `dyn` is *not* a hole for inference/subtyping purposes.)
+    /// the runtime — either because the type is an inference hole (`Unknown`) or because it is the
+    /// dynamic escape (`Dyn`). Operator/member/index/`?` checks accept such a type without a
+    /// diagnostic: a hole because information is missing, `dyn` because dynamic dispatch is exactly
+    /// its sanctioned semantics. (Distinct from [`Self::is_gradual`], which is holes only — `dyn`
+    /// is *not* a hole for inference/subtyping purposes.)
     pub fn defers_to_runtime(&self) -> bool {
-        matches!(self, Type::Unknown | Type::Var(_) | Type::Dyn)
+        matches!(self, Type::Unknown | Type::Dyn)
     }
 
     /// The subtype relation `sub <: sup` for the inferred-static lattice — the single place the
     /// directional widening rules live (the bidirectional checker's check-mode subsumption will
     /// consume this). The rules:
     ///
-    /// - An **inference hole** ([`Type::Unknown`] / [`Type::Var`]) is compatible in *both*
-    ///   directions, so an un-inferred operand never produces a false positive (gradual behavior,
-    ///   preserved until the strict flip removes the holes themselves).
+    /// - An **inference hole** ([`Type::Unknown`]) is compatible in *both* directions, so an
+    ///   un-inferred *interior* operand never produces a false positive (the deliberate residual
+    ///   tolerance; holes are removed at typed boundaries, not here).
     /// - [`Type::Dyn`] is the **top**: every type widens into it (`T <: dyn`). It does *not* widen
     ///   the other way — `dyn <: T` is false (narrowing out of `dyn` is the explicit, checked
     ///   `x.as<T>()`, never implicit).
@@ -266,8 +269,9 @@ impl Type {
                     "Map" => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
                     "Set" => Type::Set(Box::new(arg(0))),
                     // The bare lowercase collection spellings leave the element type *unspecified*
-                    // — an inference hole, tolerated by the gradual checker. The strict flip later
-                    // forces these to be made explicit (`List<int>` / `List<dyn>`).
+                    // — an inference hole the checker fills by forward inference (a literal's
+                    // elements, an argument's declared type); an annotation can pin it explicitly
+                    // (`List<int>` / `List<dyn>`).
                     "list" => Type::List(Box::new(Type::Unknown)),
                     "map" => Type::Map(Box::new(Type::Unknown), Box::new(Type::Unknown)),
                     "set" => Type::Set(Box::new(Type::Unknown)),
@@ -316,7 +320,6 @@ impl std::fmt::Display for Type {
                 }
                 write!(f, ") -> {ret}")
             }
-            Type::Var(n) => write!(f, "?{n}"),
             Type::Union(members) => {
                 for (i, m) in members.iter().enumerate() {
                     if i > 0 {
@@ -415,7 +418,6 @@ mod tests {
     #[test]
     fn defers_to_runtime_covers_holes_and_dyn_but_not_concrete() {
         assert!(Type::Unknown.defers_to_runtime());
-        assert!(Type::Var(0).defers_to_runtime());
         assert!(Type::Dyn.defers_to_runtime());
         assert!(!Type::Int.defers_to_runtime());
         assert!(!Type::List(Box::new(Type::Int)).defers_to_runtime());
@@ -462,7 +464,6 @@ mod tests {
         // An inference hole never produces a false positive in either direction.
         assert!(Type::subtype(&Type::Unknown, &Type::Int));
         assert!(Type::subtype(&Type::Int, &Type::Unknown));
-        assert!(Type::subtype(&Type::Var(0), &Type::String));
     }
 
     #[test]

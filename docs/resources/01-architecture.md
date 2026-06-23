@@ -184,7 +184,7 @@ Versioned semantics follow Rust's edition model — and critically, **editions c
 ## 9. Feature set
 
 ### 9.1 Type system
-- Gradual but real: optional annotations, name-first (`x: int`), with inference.
+- Inferred-static, name-first (`x: int`): signatures required at named boundaries, bodies inferred (bidirectional checking with local inference, not Hindley–Milner), `dyn` the one explicit dynamic escape.
 - **Generics** via erasure-for-storage, reification-for-identity: the shape encodes the type argument; checks are inline-cache guards, elided when monomorphic.
 - **Algebraic data types** (sum types with associated data) and **exhaustive `match`** — the core "make illegal states unrepresentable" primitive PHP lacks.
 - **`Result<T, E>` and `Option<T>` are the primary path** for recoverable failure and absence, with the `?` propagation operator. This is the everyday mechanism — a simple recoverable error stays a one-liner (`do_thing()?`), so the primary path is also the easy path.

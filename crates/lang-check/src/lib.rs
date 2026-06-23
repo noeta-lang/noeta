@@ -17,22 +17,21 @@
 //!   ([`Checker::subsume`]: require `actual <: expected` via [`Type::subtype`]). Statement and
 //!   boundary positions enter through `check`.
 //!
-//! ## Gradual tolerance — being removed across this track
+//! ## Hole tolerance — eliminated at boundaries, residual in the interior
 //!
-//! Today the checker is still *gradual*: wherever it cannot infer a precise type — an unannotated
-//! parameter, a prelude call, a method result — it falls back to the inference hole
+//! Where the checker cannot infer a precise type it falls back to the inference hole
 //! [`Type::Unknown`], and [`Type::subtype`] treats a hole as compatible in both directions, so
-//! **subsumption never fires on missing information**. The consequence is the property M1.7
-//! established: every program the M0 tree-walker runs still type-checks. A diagnostic fires only
-//! when types are *concretely* known and unambiguously wrong — which is what lets the checker run
-//! as a shared front-end for both backends without ever diverging the differential oracle (a
-//! rejected program is rejected identically by both; a gradual gap is an error in neither).
+//! **subsumption never fires on missing information**. The inferred-static track removes that hole
+//! at every *typed boundary*: a named `fn`/method must carry signatures (`E0022`), each argument is
+//! checked against its parameter type and each `return` against the declared return, and a hole
+//! that reaches a binding with nothing to determine it is `E0023`. What remains tolerated is an
+//! *interior* hole — an un-typed prelude result, a numeric hole — where flagging it would risk a
+//! false positive; that residual leniency is deliberate and recorded (see the `lang-types` module
+//! docs and the README's "known gaps").
 //!
-//! The inferred-static track tightens this in stages: the engine swap (synth/check) is
-//! behavior-preserving — statement positions enter `check` with an open (`Unknown`) expectation,
-//! so subsumption is a no-op and verdicts are identical — and later slices supply real
-//! expectations (declared returns, required signatures) and remove the hole fallback, at which
-//! point an un-inferable type becomes a compile error rather than a silent pass.
+//! This posture is also what lets the checker run as a single shared front-end for both backends
+//! without diverging the differential oracle: a rejected program is rejected identically by both,
+//! and an interior-hole gap is an error in neither.
 //!
 //! ## What it checks
 //!
@@ -61,9 +60,8 @@
 //!
 //! The engine is bidirectional with local inference (see above), deliberately **not** classical
 //! Hindley–Milner: subtyping (`dyn` widening, directional method resolution, record width) is
-//! load-bearing and defeats HM's symmetric unification. The remaining gradual fallback to
-//! [`Type::Unknown`] is being removed in stages across the inferred-static track; until then an
-//! un-inferable interior type is tolerated rather than an error.
+//! load-bearing and defeats HM's symmetric unification. The fallback to [`Type::Unknown`] is gone
+//! at every typed boundary; only an un-inferable *interior* type stays tolerated, by design.
 
 use std::collections::{HashMap, HashSet};
 
@@ -78,7 +76,8 @@ use lang_types::{BuiltinTrait, Type};
 mod stdlib;
 
 /// Type-check a program and return every diagnostic found, in source order. An empty result
-/// means the program is well-typed (as far as the gradual checker can determine).
+/// means the program is well-typed (modulo the deliberate interior-hole tolerance documented
+/// in the module docs).
 pub fn check(program: &Program) -> Vec<Diagnostic> {
     let mut checker = Checker::default();
     checker.collect(program);
@@ -404,9 +403,9 @@ impl Checker {
 
     fn check_stmt(&mut self, stmt: &Stmt, env: &mut Env) {
         match stmt {
-            // Statement positions enter checking mode. The expectation is open (`Unknown`) until
-            // later slices supply real ones (a declared return type at `Return`), so subsumption
-            // is a no-op here and behavior is identical to bare synthesis — the parity guarantee.
+            // `echo` accepts any value, so it enters checking mode with a genuinely open
+            // (`Unknown`) expectation — subsumption is a no-op here. (Other statement positions,
+            // such as `return`, do supply a real expectation; see `check_stmt`'s `Return` arm.)
             Stmt::Echo { value, .. } => {
                 self.check(value, &Type::Unknown, env);
             }
@@ -943,10 +942,11 @@ impl Checker {
     /// `List<T>` checks each element against `T`; a closure against a function type adopts the
     /// expected parameter/return types); every other form synthesizes and is then subsumed.
     ///
-    /// In this slice every caller passes an open (`Unknown`) expectation, so the propagation
-    /// arms below adopt no concrete type and [`Self::subsume`] never fires — `check` is
-    /// behavior-identical to [`Self::synth`]. Later slices pass real expectations (declared
-    /// returns, parameter types) and this is where they take effect.
+    /// Callers pass real expectations here — a declared return at `return`, a parameter type at a
+    /// call argument, a declared element type into a list/map literal — so the propagation arms
+    /// below adopt the concrete type and [`Self::subsume`] enforces `actual <: expected`. Only a
+    /// genuinely open position (e.g. `echo`) passes `Unknown`, where `check` reduces to bare
+    /// [`Self::synth`].
     fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
         match expr {
             // A list literal absorbs an expected `List<T>`: check each element against `T`.
@@ -1053,8 +1053,9 @@ impl Checker {
 
     /// Subsumption: require `actual <: expected`. A violation is a type mismatch (`E0007`, the
     /// same code the arithmetic/runtime mismatch path uses). An inference hole on either side
-    /// makes [`Type::subtype`] hold, so a not-yet-inferred type never produces a false positive —
-    /// the gradual-tolerance invariant this slice preserves.
+    /// makes [`Type::subtype`] hold, so a not-yet-inferred interior type never produces a false
+    /// positive — the deliberate residual tolerance (holes are removed at typed boundaries, not
+    /// here).
     fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
         if !Type::subtype(actual, expected) {
             self.diags.push(Diagnostic::error(

@@ -418,9 +418,9 @@ fn data_attribute_is_accepted() {
 
 // ----- bidirectional check-mode (white-box) -----
 //
-// Production callers pass an open (`Unknown`) expectation in this slice, so the check path is a
-// no-op end-to-end — these drive `Checker::check` directly with concrete expectations to prove
-// subsumption and inward propagation are wired (the machinery later slices feed real types into).
+// Production callers feed real expectations through `Checker::check` (declared returns, argument
+// types, declared element types). These white-box tests drive it directly with concrete
+// expectations to pin down subsumption and inward propagation in isolation.
 
 /// Parse `__probe = <expr>;`, then check the binding's value against `expected`, returning the
 /// resulting diagnostic codes.
