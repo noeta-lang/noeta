@@ -149,6 +149,21 @@ n = x.as<int>() ?? 0;               // narrow, then unwrap with a fallback
 
 The check is on the **head constructor** — generics are erased, so `x.as<List<int>>()` tests "is a list" and trusts the element type from the annotation. Narrowing a value whose static type is already concrete (there is nothing dynamic to narrow) is a compile error (`E0028`). This is the only place runtime type dispatch survives; everywhere else the static type is known.
 
+**Union types (a *closed* `dyn`).** A union `A | B` is a `dyn` whose membership is a static, finite set — written only where you declare it, never produced by inference. A value of any member widens into it; you narrow back out with the same `x.as<T>()`.
+
+```
+fn label(x: int | string): string {
+    if x.as<int>() != none { return "number"; }
+    return "text";
+}
+
+label(42);            // ok — int is a member
+label("hi");          // ok — string is a member
+// label(true);       // compile error: bool is not a member of `int | string`
+```
+
+`|` is the loosest type combinator, so `?A | B` reads as `(?A) | B`, and a union may appear inside generics (`List<int | string>`). Unions carry no runtime cost — the value is just its concrete `int`/`string`. Prefer a single concrete type, `dyn`, or a tagged enum/`Result`/`Option`; reach for a union only when a bounded-`dyn` is genuinely what you mean. (Intersection is expressed as trait bounds — `<T: Comparable + Display>` — not a first-class `A & B`.)
+
 ---
 
 ## 6. Classes

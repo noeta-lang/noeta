@@ -1,8 +1,20 @@
 # Slice S8 — Declared union / intersection types ("closed `dyn`")
 
-Status: **planned** (design-only; no code yet)
+Status: **done** (unions; intersection deliberately unbuilt). Conformance 169 / differential 163 matched / 0 skipped / backends agree. Branch `types-inferred-static`. Landed in three sub-slices: **S8.1** lattice + subtyping, **S8.2** surface syntax + validation, **S8.3** narrowing out of a union.
 
-> **Track:** inferred-static type system (see `plans/types/README.md`). **Gated after:** S6 (`dyn` narrowing). **Not** part of S3c. Recorded now so the door stays explicitly open; sequenced after the core inferred-static work and the `dyn` narrowing op it rides on.
+> **Track:** inferred-static type system (see `plans/types/README.md`). **Gated after:** S6 (`dyn` narrowing) — a union rides S6's `x.as<T>()` to pick a member back out.
+
+## Outcome (what landed)
+
+- **Lattice (S8.1):** `Type::Union(Vec<Type>)` built only through the normalizing `Type::union(...)` — flatten nested unions, dedupe (first-seen order), a `dyn` member absorbs the whole union, a singleton collapses to the bare member. Invariant: a `Union` always holds ≥2 distinct, non-`dyn`, non-`Union` members. Subtyping: `A <: (B|…)` iff `A` is a subtype of *any* member; `(B|…) <: A` iff *every* member is — which gives `union <: dyn` for free.
+- **Surface (S8.2):** a bare `Pipe` token (`|`; logos longest-match keeps `||`/`|>`), a `TypeRef::Union` node, and a union combinator in `type_parser` where `|` is the **loosest** type combinator and `?` binds tighter (`?A | B` = `(?A) | B`, via an inner recursion; generic args use the full type so `List<A | B>` works). `Type::from_ref` feeds members through `Type::union`; `check_type_ref` validates each member (E0013). A lone type still parses byte-identically (no one-member unions).
+- **Narrowing out (S8.3):** the S6 `Expr::As` source gate widened — `dyn`, a hole, **or a union** is a valid narrowing source; a single concrete source is still `E0028`. Narrowing *to* a union (`x.as<int | string>()`) is "matches any member", carried by a new `NarrowTarget::AnyOf` that both backend matchers fold over. **No new runtime op and no new diagnostic code** (E0007 for a non-member argument, E0013 for an unknown member); next free stays **E0029**. Unions are fully erased — a union value *is* its concrete value — so the runtime already narrows correctly and both backends agree by construction.
+
+## What stayed deferred / unbuilt
+
+- **Exhaustive `match` over a union** — `match` has no type-patterns, so closing the union's domain in `check_exhaustive` is deferred (a companion to the later conditional-expression / `if let` work). A union is consumed via `x.as<T>()` chains today.
+- **Structural intersection types (`A & B`)** — left unbuilt; the useful form is S4 trait bounds (`<T: Comparable + Display>`).
+- **Inferred unions** — never, by design (inference joins conflicts to `dyn`).
 
 ## Why this is a separate, later stage — and why our engine choice does not foreclose it
 

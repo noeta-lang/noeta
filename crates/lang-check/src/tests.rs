@@ -362,9 +362,16 @@ fn narrowing_a_dyn_value_is_clean() {
 
 #[test]
 fn narrowing_a_concrete_value_is_rejected() {
-    // Narrowing only makes sense out of `dyn`; an already-concrete `int` has nothing to narrow.
+    // Narrowing only makes sense out of an open type; an already-concrete `int` has nothing to narrow.
     let src = "fn f(n: int): ?int {\n  return n.as<int>();\n}\n";
     assert_eq!(codes(src), ["E0028"]);
+}
+
+#[test]
+fn narrowing_out_of_a_union_is_clean() {
+    // A union is a closed `dyn`, so narrowing a member back out is allowed (not E0028).
+    let src = "fn f(x: int | string): ?int {\n  return x.as<int>();\n}\n";
+    assert!(codes(src).is_empty());
 }
 
 #[test]

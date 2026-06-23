@@ -1,0 +1,23 @@
+// A union is a *closed* `dyn`: narrowing picks a member back out with the same `x.as<T>()` from
+// S6. `x.as<int>()` is `some` for an int argument and `none` for a string, so the discriminator
+// returns the right tag. Erased at runtime, so M0 and M1 agree (differential).
+// expect: stdout "int"
+// expect: stdout "string"
+// expect: stdout "some(7)"
+// expect: stdout "none"
+// expect: exit 0
+fn kind(x: int | string): string {
+    if x.as<int>() != none {
+        return "int";
+    }
+    return "string";
+}
+
+fn as_int(x: int | string): ?int {
+    return x.as<int>();
+}
+
+echo kind(7);
+echo kind("hi");
+echo as_int(7);
+echo as_int("hi");

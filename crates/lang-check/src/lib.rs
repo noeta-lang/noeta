@@ -1320,22 +1320,23 @@ impl Checker {
                 let src = self.synth(expr, env);
                 self.check_type_ref(ty);
                 let target = Type::from_ref(ty);
-                // Narrowing is the explicit way *out* of `dyn`: it only makes sense when the source
-                // is the open top (or an un-inferred hole, which defers). A value whose static type
-                // is already concrete has nothing dynamic to narrow — that is an `E0028`.
-                if !src.defers_to_runtime() {
+                // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
+                // un-inferred hole (which defers), or a **union** (a *closed* `dyn` — narrowing
+                // picks a member back out). A value whose static type is already a single concrete
+                // type has nothing dynamic to narrow — that is an `E0028`.
+                if !src.defers_to_runtime() && !matches!(src, Type::Union(_)) {
                     self.diags.push(
                         Diagnostic::error(
                             DiagnosticCode::InvalidNarrow,
                             *span,
                             format!(
-                                "`.as<{target}>()` can only narrow a `dyn` value, but this value \
-                                 is already `{src}`"
+                                "`.as<{target}>()` can only narrow a `dyn` or union value, but \
+                                 this value is already `{src}`"
                             ),
                         )
                         .with_help(
-                            "narrowing converts the dynamic top `dyn` to a checked `?T`; a value \
-                             with a known concrete type does not need it",
+                            "narrowing converts an open type (`dyn` or a union) to a checked `?T`; \
+                             a value with a single known concrete type does not need it",
                         ),
                     );
                 }
