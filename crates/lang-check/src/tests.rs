@@ -442,6 +442,23 @@ fn concat_result_flows_through_a_signature() {
     assert_eq!(codes("fn f(): string { return [1] ~ [2]; }\n"), ["E0007"]);
 }
 
+// ----- list spread `[..xs, x]` (L2, desugars to `~`) -----
+
+#[test]
+fn list_spread_types_as_the_unified_list() {
+    use lang_types::Type;
+    let li = |t| Type::List(Box::new(t));
+    // `[..xs, x]` desugars to `[] ~ xs ~ [x]`, so it types as the unified element list.
+    assert!(codes("fn f(xs: List<int>): List<int> { return [..xs, 99]; }\n").is_empty());
+    // A spread element of the wrong type is caught through the concat result.
+    assert_eq!(
+        codes("fn f(xs: List<int>): List<string> { return [..xs]; }\n"),
+        ["E0007"]
+    );
+    // Spread + literal element of disagreeing types widens to `List<dyn>`.
+    assert!(check_value_against("[..[1, 2], \"x\"]", li(Type::Dyn)).is_empty());
+}
+
 // ----- optional binding annotations (S3c.2) -----
 
 #[test]

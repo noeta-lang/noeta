@@ -181,6 +181,57 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
 }
 
 /// Convert a [`Span`] to a chumsky [`SimpleSpan`].
+/// Build a list-literal expression from its parsed elements, each flagged as a spread (`..xs`) or
+/// a plain element. With no spreads it is a plain `Expr::List`. With one or more spreads it
+/// desugars to `~` concatenation — `[..a, x, ..b]` becomes `[] ~ a ~ [x] ~ b` — reusing the
+/// list-concat operator (L1), so list spread needs no AST, runtime, or checker support of its own.
+/// The fold starts from an empty list so the result is always list-shaped (a spread of a non-list
+/// falls through `~` to display-concatenation, exactly as the operator does elsewhere).
+fn desugar_list_literal(elems: Vec<(bool, Expr)>, span: Span) -> Expr {
+    if !elems.iter().any(|(is_spread, _)| *is_spread) {
+        return Expr::List {
+            items: elems.into_iter().map(|(_, e)| e).collect(),
+            span,
+        };
+    }
+    // Group consecutive plain elements into `[...]` chunks; each spread contributes its operand.
+    let mut chunks: Vec<Expr> = Vec::new();
+    let mut pending: Vec<Expr> = Vec::new();
+    for (is_spread, e) in elems {
+        if is_spread {
+            if !pending.is_empty() {
+                chunks.push(Expr::List {
+                    items: std::mem::take(&mut pending),
+                    span,
+                });
+            }
+            chunks.push(e);
+        } else {
+            pending.push(e);
+        }
+    }
+    if !pending.is_empty() {
+        chunks.push(Expr::List {
+            items: pending,
+            span,
+        });
+    }
+    // Fold left-to-right with `~`, starting from an empty list so the value is always list-shaped.
+    let mut acc = Expr::List {
+        items: Vec::new(),
+        span,
+    };
+    for chunk in chunks {
+        acc = Expr::Binary {
+            op: BinaryOp::Concat,
+            lhs: Box::new(acc),
+            rhs: Box::new(chunk),
+            span,
+        };
+    }
+    acc
+}
+
 fn to_simple(s: Span) -> SimpleSpan {
     (s.start as usize..s.end as usize).into()
 }
@@ -540,17 +591,19 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // List literal `[a, b]` and map literal `{"k": v}`.
-        let list = expr
-            .clone()
+        // List literal `[a, b]`, with optional spread elements `[..xs, x]` (a list element is
+        // `..expr` for a spread or a plain `expr`). Spreads desugar to `~` concatenation in
+        // `desugar_list_literal`. Map literal `{"k": v}` follows.
+        let list_element = just(T::DotDot)
+            .ignore_then(expr.clone())
+            .map(|e| (true, e))
+            .or(expr.clone().map(|e| (false, e)));
+        let list = list_element
             .separated_by(just(T::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBracket), just(T::RBracket))
-            .map_with(move |items, e| Expr::List {
-                items,
-                span: ctx.to_span(e.span()),
-            });
+            .map_with(move |elems, e| desugar_list_literal(elems, ctx.to_span(e.span())));
         let entry = expr.clone().then_ignore(just(T::Colon)).then(expr.clone());
         let map = entry
             .separated_by(just(T::Comma))
