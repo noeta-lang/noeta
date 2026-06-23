@@ -1,4 +1,4 @@
-// Structural update: `Money { amount: 300, ..a }` builds a new value with `amount`
+// Structural update: `Money { amount: 300, ...a }` builds a new value with `amount`
 // overridden and every other field (here `currency`) carried over from `a`. The
 // original is unchanged (immutable), so the full-initialization guarantee still holds.
 // expect: stdout "500 USD"
@@ -19,7 +19,7 @@ class Money {
 }
 
 a = Money.new(500, "USD");
-b = Money { amount: 300, ..a };
+b = Money { amount: 300, ...a };
 echo a.show();
 echo b.show();
 echo a.show();

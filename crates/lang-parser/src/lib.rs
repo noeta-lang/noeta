@@ -65,7 +65,7 @@ impl Ctx<'_> {
     }
 }
 
-/// One item inside an object literal's braces: a `name: value` field or a `..base`
+/// One item inside an object literal's braces: a `name: value` field or a `...base`
 /// spread. Collected into [`ObjectLit`] after the comma-separated list is parsed.
 enum ObjItem {
     Field(FieldInit),
@@ -181,10 +181,10 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
 }
 
 /// Convert a [`Span`] to a chumsky [`SimpleSpan`].
-/// Build a list-literal expression from its parsed elements, each flagged as a spread (`..xs`) or
+/// Build a list-literal expression from its parsed elements, each flagged as a spread (`...xs`) or
 /// a plain element. With no spreads it is a plain `Expr::List`. With one or more spreads it
-/// desugars to `~` concatenation — `[..a, x, ..b]` becomes `[] ~ a ~ [x] ~ b` — reusing the
-/// list-concat operator (L1). Each spread operand is wrapped in `..` ([`UnaryOp::Spread`]) — a
+/// desugars to `~` concatenation — `[...a, x, ...b]` becomes `[] ~ a ~ [x] ~ b` — reusing the
+/// list-concat operator (L1). Each spread operand is wrapped in `...` ([`UnaryOp::Spread`]) — a
 /// runtime-identity marker the checker uses to require the operand be a list (else `E0007`); the
 /// fold starts from an empty list so the result is always list-shaped.
 fn desugar_list_literal(elems: Vec<(bool, Expr)>, span: Span) -> Expr {
@@ -205,7 +205,7 @@ fn desugar_list_literal(elems: Vec<(bool, Expr)>, span: Span) -> Expr {
                     span,
                 });
             }
-            // Wrap the spread operand in `..` so the checker can require it to be a list; the
+            // Wrap the spread operand in `...` so the checker can require it to be a list; the
             // operator is the runtime identity, so the folded `~` concatenation is unchanged.
             let spread_span = e.span();
             chunks.push(Expr::Unary {
@@ -511,7 +511,7 @@ where
                 span: ctx.to_span(e.span()),
             }),
         ));
-        // A bare name, or an all-fields object literal `Type { field: v, ..base }`. The
+        // A bare name, or an all-fields object literal `Type { field: v, ...base }`. The
         // object body is required to be **non-empty**: that is what lets `if x { ... }`,
         // `for x in xs { ... }`, and `match x { ... }` keep their block/arm braces — an
         // empty `{}` is never an object literal, and a `{` whose contents are statements
@@ -528,7 +528,7 @@ where
                     span: ctx.to_span(e.span()),
                 })
             });
-        let obj_spread = just(T::DotDot)
+        let obj_spread = just(T::DotDotDot)
             .ignore_then(expr.clone())
             .map(|value| ObjItem::Spread(Box::new(value)));
         let object_body = choice((obj_spread, obj_field))
@@ -598,10 +598,10 @@ where
                 span: ctx.to_span(e.span()),
             });
 
-        // List literal `[a, b]`, with optional spread elements `[..xs, x]` (a list element is
-        // `..expr` for a spread or a plain `expr`). Spreads desugar to `~` concatenation in
+        // List literal `[a, b]`, with optional spread elements `[...xs, x]` (a list element is
+        // `...expr` for a spread or a plain `expr`). Spreads desugar to `~` concatenation in
         // `desugar_list_literal`. Map literal `{"k": v}` follows.
-        let list_element = just(T::DotDot)
+        let list_element = just(T::DotDotDot)
             .ignore_then(expr.clone())
             .map(|e| (true, e))
             .or(expr.clone().map(|e| (false, e)));
@@ -1775,7 +1775,7 @@ mod tests {
     #[test]
     fn record_and_class_and_object_literal() {
         insta::assert_snapshot!(pretty(
-            "type Item = { price: float, qty: int }; class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ..base };"
+            "type Item = { price: float, qty: int }; class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ...base };"
         ));
     }
 

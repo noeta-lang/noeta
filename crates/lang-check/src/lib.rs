@@ -811,7 +811,7 @@ impl Checker {
                 .unwrap_or(Type::Unknown),
             Expr::Unary { op, operand, span } => {
                 let t = self.synth(operand, env);
-                // A list spread `..xs` (the marker the L2 desugar wraps spread operands in) must
+                // A list spread `...xs` (the marker the L2 desugar wraps spread operands in) must
                 // spread a list — otherwise the desugared `~` would silently fall through to
                 // display-concatenation. It always types list-shaped so the surrounding literal
                 // stays a list: a list passes through; a `dyn`/hole spread contributes `dyn`
@@ -825,7 +825,7 @@ impl Checker {
                             self.diags.push(Diagnostic::error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("cannot spread `{t}` — `..` expects a list"),
+                                format!("cannot spread `{t}` — `...` expects a list"),
                             ));
                             Type::List(Box::new(Type::Dyn))
                         }

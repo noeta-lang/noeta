@@ -234,7 +234,7 @@ pub enum Op {
         index: Reg,
         span: Span,
     },
-    /// `dst = Type { named..., ..spread }` — construct a declared record/class instance whose
+    /// `dst = Type { named..., ...spread }` — construct a declared record/class instance whose
     /// layout is `shapes[shape]`. `named` gives each provided field's slot index and value
     /// register; `spread` (if present) is a base object every still-unset declared slot is
     /// copied from. A declared slot left unset by both raises E0009 ("missing field(s) ...")
@@ -246,7 +246,7 @@ pub enum Op {
         spread: Option<Reg>,
         span: Span,
     },
-    /// `dst = Type { key: value, ..spread }` for an **opaque** `use`-imported type, whose
+    /// `dst = Type { key: value, ...spread }` for an **opaque** `use`-imported type, whose
     /// real field set is unknown until the literal supplies it. The runtime object's shape is
     /// built from the (spread ∪ named) keys in sorted order — matching the M0 tree-walker's
     /// `BTreeMap`-ordered field bag — with no missing/unknown-field checks.

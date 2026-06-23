@@ -1,13 +1,13 @@
-// List spread `[..xs, x, ..ys]` builds a new list, splicing in the elements of spread operands and
-// individual elements at any position. It is sugar over `~` concatenation (`[] ~ xs ~ [x] ~ ys`),
+// List spread `[...xs, x, ...ys]` builds a new list, splicing in the elements of spread operands
+// and individual elements at any position. It is sugar over `~` concatenation (`[] ~ xs ~ [x] ~ ys`),
 // so it inherits immutability and both backends agree. Spread is also how a single element is
-// "pushed": `[..xs, x]`.
+// "pushed": `[...xs, x]`.
 // expect: stdout "[1, 2, 3, 4, 5]"
 // expect: stdout "[0, 1, 2]"
 // expect: stdout "[1, 2, 99]"
 // expect: exit 0
 a = [1, 2];
 b = [4, 5];
-echo [..a, 3, ..b];
-echo [0, ..a];
-echo [..a, 99];
+echo [...a, 3, ...b];
+echo [0, ...a];
+echo [...a, 99];

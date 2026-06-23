@@ -394,7 +394,7 @@ pub enum Expr {
         arms: Vec<MatchArm>,
         span: Span,
     },
-    /// An all-fields object literal: `Order { id: 1, ..base }`. Constructs a record or
+    /// An all-fields object literal: `Order { id: 1, ...base }`. Constructs a record or
     /// class instance; the evaluator requires every declared field to be set.
     Object(ObjectLit),
     /// The `?` propagation operator: `expr?`. On `Ok(x)`/`some(x)` it yields `x`; on
@@ -527,7 +527,7 @@ pub enum UnaryOp {
     Neg,
     /// Logical negation, `!x`.
     Not,
-    /// List spread, `..xs`. Produced only by the list-literal desugar (L2) to wrap a spread
+    /// List spread, `...xs`. Produced only by the list-literal desugar (L2) to wrap a spread
     /// operand so the checker can require it to be a list; at runtime it is the identity (the
     /// operand's value is passed straight through to the surrounding `~` concatenation).
     Spread,
@@ -538,7 +538,7 @@ impl UnaryOp {
         match self {
             UnaryOp::Neg => "-",
             UnaryOp::Not => "!",
-            UnaryOp::Spread => "..",
+            UnaryOp::Spread => "...",
         }
     }
 }

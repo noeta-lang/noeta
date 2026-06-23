@@ -961,7 +961,7 @@ impl Interpreter {
 
         let mut fields: BTreeMap<String, Value> = BTreeMap::new();
 
-        // `..base` fills the unnamed fields first (named initializers override below). For
+        // `...base` fills the unnamed fields first (named initializers override below). For
         // an opaque imported stub the field set is unknown, so the whole base is copied.
         if let Some(spread) = &lit.spread {
             match self.eval_expr(spread)? {
@@ -3172,7 +3172,7 @@ mod tests {
 
     #[test]
     fn structural_update_overrides_one_field() {
-        let src = "class M { amount: int currency: string fn new(a: int, c: string): M { return M { amount: a, currency: c }; } } a = M.new(500, \"USD\"); b = M { amount: 300, ..a }; echo b.amount; echo b.currency; echo a.amount;";
+        let src = "class M { amount: int currency: string fn new(a: int, c: string): M { return M { amount: a, currency: c }; } } a = M.new(500, \"USD\"); b = M { amount: 300, ...a }; echo b.amount; echo b.currency; echo a.amount;";
         assert_eq!(run(src).stdout, "300\nUSD\n500\n");
     }
 

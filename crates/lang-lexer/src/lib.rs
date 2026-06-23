@@ -99,7 +99,9 @@ pub enum TokenKind {
     Semicolon,
     #[token(",")]
     Comma,
-    // `..` must be listed before `.`; logos resolves the overlap by longest match.
+    // `...` (spread) / `..` (range) / `.` overlap; logos resolves by longest match.
+    #[token("...")]
+    DotDotDot,
     #[token("..")]
     DotDot,
     #[token(".")]
@@ -211,6 +213,7 @@ impl TokenKind {
             TokenKind::Ident => "Ident",
             TokenKind::Semicolon => "Semicolon",
             TokenKind::Comma => "Comma",
+            TokenKind::DotDotDot => "DotDotDot",
             TokenKind::DotDot => "DotDot",
             TokenKind::Dot => "Dot",
             TokenKind::Colon => "Colon",
@@ -282,6 +285,7 @@ impl TokenKind {
             TokenKind::Ident => "an identifier",
             TokenKind::Semicolon => "`;`",
             TokenKind::Comma => "`,`",
+            TokenKind::DotDotDot => "`...`",
             TokenKind::DotDot => "`..`",
             TokenKind::Dot => "`.`",
             TokenKind::Colon => "`:`",
@@ -500,16 +504,16 @@ mod tests {
 
     #[test]
     fn lexes_record_class_and_spread_tokens() {
-        let (_source, lexed) = lex_str("type class ..a");
+        let (_source, lexed) = lex_str("type class ...a");
         assert!(lexed.diagnostics.is_empty());
         let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
-        // `..a` is `DotDot` then `Ident` — longest match keeps `..` whole, not two `.`.
+        // `...a` is `DotDotDot` (spread) then `Ident` — longest match keeps `...` whole.
         assert_eq!(
             kinds,
             vec![
                 TokenKind::TypeKw,
                 TokenKind::ClassKw,
-                TokenKind::DotDot,
+                TokenKind::DotDotDot,
                 TokenKind::Ident
             ]
         );

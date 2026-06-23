@@ -1667,7 +1667,7 @@ impl<'m> Vm<'m> {
                 } => {
                     let shape = self.shapes[*shape as usize].clone();
                     let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
-                    // `..base` fills declared slots the base provides; named initializers then
+                    // `...base` fills declared slots the base provides; named initializers then
                     // override. A slot left unset by both is a missing-field error (E0009).
                     if let Some(base_reg) = spread {
                         let base = frames[top].regs[*base_reg as usize];
@@ -2880,7 +2880,7 @@ mod tests {
     #[test]
     fn structural_update_overrides_one_field() {
         let r = run(
-            "class M {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): M { return M { amount: a, currency: c }; }\n}\na = M.new(500, \"USD\");\nb = M { amount: 300, ..a };\necho b.amount;\necho b.currency;\necho a.amount;\n",
+            "class M {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): M { return M { amount: a, currency: c }; }\n}\na = M.new(500, \"USD\");\nb = M { amount: 300, ...a };\necho b.amount;\necho b.currency;\necho a.amount;\n",
         );
         assert_eq!(r.stdout, "300\nUSD\n500\n");
     }

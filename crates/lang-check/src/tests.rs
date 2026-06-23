@@ -540,32 +540,32 @@ fn nested_reassignment_updates_the_outer_binding() {
     assert!(codes(src).is_empty());
 }
 
-// ----- list spread `[..xs, x]` (L2, desugars to `~`) -----
+// ----- list spread `[...xs, x]` (L2, desugars to `~`) -----
 
 #[test]
 fn list_spread_types_as_the_unified_list() {
     use lang_types::Type;
     let li = |t| Type::List(Box::new(t));
-    // `[..xs, x]` desugars to `[] ~ xs ~ [x]`, so it types as the unified element list.
-    assert!(codes("fn f(xs: List<int>): List<int> { return [..xs, 99]; }\n").is_empty());
+    // `[...xs, x]` desugars to `[] ~ xs ~ [x]`, so it types as the unified element list.
+    assert!(codes("fn f(xs: List<int>): List<int> { return [...xs, 99]; }\n").is_empty());
     // A spread element of the wrong type is caught through the concat result.
     assert_eq!(
-        codes("fn f(xs: List<int>): List<string> { return [..xs]; }\n"),
+        codes("fn f(xs: List<int>): List<string> { return [...xs]; }\n"),
         ["E0007"]
     );
     // Spread + literal element of disagreeing types widens to `List<dyn>`.
-    assert!(check_value_against("[..[1, 2], \"x\"]", li(Type::Dyn)).is_empty());
+    assert!(check_value_against("[...[1, 2], \"x\"]", li(Type::Dyn)).is_empty());
 }
 
 #[test]
 fn spreading_a_non_list_is_rejected() {
-    // `..` requires a list operand; a concrete non-list is an error (not display-concatenation).
+    // `...` requires a list operand; a concrete non-list is an error (not display-concatenation).
     // It still resolves list-shaped, so there is no cascading second diagnostic.
-    assert_eq!(codes("echo [..42];\n"), ["E0007"]);
-    assert_eq!(codes("echo [..\"hi\"];\n"), ["E0007"]);
+    assert_eq!(codes("echo [...42];\n"), ["E0007"]);
+    assert_eq!(codes("echo [...\"hi\"];\n"), ["E0007"]);
     // A `dyn` operand defers (its membership is unknown until runtime) and a list passes through.
-    assert!(codes("fn f(x: dyn): List<dyn> { return [..x]; }\n").is_empty());
-    assert!(codes("fn f(xs: List<int>): List<int> { return [..xs]; }\n").is_empty());
+    assert!(codes("fn f(x: dyn): List<dyn> { return [...x]; }\n").is_empty());
+    assert!(codes("fn f(xs: List<int>): List<int> { return [...xs]; }\n").is_empty());
 }
 
 // ----- optional binding annotations (S3c.2) -----

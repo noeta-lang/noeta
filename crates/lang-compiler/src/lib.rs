@@ -5,7 +5,7 @@
 //! `if`/`else` — M1.2); **collections** (`[...]`/`{...}` literals, `for`-iteration, the
 //! `len`/`map`/`filter`/`sum` builtins, `.count()`/`.enumerate()`, string interpolation —
 //! M1.3); the **object model** (records/classes/enums on shapes, member access, methods,
-//! `..spread` — M1.4); and **`match`/`?`/`??`** with the `Result`/`Option` constructors and
+//! `...spread` — M1.4); and **`match`/`?`/`??`** with the `Result`/`Option` constructors and
 //! `panic`/`next_id` (M1.5). A nested closure or `fn` that captures an enclosing function's
 //! local is lowered via **upvalues** (slice F1 — see [`freevars`]); the few constructs still
 //! outside the subset (a closure inside a *method* capturing `self`/a field; a prelude
@@ -1510,7 +1510,7 @@ impl<'m> FnCompiler<'m> {
         }
     }
 
-    /// `Type { field: value, ..spread }` — construct a record/class/opaque instance, or raise
+    /// `Type { field: value, ...spread }` — construct a record/class/opaque instance, or raise
     /// the tree-walker's runtime error for an unknown type.
     fn object_literal(&mut self, lit: &ObjectLit, dst: Reg) -> Result<(), Unsupported> {
         match self.module.types.get(&lit.type_name) {
@@ -1592,7 +1592,7 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// Evaluate an object literal's `..spread` base into a register, if present.
+    /// Evaluate an object literal's `...spread` base into a register, if present.
     fn spread_reg(&mut self, lit: &ObjectLit) -> Result<Option<Reg>, Unsupported> {
         match &lit.spread {
             Some(spread) => {

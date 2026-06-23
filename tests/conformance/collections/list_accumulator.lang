@@ -15,7 +15,7 @@ fn doubled(xs: List<int>): List<int> {
 fn pushed(xs: List<int>): List<int> {
     mut acc = [];
     for x in xs {
-        acc = [..acc, x];
+        acc = [...acc, x];
     }
     return acc;
 }

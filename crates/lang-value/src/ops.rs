@@ -57,7 +57,7 @@ pub fn apply_unary(op: UnaryOp, value: Value) -> Result<Value, OpError> {
         }
         UnaryOp::Neg if value.as_float().is_some() => Ok(Value::float(-value.as_float().unwrap())),
         UnaryOp::Not if value.as_bool().is_some() => Ok(Value::bool(!value.as_bool().unwrap())),
-        // `..xs` (list spread) is the runtime identity — the value flows straight into the
+        // `...xs` (list spread) is the runtime identity — the value flows straight into the
         // surrounding `~` concatenation; the list requirement is enforced statically.
         UnaryOp::Spread => Ok(value),
         _ => Err(OpError {
