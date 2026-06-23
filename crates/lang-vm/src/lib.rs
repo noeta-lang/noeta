@@ -1940,6 +1940,11 @@ impl<'m> Vm<'m> {
                 Op::Unary { op, dst, src, span } => {
                     match apply_unary(*op, frames[top].regs[*src as usize]) {
                         Ok(v) => {
+                            // `..xs` (spread) returns the source value unchanged, so the result
+                            // aliases a live heap reference — retain it before `set_reg` releases
+                            // the old occupant of `dst` (which is `src`). A no-op for the fresh
+                            // primitives `Neg`/`Not` produce; mirrors `Op::Move`.
+                            retain(v);
                             set_reg(&mut frames[top].regs, *dst, v);
                             frames[top].pc += 1;
                         }

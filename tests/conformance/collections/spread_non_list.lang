@@ -1,0 +1,6 @@
+// `..` (list spread) requires a list operand. Spreading a concrete non-list is a static error
+// rather than silently falling through `~` to display-concatenation. `..x` is a runtime-identity
+// marker the L2 desugar wraps spread operands in; the checker enforces the list requirement.
+// expect: error E0007 at 6:9
+// expect: exit 1
+echo [..42];

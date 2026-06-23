@@ -69,7 +69,7 @@ use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
     Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock, MatchArm, Param,
-    Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef,
+    Pattern, Program, RecordDecl, Stmt, StrPart, TypeRef, UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -764,10 +764,31 @@ impl Checker {
                     })
                 })
                 .unwrap_or(Type::Unknown),
-            Expr::Unary { operand, .. } => {
-                // Unary type errors have no corpus case and the operand is often gradual; infer
-                // for nested checks but do not promote (kept conservative).
-                self.synth(operand, env)
+            Expr::Unary { op, operand, span } => {
+                let t = self.synth(operand, env);
+                // A list spread `..xs` (the marker the L2 desugar wraps spread operands in) must
+                // spread a list — otherwise the desugared `~` would silently fall through to
+                // display-concatenation. It always types list-shaped so the surrounding literal
+                // stays a list: a list passes through; a `dyn`/hole spread contributes `dyn`
+                // elements; a concrete non-list is an error (and still resolves to `List<dyn>`,
+                // suppressing a second diagnostic from the desugared concat).
+                if matches!(op, UnaryOp::Spread) {
+                    return match &t {
+                        Type::List(_) => t,
+                        _ if t.defers_to_runtime() => Type::List(Box::new(Type::Dyn)),
+                        _ => {
+                            self.diags.push(Diagnostic::error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("cannot spread `{t}` — `..` expects a list"),
+                            ));
+                            Type::List(Box::new(Type::Dyn))
+                        }
+                    };
+                }
+                // Other unary type errors have no corpus case and the operand is often gradual;
+                // infer for nested checks but do not promote (kept conservative).
+                t
             }
             Expr::Binary { op, lhs, rhs, span } => self.synth_binary(*op, lhs, rhs, *span, env),
             Expr::Call { callee, args, .. } => {

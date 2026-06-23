@@ -184,9 +184,9 @@ fn build_use(first: String, first_span: Span, tails: Vec<UseTail>, span: Span) -
 /// Build a list-literal expression from its parsed elements, each flagged as a spread (`..xs`) or
 /// a plain element. With no spreads it is a plain `Expr::List`. With one or more spreads it
 /// desugars to `~` concatenation — `[..a, x, ..b]` becomes `[] ~ a ~ [x] ~ b` — reusing the
-/// list-concat operator (L1), so list spread needs no AST, runtime, or checker support of its own.
-/// The fold starts from an empty list so the result is always list-shaped (a spread of a non-list
-/// falls through `~` to display-concatenation, exactly as the operator does elsewhere).
+/// list-concat operator (L1). Each spread operand is wrapped in `..` ([`UnaryOp::Spread`]) — a
+/// runtime-identity marker the checker uses to require the operand be a list (else `E0007`); the
+/// fold starts from an empty list so the result is always list-shaped.
 fn desugar_list_literal(elems: Vec<(bool, Expr)>, span: Span) -> Expr {
     if !elems.iter().any(|(is_spread, _)| *is_spread) {
         return Expr::List {
@@ -205,7 +205,14 @@ fn desugar_list_literal(elems: Vec<(bool, Expr)>, span: Span) -> Expr {
                     span,
                 });
             }
-            chunks.push(e);
+            // Wrap the spread operand in `..` so the checker can require it to be a list; the
+            // operator is the runtime identity, so the folded `~` concatenation is unchanged.
+            let spread_span = e.span();
+            chunks.push(Expr::Unary {
+                op: UnaryOp::Spread,
+                operand: Box::new(e),
+                span: spread_span,
+            });
         } else {
             pending.push(e);
         }

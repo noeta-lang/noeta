@@ -520,6 +520,10 @@ pub enum UnaryOp {
     Neg,
     /// Logical negation, `!x`.
     Not,
+    /// List spread, `..xs`. Produced only by the list-literal desugar (L2) to wrap a spread
+    /// operand so the checker can require it to be a list; at runtime it is the identity (the
+    /// operand's value is passed straight through to the surrounding `~` concatenation).
+    Spread,
 }
 
 impl UnaryOp {
@@ -527,6 +531,7 @@ impl UnaryOp {
         match self {
             UnaryOp::Neg => "-",
             UnaryOp::Not => "!",
+            UnaryOp::Spread => "..",
         }
     }
 }

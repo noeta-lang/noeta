@@ -50,6 +50,9 @@ pub fn apply_unary(op: UnaryOp, value: &Value) -> Result<Value, OpError> {
         (UnaryOp::Neg, Value::Int(i)) => Ok(Value::Int(i.wrapping_neg())),
         (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
         (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+        // `..xs` (list spread) is the runtime identity — the value flows straight into the
+        // surrounding `~` concatenation; the list requirement is enforced statically.
+        (UnaryOp::Spread, value) => Ok(value.clone()),
         (op, value) => Err(OpError {
             code: DiagnosticCode::TypeMismatch,
             text: format!("cannot apply `{}` to {}", op.symbol(), value.type_name()),

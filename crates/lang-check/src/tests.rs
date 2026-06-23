@@ -530,6 +530,17 @@ fn list_spread_types_as_the_unified_list() {
     assert!(check_value_against("[..[1, 2], \"x\"]", li(Type::Dyn)).is_empty());
 }
 
+#[test]
+fn spreading_a_non_list_is_rejected() {
+    // `..` requires a list operand; a concrete non-list is an error (not display-concatenation).
+    // It still resolves list-shaped, so there is no cascading second diagnostic.
+    assert_eq!(codes("echo [..42];\n"), ["E0007"]);
+    assert_eq!(codes("echo [..\"hi\"];\n"), ["E0007"]);
+    // A `dyn` operand defers (its membership is unknown until runtime) and a list passes through.
+    assert!(codes("fn f(x: dyn): List<dyn> { return [..x]; }\n").is_empty());
+    assert!(codes("fn f(xs: List<int>): List<int> { return [..xs]; }\n").is_empty());
+}
+
 // ----- optional binding annotations (S3c.2) -----
 
 #[test]
