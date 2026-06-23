@@ -3482,8 +3482,8 @@ mod tests {
         assert_eq!(
             arg_values,
             vec![
-                lang_bytecode::AttributeValue::Ident("login".to_string()),
-                lang_bytecode::AttributeValue::Ident("post".to_string()),
+                lang_ast::AttrValue::Ident("login".to_string()),
+                lang_ast::AttrValue::Ident("post".to_string()),
             ]
         );
         // A type with no attributes has no manifest entries.

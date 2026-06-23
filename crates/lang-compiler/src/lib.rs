@@ -41,8 +41,7 @@ use lang_ast::{
 };
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
-    AttributeArg, AttributeRecord, AttributeValue, BoolSide, Builtin, CaptureFrom, Chunk, Const,
-    MethodEntry, Module, NarrowTarget, Op, Reg,
+    BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NarrowTarget, Op, Reg,
 };
 
 mod freevars;
@@ -90,7 +89,6 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         destructors: Vec::new(),
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
-        manifest: Vec::new(),
         types: HashMap::new(),
         module_globals: HashMap::new(),
     };
@@ -113,7 +111,9 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         destructors: module.destructors,
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
-        manifest: module.manifest,
+        // The attribute manifest + type registry, built from the AST by the *same* pure builder the
+        // tree-walker uses — so reflection is identical across backends by construction.
+        reflection: lang_ast::reflect::build(program),
     })
 }
 
@@ -146,7 +146,6 @@ struct ModuleCompiler {
     destructors: Vec<(String, u32)>,
     comparable_derives: Vec<String>,
     tojson_derives: Vec<String>,
-    manifest: Vec<AttributeRecord>,
     types: HashMap<String, TypeInfo>,
     /// Every top-level value global's name and whether it is mutable. Computed before any body
     /// is compiled so a nested function can resolve a global (and check its mutability on
@@ -184,17 +183,6 @@ impl ModuleCompiler {
         self.module_globals.keys().cloned().collect()
     }
 
-    /// Record a declaration's `#[...]` data attributes into the build manifest, in source order.
-    fn record_attributes(&mut self, type_name: &str, attrs: &[lang_ast::Attribute]) {
-        for attr in attrs {
-            self.manifest.push(AttributeRecord {
-                type_name: type_name.to_string(),
-                name: attr.name.clone(),
-                args: attr.args.iter().map(lower_attr_arg).collect(),
-            });
-        }
-    }
-
     /// Pass 1: register every top-level `type`/`class`/`enum`/`use` so bodies compiled later
     /// can resolve them, and reserve a placeholder prototype for each class `fn`.
     fn register_types(&mut self, program: &Program) {
@@ -220,7 +208,6 @@ impl ModuleCompiler {
                     if lang_ast::derives_trait(&decl.derives, "ToJson") {
                         self.tojson_derives.push(decl.name.clone());
                     }
-                    self.record_attributes(&decl.name, &decl.attrs);
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Record { fields });
                 }
@@ -256,7 +243,6 @@ impl ModuleCompiler {
                         self.protos.push(Chunk::placeholder());
                         self.destructors.push((decl.name.clone(), proto));
                     }
-                    self.record_attributes(&decl.name, &decl.attrs);
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Class { fields, fns });
                 }
@@ -271,7 +257,6 @@ impl ModuleCompiler {
                             )
                         })
                         .collect();
-                    self.record_attributes(&decl.name, &decl.attrs);
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Enum { variants });
                 }
@@ -2143,22 +2128,6 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
 /// tree-walker's `runtime_matches` mapping exactly so both backends decide a narrowing the same
 /// way. `Option`/`Result` and user records/classes/enums all become `Named` (matched by shape
 /// name); generic arguments are dropped (erasure).
-/// Lower an AST attribute argument to its manifest form (the build-artifact mirror that tooling
-/// reads). A pure value translation — attributes carry no codegen meaning.
-fn lower_attr_arg(arg: &lang_ast::AttrArg) -> AttributeArg {
-    let value = match &arg.value {
-        lang_ast::AttrValue::Str(s) => AttributeValue::Str(s.clone()),
-        lang_ast::AttrValue::Int(n) => AttributeValue::Int(*n),
-        lang_ast::AttrValue::Float(f) => AttributeValue::Float(*f),
-        lang_ast::AttrValue::Bool(b) => AttributeValue::Bool(*b),
-        lang_ast::AttrValue::Ident(name) => AttributeValue::Ident(name.clone()),
-    };
-    AttributeArg {
-        name: arg.name.clone(),
-        value,
-    }
-}
-
 fn narrow_target(ty: &TypeRef) -> NarrowTarget {
     match ty {
         TypeRef::Union { members, .. } => {
@@ -2183,13 +2152,14 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
 #[cfg(test)]
 mod tests {
     use super::compile;
-    use lang_bytecode::AttributeValue;
+    use lang_ast::AttrValue;
+    use lang_ast::reflect::AttributeRecord;
     use lang_lexer::lex;
     use lang_parser::parse;
     use lang_span::{Source, SourceId};
 
-    /// Compile `src` and return its attribute manifest.
-    fn manifest(src: &str) -> Vec<lang_bytecode::AttributeRecord> {
+    /// Compile `src` and return its attribute manifest (the VM-side view of the shared artifact).
+    fn manifest(src: &str) -> Vec<AttributeRecord> {
         let source = Source::new(SourceId::FIRST, "test.lang", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
@@ -2198,14 +2168,17 @@ mod tests {
             "test program must parse cleanly: {:?}",
             parsed.diagnostics
         );
-        compile(&parsed.program).expect("compiles").manifest
+        compile(&parsed.program)
+            .expect("compiles")
+            .reflection
+            .manifest
     }
 
     #[test]
     fn bare_attribute_has_no_args() {
         let m = manifest("#[Entity]\ntype User = { id: int };\n");
         assert_eq!(m.len(), 1);
-        assert_eq!(m[0].type_name, "User");
+        assert_eq!(m[0].target, "User");
         assert_eq!(m[0].name, "Entity");
         assert!(m[0].args.is_empty());
     }
@@ -2218,10 +2191,7 @@ mod tests {
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].args.len(), 1);
         assert_eq!(m[0].args[0].name, None);
-        assert_eq!(
-            m[0].args[0].value,
-            AttributeValue::Str("/users".to_string())
-        );
+        assert_eq!(m[0].args[0].value, AttrValue::Str("/users".to_string()));
     }
 
     #[test]
@@ -2229,8 +2199,46 @@ mod tests {
         let m = manifest("#[Cache(ttl: 60, eager: true)]\ntype Page = { id: int };\n");
         assert_eq!(m[0].args.len(), 2);
         assert_eq!(m[0].args[0].name, Some("ttl".to_string()));
-        assert_eq!(m[0].args[0].value, AttributeValue::Int(60));
+        assert_eq!(m[0].args[0].value, AttrValue::Int(60));
         assert_eq!(m[0].args[1].name, Some("eager".to_string()));
-        assert_eq!(m[0].args[1].value, AttributeValue::Bool(true));
+        assert_eq!(m[0].args[1].value, AttrValue::Bool(true));
+    }
+
+    #[test]
+    fn vm_reflection_is_the_shared_builder_output() {
+        // P2.0's parity guarantee: the VM-side artifact (in the compiled `Module`) is *exactly*
+        // what `lang_ast::reflect::build` produces from the AST — the same pure builder the
+        // tree-walker calls. So both backends agree on reflection by construction, no drift.
+        let src = "#[Entity]\ntype User = { id: int };\nenum Color { Red; Rgb(r: int); }\n";
+        let source = Source::new(SourceId::FIRST, "t.lang", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let from_module = compile(&parsed.program).expect("compiles").reflection;
+        let from_builder = lang_ast::reflect::build(&parsed.program);
+        assert_eq!(from_module, from_builder);
+        // Deterministic: the same AST always yields the same artifact.
+        assert_eq!(from_builder, lang_ast::reflect::build(&parsed.program));
+    }
+
+    #[test]
+    fn type_registry_records_declared_shapes() {
+        // The shared artifact also carries every declared type's reflectable shape (name, kind,
+        // member names) — the half `attributes_of` materialization and `type_of` will read.
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "type Point = { x: int, y: int };\nenum Color { Red; Rgb(r: int); }\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let reflection = compile(&parsed.program).expect("compiles").reflection;
+        let point = reflection.type_named("Point").expect("Point registered");
+        assert_eq!(point.kind, lang_ast::reflect::TypeKind::Record);
+        assert_eq!(point.fields, vec!["x".to_string(), "y".to_string()]);
+        let color = reflection.type_named("Color").expect("Color registered");
+        assert_eq!(color.kind, lang_ast::reflect::TypeKind::Enum);
+        assert_eq!(color.variants.len(), 2);
+        assert_eq!(color.variants[1].name, "Rgb");
+        assert_eq!(color.variants[1].fields, vec!["r".to_string()]);
     }
 }

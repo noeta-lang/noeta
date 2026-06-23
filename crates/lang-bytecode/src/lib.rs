@@ -539,38 +539,6 @@ pub struct MethodEntry {
     pub proto: u32,
 }
 
-/// One `#[Name(args...)]` data attribute attached to a declaration, recorded in the build
-/// manifest. Attributes carry no codegen meaning (code generation is `@derive`) and the runtime
-/// ignores them; tooling queries them through the compiled module (see [`Module::attributes_for`]).
-#[derive(Debug, Clone, PartialEq)]
-pub struct AttributeRecord {
-    /// The decorated declaration's type name.
-    pub type_name: String,
-    /// The attribute's name (e.g. `Route`).
-    pub name: String,
-    /// The arguments inside the parentheses; empty for a bare `#[Marker]`. Each is a literal,
-    /// positional or named — the data a consumer (router, DI, ORM) reads off the manifest.
-    pub args: Vec<AttributeArg>,
-}
-
-/// One argument of a manifest [`AttributeRecord`] — the build-artifact mirror of the AST's
-/// attribute argument. Positional (`name` is `None`) or named; the value is a literal.
-#[derive(Debug, Clone, PartialEq)]
-pub struct AttributeArg {
-    pub name: Option<String>,
-    pub value: AttributeValue,
-}
-
-/// A literal value carried by a manifest attribute argument.
-#[derive(Debug, Clone, PartialEq)]
-pub enum AttributeValue {
-    Str(String),
-    Int(i64),
-    Float(f64),
-    Bool(bool),
-    Ident(String),
-}
-
 /// A compiled module: the prototype table plus the object-model side tables. `protos[0]` is
 /// the top-level program; the rest are functions, closures, and methods, referenced by
 /// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
@@ -591,10 +559,12 @@ pub struct Module {
     /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
     /// synthesizes a structural JSON serializer for `o.to_json()`.
     pub tojson_derives: Vec<String>,
-    /// The attribute manifest: every `#[...]` data attribute attached to a declaration, in source
-    /// order. A build artifact for tooling (the runtime ignores attributes), queryable through the
-    /// compiled module and so through the `bytecode` salsa query.
-    pub manifest: Vec<AttributeRecord>,
+    /// The shared reflection artifact: the attribute manifest plus the registry of every declared
+    /// type's reflectable shape. Built from the AST by [`lang_ast::reflect::build`] — the *same*
+    /// pure builder the tree-walker uses — so reflection is identical across backends by
+    /// construction. A build artifact for tooling and runtime reflection (pass 2); the rest of the
+    /// runtime ignores it.
+    pub reflection: lang_ast::reflect::ReflectionInfo,
 }
 
 impl Module {
@@ -603,15 +573,13 @@ impl Module {
         &self.protos[0]
     }
 
-    /// The data attributes (`#[...]`) attached to `type_name`, in source order — the manifest
-    /// query tooling uses to discover, e.g., every type tagged `#[Entity]`.
+    /// The data attributes (`#[...]`) attached to `target`, in source order — the manifest query
+    /// tooling uses to discover, e.g., every type tagged `#[Entity]`.
     pub fn attributes_for<'a>(
         &'a self,
-        type_name: &str,
-    ) -> impl Iterator<Item = &'a AttributeRecord> {
-        self.manifest
-            .iter()
-            .filter(move |a| a.type_name == type_name)
+        target: &'a str,
+    ) -> impl Iterator<Item = &'a lang_ast::reflect::AttributeRecord> {
+        self.reflection.attributes_for(target)
     }
 
     /// Render the whole module as stable disassembly: the shape and method tables (when

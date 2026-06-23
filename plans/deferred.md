@@ -68,8 +68,17 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 | ~~Standalone top-level `impl Attribute for X {}` + the `#[Foo(...)]`-requires-`Attribute` gate~~ | M1.8 | **Done (attribute-system pass 1, `plans/attributes/`)** — standalone `impl Trait for T {}` (A1; orphan rule = same-module target → E0013; folds into coherence E0027) is the capability mechanism for bodiless records; the `#[Foo(...)]`-requires-`Attribute` gate is **E0029** (A3) plus an all-fields construction check (E0009/E0007/E0005). Pass-1 standalone impls are empty-body markers; method-carrying standalone impls (record behavior, needs backend dispatch) stay deferred to pass 2 |
 | ~~Nested-object fields in derived `Comparable` (recurse into sub-objects)~~ | M1.8 | **Done (F3)** — `compare_field` recurses into object fields in both backends (`traits/derive_comparable_nested`); non-object/non-primitive fields (e.g. lists) still bail |
 | `Callable` (`a(...)`), `Members` / `DynamicCall` protocols routed to user objects | M1.8 | Objects used as functions / dynamic member dispatch (agentic/proxy surface) |
-| Monomorphic shape specialization + bounded type parameters (`<T: Comparable>`) — generics are erased-for-storage today | M1.8 | **Bounded params fold into the inferred-static type-system track** (enforced statically, not at runtime); monomorphic specialization is the packed/perf reification path it then unlocks (M2 "packed value types") |
+| Monomorphic shape specialization + bounded type parameters (`<T: Comparable>`) — generics are erased-for-storage today | M1.8 | **Bounded params fold into the inferred-static type-system track** (enforced statically, not at runtime); monomorphic specialization is the packed/perf reification path it then unlocks (M2 "packed value types"). **Also carries:** reflection cross-`dyn` element recovery — once type args ride in shapes, `type_of` recovers `List<int>`'s `int` after a `dyn` boundary (attribute-system pass 2, "P2.9", folded here) |
 | Richer `#[attr(...)]` arguments (identifiers only previously) | M1.8 | **Done for literals (attribute-system pass 1, A2)** — positional + named literal args (string/int/float/bool/ident) survive into `Module.manifest` (`AttributeArg`/`AttributeValue`), verified by lang-compiler manifest tests (not `RunResult` — intrinsic). **Still deferred:** nested record-valued args (`#[Foo(inner: Bar { .. })]`) and how the manifest feeds the agentic/MCP tooling — both belong to pass 2 (the runtime reflection read-back) |
+
+## Reflection (attribute-system pass 2) — pieces folded into prerequisite milestones
+
+Pass 2 (the runtime reflection read-back) is planned in `plans/attributes/pass-2-reflection.md` as slices P2.0–P2.7 (shared artifact, `attributes_of`, `type_of` with full + head-constructor fidelity, method attributes, `AttachableTo`, by-name invocation, `SemanticRole`). Two of its pieces have hard prerequisites in other milestones and are built **there**, not as orphaned reflection slices:
+
+| Item | Host milestone | Note |
+|---|---|---|
+| Capability-gating + `@reflectable` tree-shaking roots (reflection metadata elimination) | **DCE / AOT compile-mode** (§9.8) | The reflected-upon root-set is only meaningful to a tree-shaker, which that milestone builds. Reflection behaves identically gated or not — a binary-size optimization, semantically invisible. Until then, all reflection metadata is resident (correct in every interpreted/dev mode) |
+| Reflection cross-`dyn` element-type recovery ("C") | **Reified generics / packed value types** (M2, §3.1) | Needs type arguments carried in shapes at runtime; rides along with that mechanism (see the Traits/generics row above) |
 
 ## Diagnostics source attribution
 

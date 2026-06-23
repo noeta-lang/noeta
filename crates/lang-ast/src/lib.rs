@@ -10,6 +10,7 @@
 use lang_span::Span;
 
 mod pretty;
+pub mod reflect;
 mod syntax_kind;
 
 pub use pretty::Pretty;
