@@ -422,6 +422,26 @@ fn generic_method_arguments_are_not_false_positives() {
     assert!(codes(src).is_empty());
 }
 
+// ----- list concatenation via `~` (L1) -----
+
+#[test]
+fn concat_of_two_lists_is_a_list() {
+    use lang_types::Type;
+    // `~` on two lists yields a list of the unified element type, not a string.
+    assert!(check_value_against("[1, 2] ~ [3]", Type::List(Box::new(Type::Int))).is_empty());
+    assert_eq!(check_value_against("[1, 2] ~ [3]", Type::String), ["E0007"]);
+    // Element types unify (int/float promote); a concrete clash widens to `List<dyn>`.
+    assert!(check_value_against("[1] ~ [2.5]", Type::List(Box::new(Type::Float))).is_empty());
+    // Display-concatenation is unchanged for non-list operands.
+    assert!(check_value_against("\"a\" ~ 1", Type::String).is_empty());
+}
+
+#[test]
+fn concat_result_flows_through_a_signature() {
+    assert!(codes("fn f(): List<int> { return [1] ~ [2]; }\n").is_empty());
+    assert_eq!(codes("fn f(): string { return [1] ~ [2]; }\n"), ["E0007"]);
+}
+
 // ----- optional binding annotations (S3c.2) -----
 
 #[test]

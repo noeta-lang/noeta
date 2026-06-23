@@ -22,7 +22,16 @@ pub struct OpError {
 /// Apply a binary operator (except the short-circuiting `&&`/`||`).
 pub fn apply_binary(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpError> {
     match op {
-        BinaryOp::Concat => Ok(Value::Str(format!("{}{}", left.display(), right.display()))),
+        // `~` concatenates two lists into a new list; for every other operand pairing it is
+        // display-based concatenation (each side stringified), so `1 ~ true` stays `"1true"`.
+        BinaryOp::Concat => match (left, right) {
+            (Value::List(a), Value::List(b)) => {
+                let mut items = (**a).clone();
+                items.extend(b.iter().cloned());
+                Ok(Value::List(std::rc::Rc::new(items)))
+            }
+            _ => Ok(Value::Str(format!("{}{}", left.display(), right.display()))),
+        },
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
             arithmetic(op, left, right)
         }

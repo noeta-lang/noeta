@@ -1,0 +1,12 @@
+// `~` concatenates two lists into a new list (immutable — a fresh list, operands untouched). For
+// any other operand pairing it stays display-concatenation, so `~` is the one deliberate concat
+// operator across lists and strings. Both backends agree.
+// expect: stdout "[1, 2, 3, 4]"
+// expect: stdout "[10, 20]"
+// expect: stdout "ab1"
+// expect: exit 0
+a = [1, 2];
+b = [3, 4];
+echo a ~ b;
+echo [10] ~ [20];
+echo "a" ~ "b" ~ 1;

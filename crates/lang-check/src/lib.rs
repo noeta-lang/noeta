@@ -893,7 +893,15 @@ impl Checker {
         let lt = self.synth(lhs, env);
         let rt = self.synth(rhs, env);
         match op {
-            BinaryOp::Concat => Type::String,
+            // `~` concatenates two lists (their element types unified, `dyn` on a concrete clash)
+            // or display-concatenates any other operands to a string.
+            BinaryOp::Concat => {
+                if let (Type::List(a), Type::List(b)) = (&lt, &rt) {
+                    Type::List(Box::new(unify_element(a, b).unwrap_or(Type::Dyn)))
+                } else {
+                    Type::String
+                }
+            }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
                 // A `dyn` operand defers to runtime dispatch (its sanctioned semantics), so it is
                 // accepted like an inference hole — only a concretely non-numeric operand errors.

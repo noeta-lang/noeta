@@ -31,12 +31,14 @@ The checker is **shared** by both backends (one `lang_check::check`), so any new
 | S3b | Argument checking + flip concrete corpus cases | **done** |
 | S3c.1 | Forward contextual propagation + map-literal inference | **done** |
 | S3c.2 | Optional binding type annotations | **done** |
-| S3c.3 | Local backward-inference solver (reuse `Type::Var`) | todo |
-| S3c.4 | Hard E0023 CannotInfer + conflict warning + finalize | todo |
+| L1 | List concatenation via `~` (both runtimes) | **done** |
+| L2 | List spread `[..xs, x]` (both runtimes) | todo |
+| L3 | Assignment updates the declaring scope (accumulators infer) | todo |
+| S3c.4 | Hard E0023 CannotInfer (fixable via annotation) + finalize | todo |
 | S4 | Explicit bounded generics, statically enforced (E0024) | todo |
 | S5 | Trait coherence — orphan/overlap rules (E0025) | todo |
 | S6 | `dyn` operations + checked narrowing (`x.as<T>()`) | todo |
 | S8 | Declared union / intersection types ("closed `dyn`") | planned |
 | S7 | Migration finalize + cleanup | todo |
 
-Dependency order is strict-linear S0 → S3c.4, then S4 → S5 → S6 → S8 → S7 (S6 may land in parallel with S4/S5 — narrowing is independent of bounds; S8 is gated after S6, since a declared union is a *closed* `dyn` discriminated by the `x.as<T>()` narrowing). S3c grew from a single "hole-elimination" slice into four sub-slices once the corpus audit showed a naive hole→error flip is both unsound (rejects valid `return none`) and unfixable today (bindings carry no annotation); the four-way split — propagation, annotations, a local backward solver, then the `E0023` endpoint — is recorded in the session plan. Diagnostic codes are append-only; next free is **E0023** (reserved for S3c.4).
+Dependency order is strict-linear S0 → S3c.2 → L1 → L2 → L3 → S3c.4, then S4 → S5 → S6 → S8 → S7 (S6 may land in parallel with S4/S5 — narrowing is independent of bounds; S8 is gated after S6, since a declared union is a *closed* `dyn` discriminated by the `x.as<T>()` narrowing). S3c grew from a single "hole-elimination" slice once the corpus audit showed a naive hole→error flip is both unsound (rejects valid `return none`) and unfixable today (bindings carried no annotation). The plan then split into propagation (S3c.1) + binding annotations (S3c.2), and a deeper finding followed: the language had *no* list-building at all (immutable lists, no append; `~` only display-concatenated), so the accumulator/backward-inference story was moot. Rather than design the type system around that gap, **L1–L3 add list-building** (concatenation, spread, declaring-scope assignment) so accumulators are both expressible and infer their element type by *forward* inference — which is why no backward-inference solver is needed. `E0023` (S3c.4) then fires only for a genuinely never-constrained binding, fixable via the S3c.2 annotation. Diagnostic codes are append-only; next free is **E0023** (reserved for S3c.4).
