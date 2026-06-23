@@ -555,5 +555,10 @@ fn type_ref_str(ty: &TypeRef) -> String {
             let args: Vec<String> = args.iter().map(type_ref_str).collect();
             format!("{name}<{}>", args.join(", "))
         }
+        TypeRef::Union { members, .. } => members
+            .iter()
+            .map(type_ref_str)
+            .collect::<Vec<_>>()
+            .join(" | "),
     }
 }

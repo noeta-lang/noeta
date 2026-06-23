@@ -368,6 +368,27 @@ fn narrowing_a_concrete_value_is_rejected() {
 }
 
 #[test]
+fn union_member_argument_is_accepted() {
+    // A value of any member widens into the union (`int <: int | string`), so both calls are clean.
+    let src = "fn f(x: int | string): string { return \"v\"; }\nf(1);\nf(\"a\");\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn union_non_member_argument_is_rejected() {
+    // `bool` is not a member of `int | string`, so the argument does not widen in (E0007).
+    let src = "fn f(x: int | string): string { return \"v\"; }\nf(true);\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn union_with_an_unknown_member_is_reported() {
+    // Each member of a union is validated like any annotation — an undeclared one is E0013.
+    let src = "fn f(x: int | Bogus): string { return \"v\"; }\n";
+    assert_eq!(codes(src), ["E0013"]);
+}
+
+#[test]
 fn narrowing_to_an_unknown_type_is_reported() {
     // The narrowing target is validated like any type annotation — an undeclared name is E0013.
     let src = "fn f(x: dyn): void {\n  x.as<Bogus>();\n}\n";

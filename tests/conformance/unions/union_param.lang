@@ -1,0 +1,13 @@
+// A declared union `int | string` is a closed `dyn`: a value of any member widens into it
+// (`int <: int | string`, `string <: int | string`), so both calls type-check and run. The
+// union is erased at runtime — the value is just its concrete `int`/`string` — so display
+// dispatch is identical on both backends.
+// expect: stdout "got: 42"
+// expect: stdout "got: hi"
+// expect: exit 0
+fn label(x: int | string): string {
+    return "got: ${x}";
+}
+
+echo label(42);
+echo label("hi");

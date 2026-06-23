@@ -164,6 +164,10 @@ pub enum TokenKind {
     AmpAmp,
     #[token("||")]
     PipePipe,
+    /// A bare `|` — the union-type separator (`int | string`). logos longest-match keeps `||`
+    /// (`PipePipe`) and `|>` (`PipeGt`) intact, so a single `|` only ever appears in type position.
+    #[token("|")]
+    Pipe,
     #[token("=")]
     Eq,
     #[token("<")]
@@ -254,6 +258,7 @@ impl TokenKind {
             TokenKind::TildeEq => "TildeEq",
             TokenKind::AmpAmp => "AmpAmp",
             TokenKind::PipePipe => "PipePipe",
+            TokenKind::Pipe => "Pipe",
             TokenKind::Eq => "Eq",
             TokenKind::Lt => "Lt",
             TokenKind::Gt => "Gt",
@@ -330,6 +335,7 @@ impl TokenKind {
             TokenKind::TildeEq => "`~=`",
             TokenKind::AmpAmp => "`&&`",
             TokenKind::PipePipe => "`||`",
+            TokenKind::Pipe => "`|`",
             TokenKind::Eq => "`=`",
             TokenKind::Lt => "`<`",
             TokenKind::Gt => "`>`",

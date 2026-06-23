@@ -772,6 +772,11 @@ impl Checker {
     /// are checked recursively, so `List<Ghost>` flags `Ghost`.
     fn check_type_ref(&mut self, ty: &TypeRef) {
         match ty {
+            TypeRef::Union { members, .. } => {
+                for m in members {
+                    self.check_type_ref(m);
+                }
+            }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name)

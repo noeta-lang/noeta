@@ -1,0 +1,8 @@
+// A value whose type is not a member of the union does not widen into it: `bool` is neither
+// `int` nor `string`, so the argument is rejected at compile time (E0007), the same code an
+// ordinary argument-type mismatch uses.
+// expect: error E0007 at 8:6
+// expect: exit 1
+fn label(x: int | string): string { return "${x}"; }
+
+echo label(true);

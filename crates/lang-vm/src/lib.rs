@@ -224,6 +224,7 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Fn => "function",
         NarrowTarget::Dyn => return true,
         NarrowTarget::Named(name) => return v.shape().is_some_and(|s| &s.name == name),
+        NarrowTarget::AnyOf(members) => return members.iter().any(|m| narrow_matches(v, m)),
     };
     v.type_name() == kind
 }

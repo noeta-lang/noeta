@@ -251,6 +251,7 @@ impl Type {
     /// job — this is a pure structural mapping.
     pub fn from_ref(ty: &TypeRef) -> Type {
         match ty {
+            TypeRef::Union { members, .. } => Type::union(members.iter().map(Type::from_ref)),
             TypeRef::Optional { inner, .. } => Type::Option(Box::new(Type::from_ref(inner))),
             TypeRef::Named { name, args, .. } => {
                 let arg = |i: usize| args.get(i).map(Type::from_ref).unwrap_or(Type::Unknown);

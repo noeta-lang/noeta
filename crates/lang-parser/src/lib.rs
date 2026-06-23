@@ -352,14 +352,36 @@ where
                 name,
                 args: args.unwrap_or_default(),
                 span: ctx.to_span(e.span()),
-            });
-        let optional = just(T::Question)
-            .ignore_then(type_)
-            .map_with(move |inner, e| TypeRef::Optional {
-                inner: Box::new(inner),
-                span: ctx.to_span(e.span()),
-            });
-        choice((optional, named)).boxed()
+            })
+            .boxed();
+        // A "base" type binds `?` tighter than `|`, so `?A | B` is `(?A) | B`. The inner recursion
+        // lets `?` nest (`??A`); generic arguments still use the full `type_`, so a union can appear
+        // inside them (`List<A | B>`).
+        let base = recursive(move |base| {
+            let optional = just(T::Question)
+                .ignore_then(base)
+                .map_with(move |inner, e| TypeRef::Optional {
+                    inner: Box::new(inner),
+                    span: ctx.to_span(e.span()),
+                });
+            choice((optional, named.clone())).boxed()
+        });
+        // A union is the loosest type combinator: `base (| base)*`. A lone base is returned bare,
+        // so any non-union annotation parses byte-identically to before.
+        base.separated_by(just(T::Pipe))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .map_with(move |mut members, e| {
+                if members.len() == 1 {
+                    members.pop().unwrap()
+                } else {
+                    TypeRef::Union {
+                        members,
+                        span: ctx.to_span(e.span()),
+                    }
+                }
+            })
+            .boxed()
     })
 }
 
@@ -1939,6 +1961,15 @@ mod tests {
         // exercises the generic target (whose own `<...>` closes against the outer angle brackets).
         insta::assert_snapshot!(pretty(
             "fn f(x: dyn): ?int { a = x.as<int>(); b = x.as<List<int>>(); return a; }"
+        ));
+    }
+
+    #[test]
+    fn union_type_in_narrowing_target() {
+        // A union `A | B` parses (surfaced here via an `.as<...>()` target, which the pretty
+        // printer renders). `?` binds tighter than `|`, so `?int | string` is `(?int) | string`.
+        insta::assert_snapshot!(pretty(
+            "fn f(x: dyn): dyn { a = x.as<int | string>(); b = x.as<?int | string>(); return a; }"
         ));
     }
 

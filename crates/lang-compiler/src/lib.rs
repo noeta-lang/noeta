@@ -2118,6 +2118,9 @@ fn unknown_field_diag(type_name: &str, field: &str, span: Span) -> Diagnostic {
 /// name); generic arguments are dropped (erasure).
 fn narrow_target(ty: &TypeRef) -> NarrowTarget {
     match ty {
+        TypeRef::Union { members, .. } => {
+            NarrowTarget::AnyOf(members.iter().map(narrow_target).collect())
+        }
         TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
         TypeRef::Named { name, .. } => match name.as_str() {
             "int" => NarrowTarget::Int,

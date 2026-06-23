@@ -334,12 +334,18 @@ pub enum TypeRef {
     /// `?T`, sugar for `Option<T>`. Kept as its own node (not desugared) so M1 can
     /// produce precise diagnostics on the nullability surface.
     Optional { inner: Box<TypeRef>, span: Span },
+    /// A union `A | B | …` — a declared, closed `dyn`. Always ≥2 members at the surface (a lone
+    /// type parses as that type, not a one-member union). M1 desugars it through the normalizing
+    /// `Type::union`.
+    Union { members: Vec<TypeRef>, span: Span },
 }
 
 impl TypeRef {
     pub fn span(&self) -> Span {
         match self {
-            TypeRef::Named { span, .. } | TypeRef::Optional { span, .. } => *span,
+            TypeRef::Named { span, .. }
+            | TypeRef::Optional { span, .. }
+            | TypeRef::Union { span, .. } => *span,
         }
     }
 }

@@ -102,6 +102,8 @@ pub enum NarrowTarget {
     Fn,
     Dyn,
     Named(String),
+    /// A union target (`x.as<int | string>()`): matches if the value matches **any** member.
+    AnyOf(Vec<NarrowTarget>),
 }
 
 /// One register-machine instruction.

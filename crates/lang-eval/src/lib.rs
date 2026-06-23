@@ -2649,6 +2649,8 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
 /// (`Value::type_name` and the enum/object shape name), so both backends decide identically.
 fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
     match ty {
+        // A union target matches if the value matches any member (`x.as<int | string>()`).
+        TypeRef::Union { members, .. } => members.iter().any(|m| runtime_matches(value, m)),
         // `?T` is `Option<T>`: matches any `Option` value (its payload is not re-checked).
         TypeRef::Optional { .. } => {
             matches!(value, Value::Enum(e) if e.enum_name == "Option")
