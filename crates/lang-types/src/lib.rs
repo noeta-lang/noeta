@@ -59,6 +59,8 @@ pub enum Type {
     String,
     List(Box<Type>),
     Map(Box<Type>, Box<Type>),
+    /// A set with element type `T` (the runtime `to_set` / set-builtin collection).
+    Set(Box<Type>),
     /// `?T` / `Option<T>`.
     Option(Box<Type>),
     /// `Result<T, E>`.
@@ -90,6 +92,16 @@ impl Type {
         matches!(self, Type::Unknown | Type::Var(_))
     }
 
+    /// Whether an operation on a value of this type is **not statically checked** but deferred to
+    /// the runtime — either because the type is an inference hole (`Unknown`/`Var`) or because it
+    /// is the dynamic escape (`Dyn`). Operator/member/index/`?` checks accept such a type without
+    /// a diagnostic: a hole because information is missing (gradual), `dyn` because dynamic
+    /// dispatch is exactly its sanctioned semantics. (Distinct from [`Self::is_gradual`], which is
+    /// holes only — `dyn` is *not* a hole for inference/subtyping purposes.)
+    pub fn defers_to_runtime(&self) -> bool {
+        matches!(self, Type::Unknown | Type::Var(_) | Type::Dyn)
+    }
+
     /// The subtype relation `sub <: sup` for the inferred-static lattice — the single place the
     /// directional widening rules live (the bidirectional checker's check-mode subsumption will
     /// consume this). The rules:
@@ -117,6 +129,7 @@ impl Type {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
             (Dyn, _) => false,
             (List(a), List(b)) => Type::subtype(a, b),
+            (Set(a), Set(b)) => Type::subtype(a, b),
             (Map(ak, av), Map(bk, bv)) => Type::subtype(ak, bk) && Type::subtype(av, bv),
             (Option(a), Option(b)) => Type::subtype(a, b),
             (Result(at, ae), Result(bt, be)) => Type::subtype(at, bt) && Type::subtype(ae, be),
@@ -155,6 +168,10 @@ impl Type {
                 | "Any"
                 | "List"
                 | "Map"
+                | "Set"
+                | "list"
+                | "map"
+                | "set"
                 | "Option"
                 | "Result"
         )
@@ -178,6 +195,12 @@ impl Type {
                     "dyn" | "Any" => Type::Dyn,
                     "List" => Type::List(Box::new(arg(0))),
                     "Map" => Type::Map(Box::new(arg(0)), Box::new(arg(1))),
+                    "Set" => Type::Set(Box::new(arg(0))),
+                    // The bare lowercase collection spellings are "collection of anything" — the
+                    // untyped collection, modeled as a collection of the dynamic top.
+                    "list" => Type::List(Box::new(Type::Dyn)),
+                    "map" => Type::Map(Box::new(Type::Dyn), Box::new(Type::Dyn)),
+                    "set" => Type::Set(Box::new(Type::Dyn)),
                     "Option" => Type::Option(Box::new(arg(0))),
                     "Result" => Type::Result(Box::new(arg(0)), Box::new(arg(1))),
                     _ => Type::Named(name.clone()),
@@ -198,6 +221,7 @@ impl std::fmt::Display for Type {
             Type::Bool => f.write_str("bool"),
             Type::String => f.write_str("string"),
             Type::List(t) => write!(f, "List<{t}>"),
+            Type::Set(t) => write!(f, "Set<{t}>"),
             Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Type::Option(t) => write!(f, "Option<{t}>"),
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
@@ -273,6 +297,38 @@ mod tests {
         assert!(Type::Float.is_numeric());
         assert!(!Type::String.is_numeric());
         assert!(!Type::Unknown.is_numeric());
+    }
+
+    #[test]
+    fn collection_spellings_desugar() {
+        // Bare lowercase collections are "collection of dyn"; capitalized carry their argument.
+        assert_eq!(
+            Type::from_ref(&named("list", vec![])),
+            Type::List(Box::new(Type::Dyn))
+        );
+        assert_eq!(
+            Type::from_ref(&named("set", vec![])),
+            Type::Set(Box::new(Type::Dyn))
+        );
+        assert_eq!(
+            Type::from_ref(&named("Set", vec![named("int", vec![])])),
+            Type::Set(Box::new(Type::Int))
+        );
+        assert_eq!(Type::Set(Box::new(Type::Int)).to_string(), "Set<int>");
+        // Sets are covariant in their element, like lists.
+        assert!(Type::subtype(
+            &Type::Set(Box::new(Type::Int)),
+            &Type::Set(Box::new(Type::Dyn))
+        ));
+    }
+
+    #[test]
+    fn defers_to_runtime_covers_holes_and_dyn_but_not_concrete() {
+        assert!(Type::Unknown.defers_to_runtime());
+        assert!(Type::Var(0).defers_to_runtime());
+        assert!(Type::Dyn.defers_to_runtime());
+        assert!(!Type::Int.defers_to_runtime());
+        assert!(!Type::List(Box::new(Type::Int)).defers_to_runtime());
     }
 
     #[test]

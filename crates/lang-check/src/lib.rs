@@ -687,7 +687,9 @@ impl Checker {
                 match &inner {
                     Type::Result(ok, _) => (**ok).clone(),
                     Type::Option(some) => (**some).clone(),
-                    t if t.is_gradual() => Type::Unknown,
+                    // A hole carries no info; `dyn` defers to runtime — both accept `?` without a
+                    // diagnostic, yielding the same deferred type.
+                    t if t.defers_to_runtime() => t.clone(),
                     other => {
                         self.diags.push(
                             Diagnostic::error(
@@ -730,7 +732,9 @@ impl Checker {
         match op {
             BinaryOp::Concat => Type::String,
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                let bad = |t: &Type| !t.is_numeric() && !t.is_gradual();
+                // A `dyn` operand defers to runtime dispatch (its sanctioned semantics), so it is
+                // accepted like an inference hole — only a concretely non-numeric operand errors.
+                let bad = |t: &Type| !t.is_numeric() && !t.defers_to_runtime();
                 if bad(&lt) || bad(&rt) {
                     // A concretely non-numeric operand: the same error the M0 runtime raised,
                     // now caught statically. Span is the binary expression (matches the runtime
@@ -943,10 +947,11 @@ impl Checker {
 }
 
 /// Surface type names the language provides that are *not* lattice built-ins (so they are not in
-/// [`Type::is_builtin_name`]): the bare, untyped collection spellings and the prelude `Ordering`
-/// enum that `compare` returns and `Comparable` maps to a bool. They resolve to no distinct
-/// [`Type`] variant but are legal annotations, so the unknown-type check (`E0013`) accepts them.
-const PRELUDE_TYPES: &[&str] = &["list", "map", "set", "Ordering"];
+/// [`Type::is_builtin_name`]): the prelude `Ordering` enum that `compare` returns and `Comparable`
+/// maps to a bool. It resolves to a [`Type::Named`] but is a legal annotation, so the unknown-type
+/// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
+/// they desugar to collections of `dyn`.)
+const PRELUDE_TYPES: &[&str] = &["Ordering"];
 
 /// The declared type of a field, or `Unknown` when unannotated.
 fn field_type(ty: &Option<TypeRef>) -> Type {
