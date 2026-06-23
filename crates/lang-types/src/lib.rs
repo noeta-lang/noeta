@@ -65,8 +65,11 @@ pub enum Type {
     Option(Box<Type>),
     /// `Result<T, E>`.
     Result(Box<Type>, Box<Type>),
-    /// A declared record/class/enum, or an imported (opaque, until M1.9) type, named.
-    Named(String),
+    /// A declared record/class/enum (or an imported type), with its type **arguments** —
+    /// `Box<int>` is `Named("Box", [Int])`, a non-generic `Order` is `Named("Order", [])`. Carrying
+    /// the arguments lets a generic container keep its element type through an instance (so
+    /// `box.get()` is `int`, not `dyn`, and an instance method enforces the class's bounds).
+    Named(String, Vec<Type>),
     /// A function value.
     Fn {
         params: Vec<Type>,
@@ -147,7 +150,19 @@ impl Type {
                     && ap.iter().zip(bp).all(|(a, b)| Type::subtype(b, a)) // contravariant params
                     && Type::subtype(ar, br) // covariant return
             }
-            // Primitives, `Named`, `Unit`: identity only.
+            // A named type is covariant in its arguments (`Box<int> <: Box<dyn>`); the name must
+            // match. An **empty** argument list on either side means "arguments unspecified" (a
+            // literal or partially-erased instance) and is compatible with any instantiation of the
+            // same name; only when both sides carry arguments are arity + covariance checked.
+            // (Covariance is sound here — generics are erased and immutable-by-default.)
+            (Named(an, aa), Named(bn, ba)) => {
+                an == bn
+                    && (aa.is_empty()
+                        || ba.is_empty()
+                        || (aa.len() == ba.len()
+                            && aa.iter().zip(ba).all(|(a, b)| Type::subtype(a, b))))
+            }
+            // Primitives, `Unit`: identity only.
             _ => sub == sup,
         }
     }
@@ -204,7 +219,7 @@ impl Type {
                     "set" => Type::Set(Box::new(Type::Unknown)),
                     "Option" => Type::Option(Box::new(arg(0))),
                     "Result" => Type::Result(Box::new(arg(0)), Box::new(arg(1))),
-                    _ => Type::Named(name.clone()),
+                    _ => Type::Named(name.clone(), args.iter().map(Type::from_ref).collect()),
                 }
             }
         }
@@ -226,7 +241,17 @@ impl std::fmt::Display for Type {
             Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Type::Option(t) => write!(f, "Option<{t}>"),
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
-            Type::Named(n) => f.write_str(n),
+            Type::Named(n, args) if args.is_empty() => f.write_str(n),
+            Type::Named(n, args) => {
+                write!(f, "{n}<")?;
+                for (i, a) in args.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{a}")?;
+                }
+                f.write_str(">")
+            }
             Type::Fn { params, ret } => {
                 f.write_str("fn(")?;
                 for (i, p) in params.iter().enumerate() {
@@ -276,7 +301,7 @@ mod tests {
         let list = named("List", vec![named("Item", vec![])]);
         assert_eq!(
             Type::from_ref(&list),
-            Type::List(Box::new(Type::Named("Item".to_string())))
+            Type::List(Box::new(Type::Named("Item".to_string(), vec![])))
         );
         let res = named(
             "Result",
@@ -286,7 +311,7 @@ mod tests {
             Type::from_ref(&res),
             Type::Result(
                 Box::new(Type::Unit),
-                Box::new(Type::Named("OrderError".to_string()))
+                Box::new(Type::Named("OrderError".to_string(), vec![]))
             )
         );
     }
@@ -359,13 +384,13 @@ mod tests {
     fn subtype_identity_and_distinctness() {
         assert!(Type::subtype(&Type::Int, &Type::Int));
         assert!(Type::subtype(
-            &Type::Named("Order".into()),
-            &Type::Named("Order".into())
+            &Type::Named("Order".into(), vec![]),
+            &Type::Named("Order".into(), vec![])
         ));
         assert!(!Type::subtype(&Type::Int, &Type::String));
         assert!(!Type::subtype(
-            &Type::Named("Order".into()),
-            &Type::Named("User".into())
+            &Type::Named("Order".into(), vec![]),
+            &Type::Named("User".into(), vec![])
         ));
     }
 

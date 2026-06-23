@@ -1,0 +1,13 @@
+// The element type is tracked through the instance both ways: `Box<string>` makes `b.get()` a
+// `string`, so passing it to a function expecting `int` is a static error (`E0007`) — the
+// generic argument is carried, not erased to `dyn` (which would defer and miss this).
+// expect: error E0007 at 13:6
+// expect: exit 1
+class Box<T> {
+    value: T
+    fn new(v: T): Box<T> { return Box { value: v }; }
+    fn get(): T { return value; }
+}
+fn need_int(n: int): int { return n; }
+b = Box.new("hi");
+echo need_int(b.get());

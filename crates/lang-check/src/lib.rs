@@ -162,6 +162,10 @@ struct Checker {
     /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
     trait_impls: HashMap<String, HashSet<String>>,
+    /// Each generic user type's type-parameter **names**, in order — so a field/method access can
+    /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
+    /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
+    generic_types: HashMap<String, Vec<String>>,
     /// Names bound to a Ring 2 stdlib module by a `use std.{…}` import (`json`, `fs`, …). A call
     /// `m.f(args)` on such a name resolves through [`stdlib::module_return`].
     modules: HashSet<String>,
@@ -201,6 +205,10 @@ impl Checker {
                     self.records.insert(r.name.clone(), fields);
                     self.types.insert(r.name.clone());
                     self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
+                    self.generic_types.insert(
+                        r.name.clone(),
+                        r.type_params.iter().map(|p| p.name.clone()).collect(),
+                    );
                 }
                 Stmt::Class(c) => {
                     let fields = c
@@ -233,6 +241,10 @@ impl Checker {
                         .iter()
                         .map(|p| (p.name.clone(), p.bounds.clone()))
                         .collect();
+                    self.generic_types.insert(
+                        c.name.clone(),
+                        c.type_params.iter().map(|p| p.name.clone()).collect(),
+                    );
                     let methods = c
                         .methods
                         .iter()
@@ -273,6 +285,10 @@ impl Checker {
                     self.enums.insert(e.name.clone(), variants);
                     self.types.insert(e.name.clone());
                     self.record_trait_impls(&e.name, e.derives.iter().map(|(n, _)| n.as_str()));
+                    self.generic_types.insert(
+                        e.name.clone(),
+                        e.type_params.iter().map(|p| p.name.clone()).collect(),
+                    );
                 }
                 Stmt::Fn(f) => {
                     // The registered signature is **erased** (generic parameters → `dyn`): the
@@ -1121,7 +1137,11 @@ impl Checker {
                 for f in &lit.fields {
                     self.synth(&f.value, env);
                 }
-                Type::Named(lit.type_name.clone())
+                // A record/object literal does not yet infer its type arguments from field values
+                // (e.g. `Box { value: 1 }` is `Box`, not `Box<int>`); constructors via an
+                // associated `fn` do carry precise arguments. Literal-argument inference is a noted
+                // follow-up (see `plans/deferred.md`).
+                Type::Named(lit.type_name.clone(), Vec::new())
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
@@ -1225,7 +1245,7 @@ impl Checker {
         if operand.defers_to_runtime() {
             return true;
         }
-        if let Type::Named(n) = operand
+        if let Type::Named(n, _) = operand
             && let Some(bounds) = self.type_params.get(n)
         {
             return bounds.iter().any(|b| b == trait_name);
@@ -1237,7 +1257,7 @@ impl Checker {
     /// or `None` if `operand` is not such a parameter — used to pick the diagnostic flavor.
     fn unbounded_type_param(&self, operand: &Type, trait_name: &str) -> Option<String> {
         match operand {
-            Type::Named(n) => match self.type_params.get(n) {
+            Type::Named(n, _) => match self.type_params.get(n) {
                 Some(bounds) if !bounds.iter().any(|b| b == trait_name) => Some(n.clone()),
                 _ => None,
             },
@@ -1310,7 +1330,7 @@ impl Checker {
                     // argument types, check arguments against the substituted parameters, enforce
                     // the bounds (E0025), and return the substituted result type.
                     if let Some(generic) = sig.generic.clone() {
-                        return self.check_generic_call(name, &generic, args, span);
+                        return self.check_generic_call(name, &generic, args, span, &[]);
                     }
                     let params = sig.params.clone();
                     let ret = sig.ret.clone();
@@ -1326,7 +1346,7 @@ impl Checker {
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && self.is_enum_variant(tn, name)
                 {
-                    return Type::Named(tn.clone());
+                    return Type::Named(tn.clone(), Vec::new());
                 }
                 // `module.func(args)` — a Ring 2 stdlib module call.
                 if let Expr::Ident { name: m, .. } = receiver.as_ref()
@@ -1347,18 +1367,21 @@ impl Checker {
                     && self.types.contains(tn)
                     && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string())).cloned()
                 {
-                    return self.call_user_method(name, &sig, args, span);
+                    // A static call: the type arguments are not known from a bare type name, so the
+                    // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
+                    return self.call_user_method(name, &sig, args, span, &[]);
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
                 let recv = self.synth(receiver, env);
                 // A user-declared instance method resolves through the same path as a static call
-                // (generic methods instantiate + enforce bounds); a built-in method or a deferred
+                // (generic methods instantiate + enforce bounds); the receiver's type arguments seed
+                // the instantiation so the result is precise. A built-in method or a deferred
                 // receiver falls through below.
-                if let Type::Named(n) = &recv
+                if let Type::Named(n, recv_args) = &recv
                     && let Some(sig) = self.methods.get(&(n.clone(), name.to_string())).cloned()
                 {
-                    return self.call_user_method(name, &sig, args, span);
+                    return self.call_user_method(name, &sig, args, span, recv_args);
                 }
                 self.check_method_args(&recv, name, args, span);
                 let ret = self.method_call_return(&recv, name);
@@ -1389,9 +1412,16 @@ impl Checker {
     /// A generic one (a method of a generic class) instantiates and enforces its bounds through the
     /// shared [`Self::check_generic_call`]; a non-generic one checks arguments against its
     /// (erased) parameter types and returns its declared return type.
-    fn call_user_method(&mut self, name: &str, sig: &FnSig, args: &[Type], span: Span) -> Type {
+    fn call_user_method(
+        &mut self,
+        name: &str,
+        sig: &FnSig,
+        args: &[Type],
+        span: Span,
+        recv_args: &[Type],
+    ) -> Type {
         if let Some(generic) = &sig.generic {
-            return self.check_generic_call(name, generic, args, span);
+            return self.check_generic_call(name, generic, args, span, recv_args);
         }
         self.check_args(&sig.params, args, span, name);
         sig.ret.clone()
@@ -1403,7 +1433,7 @@ impl Checker {
     fn check_method_args(&mut self, recv: &Type, name: &str, args: &[Type], span: Span) {
         if let Some(params) = stdlib::method_params(recv, name) {
             self.check_args(&params, args, span, name);
-        } else if let Type::Named(n) = recv
+        } else if let Type::Named(n, _) = recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
         {
             let params = sig.params.clone();
@@ -1453,12 +1483,17 @@ impl Checker {
     /// substituted parameter type (`E0007`), enforces each parameter's trait bounds (`E0025`), and
     /// returns the substituted result type (any type parameter the arguments left unbound erases to
     /// `dyn`). Arity mismatch is reported exactly as a non-generic call's.
+    /// `recv_args` seeds the substitution for an **instance** method call: the receiver's type
+    /// arguments are bound to the class's type parameters positionally (`box: Box<int>` → `T=int`),
+    /// so the method's result is precise and its bounds enforced against the receiver's instantiation.
+    /// Empty for a free function or a static call (the arguments alone instantiate the parameters).
     fn check_generic_call(
         &mut self,
         name: &str,
         generic: &GenericInfo,
         args: &[Type],
         span: Span,
+        recv_args: &[Type],
     ) -> Type {
         let tps: HashSet<String> = generic.params.iter().map(|(n, _)| n.clone()).collect();
         if generic.raw_params.len() != args.len() {
@@ -1473,7 +1508,15 @@ impl Checker {
             ));
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
-        let mut subst: HashMap<String, Type> = HashMap::new();
+        // Seed with the receiver's type arguments (instance call); the call's own arguments then
+        // refine any still-unbound parameters without overwriting the receiver's binding.
+        let mut subst: HashMap<String, Type> = generic
+            .params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .zip(recv_args.iter().cloned())
+            .filter(|(_, t)| !t.defers_to_runtime())
+            .collect();
         for (raw, arg) in generic.raw_params.iter().zip(args) {
             bind_type_params(raw, arg, &tps, &mut subst);
             let expected = apply_subst(raw, &subst);
@@ -1518,7 +1561,7 @@ impl Checker {
         if ty.defers_to_runtime() {
             return true;
         }
-        if let Type::Named(n) = ty {
+        if let Type::Named(n, _) = ty {
             return self
                 .trait_impls
                 .get(n)
@@ -1533,7 +1576,7 @@ impl Checker {
         if let Some(t) = stdlib::method_return(recv, name) {
             return t;
         }
-        if let Type::Named(n) = recv
+        if let Type::Named(n, _) = recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
         {
             return sig.ret.clone();
@@ -1549,14 +1592,27 @@ impl Checker {
         if let Expr::Ident { name: tn, .. } = receiver
             && self.is_enum_variant(tn, name)
         {
-            return Type::Named(tn.clone());
+            return Type::Named(tn.clone(), Vec::new());
         }
         let recv = self.synth(receiver, env);
-        if let Type::Named(n) = &recv
-            && let Some(fields) = self.records.get(n)
-            && let Some((_, ty)) = fields.iter().find(|(fname, _)| fname == name)
+        if let Type::Named(n, recv_args) = &recv
+            && let Some((_, ty)) = self
+                .records
+                .get(n)
+                .and_then(|fields| fields.iter().find(|(fname, _)| fname == name))
         {
-            return ty.clone();
+            // Substitute the class's type parameters from the receiver's type arguments, so a field
+            // of a `Box<int>` reads as `int`. An unresolved parameter (the receiver's arguments are
+            // unknown, e.g. from a literal) erases to `dyn` rather than leaking the parameter name.
+            let ty = ty.clone();
+            let params = self.generic_types.get(n).cloned().unwrap_or_default();
+            let subst: HashMap<String, Type> = params
+                .iter()
+                .cloned()
+                .zip(recv_args.iter().cloned())
+                .collect();
+            let pset: HashSet<String> = params.into_iter().collect();
+            return erase_type_params(apply_subst(&ty, &subst), &pset);
         }
         // A field/member access on a `dyn` (or hole) receiver stays deferred.
         if recv.defers_to_runtime() {
@@ -1604,7 +1660,7 @@ impl Checker {
         let all: Vec<String> = match scrut {
             Type::Result(..) => vec!["Ok".into(), "Err".into()],
             Type::Option(..) => vec!["some".into(), "none".into()],
-            Type::Named(n) => match self.enums.get(n) {
+            Type::Named(n, _) => match self.enums.get(n) {
                 Some(variants) => variants.iter().map(|v| v.name.clone()).collect(),
                 None => return,
             },
@@ -1680,7 +1736,7 @@ impl Checker {
                 "some" => vec![(**some).clone()],
                 _ => Vec::new(),
             },
-            Type::Named(n) => self
+            Type::Named(n, _) => self
                 .enums
                 .get(n)
                 .and_then(|vs| vs.iter().find(|v| v.name == variant))
@@ -1742,7 +1798,10 @@ fn required_operator_trait(op: BinaryOp) -> Option<&'static str> {
 fn erase_type_params(ty: Type, params: &HashSet<String>) -> Type {
     let erase = |t: Type| erase_type_params(t, params);
     match ty {
-        Type::Named(n) if params.contains(&n) => Type::Dyn,
+        // A type parameter used directly (`T`) erases to `dyn`; a named type with arguments
+        // (`Box<T>`) keeps its name but erases inside its arguments.
+        Type::Named(n, _) if params.contains(&n) => Type::Dyn,
+        Type::Named(n, args) => Type::Named(n, args.into_iter().map(erase).collect()),
         Type::List(t) => Type::List(Box::new(erase(*t))),
         Type::Set(t) => Type::Set(Box::new(erase(*t))),
         Type::Map(k, v) => Type::Map(Box::new(erase(*k)), Box::new(erase(*v))),
@@ -1769,8 +1828,14 @@ fn bind_type_params(
 ) {
     match (raw, arg) {
         // A deferred argument (`dyn`/hole) never pins a parameter, so a later concrete argument can.
-        (Type::Named(n), _) if params.contains(n) && !arg.defers_to_runtime() => {
+        (Type::Named(n, _), _) if params.contains(n) && !arg.defers_to_runtime() => {
             subst.entry(n.clone()).or_insert_with(|| arg.clone());
+        }
+        // A named generic type (`Box<T>` matched against `Box<int>`): bind through the arguments.
+        (Type::Named(rn, rargs), Type::Named(an, aargs)) if rn == an => {
+            for (r, a) in rargs.iter().zip(aargs) {
+                bind_type_params(r, a, params, subst);
+            }
         }
         (Type::List(r), Type::List(a)) => bind_type_params(r, a, params, subst),
         (Type::Set(r), Type::Set(a)) => bind_type_params(r, a, params, subst),
@@ -1806,7 +1871,15 @@ fn bind_type_params(
 /// `Named` form (the caller erases any residue to `dyn`).
 fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
     match ty {
-        Type::Named(n) => subst.get(n).cloned().unwrap_or_else(|| ty.clone()),
+        // A type parameter (`T`) resolves to its binding; a named generic type (`Box<T>`)
+        // substitutes inside its arguments.
+        Type::Named(n, args) => match subst.get(n) {
+            Some(t) => t.clone(),
+            None => Type::Named(
+                n.clone(),
+                args.iter().map(|a| apply_subst(a, subst)).collect(),
+            ),
+        },
         Type::List(t) => Type::List(Box::new(apply_subst(t, subst))),
         Type::Set(t) => Type::Set(Box::new(apply_subst(t, subst))),
         Type::Map(k, v) => Type::Map(

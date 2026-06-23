@@ -34,14 +34,14 @@ fn opt(t: Type) -> Type {
 pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
     // `compare` is defined on every value (Comparable) and yields the prelude `Ordering` enum.
     if name == "compare" {
-        return Some(Type::Named("Ordering".to_string()));
+        return Some(Type::Named("Ordering".to_string(), vec![]));
     }
     match receiver {
         Type::String => string_method(name),
         Type::List(elem) => list_method(name, elem),
         Type::Set(elem) => set_method(name, elem),
         Type::Map(_, val) => map_method(name, val),
-        Type::Named(n) if n == FILE_HANDLE => file_handle_method(name),
+        Type::Named(n, _) if n == FILE_HANDLE => file_handle_method(name),
         _ => None,
     }
 }
@@ -108,7 +108,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
         Type::Map(_, val) => map_params(name, val),
-        Type::Named(n) if n == FILE_HANDLE => file_handle_params(name),
+        Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
         _ => None,
     }
 }
@@ -255,7 +255,7 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
         ("fs", "read") => Type::String,
         ("fs", "read_lines" | "list") => list(Type::String),
         ("fs", "exists" | "remove" | "is_dir") => Type::Bool,
-        ("fs", "open") => Type::Named(FILE_HANDLE.to_string()),
+        ("fs", "open") => Type::Named(FILE_HANDLE.to_string(), vec![]),
         ("time", "monotonic") => Type::Int,
         ("time", "sleep") => Type::Unit,
         ("env", "get") => Type::String,

@@ -166,6 +166,18 @@ fn associated_call_is_typed_precisely() {
 }
 
 #[test]
+fn instance_keeps_its_type_argument() {
+    // `Box<int>` tracks its element type through the instance: `b.get()` is `int` (passes where an
+    // `int` is wanted), while `Box<string>.get()` is `string` (a mismatch against `int`).
+    let cls = "class Box<T> { value: T\n  fn new(v: T): Box<T> { return Box { value: v }; }\n  fn get(): T { return value; } }\n\
+               fn need_int(n: int): int { return n; }\n";
+    let ok = format!("{cls}b = Box.new(1);\necho need_int(b.get());\n");
+    assert!(codes(&ok).is_empty());
+    let bad = format!("{cls}b = Box.new(\"hi\");\necho need_int(b.get());\n");
+    assert_eq!(codes(&bad), ["E0007"]);
+}
+
+#[test]
 fn generic_class_enforces_its_bound_at_construction() {
     // `Pair<T: Comparable>` constructed with a non-`Comparable` record is `E0025`; with an `int`,
     // clean. The class's bound is instantiated from the constructor argument.
