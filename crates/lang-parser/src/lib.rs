@@ -31,8 +31,8 @@ use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
     Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
-    ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam,
-    TypeRef, UnaryOp, UseName, VariantDecl,
+    ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, RoleTag, Stmt, StrPart,
+    TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -88,16 +88,47 @@ enum Decorator {
     Derive {
         name: String,
         name_span: Span,
-        traits: Vec<(String, Span)>,
+        /// Each argument: a head identifier and an optional `.`-qualifier (`Enum.Variant`). Plain
+        /// directives (`@derive`, `@attribute`) use the head only; `@role(Enum.Variant)` uses the
+        /// qualifier. Sharing one grammar keeps the directive family token-free.
+        args: Vec<DirectiveArg>,
     },
     Attr(Attribute),
 }
+
+/// One argument of a `@name(...)` directive: a head identifier plus an optional `.`-qualifier, so
+/// `@role(Enum.Variant)` and `@derive(Trait)` share the same grammar.
+type DirectiveArg = ((String, Span), Option<(String, Span)>);
 
 /// One `.`-led segment of a `use` path: either another path identifier (with its span) or
 /// the trailing `{ a, b }` group (which, when present, is always last).
 enum UseTail {
     Seg(String, Span),
     Group(Vec<UseName>),
+}
+
+/// Project a directive's arguments onto their head identifiers (dropping any `.`-qualifier), for the
+/// directives that take plain names (`@derive`, `@attribute`).
+fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
+    args.into_iter().map(|(head, _tail)| head).collect()
+}
+
+/// Project one directive argument onto a [`RoleTag`]. A qualified `Enum.Variant` fills both names; a
+/// bare `Variant` leaves `enum_name` empty so the checker can require the qualifier (`E0031`).
+fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
+    let ((head, head_span), tail) = arg;
+    match tail {
+        Some((variant, variant_span)) => RoleTag {
+            enum_name: head,
+            variant,
+            span: head_span.merge(variant_span),
+        },
+        None => RoleTag {
+            enum_name: String::new(),
+            variant: head,
+            span: head_span,
+        },
+    }
 }
 
 /// Attach leading `@derive(...)` directives and `#[...]` data attributes to the type declaration
@@ -108,19 +139,26 @@ fn attach_decorators(
     derives: Vec<(String, Span)>,
     attrs: Vec<Attribute>,
     attribute: Option<Vec<(String, Span)>>,
-    role: Option<Vec<(String, Span)>>,
+    role: Option<Vec<RoleTag>>,
+    semantic: Option<Span>,
 ) -> Stmt {
-    if derives.is_empty() && attrs.is_empty() && attribute.is_none() && role.is_none() {
+    if derives.is_empty()
+        && attrs.is_empty()
+        && attribute.is_none()
+        && role.is_none()
+        && semantic.is_none()
+    {
         return stmt;
     }
     match stmt {
         Stmt::Class(mut c) => {
             c.derives = derives;
             c.attrs = attrs;
-            // `@attribute`/`@role` on a class is invalid (attributes are records only); carried so
-            // the checker can report it.
+            // `@attribute`/`@role`/`@semantic` on a class is invalid (attributes are records only,
+            // `@semantic` marks enums); carried so the checker can report it.
             c.attribute = attribute;
             c.role = role;
+            c.semantic = semantic;
             Stmt::Class(c)
         }
         Stmt::Record(mut r) => {
@@ -128,13 +166,16 @@ fn attach_decorators(
             r.attrs = attrs;
             r.attribute = attribute;
             r.role = role;
+            // `@semantic` marks enums, not records; carried so the checker can report the misplacement.
+            r.semantic = semantic;
             Stmt::Record(r)
         }
         Stmt::Enum(mut e) => {
             // An enum cannot be an attribute, so a stray `@attribute`/`@role` is dropped;
-            // derives/attrs still apply.
+            // `@semantic` is the one directive an enum accepts. derives/attrs still apply.
             e.derives = derives;
             e.attrs = attrs;
+            e.semantic = semantic;
             Stmt::Enum(e)
         }
         other => other,
@@ -1341,6 +1382,7 @@ where
                     variants,
                     derives: Vec::new(),
                     attrs: Vec::new(),
+                    semantic: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -1386,6 +1428,7 @@ where
                     attrs: Vec::new(),
                     attribute: None,
                     role: None,
+                    semantic: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -1530,6 +1573,7 @@ where
                     attrs: Vec::new(),
                     attribute: None,
                     role: None,
+                    semantic: None,
                     destructor,
                     span: ctx.to_span(e.span()),
                 })
@@ -1658,14 +1702,20 @@ where
                 }
             });
 
-        // A `@name(arg, ...)` directive. Two are recognized (partitioned below): `@derive(...)` —
-        // codegen — and `@attribute` / `@attribute(Kind, ...)` — the attribute opt-in + placement
-        // (P2.5). The argument list is optional so a bare `@attribute` (attaches anywhere) parses;
-        // any other `@name` is a diagnostic where decorators are partitioned.
+        // A `@name(arg, ...)` directive. Several are recognized (partitioned below): `@derive(...)` —
+        // codegen — `@attribute` / `@attribute(Kind, ...)` — the attribute opt-in + placement (P2.5)
+        // — `@role(Enum.Variant, ...)` — semantic-role tags — and `@semantic` — the role-eligible
+        // enum marker. Each argument is an identifier with an optional `.`-qualifier so a role's
+        // `Enum.Variant` and a derive's bare `Trait` share one grammar. The argument list is optional
+        // so a bare `@attribute`/`@semantic` parses; any other `@name` is a diagnostic where
+        // decorators are partitioned.
+        let directive_arg = id
+            .clone()
+            .then(just(T::Dot).ignore_then(id.clone()).or_not());
         let derive_directive = just(T::At)
             .ignore_then(id.clone())
             .then(
-                id.clone()
+                directive_arg
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -1673,10 +1723,10 @@ where
                     .or_not()
                     .map(Option::unwrap_or_default),
             )
-            .map(|((name, name_span), traits)| Decorator::Derive {
+            .map(|((name, name_span), args)| Decorator::Derive {
                 name,
                 name_span,
-                traits,
+                args,
             });
 
         // A `#[...]` data attribute in decorator position, wrapping the shared `attr_decl` (defined
@@ -1695,26 +1745,31 @@ where
                 let mut derives: Vec<(String, Span)> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
                 let mut attribute: Option<Vec<(String, Span)>> = None;
-                let mut role: Option<Vec<(String, Span)>> = None;
+                let mut role: Option<Vec<RoleTag>> = None;
+                let mut semantic: Option<Span> = None;
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
                             name,
                             name_span,
-                            traits,
+                            args,
                         } => match name.as_str() {
                             // `@derive(Trait, …)` — codegen. `@attribute` / `@attribute(Kind, …)` —
                             // the attribute opt-in; its args are the placement kinds (empty ⇒
-                            // anywhere). `@role(Role)` — the semantic-role tag (P2.7). The checker
-                            // validates each one's arguments and the records-only rule.
-                            "derive" => derives.extend(traits),
-                            "attribute" => attribute = Some(traits),
-                            "role" => role = Some(traits),
+                            // anywhere). `@role(Enum.Variant, …)` — semantic-role tags (accumulated
+                            // across directives). `@semantic` — marks an enum role-eligible. The
+                            // checker validates each one's arguments and the records-only rule.
+                            "derive" => derives.extend(directive_heads(args)),
+                            "attribute" => attribute = Some(directive_heads(args)),
+                            "role" => role
+                                .get_or_insert_with(Vec::new)
+                                .extend(args.into_iter().map(directive_role_tag)),
+                            "semantic" => semantic = Some(name_span),
                             _ => ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
                                 name_span,
                                 format!(
-                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, and `@role(...)`"
+                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, and `@semantic`"
                                 ),
                             )),
                         },
@@ -1722,7 +1777,7 @@ where
                     }
                 }
                 set_public(
-                    attach_decorators(stmt, derives, attrs, attribute, role),
+                    attach_decorators(stmt, derives, attrs, attribute, role, semantic),
                     pub_kw.is_some(),
                 )
             });
@@ -2078,6 +2133,43 @@ mod tests {
         let parsed = parse_str("fn add(a: int, b: int): int { return a + b; }");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         assert!(matches!(parsed.program.stmts[0], Stmt::Fn(_)));
+    }
+
+    #[test]
+    fn parses_semantic_and_qualified_role_directives() {
+        // `@semantic` marks the enum role-eligible; `@role(Enum.Variant)` parses each dotted pair
+        // into a `RoleTag`, accumulating across multiple roles on one declaration.
+        let parsed = parse_str(
+            "@semantic\nenum WebRole { Controller; Middleware; }\n@attribute\n@role(Semantic.EntryPoint, WebRole.Controller)\ntype Route = { path: string };\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Enum(e) = &parsed.program.stmts[0] else {
+            panic!("expected enum");
+        };
+        assert!(e.semantic.is_some(), "@semantic should mark the enum");
+        let Stmt::Record(r) = &parsed.program.stmts[1] else {
+            panic!("expected record");
+        };
+        let roles = r.role.as_ref().expect("@role tags");
+        assert_eq!(roles.len(), 2);
+        assert_eq!(roles[0].enum_name, "Semantic");
+        assert_eq!(roles[0].variant, "EntryPoint");
+        assert_eq!(roles[1].enum_name, "WebRole");
+        assert_eq!(roles[1].variant, "Controller");
+    }
+
+    #[test]
+    fn parses_unqualified_role_with_empty_enum() {
+        // A bare `@role(Variant)` parses with an empty `enum_name`, so the checker can require the
+        // qualifier (E0031) rather than the parser rejecting it.
+        let parsed = parse_str("@attribute\n@role(EntryPoint)\ntype Route = { path: string };\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Record(r) = &parsed.program.stmts[0] else {
+            panic!("expected record");
+        };
+        let roles = r.role.as_ref().expect("@role tags");
+        assert_eq!(roles[0].enum_name, "");
+        assert_eq!(roles[0].variant, "EntryPoint");
     }
 
     #[test]

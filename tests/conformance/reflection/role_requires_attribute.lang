@@ -2,5 +2,5 @@
 // itself an attribute (`@attribute`). Tagging a plain record is a checker error (E0031).
 // expect: error E0031 at 6:6
 // expect: exit 1
-@role(EntryPoint)
+@role(Semantic.EntryPoint)
 type Route = { path: string };

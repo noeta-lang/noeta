@@ -356,7 +356,10 @@ impl<'m> Vm<'m> {
             .map(|r| {
                 Value::object(
                     binding_shape.clone(),
-                    vec![Value::string(&r.target), make_role(&r.role)],
+                    vec![
+                        Value::string(&r.target),
+                        make_role(&r.enum_name, &r.variant),
+                    ],
                 )
             })
             .collect();
@@ -2986,10 +2989,11 @@ fn make_ordering(variant: &str) -> Value {
     Value::enum_value(shape, Vec::new())
 }
 
-/// Build a built-in `Role` enum value (`Role.EntryPoint`, …) with a fresh shape — the payload-free
-/// `roles_of()` counterpart to [`make_ordering`]. Matches the tree-walker's by structural equality.
-fn make_role(variant: &str) -> Value {
-    let shape = Rc::new(Shape::enum_variant("Role", variant, Vec::new(), false));
+/// Build a role enum value (`Semantic.EntryPoint`, `WebRole.Controller`, …) with a fresh shape —
+/// the payload-free `roles_of()` counterpart to [`make_ordering`], for whichever `@semantic` enum a
+/// `@role` tag named. Matches the tree-walker's by structural equality.
+fn make_role(enum_name: &str, variant: &str) -> Value {
+    let shape = Rc::new(Shape::enum_variant(enum_name, variant, Vec::new(), false));
     Value::enum_value(shape, Vec::new())
 }
 
@@ -3194,11 +3198,11 @@ mod tests {
 
     #[test]
     fn roles_of_materializes_the_index() {
-        // `roles_of()` materializes the `(declaration, Role)` index into a `List<RoleBinding>`,
-        // each carrying a fresh `string` target and a `Role` enum value. Exercises `materialize_roles`
+        // `roles_of()` materializes the `(declaration, role)` index into a `List<RoleBinding>`,
+        // each carrying a fresh `string` target and the named enum value. Exercises `materialize_roles`
         // and `make_role` plus the refcount handoff of the freshly-built list/record/enum values.
         let r = run(
-            "@attribute(Function)\n@role(EntryPoint)\ntype Route = { path: string };\n#[Route(\"/x\")]\nfn handle(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Role.EntryPoint => \"${b.target}=entry\", _ => \"other\" };\n}\n",
+            "@attribute(Function)\n@role(Semantic.EntryPoint)\ntype Route = { path: string };\n#[Route(\"/x\")]\nfn handle(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Semantic.EntryPoint => \"${b.target}=entry\", _ => \"other\" };\n}\n",
         );
         assert_eq!(r.stdout, "handle=entry\n");
         assert_eq!(r.exit_code, 0);

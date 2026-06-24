@@ -100,6 +100,7 @@ pub fn check_all(program: &Program) -> Checked {
     let mut checker = Checker::default();
     checker.register_prelude();
     checker.collect(program);
+    checker.check_semantic_roles(program);
     checker.check_program(program);
     Checked {
         diagnostics: checker.diags,
@@ -330,6 +331,11 @@ struct Checker {
     /// the opt-in that replaced the `Attribute` marker trait). The E0029 capability gate and
     /// `attributes_of::<T>()` both consult this set. Attributes are **records only**.
     attributes: HashSet<String>,
+    /// Every enum marked `@semantic` (plus the built-in `Semantic`) — the enums whose fieldless
+    /// variants may be named by a `@role(Enum.Variant)` tag. The role-validation pass consults this
+    /// set, so it runs after `collect` has registered every declaration (a record's `@role` may name
+    /// a `@semantic` enum declared later in the file).
+    semantic_enums: HashSet<String>,
     /// An attribute's optional placement restriction from `@attribute(Method, Function, …)`:
     /// attribute name → the declaration kinds a `#[ThisType(...)]` use may attach to. An attribute
     /// *absent* from this map (bare `@attribute`) is unrestricted. Enforced per use site (E0030);
@@ -380,29 +386,34 @@ impl Checker {
         self.type_kinds
             .insert("Attributed".to_string(), lang_types::TypeKind::Record);
         self.register_type_enum();
-        self.register_role_prelude();
+        self.register_semantic_prelude();
     }
 
-    /// Register the prelude `Role` enum and `RoleBinding` record (P2.7). `Role` is the blessed set
-    /// of architectural roles an attribute confers via `@role(...)` (every variant payload-free, so
-    /// matchable bare); `RoleBinding { target: string, role: Role }` is the element type of
-    /// `roles_of()`'s result. Both register like any prelude type, so a user declaration of the same
-    /// name shadows them and the backends materialize the matching shapes.
-    fn register_role_prelude(&mut self) {
-        let variants = lang_ast::reflect::ROLE_VARIANTS
+    /// Register the prelude `Semantic` enum and `RoleBinding` record. `Semantic` is the language's
+    /// built-in role vocabulary (every variant payload-free, so matchable bare) and is implicitly
+    /// `@semantic`, so `@role(Semantic.EntryPoint)` is always valid; a user promotes any enum to the
+    /// same status with `@semantic`. `RoleBinding { target: string, role: Enum }` is the element type
+    /// of `roles_of()`'s result — `role` is the abstract `Enum` kind because a binding's role may be
+    /// any `@semantic` enum, not a single fixed type. Both register like any prelude type, so a user
+    /// declaration of the same name shadows them and the backends materialize the matching shapes.
+    fn register_semantic_prelude(&mut self) {
+        let variants = lang_ast::reflect::SEMANTIC_VARIANTS
             .iter()
             .map(|name| VariantInfo {
                 name: name.to_string(),
                 fields: Vec::new(),
             })
             .collect();
-        self.types.insert(lang_ast::reflect::ROLE_ENUM.to_string());
+        self.types
+            .insert(lang_ast::reflect::SEMANTIC_ENUM.to_string());
         self.enums
-            .insert(lang_ast::reflect::ROLE_ENUM.to_string(), variants);
+            .insert(lang_ast::reflect::SEMANTIC_ENUM.to_string(), variants);
         self.type_kinds.insert(
-            lang_ast::reflect::ROLE_ENUM.to_string(),
+            lang_ast::reflect::SEMANTIC_ENUM.to_string(),
             lang_types::TypeKind::Enum,
         );
+        self.semantic_enums
+            .insert(lang_ast::reflect::SEMANTIC_ENUM.to_string());
         self.type_kinds.insert(
             lang_ast::reflect::ROLE_BINDING.to_string(),
             lang_types::TypeKind::Record,
@@ -413,10 +424,7 @@ impl Checker {
             lang_ast::reflect::ROLE_BINDING.to_string(),
             vec![
                 ("target".to_string(), Type::String),
-                (
-                    "role".to_string(),
-                    Type::Named(lang_ast::reflect::ROLE_ENUM.to_string(), Vec::new()),
-                ),
+                ("role".to_string(), Type::Kind(lang_types::TypeKind::Enum)),
             ],
         );
     }
@@ -484,7 +492,6 @@ impl Checker {
                         .insert(r.name.clone(), lang_types::TypeKind::Record);
                     self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
                     self.record_attribute(&r.name, r.attribute.as_deref());
-                    self.record_role(r.name_span, r.role.as_deref(), r.attribute.is_some());
                     self.generic_types.insert(
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -523,23 +530,6 @@ impl Checker {
                             .with_help(
                                 "attributes are records (their `#[...]` arguments map to fields); \
                                  declare it as `@attribute type` instead of `class`",
-                            ),
-                        );
-                    }
-                    // A role tags an attribute, and attributes are records only, so `@role` on a
-                    // class is also an error (E0031).
-                    if c.role.is_some() {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::InvalidRole,
-                                c.name_span,
-                                format!(
-                                    "a class cannot carry a role: `{}` must be a record attribute",
-                                    c.name
-                                ),
-                            )
-                            .with_help(
-                                "declare it as an `@attribute type` and tag that with `@role`",
                             ),
                         );
                     }
@@ -603,6 +593,11 @@ impl Checker {
                     self.types.insert(e.name.clone());
                     self.type_kinds
                         .insert(e.name.clone(), lang_types::TypeKind::Enum);
+                    // `@semantic` makes the enum role-eligible (its fieldless variants may be named
+                    // by `@role(Enum.Variant)`); recorded for the post-collect role-validation pass.
+                    if e.semantic.is_some() {
+                        self.semantic_enums.insert(e.name.clone());
+                    }
                     self.record_trait_impls(&e.name, e.derives.iter().map(|(n, _)| n.as_str()));
                     self.generic_types.insert(
                         e.name.clone(),
@@ -2346,24 +2341,70 @@ impl Checker {
         }
     }
 
-    /// Validate a record's `@role(...)` semantic-role tag (P2.7). A role must name **exactly one**
-    /// blessed `Role` variant, and may only tag a record that is itself an attribute (`@attribute`)
-    /// — the role rides on what the attribute attaches to. Each violation is `E0031` at its span; a
-    /// well-formed tag is recorded for the index purely by `reflect::build`, so nothing is stored
-    /// here. `name_span` locates the declaration for the spanless "missing role" case.
-    fn record_role(
+    /// Validate every `@semantic` directive and `@role(Enum.Variant)` tag in the program (`E0031`).
+    /// Runs **after** `collect`, so the full set of `@semantic` enums is known regardless of source
+    /// order. A `@semantic` on a record/class is a misplacement (it marks enums only); a `@role`
+    /// must tag a record that is itself an attribute and must name a fieldless variant of a
+    /// `@semantic` enum. Well-formed tags are surfaced purely by `reflect::build`, so nothing is
+    /// stored here.
+    fn check_semantic_roles(&mut self, program: &Program) {
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Record(r) => {
+                    self.check_misplaced_semantic(r.semantic, &r.name, "record");
+                    self.check_role_tags(r.name_span, r.role.as_deref(), r.attribute.is_some());
+                }
+                Stmt::Class(c) => {
+                    self.check_misplaced_semantic(c.semantic, &c.name, "class");
+                    // A role tags an attribute, and attributes are records only, so `@role` on a
+                    // class is an error (E0031).
+                    if c.role.is_some() {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::InvalidRole,
+                                c.name_span,
+                                format!(
+                                    "a class cannot carry a role: `{}` must be a record attribute",
+                                    c.name
+                                ),
+                            )
+                            .with_help(
+                                "declare it as an `@attribute type` and tag that with `@role`",
+                            ),
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Flag a `@semantic` directive on a non-enum declaration (`E0031`): it marks enums role-eligible
+    /// and has no meaning on a record or class.
+    fn check_misplaced_semantic(&mut self, semantic: Option<Span>, name: &str, kind: &str) {
+        if let Some(span) = semantic {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::InvalidRole,
+                    span,
+                    format!("`@semantic` may only mark an enum, not the {kind} `{name}`"),
+                )
+                .with_help("`@semantic` makes an enum's variants usable as `@role(Enum.Variant)`"),
+            );
+        }
+    }
+
+    /// Validate a record's `@role(Enum.Variant)` tags. Each must name a **fieldless** variant of a
+    /// `@semantic` enum, and may only tag a record that is itself an attribute (`@attribute`) — the
+    /// role rides on what the attribute attaches to. Multiple roles are allowed. Each violation is
+    /// `E0031` at its span; `name_span` locates the declaration for the "not an attribute" case.
+    fn check_role_tags(
         &mut self,
         name_span: Span,
-        role: Option<&[(String, Span)]>,
+        roles: Option<&[lang_ast::RoleTag]>,
         is_attribute: bool,
     ) {
-        let Some(role) = role else { return };
-        let roles_help = || {
-            format!(
-                "the roles are {}",
-                lang_ast::reflect::ROLE_VARIANTS.join(", ")
-            )
-        };
+        let Some(roles) = roles else { return };
         if !is_attribute {
             self.diags.push(
                 Diagnostic::error(
@@ -2374,33 +2415,60 @@ impl Checker {
                 .with_help("also mark the record `@attribute`"),
             );
         }
-        match role {
-            [] => self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::InvalidRole,
-                    name_span,
-                    "`@role` requires exactly one role".to_string(),
-                )
-                .with_help(roles_help()),
-            ),
-            [(variant, span), rest @ ..] => {
-                if !lang_ast::reflect::ROLE_VARIANTS.contains(&variant.as_str()) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::InvalidRole,
-                            *span,
-                            format!("`{variant}` is not a known role"),
-                        )
-                        .with_help(roles_help()),
-                    );
-                }
-                for (_, extra_span) in rest {
-                    self.diags.push(Diagnostic::error(
+        for tag in roles {
+            // A bare `@role(Variant)` carries no enum; a role must name `Enum.Variant`.
+            if tag.enum_name.is_empty() {
+                self.diags.push(
+                    Diagnostic::error(
                         DiagnosticCode::InvalidRole,
-                        *extra_span,
-                        "a declaration has a single role".to_string(),
-                    ));
-                }
+                        tag.span,
+                        format!(
+                            "`@role` requires a qualified `Enum.Variant`, not `{}`",
+                            tag.variant
+                        ),
+                    )
+                    .with_help(
+                        "name a variant of a `@semantic` enum, e.g. `@role(Semantic.EntryPoint)`",
+                    ),
+                );
+                continue;
+            }
+            // The enum must be `@semantic` (the built-in `Semantic` always is).
+            if !self.semantic_enums.contains(&tag.enum_name) {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidRole,
+                        tag.span,
+                        format!("`{}` is not a `@semantic` enum", tag.enum_name),
+                    )
+                    .with_help("mark the enum `@semantic` to use its variants as roles"),
+                );
+                continue;
+            }
+            // The variant must exist on that enum and be fieldless (a payload would have to be
+            // built per use site — genuine comptime, the one thing roles defer).
+            match self
+                .enums
+                .get(&tag.enum_name)
+                .and_then(|vs| vs.iter().find(|v| v.name == tag.variant))
+            {
+                None => self.diags.push(Diagnostic::error(
+                    DiagnosticCode::InvalidRole,
+                    tag.span,
+                    format!("`{}` has no variant `{}`", tag.enum_name, tag.variant),
+                )),
+                Some(variant) if !variant.fields.is_empty() => self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidRole,
+                        tag.span,
+                        format!(
+                            "`{}.{}` carries fields, so it cannot be a role",
+                            tag.enum_name, tag.variant
+                        ),
+                    )
+                    .with_help("a role must be a fieldless (payload-free) variant"),
+                ),
+                Some(_) => {}
             }
         }
     }
@@ -2739,7 +2807,7 @@ impl Checker {
 /// maps to a bool. It resolves to a [`Type::Named`] but is a legal annotation, so the unknown-type
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
-const PRELUDE_TYPES: &[&str] = &["Ordering", "Type", "Role", "RoleBinding"];
+const PRELUDE_TYPES: &[&str] = &["Ordering", "Type", "Semantic", "RoleBinding"];
 
 /// The static type of an attribute-argument literal, or `None` for a bare identifier (which has no
 /// statically-known type, so its assignability to a field is not checked).

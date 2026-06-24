@@ -494,30 +494,76 @@ fn dyn_narrows_to_an_abstract_kind() {
 
 #[test]
 fn role_tag_on_an_attribute_checks_clean() {
-    // A `@role(EntryPoint)` tag on a record that is also `@attribute` is well-formed; `roles_of()`
-    // then type-checks as `List<RoleBinding>` whose `.role` is a `Role` and `.target` a string.
-    let src = "@attribute\n@role(EntryPoint)\ntype Route = { path: string };\nfor b in roles_of() {\n  echo b.target;\n}\n";
+    // A `@role(Semantic.EntryPoint)` tag on a record that is also `@attribute` is well-formed;
+    // `roles_of()` then type-checks as `List<RoleBinding>` whose `.role` is an `Enum` and `.target`
+    // a string.
+    let src = "@attribute\n@role(Semantic.EntryPoint)\ntype Route = { path: string };\nfor b in roles_of() {\n  echo b.target;\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn role_must_be_a_known_variant() {
-    // `@role(...)` must name one of the blessed `Role` variants — an unknown name is E0031.
-    let src = "@attribute\n@role(Bogus)\ntype Route = { path: string };\n";
+    // `@role(Enum.Variant)` must name an existing variant of the `@semantic` enum — an unknown
+    // variant is E0031.
+    let src = "@attribute\n@role(Semantic.Bogus)\ntype Route = { path: string };\n";
+    assert_eq!(codes(src), ["E0031"]);
+}
+
+#[test]
+fn role_must_name_a_semantic_enum() {
+    // A `@role` whose enum is not `@semantic` is E0031 — only a promoted enum's variants are roles.
+    let src = "enum Plain { A; B; }\n@attribute\n@role(Plain.A)\ntype Route = { path: string };\n";
+    assert_eq!(codes(src), ["E0031"]);
+}
+
+#[test]
+fn role_on_a_user_semantic_enum_checks_clean() {
+    // A user enum marked `@semantic` makes its fieldless variants role-eligible (declared after the
+    // attribute that references it — the validation pass runs after all types are collected).
+    let src = "@attribute\n@role(WebRole.Controller)\ntype Route = { path: string };\n@semantic\nenum WebRole { Controller; Middleware; }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn role_must_be_qualified() {
+    // A bare `@role(Variant)` with no enum qualifier is E0031 — a role is always `Enum.Variant`.
+    let src = "@attribute\n@role(EntryPoint)\ntype Route = { path: string };\n";
+    assert_eq!(codes(src), ["E0031"]);
+}
+
+#[test]
+fn role_variant_must_be_fieldless() {
+    // A payload-carrying variant cannot be a role (its payload would need comptime per use site).
+    let src = "@semantic\nenum WebRole { Tagged(name: string); }\n@attribute\n@role(WebRole.Tagged)\ntype Route = { path: string };\n";
+    assert_eq!(codes(src), ["E0031"]);
+}
+
+#[test]
+fn semantic_on_a_record_is_misplaced() {
+    // `@semantic` marks enums; on a record it is a misplacement (E0031).
+    let src = "@semantic\ntype Route = { path: string };\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
 #[test]
 fn role_requires_the_record_be_an_attribute() {
     // A role rides on an attribute, so `@role` without `@attribute` is E0031.
-    let src = "@role(EntryPoint)\ntype Route = { path: string };\n";
+    let src = "@role(Semantic.EntryPoint)\ntype Route = { path: string };\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
 #[test]
+fn multiple_roles_on_one_declaration_check_clean() {
+    // A declaration may carry several roles; each becomes its own binding.
+    let src = "@attribute\n@role(Semantic.EntryPoint, Semantic.TrustBoundary)\ntype Route = { path: string };\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn role_match_is_exhaustive_over_a_wildcard() {
-    // `b.role` is the prelude `Role` enum, matchable by `Role.Variant`; a `_` arm covers the rest.
-    let src = "@attribute\n@role(Sink)\ntype Db = { table: string };\n#[Db(\"users\")]\nfn w(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Role.Sink => \"s\", _ => \"o\" };\n}\n";
+    // `b.role` is the abstract `Enum` kind, an open domain matchable by `Enum.Variant`; a `_` arm
+    // covers the rest.
+    let src = "@attribute\n@role(Semantic.Sink)\ntype Db = { table: string };\n#[Db(\"users\")]\nfn w(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Semantic.Sink => \"s\", _ => \"o\" };\n}\n";
     assert!(codes(src).is_empty());
 }
 

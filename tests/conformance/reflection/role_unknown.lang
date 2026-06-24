@@ -1,7 +1,7 @@
-// A `@role(...)` must name one of the blessed `Role` variants; an unknown name is a checker error
-// (E0031) at the offending role.
+// A `@role(Enum.Variant)` must name an existing fieldless variant of a `@semantic` enum; an unknown
+// variant is a checker error (E0031) at the offending role.
 // expect: error E0031 at 6:7
 // expect: exit 1
 @attribute
-@role(Bogus)
+@role(Semantic.Bogus)
 type Route = { path: string };

@@ -1077,7 +1077,7 @@ impl Interpreter {
                 fields.insert("target".to_string(), Value::Str(r.target.clone()));
                 fields.insert(
                     "role".to_string(),
-                    builtin_enum("Role", &r.role, Vec::new()),
+                    builtin_enum(&r.enum_name, &r.variant, Vec::new()),
                 );
                 Value::Object(Rc::new(ObjectValue {
                     def: binding_def.clone(),

@@ -1,0 +1,10 @@
+// A role must be a fieldless variant — a payload-carrying variant cannot be a role (its payload
+// would have to be built per use site, genuine comptime), so `@role(WebRole.Tagged)` is E0031.
+// expect: error E0031 at 9:7
+// expect: exit 1
+@semantic
+enum WebRole { Tagged(name: string); }
+
+@attribute
+@role(WebRole.Tagged)
+type Route = { path: string };

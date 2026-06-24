@@ -2,7 +2,7 @@
 // error (E0031), mirroring `@attribute` on a class (E0029).
 // expect: error E0031 at 6:7
 // expect: exit 1
-@role(EntryPoint)
+@role(Semantic.EntryPoint)
 class Service {
     name: string
     fn new(n: string): Service { return Service { name: n }; }

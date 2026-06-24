@@ -13,10 +13,10 @@ pub struct ReflectionInfo {
     pub manifest: Vec<AttributeRecord>,
     /// Every declared record/class/enum, in source order.
     pub types: Vec<TypeInfo>,
-    /// The `(declaration, Role)` index (P2.7): for every declaration bearing an attribute that
-    /// carries a `@role(...)` tag, the declaration's name paired with that role's variant name. This
-    /// is the labeled dependency graph `roles_of()` surfaces — built beside the attribute manifest
-    /// from the same AST, so both backends agree by construction.
+    /// The `(declaration, role)` index: for every declaration bearing an attribute that carries a
+    /// `@role(Enum.Variant)` tag, the declaration's name paired with that role's enum and variant.
+    /// This is the labeled dependency graph `roles_of()` surfaces — built beside the attribute
+    /// manifest from the same AST, so both backends agree by construction.
     pub roles: Vec<RoleRecord>,
 }
 
@@ -48,15 +48,18 @@ pub struct AttributeRecord {
     pub args: Vec<AttrArg>,
 }
 
-/// One `(declaration, Role)` entry of the semantic-role index — a declaration's name paired with
-/// the `Role` variant an attribute it bears confers on it. `roles_of()` materializes each into a
-/// `RoleBinding { target: string, role: Role }`.
+/// One `(declaration, role)` entry of the semantic-role index — a declaration's name paired with
+/// the role an attribute it bears confers on it, identified by its `@semantic` enum and variant.
+/// `roles_of()` materializes each into a `RoleBinding { target: string, role: Enum }` whose `role`
+/// is the actual `enum_name.variant` enum value.
 #[derive(Debug, Clone, PartialEq)]
 pub struct RoleRecord {
     /// The annotated declaration's name (the same target keying as the attribute manifest).
     pub target: String,
-    /// The conferred role's `Role.*` variant name (e.g. `EntryPoint`).
-    pub role: String,
+    /// The role's `@semantic` enum name (e.g. `Semantic`, `WebRole`).
+    pub enum_name: String,
+    /// The role's variant name (e.g. `EntryPoint`, `Controller`).
+    pub variant: String,
 }
 
 /// The kind of a declared type.
@@ -93,20 +96,25 @@ pub struct VariantInfo {
 pub fn build(program: &Program) -> ReflectionInfo {
     let mut manifest = Vec::new();
     let mut types = Vec::new();
-    // Attribute name → its `@role(...)` variant, harvested from the attribute records themselves;
-    // joined with the manifest below so every *use* of a role-tagged attribute is indexed.
-    let mut role_of: Vec<(String, String)> = Vec::new();
+    // Attribute name → its `@role(Enum.Variant)` tags, harvested from the attribute records
+    // themselves; joined with the manifest below so every *use* of a role-tagged attribute is
+    // indexed. One entry per (attribute, role) pair — an attribute may carry several roles.
+    let mut role_of: Vec<(String, (String, String))> = Vec::new();
     for stmt in &program.stmts {
         match stmt {
             Stmt::Record(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
                 push_field_attrs(&mut manifest, &decl.name, &decl.fields);
-                // A role tag rides on the attribute record; record its (single, validated) variant
-                // so each declaration the attribute annotates inherits it. A malformed `@role`
-                // never reaches a runnable program (the checker rejects it), so taking the first
-                // listed variant is correct for every program this actually materializes.
-                if let Some(role) = decl.role.as_ref().and_then(|r| r.first()) {
-                    role_of.push((decl.name.clone(), role.0.clone()));
+                // A role tag rides on the attribute record; record each (validated) `Enum.Variant`
+                // so every declaration the attribute annotates inherits it. A malformed `@role`
+                // never reaches a runnable program (the checker rejects it).
+                if let Some(roles) = decl.role.as_ref() {
+                    for tag in roles {
+                        role_of.push((
+                            decl.name.clone(),
+                            (tag.enum_name.clone(), tag.variant.clone()),
+                        ));
+                    }
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
@@ -160,14 +168,15 @@ pub fn build(program: &Program) -> ReflectionInfo {
         }
     }
     // Join the manifest with the role tags: every declaration bearing a role-tagged attribute is
-    // indexed `(target, role)`. Identical pairs (two attributes conferring the same role on one
-    // declaration) are de-duplicated while preserving source order.
+    // indexed `(target, enum, variant)`. Identical entries (two attributes conferring the same role
+    // on one declaration) are de-duplicated while preserving source order.
     let mut roles: Vec<RoleRecord> = Vec::new();
     for entry in &manifest {
-        if let Some((_, role)) = role_of.iter().find(|(name, _)| name == &entry.name) {
+        for (_, (enum_name, variant)) in role_of.iter().filter(|(name, _)| name == &entry.name) {
             let record = RoleRecord {
                 target: entry.target.clone(),
-                role: role.clone(),
+                enum_name: enum_name.clone(),
+                variant: variant.clone(),
             };
             if !roles.contains(&record) {
                 roles.push(record);
@@ -282,20 +291,21 @@ impl TypeRepr {
 /// The `Type` prelude enum's name (the language type `type_of` returns and users match on).
 pub const TYPE_ENUM: &str = "Type";
 
-/// The `Role` prelude enum's name — the small blessed set of architectural roles an attribute may
-/// confer with `@role(...)`, and the type `roles_of()` yields per binding.
-pub const ROLE_ENUM: &str = "Role";
+/// The built-in `Semantic` prelude enum's name — the language's own `@semantic` role vocabulary,
+/// referenced as `@role(Semantic.EntryPoint)`. A user promotes any enum to the same status with the
+/// `@semantic` directive; `Semantic` is implicitly semantic.
+pub const SEMANTIC_ENUM: &str = "Semantic";
 
-/// The `RoleBinding` prelude record's name — `{ target: string, role: Role }`, the element type of
-/// `roles_of()`'s result list.
+/// The `RoleBinding` prelude record's name — `{ target: string, role: Enum }`, the element type of
+/// `roles_of()`'s result list. `role` is typed as the abstract `Enum` kind because a binding's role
+/// may be any `@semantic` enum (the built-in `Semantic` or a user one), not a single fixed type.
 pub const ROLE_BINDING: &str = "RoleBinding";
 
-/// The blessed `Role.*` variants, in declaration order. The single source of truth for the role
-/// vocabulary, shared by the parser-side `@role(...)` validation (checker), the prelude-enum
-/// registration, and both backends' materialization — so a `@role` tag, the enum users match on,
-/// and the value `roles_of()` builds all agree. All are payload-free (a richer parameterized form,
-/// e.g. `Layer(name)`, would need comptime to evaluate per use site and is deferred).
-pub const ROLE_VARIANTS: &[&str] = &[
+/// The built-in `Semantic.*` variants, in declaration order. The single source of truth for the
+/// language's own role vocabulary, shared by the prelude-enum registration and both backends'
+/// materialization. All are payload-free (a richer parameterized form, e.g. `Layer(name)`, would
+/// need comptime to evaluate per use site and is deferred).
+pub const SEMANTIC_VARIANTS: &[&str] = &[
     "EntryPoint",
     "PersistenceBoundary",
     "TrustBoundary",

@@ -148,10 +148,27 @@ pub struct RecordDecl {
     /// `@attribute(Method, Function, …)` — empty (bare `@attribute`) ⇒ attaches anywhere. Attributes
     /// are **records only**; the same directive on a class/enum is a checker error.
     pub attribute: Option<Vec<(String, Span)>>,
-    /// The `@role(Role)` semantic-role tag (P2.7): `None` ⇒ no role; `Some(names)` ⇒ this attribute
-    /// confers the named architectural role on every declaration it annotates. The checker validates
-    /// it (exactly one blessed `Role` variant, on a record that is also `@attribute`) — `E0031`.
-    pub role: Option<Vec<(String, Span)>>,
+    /// The `@role(Enum.Variant)` semantic-role tags: `None` ⇒ no role; `Some(tags)` ⇒ this attribute
+    /// confers each named architectural role on every declaration it annotates. Multiple roles are
+    /// allowed (a thing may be both an `EntryPoint` and a `TrustBoundary`). The checker validates each
+    /// (a fieldless variant of a `@semantic` enum, on a record that is also `@attribute`) — `E0031`.
+    pub role: Option<Vec<RoleTag>>,
+    /// The `@semantic` directive (a misplacement here — it marks *enums* role-eligible). `Some(span)`
+    /// on a record is always a checker error (`E0031`), carried so the checker can point at it.
+    pub semantic: Option<Span>,
+    pub span: Span,
+}
+
+/// One `@role(Enum.Variant)` tag: the enum and variant naming an architectural role an attribute
+/// confers. A bare `@role(Variant)` with no qualifier parses with an empty `enum_name`, so the
+/// checker can report that a role must be a qualified `Enum.Variant` (`E0031`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoleTag {
+    /// The `@semantic` enum the role belongs to (e.g. `Semantic`, `WebRole`); empty if unqualified.
+    pub enum_name: String,
+    /// The variant naming the role (e.g. `EntryPoint`, `Controller`).
+    pub variant: String,
+    /// The whole `Enum.Variant` span, for diagnostics.
     pub span: Span,
 }
 
@@ -274,7 +291,10 @@ pub struct ClassDecl {
     pub attribute: Option<Vec<(String, Span)>>,
     /// A misplaced `@role(...)` tag (attributes — and thus roles — are records only); see
     /// [`RecordDecl::role`]. `Some` here is always a checker error, kept so the checker can report it.
-    pub role: Option<Vec<(String, Span)>>,
+    pub role: Option<Vec<RoleTag>>,
+    /// A misplaced `@semantic` directive (it marks enums; a class is never role-eligible); see
+    /// [`RecordDecl::semantic`]. `Some` is always a checker error, kept so the checker can report it.
+    pub semantic: Option<Span>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.
@@ -318,6 +338,10 @@ pub struct EnumDecl {
     pub derives: Vec<(String, Span)>,
     /// Leading `#[...]` data attributes on the enum.
     pub attrs: Vec<Attribute>,
+    /// The `@semantic` directive: `Some(span)` marks this enum **role-eligible**, so its fieldless
+    /// variants may be referenced by `@role(Enum.Variant)`. `None` for an ordinary enum. The built-in
+    /// `Semantic` enum is implicitly semantic.
+    pub semantic: Option<Span>,
     pub span: Span,
 }
 

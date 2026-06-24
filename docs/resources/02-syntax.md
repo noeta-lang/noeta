@@ -611,33 +611,42 @@ instance = invoke(some_type, "new", args)?;     // construct-by-name can fail  �
 
 Introspection (`type_of`, `attributes_of`) is read-only; invocation is explicitly fallible — an unknown name or wrong arity is a runtime `Result.Err`, never a static error. Runtime reflection is opt-in per type (capability-gated): reflectable types become tree-shaking roots, so unused metadata is eliminated from AOT binaries (architecture §9.8.1).
 
-**Semantic role tags** let an attribute confer a typed architectural *role* on whatever it annotates — declared once on the attribute, inherited by every use. An attribute carries a `@role(...)` directive naming one variant of a small blessed `Role` enum:
+**Semantic role tags** let an attribute confer a typed architectural *role* on whatever it annotates — declared once on the attribute, inherited by every use. The role vocabulary is **user-extensible**: the language ships a built-in `Semantic` enum, and any enum a project marks `@semantic` becomes role-eligible too. An attribute carries a `@role(Enum.Variant)` directive naming a fieldless variant of a `@semantic` enum:
 
 ```
+@semantic                                          // promote a framework's own roles
+enum WebRole { Controller, Middleware, ErrorHandler }
+
 @attribute(Function, Method)
-@role(EntryPoint)                                  // Route confers the EntryPoint role
+@role(Semantic.EntryPoint)                         // a built-in role
 type Route = { path: string };
 
 @attribute
-@role(Sink)
+@role(Semantic.Sink)
 type Persist = { table: string };
 
-enum Role { EntryPoint, PersistenceBoundary, TrustBoundary, Sink, Layer }
+@attribute(Function, Method)
+@role(WebRole.Controller)                          // a framework-specific role
+type Page = { path: string };
+
+// the built-in vocabulary, implicitly @semantic
+@semantic enum Semantic { EntryPoint, PersistenceBoundary, TrustBoundary, Sink, Layer }
 ```
 
-The compiler indexes `(declaration, Role)` at manifest-build time (zero runtime cost), and `roles_of()` surfaces it as a `List<RoleBinding>` (each `{ target: string, role: Role }`) so the dependency graph becomes queryable in architectural terms — "every entry point," "does this trust boundary reach a sink":
+The compiler indexes `(declaration, role)` at manifest-build time (zero runtime cost), and `roles_of()` surfaces it as a `List<RoleBinding>` (each `{ target: string, role: Enum }` — `role` is the abstract `Enum` kind, since a binding's role may be any `@semantic` enum) so the dependency graph becomes queryable in architectural terms — "every entry point," "does this trust boundary reach a sink":
 
 ```
 for binding in roles_of() {
-    match binding.role {
-        Role.EntryPoint => register_entry(binding.target),
-        Role.Sink       => audit_sink(binding.target),
-        _               => skip(),
+    match binding.role {                           // Enum is open, so it needs a `_`
+        Semantic.EntryPoint => register_entry(binding.target),
+        Semantic.Sink       => audit_sink(binding.target),
+        WebRole.Controller  => register_controller(binding.target),
+        _                   => skip(),
     }
 }
 ```
 
-`@role(...)` is declarative — a fixed variant name, **not** a user-evaluated `fn role(): Role` (which would require compile-time execution of user code; the project avoids comptime, exactly as for attribute placement). Only a record marked `@attribute` may carry `@role` (the role rides on what the attribute attaches to; otherwise E0031), and a class/enum cannot (attributes are records only). A *parameterized* role (`Layer(name)`, `Custom(name)`) — whose payload would be evaluated per use site — is deferred as a comptime enhancement. Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
+`@role(...)` is declarative — a fixed `Enum.Variant` name, **not** a user-evaluated `fn role(): Enum` (which would require compile-time execution of user code; the project avoids comptime, exactly as for attribute placement). Multiple roles may tag one declaration (each becomes its own binding). Only a record marked `@attribute` may carry `@role` (the role rides on what the attribute attaches to; otherwise E0031), a class/enum cannot (attributes are records only), and the named variant must be **fieldless** — a *parameterized* role (`Layer(name)`), whose payload would be evaluated per use site, is deferred as a comptime enhancement. `@semantic` marks enums only (on a record/class it is E0031). Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
 
 ---
 

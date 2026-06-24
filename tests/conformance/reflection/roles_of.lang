@@ -1,18 +1,28 @@
-// `roles_of()` surfaces the compiler-built `(declaration, Role)` index as a `List<RoleBinding>`.
-// A `@role(...)` tag on an attribute confers an architectural role on every declaration the
-// attribute annotates; the index is resolved at compile time (closed-world) from the `@role` tags
-// in the manifest, and both backends materialize identical `Role`/`RoleBinding` values from the
-// shared reflection artifact — so the query agrees across the differential by construction.
+// `roles_of()` surfaces the compiler-built `(declaration, role)` index as a `List<RoleBinding>`.
+// A `@role(Enum.Variant)` tag on an attribute confers an architectural role on every declaration
+// the attribute annotates; the index is resolved at compile time (closed-world) from the `@role`
+// tags in the manifest, and both backends materialize identical enum/`RoleBinding` values from the
+// shared reflection artifact — so the query agrees across the differential by construction. The role
+// vocabulary is user-extensible: any enum marked `@semantic` (here `WebRole`) is role-eligible
+// alongside the built-in `Semantic`.
 // expect: stdout "handleUsers=entry"
 // expect: stdout "writeUser=sink"
+// expect: stdout "renderHome=controller"
 // expect: exit 0
+@semantic
+enum WebRole { Controller; Middleware; }
+
 @attribute(Function)
-@role(EntryPoint)
+@role(Semantic.EntryPoint)
 type Route = { path: string };
 
 @attribute
-@role(Sink)
+@role(Semantic.Sink)
 type Persist = { table: string };
+
+@attribute(Function)
+@role(WebRole.Controller)
+type Page = { path: string };
 
 #[Route("/users")]
 fn handleUsers(): int { return 1; }
@@ -20,11 +30,15 @@ fn handleUsers(): int { return 1; }
 #[Persist("users")]
 fn writeUser(): int { return 2; }
 
+#[Page("/")]
+fn renderHome(): int { return 3; }
+
 bindings = roles_of();
 for b in bindings {
     name = match b.role {
-        Role.EntryPoint => "entry",
-        Role.Sink => "sink",
+        Semantic.EntryPoint => "entry",
+        Semantic.Sink => "sink",
+        WebRole.Controller => "controller",
         _ => "other",
     };
     echo "${b.target}=${name}";

@@ -1,0 +1,9 @@
+// `@role(Enum.Variant)` may only name a variant of an enum marked `@semantic`; referencing a plain
+// enum is a checker error (E0031).
+// expect: error E0031 at 6:7
+// expect: exit 1
+@attribute
+@role(Plain.A)
+type Route = { path: string };
+
+enum Plain { A; B; }
