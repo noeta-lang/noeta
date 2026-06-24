@@ -76,15 +76,43 @@ use lang_types::{BuiltinTrait, Type};
 
 mod stdlib;
 
-/// Type-check a program and return every diagnostic found, in source order. An empty result
-/// means the program is well-typed (modulo the deliberate interior-hole tolerance documented
-/// in the module docs).
-pub fn check(program: &Program) -> Vec<Diagnostic> {
+/// The full output of one checker run: the diagnostics **and** the resolved-type map both
+/// backends need. The two were once harvested by separate public entry points ([`check`] and
+/// [`resolve_type_of_sites`]), each re-running the whole checker; a CLI `run` therefore
+/// type-checked the program two-to-three times (the gate plus one re-derivation per backend).
+/// [`check_all`] runs the checker **once** and hands back both, so an orchestrator can gate on
+/// `diagnostics` and thread `type_of_sites` into the backends without re-checking. Because the
+/// map is a pure function of the program, this only changes *how many times* the checker runs,
+/// never the result — the differential oracle is unaffected.
+#[derive(Debug, Clone)]
+pub struct Checked {
+    /// Every diagnostic found, in source order. Empty ⇒ well-typed (modulo the documented
+    /// interior-hole tolerance).
+    pub diagnostics: Vec<Diagnostic>,
+    /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
+    pub type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+}
+
+/// Type-check a program once, returning both its diagnostics and its resolved-type map. This is
+/// the single-pass entry point the hot paths (the CLI, the conformance/differential harnesses,
+/// the `lang-db` `bytecode` query) use so the checker runs exactly once per program.
+pub fn check_all(program: &Program) -> Checked {
     let mut checker = Checker::default();
     checker.register_prelude();
     checker.collect(program);
     checker.check_program(program);
-    checker.diags
+    Checked {
+        diagnostics: checker.diags,
+        type_of_sites: checker.type_of_sites,
+    }
+}
+
+/// Type-check a program and return every diagnostic found, in source order. An empty result
+/// means the program is well-typed (modulo the deliberate interior-hole tolerance documented
+/// in the module docs). A thin projection of [`check_all`] for callers that need only the
+/// diagnostics; the hot paths use [`check_all`] to avoid a second checker run.
+pub fn check(program: &Program) -> Vec<Diagnostic> {
+    check_all(program).diagnostics
 }
 
 /// Resolve the precise static type of every `type_of(value)` whose operand is concretely typed,
@@ -93,12 +121,12 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
 /// (P2.3 fidelity A). Runs the same inference as [`check`] (diagnostics discarded) and is **pure**,
 /// so both backends harvest identical maps on the same program — the differential holds. A
 /// `dyn`/union/un-inferred operand is omitted, leaving that site on the runtime path (fidelity B).
+///
+/// A thin projection of [`check_all`] for callers (a backend's self-deriving default) that have
+/// no precomputed map to thread; orchestrators that already gate with [`check_all`] reuse its
+/// `type_of_sites` instead of calling this.
 pub fn resolve_type_of_sites(program: &Program) -> HashMap<Span, lang_ast::reflect::TypeRepr> {
-    let mut checker = Checker::default();
-    checker.register_prelude();
-    checker.collect(program);
-    checker.check_program(program);
-    checker.type_of_sites
+    check_all(program).type_of_sites
 }
 
 /// Project a checker [`Type`] onto the reflection [`TypeRepr`] for a **concrete** `type_of` operand,

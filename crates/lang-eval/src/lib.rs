@@ -55,6 +55,31 @@ impl TreeWalkBackend {
     pub fn run_with_host(&self, program: &Program, host: Box<dyn lang_stdlib::Host>) -> RunResult {
         Interpreter::with_host(self.seed, host).run(program)
     }
+
+    /// Run against the deterministic sandbox using a **precomputed** `type_of` site map instead
+    /// of re-deriving it. An orchestrator that already type-checked the program (holding a
+    /// [`lang_check::Checked`]) threads its `type_of_sites` here so the checker is not re-run for
+    /// the eval backend. Behavior-identical to [`Backend::run`] — the map is a pure function of
+    /// the program.
+    pub fn run_with_sites(
+        &self,
+        program: &Program,
+        type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
+    ) -> RunResult {
+        Interpreter::new(self.seed).run_with_sites(program, type_of_sites)
+    }
+
+    /// As [`TreeWalkBackend::run_with_host`], but with a **precomputed** `type_of` site map (see
+    /// [`TreeWalkBackend::run_with_sites`]). The CLI uses this to give `lang run` the real host
+    /// while threading the map from its single type-check gate.
+    pub fn run_with_host_sites(
+        &self,
+        program: &Program,
+        host: Box<dyn lang_stdlib::Host>,
+        type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
+    ) -> RunResult {
+        Interpreter::with_host(self.seed, host).run_with_sites(program, type_of_sites)
+    }
 }
 
 impl Default for TreeWalkBackend {
@@ -567,9 +592,18 @@ impl Interpreter {
         }
     }
 
-    fn run(mut self, program: &Program) -> RunResult {
+    fn run(self, program: &Program) -> RunResult {
+        let type_of_sites = lang_check::resolve_type_of_sites(program);
+        self.run_with_sites(program, type_of_sites)
+    }
+
+    fn run_with_sites(
+        mut self,
+        program: &Program,
+        type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
+    ) -> RunResult {
         self.reflection = lang_ast::reflect::build(program);
-        self.type_of_sites = lang_check::resolve_type_of_sites(program);
+        self.type_of_sites = type_of_sites;
         for stmt in &program.stmts {
             match self.exec_stmt(stmt) {
                 Ok(Flow::Normal) => {}

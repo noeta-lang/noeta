@@ -12,7 +12,7 @@
 
 use std::path::Path;
 
-use lang_backend::{Backend, RunResult};
+use lang_backend::RunResult;
 use lang_db::LangDatabase;
 use lang_eval::TreeWalkBackend;
 use lang_span::{Source, SourceId};
@@ -151,12 +151,15 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // backend, and its diagnostics are the program's whole observable result — identical no
     // matter which backend would have run. So a type error is a guaranteed agreement, counted as
     // matched. (The corpus harness separately asserts the diagnostic's code+span.)
-    if !lang_db::checked(&db, src).0.is_empty() {
+    if !lang_db::checked(&db, src).diagnostics.is_empty() {
         report.matched += 1;
         return;
     }
 
-    let tree = TreeWalkBackend::new().run(&parsed.0.program);
+    // Thread the checker's `type_of` site map (already memoized by the gate above) into eval, so
+    // the tree-walker does not re-run the checker — the VM reads it via the `bytecode` query.
+    let sites = lang_db::checked(&db, src).type_of_sites.clone();
+    let tree = TreeWalkBackend::new().run_with_sites(&parsed.0.program, sites);
     match &lang_db::bytecode(&db, src).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {
@@ -194,11 +197,12 @@ fn compare_backends_workspace(
             return;
         }
     };
-    if !lang_db::linked_checked(&db, ws).0.is_empty() {
+    if !lang_db::linked_checked(&db, ws).diagnostics.is_empty() {
         report.matched += 1;
         return;
     }
-    let tree = TreeWalkBackend::new().run(program);
+    let sites = lang_db::linked_checked(&db, ws).type_of_sites.clone();
+    let tree = TreeWalkBackend::new().run_with_sites(program, sites);
     match &lang_db::linked_bytecode(&db, ws).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {

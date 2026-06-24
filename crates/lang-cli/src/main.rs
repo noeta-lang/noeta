@@ -81,9 +81,11 @@ fn main() -> ExitCode {
 /// linked program's `SourceMap`). Returns the process exit code.
 fn run_linked(linked: &Linked) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
-    let type_diagnostics = lang_check::check(&linked.program);
-    if !type_diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, type_diagnostics.iter());
+    // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
+    // needs, so the checker runs exactly once (it previously ran again inside the backend).
+    let checked = lang_check::check_all(&linked.program);
+    if !checked.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return 1;
     }
 
@@ -91,7 +93,11 @@ fn run_linked(linked: &Linked) -> i32 {
     // tokio runtime (M2.3). The conformance differential keeps the deterministic sandbox, so this
     // real-host path is never compared backend-to-backend.
     let result = match lang_runtime::RealHost::new() {
-        Ok(host) => TreeWalkBackend::new().run_with_host(&linked.program, Box::new(host)),
+        Ok(host) => TreeWalkBackend::new().run_with_host_sites(
+            &linked.program,
+            Box::new(host),
+            checked.type_of_sites,
+        ),
         Err(err) => {
             eprintln!("lang: cannot start the runtime: {err}");
             return 1;

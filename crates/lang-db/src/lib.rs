@@ -92,9 +92,15 @@ pub struct Tokens(pub Lexed);
 #[derive(Debug, Clone)]
 pub struct Ast(pub Parsed);
 
-/// Type-checker output: the diagnostics the gradual checker found (empty ⇒ well-typed).
+/// Type-checker output: the checker's diagnostics (empty ⇒ well-typed) **and** the `type_of`
+/// site map, both produced by one `lang_check::check_all` run. Carrying the map here lets the
+/// [`bytecode`] query and the eval path read it from this memoized query instead of each
+/// re-running the checker (the redundant-passes dedup — the map is a pure function of the AST).
 #[derive(Debug, Clone)]
-pub struct Checked(pub Vec<Diagnostic>);
+pub struct Checked {
+    pub diagnostics: Vec<Diagnostic>,
+    pub type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+}
 
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
 #[derive(Debug, Clone)]
@@ -165,16 +171,23 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
 #[salsa::tracked(returns(ref))]
 pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
-    Checked(lang_check::check(&parsed.0.program))
+    let out = lang_check::check_all(&parsed.0.program);
+    Checked {
+        diagnostics: out.diagnostics,
+        type_of_sites: out.type_of_sites,
+    }
 }
 
-/// Compile the AST to a [`Module`], or report the first unsupported construct. Depends on
-/// [`ast`]. (Compilation is independent of [`checked`]; callers gate execution on the checker's
-/// diagnostics, then compile/run only well-typed programs.)
+/// Compile the AST to a [`Module`], or report the first unsupported construct. Depends on [`ast`]
+/// and [`checked`] — the latter only to reuse its `type_of_sites` map (which the compiler needs
+/// to bake full-fidelity `type_of` constants) rather than re-deriving it. Execution is still
+/// gated on `checked`'s diagnostics by the caller; reading the map here does not couple them
+/// semantically, it only avoids a second checker run.
 #[salsa::tracked(returns(ref))]
 pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let parsed = ast(db, src);
-    Bytecode(lang_compiler::compile(&parsed.0.program))
+    let sites = checked(db, src).type_of_sites.clone();
+    Bytecode(lang_compiler::compile_with_sites(&parsed.0.program, sites))
 }
 
 // ---------------------------------------------------------------------------
@@ -265,8 +278,17 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
 #[salsa::tracked(returns(ref))]
 pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     match &linked(db, ws).0 {
-        Ok(program) => Checked(lang_check::check(program)),
-        Err(diags) => Checked(diags.clone()),
+        Ok(program) => {
+            let out = lang_check::check_all(program);
+            Checked {
+                diagnostics: out.diagnostics,
+                type_of_sites: out.type_of_sites,
+            }
+        }
+        Err(diags) => Checked {
+            diagnostics: diags.clone(),
+            type_of_sites: std::collections::HashMap::new(),
+        },
     }
 }
 
@@ -277,7 +299,10 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
 #[salsa::tracked(returns(ref))]
 pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
     match &linked(db, ws).0 {
-        Ok(program) => Bytecode(lang_compiler::compile(program)),
+        Ok(program) => {
+            let sites = linked_checked(db, ws).type_of_sites.clone();
+            Bytecode(lang_compiler::compile_with_sites(program, sites))
+        }
         Err(_) => Bytecode(lang_compiler::compile(&Program {
             stmts: Vec::new(),
             span: Span::empty_at(0),
@@ -321,10 +346,10 @@ mod tests {
         // A well-typed program checks clean; a non-exhaustive match surfaces E0011 through the
         // `checked` query — the front-end gate both backends consult.
         let (db, ok) = db_and_src("echo 1 + 2;\n");
-        assert!(checked(&db, ok).0.is_empty());
+        assert!(checked(&db, ok).diagnostics.is_empty());
 
         let (db, bad) = db_and_src("enum E { A; B; }\necho match E.A { E.A => 1 };\n");
-        let diags = &checked(&db, bad).0;
+        let diags = &checked(&db, bad).diagnostics;
         assert_eq!(diags.len(), 1);
         assert_eq!(diags[0].code.to_string(), "E0011");
     }
@@ -396,7 +421,7 @@ mod tests {
                 .any(|s| matches!(s, lang_ast::Stmt::Use { .. }))
         );
         // The whole-workspace checker and compiler run over the merge.
-        assert!(linked_checked(&db, ws).0.is_empty());
+        assert!(linked_checked(&db, ws).diagnostics.is_empty());
         assert!(linked_bytecode(&db, ws).0.is_ok());
     }
 

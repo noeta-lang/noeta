@@ -22,7 +22,7 @@
 use std::path::{Path, PathBuf};
 
 use lang_diagnostics::Diagnostic;
-use lang_eval::{Backend, TreeWalkBackend};
+use lang_eval::TreeWalkBackend;
 use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId, SourceMap};
@@ -84,13 +84,18 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // errors is rejected before it runs, exactly as the bytecode pipeline gates it. Running
         // it here (not only on the VM path) is what lets a negative type-error case assert via
         // `// expect: error E00xx`, and keeps the tree-walker and VM observably identical.
+        // One `check_all` yields both the gate diagnostics and the `type_of` site map the eval
+        // backend needs, so the checker runs once per case instead of again inside the backend.
+        let mut type_of_sites = std::collections::HashMap::new();
         if stage == Stage::Eval && diagnostics.is_empty() {
-            diagnostics.extend(lang_check::check(&parsed.program));
+            let checked = lang_check::check_all(&parsed.program);
+            diagnostics.extend(checked.diagnostics);
+            type_of_sites = checked.type_of_sites;
         }
 
         // Only evaluate a program that checked cleanly and only when asked to.
         if stage == Stage::Eval && diagnostics.is_empty() {
-            let result = TreeWalkBackend::new().run(&parsed.program);
+            let result = TreeWalkBackend::new().run_with_sites(&parsed.program, type_of_sites);
             stdout = result.stdout;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
@@ -247,15 +252,15 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     // Check/runtime diagnostics may land on a declaration merged in from a sibling module, so they
     // resolve through the source map (by each span's `SourceId`) rather than always against the
     // entry — that is what gives a cross-module error its real file/line/column.
-    let check = lang_check::check(&linked.program);
-    if !check.is_empty() {
+    let checked = lang_check::check_all(&linked.program);
+    if !checked.diagnostics.is_empty() {
         return Outcome {
             stdout: String::new(),
             exit_code: 1,
-            errors: errors_of_mapped(&linked.sources, &check),
+            errors: errors_of_mapped(&linked.sources, &checked.diagnostics),
         };
     }
-    let result = TreeWalkBackend::new().run(&linked.program);
+    let result = TreeWalkBackend::new().run_with_sites(&linked.program, checked.type_of_sites);
     Outcome {
         errors: errors_of_mapped(&linked.sources, &result.diagnostics),
         stdout: result.stdout,

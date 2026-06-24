@@ -82,6 +82,20 @@ fn is_native_module(path: &[String], name: &str) -> bool {
 /// its reserved prototype; (3) compile the top-level program. Splitting (1) from (3) mirrors
 /// the tree-walker, whose type declarations are all evaluated before the driver code runs.
 pub fn compile(program: &Program) -> Result<Module, Unsupported> {
+    compile_with_sites(program, lang_check::resolve_type_of_sites(program))
+}
+
+/// Compile a program using a **precomputed** `type_of` site map instead of re-deriving it.
+///
+/// [`compile`] re-runs the checker (via `resolve_type_of_sites`) to obtain the map, which on a
+/// path that already type-checked the program — the CLI, the `lang-db` `bytecode` query, the
+/// differential harness — means a redundant checker run. An orchestrator that already holds a
+/// [`lang_check::Checked`] threads its `type_of_sites` here so the checker runs only once. The
+/// map is a pure function of the program, so this is behavior-identical to [`compile`].
+pub fn compile_with_sites(
+    program: &Program,
+    type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+) -> Result<Module, Unsupported> {
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
         shapes: Vec::new(),
@@ -91,7 +105,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         tojson_derives: Vec::new(),
         types: HashMap::new(),
         module_globals: HashMap::new(),
-        type_of_sites: lang_check::resolve_type_of_sites(program),
+        type_of_sites,
     };
     module.register_globals(program);
     module.register_types(program);
