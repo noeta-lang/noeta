@@ -259,6 +259,10 @@ pub enum Op {
         method: String,
         args: Box<[Reg]>,
         span: Span,
+        /// Inline-cache slot (index into the VM's per-run cache array). Memoizes the last receiver
+        /// shape → resolved method prototype, so a monomorphic site skips the `(type, method)`
+        /// hashmap lookup (and its two `String` clones). Assigned by the compiler.
+        cache: u32,
     },
     /// `dst = recv[index]` — index access (the `Index` trait / list element access), mirroring
     /// the tree-walker's `eval_index`. On an object it dispatches to the `get` method (pushing a
@@ -308,6 +312,10 @@ pub enum Op {
         obj: Reg,
         field: String,
         span: Span,
+        /// Inline-cache slot (index into the VM's per-run cache array). Memoizes the last receiver
+        /// shape → field slot index, so a monomorphic site skips the linear `slot_of` field scan.
+        /// Assigned by the compiler.
+        cache: u32,
     },
     /// `dst = next_id()` — the deterministic seeded counter (1, 2, 3, …), reproducing the M0
     /// tree-walker's `IdGen` (seed 1).
@@ -616,6 +624,13 @@ pub struct Module {
     /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
     /// synthesizes a structural JSON serializer for `o.to_json()`.
     pub tojson_derives: Vec<String>,
+    /// The number of inline-cache slots the program's cacheable call sites were assigned (one per
+    /// `LoadField`/`CallMethod`). The VM allocates a per-run side array of this length, indexed by
+    /// each op's `cache` field, to memoize the last receiver shape's field-slot / method prototype
+    /// — turning the repeated linear field scan / `(type, method)` hashmap lookup into a pointer
+    /// compare on a monomorphic call site. A pure optimization; zero if the program has no such
+    /// sites.
+    pub cache_slots: u32,
     /// The shared reflection artifact: the attribute manifest plus the registry of every declared
     /// type's reflectable shape. Built from the AST by [`lang_ast::reflect::build`] — the *same*
     /// pure builder the tree-walker uses — so reflection is identical across backends by

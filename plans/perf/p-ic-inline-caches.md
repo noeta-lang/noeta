@@ -1,7 +1,32 @@
 # P-IC — inline caches for member access & trait-method call sites
 
-Status: **planned** (sweep item #2). Source: deferred backlog "Inline caches for member access and
+Status: **DONE** (commit pending; conformance 218 / differential 211 matched / 0 skipped / agree /
+clippy + fmt clean / miri-clean). Source: deferred backlog "Inline caches for member access and
 trait-method call sites (currently a hashmap/shape lookup)" (M1.4, M1.8).
+
+**As built:** a per-run monomorphic inline cache, one slot per `LoadField`/`CallMethod` site. The
+compiler assigns each such op a `cache: u32` slot id (module-global counter → `Module.cache_slots`);
+the VM allocates a per-run `Vec<Option<(Rc<Shape>, u32)>>` side array (a local in `dispatch`, so it
+neither borrows `self` in the loop nor leaks across runs). A hit is a raw shape-pointer compare
+(`Value::object_shape_ptr`, no refcount bump); a miss resolves the slot (`slot_of`) / prototype
+(`(type, method)` hashmap) and refreshes the entry, holding an `Rc<Shape>` clone so the cached
+pointer key can never alias a freed shape. The cache memoizes:
+- **`LoadField`** → field slot index (skips the linear `slot_of` field-name scan).
+- **`CallMethod`** → method prototype (skips the hashmap lookup *and its two `String` clones* — the
+  dominant cost). The `to_json`-derive special case stays ahead of the cache and only clones the
+  shape name on a literal `to_json` site, off the common method-call path.
+
+**Measured (criterion, vs the Phase 0 baseline):**
+| bench | change | note |
+|---|---|---|
+| `vm_member_dispatch` (all n) | **−22% to −23%** (p<0.05) | the win — CallMethod IC |
+| `vm/property_access` | −1.6% (p<0.05) | small; the 2-field scan was already cheap |
+| `vm/dispatch_fib`, `vm/allocation_list`, `vm_accumulate` | within noise (p>0.05) | no regression from the per-run cache alloc (0 slots ⇒ no alloc) |
+
+No observable behavior change ⇒ differential unaffected. The polymorphic-site correctness guard
+(`classes/polymorphic_call_site.lang`) proves the cache refreshes on a shape miss: a field at slot 0
+in one type / slot 1 in another, and a method resolving to different prototypes, accessed through one
+union-typed site that alternates receiver types within a run.
 
 ## The cost
 

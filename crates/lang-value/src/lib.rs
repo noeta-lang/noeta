@@ -458,6 +458,36 @@ impl Value {
         }
     }
 
+    /// The object's shape **identity** as a raw pointer, without bumping the `Rc` refcount — the
+    /// cheap key for an inline-cache hit test (`shape_ptr() == Some(Rc::as_ptr(&cached))`). The
+    /// pointer is only valid while a live reference to the shape exists; the VM's cache holds an
+    /// `Rc<Shape>` clone to keep the cached shape alive, so a hit comparison can never alias a freed
+    /// shape. `None` for a non-object (an enum or a scalar).
+    pub fn object_shape_ptr(self) -> Option<*const Shape> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Object { shape, .. } => Some(Rc::as_ptr(shape)),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// The value in object slot `index` (shape order), if this is an object with that slot. Like
+    /// [`Value::field`] the returned value shares the object's reference (not retained). Lets a
+    /// resolved/cached slot index be read directly, skipping the `slot_of` field-name scan.
+    pub fn slot_at(self, index: usize) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Object { slots, .. } => slots.get(index).copied(),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// The value of object field `name`, if this is an object with that field. The returned
     /// value shares the object's reference (it is *not* retained); the caller must retain it
     /// before storing it as an independent owner.

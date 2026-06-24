@@ -106,6 +106,7 @@ pub fn compile_with_sites(
         types: HashMap::new(),
         module_globals: HashMap::new(),
         type_of_sites,
+        cache_slots: 0,
     };
     module.register_globals(program);
     module.register_types(program);
@@ -126,6 +127,7 @@ pub fn compile_with_sites(
         destructors: module.destructors,
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
+        cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
         // tree-walker uses — so reflection is identical across backends by construction.
         reflection: lang_ast::reflect::build(program),
@@ -171,9 +173,21 @@ struct ModuleCompiler {
     /// backends bake identical full-fidelity `Type` constants (`type_of` fidelity A, P2.3). A site
     /// absent here lowers to the runtime head-constructor op instead.
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// Running count of inline-cache slots assigned so far. Each `LoadField`/`CallMethod` emission
+    /// takes the next id (module-global across all chunks); the total becomes [`Module::cache_slots`],
+    /// sizing the VM's per-run cache array. See [`ModuleCompiler::next_cache_slot`].
+    cache_slots: u32,
 }
 
 impl ModuleCompiler {
+    /// Reserve and return the next inline-cache slot id (module-global across all chunks). Called
+    /// once per `LoadField`/`CallMethod` emission; the final count sizes the VM's per-run cache array.
+    fn next_cache_slot(&mut self) -> u32 {
+        let slot = self.cache_slots;
+        self.cache_slots += 1;
+        slot
+    }
+
     /// Pre-pass: collect every top-level value global (a binding or `fn`/native-module name) and
     /// its mutability, so functions can resolve and assign globals and the capture analysis can
     /// distinguish a global from an enclosing local.
@@ -1301,12 +1315,16 @@ impl<'m> FnCompiler<'m> {
                 Resolved::CelledLocal(reg) => self.code.push(Op::CellGet { dst, cell: reg }),
                 Resolved::Upvalue(index) => self.code.push(Op::UpvalueGet { dst, index }),
                 Resolved::SelfRecv => self.code.push(Op::Move { dst, src: 0 }),
-                Resolved::Field => self.code.push(Op::LoadField {
-                    dst,
-                    obj: 0,
-                    field: name.clone(),
-                    span: *span,
-                }),
+                Resolved::Field => {
+                    let cache = self.module.next_cache_slot();
+                    self.code.push(Op::LoadField {
+                        dst,
+                        obj: 0,
+                        field: name.clone(),
+                        span: *span,
+                        cache,
+                    })
+                }
                 Resolved::Global => self.code.push(Op::LoadGlobal {
                     dst,
                     name: name.clone(),
@@ -1628,12 +1646,14 @@ impl<'m> FnCompiler<'m> {
                 self.expr(arg, r)?;
                 arg_regs.push(r);
             }
+            let cache = self.module.next_cache_slot();
             self.code.push(Op::CallMethod {
                 dst,
                 recv,
                 method: name.clone(),
                 args: arg_regs.into_boxed_slice(),
                 span,
+                cache,
             });
             return Ok(());
         }
@@ -1856,11 +1876,13 @@ impl<'m> FnCompiler<'m> {
         }
         let obj = self.alloc_reg();
         self.expr(receiver, obj)?;
+        let cache = self.module.next_cache_slot();
         self.code.push(Op::LoadField {
             dst,
             obj,
             field: name.to_string(),
             span,
+            cache,
         });
         Ok(())
     }

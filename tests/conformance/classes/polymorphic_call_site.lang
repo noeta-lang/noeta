@@ -1,0 +1,36 @@
+// A single method-call site and a single field-access site that each see *different* shapes across
+// calls — the case an inline cache must get right by refreshing on a shape miss (P-IC). `legs` sits
+// at slot 0 in `Dog` but slot 1 in `Bird`, and `sound` resolves to a different prototype per type,
+// so a stale cache would read the wrong slot / call the wrong method. The receivers alternate
+// Dog→Bird→Dog through one union-typed parameter, so the site is genuinely polymorphic within a run.
+// Both backends agree (the tree-walker has no cache, so it is the oracle).
+// expect: stdout "woof"
+// expect: stdout "tweet"
+// expect: stdout "woof"
+// expect: stdout "4"
+// expect: stdout "2"
+// expect: exit 0
+class Dog {
+    legs: int
+    fn sound(): string { return "woof"; }
+}
+
+class Bird {
+    wings: int
+    legs: int
+    fn sound(): string { return "tweet"; }
+}
+
+fn speak(a: Dog | Bird): string {
+    return a.sound();
+}
+
+fn legcount(a: Dog | Bird): int {
+    return a.legs;
+}
+
+echo speak(Dog { legs: 4 });
+echo speak(Bird { wings: 7, legs: 2 });
+echo speak(Dog { legs: 4 });
+echo legcount(Dog { legs: 4 });
+echo legcount(Bird { wings: 7, legs: 2 });

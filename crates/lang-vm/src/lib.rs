@@ -1068,6 +1068,13 @@ impl<'m> Vm<'m> {
         // Copy the shared module reference out so the loop can index prototypes without
         // borrowing `self` — leaving `self.stdout`/`globals`/`diagnostics` free to mutate.
         let module = self.module;
+        // Per-run inline caches, one slot per cacheable call site (`LoadField`/`CallMethod`),
+        // indexed by the op's `cache` field. Each entry memoizes the last receiver shape and the
+        // resolved field-slot / method prototype; a hit is a pointer compare against the cached
+        // shape, skipping the field-name scan / `(type, method)` hashmap lookup. A local (not a
+        // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
+        // `Rc<Shape>` keeps the cached shape alive, so the pointer key can never alias a freed shape.
+        let mut caches: Vec<Option<(Rc<Shape>, u32)>> = vec![None; module.cache_slots as usize];
         loop {
             let top = frames.len() - 1;
             let chunk = &module.protos[frames[top].proto as usize];
@@ -1423,6 +1430,7 @@ impl<'m> Vm<'m> {
                     method,
                     args,
                     span,
+                    cache,
                 } => {
                     let v = frames[top].regs[*recv as usize];
                     // `json.parse(...)` — a Ring 2 native module function call, dispatched before
@@ -1439,26 +1447,46 @@ impl<'m> Vm<'m> {
                     // An object dispatches to a user method through the type's method table;
                     // anything else falls to the built-in `count`/`enumerate` methods.
                     if v.is_object() {
-                        let type_name = v.shape().unwrap().name.clone();
                         // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written
                         // `to_json`) synthesizes a structural JSON string — a pure value
-                        // computation, so it is produced inline rather than via a call frame.
-                        if method == "to_json"
-                            && args.is_empty()
-                            && self.tojson_derives.contains(&type_name)
-                        {
-                            let json = Value::string(&v.to_json());
-                            set_reg(&mut frames[top].regs, *dst, json);
-                            frames[top].pc += 1;
-                            continue;
+                        // computation, so it is produced inline rather than via a call frame. Only a
+                        // literal `to_json` site reaches here, so the shape clone stays off the common
+                        // method-call path.
+                        if method == "to_json" && args.is_empty() {
+                            let type_name = v.shape().unwrap().name.clone();
+                            if self.tojson_derives.contains(&type_name) {
+                                let json = Value::string(&v.to_json());
+                                set_reg(&mut frames[top].regs, *dst, json);
+                                frames[top].pc += 1;
+                                continue;
+                            }
                         }
-                        let Some(&proto) = self.methods.get(&(type_name.clone(), method.clone()))
-                        else {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!("type `{type_name}` has no method `{method}`"),
-                            ));
+                        // Inline cache: a hit (the receiver's shape pointer matches the cached one)
+                        // gives the resolved prototype directly, skipping the `(type, method)` hashmap
+                        // lookup and its two `String` clones. The hit check avoids bumping the shape
+                        // refcount (raw pointer compare); only a miss clones the shape into the cache.
+                        let ci = *cache as usize;
+                        let shape_ptr = v.object_shape_ptr();
+                        let hit = match &caches[ci] {
+                            Some((cs, p)) if Some(Rc::as_ptr(cs)) == shape_ptr => Some(*p),
+                            _ => None,
+                        };
+                        let proto = match hit {
+                            Some(proto) => proto,
+                            None => {
+                                let shape = v.shape().unwrap();
+                                let Some(&proto) =
+                                    self.methods.get(&(shape.name.clone(), method.clone()))
+                                else {
+                                    return Err(self.error(
+                                        DiagnosticCode::UnknownName,
+                                        *span,
+                                        format!("type `{}` has no method `{method}`", shape.name),
+                                    ));
+                                };
+                                caches[ci] = Some((shape, proto));
+                                proto
+                            }
                         };
                         let chunk = &module.protos[proto as usize];
                         // The prototype takes the receiver in register 0 and the user arguments
@@ -1917,9 +1945,30 @@ impl<'m> Vm<'m> {
                     obj,
                     field,
                     span,
+                    cache,
                 } => {
                     let v = frames[top].regs[*obj as usize];
-                    match v.field(field) {
+                    // Inline cache: a hit (the receiver's shape pointer matches the cached one) reads
+                    // the memoized slot directly; a miss resolves `slot_of` and refreshes the cache.
+                    // The hit check returns an owned slot so the `&caches[ci]` borrow ends before the
+                    // miss path mutates the same entry.
+                    let ci = *cache as usize;
+                    let hit = match &caches[ci] {
+                        Some((cs, slot)) if v.object_shape_ptr() == Some(Rc::as_ptr(cs)) => {
+                            Some(*slot as usize)
+                        }
+                        _ => None,
+                    };
+                    let cached_slot = match hit {
+                        Some(slot) => Some(slot),
+                        None => match v.shape() {
+                            Some(sh) => sh.slot_of(field).inspect(|&s| {
+                                caches[ci] = Some((sh.clone(), s as u32));
+                            }),
+                            None => None,
+                        },
+                    };
+                    match cached_slot.and_then(|s| v.slot_at(s)) {
                         Some(value) => {
                             retain(value);
                             set_reg(&mut frames[top].regs, *dst, value);
