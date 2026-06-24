@@ -575,6 +575,29 @@ fn attribute_on_a_method_checks_clean() {
 }
 
 #[test]
+fn structured_attribute_args_check_clean() {
+    // A composite literal tree (list of enums, map, set, nested record) type-checks recursively
+    // against the attribute's field types.
+    let src = "enum Method { Get; Post; }\ntype Limits = { rps: int };\n@attribute\ntype Endpoint = { methods: List<Method>, limits: Map<string, int>, tags: Set<string>, fallback: Limits };\n#[Endpoint(methods: [Method.Get, Method.Post], limits: { \"r\": 1 }, tags: #{\"a\"}, fallback: Limits { rps: 1 })]\ntype Users = { id: int };\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn structured_attribute_arg_nested_mismatch() {
+    // A wrong element type inside a composite argument is caught recursively (E0007): a string in a
+    // `List<int>` field.
+    let src = "@attribute\ntype Nums = { xs: List<int> };\n#[Nums(xs: [1, \"two\"])]\ntype Page = { id: int };\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn structured_attribute_arg_record_field_mismatch() {
+    // A nested record literal's field value is checked against the declared record field type.
+    let src = "type Limits = { rps: int };\n@attribute\ntype Endpoint = { fallback: Limits };\n#[Endpoint(fallback: Limits { rps: \"x\" })]\ntype Page = { id: int };\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
 fn invoke_checks_clean_and_yields_a_result() {
     // `invoke(recv, name, args)` synthesizes `Result<dyn, dyn>`, so its value matches `Ok`/`Err`
     // arms without diagnostics. The name/args are runtime-checked (no static constraint here).

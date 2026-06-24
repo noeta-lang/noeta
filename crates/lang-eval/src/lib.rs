@@ -2974,15 +2974,52 @@ fn fresh_type_def(name: &str, fields: &[String], is_record: bool) -> TypeDef {
     }
 }
 
-/// Convert a manifest attribute-argument literal to a tree-walker value. An identifier argument has
-/// no runtime value of its own, so it materializes as its name (a string) — matching the VM.
+/// Convert a manifest attribute-argument literal tree to a tree-walker value, recursing through the
+/// collection and nominal literals. A type reference materializes as the reflection `Type` ADT
+/// (`Type.Named(name, [])`); a set is canonicalized exactly like the runtime `to_set` (sorted/deduped
+/// when orderable, else insertion order). The VM's `attr_value_to_vm` builds the matching values the
+/// same way, so the materialized attribute agrees across the differential by construction.
 fn attr_value_to_eval(value: &lang_ast::AttrValue) -> Value {
+    use lang_ast::AttrValue as A;
     match value {
-        lang_ast::AttrValue::Str(s) => Value::Str(s.clone()),
-        lang_ast::AttrValue::Int(n) => Value::Int(*n),
-        lang_ast::AttrValue::Float(f) => Value::Float(*f),
-        lang_ast::AttrValue::Bool(b) => Value::Bool(*b),
-        lang_ast::AttrValue::Ident(name) => Value::Str(name.clone()),
+        A::Str(s) => Value::Str(s.clone()),
+        A::Int(n) => Value::Int(*n),
+        A::Float(f) => Value::Float(*f),
+        A::Bool(b) => Value::Bool(*b),
+        A::List(items) => Value::List(Rc::new(items.iter().map(attr_value_to_eval).collect())),
+        A::Set(items) => {
+            let vals: Vec<Value> = items.iter().map(attr_value_to_eval).collect();
+            Value::Set(Rc::new(canonical_set(&vals).unwrap_or(vals)))
+        }
+        A::Map(entries) => {
+            let mut map = BTreeMap::new();
+            for (k, v) in entries {
+                map.insert(k.clone(), attr_value_to_eval(v));
+            }
+            Value::Map(Rc::new(map))
+        }
+        A::Enum {
+            enum_name,
+            variant,
+            args,
+        } => builtin_enum(
+            enum_name,
+            variant,
+            args.iter().map(attr_value_to_eval).collect(),
+        ),
+        A::Record { type_name, fields } => {
+            let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+            let def = Rc::new(fresh_type_def(type_name, &names, true));
+            let f: BTreeMap<String, Value> = fields
+                .iter()
+                .map(|(n, v)| (n.clone(), attr_value_to_eval(v)))
+                .collect();
+            Value::Object(Rc::new(ObjectValue { def, fields: f }))
+        }
+        A::TypeRef(name) => build_type_value(&lang_ast::reflect::TypeRepr::Named(
+            name.clone(),
+            Vec::new(),
+        )),
     }
 }
 

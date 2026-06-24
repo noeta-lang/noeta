@@ -1,0 +1,45 @@
+// Attribute arguments are a constant literal tree: lists, maps, sets, enum values, and nested
+// record literals compose recursively and round-trip through the manifest into a correctly-built
+// attribute instance. Both backends materialize the same value from the shared reflection artifact,
+// so the read-back agrees across the differential by construction.
+// expect: stdout "/users"
+// expect: stdout "GET"
+// expect: stdout "POST"
+// expect: stdout "100"
+// expect: stdout "2"
+// expect: stdout "x"
+// expect: stdout "y"
+// expect: exit 0
+enum Method { Get; Post; }
+
+type Limits = { rps: int, burst: int };
+
+@attribute
+type Endpoint = {
+    path: string,
+    methods: List<Method>,
+    limits: Map<string, int>,
+    tags: Set<string>,
+    fallback: Limits,
+};
+
+#[Endpoint(
+    path: "/users",
+    methods: [Method.Get, Method.Post],
+    limits: { "rps": 100, "burst": 200 },
+    tags: #{"y", "x"},
+    fallback: Limits { rps: 1, burst: 2 },
+)]
+type Users = { id: int };
+
+for e in attributes_of::<Endpoint>() {
+    echo e.value.path;
+    for m in e.value.methods {
+        echo match m { Method.Get => "GET", Method.Post => "POST", _ => "?" };
+    }
+    echo e.value.limits["rps"];
+    echo e.value.fallback.burst;
+    for t in e.value.tags {
+        echo t;
+    }
+}

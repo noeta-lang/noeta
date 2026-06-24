@@ -30,9 +30,9 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
-    Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl, ForPattern,
-    ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, RoleTag, Stmt, StrPart,
-    TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    AttrValue, Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl,
+    ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, RoleTag, Stmt,
+    StrPart, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -105,6 +105,139 @@ type DirectiveArg = ((String, Span), Option<(String, Span)>);
 enum UseTail {
     Seg(String, Span),
     Group(Vec<UseName>),
+}
+
+/// Fold a parsed expression in attribute-argument position into a constant [`AttrValue`] tree, or
+/// describe (message + span) why it is not a literal. Attribute arguments must materialize at
+/// manifest-build time without running user code, so only literals and compositions of literals are
+/// accepted — never an operator, a general call, a closure, or a name read of runtime state. Sharing
+/// the expression grammar (rather than a parallel literal parser) keeps the two in lockstep.
+fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
+    let not_literal = || {
+        (
+            "attribute arguments must be literal values (scalars, lists, maps, sets, enum values, \
+             record literals, or a type name)"
+                .to_string(),
+            expr.span(),
+        )
+    };
+    match expr {
+        Expr::Str { value, .. } => Ok(AttrValue::Str(value.clone())),
+        Expr::Int { value, .. } => Ok(AttrValue::Int(*value)),
+        Expr::Float { value, .. } => Ok(AttrValue::Float(*value)),
+        Expr::Bool { value, .. } => Ok(AttrValue::Bool(*value)),
+        Expr::List { items, .. } => Ok(AttrValue::List(
+            items
+                .iter()
+                .map(expr_to_attr_value)
+                .collect::<Result<_, _>>()?,
+        )),
+        Expr::Map { entries, .. } => {
+            let mut out = Vec::with_capacity(entries.len());
+            for (key, value) in entries {
+                let key = match key {
+                    Expr::Str { value, .. } => value.clone(),
+                    other => {
+                        return Err((
+                            "attribute map keys must be string literals".to_string(),
+                            other.span(),
+                        ));
+                    }
+                };
+                out.push((key, expr_to_attr_value(value)?));
+            }
+            Ok(AttrValue::Map(out))
+        }
+        // A set literal `#{a, b, c}` desugars to `[a, b, c].to_set()`; recover the elements.
+        Expr::Call { callee, args, .. } if args.is_empty() && set_sugar_items(callee).is_some() => {
+            let items = set_sugar_items(callee).expect("guard checked");
+            Ok(AttrValue::Set(
+                items
+                    .iter()
+                    .map(expr_to_attr_value)
+                    .collect::<Result<_, _>>()?,
+            ))
+        }
+        // A qualified enum value `Enum.Variant` (fieldless).
+        Expr::Member { receiver, name, .. } => match &**receiver {
+            Expr::Ident {
+                name: enum_name, ..
+            } => Ok(AttrValue::Enum {
+                enum_name: enum_name.clone(),
+                variant: name.clone(),
+                args: Vec::new(),
+            }),
+            _ => Err(not_literal()),
+        },
+        // A constructor call: `Enum.Variant(args)` or a built-in `Ok`/`Err`/`some` constructor.
+        Expr::Call { callee, args, .. } => {
+            let conv: Vec<AttrValue> = args
+                .iter()
+                .map(expr_to_attr_value)
+                .collect::<Result<_, _>>()?;
+            match &**callee {
+                Expr::Member {
+                    receiver,
+                    name: variant,
+                    ..
+                } => match &**receiver {
+                    Expr::Ident {
+                        name: enum_name, ..
+                    } => Ok(AttrValue::Enum {
+                        enum_name: enum_name.clone(),
+                        variant: variant.clone(),
+                        args: conv,
+                    }),
+                    _ => Err(not_literal()),
+                },
+                Expr::Ident { name, .. } if matches!(name.as_str(), "Ok" | "Err" | "some") => {
+                    let enum_name = if name == "some" { "Option" } else { "Result" };
+                    Ok(AttrValue::Enum {
+                        enum_name: enum_name.to_string(),
+                        variant: name.clone(),
+                        args: conv,
+                    })
+                }
+                _ => Err(not_literal()),
+            }
+        }
+        // A record literal `Name { field: value }` (no spread — every field is given explicitly).
+        Expr::Object(lit) if lit.spread.is_none() => {
+            let mut fields = Vec::with_capacity(lit.fields.len());
+            for field in &lit.fields {
+                fields.push((field.name.clone(), expr_to_attr_value(&field.value)?));
+            }
+            Ok(AttrValue::Record {
+                type_name: lit.type_name.clone(),
+                fields,
+            })
+        }
+        // A bare name: `none` is the nullary `Option` constructor; anything else is a type reference.
+        Expr::Ident { name, .. } => {
+            if name == "none" {
+                Ok(AttrValue::Enum {
+                    enum_name: "Option".to_string(),
+                    variant: "none".to_string(),
+                    args: Vec::new(),
+                })
+            } else {
+                Ok(AttrValue::TypeRef(name.clone()))
+            }
+        }
+        _ => Err(not_literal()),
+    }
+}
+
+/// If `callee` is the `[..].to_set` member of the set-literal desugar (`#{a, b}` → `[a, b].to_set()`),
+/// return the underlying list elements.
+fn set_sugar_items(callee: &Expr) -> Option<&[Expr]> {
+    match callee {
+        Expr::Member { receiver, name, .. } if name == "to_set" => match &**receiver {
+            Expr::List { items, .. } => Some(items),
+            _ => None,
+        },
+        _ => None,
+    }
 }
 
 /// Project a directive's arguments onto their head identifiers (dropping any `.`-qualifier), for the
@@ -1244,35 +1377,29 @@ where
             .or_not()
             .map(Option::unwrap_or_default);
 
-        // A literal value in attribute-argument position: a string/int/float/bool, or a bare
-        // identifier. Attribute arguments construct the attribute record, so they are the
-        // all-fields-literal subset, not arbitrary expressions. Defined here (above `fn_decl`) so
-        // attributes can lead a function/method declaration as well as a type declaration.
-        let attr_value = choice((
-            just(T::StringLit).map_with(move |_, e| {
-                let span = ctx.to_span(e.span());
-                let raw = ctx.source.slice(span);
-                let value = raw
-                    .strip_prefix('"')
-                    .and_then(|r| r.strip_suffix('"'))
-                    .unwrap_or(raw)
-                    .to_string();
-                lang_ast::AttrValue::Str(value)
-            }),
-            just(T::FloatLit).map_with(move |_, e| {
-                lang_ast::AttrValue::Float(parse_float_literal(
-                    ctx.source.slice(ctx.to_span(e.span())),
-                ))
-            }),
-            just(T::IntLit).map_with(move |_, e| {
-                lang_ast::AttrValue::Int(
-                    parse_int_literal(ctx.source.slice(ctx.to_span(e.span()))).unwrap_or(0),
-                )
-            }),
-            just(T::TrueKw).map(|_| lang_ast::AttrValue::Bool(true)),
-            just(T::FalseKw).map(|_| lang_ast::AttrValue::Bool(false)),
-            id.clone().map(|(name, _)| lang_ast::AttrValue::Ident(name)),
-        ));
+        // A literal value in attribute-argument position. Attribute arguments construct the attribute
+        // record at manifest-build time without running user code, so they are the constant
+        // literal-tree subset, not arbitrary expressions. We parse the **full expression grammar**
+        // (so list/map/set/record/enum literals reuse one grammar — no parallel literal parser to
+        // drift) and then fold the result into an [`AttrValue`] tree, rejecting any non-literal node.
+        // Defined here (above `fn_decl`) so attributes can lead a function/method declaration as well
+        // as a type declaration.
+        let attr_value = expr.clone().map_with(move |e, ext| {
+            match expr_to_attr_value(&e) {
+                Ok(value) => value,
+                Err((message, span)) => {
+                    ctx.diags.borrow_mut().push(Diagnostic::error(
+                        DiagnosticCode::UnexpectedToken,
+                        span,
+                        message,
+                    ));
+                    // A non-literal never reaches a runnable program; a defensive placeholder keeps
+                    // parsing going so every offending argument is reported in one pass.
+                    let _ = ext;
+                    lang_ast::AttrValue::Bool(false)
+                }
+            }
+        });
         // An attribute argument: optionally named (`ttl: 60`), then a literal value.
         let attr_arg = id
             .clone()

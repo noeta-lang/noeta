@@ -1439,18 +1439,8 @@ impl Checker {
                 continue;
             }
             filled[i] = true;
-            if let Some(vty) = attr_value_type(&arg.value)
-                && !self.arg_assignable(&vty, &fields[i].1)
-            {
-                self.diags.push(Diagnostic::error(
-                    DiagnosticCode::TypeMismatch,
-                    arg.span,
-                    format!(
-                        "value of type `{vty}` is not assignable to field `{}: {}`",
-                        fields[i].0, fields[i].1
-                    ),
-                ));
-            }
+            let (fname, fty) = fields[i].clone();
+            self.check_attr_value(&arg.value, &fty, &fname, arg.span);
         }
         for (i, (fname, fty)) in fields.iter().enumerate() {
             if !filled[i] {
@@ -1462,6 +1452,97 @@ impl Checker {
                         attr.name
                     ),
                 ));
+            }
+        }
+    }
+
+    /// Recursively check an attribute-argument literal tree against the field type it must construct
+    /// (`E0007` on a mismatch). Descends into composite literals — a list/set against `List<T>`/
+    /// `Set<T>` checks each element against `T`, a map against `Map<K,V>` checks each value against
+    /// `V`, a record literal against a record type checks each named field — and validates the
+    /// nominal cases (enum value, type reference) by assignability. A `dyn`/`Unknown` expectation
+    /// imposes nothing (the interior-hole tolerance the rest of the checker keeps). `field`/`span`
+    /// locate the diagnostic.
+    fn check_attr_value(&mut self, value: &AttrValue, expected: &Type, field: &str, span: Span) {
+        if matches!(expected, Type::Dyn | Type::Unknown) {
+            return;
+        }
+        let synth = match value {
+            AttrValue::Str(_) => Type::String,
+            AttrValue::Int(_) => Type::Int,
+            AttrValue::Float(_) => Type::Float,
+            AttrValue::Bool(_) => Type::Bool,
+            AttrValue::List(items) => {
+                if let Type::List(elem) = expected {
+                    for item in items {
+                        self.check_attr_value(item, elem, field, span);
+                    }
+                    return;
+                }
+                Type::List(Box::new(Type::Dyn))
+            }
+            AttrValue::Set(items) => {
+                if let Type::Set(elem) = expected {
+                    for item in items {
+                        self.check_attr_value(item, elem, field, span);
+                    }
+                    return;
+                }
+                Type::Set(Box::new(Type::Dyn))
+            }
+            AttrValue::Map(entries) => {
+                if let Type::Map(_, vty) = expected {
+                    for (_, val) in entries {
+                        self.check_attr_value(val, vty, field, span);
+                    }
+                    return;
+                }
+                Type::Map(Box::new(Type::String), Box::new(Type::Dyn))
+            }
+            AttrValue::Record { type_name, fields } => {
+                let rec_ty = Type::Named(type_name.clone(), Vec::new());
+                if self.assignable(&rec_ty, expected) {
+                    self.check_attr_record_fields(type_name, fields, span);
+                    return;
+                }
+                rec_ty
+            }
+            AttrValue::Enum { enum_name, .. } => match enum_name.as_str() {
+                // The built-in `Option`/`Result` constructors carry their lattice type so they check
+                // against an `?T`/`Result<…>` field; a user enum is its nominal type.
+                "Option" => Type::Option(Box::new(Type::Dyn)),
+                "Result" => Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn)),
+                _ => Type::Named(enum_name.clone(), Vec::new()),
+            },
+            // A type reference is a value of the reflection `Type` enum.
+            AttrValue::TypeRef(_) => {
+                Type::Named(lang_ast::reflect::TYPE_ENUM.to_string(), Vec::new())
+            }
+        };
+        if !self.assignable(&synth, expected) {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("value of type `{synth}` is not assignable to field `{field}: {expected}`"),
+            ));
+        }
+    }
+
+    /// Check a record-literal attribute argument's named fields against the declared record's field
+    /// types. Unknown field names and missing fields are tolerated here (the lenient interior
+    /// posture); only the values supplied for declared fields are type-checked.
+    fn check_attr_record_fields(
+        &mut self,
+        type_name: &str,
+        fields: &[(String, AttrValue)],
+        span: Span,
+    ) {
+        let Some(decl) = self.records.get(type_name).cloned() else {
+            return;
+        };
+        for (fname, fval) in fields {
+            if let Some((_, fty)) = decl.iter().find(|(n, _)| n == fname) {
+                self.check_attr_value(fval, fty, fname, span);
             }
         }
     }
@@ -2808,18 +2889,6 @@ impl Checker {
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
 const PRELUDE_TYPES: &[&str] = &["Ordering", "Type", "Semantic", "RoleBinding"];
-
-/// The static type of an attribute-argument literal, or `None` for a bare identifier (which has no
-/// statically-known type, so its assignability to a field is not checked).
-fn attr_value_type(value: &AttrValue) -> Option<Type> {
-    match value {
-        AttrValue::Str(_) => Some(Type::String),
-        AttrValue::Int(_) => Some(Type::Int),
-        AttrValue::Float(_) => Some(Type::Float),
-        AttrValue::Bool(_) => Some(Type::Bool),
-        AttrValue::Ident(_) => None,
-    }
-}
 
 /// The built-in trait an operand of `op` must satisfy, for the trait-backed operators: arithmetic
 /// (`+ - * /` → `Add`/`Sub`/`Mul`/`Div`) and ordering (`< <= > >=` → `Comparable`). `%` (no trait —

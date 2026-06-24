@@ -1,0 +1,9 @@
+// Attribute arguments must materialize without running user code, so a non-literal (here an
+// arithmetic expression) is rejected at parse time (E0003) rather than silently evaluated.
+// expect: error E0003 at 8:10
+// expect: exit 1
+@attribute
+type Foo = { n: int };
+
+#[Foo(n: 1 + 2)]
+type Bar = { id: int };

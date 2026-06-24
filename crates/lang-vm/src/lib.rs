@@ -3072,17 +3072,63 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
     Value::enum_value(shape, data)
 }
 
-/// Convert a manifest attribute-argument literal to a VM value (for materializing an attribute
-/// record). An identifier argument has no runtime value of its own, so it materializes as its name
-/// (a string) — the same choice the tree-walker makes.
+/// Convert a manifest attribute-argument literal tree to a VM value (for materializing an attribute
+/// record), recursing through the collection and nominal literals. A type reference materializes as
+/// the reflection `Type` ADT (`Type.Named(name, [])`); a set is canonicalized exactly like the
+/// runtime `to_set`. Mirrors the tree-walker's `attr_value_to_eval` element-for-element, so the
+/// materialized attribute agrees across the differential by construction.
 fn attr_value_to_vm(value: &lang_ast::AttrValue) -> Value {
+    use lang_ast::AttrValue as A;
     match value {
-        lang_ast::AttrValue::Str(s) => Value::string(s),
-        lang_ast::AttrValue::Int(n) => Value::int(*n),
-        lang_ast::AttrValue::Float(f) => Value::float(*f),
-        lang_ast::AttrValue::Bool(b) => Value::bool(*b),
-        lang_ast::AttrValue::Ident(name) => Value::string(name),
+        A::Str(s) => Value::string(s),
+        A::Int(n) => Value::int(*n),
+        A::Float(f) => Value::float(*f),
+        A::Bool(b) => Value::bool(*b),
+        A::List(items) => Value::list(items.iter().map(attr_value_to_vm).collect()),
+        A::Set(items) => {
+            let vals: Vec<Value> = items.iter().map(attr_value_to_vm).collect();
+            Value::set(canonical_set(&vals).unwrap_or(vals))
+        }
+        A::Map(entries) => {
+            let mut map = BTreeMap::new();
+            for (k, v) in entries {
+                map.insert(k.clone(), attr_value_to_vm(v));
+            }
+            Value::map(map)
+        }
+        A::Enum {
+            enum_name,
+            variant,
+            args,
+        } => make_attr_enum(
+            enum_name,
+            variant,
+            args.iter().map(attr_value_to_vm).collect(),
+        ),
+        A::Record { type_name, fields } => {
+            let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+            let shape = Rc::new(Shape::object(ShapeKind::Record, type_name, names));
+            let values: Vec<Value> = fields.iter().map(|(_, v)| attr_value_to_vm(v)).collect();
+            Value::object(shape, values)
+        }
+        A::TypeRef(name) => build_type_value(&lang_ast::reflect::TypeRepr::Named(
+            name.clone(),
+            Vec::new(),
+        )),
     }
+}
+
+/// Build an enum value (`Color.Red`, `Ok(5)`, `Option.none`) for an attribute argument, with a fresh
+/// payload-free or payload-carrying shape. Matches the tree-walker's `builtin_enum` by structural
+/// shape equality.
+fn make_attr_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
+    let shape = Rc::new(Shape::enum_variant(
+        enum_name,
+        variant,
+        Vec::new(),
+        !data.is_empty(),
+    ));
+    Value::enum_value(shape, data)
 }
 
 /// The arity-mismatch message, worded identically to the tree-walker's (so the differential
@@ -3847,8 +3893,8 @@ mod tests {
         assert_eq!(
             arg_values,
             vec![
-                lang_ast::AttrValue::Ident("login".to_string()),
-                lang_ast::AttrValue::Ident("post".to_string()),
+                lang_ast::AttrValue::TypeRef("login".to_string()),
+                lang_ast::AttrValue::TypeRef("post".to_string()),
             ]
         );
         // A type with no attributes has no manifest entries.

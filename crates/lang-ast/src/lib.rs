@@ -199,16 +199,38 @@ pub struct AttrArg {
     pub span: Span,
 }
 
-/// A literal value in attribute-argument position — the all-fields-literal subset that may
-/// construct an attribute record. Richer than the identifier-only form of the earlier prototype.
+/// A literal value in attribute-argument position — the **constant literal tree** that may
+/// construct an attribute record: scalars plus the collection and nominal literals, composed
+/// recursively (a `List` of `Record`s of `Enum`s is one tree). Never an expression — no `1 + 2`,
+/// no call, no closure, nothing that reads runtime state — so the whole value materializes at
+/// manifest-build time without running user code. (This is Java/C# annotation arguments.)
 #[derive(Debug, Clone, PartialEq)]
 pub enum AttrValue {
     Str(String),
     Int(i64),
     Float(f64),
     Bool(bool),
-    /// A bare identifier (e.g. an enum-like constant referenced by name).
-    Ident(String),
+    /// A list literal `[a, b, c]`.
+    List(Vec<AttrValue>),
+    /// A set literal `#{a, b, c}` (the `#`-prefix disambiguates it from map/record).
+    Set(Vec<AttrValue>),
+    /// A map literal `{ "k": v }`. Keys are string literals (runtime maps are string-keyed).
+    Map(Vec<(String, AttrValue)>),
+    /// An enum value: a qualified `Enum.Variant` / `Enum.Variant(args)`, or a built-in `Option`/
+    /// `Result` constructor (`Ok(5)`, `none`). Fieldless or literal-payload.
+    Enum {
+        enum_name: String,
+        variant: String,
+        args: Vec<AttrValue>,
+    },
+    /// A record literal `Point { x: 1 }` (the named type prefix disambiguates it from a map).
+    Record {
+        type_name: String,
+        fields: Vec<(String, AttrValue)>,
+    },
+    /// A bare type name used as a value (`JsonConverter`) — a type reference, materialized as the
+    /// reflection `Type` ADT (`Type.Named("JsonConverter", [])`). C# `typeof(Foo)` / Java `Class<?>`.
+    TypeRef(String),
 }
 
 /// Whether a declaration's `@derive(...)` directives include `trait_name`. Used by both backends

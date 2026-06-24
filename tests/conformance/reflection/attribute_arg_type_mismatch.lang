@@ -1,0 +1,9 @@
+// A composite attribute argument is type-checked recursively against its field type: a list of
+// ints supplied for a `List<string>` field is a mismatch (E0007) at the argument.
+// expect: error E0007 at 8:8
+// expect: exit 1
+@attribute
+type Tags = { names: List<string> };
+
+#[Tags(names: [1, 2])]
+type Page = { id: int };
