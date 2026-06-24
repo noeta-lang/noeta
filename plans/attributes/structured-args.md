@@ -1,9 +1,25 @@
 # Structured attribute arguments: the literal value tree (+ type references)
 
-Status: **planned** (not started). Branch `types-inferred-static`. Generalizes attribute arguments
-from scalars to a full **constant literal tree**, finally building the A2-era "nested record-valued
-attribute args" deferral — now that attributes are meant to carry the structured data roles don't.
-Independent of the roles/abstract-types plans.
+Status: **DONE** (two commits: `079956b` literal tree, `00b1257` type-ref + invoke; conformance 213 /
+differential 206 matched / 0-skipped / backends agree / clippy + fmt + miri clean). Branch
+`types-inferred-static`. Generalized attribute arguments from scalars to a full **constant literal
+tree**, building the A2-era "nested record-valued attribute args" deferral. Independent of the
+roles/abstract-types plans.
+
+**As built:** `AttrValue` is now recursive (List/Set/Map/Enum/Record/TypeRef; `Ident` replaced). The
+parser **reuses the full expression grammar** then folds the result into an `AttrValue` via
+`expr_to_attr_value` (one literal grammar, no parallel parser; a non-literal node → E0003 at parse
+time; set sugar `#{..}`→`[..].to_set()` recovered structurally; bare name → `TypeRef`, `none`/`Ok`/
+`Err`/`some` → enum constructors, qualified `Enum.Variant` → enum). The checker `check_attr_value`
+type-checks the tree **recursively** against each field type (list/set elements, map values, record
+fields, enum/type-ref by assignability; E0007; `dyn` stays lenient); a `TypeRef` must name a real
+type (E0013). Both backends' `attr_value_to_eval`/`attr_value_to_vm` recurse to build composite
+values (sets canonicalized like `to_set`), differential-clean by construction. A `TypeRef`
+materializes as the reflection `Type` ADT (`Type.Named(name,[])`), and **`invoke` accepts a `Type`
+receiver** (resolves the named type → associated-fn dispatch; both backends extract the name from the
+`Type` value), so a stored type-ref is constructible. **Deferred (noted, not silently):** retiring
+P2.6's `Payload::Type` in favor of the ADT (its degenerate name-only case); classifying a type-ref's
+*kind* (it materializes as `Type.Named`, not `Type.Record`/etc.) — a possible later refinement.
 
 ## What and why
 

@@ -573,6 +573,30 @@ type User = { id: int };
 
 A record can still carry *behavior* via a standalone `impl SomeTrait for Route {}` (so "records only" costs no expressiveness); and a bare `@attribute` (no kinds) is the common "attaches anywhere" case.
 
+**Attribute arguments are a constant literal tree.** Beyond scalars, an argument may be a list, map, set, enum value, or a nested record literal — composed arbitrarily — plus a **type reference** (a bare type name, like C# `typeof(Foo)`). The one rule is *no comptime*: an argument is materialized at manifest-build time without running user code, so it is literals and compositions of literals only — never an expression (`1 + 2`), a call, or a name read of runtime state. The checker type-checks the whole tree recursively against the attribute's field types (E0007), and a bare name must resolve to a real type (E0013):
+
+```
+@attribute
+type Endpoint = {
+    methods: List<Method>,                 // a list of enum values
+    limits:  Map<string, int>,             // a map
+    tags:    Set<string>,                  // a set (#{...})
+    fallback: Limits,                      // a nested record literal
+    codec:   Type,                         // a type reference
+};
+
+#[Endpoint(
+    methods: [Method.Get, Method.Post],
+    limits:  { "rps": 100, "burst": 200 },
+    tags:    #{"public", "cached"},
+    fallback: Limits { rps: 1, burst: 2 },
+    codec:   JsonCodec,
+)]
+type Users = { id: int };
+```
+
+A bare name disambiguates cleanly: `Enum.Variant` (or a built-in `Ok(5)`/`none`) is an **enum value**, while an unqualified name is a **type reference** — materialized as the reflection `Type` (`type_of`'s result type), so it is matchable (`match codec { Type.Named(n, _) => … }`) *and* operational: `invoke` accepts a `Type` value as its receiver, dispatching the named type's associated function, so a stored type-ref is constructible, not just inspectable.
+
 > Design note: the placement rule is a static, declarative list of kinds — *not* a user-evaluated `valid_target(t: Target): bool` predicate. Enforcing an arbitrary predicate would require executing user code at compile time (the project deliberately avoids comptime), and the target kinds are a fixed, closed set, so they live as plain identifiers the checker reads. A predicate over a target's *return type* would be a future enhancement, gated on comptime.
 
 **Discovery and registration are a manifest query**, not a runtime scan. The compiler already indexed every attribute; consumers read that index, compiled in as a static table:
