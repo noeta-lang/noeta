@@ -19,10 +19,13 @@ materializes as the reflection `Type` ADT (`Type.Named(name,[])`), and **`invoke
 receiver** (resolves the named type → associated-fn dispatch; both backends extract the name from the
 `Type` value), so a stored type-ref is constructible. A type-ref **carries its precise kind**
 (`Type.Record`/`Enum`/`Class`, via the shared `reflect::ReflectionInfo::type_ref_repr`; commit
-`f106aba`) — `Type.Named` only for an unknown-kind name — consistent with the `type_of` kind work, not
-the stale plan-text `Type.Named`. **Deferred (noted, not silently):** retiring P2.6's `Payload::Type`
-in favor of the ADT (its degenerate name-only case); a built-in type-ref (`int`) still materializes as
-`Type.Named("int")` rather than `Type.Int` (rare edge; the kind table covers declared types only).
+`f106aba`) — `Type.Named` only for a genuinely unknown-kind name — consistent with the `type_of` kind
+work, not the stale plan-text `Type.Named`. **Both follow-on deferrals are now also closed (`b308bb9`):**
+P2.6's `Payload::Type` is **retired** — `Op::TypeValue` builds the `Type` ADT (the one type-as-value
+representation; `Op::Invoke` resolves it via `reflection_type_name`), and the `Payload::Type` variant /
+`Value::type_value`/`type_name_of` are removed; and a **built-in type-ref carries its precise lattice
+variant** (`int`→`Type.Int`, `list`→`Type.List(Dyn)`, …) via `type_ref_repr`. Nothing structured-args
+remains deferred.
 
 ## What and why
 
