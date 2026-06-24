@@ -1,0 +1,26 @@
+// `#[...]` data attributes attach to function and method declarations, not just types (P2.4). They
+// land in the same reflection manifest, so `attributes_of::<T>()` surfaces a function target (its
+// bare name) and a method target (qualified `Class.method`) alongside type targets. The manifest is
+// built statically from the AST, so both backends agree by construction.
+// expect: stdout "greet"
+// expect: stdout "GET"
+// expect: stdout "Api.list"
+// expect: stdout "GET"
+// expect: exit 0
+type Route = { method: string };
+impl Attribute for Route {}
+
+#[Route("GET")]
+fn greet(): string { return "hi"; }
+
+class Api {
+    id: int
+
+    #[Route("GET")]
+    fn list(): string { return "[]"; }
+}
+
+for r in attributes_of::<Route>() {
+    echo r.target;        // "greet", then "Api.list"
+    echo r.value.method;  // "GET" for each
+}

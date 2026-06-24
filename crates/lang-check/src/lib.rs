@@ -685,6 +685,9 @@ impl Checker {
     /// (a class's fields, when checking a method).
     fn check_fn(&mut self, decl: &FnDecl, env: &mut Env, extra: &[(String, Type)]) {
         self.require_signature(decl);
+        // A function/method's `#[...]` attributes are validated like a type's: each names an
+        // `Attribute` capability (E0029) and constructs it from its literal args (E0009/E0007/E0005).
+        self.check_attrs(&decl.attrs);
         // Bring the function's own generic parameters into scope for its body (a free function may
         // be generic; a method is generic over its class's parameters, already in scope, and
         // carries none of its own). Union with the current set so a method does not lose the

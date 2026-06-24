@@ -1159,11 +1159,77 @@ where
             .or_not()
             .map(Option::unwrap_or_default);
 
-        // `fn name<T: Bound>(params): Ret { body }` — a declaration (the `name` distinguishes it
-        // from the `fn(...) =>` closure expression, which falls through to `expr`). Generic
-        // parameters are optional and only free functions carry them.
-        let fn_decl = just(T::PubKw)
+        // A literal value in attribute-argument position: a string/int/float/bool, or a bare
+        // identifier. Attribute arguments construct the attribute record, so they are the
+        // all-fields-literal subset, not arbitrary expressions. Defined here (above `fn_decl`) so
+        // attributes can lead a function/method declaration as well as a type declaration.
+        let attr_value = choice((
+            just(T::StringLit).map_with(move |_, e| {
+                let span = ctx.to_span(e.span());
+                let raw = ctx.source.slice(span);
+                let value = raw
+                    .strip_prefix('"')
+                    .and_then(|r| r.strip_suffix('"'))
+                    .unwrap_or(raw)
+                    .to_string();
+                lang_ast::AttrValue::Str(value)
+            }),
+            just(T::FloatLit).map_with(move |_, e| {
+                lang_ast::AttrValue::Float(parse_float_literal(
+                    ctx.source.slice(ctx.to_span(e.span())),
+                ))
+            }),
+            just(T::IntLit).map_with(move |_, e| {
+                lang_ast::AttrValue::Int(
+                    parse_int_literal(ctx.source.slice(ctx.to_span(e.span()))).unwrap_or(0),
+                )
+            }),
+            just(T::TrueKw).map(|_| lang_ast::AttrValue::Bool(true)),
+            just(T::FalseKw).map(|_| lang_ast::AttrValue::Bool(false)),
+            id.clone().map(|(name, _)| lang_ast::AttrValue::Ident(name)),
+        ));
+        // An attribute argument: optionally named (`ttl: 60`), then a literal value.
+        let attr_arg = id
+            .clone()
+            .then_ignore(just(T::Colon))
             .or_not()
+            .then(attr_value)
+            .map_with(move |(name, value), e| lang_ast::AttrArg {
+                name: name.map(|(n, _)| n),
+                value,
+                span: ctx.to_span(e.span()),
+            });
+        // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
+        // the bare [`Attribute`]. A record instance attached as metadata, consumed via the manifest;
+        // it carries no codegen meaning (codegen is `@derive`). Arguments are literals.
+        let attr_decl = just(T::Hash)
+            .ignore_then(just(T::LBracket))
+            .ignore_then(id.clone())
+            .then(
+                attr_arg
+                    .separated_by(just(T::Comma))
+                    .allow_trailing()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .or_not(),
+            )
+            .then_ignore(just(T::RBracket))
+            .map_with(move |((name, name_span), args), e| Attribute {
+                name,
+                name_span,
+                args: args.unwrap_or_default(),
+                span: ctx.to_span(e.span()),
+            });
+
+        // `#[...] fn name<T: Bound>(params): Ret { body }` — a declaration (the `name` distinguishes
+        // it from the `fn(...) =>` closure expression, which falls through to `expr`). Generic
+        // parameters are optional and only free functions carry them. Leading `#[...]` attributes
+        // attach to the function (no `@derive` — that is type-only codegen).
+        let fn_decl = attr_decl
+            .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(just(T::PubKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
             .then(type_params.clone())
@@ -1171,7 +1237,7 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
-                move |(((((pub_kw, name_pair), type_params), params), ret), body), e| {
+                move |((((((attrs, pub_kw), name_pair), type_params), params), ret), body), e| {
                     Stmt::Fn(FnDecl {
                         name: name_pair.0,
                         name_span: name_pair.1,
@@ -1179,6 +1245,7 @@ where
                         type_params,
                         params,
                         ret,
+                        attrs,
                         body,
                         span: ctx.to_span(e.span()),
                     })
@@ -1283,23 +1350,31 @@ where
                     span: ctx.to_span(e.span()),
                 })
             });
-        // A bare `fn ...` declaration, shared by plain class methods and `impl`-block methods.
-        let method = just(T::FnKw)
-            .ignore_then(id.clone())
+        // A bare `#[...]? fn ...` declaration, shared by plain class methods and `impl`-block
+        // methods. Leading `#[...]` attributes attach to the method (P2.4).
+        let method = attr_decl
+            .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .then_ignore(just(T::FnKw))
+            .then(id.clone())
             .then(params_parser(ctx, expr.clone(), true))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
-            .map_with(move |(((name_pair, params), ret), body), e| FnDecl {
-                name: name_pair.0,
-                name_span: name_pair.1,
-                is_public: false,
-                // Methods are generic over their enclosing class's parameters, not their own.
-                type_params: Vec::new(),
-                params,
-                ret,
-                body,
-                span: ctx.to_span(e.span()),
-            });
+            .map_with(
+                move |((((attrs, name_pair), params), ret), body), e| FnDecl {
+                    name: name_pair.0,
+                    name_span: name_pair.1,
+                    is_public: false,
+                    // Methods are generic over their enclosing class's parameters, not their own.
+                    type_params: Vec::new(),
+                    params,
+                    ret,
+                    attrs,
+                    body,
+                    span: ctx.to_span(e.span()),
+                },
+            );
         let class_method = method.clone().map(ClassMember::Method);
         // `impl Trait { fn ... }` — implementing a built-in trait lights up its operator/protocol.
         // The body is just methods; they are flattened into the class's method table below.
@@ -1538,69 +1613,9 @@ where
                 traits,
             });
 
-        // A literal value in attribute-argument position: a string/int/float/bool, or a bare
-        // identifier. Attribute arguments construct the attribute record, so they are the
-        // all-fields-literal subset, not arbitrary expressions.
-        let attr_value = choice((
-            just(T::StringLit).map_with(move |_, e| {
-                let span = ctx.to_span(e.span());
-                let raw = ctx.source.slice(span);
-                let value = raw
-                    .strip_prefix('"')
-                    .and_then(|r| r.strip_suffix('"'))
-                    .unwrap_or(raw)
-                    .to_string();
-                lang_ast::AttrValue::Str(value)
-            }),
-            just(T::FloatLit).map_with(move |_, e| {
-                lang_ast::AttrValue::Float(parse_float_literal(
-                    ctx.source.slice(ctx.to_span(e.span())),
-                ))
-            }),
-            just(T::IntLit).map_with(move |_, e| {
-                lang_ast::AttrValue::Int(
-                    parse_int_literal(ctx.source.slice(ctx.to_span(e.span()))).unwrap_or(0),
-                )
-            }),
-            just(T::TrueKw).map(|_| lang_ast::AttrValue::Bool(true)),
-            just(T::FalseKw).map(|_| lang_ast::AttrValue::Bool(false)),
-            id.clone().map(|(name, _)| lang_ast::AttrValue::Ident(name)),
-        ));
-        // An attribute argument: optionally named (`ttl: 60`), then a literal value.
-        let attr_arg = id
-            .clone()
-            .then_ignore(just(T::Colon))
-            .or_not()
-            .then(attr_value)
-            .map_with(move |(name, value), e| lang_ast::AttrArg {
-                name: name.map(|(n, _)| n),
-                value,
-                span: ctx.to_span(e.span()),
-            });
-
-        // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position. A record
-        // instance attached as metadata, consumed via the manifest. It carries no codegen meaning;
-        // code generation is `@derive`. Arguments are literals (positional or named).
-        let attribute = just(T::Hash)
-            .ignore_then(just(T::LBracket))
-            .ignore_then(id.clone())
-            .then(
-                attr_arg
-                    .separated_by(just(T::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(T::LParen), just(T::RParen))
-                    .or_not(),
-            )
-            .then_ignore(just(T::RBracket))
-            .map_with(move |((name, name_span), args), e| {
-                Decorator::Attr(Attribute {
-                    name,
-                    name_span,
-                    args: args.unwrap_or_default(),
-                    span: ctx.to_span(e.span()),
-                })
-            });
+        // A `#[...]` data attribute in decorator position, wrapping the shared `attr_decl` (defined
+        // above `fn_decl`) so type declarations and function declarations parse the same attribute.
+        let attribute = attr_decl.clone().map(Decorator::Attr);
 
         // Decorators attach only to type declarations (class/record/enum). Leading `@derive(...)`
         // directives and `#[...]` attributes are collected in order and partitioned onto the parsed

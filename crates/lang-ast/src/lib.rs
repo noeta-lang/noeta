@@ -352,6 +352,10 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     /// The declared return type, if any. Checked by the M1 type checker (M1.7).
     pub ret: Option<TypeRef>,
+    /// Leading `#[...]` data attributes on the function or method (attribute-system pass 2, P2.4).
+    /// Captured in the reflection manifest like a type's attributes; `@derive` is *not* permitted
+    /// here (it is codegen for types only). Empty for the common unannotated function.
+    pub attrs: Vec<Attribute>,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

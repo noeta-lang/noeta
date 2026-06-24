@@ -447,6 +447,28 @@ fn attributes_of_on_an_attribute_type_checks_clean() {
 }
 
 #[test]
+fn attribute_on_a_function_checks_clean() {
+    // A `#[...]` on a function is validated like one on a type: the capability gate plus the
+    // all-fields construction check, both satisfied here.
+    let src = "type Route = { method: string };\nimpl Attribute for Route {}\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn attribute_on_a_method_checks_clean() {
+    // The same validation reaches a class method's attributes (through `check_fn`).
+    let src = "type Route = { method: string };\nimpl Attribute for Route {}\nclass Api {\n  id: int\n  #[Route(\"GET\")]\n  fn list(): string { return \"[]\"; }\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn attribute_on_a_function_must_be_an_attribute() {
+    // The E0029 gate applies on a function too: `Plain` is a record but not an `Attribute`.
+    let src = "type Plain = { method: string };\n#[Plain(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    assert_eq!(codes(src), ["E0029"]);
+}
+
+#[test]
 fn attributes_of_on_a_non_attribute_is_rejected() {
     // The capability gate, mirroring a `#[Foo]` use: the type argument must implement `Attribute`.
     let src = "type Plain = { path: string };\nrs = attributes_of::<Plain>();\n";

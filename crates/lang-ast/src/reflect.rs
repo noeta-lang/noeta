@@ -90,6 +90,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
             }
             Stmt::Class(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
+                // A method's attributes are keyed by its qualified `Class.method` name, so a
+                // `#[...]` on a method surfaces distinctly from the same name on another class.
+                for method in &decl.methods {
+                    let target = format!("{}.{}", decl.name, method.name);
+                    push_attrs(&mut manifest, &target, &method.attrs);
+                }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Class,
@@ -97,6 +103,9 @@ pub fn build(program: &Program) -> ReflectionInfo {
                     variants: Vec::new(),
                 });
             }
+            // A top-level function carries attributes too (keyed by its bare name); it is not a
+            // declared *type*, so it contributes to the manifest only, not the type registry.
+            Stmt::Fn(decl) => push_attrs(&mut manifest, &decl.name, &decl.attrs),
             Stmt::Enum(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
                 types.push(TypeInfo {
