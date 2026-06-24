@@ -1,0 +1,7 @@
+// A `@role(...)` must name one of the blessed `Role` variants; an unknown name is a checker error
+// (E0031) at the offending role.
+// expect: error E0031 at 6:7
+// expect: exit 1
+@attribute
+@role(Bogus)
+type Route = { path: string };

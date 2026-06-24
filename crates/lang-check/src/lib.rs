@@ -358,6 +358,37 @@ impl Checker {
         self.generic_types
             .insert("Attributed".to_string(), vec!["T".to_string()]);
         self.register_type_enum();
+        self.register_role_prelude();
+    }
+
+    /// Register the prelude `Role` enum and `RoleBinding` record (P2.7). `Role` is the blessed set
+    /// of architectural roles an attribute confers via `@role(...)` (every variant payload-free, so
+    /// matchable bare); `RoleBinding { target: string, role: Role }` is the element type of
+    /// `roles_of()`'s result. Both register like any prelude type, so a user declaration of the same
+    /// name shadows them and the backends materialize the matching shapes.
+    fn register_role_prelude(&mut self) {
+        let variants = lang_ast::reflect::ROLE_VARIANTS
+            .iter()
+            .map(|name| VariantInfo {
+                name: name.to_string(),
+                fields: Vec::new(),
+            })
+            .collect();
+        self.types.insert(lang_ast::reflect::ROLE_ENUM.to_string());
+        self.enums
+            .insert(lang_ast::reflect::ROLE_ENUM.to_string(), variants);
+        self.types
+            .insert(lang_ast::reflect::ROLE_BINDING.to_string());
+        self.records.insert(
+            lang_ast::reflect::ROLE_BINDING.to_string(),
+            vec![
+                ("target".to_string(), Type::String),
+                (
+                    "role".to_string(),
+                    Type::Named(lang_ast::reflect::ROLE_ENUM.to_string(), Vec::new()),
+                ),
+            ],
+        );
     }
 
     /// Register the prelude `Type` enum — the ADT `type_of` returns, mirroring the type lattice so
@@ -416,6 +447,7 @@ impl Checker {
                     self.types.insert(r.name.clone());
                     self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
                     self.record_attribute(&r.name, r.attribute.as_deref());
+                    self.record_role(r.name_span, r.role.as_deref(), r.attribute.is_some());
                     self.generic_types.insert(
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -452,6 +484,23 @@ impl Checker {
                             .with_help(
                                 "attributes are records (their `#[...]` arguments map to fields); \
                                  declare it as `@attribute type` instead of `class`",
+                            ),
+                        );
+                    }
+                    // A role tags an attribute, and attributes are records only, so `@role` on a
+                    // class is also an error (E0031).
+                    if c.role.is_some() {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::InvalidRole,
+                                c.name_span,
+                                format!(
+                                    "a class cannot carry a role: `{}` must be a record attribute",
+                                    c.name
+                                ),
+                            )
+                            .with_help(
+                                "declare it as an `@attribute type` and tag that with `@role`",
                             ),
                         );
                     }
@@ -1832,6 +1881,15 @@ impl Checker {
                 }
                 Type::Named("Type".to_string(), Vec::new())
             }
+            Expr::RolesOf { .. } => {
+                // The compiler-built role index, surfaced as `List<RoleBinding>`. No operand to
+                // synthesize and nothing to validate — the `@role` tags were checked at their
+                // declarations.
+                Type::List(Box::new(Type::Named(
+                    lang_ast::reflect::ROLE_BINDING.to_string(),
+                    Vec::new(),
+                )))
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {
@@ -2202,6 +2260,65 @@ impl Checker {
         }
     }
 
+    /// Validate a record's `@role(...)` semantic-role tag (P2.7). A role must name **exactly one**
+    /// blessed `Role` variant, and may only tag a record that is itself an attribute (`@attribute`)
+    /// — the role rides on what the attribute attaches to. Each violation is `E0031` at its span; a
+    /// well-formed tag is recorded for the index purely by `reflect::build`, so nothing is stored
+    /// here. `name_span` locates the declaration for the spanless "missing role" case.
+    fn record_role(
+        &mut self,
+        name_span: Span,
+        role: Option<&[(String, Span)]>,
+        is_attribute: bool,
+    ) {
+        let Some(role) = role else { return };
+        let roles_help = || {
+            format!(
+                "the roles are {}",
+                lang_ast::reflect::ROLE_VARIANTS.join(", ")
+            )
+        };
+        if !is_attribute {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::InvalidRole,
+                    name_span,
+                    "`@role(...)` may only tag an attribute".to_string(),
+                )
+                .with_help("also mark the record `@attribute`"),
+            );
+        }
+        match role {
+            [] => self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::InvalidRole,
+                    name_span,
+                    "`@role` requires exactly one role".to_string(),
+                )
+                .with_help(roles_help()),
+            ),
+            [(variant, span), rest @ ..] => {
+                if !lang_ast::reflect::ROLE_VARIANTS.contains(&variant.as_str()) {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::InvalidRole,
+                            *span,
+                            format!("`{variant}` is not a known role"),
+                        )
+                        .with_help(roles_help()),
+                    );
+                }
+                for (_, extra_span) in rest {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::InvalidRole,
+                        *extra_span,
+                        "a declaration has a single role".to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Instantiate and check a generic function call. Binds each type parameter from the argument
     /// types (left to right, first concrete argument wins), checks every argument against its
     /// substituted parameter type (`E0007`), enforces each parameter's trait bounds (`E0025`), and
@@ -2536,7 +2653,7 @@ impl Checker {
 /// maps to a bool. It resolves to a [`Type::Named`] but is a legal annotation, so the unknown-type
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
-const PRELUDE_TYPES: &[&str] = &["Ordering", "Type"];
+const PRELUDE_TYPES: &[&str] = &["Ordering", "Type", "Role", "RoleBinding"];
 
 /// Whether an argument of type `arg` may be passed where `param` is expected. Subtyping, plus two
 /// leniencies that keep dynamic and numeric calls free of false positives: a `dyn`/hole on either

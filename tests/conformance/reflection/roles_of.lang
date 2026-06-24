@@ -1,0 +1,31 @@
+// `roles_of()` surfaces the compiler-built `(declaration, Role)` index as a `List<RoleBinding>`.
+// A `@role(...)` tag on an attribute confers an architectural role on every declaration the
+// attribute annotates; the index is resolved at compile time (closed-world) from the `@role` tags
+// in the manifest, and both backends materialize identical `Role`/`RoleBinding` values from the
+// shared reflection artifact — so the query agrees across the differential by construction.
+// expect: stdout "handleUsers=entry"
+// expect: stdout "writeUser=sink"
+// expect: exit 0
+@attribute(Function)
+@role(EntryPoint)
+type Route = { path: string };
+
+@attribute
+@role(Sink)
+type Persist = { table: string };
+
+#[Route("/users")]
+fn handleUsers(): int { return 1; }
+
+#[Persist("users")]
+fn writeUser(): int { return 2; }
+
+bindings = roles_of();
+for b in bindings {
+    name = match b.role {
+        Role.EntryPoint => "entry",
+        Role.Sink => "sink",
+        _ => "other",
+    };
+    echo "${b.target}=${name}";
+}

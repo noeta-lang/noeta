@@ -1,0 +1,9 @@
+// Attributes — and therefore roles — are records only, so `@role(...)` on a class is a checker
+// error (E0031), mirroring `@attribute` on a class (E0029).
+// expect: error E0031 at 6:7
+// expect: exit 1
+@role(EntryPoint)
+class Service {
+    name: string
+    fn new(n: string): Service { return Service { name: n }; }
+}

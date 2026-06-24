@@ -148,6 +148,10 @@ pub struct RecordDecl {
     /// `@attribute(Method, Function, …)` — empty (bare `@attribute`) ⇒ attaches anywhere. Attributes
     /// are **records only**; the same directive on a class/enum is a checker error.
     pub attribute: Option<Vec<(String, Span)>>,
+    /// The `@role(Role)` semantic-role tag (P2.7): `None` ⇒ no role; `Some(names)` ⇒ this attribute
+    /// confers the named architectural role on every declaration it annotates. The checker validates
+    /// it (exactly one blessed `Role` variant, on a record that is also `@attribute`) — `E0031`.
+    pub role: Option<Vec<(String, Span)>>,
     pub span: Span,
 }
 
@@ -268,6 +272,9 @@ pub struct ClassDecl {
     /// [`RecordDecl::attribute`]. `Some` here is always a checker error — kept so the checker can
     /// point at the mistake rather than silently dropping it.
     pub attribute: Option<Vec<(String, Span)>>,
+    /// A misplaced `@role(...)` tag (attributes — and thus roles — are records only); see
+    /// [`RecordDecl::role`]. `Some` here is always a checker error, kept so the checker can report it.
+    pub role: Option<Vec<(String, Span)>>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.
@@ -536,6 +543,10 @@ pub enum Expr {
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
     /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
     TypeOf { value: Box<Expr>, span: Span },
+    /// The reflection query `roles_of()` — the compiler-built `(declaration, Role)` index (P2.7),
+    /// returned as a `List<RoleBinding>` (each `{ target: string, role: Role }`). Compile-time
+    /// resolved from the attribute manifest's `@role(...)` tags; takes no operand.
+    RolesOf { span: Span },
     /// The reflection invocation `invoke(recv, name, args)` — fallible by-name dispatch. `recv` is a
     /// value (→ instance method) or a bare type name (→ associated function); `name` is a runtime
     /// `string`; `args` is a runtime `List`. Evaluates to `Result<dyn, dyn>` — `Ok(retval)` on a
@@ -673,6 +684,7 @@ impl Expr {
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
+            | Expr::RolesOf { span }
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. } => *span,
             Expr::Object(lit) => lit.span,

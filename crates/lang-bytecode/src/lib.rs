@@ -357,6 +357,12 @@ pub enum Op {
         dst: Reg,
         type_name: String,
     },
+    /// `roles_of()`: `dst = List<RoleBinding>` — the `(declaration, Role)` semantic-role index from
+    /// the module's reflection info, each entry materialized into a `RoleBinding { target, role }`.
+    /// Compile-time resolved (closed-world); reads `Module::reflection`. (P2.7.)
+    RolesOf {
+        dst: Reg,
+    },
     /// `type_of(value)`: `dst = Type` — the runtime [`lang_ast::reflect`] head-constructor descriptor
     /// of the value in `src` (`List(Dyn)`, `Named("Route")`, `Int`, …). Generics are erased at
     /// runtime, so element/argument types collapse to `Dyn` at this fidelity.
@@ -806,6 +812,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::AttributesOf { dst, type_name } => {
             format!("AttributesOf r{dst} <- attributes_of::<{type_name}>()")
         }
+        Op::RolesOf { dst } => format!("RolesOf     r{dst} <- roles_of()"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::TypeOfStatic { dst, repr } => format!("TypeOfStatic r{dst} <- {repr:?}"),
         Op::TypeValue { dst, name } => format!("TypeValue   r{dst} <- type {name}"),

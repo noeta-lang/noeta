@@ -328,6 +328,31 @@ impl<'m> Vm<'m> {
         Value::list(items)
     }
 
+    /// Materialize the `(declaration, Role)` index from the module's reflection info into a
+    /// `List<RoleBinding>` — each `{ target: string, role: Role }`. Shapes are built fresh; because
+    /// shape equality is structural (name + variant + fields), the `Role` enum and `RoleBinding`
+    /// record match the tree-walker's by construction. (P2.7.)
+    fn materialize_roles(&self) -> Value {
+        let binding_shape = Rc::new(Shape::object(
+            ShapeKind::Record,
+            "RoleBinding",
+            vec!["target".to_string(), "role".to_string()],
+        ));
+        let items: Vec<Value> = self
+            .module
+            .reflection
+            .roles
+            .iter()
+            .map(|r| {
+                Value::object(
+                    binding_shape.clone(),
+                    vec![Value::string(&r.target), make_role(&r.role)],
+                )
+            })
+            .collect();
+        Value::list(items)
+    }
+
     /// Record a runtime diagnostic and produce the unwind token.
     fn error(&mut self, code: DiagnosticCode, span: Span, message: String) -> Abort {
         self.diagnostics
@@ -2025,6 +2050,11 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::RolesOf { dst } => {
+                    let result = self.materialize_roles();
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::TypeOf { dst, src } => {
                     let repr = vm_type_repr(&frames[top].regs[*src as usize]);
                     let result = build_type_value(&repr);
@@ -2946,6 +2976,13 @@ fn make_ordering(variant: &str) -> Value {
     Value::enum_value(shape, Vec::new())
 }
 
+/// Build a built-in `Role` enum value (`Role.EntryPoint`, …) with a fresh shape — the payload-free
+/// `roles_of()` counterpart to [`make_ordering`]. Matches the tree-walker's by structural equality.
+fn make_role(variant: &str) -> Value {
+    let shape = Rc::new(Shape::enum_variant("Role", variant, Vec::new(), false));
+    Value::enum_value(shape, Vec::new())
+}
+
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
 /// Mirrors the tree-walker's `eval_type_repr` exactly so both backends reflect identical `Type`
@@ -3113,6 +3150,18 @@ mod tests {
             "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
         );
         assert_eq!(r.stdout, "42\n14\nmiss\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn roles_of_materializes_the_index() {
+        // `roles_of()` materializes the `(declaration, Role)` index into a `List<RoleBinding>`,
+        // each carrying a fresh `string` target and a `Role` enum value. Exercises `materialize_roles`
+        // and `make_role` plus the refcount handoff of the freshly-built list/record/enum values.
+        let r = run(
+            "@attribute(Function)\n@role(EntryPoint)\ntype Route = { path: string };\n#[Route(\"/x\")]\nfn handle(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Role.EntryPoint => \"${b.target}=entry\", _ => \"other\" };\n}\n",
+        );
+        assert_eq!(r.stdout, "handle=entry\n");
         assert_eq!(r.exit_code, 0);
     }
 

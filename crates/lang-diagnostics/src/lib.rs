@@ -112,6 +112,10 @@ pub enum DiagnosticCode {
     /// may restrict where it attaches with the `@attribute(Method, Function, …)` directive; using it
     /// on any other kind (or naming an unknown kind in the directive) is this error.
     InvalidAttributeTarget,
+    /// An `@role(...)` directive is malformed: it names an unknown role, supplies no role (or more
+    /// than one), or labels a record that is not itself an attribute (a role rides on what an
+    /// attribute attaches to, so the record must also be marked `@attribute`).
+    InvalidRole,
 }
 
 impl DiagnosticCode {
@@ -148,6 +152,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidNarrow,
         DiagnosticCode::NotAnAttribute,
         DiagnosticCode::InvalidAttributeTarget,
+        DiagnosticCode::InvalidRole,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -184,6 +189,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidNarrow => "E0028",
             DiagnosticCode::NotAnAttribute => "E0029",
             DiagnosticCode::InvalidAttributeTarget => "E0030",
+            DiagnosticCode::InvalidRole => "E0031",
         }
     }
 

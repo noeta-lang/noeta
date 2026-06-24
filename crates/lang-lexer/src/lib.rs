@@ -88,6 +88,10 @@ pub enum TokenKind {
     /// reflection surface is lexically distinct.
     #[token("type_of")]
     TypeOfKw,
+    /// The reflection keyword `roles_of()` — the compiler-built `(declaration, Role)` index, returned
+    /// as `List<RoleBinding>`. A keyword for symmetry with `attributes_of`/`type_of`.
+    #[token("roles_of")]
+    RolesOfKw,
     /// The reflection keyword `invoke(recv, name, args)` — the fallible by-name invocation
     /// primitive: dispatch a method (on a value) or an associated function (on a type) by a
     /// runtime string name, returning `Result`. A keyword for symmetry with the other reflection
@@ -257,6 +261,7 @@ impl TokenKind {
             TokenKind::IsKw => "IsKw",
             TokenKind::AttributesOfKw => "AttributesOfKw",
             TokenKind::TypeOfKw => "TypeOfKw",
+            TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::InvokeKw => "InvokeKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
@@ -341,6 +346,7 @@ impl TokenKind {
             TokenKind::IsKw => "`is`",
             TokenKind::AttributesOfKw => "`attributes_of`",
             TokenKind::TypeOfKw => "`type_of`",
+            TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::InvokeKw => "`invoke`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",

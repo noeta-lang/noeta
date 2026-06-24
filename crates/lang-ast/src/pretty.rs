@@ -578,6 +578,9 @@ impl Pretty for Expr {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::RolesOf { span: s } => {
+                out.push_str(&format!("(roles_of {})", span(*s)));
+            }
             Expr::Invoke {
                 recv,
                 name,

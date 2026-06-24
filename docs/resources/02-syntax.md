@@ -602,25 +602,33 @@ instance = invoke(some_type, "new", args)?;     // construct-by-name can fail  �
 
 Introspection (`type_of`, `attributes_of`) is read-only; invocation is explicitly fallible — an unknown name or wrong arity is a runtime `Result.Err`, never a static error. Runtime reflection is opt-in per type (capability-gated): reflectable types become tree-shaking roots, so unused metadata is eliminated from AOT binaries (architecture §9.8.1).
 
-**Semantic role tags** let an attribute confer a typed architectural *role* on whatever it annotates — declared once on the attribute, inherited by every use. An attribute additionally implements `SemanticRole`, returning a value from a small blessed enum:
+**Semantic role tags** let an attribute confer a typed architectural *role* on whatever it annotates — declared once on the attribute, inherited by every use. An attribute carries a `@role(...)` directive naming one variant of a small blessed `Role` enum:
 
 ```
-impl SemanticRole for Route {                      // Route already @attribute
-    fn role(): Role { return Role.EntryPoint(kind: "http", id: self.path); }
-}
+@attribute(Function, Method)
+@role(EntryPoint)                                  // Route confers the EntryPoint role
+type Route = { path: string };
 
-enum Role {
-    EntryPoint(kind: string, id: string),
-    PersistenceBoundary,
-    TrustBoundary,
-    Sink,
-    ExternalCall,
-    Layer(name: string),
-    Custom(name: string),          // escape hatch; the typed variants are what tools rely on
+@attribute
+@role(Sink)
+type Persist = { table: string };
+
+enum Role { EntryPoint, PersistenceBoundary, TrustBoundary, Sink, Layer }
+```
+
+The compiler indexes `(declaration, Role)` at manifest-build time (zero runtime cost), and `roles_of()` surfaces it as a `List<RoleBinding>` (each `{ target: string, role: Role }`) so the dependency graph becomes queryable in architectural terms — "every entry point," "does this trust boundary reach a sink":
+
+```
+for binding in roles_of() {
+    match binding.role {
+        Role.EntryPoint => register_entry(binding.target),
+        Role.Sink       => audit_sink(binding.target),
+        _               => skip(),
+    }
 }
 ```
 
-The compiler evaluates `role()` at manifest-build time and indexes `(declaration, Role)` (zero runtime cost), so the dependency graph becomes queryable in architectural terms — "every entry point," "does this trust boundary reach a sink." Only a record marked `@attribute` may `impl SemanticRole` (the role rides on what the attribute attaches to; otherwise a compile error). Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
+`@role(...)` is declarative — a fixed variant name, **not** a user-evaluated `fn role(): Role` (which would require compile-time execution of user code; the project avoids comptime, exactly as for attribute placement). Only a record marked `@attribute` may carry `@role` (the role rides on what the attribute attaches to; otherwise E0031), and a class/enum cannot (attributes are records only). A *parameterized* role (`Layer(name)`, `Custom(name)`) — whose payload would be evaluated per use site — is deferred as a comptime enhancement. Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
 
 ---
 

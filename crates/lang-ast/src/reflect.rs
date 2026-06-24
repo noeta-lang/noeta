@@ -13,6 +13,11 @@ pub struct ReflectionInfo {
     pub manifest: Vec<AttributeRecord>,
     /// Every declared record/class/enum, in source order.
     pub types: Vec<TypeInfo>,
+    /// The `(declaration, Role)` index (P2.7): for every declaration bearing an attribute that
+    /// carries a `@role(...)` tag, the declaration's name paired with that role's variant name. This
+    /// is the labeled dependency graph `roles_of()` surfaces — built beside the attribute manifest
+    /// from the same AST, so both backends agree by construction.
+    pub roles: Vec<RoleRecord>,
 }
 
 impl ReflectionInfo {
@@ -41,6 +46,17 @@ pub struct AttributeRecord {
     pub name: String,
     /// The attribute's literal arguments (positional + named), straight from the AST.
     pub args: Vec<AttrArg>,
+}
+
+/// One `(declaration, Role)` entry of the semantic-role index — a declaration's name paired with
+/// the `Role` variant an attribute it bears confers on it. `roles_of()` materializes each into a
+/// `RoleBinding { target: string, role: Role }`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RoleRecord {
+    /// The annotated declaration's name (the same target keying as the attribute manifest).
+    pub target: String,
+    /// The conferred role's `Role.*` variant name (e.g. `EntryPoint`).
+    pub role: String,
 }
 
 /// The kind of a declared type.
@@ -77,11 +93,21 @@ pub struct VariantInfo {
 pub fn build(program: &Program) -> ReflectionInfo {
     let mut manifest = Vec::new();
     let mut types = Vec::new();
+    // Attribute name → its `@role(...)` variant, harvested from the attribute records themselves;
+    // joined with the manifest below so every *use* of a role-tagged attribute is indexed.
+    let mut role_of: Vec<(String, String)> = Vec::new();
     for stmt in &program.stmts {
         match stmt {
             Stmt::Record(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
                 push_field_attrs(&mut manifest, &decl.name, &decl.fields);
+                // A role tag rides on the attribute record; record its (single, validated) variant
+                // so each declaration the attribute annotates inherits it. A malformed `@role`
+                // never reaches a runnable program (the checker rejects it), so taking the first
+                // listed variant is correct for every program this actually materializes.
+                if let Some(role) = decl.role.as_ref().and_then(|r| r.first()) {
+                    role_of.push((decl.name.clone(), role.0.clone()));
+                }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Record,
@@ -133,7 +159,26 @@ pub fn build(program: &Program) -> ReflectionInfo {
             _ => {}
         }
     }
-    ReflectionInfo { manifest, types }
+    // Join the manifest with the role tags: every declaration bearing a role-tagged attribute is
+    // indexed `(target, role)`. Identical pairs (two attributes conferring the same role on one
+    // declaration) are de-duplicated while preserving source order.
+    let mut roles: Vec<RoleRecord> = Vec::new();
+    for entry in &manifest {
+        if let Some((_, role)) = role_of.iter().find(|(name, _)| name == &entry.name) {
+            let record = RoleRecord {
+                target: entry.target.clone(),
+                role: role.clone(),
+            };
+            if !roles.contains(&record) {
+                roles.push(record);
+            }
+        }
+    }
+    ReflectionInfo {
+        manifest,
+        types,
+        roles,
+    }
 }
 
 /// Resolve an attribute's arguments to its record's field values, in declaration order — the shared
@@ -223,6 +268,27 @@ impl TypeRepr {
 
 /// The `Type` prelude enum's name (the language type `type_of` returns and users match on).
 pub const TYPE_ENUM: &str = "Type";
+
+/// The `Role` prelude enum's name — the small blessed set of architectural roles an attribute may
+/// confer with `@role(...)`, and the type `roles_of()` yields per binding.
+pub const ROLE_ENUM: &str = "Role";
+
+/// The `RoleBinding` prelude record's name — `{ target: string, role: Role }`, the element type of
+/// `roles_of()`'s result list.
+pub const ROLE_BINDING: &str = "RoleBinding";
+
+/// The blessed `Role.*` variants, in declaration order. The single source of truth for the role
+/// vocabulary, shared by the parser-side `@role(...)` validation (checker), the prelude-enum
+/// registration, and both backends' materialization — so a `@role` tag, the enum users match on,
+/// and the value `roles_of()` builds all agree. All are payload-free (a richer parameterized form,
+/// e.g. `Layer(name)`, would need comptime to evaluate per use site and is deferred).
+pub const ROLE_VARIANTS: &[&str] = &[
+    "EntryPoint",
+    "PersistenceBoundary",
+    "TrustBoundary",
+    "Sink",
+    "Layer",
+];
 
 /// Push each field's `#[...]` attributes, keyed by the qualified `Type.field` name (mirroring the
 /// `Type.method` convention), so a `#[Column(...)]` on a property surfaces distinctly per owner.

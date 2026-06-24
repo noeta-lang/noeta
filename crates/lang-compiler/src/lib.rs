@@ -1495,6 +1495,11 @@ impl<'m> FnCompiler<'m> {
                 };
                 self.code.push(Op::AttributesOf { dst, type_name });
             }
+            Expr::RolesOf { .. } => {
+                // The role index is resolved at compile time (closed-world); the VM reads the
+                // `(declaration, Role)` entries from `Module::reflection` and materializes them.
+                self.code.push(Op::RolesOf { dst });
+            }
             Expr::TypeOf { value, span } => {
                 // Evaluate the operand for its side effects in both fidelities. When the checker
                 // resolved a concrete static type for this site, bake the precise `Type` constant

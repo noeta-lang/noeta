@@ -108,28 +108,31 @@ fn attach_decorators(
     derives: Vec<(String, Span)>,
     attrs: Vec<Attribute>,
     attribute: Option<Vec<(String, Span)>>,
+    role: Option<Vec<(String, Span)>>,
 ) -> Stmt {
-    if derives.is_empty() && attrs.is_empty() && attribute.is_none() {
+    if derives.is_empty() && attrs.is_empty() && attribute.is_none() && role.is_none() {
         return stmt;
     }
     match stmt {
         Stmt::Class(mut c) => {
             c.derives = derives;
             c.attrs = attrs;
-            // `@attribute` on a class is invalid (attributes are records only); carried so the
-            // checker can report it.
+            // `@attribute`/`@role` on a class is invalid (attributes are records only); carried so
+            // the checker can report it.
             c.attribute = attribute;
+            c.role = role;
             Stmt::Class(c)
         }
         Stmt::Record(mut r) => {
             r.derives = derives;
             r.attrs = attrs;
             r.attribute = attribute;
+            r.role = role;
             Stmt::Record(r)
         }
         Stmt::Enum(mut e) => {
-            // An enum cannot be an attribute, so a stray `@attribute` is dropped; derives/attrs
-            // still apply.
+            // An enum cannot be an attribute, so a stray `@attribute`/`@role` is dropped;
+            // derives/attrs still apply.
             e.derives = derives;
             e.attrs = attrs;
             Stmt::Enum(e)
@@ -793,6 +796,15 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `roles_of()` — the semantic-role index query (P2.7). A keyword + empty `()` (no
+        // type-argument; the index spans all role-tagged attributes), yielding `List<RoleBinding>`.
+        let roles_of = just(T::RolesOfKw)
+            .then_ignore(just(T::LParen))
+            .then_ignore(just(T::RParen))
+            .map_with(move |_, e| Expr::RolesOf {
+                span: ctx.to_span(e.span()),
+            });
+
         // `invoke(recv, name, args)` — the fallible by-name invocation primitive. A keyword + three
         // parenthesized, comma-separated operands (receiver, method-name string, argument list),
         // yielding `Result<dyn, dyn>`.
@@ -824,6 +836,7 @@ where
             match_,
             attributes_of,
             type_of,
+            roles_of,
             invoke,
             list,
             map,
@@ -1372,6 +1385,7 @@ where
                     derives: Vec::new(),
                     attrs: Vec::new(),
                     attribute: None,
+                    role: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -1515,6 +1529,7 @@ where
                     derives: Vec::new(),
                     attrs: Vec::new(),
                     attribute: None,
+                    role: None,
                     destructor,
                     span: ctx.to_span(e.span()),
                 })
@@ -1680,6 +1695,7 @@ where
                 let mut derives: Vec<(String, Span)> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
                 let mut attribute: Option<Vec<(String, Span)>> = None;
+                let mut role: Option<Vec<(String, Span)>> = None;
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
@@ -1689,14 +1705,16 @@ where
                         } => match name.as_str() {
                             // `@derive(Trait, …)` — codegen. `@attribute` / `@attribute(Kind, …)` —
                             // the attribute opt-in; its args are the placement kinds (empty ⇒
-                            // anywhere). The checker validates the kinds and the records-only rule.
+                            // anywhere). `@role(Role)` — the semantic-role tag (P2.7). The checker
+                            // validates each one's arguments and the records-only rule.
                             "derive" => derives.extend(traits),
                             "attribute" => attribute = Some(traits),
+                            "role" => role = Some(traits),
                             _ => ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
                                 name_span,
                                 format!(
-                                    "unknown directive `@{name}`; the directives are `@derive(...)` and `@attribute(...)`"
+                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, and `@role(...)`"
                                 ),
                             )),
                         },
@@ -1704,7 +1722,7 @@ where
                     }
                 }
                 set_public(
-                    attach_decorators(stmt, derives, attrs, attribute),
+                    attach_decorators(stmt, derives, attrs, attribute, role),
                     pub_kw.is_some(),
                 )
             });
@@ -2263,6 +2281,13 @@ mod tests {
         // `invoke(recv, name, args)` — a keyword + three parenthesized, comma-separated operands —
         // parses to a dedicated reflection node carrying the receiver, name, and argument list.
         insta::assert_snapshot!(pretty("x = invoke(obj, \"area\", [1, 2]);"));
+    }
+
+    #[test]
+    fn roles_of_parses() {
+        // `roles_of()` — a keyword + empty `()` — parses to a dedicated reflection node (the
+        // semantic-role index query), taking no operand.
+        insta::assert_snapshot!(pretty("x = roles_of();"));
     }
 
     #[test]

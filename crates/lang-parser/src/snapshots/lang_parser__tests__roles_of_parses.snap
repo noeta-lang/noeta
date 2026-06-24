@@ -1,0 +1,8 @@
+---
+source: crates/lang-parser/src/lib.rs
+assertion_line: 2290
+expression: "pretty(\"x = roles_of();\")"
+---
+(program @0..15
+  (binding x @0..15
+    (roles_of @4..14)))

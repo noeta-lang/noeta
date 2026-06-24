@@ -1058,6 +1058,36 @@ impl Interpreter {
         Value::List(Rc::new(items))
     }
 
+    /// Materialize the `(declaration, Role)` index from the reflection info into a
+    /// `List<RoleBinding>` — each `{ target: string, role: Role }`. Builds fresh `TypeDef`s/enum
+    /// values; the VM builds the matching shapes the same way, so the values agree by construction.
+    /// (P2.7.)
+    fn materialize_roles(&self) -> Value {
+        let binding_def = Rc::new(fresh_type_def(
+            "RoleBinding",
+            &["target".to_string(), "role".to_string()],
+            true,
+        ));
+        let items: Vec<Value> = self
+            .reflection
+            .roles
+            .iter()
+            .map(|r| {
+                let mut fields = BTreeMap::new();
+                fields.insert("target".to_string(), Value::Str(r.target.clone()));
+                fields.insert(
+                    "role".to_string(),
+                    builtin_enum("Role", &r.role, Vec::new()),
+                );
+                Value::Object(Rc::new(ObjectValue {
+                    def: binding_def.clone(),
+                    fields,
+                }))
+            })
+            .collect();
+        Value::List(Rc::new(items))
+    }
+
     fn eval_object(&mut self, lit: &ObjectLit) -> Eval<Value> {
         let def = match self.scope.lookup(&lit.type_name) {
             Some(Value::Type(def)) => def,
@@ -1397,6 +1427,7 @@ impl Interpreter {
                 };
                 Ok(self.materialize_attributes(type_name))
             }
+            Expr::RolesOf { .. } => Ok(self.materialize_roles()),
             Expr::TypeOf { value, span } => {
                 // Evaluate the operand for its side effects in both fidelities. A concrete static
                 // type resolved by the checker builds the precise `Type` constant (fidelity A);

@@ -472,6 +472,35 @@ fn attribute_on_a_function_checks_clean() {
 }
 
 #[test]
+fn role_tag_on_an_attribute_checks_clean() {
+    // A `@role(EntryPoint)` tag on a record that is also `@attribute` is well-formed; `roles_of()`
+    // then type-checks as `List<RoleBinding>` whose `.role` is a `Role` and `.target` a string.
+    let src = "@attribute\n@role(EntryPoint)\ntype Route = { path: string };\nfor b in roles_of() {\n  echo b.target;\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn role_must_be_a_known_variant() {
+    // `@role(...)` must name one of the blessed `Role` variants — an unknown name is E0031.
+    let src = "@attribute\n@role(Bogus)\ntype Route = { path: string };\n";
+    assert_eq!(codes(src), ["E0031"]);
+}
+
+#[test]
+fn role_requires_the_record_be_an_attribute() {
+    // A role rides on an attribute, so `@role` without `@attribute` is E0031.
+    let src = "@role(EntryPoint)\ntype Route = { path: string };\n";
+    assert_eq!(codes(src), ["E0031"]);
+}
+
+#[test]
+fn role_match_is_exhaustive_over_a_wildcard() {
+    // `b.role` is the prelude `Role` enum, matchable by `Role.Variant`; a `_` arm covers the rest.
+    let src = "@attribute\n@role(Sink)\ntype Db = { table: string };\n#[Db(\"users\")]\nfn w(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Role.Sink => \"s\", _ => \"o\" };\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn attribute_on_a_method_checks_clean() {
     // The same validation reaches a class method's attributes (through `check_fn`).
     let src = "@attribute\ntype Route = { method: string };\nclass Api {\n  id: int\n  #[Route(\"GET\")]\n  fn list(): string { return \"[]\"; }\n}\n";
