@@ -713,6 +713,7 @@ dependencies = [
 name = "lang-eval"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "insta",
  "lang-ast",
  "lang-backend",

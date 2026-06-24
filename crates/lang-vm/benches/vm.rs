@@ -11,7 +11,7 @@
 
 use std::hint::black_box;
 
-use criterion::{Criterion, criterion_group, criterion_main};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use lang_bytecode::Module;
 use lang_lexer::lex;
@@ -25,6 +25,13 @@ fn compile(src: &str) -> Module {
     let source = Source::new(SourceId::FIRST, "bench.lang", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
+    // A parse error would otherwise yield a near-empty `program` that compiles to a trivial module
+    // and benches in nanoseconds — silently measuring nothing. Fail loudly instead.
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "bench program must parse without diagnostics: {:?}",
+        parsed.diagnostics
+    );
     lang_compiler::compile(&parsed.program).expect("bench program must be in the VM subset")
 }
 
@@ -88,6 +95,39 @@ fn allocation_src() -> String {
     )
 }
 
+/// The self-append accumulator `acc ~= [i]` n times. O(n²) today (each `~` copies the whole left
+/// list); the P-COW VM half (folded into P-GC) brings it to O(n). Parameterized over n so the
+/// scaling — not just a constant factor — is visible.
+fn accumulate_src(n: usize) -> String {
+    format!(
+        "mut acc = [];\n\
+         for i in 0..{n} {{\n    \
+            acc ~= [i];\n\
+         }}\n\
+         echo acc.count();\n"
+    )
+}
+
+/// A hot method-call + field-read site on the same receiver every iteration — the monomorphic
+/// dispatch/property pattern P-IC (inline caches) targets beyond the existing `property_access`.
+fn member_dispatch_src(n: usize) -> String {
+    format!(
+        "class Counter {{\n    n: int\n    \
+            fn bump(): int {{ return n + 1; }}\n\
+         }}\n\
+         mut total = 0;\n\
+         c = Counter {{ n: 1 }};\n\
+         for i in 0..{n} {{\n    \
+            total = total + c.bump() + c.n + i;\n\
+         }}\n\
+         echo total;\n"
+    )
+}
+
+/// Sizes for the parameterized loops. Each doubles the previous, so the per-step time ratio reveals
+/// the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
+const LOOP_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
+
 fn vm_hot_paths(c: &mut Criterion) {
     let programs = [
         ("dispatch_fib", dispatch_src()),
@@ -106,6 +146,24 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    let mut acc = c.benchmark_group("vm_accumulate");
+    for &n in LOOP_SIZES {
+        let module = compile(&accumulate_src(n));
+        acc.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    acc.finish();
+
+    let mut disp = c.benchmark_group("vm_member_dispatch");
+    for &n in LOOP_SIZES {
+        let module = compile(&member_dispatch_src(n));
+        disp.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    disp.finish();
 }
 
 criterion_group!(benches, vm_hot_paths);
