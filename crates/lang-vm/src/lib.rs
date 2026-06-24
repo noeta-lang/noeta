@@ -3335,6 +3335,20 @@ mod tests {
     }
 
     #[test]
+    fn heap_element_list_concat_refcounts() {
+        // Probe: concatenating lists of HEAP elements (strings) must keep element refcounts
+        // balanced (no UAF / double free at teardown). Run under miri to validate.
+        let r = run(
+            "mut acc = [\"a\", \"b\"];\nacc = acc ~ [\"c\"];\nacc ~= [\"d\"];\nb = acc;\nacc ~= [\"e\"];\necho acc;\necho b;\n",
+        );
+        assert_eq!(
+            r.stdout,
+            "[\"a\", \"b\", \"c\", \"d\", \"e\"]\n[\"a\", \"b\", \"c\", \"d\"]\n"
+        );
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn integer_wrapping_matches_i64() {
         let r = run("echo 9223372036854775807 + 1;\necho 9223372036854775807 * 2;\n");
         assert_eq!(r.stdout, "-9223372036854775808\n-2\n");

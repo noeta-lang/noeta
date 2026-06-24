@@ -28,6 +28,14 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
             if left.is_list() && right.is_list() {
                 let mut items = left.list_items().unwrap();
                 items.extend(right.list_items().unwrap());
+                // The new list owns one reference to each element, but `list_items` only *borrowed*
+                // them from the operands (no retain). Retain each now, or the new list and the
+                // operands would both claim ownership of the same heap elements and double-free them
+                // at teardown (a UAF — latent because immediate elements like ints are no-ops here,
+                // and no heap-element list concat was exercised under miri).
+                for &item in &items {
+                    item.inc_ref();
+                }
                 Ok(Value::list(items))
             } else {
                 Ok(Value::string(&format!(

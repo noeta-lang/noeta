@@ -1,0 +1,15 @@
+// Concatenating lists whose elements are heap values (strings, not immediates) must keep element
+// refcounts balanced: the result list and the operands each own their own references, so no element
+// is double-freed at teardown. (Regression guard for a latent VM use-after-free — the concat result
+// borrowed its elements without retaining them; immediate elements like ints masked it.) The alias
+// `b = acc` taken mid-sequence must still see the pre-append list. Both backends agree.
+// expect: stdout "["a", "b", "c", "d", "e"]"
+// expect: stdout "["a", "b", "c", "d"]"
+// expect: exit 0
+mut acc = ["a", "b"];
+acc = acc ~ ["c"];
+acc ~= ["d"];
+b = acc;
+acc ~= ["e"];
+echo acc;
+echo b;
