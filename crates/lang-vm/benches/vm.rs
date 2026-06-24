@@ -71,6 +71,30 @@ fn record_update_src(n: usize) -> String {
     )
 }
 
+/// A **read-update** record accumulator inside a function (`acc = Wide { ...acc, f0: acc.f0 + 1 }`),
+/// returned after the loop. Before drop insertion this could not reuse — the `acc.f0` read retained
+/// the accumulator into a temporary the register machine never freed, so reuse fell back to a copy.
+/// With drop insertion (`Drop` after the `LoadField`, plus no declaration `Move` for the local) the
+/// accumulator stays uniquely owned, so `runtime` reuses in place. `off` vs `runtime` is the win drop
+/// insertion unlocked. (Static stays off — the analysis keeps read-updates on the runtime path.)
+fn record_update_read_src(n: usize) -> String {
+    let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
+    let inits: Vec<String> = (0..8).map(|i| format!("f{i}: 0")).collect();
+    format!(
+        "class Wide {{\n    {}\n}}\n\
+         fn build(n: int): int {{\n    \
+            mut acc = Wide {{ {} }};\n    \
+            for i in 0..n {{\n        \
+                acc = Wide {{ ...acc, f0: acc.f0 + 1 }};\n    \
+            }}\n    \
+            return acc.f0;\n\
+         }}\n\
+         echo build({n});\n",
+        fields.join("\n    "),
+        inits.join(", "),
+    )
+}
+
 /// A list literal `[0, 1, 2, …, n-1]`, generated here so the iteration count is
 /// high without a giant source line in this file.
 fn int_list(n: usize) -> String {
@@ -220,6 +244,20 @@ fn vm_hot_paths(c: &mut Criterion) {
         }
     }
     reuse.finish();
+
+    // Read-update reuse, unlocked by drop insertion: `off` (copy) vs `runtime` (in-place). Without
+    // the `Drop` after `acc.f0`'s `LoadField`, `runtime` would fall back to a copy (refcount > 1), so
+    // this gap is exactly what drop insertion bought.
+    let mut read = c.benchmark_group("vm_record_update_read");
+    for (label, mode) in [("off", ReuseMode::Off), ("runtime", ReuseMode::Runtime)] {
+        for &n in LOOP_SIZES {
+            let module = compile_reuse(&record_update_read_src(n), mode);
+            read.bench_with_input(BenchmarkId::new(label, n), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))))
+            });
+        }
+    }
+    read.finish();
 }
 
 criterion_group!(benches, vm_hot_paths);

@@ -601,6 +601,12 @@ struct FnCompiler<'m> {
     /// is [`ReuseMode::Static`]. A self-update whose name is absent here still gets the runtime-checked
     /// reuse. See [`linear_record_accumulators`].
     linear_accs: HashSet<String>,
+    /// Whether a `LoadField`'s receiver temporary should be released immediately (drop insertion).
+    /// Set only while lowering a reuse construct's field initializers (`eval_in_place_named`), so a
+    /// self-update that *reads* the accumulator (`acc = T { ...acc, x: acc.x }`) frees the read's
+    /// temporary before the in-place mutation — restoring unique ownership. Off everywhere else, so
+    /// ordinary field reads (the common case) pay nothing. See `plans/perf/p-reuse-analysis.md`.
+    drop_receivers: bool,
 }
 
 /// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
@@ -687,6 +693,7 @@ impl<'m> FnCompiler<'m> {
             local_layer: HashSet::new(),
             loops: Vec::new(),
             linear_accs: HashSet::new(),
+            drop_receivers: false,
         }
     }
 
@@ -1235,17 +1242,38 @@ impl<'m> FnCompiler<'m> {
         value: &Expr,
     ) -> Result<(), Unsupported> {
         if mut_decl {
-            let t = self.alloc_reg();
-            self.expr(value, t)?;
             if self.at_global_depth() {
+                let t = self.alloc_reg();
+                self.expr(value, t)?;
                 self.globals
                     .insert(name.to_string(), GlobalInfo { mutable: true });
                 self.code.push(Op::StoreGlobal {
                     name: name.to_string(),
                     src: t,
                 });
-            } else {
+            } else if self.celled.contains(name) || self.scopes.last().unwrap().contains_key(name) {
+                // A captured local needs `MakeCell`; a re-`mut` of a name already in this scope reuses
+                // its register — both go through `declare_local`'s temp-and-move path.
+                let t = self.alloc_reg();
+                self.expr(value, t)?;
                 self.declare_local(name, t, true);
+            } else {
+                // Drop insertion (Step A): a fresh non-celled local is evaluated **directly into its
+                // own register** — no retaining `Op::Move` from an initializer temp. The monotonic
+                // register machine never frees that temp until the frame ends, so the old `Move`
+                // left a freshly-built value at refcount 2 (temp + local), permanently blocking
+                // reuse on a local accumulator. Binding `name` *after* evaluating `value` keeps the
+                // initializer from resolving to the not-yet-bound local. See `p-reuse-analysis.md`.
+                let reg = self.alloc_reg();
+                self.expr(value, reg)?;
+                self.scopes.last_mut().unwrap().insert(
+                    name.to_string(),
+                    Var {
+                        reg,
+                        mutable: true,
+                        celled: false,
+                    },
+                );
             }
             return Ok(());
         }
@@ -1272,15 +1300,30 @@ impl<'m> FnCompiler<'m> {
                 });
                 return Ok(());
             }
-            // NOTE: a *local* self-update accumulator gets **no** record-update reuse. `declare_local`
-            // binds a local with a retaining `Op::Move` from the initializer's temporary register,
-            // and the register machine frees no temporary until the frame ends — so a local
-            // accumulator is born at refcount 2 (the temp lingers) and is never uniquely owned at the
-            // construct. Reuse fires only for *globals* (stored via the consuming `StoreGlobal`), the
-            // same reason the COW list append targets a global accumulator. Making locals reusable
-            // needs a consuming move / dead-temp release — the drop-insertion work this prototype
-            // identifies as the gating prerequisite. So a local falls through to the copying
-            // `MakeRecord` below. See `plans/perf/p-reuse-analysis.md`.
+            // Record-update reuse for a local self-update `acc = Type { ...acc, … }`. With drop
+            // insertion (Step A, no declaration `Move`) a non-celled local accumulator now lives at
+            // refcount 1 in `var.reg`, so the in-place op reads/mutates/re-stores it there directly.
+            // `Static` (check elided) is sound when the linearity analysis cleared `acc`; otherwise
+            // `Runtime`. A celled local stays behind a shared cell and is skipped.
+            if var.mutable
+                && !var.celled
+                && self.module.reuse != ReuseMode::Off
+                && let Some(lit) = record_self_update(name, value)
+                && let Some((kind, fields)) = self.record_kind_fields(&lit.type_name)
+            {
+                let check = self.reuse_check(name);
+                if let Some((shape, named)) = self.eval_in_place_named(lit, kind, &fields)? {
+                    self.code.push(Op::MakeRecordInPlace {
+                        dst: var.reg,
+                        shape,
+                        named,
+                        base: var.reg,
+                        check,
+                        span: value.span(),
+                    });
+                }
+                return Ok(());
+            }
             let t = self.alloc_reg();
             self.expr(value, t)?;
             if !var.mutable {
@@ -1945,8 +1988,14 @@ impl<'m> FnCompiler<'m> {
             self.module
                 .intern_shape(Shape::object(kind, lit.type_name.clone(), fields.to_vec()));
         let mut named: Vec<(u16, Reg)> = Vec::with_capacity(lit.fields.len());
+        // Free each `acc.field` read's receiver temporary at its last use while lowering these
+        // initializers, so a self-update that reads the accumulator keeps it uniquely owned for the
+        // in-place mutation. Restored after, so no other field read pays the extra `Drop`.
+        let prev = self.drop_receivers;
+        self.drop_receivers = true;
         for init in &lit.fields {
             let Some(slot) = fields.iter().position(|f| f == &init.name) else {
+                self.drop_receivers = prev;
                 let idx = self.add_diag(unknown_field_diag(
                     &lit.type_name,
                     &init.name,
@@ -1959,6 +2008,7 @@ impl<'m> FnCompiler<'m> {
             self.expr(&init.value, r)?;
             named.push((slot as u16, r));
         }
+        self.drop_receivers = prev;
         Ok(Some((shape, named.into_boxed_slice())))
     }
 
@@ -2088,6 +2138,15 @@ impl<'m> FnCompiler<'m> {
             span,
             cache,
         });
+        // Drop insertion (Step B): inside a reuse construct's field initializers, `obj` is a
+        // freshly-allocated single-use temporary holding the receiver, dead after this `LoadField`.
+        // Releasing it now (instead of at frame teardown) restores the accumulator's unique ownership
+        // when the receiver *is* the accumulator (`acc.field` inside a self-update), so the update
+        // can still reuse in place. `dst != obj` (obj is allocated after dst), so this never frees
+        // the field we just loaded. Gated on `drop_receivers` so ordinary field reads pay nothing.
+        if self.drop_receivers {
+            self.code.push(Op::Drop { reg: obj });
+        }
         Ok(())
     }
 

@@ -1,6 +1,11 @@
 # P-REUSE — compile-time reuse analysis (Perceus/Roc-style), prototype + benchmark
 
-Status: **PROTOTYPE COMPLETE — both axes measured.** Generalizes the hand-rolled COW list append
+Status: **PROTOTYPE COMPLETE + DROP INSERTION DONE.** The prototype measured both axes and identified
+**drop insertion** as the gating prerequisite; the follow-up below then *implemented* targeted drop
+insertion, unlocking reuse for local and read-update accumulators (the idiomatic cases) at **~3×**.
+Jump to **"Drop insertion (follow-up)"** for that work. The original prototype writeup follows.
+
+Status (prototype): **both axes measured.** Generalizes the hand-rolled COW list append
 (`p-cow-list-append.md`) to a second constructor — **record functional-update** `acc = Type { ...acc,
 … }` — and prototypes the **compile-time uniqueness hoist** (the static-reuse path). Both backends;
 benchmarked. The headline result is a clear answer to "what gives the highest performance," including
@@ -95,17 +100,62 @@ loop. Same source compiled three ways. Quick criterion settings (warm-up 0.5 s, 
 - **Recommendation.** Ship the runtime-checked record reuse (axis 1) as the generalization of the
   COW; treat the static path as a measured-but-marginal curiosity. The high-value next step is **not**
   more static analysis but **drop insertion** (free dead temporaries at last use) — it is what unlocks
-  reuse for locals and read-updates, i.e. the cases that actually occur in idiomatic code. That is the
-  real Perceus track and is milestone-scale; gate it on a workload where construct allocation
-  dominates a profile.
+  reuse for locals and read-updates, i.e. the cases that actually occur in idiomatic code. **(Done —
+  see "Drop insertion (follow-up)" below; ~3× on the read-update accumulator.)**
+
+## Drop insertion (follow-up): unlocking locals + read-updates
+
+The prototype found reuse fired only for a global blind-overwrite accumulator — because the register
+machine frees no temporary until frame end, so a *local* accumulator (born via a retaining
+declaration `Move`) and any *read* of the accumulator (`acc.field` retains it into a lingering temp)
+stay above refcount 1. The fix is **targeted drop insertion** for exactly those compiler-generated
+single-use temporaries — provably dead by construction, so no CFG-liveness pass is needed.
+
+- **Step A — no declaration `Move`.** A fresh non-celled `mut` local is now evaluated *directly into
+  its own register* (`binding`), instead of into a temp then `Move`d (retained) into the local. That
+  retaining `Move` left the value at refcount 2 forever (the temp lingers). Now a local accumulator
+  is refcount 1 → local self-update reuse re-enabled (`MakeRecordInPlace` in the local branch).
+- **Step B — `Op::Drop { reg }`** (release + clear to `unit`, idempotent with `set_reg`/teardown so
+  nothing double-frees). `member()` emits it after a `LoadField` to free the receiver temp — but only
+  while lowering a **reuse construct's** field initializers (`drop_receivers` flag, set in
+  `eval_in_place_named`). So `acc = T { ...acc, x: acc.x + 1 }` frees the `acc.x` read's temp before
+  the in-place mutation (reuse fires), while ordinary field reads everywhere else emit no `Drop` and
+  pay nothing — no regression. (A general drop pass over *all* temps cost ~+4% on field-read loops;
+  gating it to reuse constructs removed that.)
+
+`Op::Drop` is miri-validated (no double-free); conformance `record_update_drop_insertion.lang` (local
++ read-update, heap field) + VM unit test `record_update_reuse_with_self_read`. Conformance 223 /
+differential agrees / 0-skipped.
+
+**Benchmark — read-update accumulator (the unlocked case), `vm_record_update_read`** (local, inside a
+function, `acc = Wide { ...acc, f0: acc.f0 + 1 }`, 8 fields; off = copy, runtime = reuse):
+
+| n | off (copy) | runtime (reuse) | speedup |
+|---|------------|-----------------|---------|
+| 1000 | 154 µs | 57.6 µs | 2.7× |
+| 2000 | 311 µs | 118.9 µs | 2.6× |
+| 4000 | 611 µs | 220.7 µs | 2.8× |
+| 8000 | 1.269 ms | 403.9 µs | 3.1× |
+
+This is the idiomatic accumulator (a local, reading itself) the prototype found blocked — now reusing
+at ~3×. Field-read regression check (gated `Drop`): `vm/property_access` 608 µs → 565 µs (within
+noise, no regression); `dispatch_fib` (no field reads) unchanged.
+
+**Takeaway.** Targeted drop insertion — not general CFG liveness — was enough to unlock the cases that
+matter, because the reuse-blocking temporaries are compiler-generated and provably single-use. The
+remaining gap (a fully general last-use pass for arbitrary user code) stays milestone-scale and
+unmotivated by these numbers: the targeted version already captures the accumulator-reuse win. Axis 2
+(static check elision) remains negligible — read-updates ride the runtime path and reuse just as well.
 
 ## Files
 
-- `crates/lang-bytecode/src/lib.rs` — `ReuseCheck`, `Op::MakeRecordInPlace` + disasm.
+- `crates/lang-bytecode/src/lib.rs` — `ReuseCheck`, `Op::MakeRecordInPlace`, `Op::Drop` + disasm.
 - `crates/lang-vm/src/lib.rs` — dispatch arm (static/runtime/copy paths); unit test (miri).
 - `crates/lang-compiler/src/lib.rs` — `ReuseMode`/`compile_with_options`, `record_self_update`,
-  `linear_record_accumulators` + the positional last-update refinement, global self-update lowering.
+  `linear_record_accumulators` + the positional last-update refinement, both local & global
+  self-update lowering; **drop insertion** — `binding` (no declaration `Move`) + `member()`'s gated
+  receiver `Drop` (`drop_receivers`, set in `eval_in_place_named`).
 - `crates/lang-eval/src/lib.rs` — `try_record_reuse`, `record_reuse` knob, `run_without_record_reuse`.
-- Benches: `crates/lang-vm/benches/vm.rs` (`vm_record_update`), `crates/lang-eval/benches/eval.rs`
-  (`eval_record_update`).
-- Conformance: `tests/conformance/classes/record_update_{static,reuse,aliasing}.lang`.
+- Benches: `crates/lang-vm/benches/vm.rs` (`vm_record_update`, `vm_record_update_read`),
+  `crates/lang-eval/benches/eval.rs` (`eval_record_update`).
+- Conformance: `tests/conformance/classes/record_update_{static,reuse,aliasing,drop_insertion}.lang`.

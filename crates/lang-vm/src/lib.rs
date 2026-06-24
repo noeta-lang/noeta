@@ -1141,6 +1141,14 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, v);
                     frames[top].pc += 1;
                 }
+                Op::Drop { reg } => {
+                    // Release a dead single-use temporary at its last use and clear it to `unit` (so
+                    // `set_reg`/teardown later release `unit`, never double-freeing). This frees the
+                    // `LoadField` receiver promptly, restoring the accumulator's unique ownership.
+                    let v = std::mem::replace(&mut frames[top].regs[*reg as usize], Value::unit());
+                    release(v);
+                    frames[top].pc += 1;
+                }
                 Op::ConcatInPlace { dst, lhs, rhs, .. } => {
                     let l = frames[top].regs[*lhs as usize];
                     let r = frames[top].regs[*rhs as usize];
@@ -3505,6 +3513,21 @@ mod tests {
             "class Point {\n  x: int\n  tag: string\n  fn show(): string { return \"${x} ${tag}\"; }\n}\nmut acc = Point { x: -1, tag: \"k\" };\nfor i in 0..4 {\n  acc = Point { ...acc, x: i };\n}\necho acc.show();\nmut p = Point { x: 1, tag: \"a\" };\nsnap = p;\np = Point { ...p, x: 9 };\necho p.show();\necho snap.show();\n",
         );
         assert_eq!(r.stdout, "3 k\n9 a\n1 a\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn record_update_reuse_with_self_read() {
+        // Drop insertion (Step B): a self-update that *reads* the accumulator
+        // (`acc = Point { ...acc, x: acc.x + 1 }`) reuses in place — the `Drop` after the `acc.x`
+        // `LoadField` frees the receiver temporary, restoring unique ownership before the construct.
+        // Covers a LOCAL accumulator (Step A: no declaration `Move`) inside a function with a HEAP
+        // field carried across each in-place update. Run under miri to validate the `Drop` does not
+        // double-free the receiver and the carried heap field's refcount stays balanced.
+        let r = run(
+            "class Point {\n  x: int\n  label: string\n  fn show(): string { return \"${x} ${label}\"; }\n}\nfn run(n: int): string {\n  mut acc = Point { x: 0, label: \"p\" };\n  for i in 0..n {\n    acc = Point { ...acc, x: acc.x + 2 };\n  }\n  return acc.show();\n}\necho run(5);\n",
+        );
+        assert_eq!(r.stdout, "10 p\n");
         assert_eq!(r.exit_code, 0);
     }
 

@@ -1,0 +1,25 @@
+// Drop insertion unlocks reuse for the idiomatic accumulator the prototype found blocked: a LOCAL
+// accumulator (Step A: declared without a retaining `Move`, so refcount 1) whose update READS itself
+// (Step B: the `acc.total` read's receiver temporary is freed at its last use, restoring unique
+// ownership before the in-place mutation). The carried field `label` (a heap string) must survive
+// each reuse untouched. Output is identical to the copying path — reuse is invisible.
+// expect: stdout "10 acc"
+// expect: exit 0
+class Bag {
+    total: int
+    label: string
+
+    fn show(): string {
+        return "${total} ${label}";
+    }
+}
+
+fn accumulate(n: int): Bag {
+    mut acc = Bag { total: 0, label: "acc" };
+    for i in 0..n {
+        acc = Bag { ...acc, total: acc.total + i };
+    }
+    return acc;
+}
+
+echo accumulate(5).show();

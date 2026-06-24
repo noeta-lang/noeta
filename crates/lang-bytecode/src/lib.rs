@@ -167,6 +167,16 @@ pub enum Op {
         name: String,
         span: Span,
     },
+    /// `drop(reg)` — release the value held in `reg` and leave `unit` in its place. Inserted by the
+    /// compiler's targeted drop insertion to free a compiler-generated **single-use temporary** at its
+    /// last use (e.g. a `LoadField` receiver) instead of waiting for frame teardown. Freeing the
+    /// temporary promptly restores the accumulator's unique ownership, so a following self-update can
+    /// reuse it in place even when the update *reads* the accumulator (`acc = T { ...acc, x: acc.x }`).
+    /// Clearing to `unit` keeps it idempotent with `set_reg`'s release-on-overwrite and frame teardown
+    /// (both then release `unit`, a no-op) — so no value is double-freed. See `p-reuse-analysis.md`.
+    Drop {
+        reg: Reg,
+    },
     /// `dst = lhs ~ rhs`, **consuming `lhs`** (the copy-on-write list-append fast path). `lhs` is the
     /// taken-out accumulator (its register is left `unit`); `rhs` is borrowed. When `lhs` is a
     /// uniquely-owned list (`refcount == 1`) its backing buffer is extended in place — O(1)
@@ -780,6 +790,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {name:?}"),
         Op::StoreGlobal { name, src } => format!("StoreGlobal {name:?} <- r{src}"),
         Op::TakeGlobal { dst, name, .. } => format!("TakeGlobal  r{dst} <- take({name:?})"),
+        Op::Drop { reg } => format!("Drop        r{reg}"),
         Op::ConcatInPlace { dst, lhs, rhs, .. } => format!("ConcatIP    r{dst} <- r{lhs} ~ r{rhs}"),
         Op::MakeClosure {
             dst,
