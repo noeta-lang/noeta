@@ -1127,6 +1127,12 @@ mod tests {
     }
 
     proptest! {
+        // Disable on-disk failure persistence: its default backend calls `getcwd` to absolutize the
+        // source path, which Miri's isolation forbids (so `cargo miri test` aborted here). Regression
+        // seeds are a convenience we don't rely on, and dropping them lets these properties run under
+        // Miri alongside the rest of the crate.
+        #![proptest_config(ProptestConfig { failure_persistence: None, ..ProptestConfig::default() })]
+
         #[test]
         fn float_round_trips(bits in any::<u64>()) {
             let f = f64::from_bits(bits);
