@@ -1,0 +1,28 @@
+// `#[...]` data attributes attach to enum variants too — the last declaration site, completing the
+// target set (types, functions, methods, fields, variants). Keyed by the qualified `Enum.Variant`
+// name in the shared manifest, so `attributes_of::<T>()` surfaces a variant target. Built
+// statically, so both backends agree.
+// expect: stdout "Status.Archived"
+// expect: stdout "use Active instead"
+// expect: stdout "Color.Rgb"
+// expect: stdout "experimental"
+// expect: exit 0
+type Note = { text: string };
+impl Attribute for Note {}
+
+enum Status {
+    Active;
+    #[Note("use Active instead")]
+    Archived;
+}
+
+enum Color {
+    Red;
+    #[Note("experimental")]
+    Rgb(r: int);
+}
+
+for n in attributes_of::<Note>() {
+    echo n.target;     // "Status.Archived", then "Color.Rgb"
+    echo n.value.text; // "use Active instead", then "experimental"
+}

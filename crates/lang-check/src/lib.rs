@@ -878,6 +878,7 @@ impl Checker {
             for field in &variant.fields {
                 self.check_type_opt(&field.ty);
             }
+            self.check_attrs(&variant.attrs);
         }
         self.check_derives(&e.derives);
         let standalone = self.standalone_for(&e.name);

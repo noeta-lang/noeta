@@ -110,6 +110,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
             Stmt::Fn(decl) => push_attrs(&mut manifest, &decl.name, &decl.attrs),
             Stmt::Enum(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
+                // A variant's attributes are keyed by its qualified `Enum.Variant` name, mirroring
+                // the `Type.field`/`Type.method` convention.
+                for variant in &decl.variants {
+                    let target = format!("{}.{}", decl.name, variant.name);
+                    push_attrs(&mut manifest, &target, &variant.attrs);
+                }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Enum,

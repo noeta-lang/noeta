@@ -483,6 +483,20 @@ fn attribute_on_a_field_must_be_an_attribute() {
 }
 
 #[test]
+fn attribute_on_an_enum_variant_checks_clean() {
+    // A `#[...]` on an enum variant (plain or algebraic) is validated like any other attribute use.
+    let src = "type Note = { text: string };\nimpl Attribute for Note {}\nenum Status {\n  Active;\n  #[Note(\"gone\")]\n  Archived;\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn attribute_on_a_variant_must_be_an_attribute() {
+    // The E0029 gate reaches enum-variant attributes too.
+    let src = "type Plain = { text: string };\nenum Status {\n  #[Plain(\"x\")]\n  Active;\n}\n";
+    assert_eq!(codes(src), ["E0029"]);
+}
+
+#[test]
 fn attributes_of_on_a_non_attribute_is_rejected() {
     // The capability gate, mirroring a `#[Foo]` use: the type argument must implement `Attribute`.
     let src = "type Plain = { path: string };\nrs = attributes_of::<Plain>();\n";

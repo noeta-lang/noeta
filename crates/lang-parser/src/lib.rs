@@ -1252,9 +1252,13 @@ where
                 },
             );
 
-        // Enum variant: plain `Red;`, algebraic `Code(n: int);`, or backed `P = "p";`.
-        let variant = id
+        // Enum variant: plain `Red;`, algebraic `Code(n: int);`, or backed `P = "p";`, each with
+        // optional leading `#[...]` attributes (P2.4c).
+        let variant = attr_decl
             .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(id.clone())
             .then(choice((
                 params_parser(ctx, expr.clone(), false).map(|fields| (fields, None)),
                 just(T::Eq)
@@ -1264,11 +1268,12 @@ where
             )))
             .then_ignore(just(T::Semicolon))
             .map_with(
-                move |((name, name_span), (fields, backed_value)), e| VariantDecl {
+                move |((attrs, (name, name_span)), (fields, backed_value)), e| VariantDecl {
                     name,
                     name_span,
                     fields,
                     backed_value,
+                    attrs,
                     span: ctx.to_span(e.span()),
                 },
             );

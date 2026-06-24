@@ -314,6 +314,10 @@ pub struct VariantDecl {
     pub fields: Vec<Param>,
     /// The backing value (`= "pending"`) for a backed enum's variant.
     pub backed_value: Option<Expr>,
+    /// Leading `#[...]` data attributes on the variant (attribute-system pass 2, P2.4c). Captured in
+    /// the reflection manifest like a field's or method's attributes; `@derive` is not permitted
+    /// here. Empty for the common unannotated variant.
+    pub attrs: Vec<Attribute>,
     pub span: Span,
 }
 
