@@ -143,6 +143,11 @@ pub struct RecordDecl {
     /// into the compiler-built manifest, and gated by the checker (each must name a record/class
     /// marked `impl Attribute`, and its arguments must construct it).
     pub attrs: Vec<Attribute>,
+    /// The target kinds named by a leading `@attachableTo(Method, Function, …)` directive (P2.5),
+    /// each with its span. Meaningful only when this type is itself an attribute (`impl Attribute`):
+    /// it restricts the declaration kinds a `#[ThisType(...)]` use may attach to. Empty ⇒
+    /// unrestricted (attaches anywhere). The checker validates the names and enforces placement.
+    pub attachable_to: Vec<(String, Span)>,
     pub span: Span,
 }
 
@@ -259,6 +264,9 @@ pub struct ClassDecl {
     pub derives: Vec<(String, Span)>,
     /// Leading `#[...]` data attributes on the class.
     pub attrs: Vec<Attribute>,
+    /// The target kinds named by a leading `@attachableTo(...)` directive (P2.5); see
+    /// [`RecordDecl::attachable_to`]. Empty ⇒ unrestricted.
+    pub attachable_to: Vec<(String, Span)>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.

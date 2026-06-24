@@ -483,6 +483,36 @@ fn attribute_on_a_field_must_be_an_attribute() {
 }
 
 #[test]
+fn attachable_to_permits_a_listed_kind() {
+    // `@attachableTo(Function)` allows the attribute on a top-level function.
+    let src = "@attachableTo(Function)\ntype Route = { method: string };\nimpl Attribute for Route {}\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn attachable_to_rejects_an_unlisted_kind() {
+    // `@attachableTo(Method)` forbids the attribute on a type declaration → E0030.
+    let src = "@attachableTo(Method)\ntype Route = { method: string };\nimpl Attribute for Route {}\n#[Route(\"GET\")]\ntype User = { id: int };\n";
+    assert_eq!(codes(src), ["E0030"]);
+}
+
+#[test]
+fn attachable_to_with_an_unknown_kind_is_rejected() {
+    // The kind vocabulary is closed; an unknown name in the directive is E0030.
+    let src =
+        "@attachableTo(Bogus)\ntype Route = { method: string };\nimpl Attribute for Route {}\n";
+    assert_eq!(codes(src), ["E0030"]);
+}
+
+#[test]
+fn attachable_to_field_only_attribute_rejects_a_method() {
+    // A field-only attribute (`@attachableTo(Field)`) on a method is E0030 — exercising the
+    // method/function target axis added in P2.4.
+    let src = "@attachableTo(Field)\ntype Column = { name: string };\nimpl Attribute for Column {}\nclass Api {\n  #[Column(\"x\")]\n  fn list(): int { return 0; }\n}\n";
+    assert_eq!(codes(src), ["E0030"]);
+}
+
+#[test]
 fn attribute_on_an_enum_variant_checks_clean() {
     // A `#[...]` on an enum variant (plain or algebraic) is validated like any other attribute use.
     let src = "type Note = { text: string };\nimpl Attribute for Note {}\nenum Status {\n  Active;\n  #[Note(\"gone\")]\n  Archived;\n}\n";

@@ -146,6 +146,49 @@ struct VariantInfo {
     fields: Vec<Type>,
 }
 
+/// A declaration **kind** an attribute may attach to — the closed vocabulary of `@attachableTo(...)`
+/// and the axis `#[Foo(...)]` placement is checked on (P2.5). One per declaration site the attribute
+/// system reaches. These are source positions, not runtime value types (a `Field`/`Variant` is not a
+/// value), so they live only in the checker.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetKind {
+    Record,
+    Class,
+    Enum,
+    Function,
+    Method,
+    Field,
+    Variant,
+}
+
+impl TargetKind {
+    /// The directive spelling (`@attachableTo(Method, …)`) ⇄ kind, also used in diagnostics.
+    fn from_name(name: &str) -> Option<TargetKind> {
+        Some(match name {
+            "Record" => TargetKind::Record,
+            "Class" => TargetKind::Class,
+            "Enum" => TargetKind::Enum,
+            "Function" => TargetKind::Function,
+            "Method" => TargetKind::Method,
+            "Field" => TargetKind::Field,
+            "Variant" => TargetKind::Variant,
+            _ => return None,
+        })
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            TargetKind::Record => "Record",
+            TargetKind::Class => "Class",
+            TargetKind::Enum => "Enum",
+            TargetKind::Function => "Function",
+            TargetKind::Method => "Method",
+            TargetKind::Field => "Field",
+            TargetKind::Variant => "Variant",
+        }
+    }
+}
+
 /// A callable signature, as far as annotations reveal it: the parameter types (for arity +
 /// argument checking) and the return type. Used for both top-level functions and user methods.
 /// `params`/`ret` are **erased** (generic parameters replaced by `dyn`); a generic *function* also
@@ -235,6 +278,11 @@ struct Checker {
     /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
     /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
     standalone_impls: HashMap<String, Vec<(String, Span)>>,
+    /// Each attribute type's `@attachableTo(...)` placement restriction (P2.5): attribute type name
+    /// → the declaration kinds a `#[ThisType(...)]` use may attach to. A type *absent* from this map
+    /// is unrestricted; a present-but-empty entry never occurs (an empty directive is dropped). The
+    /// checker enforces it per use site (E0030); kind names are validated when this is built.
+    attachable: HashMap<String, Vec<TargetKind>>,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": ["Comparable"]}`). Empty at top
     /// level; saved and restored around each generic declaration. The bounds drive body-side
@@ -335,6 +383,7 @@ impl Checker {
                     self.records.insert(r.name.clone(), fields);
                     self.types.insert(r.name.clone());
                     self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
+                    self.record_attachable_to(&r.name, &r.attachable_to);
                     self.generic_types.insert(
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -357,6 +406,7 @@ impl Checker {
                             .map(|(n, _)| n.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
+                    self.record_attachable_to(&c.name, &c.attachable_to);
                     // Record each method's signature (class methods and impl-block methods alike),
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
@@ -672,7 +722,7 @@ impl Checker {
                     ));
                 }
             }
-            Stmt::Fn(decl) => self.check_fn(decl, env, &[]),
+            Stmt::Fn(decl) => self.check_fn(decl, env, &[], TargetKind::Function),
             Stmt::Record(r) => self.check_record(r),
             Stmt::Class(c) => self.check_class(c, env),
             Stmt::Enum(e) => self.check_enum(e),
@@ -683,11 +733,18 @@ impl Checker {
 
     /// Check a function (or method) body. `extra` seeds the body scope with additional bindings
     /// (a class's fields, when checking a method).
-    fn check_fn(&mut self, decl: &FnDecl, env: &mut Env, extra: &[(String, Type)]) {
+    fn check_fn(
+        &mut self,
+        decl: &FnDecl,
+        env: &mut Env,
+        extra: &[(String, Type)],
+        target: TargetKind,
+    ) {
         self.require_signature(decl);
         // A function/method's `#[...]` attributes are validated like a type's: each names an
         // `Attribute` capability (E0029) and constructs it from its literal args (E0009/E0007/E0005).
-        self.check_attrs(&decl.attrs);
+        // `target` distinguishes a top-level `Function` from a `Method` for placement checks (P2.5).
+        self.check_attrs(&decl.attrs, target);
         // Bring the function's own generic parameters into scope for its body (a free function may
         // be generic; a method is generic over its class's parameters, already in scope, and
         // carries none of its own). Union with the current set so a method does not lose the
@@ -822,12 +879,12 @@ impl Checker {
         let saved = self.enter_type_params(&r.type_params);
         for f in &r.fields {
             self.check_type_opt(&f.ty);
-            self.check_attrs(&f.attrs);
+            self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.check_derives(&r.derives);
         let standalone = self.standalone_for(&r.name);
         self.check_coherence(&r.derives, &[], &standalone);
-        self.check_attrs(&r.attrs);
+        self.check_attrs(&r.attrs, TargetKind::Record);
         self.type_params = saved;
     }
 
@@ -846,17 +903,17 @@ impl Checker {
             .collect();
         for f in &c.fields {
             self.check_type_opt(&f.ty);
-            self.check_attrs(&f.attrs);
+            self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.check_derives(&c.derives);
         let standalone = self.standalone_for(&c.name);
         self.check_coherence(&c.derives, &c.impls, &standalone);
-        self.check_attrs(&c.attrs);
+        self.check_attrs(&c.attrs, TargetKind::Class);
         for block in &c.impls {
             self.check_impl(block);
         }
         for method in &c.methods {
-            self.check_fn(method, env, &fields);
+            self.check_fn(method, env, &fields, TargetKind::Method);
         }
         if let Some(destructor) = &c.destructor {
             env.push(HashMap::new());
@@ -878,12 +935,12 @@ impl Checker {
             for field in &variant.fields {
                 self.check_type_opt(&field.ty);
             }
-            self.check_attrs(&variant.attrs);
+            self.check_attrs(&variant.attrs, TargetKind::Variant);
         }
         self.check_derives(&e.derives);
         let standalone = self.standalone_for(&e.name);
         self.check_coherence(&e.derives, &[], &standalone);
-        self.check_attrs(&e.attrs);
+        self.check_attrs(&e.attrs, TargetKind::Enum);
         self.type_params = saved;
     }
 
@@ -1147,7 +1204,7 @@ impl Checker {
     /// build a valid `Foo` (every field set once, each literal assignable to its field), the same
     /// all-fields-literal contract any record construction obeys. The old `#[derive(...)]` codegen
     /// spelling is still rejected up front (E0017).
-    fn check_attrs(&mut self, attrs: &[Attribute]) {
+    fn check_attrs(&mut self, attrs: &[Attribute], target: TargetKind) {
         for attr in attrs {
             if attr.name == "derive" {
                 self.diags.push(
@@ -1181,6 +1238,30 @@ impl Checker {
                         "an attribute is a record or class marked with the capability — declare \
                          `impl Attribute for ` the type",
                     ),
+                );
+                continue;
+            }
+            // Placement gate (P2.5): when `Foo` declared `@attachableTo(...)`, this use site's kind
+            // must be among the permitted ones, else `E0030`.
+            if let Some(allowed) = self.attachable.get(&attr.name)
+                && !allowed.contains(&target)
+            {
+                let permitted = allowed
+                    .iter()
+                    .map(|k| k.label())
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidAttributeTarget,
+                        attr.name_span,
+                        format!(
+                            "`{}` cannot attach to a {}; it is restricted to {permitted}",
+                            attr.name,
+                            target.label(),
+                        ),
+                    )
+                    .with_help("change the target, or widen the `@attachableTo(...)` directive"),
                 );
                 continue;
             }
@@ -2028,6 +2109,32 @@ impl Checker {
         let entry = self.trait_impls.entry(name.to_string()).or_default();
         for t in traits {
             entry.insert(t.to_string());
+        }
+    }
+
+    /// Validate and record a type's `@attachableTo(...)` placement restriction (P2.5). Each name
+    /// must be one of the fixed [`TargetKind`]s (unknown → `E0030` at its span); the recognized kinds
+    /// are stored so each `#[ThisType(...)]` use can be checked against them. An empty directive
+    /// leaves the type unrestricted (no entry).
+    fn record_attachable_to(&mut self, name: &str, kinds: &[(String, Span)]) {
+        let mut recognized = Vec::new();
+        for (kind_name, span) in kinds {
+            match TargetKind::from_name(kind_name) {
+                Some(kind) => recognized.push(kind),
+                None => self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidAttributeTarget,
+                        *span,
+                        format!("`{kind_name}` is not a valid attribute target kind"),
+                    )
+                    .with_help(
+                        "the target kinds are Record, Class, Enum, Function, Method, Field, Variant",
+                    ),
+                ),
+            }
+        }
+        if !recognized.is_empty() {
+            self.attachable.insert(name.to_string(), recognized);
         }
     }
 

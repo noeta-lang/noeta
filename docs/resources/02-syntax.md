@@ -554,23 +554,23 @@ class User {
 }
 ```
 
-**Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record becomes usable in annotation position by **implementing the `Attribute` trait** (a capability declaration, hence a trait — not a derive); constructing the attribute is the same constructor machinery as any value. Constraints on *where* it attaches are an ordinary trait impl, checked at compile time:
+**Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record becomes usable in annotation position by **implementing the `Attribute` trait** (a capability declaration, hence a trait — not a derive); constructing the attribute is the same constructor machinery as any value. A `#[...]` may attach to any declaration site — a type, a function, a method, a field/property, or an enum variant. Constraints on *where* it attaches are a compile-time placement check, declared with the `@attachableTo(...)` directive listing the permitted **target kinds** (`Record`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`); omitting it leaves the attribute unrestricted. A misplaced use is a compile error (E0030):
 
 ```
-record Route { path: string }                  // a plain record
+@attachableTo(Method, Function)                // optional: constrain placement
+type Route = { path: string };                 // a plain record
 impl Attribute for Route {}                    // marks it usable in annotation position
 
-impl AttachableTo for Route {                  // optional: constrain placement
-    fn valid_target(t: Target): bool {
-        return t.is_method() && t.returns(Response);   // misuse is a compile error
-    }
-}
-
 class UserController {
-    #[Route("/users")]                         // constructs Route { path: "/users" }
+    #[Route("/users")]                         // OK — Method is permitted
     fn index(): Response { ... }
 }
+
+#[Route("/x")]                                 // E0030 — Route does not attach to a type
+type User = { id: int };
 ```
+
+> Design note: the placement rule is a static, declarative list of kinds — *not* a user-evaluated `valid_target(t: Target): bool` predicate. Enforcing an arbitrary predicate would require executing user code at compile time (the project deliberately avoids comptime), and the target kinds are a fixed, closed set, so they live as plain identifiers the checker reads. A predicate over a target's *return type* would be a future enhancement, gated on comptime.
 
 **Discovery and registration are a manifest query**, not a runtime scan. The compiler already indexed every attribute; consumers read that index, compiled in as a static table:
 

@@ -108,6 +108,10 @@ pub enum DiagnosticCode {
     /// (`impl Attribute for Foo {}`). Attributes are ordinary records/classes marked with the
     /// capability, so an unmarked or non-existent type cannot be attached as metadata.
     NotAnAttribute,
+    /// A `#[Foo(...)]` attribute is attached to a declaration kind it does not permit. An attribute
+    /// may restrict where it attaches with the `@attachableTo(Method, Function, …)` directive on its
+    /// type; using it on any other kind (or naming an unknown kind in the directive) is this error.
+    InvalidAttributeTarget,
 }
 
 impl DiagnosticCode {
@@ -143,6 +147,7 @@ impl DiagnosticCode {
         DiagnosticCode::ConflictingTraitImpl,
         DiagnosticCode::InvalidNarrow,
         DiagnosticCode::NotAnAttribute,
+        DiagnosticCode::InvalidAttributeTarget,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -178,6 +183,7 @@ impl DiagnosticCode {
             DiagnosticCode::ConflictingTraitImpl => "E0027",
             DiagnosticCode::InvalidNarrow => "E0028",
             DiagnosticCode::NotAnAttribute => "E0029",
+            DiagnosticCode::InvalidAttributeTarget => "E0030",
         }
     }
 

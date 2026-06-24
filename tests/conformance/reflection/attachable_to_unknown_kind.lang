@@ -1,0 +1,7 @@
+// An unknown target kind in `@attachableTo(...)` is rejected (E0030) at the offending name — the
+// kinds are a fixed, closed set.
+// expect: error E0030 at 5:15
+// expect: exit 1
+@attachableTo(Bogus)
+type Route = { method: string };
+impl Attribute for Route {}

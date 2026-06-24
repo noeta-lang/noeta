@@ -103,22 +103,31 @@ enum UseTail {
 /// Attach leading `@derive(...)` directives and `#[...]` data attributes to the type declaration
 /// they precede. Both are only valid on class/record/enum declarations; the grammar only ever
 /// pairs them with one of those.
-fn attach_decorators(stmt: Stmt, derives: Vec<(String, Span)>, attrs: Vec<Attribute>) -> Stmt {
-    if derives.is_empty() && attrs.is_empty() {
+fn attach_decorators(
+    stmt: Stmt,
+    derives: Vec<(String, Span)>,
+    attrs: Vec<Attribute>,
+    attachable_to: Vec<(String, Span)>,
+) -> Stmt {
+    if derives.is_empty() && attrs.is_empty() && attachable_to.is_empty() {
         return stmt;
     }
     match stmt {
         Stmt::Class(mut c) => {
             c.derives = derives;
             c.attrs = attrs;
+            c.attachable_to = attachable_to;
             Stmt::Class(c)
         }
         Stmt::Record(mut r) => {
             r.derives = derives;
             r.attrs = attrs;
+            r.attachable_to = attachable_to;
             Stmt::Record(r)
         }
         Stmt::Enum(mut e) => {
+            // An enum cannot be an attribute (the `Attribute` capability is records/classes only),
+            // so `@attachableTo` on it is meaningless and simply dropped; derives/attrs still apply.
             e.derives = derives;
             e.attrs = attrs;
             Stmt::Enum(e)
@@ -1340,6 +1349,7 @@ where
                     fields,
                     derives: Vec::new(),
                     attrs: Vec::new(),
+                    attachable_to: Vec::new(),
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -1482,6 +1492,7 @@ where
                     impls,
                     derives: Vec::new(),
                     attrs: Vec::new(),
+                    attachable_to: Vec::new(),
                     destructor,
                     span: ctx.to_span(e.span()),
                 })
@@ -1643,29 +1654,33 @@ where
             .map(move |((decorators, pub_kw), stmt)| {
                 let mut derives: Vec<(String, Span)> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
+                let mut attachable_to: Vec<(String, Span)> = Vec::new();
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
                             name,
                             name_span,
                             traits,
-                        } => {
-                            if name == "derive" {
-                                derives.extend(traits);
-                            } else {
-                                ctx.diags.borrow_mut().push(Diagnostic::error(
-                                    DiagnosticCode::UnexpectedToken,
-                                    name_span,
-                                    format!(
-                                        "unknown directive `@{name}`; the only codegen directive is `@derive(...)`"
-                                    ),
-                                ));
-                            }
-                        }
+                        } => match name.as_str() {
+                            // `@derive(Trait, …)` — codegen. `@attachableTo(Kind, …)` — the
+                            // attribute placement restriction (P2.5); the checker validates the kinds.
+                            "derive" => derives.extend(traits),
+                            "attachableTo" => attachable_to.extend(traits),
+                            _ => ctx.diags.borrow_mut().push(Diagnostic::error(
+                                DiagnosticCode::UnexpectedToken,
+                                name_span,
+                                format!(
+                                    "unknown directive `@{name}`; the directives are `@derive(...)` and `@attachableTo(...)`"
+                                ),
+                            )),
+                        },
                         Decorator::Attr(attr) => attrs.push(attr),
                     }
                 }
-                set_public(attach_decorators(stmt, derives, attrs), pub_kw.is_some())
+                set_public(
+                    attach_decorators(stmt, derives, attrs, attachable_to),
+                    pub_kw.is_some(),
+                )
             });
 
         choice((

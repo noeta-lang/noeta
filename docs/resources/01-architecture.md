@@ -348,16 +348,13 @@ The design principle here is the same one running through the language: *do at c
 
 The attribute's *capabilities are traits* — the "everything is a trait" model (§9.2) applied here too:
 - A record is usable in annotation position iff it implements the marker trait **`Attribute`** (the equivalent of PHP's `#[Attribute]` marker — and fittingly, itself a trait). Marking attribute-ness is a *capability declaration*, so it is a trait impl (`impl Attribute for X {}`), never a `@derive` — codegen and capability are different operations. The `Attribute` trait also guarantees the construction contract the attribute system uses to build the record from `#[Route("...")]`.
-- An attribute that constrains *where* it may be attached implements **`AttachableTo`** (or a validation trait), checked at compile time — replacing the old bespoke `valid_on` predicate with an ordinary trait impl. E.g. a `Route` that may only annotate methods returning `Response` expresses that as a trait the checker enforces.
+- An attribute that constrains *where* it may be attached uses the **`@attachableTo(...)`** directive, listing the permitted declaration kinds (`Record`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`), enforced by the checker at compile time (E0030). This is a static, declarative list — deliberately *not* a user-evaluated `valid_target(t): bool` predicate, which would require compile-time execution of user code (the project avoids comptime). A predicate over a target's *return type* would be a future enhancement gated on comptime.
 - An attribute that wants *behavior* (normalize its path, compute a derived value) just has methods, like any record.
 
 ```
-record Route { path: string }          // a plain record
+@attachableTo(Method)                  // optional: constrain where it attaches
+type Route = { path: string };         // a plain record
 impl Attribute for Route {}            // marks it usable in annotation position
-
-impl AttachableTo for Route {           // optional: constrain where it attaches
-    fn valid_target(t: Target): bool { return t.is_method() && t.returns(Response); }
-}
 
 class UserController {
     #[Route("/users")]                  // constructs Route { path: "/users" }; checked

@@ -1,0 +1,18 @@
+// `@attachableTo(Method, Function)` restricts where `#[Route(...)]` may attach. A use on a
+// permitted kind (here a top-level function) is accepted, and the attribute still surfaces through
+// `attributes_of`. The restriction is a pure compile-time placement check, so both backends run
+// the (accepted) program identically.
+// expect: stdout "handler"
+// expect: stdout "GET"
+// expect: exit 0
+@attachableTo(Method, Function)
+type Route = { method: string };
+impl Attribute for Route {}
+
+#[Route("GET")]
+fn handler(): string { return "ok"; }
+
+for r in attributes_of::<Route>() {
+    echo r.target;
+    echo r.value.method;
+}
