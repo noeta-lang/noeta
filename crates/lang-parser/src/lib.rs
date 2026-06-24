@@ -30,9 +30,9 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
-    AttrValue, Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FieldDecl, FieldInit, FnDecl,
-    ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl, RoleTag, Stmt,
-    StrPart, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit,
+    FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl,
+    RoleTag, Stmt, StrPart, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -88,17 +88,24 @@ enum Decorator {
     Derive {
         name: String,
         name_span: Span,
-        /// Each argument: a head identifier and an optional `.`-qualifier (`Enum.Variant`). Plain
-        /// directives (`@derive`, `@attribute`) use the head only; `@role(Enum.Variant)` uses the
-        /// qualifier. Sharing one grammar keeps the directive family token-free.
+        /// Each argument: a head identifier and an optional suffix. The shared grammar covers every
+        /// directive family: `@derive(Comparable)` (head only), `@derive(Serialize<Json>)` (generic
+        /// suffix), `@role(Enum.Variant)` (dotted suffix), `@attribute(Method)` (head only).
         args: Vec<DirectiveArg>,
     },
     Attr(Attribute),
 }
 
-/// One argument of a `@name(...)` directive: a head identifier plus an optional `.`-qualifier, so
-/// `@role(Enum.Variant)` and `@derive(Trait)` share the same grammar.
-type DirectiveArg = ((String, Span), Option<(String, Span)>);
+/// The optional suffix on a directive argument: a `.Variant` qualifier (`@role(Enum.Variant)`) or a
+/// `<Type, …>` generic-argument list (`@derive(Serialize<Json>)`). The two are syntactically
+/// exclusive, so one shared grammar parses every directive's arguments.
+enum DirectiveSuffix {
+    Dotted((String, Span)),
+    Generic(Vec<TypeRef>),
+}
+
+/// One argument of a `@name(...)` directive: a head identifier plus an optional [`DirectiveSuffix`].
+type DirectiveArg = ((String, Span), Option<DirectiveSuffix>);
 
 /// One `.`-led segment of a `use` path: either another path identifier (with its span) or
 /// the trailing `{ a, b }` group (which, when present, is always last).
@@ -240,23 +247,41 @@ fn set_sugar_items(callee: &Expr) -> Option<&[Expr]> {
     }
 }
 
-/// Project a directive's arguments onto their head identifiers (dropping any `.`-qualifier), for the
-/// directives that take plain names (`@derive`, `@attribute`).
+/// Project a directive's arguments onto their head identifiers (dropping any suffix), for the
+/// directives that take plain names (`@attribute`).
 fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
-    args.into_iter().map(|(head, _tail)| head).collect()
+    args.into_iter().map(|(head, _suffix)| head).collect()
+}
+
+/// Project a directive's arguments onto [`DeriveSpec`]s — the trait name plus its generic type
+/// arguments (`Serialize<Json>` → `name: "Serialize"`, `args: [Json]`). A non-generic derive has
+/// empty `args`; a stray `.`-qualifier on a derive argument is ignored (the checker never sees a
+/// valid program with one).
+fn directive_derive_specs(args: Vec<DirectiveArg>) -> Vec<DeriveSpec> {
+    args.into_iter()
+        .map(|((name, span), suffix)| DeriveSpec {
+            name,
+            args: match suffix {
+                Some(DirectiveSuffix::Generic(type_args)) => type_args,
+                _ => Vec::new(),
+            },
+            span,
+        })
+        .collect()
 }
 
 /// Project one directive argument onto a [`RoleTag`]. A qualified `Enum.Variant` fills both names; a
-/// bare `Variant` leaves `enum_name` empty so the checker can require the qualifier (`E0031`).
+/// bare `Variant` (no suffix, or a stray generic suffix) leaves `enum_name` empty so the checker can
+/// require the qualifier (`E0031`).
 fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
-    let ((head, head_span), tail) = arg;
-    match tail {
-        Some((variant, variant_span)) => RoleTag {
+    let ((head, head_span), suffix) = arg;
+    match suffix {
+        Some(DirectiveSuffix::Dotted((variant, variant_span))) => RoleTag {
             enum_name: head,
             variant,
             span: head_span.merge(variant_span),
         },
-        None => RoleTag {
+        _ => RoleTag {
             enum_name: String::new(),
             variant: head,
             span: head_span,
@@ -269,7 +294,7 @@ fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
 /// pairs them with one of those.
 fn attach_decorators(
     stmt: Stmt,
-    derives: Vec<(String, Span)>,
+    derives: Vec<DeriveSpec>,
     attrs: Vec<Attribute>,
     attribute: Option<Vec<(String, Span)>>,
     role: Option<Vec<RoleTag>>,
@@ -1836,9 +1861,22 @@ where
         // `Enum.Variant` and a derive's bare `Trait` share one grammar. The argument list is optional
         // so a bare `@attribute`/`@semantic` parses; any other `@name` is a diagnostic where
         // decorators are partitioned.
-        let directive_arg = id
-            .clone()
-            .then(just(T::Dot).ignore_then(id.clone()).or_not());
+        // A directive argument: a head identifier, then an optional suffix — `.Variant` (a role's
+        // qualifier) or `<Type, …>` (a derive's generic arguments, parsed with the full type grammar
+        // so `Serialize<Json>`/`Serialize<List<int>>` work). The two suffixes are syntactically
+        // exclusive, so one grammar serves every directive.
+        let directive_suffix = choice((
+            just(T::Dot)
+                .ignore_then(id.clone())
+                .map(DirectiveSuffix::Dotted),
+            type_parser(ctx)
+                .separated_by(just(T::Comma))
+                .at_least(1)
+                .collect::<Vec<_>>()
+                .delimited_by(just(T::Lt), just(T::Gt))
+                .map(DirectiveSuffix::Generic),
+        ));
+        let directive_arg = id.clone().then(directive_suffix.or_not());
         let derive_directive = just(T::At)
             .ignore_then(id.clone())
             .then(
@@ -1869,7 +1907,7 @@ where
             .then(just(T::PubKw).or_not())
             .then(choice((enum_decl, record_decl, class_decl)))
             .map(move |((decorators, pub_kw), stmt)| {
-                let mut derives: Vec<(String, Span)> = Vec::new();
+                let mut derives: Vec<DeriveSpec> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
                 let mut attribute: Option<Vec<(String, Span)>> = None;
                 let mut role: Option<Vec<RoleTag>> = None;
@@ -1886,7 +1924,7 @@ where
                             // anywhere). `@role(Enum.Variant, …)` — semantic-role tags (accumulated
                             // across directives). `@semantic` — marks an enum role-eligible. The
                             // checker validates each one's arguments and the records-only rule.
-                            "derive" => derives.extend(directive_heads(args)),
+                            "derive" => derives.extend(directive_derive_specs(args)),
                             "attribute" => attribute = Some(directive_heads(args)),
                             "role" => role
                                 .get_or_insert_with(Vec::new)
@@ -2283,6 +2321,26 @@ mod tests {
         assert_eq!(roles[0].variant, "EntryPoint");
         assert_eq!(roles[1].enum_name, "WebRole");
         assert_eq!(roles[1].variant, "Controller");
+    }
+
+    #[test]
+    fn parses_generic_derive_with_type_argument() {
+        // `@derive(Serialize<Json>)` parses the derive argument with the full type grammar, so the
+        // `DeriveSpec` carries the trait name plus its generic type arguments; a plain derive has none.
+        let parsed = parse_str("@derive(Comparable, Serialize<Json>)\ntype Point = { x: int };\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Record(r) = &parsed.program.stmts[0] else {
+            panic!("expected record");
+        };
+        assert_eq!(r.derives.len(), 2);
+        assert_eq!(r.derives[0].name, "Comparable");
+        assert!(r.derives[0].args.is_empty());
+        assert_eq!(r.derives[1].name, "Serialize");
+        assert_eq!(r.derives[1].args.len(), 1);
+        assert!(matches!(
+            &r.derives[1].args[0],
+            lang_ast::TypeRef::Named { name, .. } if name == "Json"
+        ));
     }
 
     #[test]

@@ -301,7 +301,7 @@ pub struct TypeDef {
     /// Whether the type `@derive(Comparable)`s without a hand-written `compare`: its instances
     /// get structural field-wise ordering for `< <= > >=`.
     derives_comparable: bool,
-    /// Whether the type `@derive(ToJson)`s without a hand-written `to_json`: `o.to_json()`
+    /// Whether the type `@derive(Serialize<Json>)`s without a hand-written `to_json`: `o.to_json()`
     /// synthesizes a structural JSON serializer.
     derives_tojson: bool,
     /// An *opaque* stub introduced by a `use` import: its real field set is unknown until
@@ -932,7 +932,7 @@ impl Interpreter {
             destructor: None,
             is_record: true,
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable"),
-            derives_tojson: lang_ast::derives_trait(&decl.derives, "ToJson"),
+            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize"),
             opaque: false,
         };
         self.scope
@@ -1002,7 +1002,7 @@ impl Interpreter {
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
             // A hand-written `to_json` takes precedence over the derived serializer.
-            derives_tojson: lang_ast::derives_trait(&decl.derives, "ToJson")
+            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
                 && !decl.methods.iter().any(|m| m.name == "to_json"),
             opaque: false,
         };
@@ -1600,7 +1600,7 @@ impl Interpreter {
         }
         // `order.total()` — an instance method; the instance's fields are in scope.
         if let Value::Object(object) = &receiver {
-            // `o.to_json()` on a type that `@derive(ToJson)` (so has no hand-written `to_json`)
+            // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written `to_json`)
             // synthesizes a structural JSON string.
             if name == "to_json" && args.is_empty() && object.def.derives_tojson {
                 return Ok(Value::Str(value_to_json(&receiver)));
@@ -3163,7 +3163,7 @@ fn compare_field(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
     }
 }
 
-/// The JSON encoding synthesized by `@derive(ToJson)`. The byte-for-byte mirror of the VM's
+/// The JSON encoding synthesized by `@derive(Serialize<Json>)`. The byte-for-byte mirror of the VM's
 /// `Value::to_json`: scalars reuse `display` (so both backends format numbers identically),
 /// strings are quoted/escaped via [`json_string`], lists become JSON arrays, maps and objects
 /// JSON objects (objects in declared field order), unit is `null`, and any other value falls
@@ -3211,7 +3211,7 @@ fn value_to_json(value: &Value) -> String {
 }
 
 /// Encode a string as a JSON string literal (quotes + the mandatory escapes). Byte-identical to
-/// the VM's copy so `@derive(ToJson)` renders the same under both backends.
+/// the VM's copy so `@derive(Serialize<Json>)` renders the same under both backends.
 fn json_string(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + 2);
     out.push('"');

@@ -225,7 +225,9 @@ impl ModuleCompiler {
                     if lang_ast::derives_trait(&decl.derives, "Comparable") {
                         self.comparable_derives.push(decl.name.clone());
                     }
-                    if lang_ast::derives_trait(&decl.derives, "ToJson") {
+                    // `@derive(Serialize<Json>)` synthesizes the structural JSON serializer (`Json`
+                    // is the only format today, so it maps to the existing `to_json` codegen).
+                    if lang_ast::derives_trait(&decl.derives, "Serialize") {
                         self.tojson_derives.push(decl.name.clone());
                     }
                     self.types
@@ -241,7 +243,7 @@ impl ModuleCompiler {
                         self.comparable_derives.push(decl.name.clone());
                     }
                     // A hand-written `to_json` takes precedence over the derived serializer.
-                    if lang_ast::derives_trait(&decl.derives, "ToJson")
+                    if lang_ast::derives_trait(&decl.derives, "Serialize")
                         && !decl.methods.iter().any(|m| m.name == "to_json")
                     {
                         self.tojson_derives.push(decl.name.clone());

@@ -1,0 +1,6 @@
+// A nullary derivable trait takes no type arguments; `@derive(Comparable<int>)` is an arity error
+// (E0014).
+// expect: error E0014 at 5:9
+// expect: exit 1
+@derive(Comparable<int>)
+type Point = { x: int };

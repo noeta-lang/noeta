@@ -66,9 +66,9 @@
 use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
-    AttrValue, Attribute, BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, ImplBlock,
-    ImplDecl, MatchArm, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef,
-    UnaryOp,
+    AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FnDecl, ForPattern,
+    ImplBlock, ImplDecl, MatchArm, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam,
+    TypeRef, UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -490,7 +490,7 @@ impl Checker {
                     self.types.insert(r.name.clone());
                     self.type_kinds
                         .insert(r.name.clone(), lang_types::TypeKind::Record);
-                    self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
+                    self.record_trait_impls(&r.name, r.derives.iter().map(|d| d.name.as_str()));
                     self.record_attribute(&r.name, r.attribute.as_deref());
                     self.generic_types.insert(
                         r.name.clone(),
@@ -513,7 +513,7 @@ impl Checker {
                         &c.name,
                         c.derives
                             .iter()
-                            .map(|(n, _)| n.as_str())
+                            .map(|d| d.name.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
                     // Attributes are records only: `@attribute` on a class is an error (E0029).
@@ -598,7 +598,7 @@ impl Checker {
                     if e.semantic.is_some() {
                         self.semantic_enums.insert(e.name.clone());
                     }
-                    self.record_trait_impls(&e.name, e.derives.iter().map(|(n, _)| n.as_str()));
+                    self.record_trait_impls(&e.name, e.derives.iter().map(|d| d.name.as_str()));
                     self.generic_types.insert(
                         e.name.clone(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -1272,7 +1272,7 @@ impl Checker {
     /// `(trait, span)` of every standalone impl targeting this type.
     fn check_coherence(
         &mut self,
-        derives: &[(String, Span)],
+        derives: &[DeriveSpec],
         impls: &[ImplBlock],
         standalone: &[(String, Span)],
     ) {
@@ -1281,7 +1281,7 @@ impl Checker {
         let mut seen: HashMap<&str, Span> = HashMap::new();
         let occurrences = derives
             .iter()
-            .map(|(name, span)| (name.as_str(), *span))
+            .map(|d| (d.name.as_str(), d.span))
             .chain(impls.iter().map(|b| (b.trait_name.as_str(), b.trait_span)))
             .chain(standalone.iter().map(|(name, span)| (name.as_str(), *span)));
         for (name, span) in occurrences {
@@ -1305,28 +1305,84 @@ impl Checker {
     }
 
     /// Validate the `@derive(...)` directives on a declaration: every named trait must be a known
-    /// *derivable* built-in. The compiler synthesizes the listed impls from the type's fields.
-    fn check_derives(&mut self, derives: &[(String, Span)]) {
-        for (trait_name, span) in derives {
-            match BuiltinTrait::lookup(trait_name) {
-                Some(t) if t.derivable => {}
-                Some(_) => self.diags.push(
+    /// *derivable* built-in, with the right number of generic type arguments, and a generic derive's
+    /// arguments must resolve. The compiler synthesizes the listed impls from the type's fields,
+    /// parameterized by the arguments (e.g. `Serialize<Json>`'s format). The only parameterized
+    /// derivable trait today is `Serialize<Format>`.
+    fn check_derives(&mut self, derives: &[DeriveSpec]) {
+        for spec in derives {
+            let Some(t) = BuiltinTrait::lookup(&spec.name) else {
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::UnknownTrait,
+                    spec.span,
+                    format!("unknown trait `{}` in `@derive(...)`", spec.name),
+                ));
+                continue;
+            };
+            if !t.derivable {
+                self.diags.push(
                     Diagnostic::error(
                         DiagnosticCode::UnknownTrait,
-                        *span,
-                        format!("`{trait_name}` is not a derivable trait"),
+                        spec.span,
+                        format!("`{}` is not a derivable trait", spec.name),
                     )
                     .with_help(
                         "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
-                         `ToJson`, `Serialize`; mark attribute records with the `@attribute` directive",
+                         `Serialize<Format>`; mark attribute records with the `@attribute` directive",
                     ),
-                ),
-                None => self.diags.push(Diagnostic::error(
-                    DiagnosticCode::UnknownTrait,
-                    *span,
-                    format!("unknown trait `{trait_name}` in `@derive(...)`"),
-                )),
+                );
+                continue;
             }
+            // Generic arity: `Serialize` requires one type argument (`Serialize<Json>`); every other
+            // derivable trait is nullary.
+            let arity = t.generic_arity();
+            if spec.args.len() != arity {
+                let msg = if arity == 0 {
+                    format!("`{}` takes no type arguments", spec.name)
+                } else {
+                    format!(
+                        "`{}` takes {arity} type argument(s), found {}",
+                        spec.name,
+                        spec.args.len()
+                    )
+                };
+                self.diags.push(
+                    Diagnostic::error(DiagnosticCode::UnknownTrait, spec.span, msg).with_help(
+                        "`Serialize` is `@derive(Serialize<Json>)`; the other derivable traits take \
+                         no arguments",
+                    ),
+                );
+                continue;
+            }
+            // `Serialize`'s argument is a serialization **format** (a blessed token, not a general
+            // type), validated against the format vocabulary rather than the type namespace.
+            if spec.name == "Serialize" {
+                self.check_serialize_format(&spec.args[0]);
+            }
+        }
+    }
+
+    /// Validate a `Serialize<Format>` derive's format argument: it must be one of the blessed
+    /// formats (`Json`). A non-format type — `Serialize<int>`, `Serialize<List<int>>` — or an unknown
+    /// name is `E0013`.
+    fn check_serialize_format(&mut self, arg: &TypeRef) {
+        let ok = matches!(
+            arg,
+            TypeRef::Named { name, args, .. }
+                if args.is_empty() && lang_types::SERIALIZE_FORMATS.contains(&name.as_str())
+        );
+        if !ok {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::UnknownType,
+                    arg.span(),
+                    "expected a serialization format".to_string(),
+                )
+                .with_help(format!(
+                    "the formats are {}",
+                    lang_types::SERIALIZE_FORMATS.join(", ")
+                )),
+            );
         }
     }
 

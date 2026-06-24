@@ -1,10 +1,10 @@
-// `@derive(ToJson)` synthesizes a structural `to_json` method: `o.to_json()` returns the object's
+// `@derive(Serialize<Json>)` synthesizes a structural `to_json` method: `o.to_json()` returns the object's
 // JSON encoding, fields in declared order, strings quoted and escaped, nested objects and lists
 // recursed. Runs identically under both backends (the differential oracle).
 // expect: stdout "{"name":"Ada","id":7,"active":true}"
 // expect: stdout "{"label":"pt","at":{"name":"Bob","id":2,"active":false}}"
 // expect: exit 0
-@derive(ToJson)
+@derive(Serialize<Json>)
 class User {
     name: string
     id: int
@@ -15,7 +15,7 @@ class User {
     }
 }
 
-@derive(ToJson)
+@derive(Serialize<Json>)
 class Tagged {
     label: string
     at: User

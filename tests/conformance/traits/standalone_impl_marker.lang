@@ -1,10 +1,10 @@
 // A standalone `impl Trait for T {}` declares a capability for a type from *outside* its
-// declaration — here giving a bodiless record the `Serialize` capability. A marker
+// declaration — here giving a bodiless record the `Clone` capability. A marker
 // (empty-body) impl has no runtime effect, so the program runs identically in both backends.
 // expect: stdout "/users"
 // expect: exit 0
 type Route = { path: string };
-impl Serialize for Route {}
+impl Clone for Route {}
 
 r = Route { path: "/users" };
 echo r.path;

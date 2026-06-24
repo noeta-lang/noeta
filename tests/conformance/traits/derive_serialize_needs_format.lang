@@ -1,0 +1,6 @@
+// `Serialize` is generic — `@derive(Serialize<Format>)`. Supplying no format is an arity error
+// (E0014); the other derivable traits remain nullary.
+// expect: error E0014 at 5:9
+// expect: exit 1
+@derive(Serialize)
+type Point = { x: int };

@@ -36,7 +36,7 @@
 use lang_ast::TypeRef;
 
 mod traits;
-pub use traits::{BUILTIN_TRAITS, BuiltinTrait, operator_trait};
+pub use traits::{BUILTIN_TRAITS, BuiltinTrait, SERIALIZE_FORMATS, operator_trait};
 
 /// The kind of a declared nominal type — the discriminant of an abstract [`Type::Kind`] supertype.
 /// Mirrors the three declaration forms the language has.

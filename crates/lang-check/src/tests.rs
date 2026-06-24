@@ -412,15 +412,43 @@ fn two_impl_blocks_for_same_trait_conflict() {
 fn standalone_marker_impl_is_accepted() {
     // A bodiless record declares a capability via a same-module standalone `impl` — the mechanism
     // that lets a record (which has no body) participate in a trait. No diagnostics.
-    let src = "type Route = { path: string };\nimpl Serialize for Route {}\n";
+    let src = "type Route = { path: string };\nimpl Clone for Route {}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn standalone_impl_for_undeclared_type_is_orphan() {
     // The orphan rule: a standalone `impl` may only target a type declared in this module.
-    let src = "impl Serialize for Widget {}\n";
+    let src = "impl Clone for Widget {}\n";
     assert_eq!(codes(src), ["E0013"]);
+}
+
+#[test]
+fn generic_serialize_derive_checks_clean() {
+    // `@derive(Serialize<Json>)` is the format-parameterized serializer; a valid format checks clean.
+    let src = "@derive(Serialize<Json>)\ntype Point = { x: int };\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn serialize_derive_requires_a_format() {
+    // `Serialize` is generic, so a bare `@derive(Serialize)` is an arity error (E0014).
+    let src = "@derive(Serialize)\ntype Point = { x: int };\n";
+    assert_eq!(codes(src), ["E0014"]);
+}
+
+#[test]
+fn serialize_derive_rejects_an_unknown_format() {
+    // A `Serialize` format argument must be a blessed format; `Xml` is unknown (E0013).
+    let src = "@derive(Serialize<Xml>)\ntype Point = { x: int };\n";
+    assert_eq!(codes(src), ["E0013"]);
+}
+
+#[test]
+fn nullary_derive_rejects_type_arguments() {
+    // A non-generic derivable trait takes no type arguments (E0014).
+    let src = "@derive(Comparable<int>)\ntype Point = { x: int };\n";
+    assert_eq!(codes(src), ["E0014"]);
 }
 
 #[test]
@@ -434,7 +462,7 @@ fn standalone_impl_counts_toward_coherence() {
 #[test]
 fn standalone_impl_with_methods_is_unsupported() {
     // Pass 1 supports only empty-body capability impls; a body with methods is rejected (E0015).
-    let src = "type Route = { path: string };\nimpl Serialize for Route {\n  fn extra(): int { return 1; }\n}\n";
+    let src = "type Route = { path: string };\nimpl Clone for Route {\n  fn extra(): int { return 1; }\n}\n";
     assert_eq!(codes(src), ["E0015"]);
 }
 

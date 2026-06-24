@@ -138,7 +138,7 @@ pub struct RecordDecl {
     pub fields: Vec<FieldDecl>,
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
     /// across all directive lines. Validated by the checker; drives compiler codegen.
-    pub derives: Vec<(String, Span)>,
+    pub derives: Vec<DeriveSpec>,
     /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected
     /// into the compiler-built manifest, and gated by the checker (each must name a record marked
     /// `@attribute`, and its arguments must construct it).
@@ -233,11 +233,23 @@ pub enum AttrValue {
     TypeRef(String),
 }
 
+/// One `@derive(...)` entry: the trait name plus any **generic type arguments** it carries
+/// (`@derive(Serialize<Json>)` → `name: "Serialize"`, `args: [Json]`). A plain `@derive(Comparable)`
+/// has empty `args`. The checker validates the name, arity, and arguments; the compiler synthesizes
+/// the impl from the type's fields (parameterized by the args, e.g. the serialization format).
+#[derive(Debug, Clone, PartialEq)]
+pub struct DeriveSpec {
+    pub name: String,
+    /// Generic type arguments (`<Json>`); empty for a nullary derive.
+    pub args: Vec<TypeRef>,
+    pub span: Span,
+}
+
 /// Whether a declaration's `@derive(...)` directives include `trait_name`. Used by both backends
 /// and the compiler to detect which traits a value object derives (e.g. `Comparable`, which
-/// synthesizes structural ordering).
-pub fn derives_trait(derives: &[(String, Span)], trait_name: &str) -> bool {
-    derives.iter().any(|(name, _)| name == trait_name)
+/// synthesizes structural ordering). Matches on the trait name regardless of its generic arguments.
+pub fn derives_trait(derives: &[DeriveSpec], trait_name: &str) -> bool {
+    derives.iter().any(|d| d.name == trait_name)
 }
 
 /// A generic type parameter on a declaration: a name and its trait **bounds** (`<T: Comparable>`,
@@ -304,7 +316,7 @@ pub struct ClassDecl {
     pub impls: Vec<ImplBlock>,
     /// Leading `@derive(...)` codegen directives on the class (e.g. `@derive(Comparable)`),
     /// flattened across all directive lines.
-    pub derives: Vec<(String, Span)>,
+    pub derives: Vec<DeriveSpec>,
     /// Leading `#[...]` data attributes on the class.
     pub attrs: Vec<Attribute>,
     /// A misplaced `@attribute` directive (attributes are records only); see
@@ -357,7 +369,7 @@ pub struct EnumDecl {
     pub backing: Option<TypeRef>,
     pub variants: Vec<VariantDecl>,
     /// Leading `@derive(...)` codegen directives on the enum, flattened across all directive lines.
-    pub derives: Vec<(String, Span)>,
+    pub derives: Vec<DeriveSpec>,
     /// Leading `#[...]` data attributes on the enum.
     pub attrs: Vec<Attribute>,
     /// The `@semantic` directive: `Some(span)` marks this enum **role-eligible**, so its fieldless

@@ -169,7 +169,7 @@ struct Vm<'m> {
     /// Type names that `@derive(Comparable)` (without a hand-written `compare`): their instances
     /// get structural field-wise ordering for `< <= > >=`.
     comparable_derives: HashSet<String>,
-    /// Type names that `@derive(ToJson)` (without a hand-written `to_json`): `o.to_json()` on
+    /// Type names that `@derive(Serialize<Json>)` (without a hand-written `to_json`): `o.to_json()` on
     /// their instances synthesizes a structural JSON serializer.
     tojson_derives: HashSet<String>,
     globals: HashMap<String, Value>,
@@ -1440,7 +1440,7 @@ impl<'m> Vm<'m> {
                     // anything else falls to the built-in `count`/`enumerate` methods.
                     if v.is_object() {
                         let type_name = v.shape().unwrap().name.clone();
-                        // `o.to_json()` on a type that `@derive(ToJson)` (so has no hand-written
+                        // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written
                         // `to_json`) synthesizes a structural JSON string — a pure value
                         // computation, so it is produced inline rather than via a call frame.
                         if method == "to_json"
@@ -3638,10 +3638,10 @@ mod tests {
 
     #[test]
     fn derived_to_json_serializes_structurally() {
-        // `@derive(ToJson)` synthesizes `to_json`: fields in declared order, strings escaped,
-        // nested objects recursed — computed inline (no call frame).
+        // `@derive(Serialize<Json>)` synthesizes `to_json`: fields in declared order, strings
+        // escaped, nested objects recursed — computed inline (no call frame).
         let r = run(
-            "@derive(ToJson)\nclass U {\n  name: string\n  id: int\n  fn new(name: string, id: int): U { return U { name: name, id: id }; }\n}\necho U.new(\"Ada\", 7).to_json();\n",
+            "@derive(Serialize<Json>)\nclass U {\n  name: string\n  id: int\n  fn new(name: string, id: int): U { return U { name: name, id: id }; }\n}\necho U.new(\"Ada\", 7).to_json();\n",
         );
         assert_eq!(r.stdout, "{\"name\":\"Ada\",\"id\":7}\n");
         assert_eq!(r.exit_code, 0);

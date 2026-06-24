@@ -1,0 +1,6 @@
+// A `Serialize` derive's type argument is a serialization format from the blessed vocabulary
+// (`Json`); an unknown format is a checker error (E0013).
+// expect: error E0013 at 5:19
+// expect: exit 1
+@derive(Serialize<Xml>)
+type Point = { x: int };

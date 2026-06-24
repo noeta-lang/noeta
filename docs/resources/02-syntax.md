@@ -539,7 +539,7 @@ class Proxy {
 }
 ```
 
-Common protocols and the PHP magic they replace: `Equatable` (`==`), `Comparable` (`< <= > >=`), `Add`/`Sub`/`Mul`/`Div` (`+ - * /`), `Concat` (`~`), `Index` (`ArrayAccess`), `Display` (`Stringable`), `Length` (`Countable`), `Iterable` (`IteratorAggregate`), `Callable` (`__invoke`), `Members` (`__get`/`__set`), `DynamicCall` (`__call`/`__callStatic`), `Clone` (`__clone`), `Serialize`/`ToJson`. Construction is *not* a trait and not a special form — it is ordinary associated functions returning `Self` (`new`, `parse`, ...; see §6). Destruction is *not* a trait either, but for a different reason: it is the one hook invoked by the runtime (the GC) rather than by user code, so it stays a distinct `destruct` language construct, not directly callable (see architecture §9.2).
+Common protocols and the PHP magic they replace: `Equatable` (`==`), `Comparable` (`< <= > >=`), `Add`/`Sub`/`Mul`/`Div` (`+ - * /`), `Concat` (`~`), `Index` (`ArrayAccess`), `Display` (`Stringable`), `Length` (`Countable`), `Iterable` (`IteratorAggregate`), `Callable` (`__invoke`), `Members` (`__get`/`__set`), `DynamicCall` (`__call`/`__callStatic`), `Clone` (`__clone`), `Serialize<Format>`. Construction is *not* a trait and not a special form — it is ordinary associated functions returning `Self` (`new`, `parse`, ...; see §6). Destruction is *not* a trait either, but for a different reason: it is the one hook invoked by the runtime (the GC) rather than by user code, so it stays a distinct `destruct` language construct, not directly callable (see architecture §9.2).
 
 ### 9.7 Attributes and reflection
 
@@ -548,13 +548,15 @@ No comptime or user-defined macros (see architecture §9.13). Three surfaces cov
 **Built-in derives** (`@derive`) handle shape-based codegen. You apply them; you do not write new ones (the stdlib/compiler implements them):
 
 ```
-@derive(ToJson, Equatable, Clone)
+@derive(Serialize<Json>, Equatable, Clone)
 class User {
     name: string
     age: int
     fn new(name: string, age: int): User { return User { name: name, age: age }; }
 }
 ```
+
+A derive may carry **generic type arguments**: `Serialize<Format>` is the format-parameterized serializer (`@derive(Serialize<Json>)` synthesizes the structural `to_json`), the format chosen from a blessed vocabulary (`Json` to start). Supplying the wrong number of arguments — `@derive(Serialize)`, `@derive(Comparable<int>)` — is an arity error (E0014); an unknown format is E0013. The other derivable traits (`Equatable`, `Comparable`, `Display`, `Clone`) are nullary.
 
 **Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record opts in as an attribute with the **`@attribute` directive**; its `#[...]` arguments then map to the record's fields (positional in declaration order, named by name), the one unambiguous construction a record has — which is exactly why **attributes are records, not classes** (a class has only convention-named constructors, with no canonical one to call). A `#[...]` may attach to any declaration site — a type, a function, a method, a field/property, or an enum variant. Placement can be constrained by listing the permitted **target kinds** in the directive (`Record`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`); a bare `@attribute` attaches anywhere. A misplaced use is a compile error (E0030):
 

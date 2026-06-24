@@ -13,7 +13,7 @@
 //! `Mul`/`Div`/`Concat` (`+ - * / ~`, M1.8a), `Equatable` (`==`/`!=` → `eq`), and `Comparable`
 //! (`< <= > >=` → `compare`, returning the built-in `Ordering` enum). The `Index` trait lights up
 //! `a[i]` (→ `get`, with built-in list element access as the fallback). Every trait/derive name is
-//! validated against this table. The behavior behind the remaining protocols (`Display`/`ToJson`
+//! validated against this table. The behavior behind the remaining protocols (`Display`/`Serialize`
 //! codegen, `Length`/`Members`/`Callable` dispatch) is the rest of M1.8b; their names are registered
 //! now so the surface parses, checks, and reads as the design intends. (`TryAdd` is fallible-by-
 //! method: `a.try_add(b)?`, no operator wiring.)
@@ -27,7 +27,7 @@ use lang_ast::BinaryOp;
 pub struct BuiltinTrait {
     pub name: &'static str,
     /// The required method's name and parameter count *excluding the receiver*, or `None` for a
-    /// marker trait whose behavior is fully synthesized (e.g. `Clone`, `ToJson`) and so imposes no
+    /// marker trait whose behavior is fully synthesized (e.g. `Clone`, `Serialize`) and so imposes no
     /// single hand-written method.
     pub required_method: Option<(&'static str, usize)>,
     /// The infix operator this trait overloads, for the operator traits; `None` otherwise.
@@ -41,7 +41,22 @@ impl BuiltinTrait {
     pub fn lookup(name: &str) -> Option<&'static BuiltinTrait> {
         BUILTIN_TRAITS.iter().find(|t| t.name == name)
     }
+
+    /// How many **generic type arguments** `@derive(Name<…>)` requires for this trait. Only
+    /// `Serialize<Format>` is parameterized today (arity 1); every other trait is nullary. Kept as a
+    /// method (not a per-entry field) so the table stays terse.
+    pub fn generic_arity(&self) -> usize {
+        match self.name {
+            "Serialize" => 1,
+            _ => 0,
+        }
+    }
 }
+
+/// The serialization formats `@derive(Serialize<Format>)` accepts — the blessed vocabulary, starting
+/// with `Json` (extensible). The format selects the emitter the structural serializer uses; the
+/// checker validates a `Serialize` derive's type argument against this set.
+pub const SERIALIZE_FORMATS: &[&str] = &["Json"];
 
 /// The built-in trait that overloads `op`, if any. Used by the checker; the backends use the
 /// lighter [`BinaryOp::overload_method`](lang_ast::BinaryOp::overload_method) directly.
@@ -104,12 +119,6 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
     },
     BuiltinTrait {
         name: "Clone",
-        required_method: None,
-        operator: None,
-        derivable: true,
-    },
-    BuiltinTrait {
-        name: "ToJson",
         required_method: None,
         operator: None,
         derivable: true,
