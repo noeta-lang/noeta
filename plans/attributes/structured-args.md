@@ -17,9 +17,12 @@ type (E0013). Both backends' `attr_value_to_eval`/`attr_value_to_vm` recurse to 
 values (sets canonicalized like `to_set`), differential-clean by construction. A `TypeRef`
 materializes as the reflection `Type` ADT (`Type.Named(name,[])`), and **`invoke` accepts a `Type`
 receiver** (resolves the named type → associated-fn dispatch; both backends extract the name from the
-`Type` value), so a stored type-ref is constructible. **Deferred (noted, not silently):** retiring
-P2.6's `Payload::Type` in favor of the ADT (its degenerate name-only case); classifying a type-ref's
-*kind* (it materializes as `Type.Named`, not `Type.Record`/etc.) — a possible later refinement.
+`Type` value), so a stored type-ref is constructible. A type-ref **carries its precise kind**
+(`Type.Record`/`Enum`/`Class`, via the shared `reflect::ReflectionInfo::type_ref_repr`; commit
+`f106aba`) — `Type.Named` only for an unknown-kind name — consistent with the `type_of` kind work, not
+the stale plan-text `Type.Named`. **Deferred (noted, not silently):** retiring P2.6's `Payload::Type`
+in favor of the ADT (its degenerate name-only case); a built-in type-ref (`int`) still materializes as
+`Type.Named("int")` rather than `Type.Int` (rare edge; the kind table covers declared types only).
 
 ## What and why
 
