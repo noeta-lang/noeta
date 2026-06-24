@@ -1040,7 +1040,11 @@ impl Interpreter {
                 let t_fields: BTreeMap<String, Value> = fields
                     .iter()
                     .cloned()
-                    .zip(values.iter().map(attr_value_to_eval))
+                    .zip(
+                        values
+                            .iter()
+                            .map(|v| attr_value_to_eval(v, &self.reflection)),
+                    )
                     .collect();
                 let t_value = Value::Object(Rc::new(ObjectValue {
                     def: attr_def.clone(),
@@ -3005,25 +3009,31 @@ fn reflection_type_name(value: &Value) -> Option<String> {
 
 /// Convert a manifest attribute-argument literal tree to a tree-walker value, recursing through the
 /// collection and nominal literals. A type reference materializes as the reflection `Type` ADT
-/// (`Type.Named(name, [])`); a set is canonicalized exactly like the runtime `to_set` (sorted/deduped
-/// when orderable, else insertion order). The VM's `attr_value_to_vm` builds the matching values the
-/// same way, so the materialized attribute agrees across the differential by construction.
-fn attr_value_to_eval(value: &lang_ast::AttrValue) -> Value {
+/// classified by the named type's *kind* (`Type.Record`/`Enum`/`Class`, or `Type.Named` for an
+/// unknown-kind name) via the shared [`reflect::ReflectionInfo::type_ref_repr`]; a set is
+/// canonicalized exactly like the runtime `to_set` (sorted/deduped when orderable, else insertion
+/// order). The VM's `attr_value_to_vm` builds the matching values the same way, so the materialized
+/// attribute agrees across the differential by construction.
+fn attr_value_to_eval(
+    value: &lang_ast::AttrValue,
+    reflection: &lang_ast::reflect::ReflectionInfo,
+) -> Value {
     use lang_ast::AttrValue as A;
+    let recur = |v: &A| attr_value_to_eval(v, reflection);
     match value {
         A::Str(s) => Value::Str(s.clone()),
         A::Int(n) => Value::Int(*n),
         A::Float(f) => Value::Float(*f),
         A::Bool(b) => Value::Bool(*b),
-        A::List(items) => Value::List(Rc::new(items.iter().map(attr_value_to_eval).collect())),
+        A::List(items) => Value::List(Rc::new(items.iter().map(recur).collect())),
         A::Set(items) => {
-            let vals: Vec<Value> = items.iter().map(attr_value_to_eval).collect();
+            let vals: Vec<Value> = items.iter().map(recur).collect();
             Value::Set(Rc::new(canonical_set(&vals).unwrap_or(vals)))
         }
         A::Map(entries) => {
             let mut map = BTreeMap::new();
             for (k, v) in entries {
-                map.insert(k.clone(), attr_value_to_eval(v));
+                map.insert(k.clone(), recur(v));
             }
             Value::Map(Rc::new(map))
         }
@@ -3031,24 +3041,15 @@ fn attr_value_to_eval(value: &lang_ast::AttrValue) -> Value {
             enum_name,
             variant,
             args,
-        } => builtin_enum(
-            enum_name,
-            variant,
-            args.iter().map(attr_value_to_eval).collect(),
-        ),
+        } => builtin_enum(enum_name, variant, args.iter().map(recur).collect()),
         A::Record { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
             let def = Rc::new(fresh_type_def(type_name, &names, true));
-            let f: BTreeMap<String, Value> = fields
-                .iter()
-                .map(|(n, v)| (n.clone(), attr_value_to_eval(v)))
-                .collect();
+            let f: BTreeMap<String, Value> =
+                fields.iter().map(|(n, v)| (n.clone(), recur(v))).collect();
             Value::Object(Rc::new(ObjectValue { def, fields: f }))
         }
-        A::TypeRef(name) => build_type_value(&lang_ast::reflect::TypeRepr::Named(
-            name.clone(),
-            Vec::new(),
-        )),
+        A::TypeRef(name) => build_type_value(&reflection.type_ref_repr(name)),
     }
 }
 

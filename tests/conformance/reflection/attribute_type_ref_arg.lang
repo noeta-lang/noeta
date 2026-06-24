@@ -1,19 +1,34 @@
 // A bare type name in attribute position is a type reference, materialized as the reflection `Type`
-// ADT (`Type.Named("JsonCodec", [])`) and statically typed as `Type`. It round-trips through the
-// manifest and is matchable like any `type_of` result; both backends build the same value.
-// expect: stdout "JsonCodec"
+// ADT classified by the named type's *kind* — a record → `Type.Record`, an enum → `Type.Enum`, a
+// class → `Type.Class` — exactly the constructor a `type_of` over a value of that type would report
+// (not the generic `Type.Named`). It round-trips through the manifest and both backends build the
+// same value.
+// expect: stdout "record:JsonCodec"
+// expect: stdout "enum:Mode"
+// expect: stdout "class:Engine"
 // expect: exit 0
 type JsonCodec = { version: int };
+enum Mode { Fast; Slow; }
+class Engine { id: int  fn new(): Engine { return Engine { id: 0 }; } }
 
 @attribute
-type Encode = { codec: Type };
+type Encode = { codec: Type, mode: Type, engine: Type };
 
-#[Encode(codec: JsonCodec)]
+#[Encode(codec: JsonCodec, mode: Mode, engine: Engine)]
 type Payload = { id: int };
 
-for e in attributes_of::<Encode>() {
-    echo match e.value.codec {
-        Type.Named(name, _) => name,
+fn describe(t: Type): string {
+    return match t {
+        Type.Record(name, _) => "record:${name}",
+        Type.Enum(name, _) => "enum:${name}",
+        Type.Class(name, _) => "class:${name}",
+        Type.Named(name, _) => "named:${name}",
         _ => "?",
     };
+}
+
+for e in attributes_of::<Encode>() {
+    echo describe(e.value.codec);
+    echo describe(e.value.mode);
+    echo describe(e.value.engine);
 }

@@ -325,7 +325,7 @@ impl<'m> Vm<'m> {
             .map(|a| {
                 let values: Vec<Value> = lang_ast::reflect::materialize_args(a, &fields)
                     .iter()
-                    .map(attr_value_to_vm)
+                    .map(|v| attr_value_to_vm(v, &self.module.reflection))
                     .collect();
                 let t_shape = Rc::new(Shape::object(kind, type_name, fields.clone()));
                 let t_value = Value::object(t_shape, values);
@@ -3077,25 +3077,30 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
 
 /// Convert a manifest attribute-argument literal tree to a VM value (for materializing an attribute
 /// record), recursing through the collection and nominal literals. A type reference materializes as
-/// the reflection `Type` ADT (`Type.Named(name, [])`); a set is canonicalized exactly like the
-/// runtime `to_set`. Mirrors the tree-walker's `attr_value_to_eval` element-for-element, so the
-/// materialized attribute agrees across the differential by construction.
-fn attr_value_to_vm(value: &lang_ast::AttrValue) -> Value {
+/// the reflection `Type` ADT classified by the named type's *kind* (via the shared
+/// [`reflect::ReflectionInfo::type_ref_repr`]); a set is canonicalized exactly like the runtime
+/// `to_set`. Mirrors the tree-walker's `attr_value_to_eval` element-for-element, so the materialized
+/// attribute agrees across the differential by construction.
+fn attr_value_to_vm(
+    value: &lang_ast::AttrValue,
+    reflection: &lang_ast::reflect::ReflectionInfo,
+) -> Value {
     use lang_ast::AttrValue as A;
+    let recur = |v: &A| attr_value_to_vm(v, reflection);
     match value {
         A::Str(s) => Value::string(s),
         A::Int(n) => Value::int(*n),
         A::Float(f) => Value::float(*f),
         A::Bool(b) => Value::bool(*b),
-        A::List(items) => Value::list(items.iter().map(attr_value_to_vm).collect()),
+        A::List(items) => Value::list(items.iter().map(recur).collect()),
         A::Set(items) => {
-            let vals: Vec<Value> = items.iter().map(attr_value_to_vm).collect();
+            let vals: Vec<Value> = items.iter().map(recur).collect();
             Value::set(canonical_set(&vals).unwrap_or(vals))
         }
         A::Map(entries) => {
             let mut map = BTreeMap::new();
             for (k, v) in entries {
-                map.insert(k.clone(), attr_value_to_vm(v));
+                map.insert(k.clone(), recur(v));
             }
             Value::map(map)
         }
@@ -3103,21 +3108,14 @@ fn attr_value_to_vm(value: &lang_ast::AttrValue) -> Value {
             enum_name,
             variant,
             args,
-        } => make_attr_enum(
-            enum_name,
-            variant,
-            args.iter().map(attr_value_to_vm).collect(),
-        ),
+        } => make_attr_enum(enum_name, variant, args.iter().map(recur).collect()),
         A::Record { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
             let shape = Rc::new(Shape::object(ShapeKind::Record, type_name, names));
-            let values: Vec<Value> = fields.iter().map(|(_, v)| attr_value_to_vm(v)).collect();
+            let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
-        A::TypeRef(name) => build_type_value(&lang_ast::reflect::TypeRepr::Named(
-            name.clone(),
-            Vec::new(),
-        )),
+        A::TypeRef(name) => build_type_value(&reflection.type_ref_repr(name)),
     }
 }
 

@@ -34,6 +34,22 @@ impl ReflectionInfo {
     pub fn type_named(&self, name: &str) -> Option<&TypeInfo> {
         self.types.iter().find(|t| t.name == name)
     }
+
+    /// The reflection [`TypeRepr`] of a **type reference** by name — a bare type name used as a value
+    /// (`#[Encode(codec: JsonCodec)]`). Classified by the named type's *kind* so a type-ref reports
+    /// the same precise constructor a `type_of` over a value of that type would (`Type.Record` for a
+    /// record, etc.), rather than the generic `Type.Named`. A name with no declared kind (an opaque
+    /// import or a built-in) stays `Type.Named` — the honest unknown-kind fallback. Both backends
+    /// build a type-ref through this one function, so the materialized `Type` value agrees across the
+    /// differential by construction.
+    pub fn type_ref_repr(&self, name: &str) -> TypeRepr {
+        match self.type_named(name).map(|t| t.kind) {
+            Some(TypeKind::Record) => TypeRepr::Record(name.to_string(), Vec::new()),
+            Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
+            Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
+            None => TypeRepr::Named(name.to_string(), Vec::new()),
+        }
+    }
 }
 
 /// One `#[Name(args)]` attached to a declaration. Semantically a record instance attached as
