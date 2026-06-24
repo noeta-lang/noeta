@@ -1744,6 +1744,19 @@ impl Interpreter {
             )));
         };
         let args: Vec<Value> = items.as_ref().clone();
+        // A reflection `Type` value (e.g. a stored attribute type-ref) dispatches like the type
+        // handle it names: resolve it to the type and fall through to the `Value::Type` arm.
+        let receiver = match reflection_type_name(&receiver) {
+            Some(name) => match self.scope.lookup(&name) {
+                Some(found @ Value::Type(_)) => found,
+                _ => {
+                    return Ok(invoke_err(format!(
+                        "type `{name}` is not a constructible type"
+                    )));
+                }
+            },
+            None => receiver,
+        };
         match &receiver {
             // A type handle → an associated function (no receiver).
             Value::Type(def) => {
@@ -2972,6 +2985,22 @@ fn fresh_type_def(name: &str, fields: &[String], is_record: bool) -> TypeDef {
         derives_tojson: false,
         opaque: false,
     }
+}
+
+/// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Record`/`Class`/
+/// `Enum`, whose first payload is the type's name), return that name — so a stored type reference
+/// can be used as an `invoke` receiver. Mirrors the VM's `reflection_type_name`.
+fn reflection_type_name(value: &Value) -> Option<String> {
+    let Value::Enum(ev) = value else {
+        return None;
+    };
+    if ev.enum_name == lang_ast::reflect::TYPE_ENUM
+        && matches!(ev.variant.as_str(), "Named" | "Record" | "Class" | "Enum")
+        && let Some(Value::Str(name)) = ev.data.first()
+    {
+        return Some(name.clone());
+    }
+    None
 }
 
 /// Convert a manifest attribute-argument literal tree to a tree-walker value, recursing through the

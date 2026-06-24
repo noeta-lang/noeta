@@ -1,0 +1,19 @@
+// A bare type name in attribute position is a type reference, materialized as the reflection `Type`
+// ADT (`Type.Named("JsonCodec", [])`) and statically typed as `Type`. It round-trips through the
+// manifest and is matchable like any `type_of` result; both backends build the same value.
+// expect: stdout "JsonCodec"
+// expect: exit 0
+type JsonCodec = { version: int };
+
+@attribute
+type Encode = { codec: Type };
+
+#[Encode(codec: JsonCodec)]
+type Payload = { id: int };
+
+for e in attributes_of::<Encode>() {
+    echo match e.value.codec {
+        Type.Named(name, _) => name,
+        _ => "?",
+    };
+}

@@ -1,0 +1,24 @@
+// A type reference stored in an attribute is a first-class `Type` value, so `invoke` accepts it as
+// a receiver: it dispatches the named type's associated function, exactly as a bare type handle
+// would. Both backends resolve the type by the name carried in the `Type` value.
+// expect: stdout "made:7"
+// expect: exit 0
+class Widget {
+    size: int
+    fn make(n: int): Widget { return Widget { size: n }; }
+    fn describe(): string { return "made:${self.size}"; }
+}
+
+@attribute
+type Builds = { target: Type };
+
+#[Builds(target: Widget)]
+type Factory = { id: int };
+
+for b in attributes_of::<Builds>() {
+    result = invoke(b.value.target, "make", [7]);
+    echo match result {
+        Ok(w) => w.describe(),
+        Err(e) => "err:${e}",
+    };
+}

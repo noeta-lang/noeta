@@ -2113,9 +2113,12 @@ impl<'m> Vm<'m> {
                             ));
                         };
                         // A type handle dispatches an associated function (no receiver); an object
-                        // dispatches an instance method (receiver in register 0).
+                        // dispatches an instance method (receiver in register 0). A reflection `Type`
+                        // value (a stored type-ref) names the type for an associated call too.
                         let (type_name, is_assoc) = if recv_val.is_object() {
                             (recv_val.shape().unwrap().name.clone(), false)
+                        } else if let Some(tn) = reflection_type_name(recv_val) {
+                            (tn, true)
                         } else if let Some(tn) = recv_val.type_name_of() {
                             (tn, true)
                         } else {
@@ -3116,6 +3119,26 @@ fn attr_value_to_vm(value: &lang_ast::AttrValue) -> Value {
             Vec::new(),
         )),
     }
+}
+
+/// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Record`/`Class`/
+/// `Enum`, whose first payload is the type's name), return that name — so a stored type reference
+/// can be used as an `invoke` receiver. Mirrors the tree-walker's `reflection_type_name`.
+fn reflection_type_name(value: Value) -> Option<String> {
+    let shape = value.shape()?;
+    let is_nominal = shape.name == lang_ast::reflect::TYPE_ENUM
+        && shape
+            .variant
+            .as_deref()
+            .is_some_and(|v| matches!(v, "Named" | "Record" | "Class" | "Enum"));
+    if is_nominal {
+        return value
+            .enum_data()?
+            .into_iter()
+            .next()
+            .and_then(|v| v.as_string());
+    }
+    None
 }
 
 /// Build an enum value (`Color.Red`, `Ok(5)`, `Option.none`) for an attribute argument, with a fresh

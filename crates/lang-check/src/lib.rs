@@ -1514,8 +1514,28 @@ impl Checker {
                 "Result" => Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn)),
                 _ => Type::Named(enum_name.clone(), Vec::new()),
             },
-            // A type reference is a value of the reflection `Type` enum.
-            AttrValue::TypeRef(_) => {
+            // A bare name in attribute position is a type reference — a value of the reflection
+            // `Type` enum. It must name a real type (else E0013); a `Type` value is then assignable
+            // to a `Type`-typed (or `dyn`) field.
+            AttrValue::TypeRef(name) => {
+                if !Type::is_builtin_name(name)
+                    && !PRELUDE_TYPES.contains(&name.as_str())
+                    && !self.types.contains(name)
+                {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::UnknownType,
+                            span,
+                            format!("unknown type `{name}` in attribute argument"),
+                        )
+                        .with_help(
+                            "a bare name in an attribute argument is a type reference; name a \
+                             declared type, an import, or a built-in (use `Enum.Variant` for an \
+                             enum value)",
+                        ),
+                    );
+                    return;
+                }
                 Type::Named(lang_ast::reflect::TYPE_ENUM.to_string(), Vec::new())
             }
         };
