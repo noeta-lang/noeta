@@ -1,8 +1,20 @@
 # Semantic roles, generalized: `@semantic` enums + `@role(Enum.Variant)`
 
-Status: **planned** (not started). Branch `types-inferred-static`. **Supersedes the shipped P2.7**
-(commit `c6a98c2`, the closed 5-variant `Role` enum) with the user-designed extensible model.
-Depends on [abstract-kind-types](../types/abstract-kind-types.md) (`role: Enum`).
+Status: **DONE** (commit `3e1ac16`; conformance 207 / differential 201 matched / 0-skipped /
+backends agree / clippy + fmt + miri clean). Branch `types-inferred-static`. **Superseded the shipped
+P2.7** (commit `c6a98c2`, the closed 5-variant `Role` enum) with the user-designed extensible model.
+Built on [abstract-kind-types](../types/abstract-kind-types.md) (`role: Enum`).
+
+**As built:** `@semantic` marks an enum role-eligible (built-in `Semantic` enum implicitly so);
+`@role(Enum.Variant)` references a fieldless variant of one (multiple roles per declaration accumulate).
+Directive args generalized to an optional `.`-qualifier so `@role`'s `Enum.Variant` and `@derive`'s
+bare `Trait` share one grammar (zero new tokens). `RecordDecl/ClassDecl.role: Vec<RoleTag>` +
+`.semantic` (misplacement); `EnumDecl.semantic`. Checker: `semantic_enums` registry + a **post-collect**
+`check_semantic_roles` pass (so a `@role` may name a `@semantic` enum declared later) validating
+qualifier / `@semantic`-enum / existing-fieldless-variant + `@semantic` misplacement — all reuse
+**E0031** (next free still E0032). `RoleBinding.role` typed as the abstract `Enum` kind. Both backends
+materialize the actual named enum value (`make_role(enum_name, variant)`), differential-clean by
+construction. The one deferred piece remains a *parameterized* role (`Layer(name)`) → comptime.
 
 ## What changes from the shipped P2.7
 
