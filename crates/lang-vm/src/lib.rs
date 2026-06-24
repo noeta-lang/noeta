@@ -2080,7 +2080,12 @@ impl<'m> Vm<'m> {
                     frames[top].pc += 1;
                 }
                 Op::TypeValue { dst, name } => {
-                    set_reg(&mut frames[top].regs, *dst, Value::type_value(name));
+                    // A bare type name used as a value (an `invoke` receiver) materializes as the
+                    // reflection `Type` ADT — the one representation of "a type as a value", shared
+                    // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
+                    // named type via `reflection_type_name`.
+                    let value = build_type_value(&module.reflection.type_ref_repr(name));
+                    set_reg(&mut frames[top].regs, *dst, value);
                     frames[top].pc += 1;
                 }
                 Op::Invoke {
@@ -2118,8 +2123,6 @@ impl<'m> Vm<'m> {
                         let (type_name, is_assoc) = if recv_val.is_object() {
                             (recv_val.shape().unwrap().name.clone(), false)
                         } else if let Some(tn) = reflection_type_name(recv_val) {
-                            (tn, true)
-                        } else if let Some(tn) = recv_val.type_name_of() {
                             (tn, true)
                         } else {
                             break 'resolve Err(format!(

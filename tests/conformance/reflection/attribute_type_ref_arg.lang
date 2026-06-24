@@ -1,20 +1,21 @@
 // A bare type name in attribute position is a type reference, materialized as the reflection `Type`
-// ADT classified by the named type's *kind* — a record → `Type.Record`, an enum → `Type.Enum`, a
-// class → `Type.Class` — exactly the constructor a `type_of` over a value of that type would report
-// (not the generic `Type.Named`). It round-trips through the manifest and both backends build the
-// same value.
+// ADT classified exactly as a `type_of` over a value of that type would report — a record →
+// `Type.Record`, an enum → `Type.Enum`, a class → `Type.Class`, a built-in scalar → its lattice
+// variant (`int` → `Type.Int`) — never the generic `Type.Named`. It round-trips through the manifest
+// and both backends build the same value.
 // expect: stdout "record:JsonCodec"
 // expect: stdout "enum:Mode"
 // expect: stdout "class:Engine"
+// expect: stdout "scalar-int"
 // expect: exit 0
 type JsonCodec = { version: int };
 enum Mode { Fast; Slow; }
 class Engine { id: int  fn new(): Engine { return Engine { id: 0 }; } }
 
 @attribute
-type Encode = { codec: Type, mode: Type, engine: Type };
+type Encode = { codec: Type, mode: Type, engine: Type, key: Type };
 
-#[Encode(codec: JsonCodec, mode: Mode, engine: Engine)]
+#[Encode(codec: JsonCodec, mode: Mode, engine: Engine, key: int)]
 type Payload = { id: int };
 
 fn describe(t: Type): string {
@@ -22,6 +23,7 @@ fn describe(t: Type): string {
         Type.Record(name, _) => "record:${name}",
         Type.Enum(name, _) => "enum:${name}",
         Type.Class(name, _) => "class:${name}",
+        Type.Int => "scalar-int",
         Type.Named(name, _) => "named:${name}",
         _ => "?",
     };
@@ -31,4 +33,5 @@ for e in attributes_of::<Encode>() {
     echo describe(e.value.codec);
     echo describe(e.value.mode);
     echo describe(e.value.engine);
+    echo describe(e.value.key);
 }

@@ -36,18 +36,33 @@ impl ReflectionInfo {
     }
 
     /// The reflection [`TypeRepr`] of a **type reference** by name — a bare type name used as a value
-    /// (`#[Encode(codec: JsonCodec)]`). Classified by the named type's *kind* so a type-ref reports
-    /// the same precise constructor a `type_of` over a value of that type would (`Type.Record` for a
-    /// record, etc.), rather than the generic `Type.Named`. A name with no declared kind (an opaque
-    /// import or a built-in) stays `Type.Named` — the honest unknown-kind fallback. Both backends
-    /// build a type-ref through this one function, so the materialized `Type` value agrees across the
-    /// differential by construction.
+    /// (`#[Encode(codec: JsonCodec)]`). Reports the same precise constructor a `type_of` over a value
+    /// of that type would: a built-in scalar/collection maps to its lattice variant (`int` →
+    /// `Type.Int`, `list` → `Type.List(Dyn)`), and a declared type maps by *kind* (`Type.Record`/
+    /// `Enum`/`Class`). Only a name with no known classification — an opaque import, or one of the
+    /// abstract kind-types `Enum`/`Record`/`Class` used directly — stays `Type.Named`, the honest
+    /// unknown-kind fallback. Both backends build a type-ref through this one function, so the
+    /// materialized `Type` value agrees across the differential by construction.
     pub fn type_ref_repr(&self, name: &str) -> TypeRepr {
-        match self.type_named(name).map(|t| t.kind) {
-            Some(TypeKind::Record) => TypeRepr::Record(name.to_string(), Vec::new()),
-            Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
-            Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
-            None => TypeRepr::Named(name.to_string(), Vec::new()),
+        let dyn_box = || Box::new(TypeRepr::Dyn);
+        match name {
+            "int" => TypeRepr::Int,
+            "float" => TypeRepr::Float,
+            "bool" => TypeRepr::Bool,
+            "string" => TypeRepr::Str,
+            "void" | "unit" => TypeRepr::Unit,
+            "dyn" | "Any" => TypeRepr::Dyn,
+            "list" | "List" => TypeRepr::List(dyn_box()),
+            "set" | "Set" => TypeRepr::Set(dyn_box()),
+            "map" | "Map" => TypeRepr::Map(dyn_box(), dyn_box()),
+            "Option" => TypeRepr::Option(dyn_box()),
+            "Result" => TypeRepr::Result(dyn_box(), dyn_box()),
+            _ => match self.type_named(name).map(|t| t.kind) {
+                Some(TypeKind::Record) => TypeRepr::Record(name.to_string(), Vec::new()),
+                Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
+                Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
+                None => TypeRepr::Named(name.to_string(), Vec::new()),
+            },
         }
     }
 }

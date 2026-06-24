@@ -383,16 +383,18 @@ pub enum Op {
         dst: Reg,
         repr: lang_ast::reflect::TypeRepr,
     },
-    /// `dst = <type handle for `name`>` — materialize a first-class type value (the tree-walker's
-    /// `Value::Type` analogue). Emitted when an `invoke(...)` receiver is a bare type name, so the
-    /// associated-function path has a runtime receiver to dispatch on (P2.6).
+    /// `dst = <the reflection `Type` value for `name`>` — materialize a bare type name as a
+    /// first-class value (the one "type as a value" representation, shared with `type_of` and stored
+    /// type-refs). Emitted when an `invoke(...)` receiver is a bare type name; `Op::Invoke` resolves
+    /// the `Type` value back to the named type via `reflection_type_name` to dispatch its associated
+    /// function. The kind is classified at run time from the module's reflection (`type_ref_repr`).
     TypeValue {
         dst: Reg,
         name: String,
     },
     /// `invoke(recv, name, args)`: `dst = Result<dyn, dyn>` — fallible by-name dispatch. `recv` holds
-    /// an object (→ instance method, keyed `(shape, name)`) or a type handle (→ associated function,
-    /// keyed `(type, name)`); `name` is a runtime `string`; `args` a runtime `List`. An unknown name,
+    /// an object (→ instance method, keyed `(shape, name)`) or a reflection `Type` value (→ associated
+    /// function, keyed `(type, name)`); `name` is a runtime `string`; `args` a runtime `List`. An unknown name,
     /// a non-string name, a non-list args, or an arity mismatch builds `Result.Err(string)` (via
     /// `err_shape`); a hit pushes a call frame whose result is wrapped in `Result.Ok` (via
     /// `ok_shape`). A panic inside the invoked body propagates as a normal abort (P2.6).

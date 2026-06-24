@@ -207,24 +207,6 @@ impl Value {
         }
     }
 
-    /// A first-class type handle (`Circle` as a value) — the receiver of a reflective
-    /// associated-function call (P2.6). Carries only the type's name.
-    pub fn type_value(name: &str) -> Value {
-        heap::alloc(Payload::Type(name.to_string()))
-    }
-
-    /// The type's name, if this is a type handle.
-    pub fn type_name_of(self) -> Option<String> {
-        if self.is_pointer() {
-            heap::with_payload(self, |p| match p {
-                Payload::Type(name) => Some(name.clone()),
-                _ => None,
-            })
-        } else {
-            None
-        }
-    }
-
     /// A heap map (refcount 1), keyed by owned strings, iterating in sorted-key order. As
     /// with [`Value::list`], the map takes ownership of one reference to each value.
     pub fn map(entries: BTreeMap<String, Value>) -> Value {
@@ -583,7 +565,6 @@ impl Value {
                     }
                 }
                 Payload::NativeModule(name) => format!("<module {name}>"),
-                Payload::Type(name) => format!("<type {name}>"),
                 // `<file "path" (mode)>`, rendered by the shared handle so both backends match.
                 Payload::FileHandle(handle) => handle.display(),
             })
@@ -640,7 +621,6 @@ impl Value {
                     json_string(shape.variant.as_deref().unwrap_or(&shape.name))
                 }
                 Payload::NativeModule(name) => json_string(&format!("<module {name}>")),
-                Payload::Type(name) => json_string(&format!("<type {name}>")),
                 // A handle has no JSON analog; fall back to its quoted display form, like a closure.
                 Payload::FileHandle(handle) => json_string(&handle.display()),
             })
@@ -684,8 +664,6 @@ impl Value {
                 "enum"
             } else if self.native_module_name().is_some() {
                 "module"
-            } else if self.type_name_of().is_some() {
-                "type"
             } else if self.is_file_handle() {
                 "file handle"
             } else {
