@@ -3,6 +3,6 @@
 // expect: error E0015 at 6:1
 // expect: exit 1
 type Route = { path: string };
-impl Attribute for Route {
+impl Serialize for Route {
     fn extra(): int { return 1; }
 }

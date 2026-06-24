@@ -7,8 +7,8 @@
 // expect: stdout "Api.list"
 // expect: stdout "GET"
 // expect: exit 0
+@attribute
 type Route = { method: string };
-impl Attribute for Route {}
 
 #[Route("GET")]
 fn greet(): string { return "hi"; }

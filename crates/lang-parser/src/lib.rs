@@ -107,27 +107,29 @@ fn attach_decorators(
     stmt: Stmt,
     derives: Vec<(String, Span)>,
     attrs: Vec<Attribute>,
-    attachable_to: Vec<(String, Span)>,
+    attribute: Option<Vec<(String, Span)>>,
 ) -> Stmt {
-    if derives.is_empty() && attrs.is_empty() && attachable_to.is_empty() {
+    if derives.is_empty() && attrs.is_empty() && attribute.is_none() {
         return stmt;
     }
     match stmt {
         Stmt::Class(mut c) => {
             c.derives = derives;
             c.attrs = attrs;
-            c.attachable_to = attachable_to;
+            // `@attribute` on a class is invalid (attributes are records only); carried so the
+            // checker can report it.
+            c.attribute = attribute;
             Stmt::Class(c)
         }
         Stmt::Record(mut r) => {
             r.derives = derives;
             r.attrs = attrs;
-            r.attachable_to = attachable_to;
+            r.attribute = attribute;
             Stmt::Record(r)
         }
         Stmt::Enum(mut e) => {
-            // An enum cannot be an attribute (the `Attribute` capability is records/classes only),
-            // so `@attachableTo` on it is meaningless and simply dropped; derives/attrs still apply.
+            // An enum cannot be an attribute, so a stray `@attribute` is dropped; derives/attrs
+            // still apply.
             e.derives = derives;
             e.attrs = attrs;
             Stmt::Enum(e)
@@ -1349,7 +1351,7 @@ where
                     fields,
                     derives: Vec::new(),
                     attrs: Vec::new(),
-                    attachable_to: Vec::new(),
+                    attribute: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -1426,7 +1428,7 @@ where
             .ignore_then(block.clone())
             .map(ClassMember::Destructor);
         // `impl Trait for Type { ... }` — a *standalone* (top-level) trait implementation, the
-        // mechanism by which a bodiless record declares a capability (`impl Attribute for Route
+        // mechanism by which a bodiless record declares a capability (`impl Serialize for Route
         // {}`). The `for Type` is what distinguishes it from the class-body `impl Trait { ... }`
         // above. The checker requires `Type` to be declared in the same module (orphan rule).
         let standalone_impl = just(T::ImplKw)
@@ -1492,7 +1494,7 @@ where
                     impls,
                     derives: Vec::new(),
                     attrs: Vec::new(),
-                    attachable_to: Vec::new(),
+                    attribute: None,
                     destructor,
                     span: ctx.to_span(e.span()),
                 })
@@ -1621,9 +1623,10 @@ where
                 }
             });
 
-        // `@derive ( Name, ... )` — a compile-time codegen directive: the compiler synthesizes the
-        // listed trait impls from the type's fields. `@` is used for nothing else; an `@name` other
-        // than `@derive` is a diagnostic (handled where decorators are partitioned).
+        // A `@name(arg, ...)` directive. Two are recognized (partitioned below): `@derive(...)` —
+        // codegen — and `@attribute` / `@attribute(Kind, ...)` — the attribute opt-in + placement
+        // (P2.5). The argument list is optional so a bare `@attribute` (attaches anywhere) parses;
+        // any other `@name` is a diagnostic where decorators are partitioned.
         let derive_directive = just(T::At)
             .ignore_then(id.clone())
             .then(
@@ -1631,7 +1634,9 @@ where
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
-                    .delimited_by(just(T::LParen), just(T::RParen)),
+                    .delimited_by(just(T::LParen), just(T::RParen))
+                    .or_not()
+                    .map(Option::unwrap_or_default),
             )
             .map(|((name, name_span), traits)| Decorator::Derive {
                 name,
@@ -1654,7 +1659,7 @@ where
             .map(move |((decorators, pub_kw), stmt)| {
                 let mut derives: Vec<(String, Span)> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
-                let mut attachable_to: Vec<(String, Span)> = Vec::new();
+                let mut attribute: Option<Vec<(String, Span)>> = None;
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
@@ -1662,15 +1667,16 @@ where
                             name_span,
                             traits,
                         } => match name.as_str() {
-                            // `@derive(Trait, …)` — codegen. `@attachableTo(Kind, …)` — the
-                            // attribute placement restriction (P2.5); the checker validates the kinds.
+                            // `@derive(Trait, …)` — codegen. `@attribute` / `@attribute(Kind, …)` —
+                            // the attribute opt-in; its args are the placement kinds (empty ⇒
+                            // anywhere). The checker validates the kinds and the records-only rule.
                             "derive" => derives.extend(traits),
-                            "attachableTo" => attachable_to.extend(traits),
+                            "attribute" => attribute = Some(traits),
                             _ => ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
                                 name_span,
                                 format!(
-                                    "unknown directive `@{name}`; the directives are `@derive(...)` and `@attachableTo(...)`"
+                                    "unknown directive `@{name}`; the directives are `@derive(...)` and `@attribute(...)`"
                                 ),
                             )),
                         },
@@ -1678,7 +1684,7 @@ where
                     }
                 }
                 set_public(
-                    attach_decorators(stmt, derives, attrs, attachable_to),
+                    attach_decorators(stmt, derives, attrs, attribute),
                     pub_kw.is_some(),
                 )
             });
@@ -2236,7 +2242,7 @@ mod tests {
     fn standalone_impl_parses() {
         // A top-level `impl Trait for Type { ... }` — the `for Type` distinguishes it from the
         // class-body `impl Trait { ... }`. A marker capability impl has an empty body.
-        insta::assert_snapshot!(pretty("impl Attribute for Route {}"));
+        insta::assert_snapshot!(pretty("impl Serialize for Route {}"));
     }
 
     #[test]

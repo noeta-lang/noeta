@@ -8,8 +8,8 @@
 // expect: stdout "Orders"
 // expect: stdout "/orders"
 // expect: exit 0
+@attribute
 type Route = { path: string };
-impl Attribute for Route {}
 
 #[Route("/users")]
 type Users = { id: int };

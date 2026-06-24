@@ -1,8 +1,8 @@
 // An attribute type with no uses yields an empty list — the manifest holds no matching entries.
 // expect: stdout "done"
 // expect: exit 0
+@attribute
 type Marker = {};
-impl Attribute for Marker {}
 
 mut n = 0;
 for m in attributes_of::<Marker>() {

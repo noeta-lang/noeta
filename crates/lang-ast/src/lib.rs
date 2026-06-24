@@ -55,7 +55,7 @@ pub enum Stmt {
     Class(ClassDecl),
     /// A standalone `impl Trait for Type { ... }` declaration — implementing a built-in trait
     /// for a type from *outside* its declaration. This is how a bodiless record (`type Route =
-    /// {...}`) declares a capability such as `impl Attribute for Route {}`; it works uniformly
+    /// {...}`) declares a capability such as `impl Serialize for Route {}`; it works uniformly
     /// for classes too. The target must be a type declared in the same module (the orphan rule).
     Impl(ImplDecl),
     /// `namespace App.Orders;` — declares the file's namespace. M0 records the path but
@@ -140,14 +140,14 @@ pub struct RecordDecl {
     /// across all directive lines. Validated by the checker; drives compiler codegen.
     pub derives: Vec<(String, Span)>,
     /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected
-    /// into the compiler-built manifest, and gated by the checker (each must name a record/class
-    /// marked `impl Attribute`, and its arguments must construct it).
+    /// into the compiler-built manifest, and gated by the checker (each must name a record marked
+    /// `@attribute`, and its arguments must construct it).
     pub attrs: Vec<Attribute>,
-    /// The target kinds named by a leading `@attachableTo(Method, Function, …)` directive (P2.5),
-    /// each with its span. Meaningful only when this type is itself an attribute (`impl Attribute`):
-    /// it restricts the declaration kinds a `#[ThisType(...)]` use may attach to. Empty ⇒
-    /// unrestricted (attaches anywhere). The checker validates the names and enforces placement.
-    pub attachable_to: Vec<(String, Span)>,
+    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary record; `Some(kinds)` ⇒ this
+    /// record is usable as an attribute. The `kinds` are the placement restriction from
+    /// `@attribute(Method, Function, …)` — empty (bare `@attribute`) ⇒ attaches anywhere. Attributes
+    /// are **records only**; the same directive on a class/enum is a checker error.
+    pub attribute: Option<Vec<(String, Span)>>,
     pub span: Span,
 }
 
@@ -223,7 +223,7 @@ pub struct ImplBlock {
 
 /// A standalone `impl Trait for Type { ... }` declaration (top-level, not inside a class body).
 /// Implements a built-in trait for a type from outside its declaration — the mechanism by which
-/// a bodiless record declares a capability (`impl Attribute for Route {}`). The checker validates
+/// a bodiless record declares a capability (`impl Serialize for Route {}`). The checker validates
 /// the trait, requires `target` to be a type declared in the same module (orphan rule), records
 /// the satisfaction for bound/gate checks, and folds it into the target's trait coherence.
 #[derive(Debug, Clone, PartialEq)]
@@ -264,9 +264,10 @@ pub struct ClassDecl {
     pub derives: Vec<(String, Span)>,
     /// Leading `#[...]` data attributes on the class.
     pub attrs: Vec<Attribute>,
-    /// The target kinds named by a leading `@attachableTo(...)` directive (P2.5); see
-    /// [`RecordDecl::attachable_to`]. Empty ⇒ unrestricted.
-    pub attachable_to: Vec<(String, Span)>,
+    /// A misplaced `@attribute` directive (attributes are records only); see
+    /// [`RecordDecl::attribute`]. `Some` here is always a checker error — kept so the checker can
+    /// point at the mistake rather than silently dropping it.
+    pub attribute: Option<Vec<(String, Span)>>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.

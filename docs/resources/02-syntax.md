@@ -554,12 +554,11 @@ class User {
 }
 ```
 
-**Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record becomes usable in annotation position by **implementing the `Attribute` trait** (a capability declaration, hence a trait — not a derive); constructing the attribute is the same constructor machinery as any value. A `#[...]` may attach to any declaration site — a type, a function, a method, a field/property, or an enum variant. Constraints on *where* it attaches are a compile-time placement check, declared with the `@attachableTo(...)` directive listing the permitted **target kinds** (`Record`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`); omitting it leaves the attribute unrestricted. A misplaced use is a compile error (E0030):
+**Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record opts in as an attribute with the **`@attribute` directive**; its `#[...]` arguments then map to the record's fields (positional in declaration order, named by name), the one unambiguous construction a record has — which is exactly why **attributes are records, not classes** (a class has only convention-named constructors, with no canonical one to call). A `#[...]` may attach to any declaration site — a type, a function, a method, a field/property, or an enum variant. Placement can be constrained by listing the permitted **target kinds** in the directive (`Record`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`); a bare `@attribute` attaches anywhere. A misplaced use is a compile error (E0030):
 
 ```
-@attachableTo(Method, Function)                // optional: constrain placement
-type Route = { path: string };                 // a plain record
-impl Attribute for Route {}                    // marks it usable in annotation position
+@attribute(Method, Function)                   // opt-in + constrain placement
+type Route = { path: string };                 // a record; #[Route(...)] fills `path`
 
 class UserController {
     #[Route("/users")]                         // OK — Method is permitted
@@ -569,6 +568,8 @@ class UserController {
 #[Route("/x")]                                 // E0030 — Route does not attach to a type
 type User = { id: int };
 ```
+
+A record can still carry *behavior* via a standalone `impl SomeTrait for Route {}` (so "records only" costs no expressiveness); and a bare `@attribute` (no kinds) is the common "attaches anywhere" case.
 
 > Design note: the placement rule is a static, declarative list of kinds — *not* a user-evaluated `valid_target(t: Target): bool` predicate. Enforcing an arbitrary predicate would require executing user code at compile time (the project deliberately avoids comptime), and the target kinds are a fixed, closed set, so they live as plain identifiers the checker reads. A predicate over a target's *return type* would be a future enhancement, gated on comptime.
 
@@ -600,7 +601,7 @@ Runtime reflection is opt-in per type (capability-gated): reflectable types beco
 **Semantic role tags** let an attribute confer a typed architectural *role* on whatever it annotates — declared once on the attribute, inherited by every use. An attribute additionally implements `SemanticRole`, returning a value from a small blessed enum:
 
 ```
-impl SemanticRole for Route {                      // Route already impl Attribute
+impl SemanticRole for Route {                      // Route already @attribute
     fn role(): Role { return Role.EntryPoint(kind: "http", id: self.path); }
 }
 
@@ -615,7 +616,7 @@ enum Role {
 }
 ```
 
-The compiler evaluates `role()` at manifest-build time and indexes `(declaration, Role)` (zero runtime cost), so the dependency graph becomes queryable in architectural terms — "every entry point," "does this trust boundary reach a sink." Only a type that `impl Attribute` may `impl SemanticRole` (the role rides on what the attribute attaches to; otherwise a compile error). Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
+The compiler evaluates `role()` at manifest-build time and indexes `(declaration, Role)` (zero runtime cost), so the dependency graph becomes queryable in architectural terms — "every entry point," "does this trust boundary reach a sink." Only a record marked `@attribute` may `impl SemanticRole` (the role rides on what the attribute attaches to; otherwise a compile error). Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
 
 ---
 

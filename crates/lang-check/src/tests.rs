@@ -412,14 +412,14 @@ fn two_impl_blocks_for_same_trait_conflict() {
 fn standalone_marker_impl_is_accepted() {
     // A bodiless record declares a capability via a same-module standalone `impl` — the mechanism
     // that lets a record (which has no body) participate in a trait. No diagnostics.
-    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n";
+    let src = "type Route = { path: string };\nimpl Serialize for Route {}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn standalone_impl_for_undeclared_type_is_orphan() {
     // The orphan rule: a standalone `impl` may only target a type declared in this module.
-    let src = "impl Attribute for Widget {}\n";
+    let src = "impl Serialize for Widget {}\n";
     assert_eq!(codes(src), ["E0013"]);
 }
 
@@ -434,15 +434,32 @@ fn standalone_impl_counts_toward_coherence() {
 #[test]
 fn standalone_impl_with_methods_is_unsupported() {
     // Pass 1 supports only empty-body capability impls; a body with methods is rejected (E0015).
-    let src = "type Route = { path: string };\nimpl Attribute for Route {\n  fn extra(): int { return 1; }\n}\n";
+    let src = "type Route = { path: string };\nimpl Serialize for Route {\n  fn extra(): int { return 1; }\n}\n";
     assert_eq!(codes(src), ["E0015"]);
+}
+
+#[test]
+fn attribute_on_a_class_is_rejected() {
+    // Attributes are records only — `@attribute` on a class is E0029 (the arguments have no
+    // unambiguous constructor to map to).
+    let src = "@attribute\nclass Route {\n  path: string\n}\n";
+    assert_eq!(codes(src), ["E0029"]);
+}
+
+#[test]
+fn bare_attribute_record_is_usable_anywhere() {
+    // A bare `@attribute` (no kinds) opts the record in with no placement restriction, so a use on
+    // any site — here a top-level function — is accepted.
+    let src =
+        "@attribute\ntype Tag = { name: string };\n#[Tag(\"x\")]\nfn f(): int { return 0; }\n";
+    assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attributes_of_on_an_attribute_type_checks_clean() {
     // `attributes_of::<Route>()` is `List<Attributed<Route>>`, so `r.target` is a string and
     // `r.value` is a `Route` whose `.path` is a string — all resolve without diagnostics.
-    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route(\"/x\")]\ntype Users = { id: int };\nfor r in attributes_of::<Route>() {\n  echo r.target;\n  echo r.value.path;\n}\n";
+    let src = "@attribute\ntype Route = { path: string };\n#[Route(\"/x\")]\ntype Users = { id: int };\nfor r in attributes_of::<Route>() {\n  echo r.target;\n  echo r.value.path;\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -450,20 +467,20 @@ fn attributes_of_on_an_attribute_type_checks_clean() {
 fn attribute_on_a_function_checks_clean() {
     // A `#[...]` on a function is validated like one on a type: the capability gate plus the
     // all-fields construction check, both satisfied here.
-    let src = "type Route = { method: string };\nimpl Attribute for Route {}\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    let src = "@attribute\ntype Route = { method: string };\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attribute_on_a_method_checks_clean() {
     // The same validation reaches a class method's attributes (through `check_fn`).
-    let src = "type Route = { method: string };\nimpl Attribute for Route {}\nclass Api {\n  id: int\n  #[Route(\"GET\")]\n  fn list(): string { return \"[]\"; }\n}\n";
+    let src = "@attribute\ntype Route = { method: string };\nclass Api {\n  id: int\n  #[Route(\"GET\")]\n  fn list(): string { return \"[]\"; }\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attribute_on_a_function_must_be_an_attribute() {
-    // The E0029 gate applies on a function too: `Plain` is a record but not an `Attribute`.
+    // The E0029 gate applies on a function too: `Plain` is a record but not marked `@attribute`.
     let src = "type Plain = { method: string };\n#[Plain(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
     assert_eq!(codes(src), ["E0029"]);
 }
@@ -471,7 +488,7 @@ fn attribute_on_a_function_must_be_an_attribute() {
 #[test]
 fn attribute_on_record_and_class_fields_checks_clean() {
     // A `#[...]` on a record field and on a class field is validated like any other attribute use.
-    let src = "type Column = { name: string };\nimpl Attribute for Column {}\ntype User = {\n  #[Column(\"uid\")]\n  id: int,\n};\nclass Account {\n  #[Column(\"bal\")]\n  balance: int\n}\n";
+    let src = "@attribute\ntype Column = { name: string };\ntype User = {\n  #[Column(\"uid\")]\n  id: int,\n};\nclass Account {\n  #[Column(\"bal\")]\n  balance: int\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -484,38 +501,37 @@ fn attribute_on_a_field_must_be_an_attribute() {
 
 #[test]
 fn attachable_to_permits_a_listed_kind() {
-    // `@attachableTo(Function)` allows the attribute on a top-level function.
-    let src = "@attachableTo(Function)\ntype Route = { method: string };\nimpl Attribute for Route {}\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    // `@attribute(Function)` allows the attribute on a top-level function.
+    let src = "@attribute(Function)\ntype Route = { method: string };\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attachable_to_rejects_an_unlisted_kind() {
-    // `@attachableTo(Method)` forbids the attribute on a type declaration → E0030.
-    let src = "@attachableTo(Method)\ntype Route = { method: string };\nimpl Attribute for Route {}\n#[Route(\"GET\")]\ntype User = { id: int };\n";
+    // `@attribute(Method)` forbids the attribute on a type declaration → E0030.
+    let src = "@attribute(Method)\ntype Route = { method: string };\n#[Route(\"GET\")]\ntype User = { id: int };\n";
     assert_eq!(codes(src), ["E0030"]);
 }
 
 #[test]
 fn attachable_to_with_an_unknown_kind_is_rejected() {
     // The kind vocabulary is closed; an unknown name in the directive is E0030.
-    let src =
-        "@attachableTo(Bogus)\ntype Route = { method: string };\nimpl Attribute for Route {}\n";
+    let src = "@attribute(Bogus)\ntype Route = { method: string };\n";
     assert_eq!(codes(src), ["E0030"]);
 }
 
 #[test]
 fn attachable_to_field_only_attribute_rejects_a_method() {
-    // A field-only attribute (`@attachableTo(Field)`) on a method is E0030 — exercising the
+    // A field-only attribute (`@attribute(Field)`) on a method is E0030 — exercising the
     // method/function target axis added in P2.4.
-    let src = "@attachableTo(Field)\ntype Column = { name: string };\nimpl Attribute for Column {}\nclass Api {\n  #[Column(\"x\")]\n  fn list(): int { return 0; }\n}\n";
+    let src = "@attribute(Field)\ntype Column = { name: string };\nclass Api {\n  #[Column(\"x\")]\n  fn list(): int { return 0; }\n}\n";
     assert_eq!(codes(src), ["E0030"]);
 }
 
 #[test]
 fn attribute_on_an_enum_variant_checks_clean() {
     // A `#[...]` on an enum variant (plain or algebraic) is validated like any other attribute use.
-    let src = "type Note = { text: string };\nimpl Attribute for Note {}\nenum Status {\n  Active;\n  #[Note(\"gone\")]\n  Archived;\n}\n";
+    let src = "@attribute\ntype Note = { text: string };\nenum Status {\n  Active;\n  #[Note(\"gone\")]\n  Archived;\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -528,7 +544,7 @@ fn attribute_on_a_variant_must_be_an_attribute() {
 
 #[test]
 fn attributes_of_on_a_non_attribute_is_rejected() {
-    // The capability gate, mirroring a `#[Foo]` use: the type argument must implement `Attribute`.
+    // The capability gate, mirroring a `#[Foo]` use: the type argument must be marked `@attribute`.
     let src = "type Plain = { path: string };\nrs = attributes_of::<Plain>();\n";
     assert_eq!(codes(src), ["E0029"]);
 }
@@ -641,15 +657,16 @@ fn old_derive_attribute_spelling_is_reported() {
 
 #[test]
 fn data_attribute_marked_with_capability_is_accepted() {
-    // `#[Route(...)]` is valid when `Route` is a record/class marked `impl Attribute for Route`,
+    // `#[Route(...)]` is valid when `Route` is a record marked `@attribute`,
     // and the arguments construct it (the positional value fills `path`).
-    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route(\"/x\")]\nclass P {\n  x: int\n}\n";
+    let src =
+        "@attribute\ntype Route = { path: string };\n#[Route(\"/x\")]\nclass P {\n  x: int\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn unmarked_attribute_is_rejected() {
-    // The capability gate: a `#[Foo]` whose `Foo` does not implement `Attribute` is E0029.
+    // The capability gate: a `#[Foo]` whose `Foo` is not marked `@attribute` is E0029.
     let src = "#[Route]\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0029"]);
 }
@@ -657,14 +674,14 @@ fn unmarked_attribute_is_rejected() {
 #[test]
 fn attribute_missing_field_is_reported() {
     // The construction check: `#[Route]` with no argument leaves `path` unset (E0009).
-    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route]\nclass P {\n  x: int\n}\n";
+    let src = "@attribute\ntype Route = { path: string };\n#[Route]\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0009"]);
 }
 
 #[test]
 fn attribute_argument_type_mismatch_is_reported() {
     // The construction check: a literal whose type does not match its field is E0007.
-    let src = "type Route = { path: string };\nimpl Attribute for Route {}\n#[Route(42)]\nclass P {\n  x: int\n}\n";
+    let src = "@attribute\ntype Route = { path: string };\n#[Route(42)]\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 

@@ -120,14 +120,6 @@ pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
         operator: None,
         derivable: true,
     },
-    // `Attribute` is a capability trait, not codegen: a record becomes usable in `#[...]`
-    // annotation position by implementing it (`impl Attribute for X {}`), never by deriving it.
-    BuiltinTrait {
-        name: "Attribute",
-        required_method: None,
-        operator: None,
-        derivable: false,
-    },
     BuiltinTrait {
         name: "Index",
         required_method: Some(("get", 1)),

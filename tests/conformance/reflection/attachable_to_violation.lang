@@ -1,10 +1,9 @@
-// `@attachableTo(Method)` forbids `Route` on anything but a method. Attaching it to a type
+// `@attribute(Method)` forbids `Route` on anything but a method. Attaching it to a type
 // declaration is a placement error (E0030) at the misplaced attribute.
-// expect: error E0030 at 9:3
+// expect: error E0030 at 8:3
 // expect: exit 1
-@attachableTo(Method)
+@attribute(Method)
 type Route = { method: string };
-impl Attribute for Route {}
 
 #[Route("GET")]
 type User = { id: int };

@@ -1,6 +1,6 @@
 ---
 source: crates/lang-parser/src/lib.rs
-expression: "pretty(\"impl Attribute for Route {}\")"
+expression: "pretty(\"impl Serialize for Route {}\")"
 ---
 (program @0..27
-  (impl Attribute for Route @0..27))
+  (impl Serialize for Route @0..27))

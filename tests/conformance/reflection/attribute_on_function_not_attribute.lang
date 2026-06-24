@@ -1,5 +1,5 @@
 // The `#[Foo(...)]`-requires-`Attribute` gate (E0029) applies to a `#[...]` on a function just as it
-// does on a type: `Plain` is a record but is not marked `impl Attribute for Plain`, so decorating a
+// does on a type: `Plain` is a record but is not marked `@attribute`, so decorating a
 // function with it is rejected at the attribute's span.
 // expect: error E0029 at 8:3
 // expect: exit 1

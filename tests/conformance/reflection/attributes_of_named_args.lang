@@ -3,8 +3,8 @@
 // expect: stdout "60"
 // expect: stdout "true"
 // expect: exit 0
+@attribute
 type Cache = { ttl: int, eager: bool };
-impl Attribute for Cache {}
 
 #[Cache(ttl: 60, eager: true)]
 type Page = { id: int };

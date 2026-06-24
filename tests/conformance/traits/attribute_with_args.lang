@@ -4,11 +4,11 @@
 // manifest, never executed), so the program runs identically in both backends.
 // expect: stdout "1"
 // expect: exit 0
+@attribute
 type Route = { path: string, method: string };
-impl Attribute for Route {}
 
+@attribute
 type Cache = { ttl: int };
-impl Attribute for Cache {}
 
 #[Route("/users", method: "GET")]
 #[Cache(ttl: 60)]

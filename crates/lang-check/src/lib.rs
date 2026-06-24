@@ -146,7 +146,7 @@ struct VariantInfo {
     fields: Vec<Type>,
 }
 
-/// A declaration **kind** an attribute may attach to — the closed vocabulary of `@attachableTo(...)`
+/// A declaration **kind** an attribute may attach to — the closed vocabulary of `@attribute(...)`
 /// and the axis `#[Foo(...)]` placement is checked on (P2.5). One per declaration site the attribute
 /// system reaches. These are source positions, not runtime value types (a `Field`/`Variant` is not a
 /// value), so they live only in the checker.
@@ -162,7 +162,7 @@ enum TargetKind {
 }
 
 impl TargetKind {
-    /// The directive spelling (`@attachableTo(Method, …)`) ⇄ kind, also used in diagnostics.
+    /// The directive spelling (`@attribute(Method, …)`) ⇄ kind, also used in diagnostics.
     fn from_name(name: &str) -> Option<TargetKind> {
         Some(match name {
             "Record" => TargetKind::Record,
@@ -278,10 +278,14 @@ struct Checker {
     /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
     /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
     standalone_impls: HashMap<String, Vec<(String, Span)>>,
-    /// Each attribute type's `@attachableTo(...)` placement restriction (P2.5): attribute type name
-    /// → the declaration kinds a `#[ThisType(...)]` use may attach to. A type *absent* from this map
-    /// is unrestricted; a present-but-empty entry never occurs (an empty directive is dropped). The
-    /// checker enforces it per use site (E0030); kind names are validated when this is built.
+    /// Every record marked `@attribute` — the names usable in `#[...]` annotation position (P2.5,
+    /// the opt-in that replaced the `Attribute` marker trait). The E0029 capability gate and
+    /// `attributes_of::<T>()` both consult this set. Attributes are **records only**.
+    attributes: HashSet<String>,
+    /// An attribute's optional placement restriction from `@attribute(Method, Function, …)`:
+    /// attribute name → the declaration kinds a `#[ThisType(...)]` use may attach to. An attribute
+    /// *absent* from this map (bare `@attribute`) is unrestricted. Enforced per use site (E0030);
+    /// kind names are validated when this is built.
     attachable: HashMap<String, Vec<TargetKind>>,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": ["Comparable"]}`). Empty at top
@@ -383,7 +387,7 @@ impl Checker {
                     self.records.insert(r.name.clone(), fields);
                     self.types.insert(r.name.clone());
                     self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
-                    self.record_attachable_to(&r.name, &r.attachable_to);
+                    self.record_attribute(&r.name, r.attribute.as_deref());
                     self.generic_types.insert(
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
@@ -406,7 +410,23 @@ impl Checker {
                             .map(|(n, _)| n.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    self.record_attachable_to(&c.name, &c.attachable_to);
+                    // Attributes are records only: `@attribute` on a class is an error (E0029).
+                    if c.attribute.is_some() {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::NotAnAttribute,
+                                c.name_span,
+                                format!(
+                                    "a class cannot be an attribute: `{}` must be a record",
+                                    c.name
+                                ),
+                            )
+                            .with_help(
+                                "attributes are records (their `#[...]` arguments map to fields); \
+                                 declare it as `@attribute type` instead of `class`",
+                            ),
+                        );
+                    }
                     // Record each method's signature (class methods and impl-block methods alike),
                     // so `obj.method(...)` resolves to a concrete type and its arguments are
                     // checked. The class's generic parameters are erased to `dyn` (erased at
@@ -1115,7 +1135,7 @@ impl Checker {
                     "a standalone `impl` with methods is not yet supported",
                 )
                 .with_help(
-                    "only an empty-body capability impl (e.g. `impl Attribute for X {}`) is \
+                    "only an empty-body capability impl (e.g. `impl Serialize for X {}`) is \
                      supported here; write trait methods inside the type's own `class` body",
                 ),
             );
@@ -1185,7 +1205,7 @@ impl Checker {
                     )
                     .with_help(
                         "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
-                         `ToJson`, `Serialize`; mark attribute records with `impl Attribute for X {}`",
+                         `ToJson`, `Serialize`; mark attribute records with the `@attribute` directive",
                     ),
                 ),
                 None => self.diags.push(Diagnostic::error(
@@ -1199,8 +1219,8 @@ impl Checker {
 
     /// Validate the `#[...]` data attributes on a declaration. An attribute reduces to a record
     /// constructed in annotation position, so two things are checked: the **capability gate** —
-    /// `#[Foo(...)]` requires `Foo` to be a record/class implementing the marker trait `Attribute`
-    /// (`impl Attribute for Foo {}`) — and, when it is, the **construction** — the arguments must
+    /// `#[Foo(...)]` requires `Foo` to be a record marked `@attribute` — and, when it is, the
+    /// **construction** — the arguments must
     /// build a valid `Foo` (every field set once, each literal assignable to its field), the same
     /// all-fields-literal contract any record construction obeys. The old `#[derive(...)]` codegen
     /// spelling is still rejected up front (E0017).
@@ -1220,14 +1240,8 @@ impl Checker {
                 );
                 continue;
             }
-            // The capability gate: only a record/class marked `impl Attribute for Foo {}` may be
-            // used as `#[Foo(...)]`.
-            let is_attribute = self.records.contains_key(&attr.name)
-                && self
-                    .trait_impls
-                    .get(&attr.name)
-                    .is_some_and(|ts| ts.contains("Attribute"));
-            if !is_attribute {
+            // The capability gate: only a record marked `@attribute` may be used as `#[Foo(...)]`.
+            if !self.attributes.contains(&attr.name) {
                 self.diags.push(
                     Diagnostic::error(
                         DiagnosticCode::NotAnAttribute,
@@ -1235,13 +1249,13 @@ impl Checker {
                         format!("`{}` cannot be used as an attribute", attr.name),
                     )
                     .with_help(
-                        "an attribute is a record or class marked with the capability — declare \
-                         `impl Attribute for ` the type",
+                        "an attribute is a record marked `@attribute`; declare the record with that \
+                         directive",
                     ),
                 );
                 continue;
             }
-            // Placement gate (P2.5): when `Foo` declared `@attachableTo(...)`, this use site's kind
+            // Placement gate (P2.5): when `Foo` declared `@attribute(Kind, …)`, this use site's kind
             // must be among the permitted ones, else `E0030`.
             if let Some(allowed) = self.attachable.get(&attr.name)
                 && !allowed.contains(&target)
@@ -1261,7 +1275,7 @@ impl Checker {
                             target.label(),
                         ),
                     )
-                    .with_help("change the target, or widen the `@attachableTo(...)` directive"),
+                    .with_help("change the target, or widen the `@attribute(...)` directive"),
                 );
                 continue;
             }
@@ -1758,12 +1772,11 @@ impl Checker {
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);
                 let target = Type::from_ref(ty);
-                // The type argument must itself be an attribute — a record/class implementing
-                // `Attribute` (the same capability gate as a `#[T(...)]` use). Otherwise the
-                // manifest can hold no `T` to materialize.
+                // The type argument must itself be an attribute — a record marked `@attribute` (the
+                // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
+                // materialize.
                 let is_attribute = matches!(&target, Type::Named(n, _)
-                    if self.records.contains_key(n)
-                        && self.trait_impls.get(n).is_some_and(|ts| ts.contains("Attribute")));
+                    if self.attributes.contains(n));
                 if !is_attribute {
                     self.diags.push(
                         Diagnostic::error(
@@ -1771,9 +1784,7 @@ impl Checker {
                             *span,
                             format!("`attributes_of` requires an attribute type, but `{target}` is not one"),
                         )
-                        .with_help(
-                            "name a record or class marked `impl Attribute for ` the type",
-                        ),
+                        .with_help("name a record marked `@attribute`"),
                     );
                     return Type::List(Box::new(Type::Dyn));
                 }
@@ -2112,11 +2123,15 @@ impl Checker {
         }
     }
 
-    /// Validate and record a type's `@attachableTo(...)` placement restriction (P2.5). Each name
-    /// must be one of the fixed [`TargetKind`]s (unknown → `E0030` at its span); the recognized kinds
-    /// are stored so each `#[ThisType(...)]` use can be checked against them. An empty directive
-    /// leaves the type unrestricted (no entry).
-    fn record_attachable_to(&mut self, name: &str, kinds: &[(String, Span)]) {
+    /// Register a record's `@attribute` opt-in (P2.5). `kinds` is `None` for an ordinary record and
+    /// `Some(list)` when the record is marked `@attribute`: the record joins [`Self::attributes`]
+    /// (usable in `#[...]` position), and any placement kinds (`@attribute(Method, …)`) are validated
+    /// — each must be a fixed [`TargetKind`] (unknown → `E0030` at its span) — and recorded so each
+    /// use site can be checked. A bare `@attribute` (empty list) is an attribute with no placement
+    /// restriction.
+    fn record_attribute(&mut self, name: &str, kinds: Option<&[(String, Span)]>) {
+        let Some(kinds) = kinds else { return };
+        self.attributes.insert(name.to_string());
         let mut recognized = Vec::new();
         for (kind_name, span) in kinds {
             match TargetKind::from_name(kind_name) {

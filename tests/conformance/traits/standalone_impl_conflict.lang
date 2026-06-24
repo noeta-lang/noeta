@@ -3,5 +3,5 @@
 // expect: error E0027 at 7:6
 // expect: exit 1
 type Route = { path: string };
-impl Attribute for Route {}
-impl Attribute for Route {}
+impl Serialize for Route {}
+impl Serialize for Route {}

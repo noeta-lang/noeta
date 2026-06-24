@@ -104,13 +104,13 @@ pub enum DiagnosticCode {
     /// already a known concrete type has nothing dynamic to narrow, so the `as` is a mistake.
     InvalidNarrow,
     /// A `#[Foo(...)]` data attribute names a type that is not usable in annotation position — `Foo`
-    /// is not a record/class, or it does not implement the marker trait `Attribute`
-    /// (`impl Attribute for Foo {}`). Attributes are ordinary records/classes marked with the
-    /// capability, so an unmarked or non-existent type cannot be attached as metadata.
+    /// is not a record marked `@attribute`. Attributes are records opted in with that directive
+    /// (also reported here when `@attribute` is placed on a class/enum — attributes are records only),
+    /// so an unmarked or non-existent type cannot be attached as metadata.
     NotAnAttribute,
     /// A `#[Foo(...)]` attribute is attached to a declaration kind it does not permit. An attribute
-    /// may restrict where it attaches with the `@attachableTo(Method, Function, …)` directive on its
-    /// type; using it on any other kind (or naming an unknown kind in the directive) is this error.
+    /// may restrict where it attaches with the `@attribute(Method, Function, …)` directive; using it
+    /// on any other kind (or naming an unknown kind in the directive) is this error.
     InvalidAttributeTarget,
 }
 

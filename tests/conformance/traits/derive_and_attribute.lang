@@ -1,12 +1,12 @@
 // `@derive(...)` (codegen) and `#[...]` (a data attribute) are two separate mechanisms and may
 // both decorate the same declaration. The derive synthesizes structural ordering; the data
 // attribute is inert metadata (consumed via the manifest). An attribute is an ordinary record
-// marked `impl Attribute for it`. Runs identically in both backends.
+// marked `@attribute`. Runs identically in both backends.
 // expect: stdout "true"
 // expect: stdout "false"
 // expect: exit 0
+@attribute
 type Entity = {};
-impl Attribute for Entity {}
 
 #[Entity]
 @derive(Comparable)
