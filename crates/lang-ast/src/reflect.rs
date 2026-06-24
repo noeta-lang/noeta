@@ -236,8 +236,18 @@ pub enum TypeRepr {
     Option(Box<TypeRepr>),
     Map(Box<TypeRepr>, Box<TypeRepr>),
     Result(Box<TypeRepr>, Box<TypeRepr>),
-    /// A declared type (record/class/enum) by name, with its type arguments (erased to `Dyn` at
-    /// runtime fidelity, precise at compile-time fidelity).
+    /// A declared **enum** type by name, with its type arguments. The reflection `Type` ADT
+    /// distinguishes the three nominal kinds (so a consumer can branch on enum-vs-record-vs-class
+    /// from a `type_of` result alone); both backends classify a value's shape kind into the matching
+    /// variant. Type arguments are erased to `Dyn` at runtime fidelity, precise at compile-time.
+    Enum(String, Vec<TypeRepr>),
+    /// A declared **record** type by name, with its type arguments.
+    Record(String, Vec<TypeRepr>),
+    /// A declared **class** type by name, with its type arguments.
+    Class(String, Vec<TypeRepr>),
+    /// A nominal type whose **kind is not statically known** — an opaque imported type at
+    /// compile-time fidelity. (At runtime fidelity the value's shape kind is always known, so the
+    /// kind-specific variants are used.)
     Named(String, Vec<TypeRepr>),
     Fn(Vec<TypeRepr>, Box<TypeRepr>),
     Union(Vec<TypeRepr>),
@@ -259,6 +269,9 @@ impl TypeRepr {
             TypeRepr::Option(_) => "Option",
             TypeRepr::Map(_, _) => "Map",
             TypeRepr::Result(_, _) => "Result",
+            TypeRepr::Enum(_, _) => "Enum",
+            TypeRepr::Record(_, _) => "Record",
+            TypeRepr::Class(_, _) => "Class",
             TypeRepr::Named(_, _) => "Named",
             TypeRepr::Fn(_, _) => "Fn",
             TypeRepr::Union(_) => "Union",

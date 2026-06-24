@@ -3012,11 +3012,14 @@ fn vm_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         "set" => TypeRepr::Set(dyn_()),
         "map" => TypeRepr::Map(dyn_(), dyn_()),
         "function" => TypeRepr::Fn(Vec::new(), dyn_()),
-        "object" => TypeRepr::Named(shape_name(), Vec::new()),
+        "object" => match v.shape().map(|s| s.kind) {
+            Some(ShapeKind::Class) => TypeRepr::Class(shape_name(), Vec::new()),
+            _ => TypeRepr::Record(shape_name(), Vec::new()),
+        },
         "enum" => match shape_name().as_str() {
             "Option" => TypeRepr::Option(dyn_()),
             "Result" => TypeRepr::Result(dyn_(), dyn_()),
-            other => TypeRepr::Named(other.to_string(), Vec::new()),
+            other => TypeRepr::Enum(other.to_string(), Vec::new()),
         },
         // A module or file handle has no nameable lattice type: it reflects as the top.
         _ => TypeRepr::Dyn,
@@ -3041,7 +3044,10 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
         TypeRepr::Map(k, v) | TypeRepr::Result(k, v) => {
             vec![build_type_value(k), build_type_value(v)]
         }
-        TypeRepr::Named(name, args) => vec![
+        TypeRepr::Enum(name, args)
+        | TypeRepr::Record(name, args)
+        | TypeRepr::Class(name, args)
+        | TypeRepr::Named(name, args) => vec![
             Value::string(name),
             Value::list(args.iter().map(build_type_value).collect()),
         ],
@@ -3160,6 +3166,18 @@ mod tests {
             "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
         );
         assert_eq!(r.stdout, "42\n14\nmiss\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn type_of_distinguishes_nominal_kinds() {
+        // `type_of` classifies a value's shape kind into `Type.Enum`/`Type.Record`/`Type.Class`
+        // (not a collapsed `Named`). Exercises `vm_type_repr` + `build_type_value`'s kind arms and
+        // their refcount handoff.
+        let r = run(
+            "enum E { A; }\ntype R = { x: int };\nclass C {\n  v: int\n  fn new(): C { return C { v: 1 }; }\n}\nfn k(t: Type): string { return match t { Type.Enum(n, _) => \"e:${n}\", Type.Record(n, _) => \"r:${n}\", Type.Class(n, _) => \"c:${n}\", _ => \"?\" }; }\necho k(type_of(E.A));\necho k(type_of(R { x: 1 }));\necho k(type_of(C.new()));\n",
+        );
+        assert_eq!(r.stdout, "e:E\nr:R\nc:C\n");
         assert_eq!(r.exit_code, 0);
     }
 

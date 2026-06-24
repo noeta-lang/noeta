@@ -2903,9 +2903,12 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         Value::Enum(e) => match e.enum_name.as_str() {
             "Option" => TypeRepr::Option(dyn_()),
             "Result" => TypeRepr::Result(dyn_(), dyn_()),
-            other => TypeRepr::Named(other.to_string(), Vec::new()),
+            other => TypeRepr::Enum(other.to_string(), Vec::new()),
         },
-        Value::Object(o) => TypeRepr::Named(o.def.name().to_string(), Vec::new()),
+        Value::Object(o) if o.def.is_record => {
+            TypeRepr::Record(o.def.name().to_string(), Vec::new())
+        }
+        Value::Object(o) => TypeRepr::Class(o.def.name().to_string(), Vec::new()),
         // A type value, module, file handle, or enum-type has no nameable lattice type → the top.
         Value::EnumType(_) | Value::Type(_) | Value::NativeModule(_) | Value::FileHandle(_) => {
             TypeRepr::Dyn
@@ -2932,7 +2935,10 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
         TypeRepr::Map(k, v) | TypeRepr::Result(k, v) => {
             vec![build_type_value(k), build_type_value(v)]
         }
-        TypeRepr::Named(name, args) => vec![
+        TypeRepr::Enum(name, args)
+        | TypeRepr::Record(name, args)
+        | TypeRepr::Class(name, args)
+        | TypeRepr::Named(name, args) => vec![
             Value::Str(name.clone()),
             list(args.iter().map(build_type_value).collect()),
         ],

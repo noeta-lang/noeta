@@ -590,10 +590,17 @@ The same index powers the LSP and static analysis ("show every `#[Route]`", "who
 
 ```
 match type_of(value) {
-    Type.Record(r)    => "record, {r.fields.count()} fields",
-    Type.Enum(e)      => "enum: {e.variants}",
-    Type.Primitive(p) => "primitive {p}",
+    Type.Record(name, _) => "record ${name}",
+    Type.Enum(name, _)   => "enum ${name}",
+    Type.Class(name, _)  => "class ${name}",
+    Type.List(elem)      => "list",
+    Type.Int             => "int",
+    _                    => "other",
 }
+// `type_of` reports the value's concrete type, distinguishing the three nominal kinds
+// (`Type.Enum`/`Type.Record`/`Type.Class`) so a consumer can branch on kind from the result alone.
+// The abstract `Enum`/`Record`/`Class` *types* are the static-bound counterpart (`roles_of()`'s
+// `role` is `Enum`); the runtime kind test on a value is `x is Enum`.
 
 // By-name invocation — the single fallible primitive. The name is a runtime string; the result is
 // `Result<dyn, dyn>`. The receiver is a value (→ instance method) or a type (→ associated function,

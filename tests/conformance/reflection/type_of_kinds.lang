@@ -1,0 +1,28 @@
+// `type_of` distinguishes the three nominal kinds: a value's `Type` is `Type.Enum`, `Type.Record`,
+// or `Type.Class` (not a single collapsed `Named`), so a consumer can branch on the kind from a
+// `type_of` result alone. Both backends classify the value's shape kind identically, and the
+// compile-time fidelity path classifies the same way from the checker's `type_kinds` registry, so
+// fidelity A and B agree.
+// expect: stdout "enum:Color"
+// expect: stdout "record:Point"
+// expect: stdout "class:Box"
+// expect: exit 0
+enum Color { Red; Green; }
+type Point = { x: int };
+class Box {
+    v: int
+    fn new(): Box { return Box { v: 1 }; }
+}
+
+fn kind(t: Type): string {
+    return match t {
+        Type.Enum(name, _) => "enum:${name}",
+        Type.Record(name, _) => "record:${name}",
+        Type.Class(name, _) => "class:${name}",
+        _ => "other",
+    };
+}
+
+echo kind(type_of(Color.Red));
+echo kind(type_of(Point { x: 1 }));
+echo kind(type_of(Box.new()));

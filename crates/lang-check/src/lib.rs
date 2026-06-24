@@ -133,38 +133,52 @@ pub fn resolve_type_of_sites(program: &Program) -> HashMap<Span, lang_ast::refle
 /// or `None` when the site must stay on the runtime path: a `dyn`/union/un-inferred (`Unknown`) top
 /// type carries no fixed head constructor to bake (a union's runtime value is more precise — its
 /// actual member — than `Type.Union` would be).
-fn type_to_repr_top(ty: &Type) -> Option<lang_ast::reflect::TypeRepr> {
+fn type_to_repr_top(
+    ty: &Type,
+    kinds: &HashMap<String, lang_types::TypeKind>,
+) -> Option<lang_ast::reflect::TypeRepr> {
     match ty {
         // An abstract kind-type (`Enum`/`Record`/`Class`) has no precise static head — the runtime
         // value is a concrete enum/record/class — so it defers to the runtime `type_of` path.
         Type::Dyn | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
-        concrete => Some(type_to_repr(concrete)),
+        concrete => Some(type_to_repr(concrete, kinds)),
     }
 }
 
 /// Total projection of a checker [`Type`] onto a reflection [`TypeRepr`], used for the nested
 /// element/argument types once a concrete head is committed. A nested hole, `dyn`, or union erases
 /// to [`TypeRepr::Dyn`] (the runtime erases generics anyway; nested-union fidelity is out of scope).
-fn type_to_repr(ty: &Type) -> lang_ast::reflect::TypeRepr {
+/// A nominal type is classified into its kind variant (`Enum`/`Record`/`Class`) via `kinds`,
+/// matching the runtime classification; an unknown-kind name falls back to `Named`.
+fn type_to_repr(
+    ty: &Type,
+    kinds: &HashMap<String, lang_types::TypeKind>,
+) -> lang_ast::reflect::TypeRepr {
     use lang_ast::reflect::TypeRepr;
+    let rec = |t: &Type| type_to_repr(t, kinds);
     match ty {
         Type::Int => TypeRepr::Int,
         Type::Float => TypeRepr::Float,
         Type::Bool => TypeRepr::Bool,
         Type::String => TypeRepr::Str,
         Type::Unit => TypeRepr::Unit,
-        Type::List(e) => TypeRepr::List(Box::new(type_to_repr(e))),
-        Type::Set(e) => TypeRepr::Set(Box::new(type_to_repr(e))),
-        Type::Option(e) => TypeRepr::Option(Box::new(type_to_repr(e))),
-        Type::Map(k, v) => TypeRepr::Map(Box::new(type_to_repr(k)), Box::new(type_to_repr(v))),
-        Type::Result(o, e) => {
-            TypeRepr::Result(Box::new(type_to_repr(o)), Box::new(type_to_repr(e)))
+        Type::List(e) => TypeRepr::List(Box::new(rec(e))),
+        Type::Set(e) => TypeRepr::Set(Box::new(rec(e))),
+        Type::Option(e) => TypeRepr::Option(Box::new(rec(e))),
+        Type::Map(k, v) => TypeRepr::Map(Box::new(rec(k)), Box::new(rec(v))),
+        Type::Result(o, e) => TypeRepr::Result(Box::new(rec(o)), Box::new(rec(e))),
+        Type::Named(n, args) => {
+            let args = args.iter().map(rec).collect();
+            match kinds.get(n) {
+                Some(lang_types::TypeKind::Enum) => TypeRepr::Enum(n.clone(), args),
+                Some(lang_types::TypeKind::Record) => TypeRepr::Record(n.clone(), args),
+                Some(lang_types::TypeKind::Class) => TypeRepr::Class(n.clone(), args),
+                None => TypeRepr::Named(n.clone(), args),
+            }
         }
-        Type::Named(n, args) => TypeRepr::Named(n.clone(), args.iter().map(type_to_repr).collect()),
-        Type::Fn { params, ret } => TypeRepr::Fn(
-            params.iter().map(type_to_repr).collect(),
-            Box::new(type_to_repr(ret)),
-        ),
+        Type::Fn { params, ret } => {
+            TypeRepr::Fn(params.iter().map(rec).collect(), Box::new(rec(ret)))
+        }
         Type::Union(_) | Type::Dyn | Type::Unknown | Type::Kind(_) => TypeRepr::Dyn,
     }
 }
@@ -432,10 +446,13 @@ impl Checker {
                 fields: vec![ty(), ty()],
             });
         }
-        variants.push(VariantInfo {
-            name: "Named".to_string(),
-            fields: vec![Type::String, list_of_ty()],
-        });
+        // The three nominal kinds + the unknown-kind `Named` fallback all carry `(name, args)`.
+        for name in ["Enum", "Record", "Class", "Named"] {
+            variants.push(VariantInfo {
+                name: name.to_string(),
+                fields: vec![Type::String, list_of_ty()],
+            });
+        }
         variants.push(VariantInfo {
             name: "Fn".to_string(),
             fields: vec![list_of_ty(), ty()],
@@ -1945,7 +1962,7 @@ impl Checker {
                 // `TypeRepr` so the backends bake a full-fidelity `Type` constant (A); otherwise the
                 // site stays absent and falls back to the runtime head-constructor path (B).
                 let operand = self.synth(value, env);
-                if let Some(repr) = type_to_repr_top(&operand) {
+                if let Some(repr) = type_to_repr_top(&operand, &self.type_kinds) {
                     self.type_of_sites.insert(*span, repr);
                 }
                 Type::Named("Type".to_string(), Vec::new())

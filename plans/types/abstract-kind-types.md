@@ -15,7 +15,19 @@ type names (`is_builtin_name` + `from_ref`); the `as`-gate accepts a `Kind` sour
 backstop, exactly like `dyn`). Runtime kind tests (`is`/`.as<>()`) are one new `NarrowTarget`
 family (`AnyEnum`/`AnyRecord`/`AnyClass`) keyed on the value's shape kind (VM `narrow_matches`) /
 `Value::Enum` + `TypeDef::is_record` (eval `runtime_matches`) — both backends agree by construction.
-No new diagnostic code. Commit pending.
+No new diagnostic code. Committed `edbd1ba`.
+
+**Follow-on (folded into this arc): `type_of` now distinguishes the nominal kinds.** P2.2 collapsed
+record/class/enum into a single reflection `Type.Named` (a simplification the user flagged as less
+elegant); now that the kind is first-class, the reflection `TypeRepr` regained `Enum`/`Record`/
+`Class(name, args)` variants (`Named` kept only as the unknown-kind fallback for opaque imports).
+Both backends classify a value's shape kind into the matching variant (`vm_type_repr` via
+`ShapeKind`, `eval_type_repr` via `Value::Enum`/`TypeDef::is_record`), and fidelity A
+(`type_to_repr`) classifies the same way from the `type_kinds` registry — so `type_of(Color.Red)`
+is `Type.Enum("Color")` at both fidelities and in both backends. So `type_of` reports the concrete
+type's kind, while the abstract `Enum`/`Record`/`Class` types are its static-bound counterpart and
+`x is Enum` the value-side kind test. Conformance 204 / differential 197 / 0-skipped / miri-clean.
+Second commit.
 
 ## What and why
 

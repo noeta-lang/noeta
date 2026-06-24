@@ -19,6 +19,9 @@ fn label(t: Type): string {
         Type.Bool => "bool",
         Type.List(_) => "list",
         Type.Option(_) => "option",
+        Type.Record(name, _) => name,
+        Type.Enum(name, _) => name,
+        Type.Class(name, _) => name,
         Type.Named(name, _) => name,
         _ => "other",
     };
