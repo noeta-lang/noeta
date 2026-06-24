@@ -2234,6 +2234,9 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             "List" | "list" => NarrowTarget::List,
             "Map" | "map" => NarrowTarget::Map,
             "Set" | "set" => NarrowTarget::Set,
+            "Enum" => NarrowTarget::AnyEnum,
+            "Record" => NarrowTarget::AnyRecord,
+            "Class" => NarrowTarget::AnyClass,
             other => NarrowTarget::Named(other.to_string()),
         },
     }

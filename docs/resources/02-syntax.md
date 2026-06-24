@@ -155,6 +155,8 @@ fn describe(x: dyn): string {
 
 **Union types (a *closed* `dyn`).** A union `A | B` is a `dyn` whose membership is a static, finite set — written only where you declare it, never produced by inference. A value of any member widens into it; you narrow back out with `.as<T>()`, `is`, or an `is`-pattern `match`. Because the member set is *closed*, a `match` with an `is T` arm per member is **exhaustive with no `_`** — the closed-world guarantee a union buys over `dyn` (a `dyn` match, being open, still needs a `_`).
 
+**Abstract kind-types (`Enum` · `Record` · `Class`).** Each is the supertype of every declared type of that kind — `Enum` accepts any enum value, `Record` any record, `Class` any class instance (the PHP `UnitEnum` / Java `java.lang.Enum` / C# `System.Enum` model). They sit between a concrete type and `dyn`: a concrete value widens in implicitly (`Color.Red` is an `Enum`), and you narrow back out with `is` / `.as<T>()` (`x is Enum` is a runtime kind test; `x.as<WebRole>()` recovers the concrete enum). They are **abstract** — no value *has* a kind-type at runtime (every value is a concrete enum/record/class); a kind-type appears only in a static position (a field, parameter, or return), as a bound weaker than a concrete type but stronger than `dyn`. A `match` over a kind-typed value is open, so it needs a `_`. (This is what `roles_of()` returns each binding's `role` as — "some enum.")
+
 ```
 fn label(x: int | string): string {
     return match x {

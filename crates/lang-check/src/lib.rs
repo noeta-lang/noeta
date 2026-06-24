@@ -135,7 +135,9 @@ pub fn resolve_type_of_sites(program: &Program) -> HashMap<Span, lang_ast::refle
 /// actual member — than `Type.Union` would be).
 fn type_to_repr_top(ty: &Type) -> Option<lang_ast::reflect::TypeRepr> {
     match ty {
-        Type::Dyn | Type::Unknown | Type::Union(_) => None,
+        // An abstract kind-type (`Enum`/`Record`/`Class`) has no precise static head — the runtime
+        // value is a concrete enum/record/class — so it defers to the runtime `type_of` path.
+        Type::Dyn | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
         concrete => Some(type_to_repr(concrete)),
     }
 }
@@ -163,7 +165,7 @@ fn type_to_repr(ty: &Type) -> lang_ast::reflect::TypeRepr {
             params.iter().map(type_to_repr).collect(),
             Box::new(type_to_repr(ret)),
         ),
-        Type::Union(_) | Type::Dyn | Type::Unknown => TypeRepr::Dyn,
+        Type::Union(_) | Type::Dyn | Type::Unknown | Type::Kind(_) => TypeRepr::Dyn,
     }
 }
 
@@ -282,6 +284,10 @@ struct Checker {
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
     records: HashMap<String, Vec<(String, Type)>>,
+    /// Declared type → its kind (`Enum`/`Record`/`Class`). Drives the abstract kind-type
+    /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
+    /// pure lattice cannot decide, consulted by [`Checker::assignable`].
+    type_kinds: HashMap<String, lang_types::TypeKind>,
     /// User-defined methods: (type name, method name) → signature. Populated from class methods and
     /// `impl`-block methods so a method call on a user object resolves to a real type, with the
     /// owning class's generic parameters erased to `dyn` (they accept any argument).
@@ -357,6 +363,8 @@ impl Checker {
         );
         self.generic_types
             .insert("Attributed".to_string(), vec!["T".to_string()]);
+        self.type_kinds
+            .insert("Attributed".to_string(), lang_types::TypeKind::Record);
         self.register_type_enum();
         self.register_role_prelude();
     }
@@ -377,6 +385,14 @@ impl Checker {
         self.types.insert(lang_ast::reflect::ROLE_ENUM.to_string());
         self.enums
             .insert(lang_ast::reflect::ROLE_ENUM.to_string(), variants);
+        self.type_kinds.insert(
+            lang_ast::reflect::ROLE_ENUM.to_string(),
+            lang_types::TypeKind::Enum,
+        );
+        self.type_kinds.insert(
+            lang_ast::reflect::ROLE_BINDING.to_string(),
+            lang_types::TypeKind::Record,
+        );
         self.types
             .insert(lang_ast::reflect::ROLE_BINDING.to_string());
         self.records.insert(
@@ -430,6 +446,8 @@ impl Checker {
         });
         self.types.insert("Type".to_string());
         self.enums.insert("Type".to_string(), variants);
+        self.type_kinds
+            .insert("Type".to_string(), lang_types::TypeKind::Enum);
     }
 
     /// Pass 1: register every top-level declaration so forward references resolve before any
@@ -445,6 +463,8 @@ impl Checker {
                         .collect();
                     self.records.insert(r.name.clone(), fields);
                     self.types.insert(r.name.clone());
+                    self.type_kinds
+                        .insert(r.name.clone(), lang_types::TypeKind::Record);
                     self.record_trait_impls(&r.name, r.derives.iter().map(|(n, _)| n.as_str()));
                     self.record_attribute(&r.name, r.attribute.as_deref());
                     self.record_role(r.name_span, r.role.as_deref(), r.attribute.is_some());
@@ -461,6 +481,8 @@ impl Checker {
                         .collect();
                     self.records.insert(c.name.clone(), fields);
                     self.types.insert(c.name.clone());
+                    self.type_kinds
+                        .insert(c.name.clone(), lang_types::TypeKind::Class);
                     // A class satisfies a trait it `@derive`s or `impl`s; record both for bound
                     // enforcement (the `impl`/`derive` *names* are validated elsewhere).
                     self.record_trait_impls(
@@ -562,6 +584,8 @@ impl Checker {
                         .collect();
                     self.enums.insert(e.name.clone(), variants);
                     self.types.insert(e.name.clone());
+                    self.type_kinds
+                        .insert(e.name.clone(), lang_types::TypeKind::Enum);
                     self.record_trait_impls(&e.name, e.derives.iter().map(|(n, _)| n.as_str()));
                     self.generic_types.insert(
                         e.name.clone(),
@@ -928,7 +952,7 @@ impl Checker {
             // type is generic/`dyn` (erases to `dyn`, which accepts any default).
             if p.ty.is_some() {
                 let expected = erase_type_params(param_type(p), &tps);
-                if !arg_compatible(&actual, &expected) {
+                if !self.arg_assignable(&actual, &expected) {
                     self.diags.push(Diagnostic::error(
                         DiagnosticCode::TypeMismatch,
                         default.span(),
@@ -1404,7 +1428,7 @@ impl Checker {
             }
             filled[i] = true;
             if let Some(vty) = attr_value_type(&arg.value)
-                && !arg_compatible(&vty, &fields[i].1)
+                && !self.arg_assignable(&vty, &fields[i].1)
             {
                 self.diags.push(Diagnostic::error(
                     DiagnosticCode::TypeMismatch,
@@ -1551,8 +1575,52 @@ impl Checker {
     /// makes [`Type::subtype`] hold, so a not-yet-inferred interior type never produces a false
     /// positive — the deliberate residual tolerance (holes are removed at typed boundaries, not
     /// here).
+    /// Whether `name` is a declared (or prelude) type of `kind` — the registry-dependent half of the
+    /// abstract kind-type membership rule the pure lattice cannot decide.
+    fn is_of_kind(&self, name: &str, kind: lang_types::TypeKind) -> bool {
+        self.type_kinds.get(name) == Some(&kind)
+    }
+
+    /// Kind-aware assignability: `actual <: expected`, extending [`Type::subtype`] with the one rule
+    /// it cannot decide on its own — a concrete `Named(n)` widens into an abstract `Kind(k)` when
+    /// `n` is a declared type of kind `k`. Recurses through the covariant containers and unions so
+    /// the rule composes (`List<WebRole> <: List<Enum>`); every non-kind case delegates to the pure
+    /// lattice. This is the single funnel for assignment, argument, return, and field checks.
+    fn assignable(&self, actual: &Type, expected: &Type) -> bool {
+        // Preserve the lattice's hole/`dyn` leniencies before the structural walk.
+        if actual.is_gradual() || expected.is_gradual() || matches!(expected, Type::Dyn) {
+            return true;
+        }
+        match (actual, expected) {
+            (Type::Named(n, _), Type::Kind(k)) => self.is_of_kind(n, *k),
+            (Type::List(a), Type::List(b)) | (Type::Set(a), Type::Set(b)) => self.assignable(a, b),
+            (Type::Option(a), Type::Option(b)) => self.assignable(a, b),
+            (Type::Map(ak, av), Type::Map(bk, bv)) => {
+                self.assignable(ak, bk) && self.assignable(av, bv)
+            }
+            (Type::Result(at, ae), Type::Result(bt, be)) => {
+                self.assignable(at, bt) && self.assignable(ae, be)
+            }
+            (Type::Union(members), _) => members.iter().all(|m| self.assignable(m, expected)),
+            (_, Type::Union(members)) => members.iter().any(|m| self.assignable(actual, m)),
+            // No kind rule applies — defer to the pure lattice (identity, covariance already
+            // handled above for the cases a kind could nest in, function arrows, primitives).
+            _ => Type::subtype(actual, expected),
+        }
+    }
+
+    /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware
+    /// counterpart of the free [`arg_compatible`], adding the two call-site leniencies (a `dyn`/hole
+    /// on either side defers; a numeric argument widens to a numeric parameter).
+    fn arg_assignable(&self, arg: &Type, param: &Type) -> bool {
+        self.assignable(arg, param)
+            || arg.defers_to_runtime()
+            || param.defers_to_runtime()
+            || (arg.is_numeric() && param.is_numeric())
+    }
+
     fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
-        if !Type::subtype(actual, expected) {
+        if !self.assignable(actual, expected) {
             self.diags.push(Diagnostic::error(
                 DiagnosticCode::TypeMismatch,
                 span,
@@ -1817,10 +1885,11 @@ impl Checker {
                 self.check_type_ref(ty);
                 let target = Type::from_ref(ty);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
-                // un-inferred hole (which defers), or a **union** (a *closed* `dyn` — narrowing
-                // picks a member back out). A value whose static type is already a single concrete
-                // type has nothing dynamic to narrow — that is an `E0028`.
-                if !src.defers_to_runtime() && !matches!(src, Type::Union(_)) {
+                // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
+                // **kind-type** (`Enum`/`Record`/`Class` — narrow to a concrete member). A value
+                // whose static type is already a single concrete type has nothing dynamic to narrow
+                // — that is an `E0028`.
+                if !src.defers_to_runtime() && !matches!(src, Type::Union(_) | Type::Kind(_)) {
                     self.diags.push(
                         Diagnostic::error(
                             DiagnosticCode::InvalidNarrow,
@@ -2210,7 +2279,7 @@ impl Checker {
         // filled by their defaults (already checked against their parameter types at the
         // declaration), so `zip` stopping at the shorter side is exactly right.
         for (param, arg) in params.iter().zip(args) {
-            if !arg_compatible(arg, param) {
+            if !self.arg_assignable(arg, param) {
                 self.diags.push(Diagnostic::error(
                     DiagnosticCode::TypeMismatch,
                     span,
@@ -2366,7 +2435,7 @@ impl Checker {
         for (raw, arg) in generic.raw_params.iter().zip(args) {
             bind_type_params(raw, arg, &tps, &mut subst);
             let expected = apply_subst(raw, &subst);
-            if !arg_compatible(arg, &expected) {
+            if !self.arg_assignable(arg, &expected) {
                 self.diags.push(Diagnostic::error(
                     DiagnosticCode::TypeMismatch,
                     span,
@@ -2654,17 +2723,6 @@ impl Checker {
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
 const PRELUDE_TYPES: &[&str] = &["Ordering", "Type", "Role", "RoleBinding"];
-
-/// Whether an argument of type `arg` may be passed where `param` is expected. Subtyping, plus two
-/// leniencies that keep dynamic and numeric calls free of false positives: a `dyn`/hole on either
-/// side defers, and a numeric argument is accepted for a numeric parameter (`int` widens to
-/// `float`).
-fn arg_compatible(arg: &Type, param: &Type) -> bool {
-    Type::subtype(arg, param)
-        || arg.defers_to_runtime()
-        || param.defers_to_runtime()
-        || (arg.is_numeric() && param.is_numeric())
-}
 
 /// The static type of an attribute-argument literal, or `None` for a bare identifier (which has no
 /// statically-known type, so its assignability to a field is not checked).

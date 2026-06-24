@@ -104,6 +104,11 @@ pub enum NarrowTarget {
     Named(String),
     /// A union target (`x.as<int | string>()`): matches if the value matches **any** member.
     AnyOf(Vec<NarrowTarget>),
+    /// An abstract kind-type target (`x.as<Enum>()` / `x is Record`): matches any value of that
+    /// declaration kind, regardless of which concrete type it is.
+    AnyEnum,
+    AnyRecord,
+    AnyClass,
 }
 
 /// One register-machine instruction.

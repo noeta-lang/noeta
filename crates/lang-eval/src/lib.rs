@@ -3003,6 +3003,11 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
             "List" | "list" => matches!(value, Value::List(_)),
             "Map" | "map" => matches!(value, Value::Map(_)),
             "Set" | "set" => matches!(value, Value::Set(_)),
+            // Abstract kind-types match any value of that declaration kind (records and classes are
+            // both `Object`s, told apart by `TypeDef::is_record`).
+            "Enum" => matches!(value, Value::Enum(_)),
+            "Record" => matches!(value, Value::Object(o) if o.def.is_record),
+            "Class" => matches!(value, Value::Object(o) if !o.def.is_record),
             // `Option`/`Result` are enums whose shape name is the type name, like a user enum.
             other => match value {
                 Value::Object(object) => object.def.name() == other,

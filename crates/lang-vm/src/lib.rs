@@ -232,6 +232,16 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Dyn => return true,
         NarrowTarget::Named(name) => return v.shape().is_some_and(|s| &s.name == name),
         NarrowTarget::AnyOf(members) => return members.iter().any(|m| narrow_matches(v, m)),
+        // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
+        NarrowTarget::AnyEnum => {
+            return v.shape().is_some_and(|s| s.kind == ShapeKind::Enum);
+        }
+        NarrowTarget::AnyRecord => {
+            return v.shape().is_some_and(|s| s.kind == ShapeKind::Record);
+        }
+        NarrowTarget::AnyClass => {
+            return v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
+        }
     };
     v.type_name() == kind
 }
@@ -3150,6 +3160,17 @@ mod tests {
             "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
         );
         assert_eq!(r.stdout, "42\n14\nmiss\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn abstract_kind_is_tests() {
+        // `is Enum`/`Record`/`Class` are runtime kind tests over a `dyn` value, keyed on the
+        // value's shape kind. Exercises the new `narrow_matches` arms in the VM.
+        let r = run(
+            "enum E { A; }\ntype R = { x: int };\nclass C {\n  v: int\n  fn new(): C { return C { v: 1 }; }\n}\ne: dyn = E.A;\nrec: dyn = R { x: 1 };\nc: dyn = C.new();\necho e is Enum;\necho rec is Record;\necho c is Class;\necho e is Record;\n",
+        );
+        assert_eq!(r.stdout, "true\ntrue\ntrue\nfalse\n");
         assert_eq!(r.exit_code, 0);
     }
 

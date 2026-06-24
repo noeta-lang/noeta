@@ -38,6 +38,26 @@ use lang_ast::TypeRef;
 mod traits;
 pub use traits::{BUILTIN_TRAITS, BuiltinTrait, operator_trait};
 
+/// The kind of a declared nominal type — the discriminant of an abstract [`Type::Kind`] supertype.
+/// Mirrors the three declaration forms the language has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TypeKind {
+    Enum,
+    Record,
+    Class,
+}
+
+impl TypeKind {
+    /// The user-facing type name (`Enum`/`Record`/`Class`).
+    pub fn name(self) -> &'static str {
+        match self {
+            TypeKind::Enum => "Enum",
+            TypeKind::Record => "Record",
+            TypeKind::Class => "Class",
+        }
+    }
+}
+
 /// A type in the lattice.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Type {
@@ -78,6 +98,15 @@ pub enum Type {
         params: Vec<Type>,
         ret: Box<Type>,
     },
+    /// An **abstract kind-type** — the supertype of every declared type of one kind: `Enum`
+    /// (any enum value), `Record` (any record), `Class` (any class instance). The PHP `UnitEnum` /
+    /// Java `java.lang.Enum` / C# `System.Enum` model, generalized to the three nominal kinds. A
+    /// concrete `Named(n, …)` widens into `Kind(k)` when `n` is a declared type of kind `k` — a
+    /// **registry-dependent** rule the pure lattice cannot decide, so it lives in the checker
+    /// (`assignable`), not in [`Self::subtype`]. Abstract: no runtime value *has* a kind-type (every
+    /// value is a concrete enum/record/class); it appears only in static positions (a field,
+    /// parameter, or return type) as a bound weaker than a concrete type but stronger than `dyn`.
+    Kind(TypeKind),
     /// A declared **union** `A | B | …` — a *closed* `dyn` whose membership is a static, finite
     /// set. A value of any member widens into it (`A <: A | B`); narrowing back out is the checked
     /// `x.as<T>()`. **Declared-only — never produced by inference** (inference joins conflicts to
@@ -178,6 +207,11 @@ impl Type {
                         || (aa.len() == ba.len()
                             && aa.iter().zip(ba).all(|(a, b)| Type::subtype(a, b))))
             }
+            // Abstract kind-types: a kind is a subtype only of the same kind (widening into `dyn`
+            // is handled above). `Named(n) <: Kind(k)` is **registry-dependent** (is `n` an enum?),
+            // which the pure lattice cannot decide — the checker's `assignable` handles it; here it
+            // is conservatively false.
+            (Kind(a), Kind(b)) => a == b,
             // Primitives, `Unit`: identity only.
             _ => sub == sup,
         }
@@ -205,6 +239,9 @@ impl Type {
                 | "set"
                 | "Option"
                 | "Result"
+                | "Enum"
+                | "Record"
+                | "Class"
         )
     }
 
@@ -277,6 +314,9 @@ impl Type {
                     "set" => Type::Set(Box::new(Type::Unknown)),
                     "Option" => Type::Option(Box::new(arg(0))),
                     "Result" => Type::Result(Box::new(arg(0)), Box::new(arg(1))),
+                    "Enum" => Type::Kind(TypeKind::Enum),
+                    "Record" => Type::Kind(TypeKind::Record),
+                    "Class" => Type::Kind(TypeKind::Class),
                     _ => Type::Named(name.clone(), args.iter().map(Type::from_ref).collect()),
                 }
             }
@@ -299,6 +339,7 @@ impl std::fmt::Display for Type {
             Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),
             Type::Option(t) => write!(f, "Option<{t}>"),
             Type::Result(t, e) => write!(f, "Result<{t}, {e}>"),
+            Type::Kind(k) => f.write_str(k.name()),
             Type::Named(n, args) if args.is_empty() => f.write_str(n),
             Type::Named(n, args) => {
                 write!(f, "{n}<")?;

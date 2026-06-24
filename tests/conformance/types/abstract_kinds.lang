@@ -1,0 +1,33 @@
+// The abstract kind-types `Enum`/`Record`/`Class` are supertypes of every declared type of that
+// kind: a concrete value widens into the matching kind-type at a boundary, and a `dyn` value
+// narrows to a kind with `is`/`.as<>()` (a runtime kind test). Abstract — no value *has* a
+// kind-type; it is a static bound weaker than a concrete type, stronger than `dyn`.
+// expect: stdout "an enum"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "rec"
+// expect: stdout "cls"
+// expect: exit 0
+enum Color { Red; Green; }
+type Point = { x: int };
+class Box {
+    v: int
+    fn new(v: int): Box { return Box { v: v }; }
+}
+
+// A concrete enum widens into `Enum` at a call boundary.
+fn describe(e: Enum): string { return "an enum"; }
+echo describe(Color.Red);
+
+// `dyn` narrows to a kind with `is` — a runtime kind test, identical in both backends.
+d: dyn = Color.Green;
+echo d is Enum;
+echo d is Record;
+
+p: dyn = Point { x: 1 };
+who: string = if p is Record then "rec" else "no";
+echo who;
+
+b: dyn = Box.new(3);
+kind: string = if b is Class then "cls" else "no";
+echo kind;

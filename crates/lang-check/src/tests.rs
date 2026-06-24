@@ -472,6 +472,27 @@ fn attribute_on_a_function_checks_clean() {
 }
 
 #[test]
+fn concrete_type_is_assignable_to_its_abstract_kind() {
+    // A declared enum/record/class widens into the matching abstract kind-type at a boundary.
+    let src = "enum E { A; B; }\ntype R = { x: int };\nfn takeE(e: Enum): int { return 1; }\nfn takeR(r: Record): int { return 1; }\necho takeE(E.A);\nv = R { x: 1 };\necho takeR(v);\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn wrong_kind_is_a_type_error() {
+    // The kinds are distinct: a record is not an enum (E0007 at the call).
+    let src = "type R = { x: int };\nfn takeE(e: Enum): int { return 1; }\nv = R { x: 1 };\necho takeE(v);\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
+fn dyn_narrows_to_an_abstract_kind() {
+    // `dyn` → a kind via `is`/`.as<>()` is a valid (runtime) narrow, not E0028.
+    let src = "enum E { A; }\nx: dyn = E.A;\necho x is Enum;\ny = x.as<Record>();\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
 fn role_tag_on_an_attribute_checks_clean() {
     // A `@role(EntryPoint)` tag on a record that is also `@attribute` is well-formed; `roles_of()`
     // then type-checks as `List<RoleBinding>` whose `.role` is a `Role` and `.target` a string.
