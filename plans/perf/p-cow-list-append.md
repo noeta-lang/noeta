@@ -1,7 +1,9 @@
 # P-COW — copy-on-write / unique-owner in-place list append
 
-Status: **in progress** (eval-side slice). Source: deferred backlog row "Copy-on-write /
-unique-owner in-place list append", introduced by L1 (list-building).
+Status: **eval-side DONE** (commit pending; conformance 217 / differential 210 matched / 0 skipped
+/ backends agree / clippy + fmt clean / miri-clean). VM-side folds into P-GC (still open). Source:
+deferred backlog row "Copy-on-write / unique-owner in-place list append", introduced by L1
+(list-building).
 
 ## The bug
 
@@ -85,12 +87,16 @@ The Phase 0 parameterized accumulator bench (`acc ~= [i]` over `n ∈ {1k,2k,4k,
 
 Record both columns here on completion.
 
-| n | eval before | eval after |
-|---|---|---|
-| 1000 | | |
-| 2000 | | |
-| 4000 | | |
-| 8000 | | |
+| n | eval before | eval after | speedup | after ratio |
+|---|---|---|---|---|
+| 1000 | 1.33 ms | 152 µs | 8.7× | — |
+| 2000 | 4.70 ms | 308 µs | 15× | ×2.0 |
+| 4000 | 17.6 ms | 645 µs | 27× | ×2.1 |
+| 8000 | 68.6 ms | 1.23 ms | 56× | ×1.9 |
+
+**Confirmed:** the eval column flattened from ≈×4 per doubling (O(n²)) to ≈×2 (O(n)); the speedup
+grows with n exactly as an O(n²)→O(n) change predicts (56× at n=8000). The VM column is unchanged
+(still O(n²)) until P-GC lands the VM-side COW.
 
 ## Conformance
 `tests/conformance/perf/` (or `lists/`): a self-append accumulator producing the right list; the

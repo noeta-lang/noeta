@@ -1,0 +1,20 @@
+// Copy-on-write self-append (`~=`) must preserve immutable list semantics: an aliased snapshot
+// taken before the append is never mutated by it. The eval backend appends in place only when the
+// list is uniquely owned (P-COW); an alias (`b = acc`) keeps the refcount > 1, forcing a copy — so
+// `b` still observes the pre-append list. The `~=` compound form and the explicit self-reference
+// `acc = acc ~ acc` (which must double, proving the fast path never vacates a slot the RHS reads)
+// round out the cases. Both backends agree (the VM already copies unconditionally).
+// expect: stdout "[1, 2, 3, 4]"
+// expect: stdout "[1, 2]"
+// expect: stdout "[5, 5]"
+// expect: exit 0
+mut acc = [1, 2];
+b = acc;
+acc ~= [3];
+acc ~= [4];
+echo acc;
+echo b;
+
+mut twice = [5];
+twice = twice ~ twice;
+echo twice;

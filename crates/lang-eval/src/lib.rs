@@ -489,6 +489,25 @@ impl Scope {
         }
     }
 
+    /// Take the value out of an existing **mutable** binding (replacing it with `Unit`),
+    /// searching outward through the chain like [`Scope::assign`]. Returns the displaced value, or
+    /// `None` if the nearest binding for `name` is immutable or absent (in which case the caller
+    /// must fall back to the ordinary path, which reports the right error).
+    ///
+    /// Used by the copy-on-write self-append fast path (`acc ~= [x]`): dropping the scope's
+    /// reference *before* the right-hand side is evaluated lets a uniquely-owned list be appended
+    /// in place instead of copied, turning the O(n²) accumulator loop into O(n).
+    fn take_mut(&self, name: &str) -> Option<Value> {
+        if let Some(binding) = self.vars.borrow_mut().get_mut(name) {
+            return binding
+                .mutable
+                .then(|| std::mem::replace(&mut binding.value, Value::Unit));
+        }
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.take_mut(name))
+    }
+
     /// Remove and return this scope's bindings in **reverse** declaration order, for
     /// deterministic destruction at scope exit.
     fn drain_reverse(&self) -> Vec<Value> {
@@ -673,6 +692,39 @@ impl Interpreter {
                 value,
                 ..
             } => {
+                // Copy-on-write fast path for the self-append accumulator `acc ~= [x]` (which the
+                // parser desugars to the reassignment `acc = acc ~ [x]`). The naive path copies the
+                // whole left list every step — O(n²). Here we take the old value out of its scope
+                // slot *before* evaluating the right-hand side, so (absent other aliases) we hold
+                // the only reference and can append in place. Guarded so it only fires when it is
+                // provably equivalent: a reassignment (`!mut_decl`) of a name that the RHS does not
+                // itself mention (else `acc = acc ~ acc` would read the vacated slot), and a live
+                // mutable binding. Aliasing stays correct by construction — a second reference
+                // (`b = acc`) keeps the refcount > 1, so `cow_concat` copies, preserving immutable
+                // semantics. Any case the guard rejects falls through to the ordinary path.
+                if !*mut_decl
+                    && let Expr::Binary {
+                        op: BinaryOp::Concat,
+                        lhs,
+                        rhs,
+                        ..
+                    } = value
+                    && let Expr::Ident { name: lhs_name, .. } = lhs.as_ref()
+                    && lhs_name == name
+                    && !expr_mentions(rhs, name)
+                    && let Some(old) = self.scope.take_mut(name)
+                {
+                    let right = match self.eval_expr(rhs) {
+                        Ok(right) => right,
+                        // Restore the binding before unwinding so the vacated slot is never observed.
+                        Err(unwind) => {
+                            self.scope.assign(name, old);
+                            return Err(unwind);
+                        }
+                    };
+                    self.scope.assign(name, cow_concat(old, right));
+                    return Ok(Flow::Normal);
+                }
                 let value = self.eval_expr(value)?;
                 self.bind(*mut_decl, name, *name_span, value)?;
                 Ok(Flow::Normal)
@@ -2882,6 +2934,105 @@ impl Interpreter {
     }
 }
 
+/// Concatenate for the copy-on-write self-append fast path, **consuming** `left` (which the caller
+/// has taken out of its scope slot, so it may be uniquely owned). A uniquely-owned list is extended
+/// in place — O(1) amortized; a shared list (refcount > 1, e.g. an alias `b = acc`) is copied,
+/// preserving immutable semantics; a non-list pairing falls back to display concatenation, byte-for
+/// -byte identical to [`ops::apply_binary`]'s `~`. The result is observably indistinguishable from
+/// the ordinary path — only the cost differs.
+fn cow_concat(left: Value, right: Value) -> Value {
+    match (left, right) {
+        (Value::List(mut a), Value::List(b)) => {
+            if let Some(items) = Rc::get_mut(&mut a) {
+                items.extend(b.iter().cloned());
+                Value::List(a)
+            } else {
+                let mut items = (*a).clone();
+                items.extend(b.iter().cloned());
+                Value::List(Rc::new(items))
+            }
+        }
+        (left, right) => Value::Str(format!("{}{}", left.display(), right.display())),
+    }
+}
+
+/// Whether `name` appears as a free identifier anywhere in `expr`. The copy-on-write fast path uses
+/// this as a correctness guard: it may vacate `name`'s scope slot before evaluating `expr` only if
+/// `expr` does not read `name`. An **over-approximation is safe** — a spurious `true` merely skips
+/// the optimization (the ordinary copy path runs); only a spurious `false` would be a bug, so the
+/// match is exhaustive (no wildcard) to force a decision when a new `Expr` variant is added, and
+/// shadowing (a closure parameter named `name`) is deliberately not modelled — it can only push the
+/// answer toward `true`.
+fn expr_mentions(expr: &Expr, name: &str) -> bool {
+    let any = |exprs: &[Expr]| exprs.iter().any(|e| expr_mentions(e, name));
+    match expr {
+        Expr::Str { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::Bool { .. }
+        | Expr::AttributesOf { .. }
+        | Expr::RolesOf { .. } => false,
+        Expr::Ident { name: n, .. } => n == name,
+        Expr::Unary { operand, .. } => expr_mentions(operand, name),
+        Expr::Binary { lhs, rhs, .. }
+        | Expr::Pipeline {
+            left: lhs,
+            right: rhs,
+            ..
+        }
+        | Expr::Coalesce {
+            value: lhs,
+            fallback: rhs,
+            ..
+        }
+        | Expr::Index {
+            receiver: lhs,
+            index: rhs,
+            ..
+        }
+        | Expr::Range {
+            start: lhs,
+            end: rhs,
+            ..
+        } => expr_mentions(lhs, name) || expr_mentions(rhs, name),
+        Expr::Call { callee, args, .. } => expr_mentions(callee, name) || any(args),
+        Expr::Closure { params, body, .. } => {
+            expr_mentions(body, name)
+                || params
+                    .iter()
+                    .any(|p| p.default.as_ref().is_some_and(|d| expr_mentions(d, name)))
+        }
+        Expr::List { items, .. } => any(items),
+        Expr::Map { entries, .. } => entries
+            .iter()
+            .any(|(k, v)| expr_mentions(k, name) || expr_mentions(v, name)),
+        Expr::Member { receiver, .. } => expr_mentions(receiver, name),
+        Expr::Interp { parts, .. } => parts.iter().any(|part| match part {
+            lang_ast::StrPart::Literal(_) => false,
+            lang_ast::StrPart::Hole(e) => expr_mentions(e, name),
+        }),
+        Expr::Match {
+            scrutinee, arms, ..
+        } => {
+            expr_mentions(scrutinee, name) || arms.iter().any(|arm| expr_mentions(&arm.body, name))
+        }
+        Expr::Object(lit) => {
+            lit.fields.iter().any(|f| expr_mentions(&f.value, name))
+                || lit.spread.as_ref().is_some_and(|s| expr_mentions(s, name))
+        }
+        Expr::Try { expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::TypeTest { expr, .. }
+        | Expr::TypeOf { value: expr, .. } => expr_mentions(expr, name),
+        Expr::Invoke {
+            recv,
+            name: n,
+            args,
+            ..
+        } => expr_mentions(recv, name) || expr_mentions(n, name) || expr_mentions(args, name),
+    }
+}
+
 /// Construct a built-in `Result`/`Option`/`Ordering` value (`Ok`/`Err`/`some`/`none`, or
 /// `Ordering.Less`/`Equal`/`Greater`). These reuse the ordinary [`EnumValue`] representation, so
 /// they participate in `match` and equality like any enum; only `Result`/`Option`'s display and
@@ -3416,6 +3567,19 @@ mod tests {
             parsed.diagnostics
         );
         parsed.program
+    }
+
+    #[test]
+    fn cow_self_append_preserves_aliases() {
+        // The copy-on-write `~=` fast path may mutate in place only when uniquely owned. An alias
+        // taken before the appends must still observe the original list; an explicit `acc = acc ~ acc`
+        // must double (the self-reference guard sends it to the copy path, never vacating a slot the
+        // RHS reads). Locks the P-COW correctness invariant at the crate level.
+        let out = run(
+            "mut acc = [1, 2];\nb = acc;\nacc ~= [3];\nacc ~= [4];\necho acc;\necho b;\nmut twice = [5];\ntwice = twice ~ twice;\necho twice;\n",
+        );
+        assert_eq!(out.stdout, "[1, 2, 3, 4]\n[1, 2]\n[5, 5]\n");
+        assert_eq!(out.exit_code, 0);
     }
 
     #[test]
