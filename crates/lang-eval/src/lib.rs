@@ -88,6 +88,15 @@ impl Default for TreeWalkBackend {
     }
 }
 
+/// Run with the record-update reuse fast path **disabled** — the copying baseline the perf bench
+/// measures against (behavior-identical, since reuse is invisible to a value-semantics program).
+#[doc(hidden)]
+pub fn run_without_record_reuse(seed: u64, program: &Program) -> RunResult {
+    let mut interp = Interpreter::new(seed);
+    interp.record_reuse = false;
+    interp.run(program)
+}
+
 impl Backend for TreeWalkBackend {
     fn run(&self, program: &Program) -> RunResult {
         Interpreter::new(self.seed).run(program)
@@ -562,6 +571,10 @@ struct Interpreter {
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
     /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
+    /// Whether the record-update reuse fast path (`try_record_reuse`) is enabled. Always `true` in
+    /// production; the perf bench flips it off to measure the gain on identical input (the
+    /// tree-walker has no `MakeRecord` op to toggle, so the knob lives here instead).
+    record_reuse: bool,
 }
 
 impl Interpreter {
@@ -608,6 +621,7 @@ impl Interpreter {
             host,
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
+            record_reuse: true,
         }
     }
 
@@ -724,6 +738,12 @@ impl Interpreter {
                     };
                     self.scope.assign(name, cow_concat(old, right));
                     return Ok(Flow::Normal);
+                }
+                // Record-update reuse: `acc = Type { ...acc, … }` (the generalization of the COW
+                // append to record construction). Returns `None` — having done nothing observable —
+                // when the fast path does not apply, so we fall through to the ordinary path.
+                if let Some(result) = self.try_record_reuse(*mut_decl, name, *name_span, value) {
+                    return result;
                 }
                 let value = self.eval_expr(value)?;
                 self.bind(*mut_decl, name, *name_span, value)?;
@@ -1142,6 +1162,119 @@ impl Interpreter {
             })
             .collect();
         Value::List(Rc::new(items))
+    }
+
+    /// Tree-walker record-update reuse for a self-update `acc = Type { ...acc, … }`: the
+    /// generalization of the COW list append to record construction. Returns `None` — having done
+    /// nothing observable — when the fast path does not apply (not a self-update, an opaque/foreign
+    /// base, or a non-object value), so the caller runs the ordinary `eval_object`. When the
+    /// accumulator is the **sole owner** of a same-type object its backing field map is mutated in
+    /// place (avoiding a full `BTreeMap` + per-field clone); an **aliased** accumulator copies,
+    /// preserving the alias — the same shared ⇒ copy / unique ⇒ mutate invariant as the list COW.
+    ///
+    /// Field initializers are evaluated in source order while `acc` is still bound (so `acc.field`
+    /// reads work), with the same unknown-field check as `eval_object`, then `acc` is taken out and
+    /// reused. The base is peeked via a side-effect-free ident read, so bailing out is invisible.
+    fn try_record_reuse(
+        &mut self,
+        mut_decl: bool,
+        name: &str,
+        name_span: Span,
+        value: &Expr,
+    ) -> Option<Eval<Flow>> {
+        if !self.record_reuse || mut_decl {
+            return None;
+        }
+        let Expr::Object(lit) = value else {
+            return None;
+        };
+        let spread = lit.spread.as_ref()?;
+        let Expr::Ident { name: base, .. } = spread.as_ref() else {
+            return None;
+        };
+        if base != name {
+            return None;
+        }
+        // Peek the accumulator (a pure ident read) to learn its def and whether it is uniquely
+        // owned. The clone is dropped at the end of this block, restoring the refcount.
+        let (def, unique) = {
+            let peek = match self.eval_expr(spread) {
+                Ok(v) => v,
+                Err(u) => return Some(Err(u)),
+            };
+            let Value::Object(rc) = &peek else {
+                return None;
+            };
+            if rc.def.name() != lit.type_name || rc.def.opaque {
+                return None;
+            }
+            // The scope holds one reference and `peek` is the second; any more means an alias.
+            (Rc::clone(&rc.def), Rc::strong_count(rc) == 2)
+        };
+
+        // Evaluate the overrides in source order, matching `eval_object`'s unknown-field timing.
+        let mut overrides: Vec<(String, Value)> = Vec::with_capacity(lit.fields.len());
+        for init in &lit.fields {
+            if !def.has_field(&init.name) {
+                return Some(Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    init.name_span,
+                    format!("type `{}` has no field `{}`", def.name(), init.name),
+                )));
+            }
+            match self.eval_expr(&init.value) {
+                Ok(v) => overrides.push((init.name.clone(), v)),
+                Err(u) => return Some(Err(u)),
+            }
+        }
+
+        let Some(Value::Object(mut rc)) = self.scope.take_mut(name) else {
+            // The binding is immutable (or vanished): rebuild the value from a fresh peek and let
+            // `bind` report the assignment error, exactly as the ordinary path would after building.
+            let Ok(Value::Object(base)) = self.eval_expr(spread) else {
+                return None;
+            };
+            let mut fields = base.fields.clone();
+            for (k, v) in overrides {
+                fields.insert(k, v);
+            }
+            let obj = Value::Object(Rc::new(ObjectValue { def, fields }));
+            return Some(
+                self.bind(false, name, name_span, obj)
+                    .map(|()| Flow::Normal),
+            );
+        };
+
+        let new_value = if unique {
+            // Sole owner: mutate the field map in place — only the overridden keys change; every
+            // other field keeps its existing reference. `get_mut` succeeds because we proved unique
+            // and then took the scope's reference out (so this is now the only `Rc`).
+            match Rc::get_mut(&mut rc) {
+                Some(obj) => {
+                    for (k, v) in overrides {
+                        obj.fields.insert(k, v);
+                    }
+                    Value::Object(rc)
+                }
+                None => {
+                    let mut fields = rc.fields.clone();
+                    for (k, v) in overrides {
+                        fields.insert(k, v);
+                    }
+                    Value::Object(Rc::new(ObjectValue { def, fields }))
+                }
+            }
+        } else {
+            // Aliased: copy, preserving the other owner's view. Dropping `rc` at the end of the
+            // statement releases the scope's old reference; the alias keeps the original object.
+            let mut fields = rc.fields.clone();
+            for (k, v) in overrides {
+                fields.insert(k, v);
+            }
+            Value::Object(Rc::new(ObjectValue { def, fields }))
+        };
+        self.scope.assign(name, new_value);
+        Some(Ok(Flow::Normal))
     }
 
     fn eval_object(&mut self, lit: &ObjectLit) -> Eval<Value> {

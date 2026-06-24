@@ -14,6 +14,7 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use lang_bytecode::Module;
+use lang_compiler::ReuseMode;
 use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId};
@@ -33,6 +34,41 @@ fn compile(src: &str) -> Module {
         parsed.diagnostics
     );
     lang_compiler::compile(&parsed.program).expect("bench program must be in the VM subset")
+}
+
+/// Like [`compile`] but under an explicit [`ReuseMode`] — used by the record-update reuse matrix to
+/// compile the *same* source three ways (no reuse / runtime-checked / statically-elided check).
+fn compile_reuse(src: &str, mode: ReuseMode) -> Module {
+    let source = Source::new(SourceId::FIRST, "bench.lang", src);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "bench program must parse without diagnostics: {:?}",
+        parsed.diagnostics
+    );
+    lang_compiler::compile_with_options(&parsed.program, mode)
+        .expect("bench program must be in the VM subset")
+}
+
+/// A blind-overwrite record accumulator: an 8-field class whose global accumulator has one field
+/// overwritten each iteration (`acc = Wide { ...acc, f0: i }`). The plain path (`ReuseMode::Off`)
+/// allocates a fresh object and copies all 8 fields every step — O(n·fields); reuse mutates the one
+/// changed slot in place — O(n). The accumulator is read only after the loop, so it stays uniquely
+/// owned (a global, stored via the consuming `StoreGlobal`), letting both reuse modes fire.
+fn record_update_src(n: usize) -> String {
+    let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
+    let inits: Vec<String> = (0..8).map(|i| format!("f{i}: 0")).collect();
+    format!(
+        "class Wide {{\n    {}\n}}\n\
+         mut acc = Wide {{ {} }};\n\
+         for i in 0..{n} {{\n    \
+            acc = Wide {{ ...acc, f0: i }};\n\
+         }}\n\
+         echo acc.f0;\n",
+        fields.join("\n    "),
+        inits.join(", "),
+    )
 }
 
 /// A list literal `[0, 1, 2, …, n-1]`, generated here so the iteration count is
@@ -164,6 +200,26 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     disp.finish();
+
+    // Record-update reuse matrix: the same blind-overwrite accumulator compiled three ways isolates
+    // the two reuse axes — `off` vs `runtime` is the generalization win (allocation+copy elimination,
+    // O(n·fields)→O(n)); `runtime` vs `static` is the compile-time-hoist win (the elided refcount
+    // check). Parameterized over n so the complexity-class change is visible, not just a constant.
+    let modes = [
+        ("off", ReuseMode::Off),
+        ("runtime", ReuseMode::Runtime),
+        ("static", ReuseMode::Static),
+    ];
+    let mut reuse = c.benchmark_group("vm_record_update");
+    for (label, mode) in modes {
+        for &n in LOOP_SIZES {
+            let module = compile_reuse(&record_update_src(n), mode);
+            reuse.bench_with_input(BenchmarkId::new(label, n), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))))
+            });
+        }
+    }
+    reuse.finish();
 }
 
 criterion_group!(benches, vm_hot_paths);

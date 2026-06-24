@@ -42,6 +42,7 @@ use lang_ast::{
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NarrowTarget, Op, Reg,
+    ReuseCheck,
 };
 
 mod freevars;
@@ -85,6 +86,30 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
     compile_with_sites(program, lang_check::resolve_type_of_sites(program))
 }
 
+/// Which record-update reuse the compiler may apply to a self-update `acc = Type { ...acc, f: v }`.
+///
+/// This is a **benchmark ceiling**, not a behavior switch: every mode is observably identical (reuse
+/// is invisible to a value-semantics program). It exists so the perf bench can isolate the three
+/// points on the reuse spectrum on the *same* source. Production uses [`ReuseMode::Static`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ReuseMode {
+    /// No reuse — a self-update lowers to an ordinary copying `MakeRecord { spread }`. The baseline.
+    Off,
+    /// Reuse via a runtime `refcount() == 1 && same-shape` check at the construct (the record
+    /// analogue of the COW list append). Always safe; pays a branch per construct.
+    Runtime,
+    /// Reuse with the runtime check **elided** wherever the linearity analysis proved sole
+    /// ownership; self-updates it could not prove fall back to [`ReuseMode::Runtime`]. Production.
+    #[default]
+    Static,
+}
+
+/// Compile under explicit [options][ReuseMode]. [`compile`] uses [`ReuseMode::Static`] (production);
+/// the perf bench threads each mode to measure the reuse spectrum on identical source.
+pub fn compile_with_options(program: &Program, reuse: ReuseMode) -> Result<Module, Unsupported> {
+    compile_inner(program, lang_check::resolve_type_of_sites(program), reuse)
+}
+
 /// Compile a program using a **precomputed** `type_of` site map instead of re-deriving it.
 ///
 /// [`compile`] re-runs the checker (via `resolve_type_of_sites`) to obtain the map, which on a
@@ -95,6 +120,14 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
 pub fn compile_with_sites(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+) -> Result<Module, Unsupported> {
+    compile_inner(program, type_of_sites, ReuseMode::default())
+}
+
+fn compile_inner(
+    program: &Program,
+    type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    reuse: ReuseMode,
 ) -> Result<Module, Unsupported> {
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
@@ -107,12 +140,14 @@ pub fn compile_with_sites(
         module_globals: HashMap::new(),
         type_of_sites,
         cache_slots: 0,
+        reuse,
     };
     module.register_globals(program);
     module.register_types(program);
     module.compile_methods(program)?;
     let main = {
         let mut fc = FnCompiler::new(&mut module, true, None, Vec::new(), Vec::new());
+        fc.analyze_reuse(&program.stmts);
         for stmt in &program.stmts {
             fc.stmt(stmt)?;
         }
@@ -177,6 +212,10 @@ struct ModuleCompiler {
     /// takes the next id (module-global across all chunks); the total becomes [`Module::cache_slots`],
     /// sizing the VM's per-run cache array. See [`ModuleCompiler::next_cache_slot`].
     cache_slots: u32,
+    /// Which record-update reuse the perf bench asked for (production = [`ReuseMode::Static`]).
+    /// Read at each self-update site to pick `MakeRecord` (Off) vs `MakeRecordInPlace` (Runtime /
+    /// Static, the latter only where the linearity analysis cleared the accumulator).
+    reuse: ReuseMode,
 }
 
 impl ModuleCompiler {
@@ -441,6 +480,7 @@ impl ModuleCompiler {
         }
         match body {
             Body::Block(stmts) => {
+                fc.analyze_reuse(stmts);
                 for stmt in stmts {
                     fc.stmt(stmt)?;
                 }
@@ -555,6 +595,12 @@ struct FnCompiler<'m> {
     /// Enclosing-loop jump-patch sites, innermost last. Each `break`/`continue` records a pending
     /// `Jump` here; the loop patches them to its exit / continue target once those are known.
     loops: Vec<LoopCtx>,
+    /// Names of record-update accumulators this function's body proved **linear** (never aliased),
+    /// so a self-update `acc = Type { ...acc, … }` may reuse the allocation with the runtime check
+    /// elided (`ReuseCheck::Static`). Computed once before lowering; empty unless [`ModuleCompiler::reuse`]
+    /// is [`ReuseMode::Static`]. A self-update whose name is absent here still gets the runtime-checked
+    /// reuse. See [`linear_record_accumulators`].
+    linear_accs: HashSet<String>,
 }
 
 /// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
@@ -585,6 +631,10 @@ struct GlobalInfo {
 /// mutable, for the child's reassignment check) paired with the `CaptureFrom` source the building
 /// frame uses to supply each cell. The two vectors are index-aligned.
 type CaptureLayout = (Vec<(String, bool)>, Vec<CaptureFrom>);
+
+/// The interned shape index and lowered `(slot, register)` named-field list for an in-place record
+/// construct ([`Op::MakeRecordInPlace`]), as produced by `eval_in_place_named`.
+type InPlaceNamed = (u32, Box<[(u16, Reg)]>);
 
 /// How a name resolves at a use site.
 enum Resolved {
@@ -636,6 +686,15 @@ impl<'m> FnCompiler<'m> {
             enclosing_locals,
             local_layer: HashSet::new(),
             loops: Vec::new(),
+            linear_accs: HashSet::new(),
+        }
+    }
+
+    /// Populate [`Self::linear_accs`] from `stmts` when reuse is [`ReuseMode::Static`] — the
+    /// compile-time half of reuse analysis. Called once per function body before lowering.
+    fn analyze_reuse(&mut self, stmts: &[Stmt]) {
+        if self.module.reuse == ReuseMode::Static {
+            self.linear_accs = linear_record_accumulators(stmts);
         }
     }
 
@@ -1213,6 +1272,15 @@ impl<'m> FnCompiler<'m> {
                 });
                 return Ok(());
             }
+            // NOTE: a *local* self-update accumulator gets **no** record-update reuse. `declare_local`
+            // binds a local with a retaining `Op::Move` from the initializer's temporary register,
+            // and the register machine frees no temporary until the frame ends — so a local
+            // accumulator is born at refcount 2 (the temp lingers) and is never uniquely owned at the
+            // construct. Reuse fires only for *globals* (stored via the consuming `StoreGlobal`), the
+            // same reason the COW list append targets a global accumulator. Making locals reusable
+            // needs a consuming move / dead-temp release — the drop-insertion work this prototype
+            // identifies as the gating prerequisite. So a local falls through to the copying
+            // `MakeRecord` below. See `plans/perf/p-reuse-analysis.md`.
             let t = self.alloc_reg();
             self.expr(value, t)?;
             if !var.mutable {
@@ -1277,6 +1345,46 @@ impl<'m> FnCompiler<'m> {
                     name: name.to_string(),
                     src: acc_reg,
                 });
+                return Ok(());
+            }
+            // Record-update reuse for a global self-update `acc = Type { ...acc, … }`. A global is
+            // stored via the **consuming** `StoreGlobal`, so it is refcount 1 — and stays so as long
+            // as it is not *read* (a `LoadGlobal` would retain it into a lingering temporary). The
+            // named initializers are evaluated *first* (while the global is intact — they may read
+            // `acc.field`, which then keeps the refcount above one and forces the runtime copy),
+            // then `TakeGlobal` moves the accumulator into a register the in-place op consumes, and
+            // `StoreGlobal` re-binds the result.
+            //
+            // `Static` (the compile-time-hoisted check elision) is sound here exactly when the
+            // linearity analysis proved `acc` is read only *after* its last update (so no temporary
+            // overlaps an in-place mutation) — the "fully in place" blind-overwrite loop. Otherwise
+            // `Runtime` keeps it correct (it copies when a read kept the refcount above one).
+            if mutable
+                && self.module.reuse != ReuseMode::Off
+                && let Some(lit) = record_self_update(name, value)
+                && let Some((kind, fields)) = self.record_kind_fields(&lit.type_name)
+            {
+                let check = self.reuse_check(name);
+                if let Some((shape, named)) = self.eval_in_place_named(lit, kind, &fields)? {
+                    let acc_reg = self.alloc_reg();
+                    self.code.push(Op::TakeGlobal {
+                        dst: acc_reg,
+                        name: name.to_string(),
+                        span: name_span,
+                    });
+                    self.code.push(Op::MakeRecordInPlace {
+                        dst: acc_reg,
+                        shape,
+                        named,
+                        base: acc_reg,
+                        check,
+                        span: value.span(),
+                    });
+                    self.code.push(Op::StoreGlobal {
+                        name: name.to_string(),
+                        src: acc_reg,
+                    });
+                }
                 return Ok(());
             }
             let t = self.alloc_reg();
@@ -1802,6 +1910,58 @@ impl<'m> FnCompiler<'m> {
         }
     }
 
+    /// The reuse check for a self-update accumulator `name`: `Static` only when reuse is fully on
+    /// *and* the linearity analysis cleared `name`; otherwise the always-safe runtime check.
+    fn reuse_check(&self, name: &str) -> ReuseCheck {
+        if self.module.reuse == ReuseMode::Static && self.linear_accs.contains(name) {
+            ReuseCheck::Static
+        } else {
+            ReuseCheck::Runtime
+        }
+    }
+
+    /// The [`ShapeKind`] and declared field order of a record or class type, or `None` for an
+    /// opaque/enum/unknown type (which does not get record-update reuse).
+    fn record_kind_fields(&self, type_name: &str) -> Option<(ShapeKind, Vec<String>)> {
+        match self.module.types.get(type_name) {
+            Some(TypeInfo::Record { fields }) => Some((ShapeKind::Record, fields.clone())),
+            Some(TypeInfo::Class { fields, .. }) => Some((ShapeKind::Class, fields.clone())),
+            _ => None,
+        }
+    }
+
+    /// Intern the shape and lower the named initializers of a self-update record literal for
+    /// [`Op::MakeRecordInPlace`], returning `(shape, named)`. The spread base is **not** read here —
+    /// the caller supplies it as the consumed `base` register — so this runs identically whether the
+    /// accumulator is a local or a global. Returns `None` (after emitting a `Raise`) for an unknown
+    /// field, matching `make_record`'s tree-walker timing.
+    fn eval_in_place_named(
+        &mut self,
+        lit: &ObjectLit,
+        kind: ShapeKind,
+        fields: &[String],
+    ) -> Result<Option<InPlaceNamed>, Unsupported> {
+        let shape =
+            self.module
+                .intern_shape(Shape::object(kind, lit.type_name.clone(), fields.to_vec()));
+        let mut named: Vec<(u16, Reg)> = Vec::with_capacity(lit.fields.len());
+        for init in &lit.fields {
+            let Some(slot) = fields.iter().position(|f| f == &init.name) else {
+                let idx = self.add_diag(unknown_field_diag(
+                    &lit.type_name,
+                    &init.name,
+                    init.name_span,
+                ));
+                self.code.push(Op::Raise { idx });
+                return Ok(None);
+            };
+            let r = self.alloc_reg();
+            self.expr(&init.value, r)?;
+            named.push((slot as u16, r));
+        }
+        Ok(Some((shape, named.into_boxed_slice())))
+    }
+
     /// Construct a declared record/class instance. Field initializers are checked and
     /// evaluated in source order (after the spread), reproducing the tree-walker's timing; the
     /// full-initialization guarantee (E0009) is enforced at runtime by `MakeRecord`.
@@ -2269,6 +2429,223 @@ fn self_append_rhs<'a>(name: &str, value: &'a Expr) -> Option<&'a Expr> {
         Some(rhs)
     } else {
         None
+    }
+}
+
+/// If `value` is a self-update record literal `Type { ...name, fields }` whose spread base is
+/// exactly the accumulator `name`, return the literal — the record analogue of [`self_append_rhs`].
+/// The base is then the *consumed* old value of `name` (its binding is reassigned to the result), so
+/// its allocation can be reused. Unlike the list-append case there is no `mentions` guard: the field
+/// initializers are evaluated *before* the base is taken, so `Type { ...acc, x: acc.x + 1 }` is fine.
+fn record_self_update<'a>(name: &str, value: &'a Expr) -> Option<&'a ObjectLit> {
+    if let Expr::Object(lit) = value
+        && let Some(spread) = &lit.spread
+        && let Expr::Ident { name: base, .. } = spread.as_ref()
+        && base == name
+    {
+        Some(lit)
+    } else {
+        None
+    }
+}
+
+// --- Reuse analysis: the compile-time half (Perceus/Roc-style) ---------------------------------
+//
+// A self-update record accumulator's `MakeRecordInPlace` may elide its runtime uniqueness check
+// (`ReuseCheck::Static`) only when the compiler can prove the accumulator is **linear** — the sole
+// owner of its object at the construct. The proof must account for how the register machine emits
+// reads: reading the accumulator anywhere (`acc.field`, `echo acc`, a method receiver, a spread in
+// *another* literal) lowers to a `Move`/`LoadGlobal` that **retains** the object into a temporary
+// register, and the machine frees no temporary until the frame ends. So *any* read leaves a lingering
+// reference and the accumulator is no longer uniquely owned. (The list COW dodges this because
+// `acc = acc ~ rhs` never reads `acc` except as the consumed base.) The only non-retaining occurrence
+// is the accumulator as the **consumed spread base of its own self-update** — which the reuse op takes
+// directly, without a `Move`. Hence the linearity rule below: `acc` may appear *only* there, and the
+// update's field initializers must not read it either. (This is the "fully in place" pattern; reusing
+// an accumulator that is *read* during the loop would need precise last-use drop insertion — the real
+// Perceus pass — which this backend lacks. See `plans/perf/p-reuse-analysis.md`.)
+
+/// The subset of self-update record accumulators in `stmts` proven linear (safe for static reuse):
+/// names that appear *only* as the consumed spread base of their own `name = Type { ...name, … }`
+/// reassignments, whose field initializers do not read `name`. Any other mention disqualifies the
+/// name (it would be retained into a temporary the backend never frees).
+fn linear_record_accumulators(stmts: &[Stmt]) -> HashSet<String> {
+    let mut candidates = HashSet::new();
+    collect_reuse_candidates(stmts, &mut candidates);
+    candidates.retain(|name| {
+        // A read of `name` *after* its last update is harmless — the lingering temporary it leaves
+        // cannot overlap any in-place mutation (those are all behind it). So only the statements up
+        // to and including the last update must use `name` solely as the consumed spread base; the
+        // tail may read it freely (e.g. `return acc` / `echo acc.x` after the loop). A read inside a
+        // loop that updates `name` is *not* in the tail (the loop re-runs), and `stmt_only_consumes`
+        // already forbids it by recursing into loop bodies.
+        match last_update_index(stmts, name) {
+            Some(last) => stmts[..=last].iter().all(|s| stmt_only_consumes(s, name)),
+            None => false,
+        }
+    });
+    candidates
+}
+
+/// The highest index of a top-level statement in `stmts` that contains (possibly nested in an
+/// `if`/`for`/`while`) a self-update of `name`. Statements after it execute after every update.
+fn last_update_index(stmts: &[Stmt], name: &str) -> Option<usize> {
+    stmts.iter().rposition(|s| contains_self_update(s, name))
+}
+
+/// Does `stmt` contain a self-update reassignment of `name` (directly or in a nested block body)?
+fn contains_self_update(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Binding {
+            name: target,
+            value,
+            ..
+        } => target == name && record_self_update(name, value).is_some(),
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            then_body.iter().any(|s| contains_self_update(s, name))
+                || else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(|s| contains_self_update(s, name)))
+        }
+        Stmt::For { body, .. } | Stmt::While { body, .. } => {
+            body.iter().any(|s| contains_self_update(s, name))
+        }
+        _ => false,
+    }
+}
+
+/// Collect names that have a self-update record reassignment somewhere in this function's own
+/// statements (descending into `if`/`for`/`while` bodies, but not into nested fn/closure/class
+/// scopes — those run their own analysis).
+fn collect_reuse_candidates(stmts: &[Stmt], out: &mut HashSet<String>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Binding { name, value, .. } if record_self_update(name, value).is_some() => {
+                out.insert(name.clone());
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_reuse_candidates(then_body, out);
+                if let Some(body) = else_body {
+                    collect_reuse_candidates(body, out);
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                collect_reuse_candidates(body, out)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Does `stmt` use `name` *only* as the consumed spread base of a self-update (so it leaves no
+/// lingering reference)? Returns `false` as soon as `name` is mentioned in any retaining position.
+fn stmt_only_consumes(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Binding {
+            name: target,
+            value,
+            ..
+        } => {
+            // `name = Type { ...name, fields }` where no field reads `name`: the only occurrence is
+            // the consumed spread base — not retained. Anything else: `name` must not appear at all.
+            if target == name
+                && let Some(lit) = record_self_update(name, value)
+                && lit.fields.iter().all(|f| !f.value.mentions(name))
+            {
+                true
+            } else {
+                !value.mentions(name)
+            }
+        }
+        Stmt::Echo { value, .. } | Stmt::Expr { expr: value, .. } => !value.mentions(name),
+        Stmt::Return { value, .. } => value.as_ref().is_none_or(|e| !e.mentions(name)),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            !cond.mentions(name)
+                && then_body.iter().all(|s| stmt_only_consumes(s, name))
+                && else_body
+                    .as_ref()
+                    .is_none_or(|b| b.iter().all(|s| stmt_only_consumes(s, name)))
+        }
+        Stmt::For { iterable, body, .. } => {
+            !iterable.mentions(name) && body.iter().all(|s| stmt_only_consumes(s, name))
+        }
+        Stmt::While { cond, body, .. } => {
+            !cond.mentions(name) && body.iter().all(|s| stmt_only_consumes(s, name))
+        }
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Namespace { .. } | Stmt::Use { .. } => {
+            true
+        }
+        // A declaration that references `name` could read it as a global or capture it — disqualify.
+        Stmt::Fn(decl) => !fn_mentions(decl, name),
+        Stmt::Impl(decl) => !decl.methods.iter().any(|m| fn_mentions(m, name)),
+        Stmt::Class(decl) => !decl.methods.iter().any(|m| fn_mentions(m, name)),
+        Stmt::Enum(decl) => !decl
+            .variants
+            .iter()
+            .any(|v| v.fields.iter().any(|p| param_default_mentions(p, name))),
+        Stmt::Record(_) => true,
+    }
+}
+
+fn fn_mentions(decl: &FnDecl, name: &str) -> bool {
+    decl.params.iter().any(|p| param_default_mentions(p, name))
+        || decl.body.iter().any(|s| stmt_mentions(s, name))
+}
+
+fn param_default_mentions(param: &Param, name: &str) -> bool {
+    param.default.as_ref().is_some_and(|d| d.mentions(name))
+}
+
+/// Fully conservative "does this statement mention `name` anywhere" — used inside nested declarations
+/// where any reference is treated as a disqualifying use.
+fn stmt_mentions(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::Echo { value, .. } | Stmt::Expr { expr: value, .. } => value.mentions(name),
+        Stmt::Binding { value, .. } => value.mentions(name),
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| e.mentions(name)),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            cond.mentions(name)
+                || then_body.iter().any(|s| stmt_mentions(s, name))
+                || else_body
+                    .as_ref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_mentions(s, name)))
+        }
+        Stmt::For { iterable, body, .. } => {
+            iterable.mentions(name) || body.iter().any(|s| stmt_mentions(s, name))
+        }
+        Stmt::While { cond, body, .. } => {
+            cond.mentions(name) || body.iter().any(|s| stmt_mentions(s, name))
+        }
+        Stmt::Fn(decl) => fn_mentions(decl, name),
+        Stmt::Impl(decl) => decl.methods.iter().any(|m| fn_mentions(m, name)),
+        Stmt::Class(decl) => decl.methods.iter().any(|m| fn_mentions(m, name)),
+        Stmt::Enum(decl) => decl
+            .variants
+            .iter()
+            .any(|v| v.fields.iter().any(|p| param_default_mentions(p, name))),
+        Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Namespace { .. }
+        | Stmt::Use { .. }
+        | Stmt::Record(_) => false,
     }
 }
 

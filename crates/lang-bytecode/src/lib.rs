@@ -111,6 +111,24 @@ pub enum NarrowTarget {
     AnyClass,
 }
 
+/// How a [`Op::MakeRecordInPlace`] is allowed to reuse its consumed `base` object's allocation.
+///
+/// This is the compile-time half of reuse analysis: the compiler always knows the construct is a
+/// *self-update* (`acc = Type { ...acc, f: v }`, so `base` is consumed), but whether the in-place
+/// mutation is sound depends on `base` being uniquely owned **and** already the target shape.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReuseCheck {
+    /// Decide at execution: reuse in place only when `base.refcount() == 1` and `base`'s shape is
+    /// the target shape; otherwise fall back to a fresh copying allocation (always correct). This
+    /// is the runtime-checked analogue of the COW list append — safe under any aliasing.
+    Runtime,
+    /// The compiler's linearity analysis proved `base` is the sole owner of a same-shape object at
+    /// this point (the accumulator is never aliased in its scope), so the in-place mutation is
+    /// unconditional — no runtime refcount/shape branch. This is the Perceus/Roc "hoist the
+    /// uniqueness decision to compile time" path.
+    Static,
+}
+
 /// One register-machine instruction.
 #[derive(Debug, Clone)]
 pub enum Op {
@@ -309,6 +327,24 @@ pub enum Op {
         shape: u32,
         named: Box<[(u16, Reg)]>,
         spread: Option<Reg>,
+        span: Span,
+    },
+    /// `dst = Type { named..., ...base }` for a **self-update** (`acc = Type { ...acc, f: v }`),
+    /// where `base` holds the consumed accumulator — its single reference has been moved into the
+    /// `base` register (cleared before this op, transferring the ref), the record analogue of
+    /// [`Op::ConcatInPlace`]. When `base` is uniquely owned and already the target `shape`, its
+    /// allocation is **reused**: only the `named` slots are overwritten (each unchanged field's
+    /// reference transfers from `base` to the result), avoiding the allocation and per-field
+    /// retain a plain `MakeRecord { spread }` performs. `check` selects the runtime-checked or the
+    /// statically-proven path (see [`ReuseCheck`]); the runtime path and the `Static`-but-aliased
+    /// fallback build a fresh object exactly like `MakeRecord` and release `base`. The missing-field
+    /// guarantee holds by construction (a same-shape base provides every field).
+    MakeRecordInPlace {
+        dst: Reg,
+        shape: u32,
+        named: Box<[(u16, Reg)]>,
+        base: Reg,
+        check: ReuseCheck,
         span: Span,
     },
     /// `dst = Type { key: value, ...spread }` for an **opaque** `use`-imported type, whose
@@ -826,6 +862,28 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             }
             format!(
                 "MakeRecord  r{dst} <- shape s{shape} {{{}}}",
+                parts.join(", ")
+            )
+        }
+        Op::MakeRecordInPlace {
+            dst,
+            shape,
+            named,
+            base,
+            check,
+            ..
+        } => {
+            let mut parts: Vec<String> = named
+                .iter()
+                .map(|(slot, r)| format!("s{slot}=r{r}"))
+                .collect();
+            parts.push(format!("..r{base}"));
+            let tag = match check {
+                ReuseCheck::Runtime => "rt",
+                ReuseCheck::Static => "static",
+            };
+            format!(
+                "MakeRecIP   r{dst} <- shape s{shape} {{{}}} [{tag}]",
                 parts.join(", ")
             )
         }

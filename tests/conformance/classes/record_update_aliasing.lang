@@ -1,0 +1,23 @@
+// Record-update reuse must preserve immutable value semantics under aliasing: a snapshot `b = acc`
+// taken before a self-update is never mutated by it. Binding `acc` to `b` makes `acc` non-linear, so
+// the compiler cannot use the static (check-elided) reuse path; at runtime the accumulator's
+// refcount is > 1, so the update copies instead of mutating in place — `b` still sees the old value.
+// Both backends agree (the static analysis only ever *removes* a runtime check it could prove
+// redundant, so an aliased accumulator behaves identically everywhere).
+// expect: stdout "9 USD"
+// expect: stdout "1 USD"
+// expect: exit 0
+class Money {
+    amount: int
+    currency: string
+
+    fn show(): string {
+        return "${amount} ${currency}";
+    }
+}
+
+mut acc = Money { amount: 1, currency: "USD" };
+b = acc;
+acc = Money { ...acc, amount: 9 };
+echo acc.show();
+echo b.show();

@@ -36,7 +36,7 @@ use std::rc::Rc;
 
 use lang_ast::{BinaryOp, Program};
 use lang_backend::{Backend, RunResult};
-use lang_bytecode::{BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op};
+use lang_bytecode::{BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, ReuseCheck};
 use lang_compiler::{Unsupported, compile};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_gc::{release, retain};
@@ -1944,6 +1944,97 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
                     frames[top].pc += 1;
                 }
+                Op::MakeRecordInPlace {
+                    dst,
+                    shape,
+                    named,
+                    base,
+                    check,
+                    span,
+                } => {
+                    let shape = self.shapes[*shape as usize].clone();
+                    // The base is consumed: take its single reference out of the register without
+                    // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
+                    // below still counts the accumulator's reference and a `dst == base` store is
+                    // safe (the old occupant is now `unit`).
+                    let base_val = frames[top].regs[*base as usize];
+                    frames[top].regs[*base as usize] = Value::unit();
+                    let same_shape = base_val.object_shape_ptr() == Some(Rc::as_ptr(&shape));
+                    let reuse = match check {
+                        ReuseCheck::Static => {
+                            // The linearity analysis proved sole ownership, so the **refcount** check
+                            // is elided — this is the compile-time-hoisted uniqueness path. The debug
+                            // assertion documents (and, in debug builds, guards) that invariant; a
+                            // failure means the analysis is wrong. The shape is still guarded (a
+                            // well-typed self-update always matches, but a mismatch must fall back to
+                            // copy rather than corrupt the object at the wrong slot layout).
+                            debug_assert!(
+                                base_val.refcount() == 1,
+                                "static record reuse requires a uniquely-owned base"
+                            );
+                            same_shape
+                        }
+                        ReuseCheck::Runtime => same_shape && base_val.refcount() == 1,
+                    };
+                    if reuse {
+                        // Reuse the allocation: overwrite only the changed slots (`set_slot`
+                        // retains the new value and releases the old). Every unchanged field keeps
+                        // base's reference, which transfers into the result — base *is* the result.
+                        for (slot, reg) in named.iter() {
+                            let v = frames[top].regs[*reg as usize];
+                            base_val.set_slot(*slot as usize, v);
+                        }
+                        set_reg(&mut frames[top].regs, *dst, base_val);
+                        frames[top].pc += 1;
+                    } else {
+                        // Aliased or a different shape: build a fresh object exactly like
+                        // `MakeRecord` (spreading base's fields), then release the consumed base.
+                        let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
+                        for (i, field) in shape.fields.iter().enumerate() {
+                            if let Some(value) = base_val.field(field) {
+                                retain(value);
+                                slots[i] = Some(value);
+                            }
+                        }
+                        for (slot, reg) in named.iter() {
+                            let value = frames[top].regs[*reg as usize];
+                            retain(value);
+                            if let Some(old) = slots[*slot as usize].replace(value) {
+                                release(old);
+                            }
+                        }
+                        let missing: Vec<&str> = shape
+                            .fields
+                            .iter()
+                            .zip(&slots)
+                            .filter(|(_, slot)| slot.is_none())
+                            .map(|(name, _)| name.as_str())
+                            .collect();
+                        if !missing.is_empty() {
+                            for slot in slots.into_iter().flatten() {
+                                release(slot);
+                            }
+                            release(base_val);
+                            let list = missing
+                                .iter()
+                                .map(|name| format!("`{name}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ");
+                            return Err(self.error(
+                                DiagnosticCode::MissingField,
+                                *span,
+                                format!(
+                                    "missing field(s) {list} in `{}` literal — every field must be set",
+                                    shape.name
+                                ),
+                            ));
+                        }
+                        let slots = slots.into_iter().map(Option::unwrap).collect();
+                        release(base_val);
+                        set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
+                        frames[top].pc += 1;
+                    }
+                }
                 Op::MakeOpaque {
                     dst,
                     type_name,
@@ -3398,6 +3489,22 @@ mod tests {
             r.stdout,
             "[\"a\", \"b\", \"c\"]\n[\"a\", \"b\"]\n[0, 1, 2]\n"
         );
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn record_update_reuse_paths() {
+        // VM-side record-update reuse (`acc = T { ...acc, … }`). Covers all three runtime paths of
+        // `Op::MakeRecordInPlace`: (1) the STATIC check-elided in-place mutation — a global
+        // blind-overwrite accumulator the linearity analysis cleared, with a HEAP field (`tag`)
+        // whose reference must transfer untouched across the reuse; (2) the RUNTIME copy fallback —
+        // an aliased accumulator (`snap = acc`) must keep `snap` at the pre-update value; (3) the
+        // RUNTIME in-place hit — a global whose update does not read it. Heap fields exercise the
+        // slot retain/release accounting; run under miri to validate refcounts (no UAF/double free).
+        let r = run(
+            "class Point {\n  x: int\n  tag: string\n  fn show(): string { return \"${x} ${tag}\"; }\n}\nmut acc = Point { x: -1, tag: \"k\" };\nfor i in 0..4 {\n  acc = Point { ...acc, x: i };\n}\necho acc.show();\nmut p = Point { x: 1, tag: \"a\" };\nsnap = p;\np = Point { ...p, x: 9 };\necho p.show();\necho snap.show();\n",
+        );
+        assert_eq!(r.stdout, "3 k\n9 a\n1 a\n");
         assert_eq!(r.exit_code, 0);
     }
 

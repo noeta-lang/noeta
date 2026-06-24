@@ -1,0 +1,21 @@
+// A global accumulator that is blind-overwritten each iteration (`Point { ...acc, x: i }` never
+// reads `acc`) and read only *after* the loop is provably linear, so the compiler elides the runtime
+// uniqueness check — the static-reuse path, the compile-time-hoisted half of reuse analysis. The
+// global is stored via the consuming `StoreGlobal`, so it stays uniquely owned across the loop (no
+// `LoadGlobal` retains it into a lingering temporary). The result must equal the copying path.
+// expect: stdout "4 0"
+// expect: exit 0
+class Point {
+    x: int
+    y: int
+
+    fn show(): string {
+        return "${x} ${y}";
+    }
+}
+
+mut acc = Point { x: -1, y: 0 };
+for i in 0..5 {
+    acc = Point { ...acc, x: i };
+}
+echo acc.show();

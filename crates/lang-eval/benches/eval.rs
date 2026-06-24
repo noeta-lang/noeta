@@ -57,6 +57,25 @@ fn accumulate_src(n: usize) -> String {
 /// reveals the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
 const ACC_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
 
+/// A blind-overwrite record accumulator (`acc = Wide { ...acc, f0: i }`) — the tree-walker analogue
+/// of the VM `vm_record_update` bench. Reuse mutates the uniquely-owned object's field map in place
+/// instead of cloning the whole `BTreeMap` + every field reference each step. Eight fields so the
+/// per-step copy cost is visible.
+fn record_update_src(n: usize) -> String {
+    let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
+    let inits: Vec<String> = (0..8).map(|i| format!("f{i}: 0")).collect();
+    format!(
+        "class Wide {{\n    {}\n}}\n\
+         mut acc = Wide {{ {} }};\n\
+         for i in 0..{n} {{\n    \
+            acc = Wide {{ ...acc, f0: i }};\n\
+         }}\n\
+         echo acc.f0;\n",
+        fields.join("\n    "),
+        inits.join(", "),
+    )
+}
+
 fn eval_hot_paths(c: &mut Criterion) {
     let mut group = c.benchmark_group("eval");
     let dispatch = program(&dispatch_src());
@@ -73,6 +92,22 @@ fn eval_hot_paths(c: &mut Criterion) {
         });
     }
     acc.finish();
+
+    // Record-update reuse (tree-walker): `off` disables the fast path (clone the whole field map
+    // each step), `on` mutates the uniquely-owned object in place. Unlike the VM, the tree-walker
+    // reuses even when the update *reads* the accumulator, because Rust drops the read's temporary
+    // promptly — the very last-use behavior the register VM lacks.
+    let mut reuse = c.benchmark_group("eval_record_update");
+    for &n in ACC_SIZES {
+        let prog = program(&record_update_src(n));
+        reuse.bench_with_input(BenchmarkId::new("off", n), &prog, |b, prog| {
+            b.iter(|| black_box(lang_eval::run_without_record_reuse(0, black_box(prog))));
+        });
+        reuse.bench_with_input(BenchmarkId::new("on", n), &prog, |b, prog| {
+            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+        });
+    }
+    reuse.finish();
 }
 
 criterion_group!(benches, eval_hot_paths);

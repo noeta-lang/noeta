@@ -1,0 +1,23 @@
+// Record-update reuse: a self-update accumulator `acc = Point { ...acc, … }` rebuilds the value
+// with some fields overridden and the rest carried over — the generalization of the COW list append
+// to record construction. When `acc` is uniquely owned the backing field map is mutated in place
+// (invisible to the program: records are immutable value types); a field initializer may read the
+// accumulator's own fields (`...acc, x: x + 1`), since overrides are evaluated before the reuse.
+// expect: stdout "0 0"
+// expect: stdout "3 3"
+// expect: exit 0
+class Point {
+    x: int
+    y: int
+
+    fn show(): string {
+        return "${x} ${y}";
+    }
+}
+
+mut acc = Point { x: 0, y: 0 };
+echo acc.show();
+for i in 0..3 {
+    acc = Point { ...acc, x: acc.x + 1, y: acc.y + i };
+}
+echo acc.show();
