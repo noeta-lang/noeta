@@ -1,0 +1,27 @@
+// `#[...]` data attributes attach to record and class fields (properties) too — the most common
+// attribute target (validation, serialization, ORM column mapping). They land in the shared
+// manifest keyed by the qualified `Type.field` name, so `attributes_of::<T>()` surfaces a property
+// target alongside type, function, and method targets. Built statically, so both backends agree.
+// expect: stdout "User.id"
+// expect: stdout "uid"
+// expect: stdout "Account.balance"
+// expect: stdout "bal"
+// expect: exit 0
+type Column = { name: string };
+impl Attribute for Column {}
+
+type User = {
+    #[Column("uid")]
+    id: int,
+    name: string,
+};
+
+class Account {
+    #[Column("bal")]
+    balance: int
+}
+
+for c in attributes_of::<Column>() {
+    echo c.target;      // "User.id", then "Account.balance"
+    echo c.value.name;  // "uid", then "bal"
+}

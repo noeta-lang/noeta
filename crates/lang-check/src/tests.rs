@@ -469,6 +469,20 @@ fn attribute_on_a_function_must_be_an_attribute() {
 }
 
 #[test]
+fn attribute_on_record_and_class_fields_checks_clean() {
+    // A `#[...]` on a record field and on a class field is validated like any other attribute use.
+    let src = "type Column = { name: string };\nimpl Attribute for Column {}\ntype User = {\n  #[Column(\"uid\")]\n  id: int,\n};\nclass Account {\n  #[Column(\"bal\")]\n  balance: int\n}\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn attribute_on_a_field_must_be_an_attribute() {
+    // The E0029 gate reaches field attributes too.
+    let src = "type Plain = { name: string };\ntype User = {\n  #[Plain(\"x\")]\n  id: int,\n};\n";
+    assert_eq!(codes(src), ["E0029"]);
+}
+
+#[test]
 fn attributes_of_on_a_non_attribute_is_rejected() {
     // The capability gate, mirroring a `#[Foo]` use: the type argument must implement `Attribute`.
     let src = "type Plain = { path: string };\nrs = attributes_of::<Plain>();\n";

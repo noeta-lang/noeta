@@ -1296,17 +1296,22 @@ where
                 })
             });
 
-        // Structural record alias: `type Item = { price: float, qty: int };`. Record
-        // fields are comma-separated `name: type` and always immutable.
-        let record_field = id
+        // Structural record alias: `type Item = { price: float, qty: int };`. Record fields are
+        // comma-separated `name: type` and always immutable; a field may carry leading `#[...]`
+        // attributes (P2.4b).
+        let record_field = attr_decl
             .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(id.clone())
             .then_ignore(just(T::Colon))
             .then(type_parser(ctx))
-            .map_with(move |((name, name_span), ty), e| FieldDecl {
+            .map_with(move |((attrs, (name, name_span)), ty), e| FieldDecl {
                 name,
                 name_span,
                 mut_field: false,
                 ty: Some(ty),
+                attrs,
                 span: ctx.to_span(e.span()),
             });
         let record_decl = just(T::TypeKw)
@@ -1334,19 +1339,24 @@ where
                 })
             });
 
-        // Class body member: a field (`mut? name: type`, no terminator) or a method
-        // (`fn ...`). Disambiguated by the leading token (`fn` vs `mut`/name).
-        let class_field = just(T::MutKw)
-            .or_not()
+        // Class body member: a field (`#[...]? mut? name: type`, no terminator) or a method
+        // (`#[...]? fn ...`). Disambiguated by the token after any leading `#[...]` (`fn` vs
+        // `mut`/name). A field may carry leading `#[...]` attributes (P2.4b).
+        let class_field = attr_decl
+            .clone()
+            .repeated()
+            .collect::<Vec<_>>()
+            .then(just(T::MutKw).or_not())
             .then(id.clone())
             .then_ignore(just(T::Colon))
             .then(type_parser(ctx))
-            .map_with(move |((mut_kw, (name, name_span)), ty), e| {
+            .map_with(move |(((attrs, mut_kw), (name, name_span)), ty), e| {
                 ClassMember::Field(FieldDecl {
                     name,
                     name_span,
                     mut_field: mut_kw.is_some(),
                     ty: Some(ty),
+                    attrs,
                     span: ctx.to_span(e.span()),
                 })
             });

@@ -822,6 +822,7 @@ impl Checker {
         let saved = self.enter_type_params(&r.type_params);
         for f in &r.fields {
             self.check_type_opt(&f.ty);
+            self.check_attrs(&f.attrs);
         }
         self.check_derives(&r.derives);
         let standalone = self.standalone_for(&r.name);
@@ -845,6 +846,7 @@ impl Checker {
             .collect();
         for f in &c.fields {
             self.check_type_opt(&f.ty);
+            self.check_attrs(&f.attrs);
         }
         self.check_derives(&c.derives);
         let standalone = self.standalone_for(&c.name);

@@ -275,6 +275,10 @@ pub struct FieldDecl {
     /// Whether the field was declared `mut` (class fields only; always false for records).
     pub mut_field: bool,
     pub ty: Option<TypeRef>,
+    /// Leading `#[...]` data attributes on the field/property (attribute-system pass 2, P2.4b).
+    /// Captured in the reflection manifest like a type's or method's attributes; `@derive` is not
+    /// permitted here. Empty for the common unannotated field.
+    pub attrs: Vec<Attribute>,
     pub span: Span,
 }
 

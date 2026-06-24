@@ -4,7 +4,7 @@
 //! the tree-walker and the VM **by construction** — there is no second walk to drift from the first.
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
-use crate::{AttrArg, AttrValue, Attribute, Program, Stmt};
+use crate::{AttrArg, AttrValue, Attribute, FieldDecl, Program, Stmt};
 
 /// Everything reflection needs about a program, derived purely from its AST.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -81,6 +81,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
         match stmt {
             Stmt::Record(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
+                push_field_attrs(&mut manifest, &decl.name, &decl.fields);
                 types.push(TypeInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Record,
@@ -90,6 +91,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
             }
             Stmt::Class(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
+                push_field_attrs(&mut manifest, &decl.name, &decl.fields);
                 // A method's attributes are keyed by its qualified `Class.method` name, so a
                 // `#[...]` on a method surfaces distinctly from the same name on another class.
                 for method in &decl.methods {
@@ -215,6 +217,15 @@ impl TypeRepr {
 
 /// The `Type` prelude enum's name (the language type `type_of` returns and users match on).
 pub const TYPE_ENUM: &str = "Type";
+
+/// Push each field's `#[...]` attributes, keyed by the qualified `Type.field` name (mirroring the
+/// `Type.method` convention), so a `#[Column(...)]` on a property surfaces distinctly per owner.
+fn push_field_attrs(manifest: &mut Vec<AttributeRecord>, type_name: &str, fields: &[FieldDecl]) {
+    for field in fields {
+        let target = format!("{}.{}", type_name, field.name);
+        push_attrs(manifest, &target, &field.attrs);
+    }
+}
 
 fn push_attrs(manifest: &mut Vec<AttributeRecord>, target: &str, attrs: &[Attribute]) {
     for attr in attrs {
