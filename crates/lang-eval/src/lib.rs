@@ -711,7 +711,7 @@ impl Interpreter {
                     } = value
                     && let Expr::Ident { name: lhs_name, .. } = lhs.as_ref()
                     && lhs_name == name
-                    && !expr_mentions(rhs, name)
+                    && !rhs.mentions(name)
                     && let Some(old) = self.scope.take_mut(name)
                 {
                     let right = match self.eval_expr(rhs) {
@@ -2953,83 +2953,6 @@ fn cow_concat(left: Value, right: Value) -> Value {
             }
         }
         (left, right) => Value::Str(format!("{}{}", left.display(), right.display())),
-    }
-}
-
-/// Whether `name` appears as a free identifier anywhere in `expr`. The copy-on-write fast path uses
-/// this as a correctness guard: it may vacate `name`'s scope slot before evaluating `expr` only if
-/// `expr` does not read `name`. An **over-approximation is safe** — a spurious `true` merely skips
-/// the optimization (the ordinary copy path runs); only a spurious `false` would be a bug, so the
-/// match is exhaustive (no wildcard) to force a decision when a new `Expr` variant is added, and
-/// shadowing (a closure parameter named `name`) is deliberately not modelled — it can only push the
-/// answer toward `true`.
-fn expr_mentions(expr: &Expr, name: &str) -> bool {
-    let any = |exprs: &[Expr]| exprs.iter().any(|e| expr_mentions(e, name));
-    match expr {
-        Expr::Str { .. }
-        | Expr::Int { .. }
-        | Expr::Float { .. }
-        | Expr::Bool { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::RolesOf { .. } => false,
-        Expr::Ident { name: n, .. } => n == name,
-        Expr::Unary { operand, .. } => expr_mentions(operand, name),
-        Expr::Binary { lhs, rhs, .. }
-        | Expr::Pipeline {
-            left: lhs,
-            right: rhs,
-            ..
-        }
-        | Expr::Coalesce {
-            value: lhs,
-            fallback: rhs,
-            ..
-        }
-        | Expr::Index {
-            receiver: lhs,
-            index: rhs,
-            ..
-        }
-        | Expr::Range {
-            start: lhs,
-            end: rhs,
-            ..
-        } => expr_mentions(lhs, name) || expr_mentions(rhs, name),
-        Expr::Call { callee, args, .. } => expr_mentions(callee, name) || any(args),
-        Expr::Closure { params, body, .. } => {
-            expr_mentions(body, name)
-                || params
-                    .iter()
-                    .any(|p| p.default.as_ref().is_some_and(|d| expr_mentions(d, name)))
-        }
-        Expr::List { items, .. } => any(items),
-        Expr::Map { entries, .. } => entries
-            .iter()
-            .any(|(k, v)| expr_mentions(k, name) || expr_mentions(v, name)),
-        Expr::Member { receiver, .. } => expr_mentions(receiver, name),
-        Expr::Interp { parts, .. } => parts.iter().any(|part| match part {
-            lang_ast::StrPart::Literal(_) => false,
-            lang_ast::StrPart::Hole(e) => expr_mentions(e, name),
-        }),
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            expr_mentions(scrutinee, name) || arms.iter().any(|arm| expr_mentions(&arm.body, name))
-        }
-        Expr::Object(lit) => {
-            lit.fields.iter().any(|f| expr_mentions(&f.value, name))
-                || lit.spread.as_ref().is_some_and(|s| expr_mentions(s, name))
-        }
-        Expr::Try { expr, .. }
-        | Expr::As { expr, .. }
-        | Expr::TypeTest { expr, .. }
-        | Expr::TypeOf { value: expr, .. } => expr_mentions(expr, name),
-        Expr::Invoke {
-            recv,
-            name: n,
-            args,
-            ..
-        } => expr_mentions(recv, name) || expr_mentions(n, name) || expr_mentions(args, name),
     }
 }
 

@@ -138,6 +138,30 @@ pub enum Op {
         name: String,
         src: Reg,
     },
+    /// `dst = take(globals[name])` — **move** the global's value into `dst`, leaving `unit` in the
+    /// slot (no retain, unlike `LoadGlobal`). Transfers the single owning reference so a following
+    /// `ConcatInPlace` sees unique ownership (refcount 1) when the global is otherwise unaliased —
+    /// the copy-on-write self-append fast path for a global accumulator (`acc ~= [x]`). The compiler
+    /// re-stores the result with `StoreGlobal`. Raises `UnknownName` at `span` if the global is
+    /// unbound (matching `LoadGlobal`).
+    TakeGlobal {
+        dst: Reg,
+        name: String,
+        span: Span,
+    },
+    /// `dst = lhs ~ rhs`, **consuming `lhs`** (the copy-on-write list-append fast path). `lhs` is the
+    /// taken-out accumulator (its register is left `unit`); `rhs` is borrowed. When `lhs` is a
+    /// uniquely-owned list (`refcount == 1`) its backing buffer is extended in place — O(1)
+    /// amortized; otherwise (an alias keeps the count > 1) it copies, preserving immutable
+    /// semantics. A non-list pairing falls back to display concatenation, identical to `Op::Binary`'s
+    /// `~`. The compiler emits this only for the self-append shape `name = name ~ rhs` where `rhs`
+    /// does not mention `name`.
+    ConcatInPlace {
+        dst: Reg,
+        lhs: Reg,
+        rhs: Reg,
+        span: Span,
+    },
     /// `dst = <closure over proto>` — materialize a function value referencing `proto` and
     /// capturing one cell per entry of `captures` (in order), each becoming an upvalue of the
     /// new closure. A top-level `fn`/closure captures nothing (`captures` is empty).
@@ -719,6 +743,8 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Move { dst, src } => format!("Move        r{dst} <- r{src}"),
         Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {name:?}"),
         Op::StoreGlobal { name, src } => format!("StoreGlobal {name:?} <- r{src}"),
+        Op::TakeGlobal { dst, name, .. } => format!("TakeGlobal  r{dst} <- take({name:?})"),
+        Op::ConcatInPlace { dst, lhs, rhs, .. } => format!("ConcatIP    r{dst} <- r{lhs} ~ r{rhs}"),
         Op::MakeClosure {
             dst,
             proto,

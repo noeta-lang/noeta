@@ -1,9 +1,32 @@
 # P-COW — copy-on-write / unique-owner in-place list append
 
-Status: **eval-side DONE** (commit pending; conformance 217 / differential 210 matched / 0 skipped
-/ backends agree / clippy + fmt clean / miri-clean). VM-side folds into P-GC (still open). Source:
-deferred backlog row "Copy-on-write / unique-owner in-place list append", introduced by L1
-(list-building).
+Status: **DONE — both backends.** Eval-side `7d41021` (O(n²)→O(n), 56× at n=8000). VM-side this
+commit: a dedicated in-place op (NOT the P-GC route — no allocator/uniqueness rework needed, the
+manual refcount already gives uniqueness via `refcount() == 1`), **−93% at n=8000** (11.6ms→824µs),
+closing the eval/VM asymmetry — both backends are now O(n) on the accumulator loop. Conformance 219 /
+differential 212 / 0 skipped / agree / clippy + fmt + miri clean. Source: deferred backlog row
+"Copy-on-write / unique-owner in-place list append", introduced by L1 (list-building).
+
+## VM-side (this commit)
+
+The eval take-out trick ported to the VM's manual-refcount, register/global storage model:
+- **`Op::ConcatInPlace { dst, lhs, rhs }`** — `lhs` is the taken-out accumulator and is *consumed*
+  (its register cleared without release, transferring its single reference). If `lhs.refcount() == 1`
+  the backing `Vec` is extended in place (`Value::list_extend`, retaining each appended element);
+  else it copies (preserving immutable semantics for an alias). Non-list → display concat, identical
+  to `Op::Binary`'s `~`.
+- **`Op::TakeGlobal { dst, name }`** — moves a global's value into a register leaving `unit` (no
+  retain, unlike `LoadGlobal` — that retain is what inflated the count and blocked COW). Needed
+  because a top-level accumulator is a **global**, not a register. A local accumulator skips this
+  (its register *is* the slot; `ConcatInPlace` reads/mutates/re-stores it directly).
+- The compiler detects the self-append shape via the shared `Expr::mentions` guard (lifted into
+  `lang-ast`, now used by both backends) and emits the COW sequence for global + local-register
+  accumulators; **celled-local / upvalue accumulators fall through** to the ordinary (correct)
+  concat — rare, and not worth the extra take-from-cell ops.
+- **Prerequisite fix:** the ordinary concat had a latent heap-element UAF (`122945a`), fixed first.
+
+> **Note (found here):** `Expr::mentions` now lives in `lang-ast` (shared by eval + compiler); the
+> eval-local `expr_mentions` was removed in favor of it.
 
 ## The bug
 

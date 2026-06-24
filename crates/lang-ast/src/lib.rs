@@ -748,6 +748,82 @@ impl Expr {
             Expr::Object(lit) => lit.span,
         }
     }
+
+    /// Whether `name` appears as a free identifier anywhere in this expression. The copy-on-write
+    /// self-append fast path (both backends) uses this as a correctness guard: it may vacate
+    /// `name`'s storage slot before evaluating the right-hand side only if that side does not read
+    /// `name` (else `acc = acc ~ acc` would read the vacated slot). An **over-approximation is
+    /// safe** — a spurious `true` merely skips the optimization (the ordinary copy path runs); only
+    /// a spurious `false` would be a bug, so the match is exhaustive (no wildcard) to force a
+    /// decision when a new variant is added, and shadowing (a closure parameter named `name`) is
+    /// deliberately not modelled — it can only push the answer toward `true`.
+    pub fn mentions(&self, name: &str) -> bool {
+        let any = |exprs: &[Expr]| exprs.iter().any(|e| e.mentions(name));
+        match self {
+            Expr::Str { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::Bool { .. }
+            | Expr::AttributesOf { .. }
+            | Expr::RolesOf { .. } => false,
+            Expr::Ident { name: n, .. } => n == name,
+            Expr::Unary { operand, .. } => operand.mentions(name),
+            Expr::Binary { lhs, rhs, .. }
+            | Expr::Pipeline {
+                left: lhs,
+                right: rhs,
+                ..
+            }
+            | Expr::Coalesce {
+                value: lhs,
+                fallback: rhs,
+                ..
+            }
+            | Expr::Index {
+                receiver: lhs,
+                index: rhs,
+                ..
+            }
+            | Expr::Range {
+                start: lhs,
+                end: rhs,
+                ..
+            } => lhs.mentions(name) || rhs.mentions(name),
+            Expr::Call { callee, args, .. } => callee.mentions(name) || any(args),
+            Expr::Closure { params, body, .. } => {
+                body.mentions(name)
+                    || params
+                        .iter()
+                        .any(|p| p.default.as_ref().is_some_and(|d| d.mentions(name)))
+            }
+            Expr::List { items, .. } => any(items),
+            Expr::Map { entries, .. } => entries
+                .iter()
+                .any(|(k, v)| k.mentions(name) || v.mentions(name)),
+            Expr::Member { receiver, .. } => receiver.mentions(name),
+            Expr::Interp { parts, .. } => parts.iter().any(|part| match part {
+                StrPart::Literal(_) => false,
+                StrPart::Hole(e) => e.mentions(name),
+            }),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => scrutinee.mentions(name) || arms.iter().any(|arm| arm.body.mentions(name)),
+            Expr::Object(lit) => {
+                lit.fields.iter().any(|f| f.value.mentions(name))
+                    || lit.spread.as_ref().is_some_and(|s| s.mentions(name))
+            }
+            Expr::Try { expr, .. }
+            | Expr::As { expr, .. }
+            | Expr::TypeTest { expr, .. }
+            | Expr::TypeOf { value: expr, .. } => expr.mentions(name),
+            Expr::Invoke {
+                recv,
+                name: n,
+                args,
+                ..
+            } => recv.mentions(name) || n.mentions(name) || args.mentions(name),
+        }
+    }
 }
 
 /// A prefix unary operator.

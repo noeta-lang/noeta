@@ -1125,6 +1125,56 @@ impl<'m> Vm<'m> {
                     }
                     frames[top].pc += 1;
                 }
+                Op::TakeGlobal { dst, name, span } => {
+                    // Move the global's value into `dst`, leaving `unit` — no retain, so the single
+                    // owning reference transfers and a following `ConcatInPlace` can see uniqueness.
+                    let v = match self.globals.get_mut(name) {
+                        Some(slot) => std::mem::replace(slot, Value::unit()),
+                        None => {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!("cannot find `{name}` in this scope"),
+                            ));
+                        }
+                    };
+                    set_reg(&mut frames[top].regs, *dst, v);
+                    frames[top].pc += 1;
+                }
+                Op::ConcatInPlace { dst, lhs, rhs, .. } => {
+                    let l = frames[top].regs[*lhs as usize];
+                    let r = frames[top].regs[*rhs as usize];
+                    // `lhs` is consumed: clear its register *without* releasing (a direct overwrite,
+                    // not `set_reg`), so the refcount below still counts the accumulator's reference
+                    // and the single owner is transferred into the result. This also makes a
+                    // `dst == lhs` store safe (the old occupant is now `unit`, not the live list).
+                    frames[top].regs[*lhs as usize] = Value::unit();
+                    let result = if l.is_list() && r.is_list() {
+                        if l.refcount() == 1 {
+                            // Sole owner: extend the backing buffer in place (O(1) amortized). The
+                            // single reference moves from `lhs` into the result.
+                            l.list_extend(r);
+                            l
+                        } else {
+                            // Aliased (refcount > 1): copy, preserving immutable semantics. Retain
+                            // each element into the new list, then drop the accumulator's reference.
+                            let mut items = l.list_items().unwrap();
+                            items.extend(r.list_items().unwrap());
+                            for &item in &items {
+                                item.inc_ref();
+                            }
+                            release(l);
+                            Value::list(items)
+                        }
+                    } else {
+                        // Non-list operand: display concatenation, identical to `Op::Binary`'s `~`.
+                        let s = Value::string(&format!("{}{}", l.display(), r.display()));
+                        release(l);
+                        s
+                    };
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::MakeClosure {
                     dst,
                     proto,
@@ -3331,6 +3381,23 @@ mod tests {
     fn arithmetic_and_concat() {
         let r = run("echo 1 + 2 * 3;\necho \"users/\" ~ 42 ~ \"/profile\";\n");
         assert_eq!(r.stdout, "7\nusers/42/profile\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn cow_in_place_append_paths() {
+        // VM-side copy-on-write self-append (`~=`). Covers: a GLOBAL accumulator (TakeGlobal +
+        // ConcatInPlace) on the unique path (`g ~= ["b"]`) and the aliased path (`h = g; g ~= ["c"]`
+        // — the alias must keep `h` at the pre-append value, so COW copies); and a LOCAL accumulator
+        // inside a function (the register path, int elements). Heap elements (strings) exercise the
+        // element-retain accounting; run under miri to validate refcounts (no UAF / double free).
+        let r = run(
+            "mut g = [\"a\"];\ng ~= [\"b\"];\nh = g;\ng ~= [\"c\"];\necho g;\necho h;\nfn build(): List<int> {\n    mut acc = [];\n    for i in 0..3 {\n        acc ~= [i];\n    }\n    return acc;\n}\necho build();\n",
+        );
+        assert_eq!(
+            r.stdout,
+            "[\"a\", \"b\", \"c\"]\n[\"a\", \"b\"]\n[0, 1, 2]\n"
+        );
         assert_eq!(r.exit_code, 0);
     }
 

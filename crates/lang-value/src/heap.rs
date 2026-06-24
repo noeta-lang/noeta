@@ -141,6 +141,17 @@ pub(crate) fn with_payload<R>(value: Value, f: impl FnOnce(&Payload) -> R) -> R 
     f(&obj.payload)
 }
 
+/// Mutate the payload of a pointer value under a closure, so no reference outlives the object.
+/// The caller must have checked `value.is_pointer()` **and** must hold the only owning reference
+/// (refcount == 1) when the mutation observably changes the value — this is the in-place
+/// copy-on-write path. Single-threaded, so the `&mut` is unaliased.
+pub(crate) fn with_payload_mut<R>(value: Value, f: impl FnOnce(&mut Payload) -> R) -> R {
+    // SAFETY: `value` is a live pointer this module allocated; single-threaded, and the caller
+    // guarantees uniqueness for the COW case, so the `&mut` does not alias another live reference.
+    let obj = unsafe { &mut *obj_ptr(value) };
+    f(&mut obj.payload)
+}
+
 /// Read the current refcount of a pointer value. Used to detect the last reference (so a
 /// destructor can run on the about-to-be-final release). The caller must have checked
 /// `value.is_pointer()`.

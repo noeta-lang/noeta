@@ -1195,6 +1195,24 @@ impl<'m> FnCompiler<'m> {
         // captured upvalues, then globals — mirroring the tree-walker's outward `Scope::assign`),
         // else declare a fresh local.
         if let Some(var) = self.lookup_local(name) {
+            // Copy-on-write self-append (`acc ~= [x]`) for a mutable, non-celled local accumulator:
+            // the accumulator already lives in `var.reg` (its sole owner when unaliased), so the
+            // in-place op reads, mutates, and re-stores it there directly — no take-out op needed.
+            // A celled local is skipped (the value lives behind a shared cell, not the register).
+            if var.mutable
+                && !var.celled
+                && let Some(rhs) = self_append_rhs(name, value)
+            {
+                let rhs_reg = self.alloc_reg();
+                self.expr(rhs, rhs_reg)?;
+                self.code.push(Op::ConcatInPlace {
+                    dst: var.reg,
+                    lhs: var.reg,
+                    rhs: rhs_reg,
+                    span: value.span(),
+                });
+                return Ok(());
+            }
             let t = self.alloc_reg();
             self.expr(value, t)?;
             if !var.mutable {
@@ -1235,6 +1253,32 @@ impl<'m> FnCompiler<'m> {
             self.module.module_globals.get(name).copied()
         };
         if let Some(mutable) = global_mut {
+            // Copy-on-write self-append for a mutable global accumulator. The global has no register,
+            // so `TakeGlobal` moves it into a temp (leaving `unit`, no retain) — the accumulator's
+            // sole reference when unaliased — then the in-place op mutates it and `StoreGlobal`
+            // re-binds the result. Take-out happens before `rhs` is evaluated, matching the
+            // tree-walker (`rhs` cannot read the accumulator: the guard rejected any mention).
+            if mutable && let Some(rhs) = self_append_rhs(name, value) {
+                let acc_reg = self.alloc_reg();
+                self.code.push(Op::TakeGlobal {
+                    dst: acc_reg,
+                    name: name.to_string(),
+                    span: name_span,
+                });
+                let rhs_reg = self.alloc_reg();
+                self.expr(rhs, rhs_reg)?;
+                self.code.push(Op::ConcatInPlace {
+                    dst: acc_reg,
+                    lhs: acc_reg,
+                    rhs: rhs_reg,
+                    span: value.span(),
+                });
+                self.code.push(Op::StoreGlobal {
+                    name: name.to_string(),
+                    src: acc_reg,
+                });
+                return Ok(());
+            }
             let t = self.alloc_reg();
             self.expr(value, t)?;
             if mutable {
@@ -2204,6 +2248,27 @@ impl<'m> FnCompiler<'m> {
         let end = self.code.len() as u32;
         self.patch_jump(jump_pos, end);
         Ok(())
+    }
+}
+
+/// If `value` is the copy-on-write self-append shape `name ~ rhs` (what `name = name ~ rhs` and
+/// `name ~= rhs` produce) and `rhs` does not itself mention `name`, return `rhs`. The guard mirrors
+/// the tree-walker's COW fast path: vacating `name`'s storage slot before evaluating `rhs` is only
+/// sound when `rhs` does not read `name`. A `None` falls through to the ordinary concat lowering.
+fn self_append_rhs<'a>(name: &str, value: &'a Expr) -> Option<&'a Expr> {
+    if let Expr::Binary {
+        op: BinaryOp::Concat,
+        lhs,
+        rhs,
+        ..
+    } = value
+        && let Expr::Ident { name: lhs_name, .. } = lhs.as_ref()
+        && lhs_name == name
+        && !rhs.mentions(name)
+    {
+        Some(rhs)
+    } else {
+        None
     }
 }
 

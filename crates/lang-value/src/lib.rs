@@ -397,6 +397,29 @@ impl Value {
         }
     }
 
+    /// Append `other`'s elements to this list's backing buffer **in place**, retaining each (the
+    /// list takes ownership of one reference per appended element). The caller must guarantee this
+    /// is a uniquely-owned list (`refcount == 1`) — this is the copy-on-write append fast path, so
+    /// mutating the shared buffer is sound only when no other owner can observe it. `other` is
+    /// borrowed (untouched). No-op if either value is not a list.
+    pub fn list_extend(self, other: Value) {
+        debug_assert!(
+            self.is_list() && heap::refcount(self) == 1,
+            "list_extend requires a uniquely-owned list (the COW invariant)"
+        );
+        if let Some(others) = other.list_items() {
+            heap::with_payload_mut(self, |p| {
+                if let Payload::List(items) = p {
+                    items.reserve(others.len());
+                    for o in others {
+                        o.inc_ref();
+                        items.push(o);
+                    }
+                }
+            });
+        }
+    }
+
     /// A shallow copy of a list's elements, if this is a list. The copied values share the
     /// list's references (they are *not* retained); the caller decides whether to retain.
     pub fn list_items(self) -> Option<Vec<Value>> {
