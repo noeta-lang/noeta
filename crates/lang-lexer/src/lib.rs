@@ -88,6 +88,12 @@ pub enum TokenKind {
     /// reflection surface is lexically distinct.
     #[token("type_of")]
     TypeOfKw,
+    /// The reflection keyword `invoke(recv, name, args)` — the fallible by-name invocation
+    /// primitive: dispatch a method (on a value) or an associated function (on a type) by a
+    /// runtime string name, returning `Result`. A keyword for symmetry with the other reflection
+    /// surfaces and so the one surviving runtime-dispatch site is lexically visible.
+    #[token("invoke")]
+    InvokeKw,
 
     // Literals and names
     /// A double-quoted string literal, quotes included. A backslash escapes the next
@@ -251,6 +257,7 @@ impl TokenKind {
             TokenKind::IsKw => "IsKw",
             TokenKind::AttributesOfKw => "AttributesOfKw",
             TokenKind::TypeOfKw => "TypeOfKw",
+            TokenKind::InvokeKw => "InvokeKw",
             TokenKind::ColonColon => "ColonColon",
             TokenKind::StringLit => "StringLit",
             TokenKind::RawStr => "RawStr",
@@ -334,6 +341,7 @@ impl TokenKind {
             TokenKind::IsKw => "`is`",
             TokenKind::AttributesOfKw => "`attributes_of`",
             TokenKind::TypeOfKw => "`type_of`",
+            TokenKind::InvokeKw => "`invoke`",
             TokenKind::ColonColon => "`::`",
             TokenKind::StringLit => "a string literal",
             TokenKind::RawStr => "a raw string literal",

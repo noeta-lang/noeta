@@ -1407,6 +1407,17 @@ impl Interpreter {
                     None => Ok(build_type_value(&eval_type_repr(&v))),
                 }
             }
+            Expr::Invoke {
+                recv,
+                name,
+                args,
+                span,
+            } => {
+                let receiver = self.eval_expr(recv)?;
+                let name_val = self.eval_expr(name)?;
+                let args_val = self.eval_expr(args)?;
+                self.invoke_dynamic(receiver, name_val, args_val, *span)
+            }
             Expr::Interp { parts, .. } => {
                 let mut out = String::new();
                 for part in parts {
@@ -1674,6 +1685,82 @@ impl Interpreter {
                 span,
                 format!("no method `{name}` on {}", receiver.type_name()),
             )),
+        }
+    }
+
+    /// `invoke(recv, name, args)` — fallible by-name dispatch (P2.6). Reuses the same name-keyed
+    /// method tables as `call_method`, but **pre-checks** name resolution and arity so a miss is a
+    /// runtime `Result.Err` rather than a recorded diagnostic. A panic *inside* the invoked body
+    /// still aborts (the `?` propagation below), so only the by-name *resolution* is caught. The
+    /// VM's `Op::Invoke` mirrors this exactly, building identical `Ok`/`Err` values.
+    fn invoke_dynamic(
+        &mut self,
+        receiver: Value,
+        name_val: Value,
+        args_val: Value,
+        span: Span,
+    ) -> Eval<Value> {
+        let Value::Str(method) = &name_val else {
+            return Ok(invoke_err(format!(
+                "invoke name must be a string, found {}",
+                name_val.type_name()
+            )));
+        };
+        let Value::List(items) = &args_val else {
+            return Ok(invoke_err(format!(
+                "invoke args must be a list, found {}",
+                args_val.type_name()
+            )));
+        };
+        let args: Vec<Value> = items.as_ref().clone();
+        match &receiver {
+            // A type handle → an associated function (no receiver).
+            Value::Type(def) => {
+                let Some(closure) = def.methods.get(method) else {
+                    return Ok(invoke_err(format!(
+                        "type `{}` has no associated function `{method}`",
+                        def.name()
+                    )));
+                };
+                let closure = Rc::clone(closure);
+                let required = required_count(&closure.defaults);
+                if args.len() < required || args.len() > closure.params.len() {
+                    return Ok(invoke_err(arity_message(
+                        "associated function",
+                        required,
+                        closure.params.len(),
+                        args.len(),
+                    )));
+                }
+                let result = self.call_closure(&closure, args, span)?;
+                Ok(builtin_enum("Result", "Ok", vec![result]))
+            }
+            // A value → an instance method (the instance's fields are in scope).
+            Value::Object(object) => {
+                let Some(method_closure) = object.def.methods.get(method) else {
+                    return Ok(invoke_err(format!(
+                        "type `{}` has no method `{method}`",
+                        object.def.name()
+                    )));
+                };
+                let object = Rc::clone(object);
+                let method_closure = Rc::clone(method_closure);
+                let required = required_count(&method_closure.defaults);
+                if args.len() < required || args.len() > method_closure.params.len() {
+                    return Ok(invoke_err(arity_message(
+                        "method",
+                        required,
+                        method_closure.params.len(),
+                        args.len(),
+                    )));
+                }
+                let result = self.call_method_on(&object, &method_closure, args, span)?;
+                Ok(builtin_enum("Result", "Ok", vec![result]))
+            }
+            _ => Ok(invoke_err(format!(
+                "cannot invoke on a value of type `{}`",
+                receiver.type_name()
+            ))),
         }
     }
 
@@ -2757,6 +2844,13 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
         variant: variant.to_string(),
         data,
     }))
+}
+
+/// The `Result.Err(msg)` returned when a by-name `invoke` cannot resolve (unknown name, wrong
+/// arity, non-string name, non-list args, or a non-invokable receiver). The VM builds the same
+/// value from `Op::Invoke`'s baked `err_shape`.
+fn invoke_err(message: String) -> Value {
+    builtin_enum("Result", "Err", vec![Value::Str(message)])
 }
 
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).

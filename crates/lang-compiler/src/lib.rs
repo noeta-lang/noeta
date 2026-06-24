@@ -1509,6 +1509,48 @@ impl<'m> FnCompiler<'m> {
                     None => self.code.push(Op::TypeOf { dst, src }),
                 }
             }
+            Expr::Invoke {
+                recv,
+                name,
+                args,
+                span,
+            } => {
+                // The receiver is a value (→ instance method) or a bare type name (→ associated
+                // function). A type name is not an ordinary value expression in the VM, so it is
+                // materialized into a first-class type handle here; any other receiver compiles
+                // normally (yielding an object). Both then flow through the runtime-dispatched
+                // `Op::Invoke`, which classifies the receiver and keys the existing method table.
+                let recv_reg = self.alloc_reg();
+                if let Expr::Ident {
+                    name: type_name, ..
+                } = recv.as_ref()
+                    && self.module.types.contains_key(type_name)
+                {
+                    self.code.push(Op::TypeValue {
+                        dst: recv_reg,
+                        name: type_name.clone(),
+                    });
+                } else {
+                    self.expr(recv, recv_reg)?;
+                }
+                let name_reg = self.alloc_reg();
+                self.expr(name, name_reg)?;
+                let args_reg = self.alloc_reg();
+                self.expr(args, args_reg)?;
+                // The `Result` wrapping shapes are resolved at compile time, so the VM builds
+                // identical `Ok`/`Err` values to the tree-walker's `builtin_enum` path.
+                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
+                let err_shape = self.module.builtin_enum_shape("Result", "Err");
+                self.code.push(Op::Invoke {
+                    dst,
+                    recv: recv_reg,
+                    name: name_reg,
+                    args: args_reg,
+                    ok_shape,
+                    err_shape,
+                    span: *span,
+                });
+            }
             Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
             Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
             Expr::Unary { op, operand, span } => {

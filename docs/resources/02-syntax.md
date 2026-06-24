@@ -593,10 +593,14 @@ match type_of(value) {
     Type.Primitive(p) => "primitive {p}",
 }
 
-instance = some_type.construct(args)?;     // construct-by-name can fail → Result
+// By-name invocation — the single fallible primitive. The name is a runtime string; the result is
+// `Result<dyn, dyn>`. The receiver is a value (→ instance method) or a type (→ associated function,
+// including a constructor — "construct" is just a convention, not a capability).
+result   = invoke(order, method_name, args)?;   // call a method by name      → Result
+instance = invoke(some_type, "new", args)?;     // construct-by-name can fail  → Result
 ```
 
-Runtime reflection is opt-in per type (capability-gated): reflectable types become tree-shaking roots, so unused metadata is eliminated from AOT binaries (architecture §9.8.1).
+Introspection (`type_of`, `attributes_of`) is read-only; invocation is explicitly fallible — an unknown name or wrong arity is a runtime `Result.Err`, never a static error. Runtime reflection is opt-in per type (capability-gated): reflectable types become tree-shaking roots, so unused metadata is eliminated from AOT binaries (architecture §9.8.1).
 
 **Semantic role tags** let an attribute confer a typed architectural *role* on whatever it annotates — declared once on the attribute, inherited by every use. An attribute additionally implements `SemanticRole`, returning a value from a small blessed enum:
 

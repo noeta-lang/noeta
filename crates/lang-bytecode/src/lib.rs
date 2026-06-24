@@ -372,6 +372,28 @@ pub enum Op {
         dst: Reg,
         repr: lang_ast::reflect::TypeRepr,
     },
+    /// `dst = <type handle for `name`>` — materialize a first-class type value (the tree-walker's
+    /// `Value::Type` analogue). Emitted when an `invoke(...)` receiver is a bare type name, so the
+    /// associated-function path has a runtime receiver to dispatch on (P2.6).
+    TypeValue {
+        dst: Reg,
+        name: String,
+    },
+    /// `invoke(recv, name, args)`: `dst = Result<dyn, dyn>` — fallible by-name dispatch. `recv` holds
+    /// an object (→ instance method, keyed `(shape, name)`) or a type handle (→ associated function,
+    /// keyed `(type, name)`); `name` is a runtime `string`; `args` a runtime `List`. An unknown name,
+    /// a non-string name, a non-list args, or an arity mismatch builds `Result.Err(string)` (via
+    /// `err_shape`); a hit pushes a call frame whose result is wrapped in `Result.Ok` (via
+    /// `ok_shape`). A panic inside the invoked body propagates as a normal abort (P2.6).
+    Invoke {
+        dst: Reg,
+        recv: Reg,
+        name: Reg,
+        args: Reg,
+        ok_shape: u32,
+        err_shape: u32,
+        span: Span,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -786,6 +808,14 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         }
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
         Op::TypeOfStatic { dst, repr } => format!("TypeOfStatic r{dst} <- {repr:?}"),
+        Op::TypeValue { dst, name } => format!("TypeValue   r{dst} <- type {name}"),
+        Op::Invoke {
+            dst,
+            recv,
+            name,
+            args,
+            ..
+        } => format!("Invoke      r{dst} <- invoke(r{recv}, r{name}, r{args})"),
         Op::IsType { dst, src, target } => {
             format!("IsType      r{dst} <- r{src} is {target:?}")
         }

@@ -536,6 +536,16 @@ pub enum Expr {
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
     /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
     TypeOf { value: Box<Expr>, span: Span },
+    /// The reflection invocation `invoke(recv, name, args)` — fallible by-name dispatch. `recv` is a
+    /// value (→ instance method) or a bare type name (→ associated function); `name` is a runtime
+    /// `string`; `args` is a runtime `List`. Evaluates to `Result<dyn, dyn>` — `Ok(retval)` on a
+    /// hit, `Err(msg)` when the name is unknown or the arity is wrong (P2.6).
+    Invoke {
+        recv: Box<Expr>,
+        name: Box<Expr>,
+        args: Box<Expr>,
+        span: Span,
+    },
     /// The type-test operator: `expr is T` is a `bool` — `true` if the runtime value is a `T`.
     /// Shares the runtime matcher with [`Expr::As`] (head-constructor match, generics erased) but
     /// yields a plain `bool` rather than `?T`. `ty` is the type written after `is`.
@@ -663,6 +673,7 @@ impl Expr {
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
+            | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }

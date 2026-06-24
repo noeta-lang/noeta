@@ -108,7 +108,7 @@ struct Frame {
 /// register. Used by operator dispatch where the called trait method's raw result needs
 /// post-processing: `!=` calls `Equatable::eq` and negates the resulting `bool`; `< <= > >=` call
 /// `Comparable::compare` and map the resulting `Ordering` variant to a `bool`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum RetTransform {
     /// Pass the value through unchanged (every ordinary call/return).
     None,
@@ -117,6 +117,10 @@ enum RetTransform {
     /// Map a returned `Ordering` enum to this operator's `bool` (for `< <= > >=` dispatched to
     /// `compare`); a non-`Ordering` value passes through (an ill-typed `compare`).
     Ordering(BinaryOp),
+    /// Wrap a by-name invocation's return value in `Result.Ok` (P2.6). The shape is the `Result.Ok`
+    /// variant shape, baked into `Op::Invoke` and cloned in at frame setup; the raw return's
+    /// reference transfers into the enum payload, so the original is *not* released afterward.
+    WrapOk(Rc<Shape>),
 }
 
 impl RetTransform {
@@ -139,6 +143,9 @@ impl RetTransform {
                 }
                 _ => (v, false),
             },
+            // `v`'s reference transfers into the enum payload, so it is *not* a replacement (the
+            // returned `Ok` carries it onward); the caller must not release `v`.
+            RetTransform::WrapOk(shape) => (Value::enum_value(shape, vec![v]), false),
         }
     }
 }
@@ -2029,6 +2036,124 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::TypeValue { dst, name } => {
+                    set_reg(&mut frames[top].regs, *dst, Value::type_value(name));
+                    frames[top].pc += 1;
+                }
+                Op::Invoke {
+                    dst,
+                    recv,
+                    name,
+                    args,
+                    ok_shape,
+                    err_shape,
+                    ..
+                } => {
+                    let recv_val = frames[top].regs[*recv as usize];
+                    let name_val = frames[top].regs[*name as usize];
+                    let args_val = frames[top].regs[*args as usize];
+                    // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
+                    // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
+                    // non-list args, non-invokable receiver, unknown name, arity mismatch — is a
+                    // runtime `Err`, never an abort (only a panic *inside* the called body aborts).
+                    let outcome: Result<(u32, bool, Vec<Value>), String> = 'resolve: {
+                        let Some(method) = name_val.as_string() else {
+                            break 'resolve Err(format!(
+                                "invoke name must be a string, found {}",
+                                name_val.type_name()
+                            ));
+                        };
+                        let Some(arg_items) = args_val.list_items() else {
+                            break 'resolve Err(format!(
+                                "invoke args must be a list, found {}",
+                                args_val.type_name()
+                            ));
+                        };
+                        // A type handle dispatches an associated function (no receiver); an object
+                        // dispatches an instance method (receiver in register 0).
+                        let (type_name, is_assoc) = if recv_val.is_object() {
+                            (recv_val.shape().unwrap().name.clone(), false)
+                        } else if let Some(tn) = recv_val.type_name_of() {
+                            (tn, true)
+                        } else {
+                            break 'resolve Err(format!(
+                                "cannot invoke on a value of type `{}`",
+                                recv_val.type_name()
+                            ));
+                        };
+                        let kind = if is_assoc {
+                            "associated function"
+                        } else {
+                            "method"
+                        };
+                        let Some(&proto) = self.methods.get(&(type_name.clone(), method.clone()))
+                        else {
+                            break 'resolve Err(format!(
+                                "type `{type_name}` has no {kind} `{method}`"
+                            ));
+                        };
+                        // The prototype reserves register 0 for `self` (unit for an associated
+                        // call), so its declared arity is one more than the supplied args; trailing
+                        // defaults widen the accepted range, exactly as `Op::CallMethod`.
+                        let chunk = &module.protos[proto as usize];
+                        let total = chunk.num_params as usize - 1;
+                        let required = total - chunk.defaults.len();
+                        if arg_items.len() < required || arg_items.len() > total {
+                            break 'resolve Err(arity_message(
+                                kind,
+                                required,
+                                total,
+                                arg_items.len(),
+                            ));
+                        }
+                        Ok((proto, is_assoc, arg_items))
+                    };
+                    match outcome {
+                        Err(message) => {
+                            let shape = self.shapes[*err_shape as usize].clone();
+                            let err = Value::enum_value(shape, vec![Value::string(&message)]);
+                            set_reg(&mut frames[top].regs, *dst, err);
+                            frames[top].pc += 1;
+                        }
+                        Ok((proto, is_assoc, arg_items)) => {
+                            let chunk = &module.protos[proto as usize];
+                            let num_registers = chunk.num_registers as usize;
+                            let defaults = chunk.defaults.clone();
+                            let mut new_regs = vec![Value::unit(); num_registers];
+                            // An associated call leaves register 0 as unit (no receiver); an instance
+                            // call places the retained receiver there.
+                            if !is_assoc {
+                                retain(recv_val);
+                                new_regs[0] = recv_val;
+                            }
+                            for (i, &arg) in arg_items.iter().enumerate() {
+                                retain(arg);
+                                new_regs[i + 1] = arg;
+                            }
+                            // Fill any omitted trailing parameters from their default thunks (module
+                            // scope only, like a method frame).
+                            let filled = arg_items.len() + 1;
+                            for (reg, proto) in &defaults {
+                                if *reg as usize >= filled {
+                                    let value = self.run_thunk(*proto, &[])?;
+                                    new_regs[*reg as usize] = value;
+                                }
+                            }
+                            // The result is wrapped in `Result.Ok` as it lands in the caller, so the
+                            // invocation yields a `Result` whichever way the body returns.
+                            let ok = self.shapes[*ok_shape as usize].clone();
+                            frames[top].pc += 1;
+                            frames.push(Frame {
+                                proto,
+                                regs: new_regs,
+                                pc: 0,
+                                ret_dst: *dst,
+                                ret_transform: RetTransform::WrapOk(ok),
+                                upvalues: Vec::new(),
+                            });
+                        }
+                    }
+                }
                 Op::MatchInt { src, value, fail } => {
                     if frames[top].regs[*src as usize].as_int() == Some(*value) {
                         frames[top].pc += 1;
@@ -2977,6 +3102,18 @@ mod tests {
         VmBackend::new()
             .try_run(&parsed.program)
             .expect("program should be in the M1.0 subset")
+    }
+
+    #[test]
+    fn invoke_by_name_wraps_ok_and_err() {
+        // `invoke` dispatches by runtime name: a hit wraps the return in `Result.Ok` (via the
+        // `WrapOk` frame transform); an unknown name / arity mismatch builds `Result.Err`. Exercises
+        // the new type-handle value, the `Op::Invoke` dispatch, and the refcount handoff on return.
+        let r = run(
+            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
+        );
+        assert_eq!(r.stdout, "42\n14\nmiss\n");
+        assert_eq!(r.exit_code, 0);
     }
 
     #[test]

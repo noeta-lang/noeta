@@ -793,6 +793,25 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `invoke(recv, name, args)` — the fallible by-name invocation primitive. A keyword + three
+        // parenthesized, comma-separated operands (receiver, method-name string, argument list),
+        // yielding `Result<dyn, dyn>`.
+        let invoke = just(T::InvokeKw)
+            .ignore_then(
+                expr.clone()
+                    .then_ignore(just(T::Comma))
+                    .then(expr.clone())
+                    .then_ignore(just(T::Comma))
+                    .then(expr.clone())
+                    .delimited_by(just(T::LParen), just(T::RParen)),
+            )
+            .map_with(move |((recv, name), args), e| Expr::Invoke {
+                recv: Box::new(recv),
+                name: Box::new(name),
+                args: Box::new(args),
+                span: ctx.to_span(e.span()),
+            });
+
         let atom = choice((
             int,
             float,
@@ -805,6 +824,7 @@ where
             match_,
             attributes_of,
             type_of,
+            invoke,
             list,
             map,
             set,
@@ -2236,6 +2256,13 @@ mod tests {
         // `type_of(value)` — a keyword + parenthesized operand — parses to a dedicated reflection
         // node carrying the operand expression.
         insta::assert_snapshot!(pretty("x = type_of([1, 2]);"));
+    }
+
+    #[test]
+    fn invoke_parses() {
+        // `invoke(recv, name, args)` — a keyword + three parenthesized, comma-separated operands —
+        // parses to a dedicated reflection node carrying the receiver, name, and argument list.
+        insta::assert_snapshot!(pretty("x = invoke(obj, \"area\", [1, 2]);"));
     }
 
     #[test]

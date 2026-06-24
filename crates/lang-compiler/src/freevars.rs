@@ -270,6 +270,13 @@ fn collect_nested_frees_expr(
             collect_nested_frees_expr(expr, enclosing, globals, out)
         }
         Expr::TypeOf { value, .. } => collect_nested_frees_expr(value, enclosing, globals, out),
+        Expr::Invoke {
+            recv, name, args, ..
+        } => {
+            collect_nested_frees_expr(recv, enclosing, globals, out);
+            collect_nested_frees_expr(name, enclosing, globals, out);
+            collect_nested_frees_expr(args, enclosing, globals, out);
+        }
         Expr::Coalesce {
             value, fallback, ..
         } => {
@@ -446,6 +453,13 @@ fn collect_bindings_expr(expr: &Expr, local: &mut HashSet<String>) {
             collect_bindings_expr(expr, local)
         }
         Expr::TypeOf { value, .. } => collect_bindings_expr(value, local),
+        Expr::Invoke {
+            recv, name, args, ..
+        } => {
+            collect_bindings_expr(recv, local);
+            collect_bindings_expr(name, local);
+            collect_bindings_expr(args, local);
+        }
         Expr::Coalesce {
             value, fallback, ..
         } => {
@@ -632,6 +646,13 @@ fn collect_refs_expr(
             collect_refs_expr(expr, enclosing, globals, out)
         }
         Expr::TypeOf { value, .. } => collect_refs_expr(value, enclosing, globals, out),
+        Expr::Invoke {
+            recv, name, args, ..
+        } => {
+            collect_refs_expr(recv, enclosing, globals, out);
+            collect_refs_expr(name, enclosing, globals, out);
+            collect_refs_expr(args, enclosing, globals, out);
+        }
         Expr::Coalesce {
             value, fallback, ..
         } => {

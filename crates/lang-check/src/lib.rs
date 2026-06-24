@@ -1832,6 +1832,27 @@ impl Checker {
                 }
                 Type::Named("Type".to_string(), Vec::new())
             }
+            Expr::Invoke {
+                recv, name, args, ..
+            } => {
+                // The receiver is either a value (→ instance method) or a bare type name (→
+                // associated function). A bare type name is not an ordinary value expression, so it
+                // is licensed here rather than synthesized; any other receiver is synthesized
+                // normally (it must be well-typed, but its type is unconstrained — dispatch is
+                // dynamic). The name (a `string`) and args (a `List`) are runtime-checked, so they
+                // are synthesized leniently. By-name invocation is fallible by construction:
+                // unknown name / wrong arity are runtime `Err`, never static errors.
+                let recv_is_type = matches!(
+                    recv.as_ref(),
+                    Expr::Ident { name, .. } if self.types.contains(name)
+                );
+                if !recv_is_type {
+                    self.synth(recv, env);
+                }
+                self.synth(name, env);
+                self.synth(args, env);
+                Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn))
+            }
         }
     }
 

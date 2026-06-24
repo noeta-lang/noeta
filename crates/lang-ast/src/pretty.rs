@@ -578,6 +578,20 @@ impl Pretty for Expr {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::Invoke {
+                recv,
+                name,
+                args,
+                span: s,
+            } => {
+                out.push_str(&format!("(invoke {}\n", span(*s)));
+                recv.pretty(out, level + 1);
+                out.push('\n');
+                name.pretty(out, level + 1);
+                out.push('\n');
+                args.pretty(out, level + 1);
+                out.push(')');
+            }
         }
     }
 }

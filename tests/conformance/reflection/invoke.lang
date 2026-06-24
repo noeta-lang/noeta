@@ -1,0 +1,57 @@
+// `invoke(recv, name, args)` — the fallible by-name invocation primitive (P2.6). The
+// method/associated-function name is a runtime string; the result is `Result<dyn, dyn>` —
+// `Ok(retval)` on a hit, `Err(msg)` on an unknown name, a non-string name, a non-list args, or an
+// arity mismatch. The receiver is a value (→ instance method) or a bare type name (→ associated
+// function). Both backends dispatch through the same name-keyed method tables and build identical
+// `Result` values, so they agree by construction.
+// expect: stdout "area=6"
+// expect: stdout "made=20"
+// expect: stdout "miss"
+// expect: stdout "arity"
+// expect: stdout "notstr"
+// expect: exit 0
+
+class Shape {
+    w: int
+    h: int
+    fn new(w: int, h: int): Shape { return Shape { w: w, h: h }; }
+    fn area(): int { return w * h; }
+}
+
+// Instance method by name on a value.
+area = match invoke(Shape.new(2, 3), "area", []) {
+    Ok(v) => "area=${v}",
+    Err(e) => "err=${e}",
+};
+echo area;
+
+// Associated function by name on a type handle; then an instance method on the result.
+made = match invoke(Shape, "new", [4, 5]) {
+    Ok(s) => match invoke(s, "area", []) {
+        Ok(a) => "made=${a}",
+        Err(e) => "err=${e}",
+    },
+    Err(e) => "err=${e}",
+};
+echo made;
+
+// Unknown name → Err.
+miss = match invoke(Shape.new(1, 1), "nope", []) {
+    Ok(_) => "ok",
+    Err(_) => "miss",
+};
+echo miss;
+
+// Wrong arity → Err (associated `new` wants two arguments).
+arity = match invoke(Shape, "new", [1]) {
+    Ok(_) => "ok",
+    Err(_) => "arity",
+};
+echo arity;
+
+// A non-string name → Err (the name is resolved at runtime).
+notstr = match invoke(Shape.new(1, 1), 42, []) {
+    Ok(_) => "ok",
+    Err(_) => "notstr",
+};
+echo notstr;

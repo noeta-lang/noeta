@@ -479,6 +479,22 @@ fn attribute_on_a_method_checks_clean() {
 }
 
 #[test]
+fn invoke_checks_clean_and_yields_a_result() {
+    // `invoke(recv, name, args)` synthesizes `Result<dyn, dyn>`, so its value matches `Ok`/`Err`
+    // arms without diagnostics. The name/args are runtime-checked (no static constraint here).
+    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return w; }\n}\nr = invoke(Shape.new(2), \"area\", []);\necho match r { Ok(_) => \"y\", Err(_) => \"n\" };\n";
+    assert!(codes(src).is_empty());
+}
+
+#[test]
+fn invoke_result_is_a_concrete_result_not_a_hole() {
+    // The result is a concrete `Result<dyn, dyn>`, not a deferring hole, so passing it where an
+    // `int` is expected is a static error (E0007) — proof the synth is precise, not gradual.
+    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return w; }\n}\nfn need_int(n: int): int { return n; }\necho need_int(invoke(Shape.new(1), \"area\", []));\n";
+    assert_eq!(codes(src), ["E0007"]);
+}
+
+#[test]
 fn attribute_on_a_function_must_be_an_attribute() {
     // The E0029 gate applies on a function too: `Plain` is a record but not marked `@attribute`.
     let src = "type Plain = { method: string };\n#[Plain(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";

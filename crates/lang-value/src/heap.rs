@@ -100,6 +100,11 @@ pub(crate) enum Payload {
     /// A first-class prelude builtin (`len`/`map`/`filter`/`sum`) used as a value. A leaf (the
     /// `Builtin` id is plain data); `lang-vm` dispatches it at an indirect call site.
     NativeFn(Builtin),
+    /// A first-class **type handle** (`Circle` as a value): the receiver of a reflective
+    /// associated-function call via `invoke(Circle, "new", args)` (P2.6). A leaf carrying only the
+    /// type's name — the tree-walker's `Value::Type` analogue; `lang-vm` resolves the name into the
+    /// module's method table at the dynamic-dispatch site.
+    Type(String),
     /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
     /// pending write buffer. The whole state machine lives in `lang_stdlib::FileHandle` so it is
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
@@ -198,6 +203,7 @@ pub(crate) fn free(value: Value) {
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::Type(_)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -277,6 +283,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::Type(_)
         | Payload::FileHandle(_) => {}
     }
     out
