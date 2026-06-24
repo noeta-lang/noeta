@@ -1,7 +1,20 @@
 # Generic derives: `@derive(Trait<TypeArg>)`
 
-Status: **planned** (not started). Branch `types-inferred-static`. In scope from the start (per the
-design discussion). Independent of the roles/abstract-types/structured-args plans.
+Status: **DONE** (commit `394178d`; conformance 216 / differential 209 matched / 0-skipped / backends
+agree / clippy + fmt clean / serialize path miri-clean). Branch `types-inferred-static`. The final
+plan of the post-P2.7 arc.
+
+**As built:** `derives` is now `Vec<DeriveSpec { name, args: Vec<TypeRef>, span }>`. A directive
+argument gained an optional **suffix** — `.Variant` (`@role`) or `<Type, …>` (`@derive`, parsed with
+the full type grammar, so `Serialize<Json>`/`Serialize<List<int>>` work) — keeping ONE shared
+directive grammar. `check_derives` validates derivability + generic arity (`BuiltinTrait::generic_arity`,
+only `Serialize`=1) + the `Serialize` format against the blessed `SERIALIZE_FORMATS` (`Json`); arity →
+**E0014**, unknown format → **E0013**. `@derive(Serialize<Json>)` drives the existing structural
+`to_json` codegen (no new op; differential rides the generated method). **Consumer decision (user
+chose):** `Serialize<Format>` is THE serializer, **`ToJson` removed** (fixture migrated), and the
+standalone-impl marker demos that used bare `Serialize` switched to `Clone`. Deferred: additional
+formats beyond `Json`, and `impl`-side generic arity (a bare `impl Serialize for X` is still accepted
+as a no-op marker — `impl` arity isn't checked, only `@derive`).
 
 ## What and why
 
