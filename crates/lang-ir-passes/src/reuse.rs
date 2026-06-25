@@ -210,7 +210,7 @@ fn mark_self_updates(
 /// receiver's backing buffer in place (each returns a new collection structurally derived from the
 /// receiver, with value semantics). The token is name-based — a same-named *user* method is filtered
 /// out at runtime by each backend's receiver-kind check, so a wrong mark only ever costs a copy.
-const REUSE_METHODS: &[&str] = &["set", "remove"];
+const REUSE_METHODS: &[&str] = &["set", "remove", "add"];
 
 /// If `stmt` is `let %t = Var(name).m(args)` for a whitelisted update method `m` whose args do not
 /// mention `name`, return `(%t, name)` — the method self-update shape (`m = m.set(k, v)`, including

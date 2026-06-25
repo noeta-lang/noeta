@@ -178,6 +178,16 @@ fn list_index_write_src(n: usize) -> String {
     )
 }
 
+/// A function-local set accumulator: insert n distinct elements via `s = s.add(i)`. Was O(n² log n)
+/// (each `add` cloned the whole set and re-sorted); the in-place reuse (the receiver register is
+/// consumed and the uniquely-owned canonical buffer binary-search-inserts one element) brings it to
+/// O(n). Parameterized over n so the scaling is visible.
+fn set_accumulate_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    mut s = #{{}};\n    for i in 0..{n} {{\n        s = s.add(i);\n    }}\n    return s.count();\n}}\necho build();\n"
+    )
+}
+
 /// A hot method-call + field-read site on the same receiver every iteration — the monomorphic
 /// dispatch/property pattern P-IC (inline caches) targets beyond the existing `property_access`.
 fn member_dispatch_src(n: usize) -> String {
@@ -300,6 +310,15 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     listidx.finish();
+
+    let mut setacc = c.benchmark_group("vm_set_accumulate");
+    for &n in LOOP_SIZES {
+        let module = compile(&set_accumulate_src(n));
+        setacc.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    setacc.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

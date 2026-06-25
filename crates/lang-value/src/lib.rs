@@ -345,6 +345,76 @@ impl Value {
         }
     }
 
+    /// The first (smallest) element of this canonically-ordered set, if it is a non-empty set —
+    /// an O(1) peek used to check a candidate element's orderability against the set (a set is
+    /// homogeneous in its orderability class, so comparing against the first element suffices)
+    /// before a binary-search insert/remove, without cloning the whole buffer.
+    pub fn set_first(self) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Set(items) => items.first().copied(),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Binary-search-insert `value` into this canonically-ordered set's backing buffer **in place**,
+    /// keeping it sorted and de-duplicated. Returns `true` if `value` was newly inserted (the set
+    /// took ownership, so the caller must transfer a reference), `false` if an equal element was
+    /// already present (a no-op; the caller still owns `value`). The caller must guarantee a
+    /// uniquely-owned set (`refcount == 1`) and that `value` is orderable against the set's elements
+    /// (see [`Value::set_first`]) — the copy-on-write `set.add(x)` fast path, mutating the existing
+    /// buffer (O(n) shift, O(log n) compares) instead of cloning + re-sorting. Returns `false` if
+    /// not a set.
+    pub fn set_insert_sorted(self, value: Value) -> bool {
+        debug_assert!(
+            !self.is_set() || heap::refcount(self) == 1,
+            "set_insert_sorted requires a uniquely-owned set (the COW invariant)"
+        );
+        if self.is_set() {
+            heap::with_payload_mut(self, |p| match p {
+                Payload::Set(items) => match items.binary_search_by(|&item| {
+                    compare_primitive(item, value).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    Ok(_) => false,
+                    Err(pos) => {
+                        items.insert(pos, value);
+                        true
+                    }
+                },
+                _ => false,
+            })
+        } else {
+            false
+        }
+    }
+
+    /// Binary-search-remove an element equal to `target` from this canonical set's backing buffer
+    /// **in place**, returning the removed value (whose reference is handed back to the caller to
+    /// release) or `None` if no equal element was present (a no-op). Same uniqueness + orderability
+    /// contract as [`Value::set_insert_sorted`]; the copy-on-write `set.remove(x)` fast path.
+    pub fn set_remove_sorted(self, target: Value) -> Option<Value> {
+        debug_assert!(
+            !self.is_set() || heap::refcount(self) == 1,
+            "set_remove_sorted requires a uniquely-owned set (the COW invariant)"
+        );
+        if self.is_set() {
+            heap::with_payload_mut(self, |p| match p {
+                Payload::Set(items) => match items.binary_search_by(|&item| {
+                    compare_primitive(item, target).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    Ok(pos) => Some(items.remove(pos)),
+                    Err(_) => None,
+                },
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// The number of elements, if this is a list.
     pub fn list_len(self) -> Option<usize> {
         if self.is_pointer() {

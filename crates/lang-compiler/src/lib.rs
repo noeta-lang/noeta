@@ -1414,6 +1414,21 @@ impl<'m> FnCompiler<'m> {
                     });
                 }
                 self.code.push(Op::Move { dst: var.reg, src });
+                // When the value came from a dead **owned** source (an ANF temp — single-use by the
+                // ANF invariant — or a freshly-materialized constant/global/field), the retaining
+                // `Move` above left a now-redundant alias of it in `src`. Release that alias so the
+                // binding becomes the **sole owner** (a retaining move + this drop = a *consuming*
+                // move). This is what lets an accumulator self-update (`x = x.add(i)`,
+                // `x = T { ...x, … }`) see `refcount == 1` and reuse its backing allocation in place on
+                // the next iteration, rather than the stale temp alias forcing a copy every step. The
+                // binding holds the value, so this is never its last reference — a plain drop. A
+                // *borrowed* source (a live local / `self`) keeps its register and is not dropped.
+                if owned && src != var.reg {
+                    self.code.push(Op::Drop {
+                        reg: src,
+                        relevant: false,
+                    });
+                }
             }
             return Ok(());
         }

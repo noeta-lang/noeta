@@ -1128,6 +1128,60 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// In-place `add`/`remove` for a reuse-marked set self-update (`s = s.add(x)` / `s = s.remove(x)`).
+    /// The receiver has been consumed from its register by the dispatch above. A uniquely-owned set
+    /// mutates its canonical buffer in place via a binary search (the displaced element of a `remove`,
+    /// or nothing for `add`, releases now — matching the copy baseline, which drops the old set); an
+    /// aliased set copies through the ordinary method so the other owner's view is preserved.
+    fn set_update_in_place(
+        &mut self,
+        set: Value,
+        method: lang_stdlib::SetMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if set.refcount() != 1 {
+            // Aliased: copy, then release the reference we consumed from the receiver register.
+            let new = self.call_set_method(set, method, name, args, span)?;
+            release(set);
+            return Ok(new);
+        }
+        if let Err(err) = self.stdlib_arity(name, args, 1, span) {
+            release(set);
+            return Err(err);
+        }
+        let target = args[0];
+        // A target not orderable against the set's class behaves exactly as the copy path: `add`
+        // raises the unorderable error, `remove` finds nothing (a no-op). An empty set is orderable
+        // with anything, so a first-element probe of `None` (empty) takes the in-place path.
+        let orderable = set
+            .set_first()
+            .is_none_or(|first| compare_primitive(first, target).is_some());
+        match method {
+            lang_stdlib::SetMethod::Add => {
+                if !orderable {
+                    release(set);
+                    let error = lang_stdlib::unorderable_error(name);
+                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                }
+                // The set gains an owned reference only when the element is newly inserted.
+                if set.set_insert_sorted(target) {
+                    retain(target);
+                }
+                Ok(set)
+            }
+            lang_stdlib::SetMethod::Remove => {
+                if orderable && let Some(old) = set.set_remove_sorted(target) {
+                    self.release_value(old);
+                }
+                Ok(set)
+            }
+            // Only `add`/`remove` are routed to the in-place path by the dispatch guard.
+            _ => unreachable!("non-update set method on the in-place path"),
+        }
+    }
+
     /// Enforce a collection method's arity, raising the shared `lang-stdlib` arity error.
     fn stdlib_arity(
         &mut self,
@@ -1745,6 +1799,26 @@ impl<'m> Vm<'m> {
                             args.iter().map(|r| frames[top].regs[*r as usize]).collect();
                         frames[top].regs[*recv as usize] = Value::unit();
                         let result = self.list_set_in_place(v, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, result);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    // In-place set self-update (`s = s.add(x)` / `s = s.remove(x)`): a uniquely-owned,
+                    // canonically-ordered set binary-search-inserts/removes one element in its existing
+                    // buffer instead of cloning + re-sorting the whole set.
+                    if *reuse
+                        && v.is_set()
+                        && let Some(set_method) = lang_stdlib::SetMethod::from_name(method)
+                        && matches!(
+                            set_method,
+                            lang_stdlib::SetMethod::Add | lang_stdlib::SetMethod::Remove
+                        )
+                    {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        frames[top].regs[*recv as usize] = Value::unit();
+                        let result =
+                            self.set_update_in_place(v, set_method, method, &arg_values, *span)?;
                         set_reg(&mut frames[top].regs, *dst, result);
                         frames[top].pc += 1;
                         continue;
@@ -3954,6 +4028,20 @@ mod tests {
             "fn build(): string {\n  mut xs = [\"a\", \"b\", \"c\"];\n  for i in 0..3 { xs[i] = \"v${i}\"; }\n  return xs.join(\",\");\n}\necho build();\nmut ys = [\"x\", \"y\"];\nsnap = ys;\nys[0] = \"z\";\necho ys.join(\",\");\necho snap.join(\",\");\n",
         );
         assert_eq!(r.stdout, "v0,v1,v2\nz,y\nx,y\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn set_update_reuse_paths() {
+        // VM-side in-place set update (`s = s.add(x)` / `s = s.remove(x)`). Covers the in-place hit —
+        // a function-local accumulator binary-search-inserts/removes one element in its existing
+        // canonical buffer, including a duplicate `add` (a no-op) and a `remove` — and the copy
+        // fallback — an aliased accumulator (`snap = t`) keeps its value. String elements exercise the
+        // element retain/release accounting; run under miri (no UAF / double free).
+        let r = run(
+            "fn build(): string {\n  mut s = #{};\n  for i in 0..3 { s = s.add(\"v${i}\"); }\n  s = s.add(\"v0\");\n  s = s.remove(\"v1\");\n  return \"${s.count()}\";\n}\necho build();\nmut t = #{\"a\", \"b\"};\nsnap = t;\nt = t.add(\"c\");\nt = t.remove(\"a\");\necho t;\necho snap;\n",
+        );
+        assert_eq!(r.stdout, "2\n{\"b\", \"c\"}\n{\"a\", \"b\"}\n");
         assert_eq!(r.exit_code, 0);
     }
 

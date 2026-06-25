@@ -32,7 +32,7 @@ use lang_span::Span;
 
 use crate::{
     Closure, DefaultThunk, Eval, FieldSpec, Flow, FnBody, Interpreter, RunResult, TreeWalkBackend,
-    TypeDef, Unwind, Value,
+    TypeDef, Unwind, Value, compare_primitive,
 };
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
@@ -714,6 +714,14 @@ impl Interpreter {
                     if matches!(&recv, Value::List(_)) && name == "set" && values.len() == 2 {
                         return self.list_set_in_place(recv, values, *span);
                     }
+                    if matches!(&recv, Value::Set(_)) && values.len() == 1 {
+                        if name == "add" {
+                            return self.set_add_in_place(recv, values, *span);
+                        }
+                        if name == "remove" {
+                            return self.set_remove_in_place(recv, values, *span);
+                        }
+                    }
                     return self.call_method(recv, name, values, *span);
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
@@ -955,6 +963,73 @@ impl Interpreter {
                 new.remove(&key);
                 Ok(Value::Map(Rc::new(new)))
             }
+        }
+    }
+
+    /// In-place set `add` for a marked self-update `s = s.add(x)`, the set analogue of
+    /// [`Interpreter::map_set_in_place`]. A uniquely-owned, canonically-ordered set binary-search-
+    /// inserts `x` at its sorted position (a no-op if an equal element is already present — the
+    /// candidate is discarded, as the copy path's de-duplication discards the duplicate). An
+    /// unorderable element (a runtime error) or an aliased set falls back to the ordinary copy path so
+    /// the result, and any error message, matches exactly. `values` is `[element]`.
+    fn set_add_in_place(&mut self, recv: Value, mut values: Vec<Value>, span: Span) -> Eval<Value> {
+        let Value::Set(mut rc) = recv else {
+            unreachable!("caller checked the receiver is a set")
+        };
+        let value = values.pop().expect("add takes one arg");
+        // A set is homogeneous in its orderability class, so comparing against its first element
+        // settles whether `value` is orderable at all.
+        let orderable = rc
+            .first()
+            .is_none_or(|first| compare_primitive(first, &value).is_some());
+        if !orderable {
+            return self.call_method(Value::Set(rc), "add", vec![value], span);
+        }
+        match Rc::get_mut(&mut rc) {
+            Some(items) => {
+                if let Err(pos) = items.binary_search_by(|item| {
+                    compare_primitive(item, &value).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    items.insert(pos, value);
+                }
+                Ok(Value::Set(rc))
+            }
+            None => self.call_method(Value::Set(rc), "add", vec![value], span),
+        }
+    }
+
+    /// In-place set `remove` for a marked self-update `s = s.remove(x)`, the companion to
+    /// [`Interpreter::set_add_in_place`]. A uniquely-owned set binary-search-removes an element equal
+    /// to `x` (its destructor fires now — matching the copy baseline, which releases it when the old
+    /// set dies); an unorderable target finds nothing (a no-op, the set is unchanged); an aliased set
+    /// copies. `values` is `[element]`.
+    fn set_remove_in_place(
+        &mut self,
+        recv: Value,
+        mut values: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        let Value::Set(mut rc) = recv else {
+            unreachable!("caller checked the receiver is a set")
+        };
+        let target = values.pop().expect("remove takes one arg");
+        let orderable = rc
+            .first()
+            .is_none_or(|first| compare_primitive(first, &target).is_some());
+        if !orderable {
+            return Ok(Value::Set(rc));
+        }
+        match Rc::get_mut(&mut rc) {
+            Some(items) => {
+                if let Ok(pos) = items.binary_search_by(|item| {
+                    compare_primitive(item, &target).unwrap_or(std::cmp::Ordering::Equal)
+                }) {
+                    let old = items.remove(pos);
+                    self.destroy_value(old);
+                }
+                Ok(Value::Set(rc))
+            }
+            None => self.call_method(Value::Set(rc), "remove", vec![target], span),
         }
     }
 

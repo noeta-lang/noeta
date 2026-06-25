@@ -3977,7 +3977,7 @@ fn json_string(s: &str) -> String {
 /// The total order of two primitives for `x.compare(y)`: integers compare exactly, strings
 /// lexically, and any other numeric pairing as `f64`. Returns `None` when the operands are not
 /// comparable (different non-numeric kinds, or a `NaN` float).
-fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
+pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp::Ordering> {
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
