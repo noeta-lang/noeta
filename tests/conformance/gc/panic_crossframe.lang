@@ -1,0 +1,31 @@
+// Panic unwinding across frames (spec §6, Phase 4.2c-ii). A panic in a callee destroys the live
+// locals of every frame it unwinds through, innermost frame first and reverse-construction within
+// each. `inner` panics while holding `c`; the abort then unwinds `outer`, which holds `a` then `b`.
+// Destruction order is `c` (innermost), then `b`, `a` (caller, reverse construction). The VM walks
+// each frame's `frame_locals` list reversed, innermost frame first; the tree-walker fires each
+// aborted scope's `drain_reverse` as the abort climbs the stack — the differential proves they match.
+// expect: stdout "start"
+// expect: stdout "close c"
+// expect: stdout "close b"
+// expect: stdout "close a"
+// expect: exit 1
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    destruct { echo "close ${name}"; }
+}
+
+fn inner(): void {
+    c = R.new("c");
+    panic("boom");
+}
+
+fn outer(): void {
+    a = R.new("a");
+    b = R.new("b");
+    inner();
+}
+
+echo "start";
+outer();
+echo "unreachable";

@@ -307,6 +307,9 @@ impl Interpreter {
                 }
                 let saved = std::mem::replace(&mut self.scope, child);
                 let result = self.eval_ir_block_value(&arm.body, frame, arm.span);
+                if matches!(result, Err(Unwind::Abort)) {
+                    self.fire_aborted_scope();
+                }
                 self.scope = saved;
                 let v = result?;
                 if let Some(dst) = dst {
@@ -394,7 +397,13 @@ impl Interpreter {
     /// machinery (`call_closure`/`call_method_on`) when a closure has an IR body.
     pub(crate) fn exec_ir_fn_body(&mut self, func: &lang_ir::Func) -> Eval<Value> {
         let mut frame = Frame::new(func.temp_count);
-        match self.exec_ir_stmts(&func.body.stmts, &mut frame)? {
+        let result = self.exec_ir_stmts(&func.body.stmts, &mut frame);
+        if matches!(result, Err(Unwind::Abort)) {
+            // A panic abandons this frame: destroy its live locals (reverse-construction) before the
+            // abort unwinds to the caller (Phase 4.2c-ii).
+            self.fire_aborted_scope();
+        }
+        match result? {
             Flow::Return(value) => Ok(value),
             // No explicit return: a bare `break`/`continue` cannot escape a function boundary
             // (the checker rejects one outside a loop), so they fall through like `Normal`.
@@ -431,6 +440,9 @@ impl Interpreter {
         let child = crate::Scope::child(&self.scope);
         let saved = std::mem::replace(&mut self.scope, child);
         let result = self.exec_ir_stmts(&block.stmts, frame);
+        if matches!(result, Err(Unwind::Abort)) {
+            self.fire_aborted_scope();
+        }
         self.scope = saved;
         result
     }
@@ -487,6 +499,9 @@ impl Interpreter {
             self.bind_for_pattern(&child, pattern, element, span)?;
             let saved = std::mem::replace(&mut self.scope, child);
             let flow = self.exec_ir_stmts(&body.stmts, frame);
+            if matches!(flow, Err(Unwind::Abort)) {
+                self.fire_aborted_scope();
+            }
             self.scope = saved;
             match flow? {
                 Flow::Return(value) => return Ok(Flow::Return(value)),

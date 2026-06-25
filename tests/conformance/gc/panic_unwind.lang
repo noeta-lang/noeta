@@ -1,0 +1,28 @@
+// Panic destruction (spec §6, Phase 4.2c-ii). As a panic aborts the program, the live frame locals
+// it unwinds through are destroyed in reverse-construction order before the abort — the one non-local
+// exit the static drop pass cannot place, handled by a runtime teardown both backends drive from the
+// same per-frame construction-ordered local list. `a` and `b` are never read (so they live, undropped,
+// to the panic point), then `panic` aborts: both are destroyed, `b` before `a` (reverse construction),
+// before the program exits 1. The differential proves the VM's per-frame teardown matches the
+// tree-walker's per-scope `drain_reverse`.
+// expect: stdout "start"
+// expect: stdout "made"
+// expect: stdout "close b"
+// expect: stdout "close a"
+// expect: exit 1
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    destruct { echo "close ${name}"; }
+}
+
+fn go(): void {
+    a = R.new("a");
+    b = R.new("b");
+    echo "made";
+    panic("boom");
+}
+
+echo "start";
+go();
+echo "unreachable";

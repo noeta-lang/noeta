@@ -1049,6 +1049,22 @@ impl<'m> Vm<'m> {
     fn run(&mut self, mut frames: Vec<Frame>) -> Result<Value, Abort> {
         let result = self.dispatch(&mut frames);
         if result.is_err() {
+            // Phase 4.2c-ii: a panic unwinds the live frames. Before reclaiming their memory, fire
+            // the `destruct` of every live destructor-bearing frame local — innermost frame first,
+            // reverse-construction within each (the `frame_locals` list reversed) — so an aborting
+            // program destroys its abandoned values deterministically (spec §6). This matches the
+            // tree-walker, which fires each aborted scope's `drain_reverse` as the abort climbs the
+            // call stack. Each fired register is cleared to `unit`, so the plain release below (which
+            // also reclaims temporaries, never destructor-fired in either backend) never double-frees.
+            for fi in (0..frames.len()).rev() {
+                let proto = frames[fi].proto as usize;
+                let count = self.module.protos[proto].frame_locals.len();
+                for idx in (0..count).rev() {
+                    let reg = self.module.protos[proto].frame_locals[idx] as usize;
+                    let v = std::mem::replace(&mut frames[fi].regs[reg], Value::unit());
+                    self.release_value(v);
+                }
+            }
             for frame in &frames {
                 for r in &frame.regs {
                     release(*r);
@@ -3819,6 +3835,19 @@ mod tests {
         );
         assert_eq!(r.stdout, "start\nclose r\nErr(bad)\nend\n");
         assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn panic_destroys_live_frame_locals_in_reverse_construction_order() {
+        // Phase 4.2c-ii: as a panic aborts, the VM's per-frame teardown fires the `destruct` of each
+        // live destructor-bearing frame local (the `frame_locals` list reversed), so `a` and `b` are
+        // destroyed — `b` before `a` — before the program exits 1. They are never read, so they live
+        // undropped to the panic; the panic-aware `coalesce` pinning keeps them in distinct registers.
+        let r = run(
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nfn go(): void {\n  a = R.new(\"a\");\n  b = R.new(\"b\");\n  echo \"made\";\n  panic(\"boom\");\n}\necho \"start\";\ngo();\n",
+        );
+        assert_eq!(r.stdout, "start\nmade\nclose b\nclose a\n");
+        assert_eq!(r.exit_code, 1);
     }
 
     #[test]

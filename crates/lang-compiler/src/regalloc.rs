@@ -45,13 +45,41 @@ pub fn coalesce(chunk: &mut Chunk) {
         return;
     }
     let liveness = Liveness::analyze(&chunk.code, n);
-    let interfere = build_interference(&chunk.code, &liveness, n);
+    let mut interfere = build_interference(&chunk.code, &liveness, n);
+    // Pin the panic-teardown registers (Phase 4.2c-ii): make each interfere with every other
+    // register so colouring gives it a unique slot and never reuses it for another local. Without
+    // this, a destructor-bearing local that dies only at an abort-skipped drop would have its slot
+    // coalesced away and its value lost before the panic teardown fires. Parameters are already
+    // pinned by `color`; temporaries (not in `frame_locals`) are untouched and still coalesce.
+    for &reg in &chunk.frame_locals {
+        let r = reg as usize;
+        for other in 0..n {
+            if other != r {
+                interfere[r].insert(other);
+                interfere[other].insert(r);
+            }
+        }
+    }
     let colors = color(&interfere, n, chunk.num_params as usize);
 
     let new_count = colors.iter().copied().max().map_or(0, |c| c + 1);
     for op in &mut chunk.code {
         remap_op(op, &colors);
     }
+    // Remap the panic-teardown list through the same colouring (it is metadata, not code, so the
+    // op-walk above misses it). Two locals coalesced to one register collapse to one entry —
+    // harmless, since at any panic point only one of them is live and the VM fires a register once.
+    let mut seen = vec![false; new_count];
+    chunk.frame_locals.retain_mut(|reg| {
+        let c = colors[*reg as usize];
+        *reg = c as u16;
+        if seen[c] {
+            false
+        } else {
+            seen[c] = true;
+            true
+        }
+    });
     chunk.num_registers = new_count as u16;
 }
 
@@ -739,6 +767,7 @@ mod tests {
             num_params,
             num_registers,
             defaults: Vec::new(),
+            frame_locals: Vec::new(),
         }
     }
 

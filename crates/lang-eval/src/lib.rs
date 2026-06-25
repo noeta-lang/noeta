@@ -777,6 +777,18 @@ impl Interpreter {
         }
     }
 
+    /// Fire the destructors of the current scope's live values as a **panic/abort unwinds through
+    /// it** (spec §6, Phase 4.2c-ii). Drains the scope in reverse-construction order and runs each
+    /// `destruct` at its last reference — the same `drain_reverse` + `destroy_value` as global
+    /// teardown, but applied to a function/block scope the abort is abandoning. Called at every
+    /// scope boundary on `Unwind::Abort`, so as the abort climbs the call stack each frame's locals
+    /// are destroyed innermost-first; the VM's abort teardown walks the matching per-frame list.
+    fn fire_aborted_scope(&mut self) {
+        for value in self.scope.drain_reverse() {
+            self.destroy_value(value);
+        }
+    }
+
     /// Run an object's destructor if `value` is the last reference to a destructor-carrying
     /// instance, then let it drop. Mirrors the VM's `release_value`.
     fn destroy_value(&mut self, value: Value) {

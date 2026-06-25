@@ -63,11 +63,12 @@ fn conformance_corpus_passes() {
 /// The eval residency is measured on the **Core-IR interpreter** (the migration's Phase-4
 /// reference): its precise last-use drops reclaim a binding promptly rather than at scope
 /// teardown, which breaks `counter_nested_fn`'s capture cycle early — so that program, a known
-/// eval leak under the superseded AST walker, no longer leaks here. The cycles that remain
-/// (`capture_immutable_error`, `recursive_nested_fn`) are rooted in references no single-assignment
-/// local drop reaches, so they still await Phase 6.
+/// eval leak under the superseded AST walker, no longer leaks here. `capture_immutable_error`
+/// **aborts** (an immutable reassignment), and the Phase-4.2c-ii panic/abort teardown now fires its
+/// frame's reclamation as the abort unwinds, so it too no longer leaks. The remaining cycle
+/// (`recursive_nested_fn`) is rooted in references no single-assignment local drop reaches, so it
+/// still awaits Phase 6.
 const KNOWN_LEAKS: &[(&str, &str)] = &[
-    ("eval", "closures/capture_immutable_error.lang"),
     ("eval", "closures/recursive_nested_fn.lang"),
     ("vm", "closures/recursive_nested_fn.lang"),
 ];

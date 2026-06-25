@@ -625,6 +625,12 @@ pub struct Chunk {
     /// Parameters occupy registers `0..num_params` on entry.
     pub num_params: u16,
     pub num_registers: u16,
+    /// The frame's source locals (params + body bindings) in **construction order**, by register —
+    /// the order they come to life as the function runs. On a panic the VM walks this reversed and
+    /// fires the `destruct` of any register still holding a live destructor-bearing value, so an
+    /// aborting program destroys its abandoned frame values deterministically (spec §6, Phase
+    /// 4.2c-ii). Pure metadata: it changes no codegen, and is empty for the placeholder.
+    pub frame_locals: Vec<u16>,
     /// Optional parameters with defaults: each `(register, thunk_proto)` pairs a trailing parameter
     /// register with the zero-argument prototype that computes its default value (against globals
     /// only). When a call omits that argument, the VM runs the thunk to fill the register. Empty for
@@ -644,6 +650,7 @@ impl Chunk {
             num_params: 0,
             num_registers: 0,
             defaults: Vec::new(),
+            frame_locals: Vec::new(),
         }
     }
 

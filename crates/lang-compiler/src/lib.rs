@@ -624,6 +624,9 @@ struct FnCompiler<'m> {
     /// Enclosing-loop jump-patch sites, innermost last. Each `break`/`continue` records a pending
     /// `Jump` here; the loop patches them to its exit / continue target once those are known.
     loops: Vec<LoopCtx>,
+    /// The registers of this function's body locals in **declaration order** — the source of the
+    /// `Chunk.frame_locals` panic-teardown list (params, prepended at `into_chunk`, come first).
+    frame_locals: Vec<Reg>,
 }
 
 /// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
@@ -706,6 +709,7 @@ impl<'m> FnCompiler<'m> {
             enclosing_locals,
             local_layer: HashSet::new(),
             loops: Vec::new(),
+            frame_locals: Vec::new(),
         }
     }
 
@@ -739,6 +743,22 @@ impl<'m> FnCompiler<'m> {
     }
 
     fn into_chunk(self, num_params: u16, defaults: Vec<(u16, u32)>) -> Chunk {
+        // The panic-teardown list, in construction order: parameters (registers `0..num_params`, live
+        // from entry) then body locals in declaration order. Only programs that **define a
+        // destructor** can observe panic teardown, so the list (and the pinning it triggers below) is
+        // populated only then — the common no-destructor case keeps an empty list and full coalescing,
+        // so benchmarks/goldens are untouched.
+        let frame_locals: Vec<u16> = if self.module.destructors.is_empty() {
+            Vec::new()
+        } else {
+            let mut locals: Vec<u16> = (0..num_params).collect();
+            for &reg in &self.frame_locals {
+                if !locals.contains(&reg) {
+                    locals.push(reg);
+                }
+            }
+            locals
+        };
         let mut chunk = Chunk {
             code: self.code,
             consts: self.consts,
@@ -746,10 +766,15 @@ impl<'m> FnCompiler<'m> {
             num_params,
             num_registers: self.next_reg,
             defaults,
+            frame_locals,
         };
-        // Reuse-aware register coalescing (Phase 3.3): shrink the monotonically-allocated register
-        // set onto the smallest slot count liveness allows, so dead values are released promptly on
-        // slot reuse rather than at frame teardown.
+        // Coalescing reuses a dead local's slot for a later one; but a destructor-bearing local that
+        // dies only at an *unreachable* drop (a dead store before a `panic`, whose scope-exit drop the
+        // abort skips) would have its slot reused and its value lost before the panic teardown could
+        // fire its `destruct` — diverging from the tree-walker, which keeps it as a live scope binding.
+        // `coalesce` therefore **pins the `frame_locals` registers** (when present), keeping each in
+        // its own slot so the teardown list stays accurate; temporaries — the bulk of the coalescing
+        // win — still coalesce freely.
         regalloc::coalesce(&mut chunk);
         chunk
     }
@@ -1441,6 +1466,12 @@ impl<'m> FnCompiler<'m> {
         } else if reg != src {
             // A plain adoption (`reg == src`) needs no copy; only a fresh/shadowed slot does.
             self.code.push(Op::Move { dst: reg, src });
+        }
+        // Record this local's home register for the panic-teardown list, in declaration (≈
+        // construction) order. A re-`mut` shadow reuses the slot, so record a register only the first
+        // time it appears; the VM fires each register once anyway (a second is a no-op on `unit`).
+        if !self.frame_locals.contains(&reg) {
+            self.frame_locals.push(reg);
         }
         self.scopes.last_mut().unwrap().insert(
             name.to_string(),
