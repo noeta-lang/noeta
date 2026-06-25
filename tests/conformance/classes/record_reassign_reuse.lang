@@ -1,0 +1,31 @@
+// Whole-value record reassignment `p = Point { … }` (no spread) reuses the old cell in place when `p`
+// is a uniquely-owned reassignment — the loop-accumulator case (`mut p` before the loop, reassigned
+// inside it). Because a record literal sets every field, this is value-identical to the self-update
+// `p = Point { ...p, … }`, which the reuse pass injects. Aliasing still copies: a snapshot taken
+// before a reassignment keeps its own value. Both backends agree.
+// expect: stdout "3 6"
+// expect: stdout "0 0"
+// expect: exit 0
+class Point {
+    x: int
+    y: int
+
+    fn show(): string {
+        return "${x} ${y}";
+    }
+}
+
+fn build(n: int): Point {
+    mut p = Point { x: 0, y: 0 };
+    for i in 0..n {
+        p = Point { x: i, y: i * 2 };
+    }
+    return p;
+}
+
+echo build(4).show();
+
+mut q = Point { x: 0, y: 0 };
+snap = q;
+q = Point { x: 9, y: 9 };
+echo snap.show();

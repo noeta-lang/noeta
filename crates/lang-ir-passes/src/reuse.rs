@@ -62,7 +62,7 @@ use lang_ir::{Arm, Atom, BinaryOp, Block, ClassDef, Decl, Func, Program, Rvalue,
 pub fn thread_reuse(program: &Program) -> Program {
     let own_destructors = collect_own_destructors(&program.top);
     Program {
-        top: rewrite_block(&program.top, &own_destructors),
+        top: rewrite_block(&program.top, &own_destructors, &HashSet::new()),
         temp_count: program.temp_count,
         span: program.span,
     }
@@ -120,16 +120,30 @@ fn collect_own_destructors_into(block: &Block, out: &mut HashSet<String>) {
     }
 }
 
-/// Rewrite a block: first recurse into every nested block / function body, then scan the resulting
-/// statement stream for adjacent self-update pairs and set the reuse token on each.
-fn rewrite_block(block: &Block, own_destructors: &HashSet<String>) -> Block {
+/// Rewrite a block: first recurse into every nested block / function body (threading the running set
+/// of already-bound names so a nested control-flow block sees the names bound before it — e.g. an
+/// accumulator declared before a loop), then scan the resulting statement stream for self-update /
+/// reassignment-reuse pairs and set the reuse token on each. `outer_bound` is the names bound in the
+/// enclosing scope; a nested block inherits them, a function body does not (it starts from its params).
+fn rewrite_block(
+    block: &Block,
+    own_destructors: &HashSet<String>,
+    outer_bound: &HashSet<String>,
+) -> Block {
+    let mut running = outer_bound.clone();
     let stmts: Vec<Stmt> = block
         .stmts
         .iter()
-        .map(|s| rewrite_stmt(s, own_destructors))
+        .map(|s| {
+            let out = rewrite_stmt(s, own_destructors, &running);
+            if let Stmt::Bind { name, .. } = s {
+                running.insert(name.clone());
+            }
+            out
+        })
         .collect();
     Block {
-        stmts: mark_self_updates(stmts, own_destructors),
+        stmts: mark_self_updates(stmts, own_destructors, outer_bound),
         tail: block.tail.clone(),
     }
 }
@@ -144,22 +158,49 @@ fn rewrite_block(block: &Block, own_destructors: &HashSet<String>) -> Block {
 ///   does not itself mention `acc` (else the right side would read the moved-out accumulator). Lists
 ///   have no own destructor and a concat destroys no element (every element lives on in the result),
 ///   so no destructor-exclusion is needed here.
-fn mark_self_updates(mut stmts: Vec<Stmt>, own_destructors: &HashSet<String>) -> Vec<Stmt> {
-    for i in 0..stmts.len().saturating_sub(1) {
-        if let Some((dst, spread_name, type_name)) = object_self_update_candidate(&stmts[i]) {
-            if !own_destructors.contains(&type_name)
-                && rebinds_temp(&stmts[i + 1], &spread_name, dst)
+fn mark_self_updates(
+    mut stmts: Vec<Stmt>,
+    own_destructors: &HashSet<String>,
+    initial_bound: &HashSet<String>,
+) -> Vec<Stmt> {
+    // Names bound before a given point — by an earlier statement here, or in an enclosing scope
+    // (`initial_bound`) — so a `Bind` of one is a **reassignment** (its old value is displaced)
+    // rather than a first declaration: the condition that makes a whole-value record reassignment
+    // reuse-eligible (see `object_reassign_candidate`). Seeding from the enclosing scope is what
+    // catches the common loop accumulator (`mut acc` before the loop, `acc = T { … }` inside it).
+    let mut bound: HashSet<String> = initial_bound.clone();
+    for i in 0..stmts.len() {
+        if i + 1 < stmts.len() {
+            if let Some((dst, spread_name, type_name)) = object_self_update_candidate(&stmts[i]) {
+                if !own_destructors.contains(&type_name)
+                    && rebinds_temp(&stmts[i + 1], &spread_name, dst)
+                {
+                    set_object_reuse(&mut stmts[i]);
+                }
+            } else if let Some((dst, base_name)) = concat_self_append_candidate(&stmts[i])
+                && rebinds_temp(&stmts[i + 1], &base_name, dst)
             {
-                set_object_reuse(&mut stmts[i]);
+                set_binary_reuse(&mut stmts[i]);
+            } else if let Some((dst, base_name)) = method_self_update_candidate(&stmts[i])
+                && rebinds_temp(&stmts[i + 1], &base_name, dst)
+            {
+                set_method_reuse(&mut stmts[i]);
+            } else if let Some((dst, type_name)) = object_reassign_candidate(&stmts[i])
+                && !own_destructors.contains(&type_name)
+                && let Some(target) = bind_target(&stmts[i + 1], dst)
+                && bound.contains(&target)
+            {
+                // A whole-value record reassignment `x = T { … }` (all fields, no spread). Because a
+                // record literal sets *every* field, it is semantically identical to the self-update
+                // `x = T { ...x, … }` (the spread is fully overridden) — so injecting the `...x` spread
+                // makes it a self-update the existing reuse path turns into an in-place overwrite of
+                // `x`'s old cell. Sound because the type system fixes `x`'s type, so `...x` is always a
+                // valid same-shape spread at this point.
+                inject_object_reassign_reuse(&mut stmts[i], &target);
             }
-        } else if let Some((dst, base_name)) = concat_self_append_candidate(&stmts[i])
-            && rebinds_temp(&stmts[i + 1], &base_name, dst)
-        {
-            set_binary_reuse(&mut stmts[i]);
-        } else if let Some((dst, base_name)) = method_self_update_candidate(&stmts[i])
-            && rebinds_temp(&stmts[i + 1], &base_name, dst)
-        {
-            set_method_reuse(&mut stmts[i]);
+        }
+        if let Stmt::Bind { name, .. } = &stmts[i] {
+            bound.insert(name.clone());
         }
     }
     stmts
@@ -253,6 +294,66 @@ fn atom_is_var(atom: &Atom, name: &str) -> bool {
     matches!(atom, Atom::Var { name: n, .. } if n == name)
 }
 
+/// If `stmt` is `let %t = Type { … }` with **no** spread (a whole-value record/class literal), return
+/// `(%t, Type)` — a reassignment-reuse candidate (the caller still checks the result is reassigned to
+/// an already-bound binding). A literal *with* a spread is a self-update, handled separately.
+fn object_reassign_candidate(stmt: &Stmt) -> Option<(Temp, String)> {
+    let Stmt::Let {
+        dst,
+        rvalue:
+            Rvalue::Object {
+                spread: None,
+                type_name,
+                ..
+            },
+        ..
+    } = stmt
+    else {
+        return None;
+    };
+    Some((*dst, type_name.clone()))
+}
+
+/// If `stmt` is `name = %t` for the given temp, return the reassigned `name`. The dual of
+/// [`rebinds_temp`] for the cases that need the bound name rather than just a yes/no.
+fn bind_target(stmt: &Stmt, dst: Temp) -> Option<String> {
+    match stmt {
+        Stmt::Bind {
+            name,
+            value: Atom::Temp(t),
+            ..
+        } if *t == dst => Some(name.clone()),
+        _ => None,
+    }
+}
+
+/// Turn a whole-value record reassignment `let %t = Type { … }` into the self-update
+/// `let %t = Type { ...target, … }` and mark it for reuse: the injected spread is the binding the
+/// result is reassigned to, so the existing in-place path reuses its old cell (every field is
+/// overwritten, since a record literal sets them all). The spread carries the object's own span.
+fn inject_object_reassign_reuse(stmt: &mut Stmt, target: &str) {
+    if let Stmt::Let {
+        rvalue:
+            Rvalue::Object {
+                spread,
+                reuse,
+                span,
+                ..
+            },
+        ..
+    } = stmt
+    {
+        *spread = Some((
+            Atom::Var {
+                name: target.to_string(),
+                span: *span,
+            },
+            *span,
+        ));
+        *reuse = true;
+    }
+}
+
 /// Whether `stmt` is `name = %t` — the reassignment of the spread base to the constructor's result,
 /// confirming the self-update.
 fn rebinds_temp(stmt: &Stmt, name: &str, dst: Temp) -> bool {
@@ -300,7 +401,7 @@ fn set_method_reuse(stmt: &mut Stmt) {
 
 /// Recurse into a statement's nested blocks and function bodies, returning it with reuse tokens
 /// threaded throughout. Straight-line statements with no sub-structure are returned unchanged.
-fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>) -> Stmt {
+fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>, bound: &HashSet<String>) -> Stmt {
     match stmt {
         Stmt::Let { dst, rvalue, span } => Stmt::Let {
             dst: *dst,
@@ -318,13 +419,13 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>) -> Stmt {
             span,
         } => Stmt::If {
             cond: cond.clone(),
-            then_block: rewrite_block(then_block, od),
-            else_block: else_block.as_ref().map(|b| rewrite_block(b, od)),
+            then_block: rewrite_block(then_block, od, bound),
+            else_block: else_block.as_ref().map(|b| rewrite_block(b, od, bound)),
             span: *span,
         },
         Stmt::While { cond, body, span } => Stmt::While {
-            cond: rewrite_block(cond, od),
-            body: rewrite_block(body, od),
+            cond: rewrite_block(cond, od, bound),
+            body: rewrite_block(body, od, bound),
             span: *span,
         },
         Stmt::For {
@@ -335,7 +436,7 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>) -> Stmt {
         } => Stmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
-            body: rewrite_block(body, od),
+            body: rewrite_block(body, od, bound),
             span: *span,
         },
         Stmt::Match {
@@ -349,7 +450,7 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>) -> Stmt {
                 .iter()
                 .map(|arm| Arm {
                     pattern: arm.pattern.clone(),
-                    body: rewrite_block(&arm.body, od),
+                    body: rewrite_block(&arm.body, od, bound),
                     span: arm.span,
                 })
                 .collect(),
@@ -366,7 +467,7 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>) -> Stmt {
             dst: *dst,
             op: *op,
             left: left.clone(),
-            right: rewrite_block(right, od),
+            right: rewrite_block(right, od, bound),
             span: *span,
         },
         Stmt::Coalesce {
@@ -377,7 +478,7 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>) -> Stmt {
         } => Stmt::Coalesce {
             dst: *dst,
             value: value.clone(),
-            fallback: rewrite_block(fallback, od),
+            fallback: rewrite_block(fallback, od, bound),
             span: *span,
         },
         Stmt::Decl(decl) => Stmt::Decl(rewrite_decl(decl, od)),
@@ -402,12 +503,16 @@ fn rewrite_rvalue(rvalue: &Rvalue, od: &HashSet<String>) -> Rvalue {
     }
 }
 
-/// Rewrite a function/method/destructor body, threading reuse tokens through it.
+/// Rewrite a function/method/destructor body, threading reuse tokens through it. A function body
+/// starts a **fresh** bound scope seeded with its parameters (it does not inherit the enclosing
+/// block's names): a closure captures outer variables by cell, so reassigning a captured variable
+/// inside it must not be reuse-injected (the cell may be aliased by the outer scope).
 fn rewrite_func(func: &Func, od: &HashSet<String>) -> Func {
+    let params: HashSet<String> = func.params.iter().cloned().collect();
     Func {
         params: func.params.clone(),
         defaults: func.defaults.clone(),
-        body: rewrite_block(&func.body, od),
+        body: rewrite_block(&func.body, od, &params),
         temp_count: func.temp_count,
         span: func.span,
     }

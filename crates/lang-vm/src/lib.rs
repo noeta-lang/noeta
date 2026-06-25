@@ -3844,6 +3844,21 @@ mod tests {
     }
 
     #[test]
+    fn record_reassign_reuse_paths() {
+        // VM-side whole-value record reassignment reuse (`p = P { … }`, no spread; Phase 5 general
+        // reassignment). The reuse pass injects a `...p` spread (a record literal sets every field, so
+        // it is value-identical), so this lowers to `MakeRecordInPlace` overwriting *all* slots — the
+        // in-place hit reuses `p`'s cell across the loop (its displaced HEAP field `tag` released each
+        // step), while an aliased reassignment (`snap = q`) copies to preserve `snap`. Run under miri to
+        // validate the all-slot overwrite's retain/release accounting (no UAF / double free).
+        let r = run(
+            "class P {\n  n: int\n  tag: string\n  fn show(): string { return \"${n} ${tag}\"; }\n}\nfn build(): string {\n  mut p = P { n: 0, tag: \"a\" };\n  for i in 0..3 { p = P { n: i, tag: \"t${i}\" }; }\n  return p.show();\n}\necho build();\nmut q = P { n: 1, tag: \"x\" };\nsnap = q;\nq = P { n: 9, tag: \"y\" };\necho q.show();\necho snap.show();\n",
+        );
+        assert_eq!(r.stdout, "2 t2\n9 y\n1 x\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn record_update_reuse_with_self_read() {
         // Drop insertion (Step B): a self-update that *reads* the accumulator
         // (`acc = Point { ...acc, x: acc.x + 1 }`) reuses in place — the `Drop` after the `acc.x`
