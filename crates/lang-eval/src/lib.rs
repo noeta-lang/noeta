@@ -141,8 +141,12 @@ impl Session {
     /// reuse passes are run (exactly as the bytecode pipeline does), and the top-level statements
     /// execute in the **persistent** global scope with a fresh per-batch temporary frame, so
     /// bindings, `fn`/`type`/`enum`/`class` declarations, and id continuity survive across entries.
-    /// A program outside the lowering's subset falls back to the AST tree-walker (the total
-    /// reference), preserving totality until the lowering is total (migration Phase 7).
+    ///
+    /// There is **no AST-walker fallback**: lowering is total over the parsed language (no
+    /// `Unsupported` is ever produced) and is purely syntactic, so every successfully-parsed REPL
+    /// batch lowers. Keeping a fallback would mean a second, *divergent* semantics (the walker fires
+    /// destructors only at teardown), so it is deliberately absent — the REPL has exactly one
+    /// execution model, the canonical one.
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
         self.interp.stdout.clear();
         self.interp.diagnostics.clear();
@@ -151,29 +155,25 @@ impl Session {
         // value is captured in scope (and read back for the REPL to echo) while it is evaluated
         // exactly once on the IR path.
         let (lowerable, captures_value) = rewrite_trailing_expr(program);
-        let value = match lang_ir::lower(&lowerable) {
-            Ok(ir) => {
-                // Mirror the bytecode pipeline: precise-RC drops (no checker in the REPL, so drops
-                // are conservatively destructor-relevant) then reuse tokens. Reflection is rebuilt
-                // from this batch so within-entry `attributes_of`/`roles_of`/type queries resolve.
-                let ir = lang_ir_passes::insert_drops(&ir, None);
-                let ir = lang_ir_passes::thread_reuse(&ir);
-                self.interp.reflection = lang_ast::reflect::build(&lowerable);
-                let flow = self.interp.run_ir_batch(&ir);
-                // Only a cleanly-completed batch yields a value; a `return`/error before the
-                // sentinel binding leaves nothing to echo.
-                match (flow, captures_value) {
-                    (Ok(Flow::Normal), true) => self
-                        .interp
-                        .scope
-                        .lookup(REPL_VALUE)
-                        .filter(|v| !matches!(v, Value::Unit))
-                        .map(|v| v.display()),
-                    _ => None,
-                }
-            }
-            // Outside the lowering's subset: fall back to the AST walker (the total reference).
-            Err(_) => self.eval_ast(program),
+        let ir = lang_ir::lower(&lowerable)
+            .expect("Core-IR lowering is total over the parsed language (the REPL only feeds parsed programs)");
+        // Mirror the bytecode pipeline: precise-RC drops (no checker in the REPL, so drops are
+        // conservatively destructor-relevant) then reuse tokens. Reflection is rebuilt from this
+        // batch so within-entry `attributes_of`/`roles_of`/type queries resolve.
+        let ir = lang_ir_passes::insert_drops(&ir, None);
+        let ir = lang_ir_passes::thread_reuse(&ir);
+        self.interp.reflection = lang_ast::reflect::build(&lowerable);
+        let flow = self.interp.run_ir_batch(&ir);
+        // Only a cleanly-completed batch yields a value; a `return`/error before the sentinel
+        // binding leaves nothing to echo.
+        let value = match (flow, captures_value) {
+            (Ok(Flow::Normal), true) => self
+                .interp
+                .scope
+                .lookup(REPL_VALUE)
+                .filter(|v| !matches!(v, Value::Unit))
+                .map(|v| v.display()),
+            _ => None,
         };
 
         SessionOutput {
@@ -181,36 +181,6 @@ impl Session {
             diagnostics: std::mem::take(&mut self.interp.diagnostics),
             value,
         }
-    }
-
-    /// The AST-walker fallback for a batch the Core IR cannot lower yet. Mirrors the historical
-    /// session loop: run each statement in the persistent scope, echo a trailing bare expression's
-    /// non-unit value. (The walker fires destructors only at session end, which never comes, so its
-    /// destruction timing differs from the IR path — acceptable for the residual unlowered set,
-    /// which is empty over the corpus and shrinking to nothing by Phase 7.)
-    fn eval_ast(&mut self, program: &Program) -> Option<String> {
-        let mut value = None;
-        let last = program.stmts.len().saturating_sub(1);
-        for (i, stmt) in program.stmts.iter().enumerate() {
-            if i == last
-                && let Stmt::Expr { expr, .. } = stmt
-            {
-                if let Ok(v) = self.interp.eval_expr(expr)
-                    && !matches!(v, Value::Unit)
-                {
-                    value = Some(v.display());
-                }
-                break;
-            }
-            match self.interp.exec_stmt(stmt) {
-                Ok(Flow::Normal) => {}
-                // `break`/`continue` cannot occur at the top level (the checker rejects them
-                // outside a loop); treat as a no-op for exhaustiveness.
-                Ok(Flow::Break) | Ok(Flow::Continue) => {}
-                Ok(Flow::Return(_)) | Err(_) => break,
-            }
-        }
-        value
     }
 }
 

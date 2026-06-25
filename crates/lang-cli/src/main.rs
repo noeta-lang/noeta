@@ -13,7 +13,7 @@ use clap::{Parser, Subcommand};
 use lang_conformance::{Stage, run_corpus, run_differential, run_leak_check};
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Session, SessionOutput, TreeWalkBackend};
-use lang_lexer::lex;
+use lang_lexer::{TokenKind, lex};
 use lang_loader::Linked;
 use lang_parser::parse;
 use lang_span::{Source, SourceId, SourceMap};
@@ -110,30 +110,24 @@ fn run_linked(linked: &Linked) -> i32 {
         }
     };
     // Lower + insert the precise-RC drops exactly as the bytecode pipeline does (with the same
-    // destructor-relevance annotation), so `lang run` matches the reference. A program outside the
-    // lowering's subset falls back to the AST walker, the total reference (none in the corpus today).
+    // destructor-relevance annotation), so `lang run` matches the reference, then thread reuse
+    // tokens (Phase 5). There is no AST-walker fallback: lowering is total over the parsed language
+    // (it never produces `Unsupported`) and is purely syntactic, so every loaded program lowers —
+    // and a fallback would be a second, divergent destruction semantics.
     let relevance = lang_ir_passes::Relevance {
         locals: checked.destructor_relevance.locals.clone(),
         params: checked.destructor_relevance.params.clone(),
     };
-    let result = match lang_ir::lower(&linked.program) {
-        Ok(ir) => {
-            let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
-            // Thread reuse tokens (Phase 5), matching the bytecode pipeline and the reference runner.
-            let ir = lang_ir_passes::thread_reuse(&ir);
-            TreeWalkBackend::new().run_ir_with_host(
-                &linked.program,
-                &ir,
-                Box::new(host),
-                checked.type_of_sites,
-            )
-        }
-        Err(_) => TreeWalkBackend::new().run_with_host_sites(
-            &linked.program,
-            Box::new(host),
-            checked.type_of_sites,
-        ),
-    };
+    let ir = lang_ir::lower(&linked.program)
+        .expect("Core-IR lowering is total over the parsed language");
+    let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
+    let ir = lang_ir_passes::thread_reuse(&ir);
+    let result = TreeWalkBackend::new().run_ir_with_host(
+        &linked.program,
+        &ir,
+        Box::new(host),
+        checked.type_of_sites,
+    );
     print!("{}", result.stdout);
     let _ = io::stdout().flush();
     emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
@@ -259,6 +253,16 @@ fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplSte
         return ReplStep::Consumed;
     }
 
+    // An entry with unclosed `(`/`{`/`[` is a multi-line definition still being typed (a `class`,
+    // a `fn` body, a multi-line list/object literal). The parser may report a *non*-end-of-input
+    // error inside such a buffer rather than cleanly running out of tokens, so the end-of-input
+    // check below is not enough on its own — gather more lines until the delimiters balance. The
+    // count is over lexer tokens, so braces inside string/template literals (a single token) and
+    // `${…}` interpolation never miscount.
+    if unclosed_delimiters(&lexed.tokens) {
+        return ReplStep::Incomplete;
+    }
+
     // Only end-of-input errors → the entry is unfinished; gather more lines.
     if diags
         .iter()
@@ -271,6 +275,22 @@ fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplSte
     *entry_no += 1;
     emit_diagnostics(&source, diags.iter());
     ReplStep::Consumed
+}
+
+/// Whether `tokens` has more opening than closing delimiters — i.e. a `(`/`{`/`[` left unclosed, the
+/// signature of a multi-line REPL entry still being typed. A single net depth across all three kinds
+/// is enough to decide *incompleteness* (the parser validates correct nesting once the buffer is
+/// balanced); a buffer that closes more than it opens (net ≤ 0) is left to the parser to report.
+fn unclosed_delimiters(tokens: &[lang_lexer::Token]) -> bool {
+    let mut depth: i32 = 0;
+    for token in tokens {
+        match token.kind {
+            TokenKind::LParen | TokenKind::LBrace | TokenKind::LBracket => depth += 1,
+            TokenKind::RParen | TokenKind::RBrace | TokenKind::RBracket => depth -= 1,
+            _ => {}
+        }
+    }
+    depth > 0
 }
 
 /// Print a session evaluation's stdout, the value of a trailing bare expression (if any),
@@ -345,4 +365,31 @@ fn cmd_leaks(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode 
 
 fn exit_code(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn toks(src: &str) -> Vec<lang_lexer::Token> {
+        lex(&Source::new(SourceId::FIRST, "<t>", src.to_string())).tokens
+    }
+
+    #[test]
+    fn unclosed_delimiters_detects_in_progress_multiline_entries() {
+        // Open `{`/`(`/`[` with no match → still being typed (a `class`, `fn` body, or literal).
+        assert!(unclosed_delimiters(&toks("class Res {")));
+        assert!(unclosed_delimiters(&toks(
+            "fn run(): void {\n  mut r = Res.new(3);"
+        )));
+        assert!(unclosed_delimiters(&toks("[1,\n 2,")));
+        assert!(unclosed_delimiters(&toks("f(")));
+        // Balanced (or over-closed) → let the parser decide, not "incomplete".
+        assert!(!unclosed_delimiters(&toks("class Res { id: int }")));
+        assert!(!unclosed_delimiters(&toks("[1, 2, 3]")));
+        assert!(!unclosed_delimiters(&toks("x = 5;")));
+        assert!(!unclosed_delimiters(&toks("}")));
+        // Braces inside a template string are one token — they never miscount.
+        assert!(!unclosed_delimiters(&toks("echo \"drop ${id}\";")));
+    }
 }
