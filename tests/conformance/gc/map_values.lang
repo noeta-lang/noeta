@@ -1,0 +1,26 @@
+// A map releases its values in sorted-key order (spec §4) — the canonical order both backends share
+// (eval's `BTreeMap`, the VM's sorted-key slots). The keys are strings (no destructors); the values
+// are destructor-bearing `Leaf`s. When the map dies at the end of `go`, its values are released in
+// key order, so the destructors fire `a`, `b`, `c` regardless of literal order. Proves the map walk
+// and its ordering agree across backends.
+// expect: stdout "start"
+// expect: stdout "built"
+// expect: stdout "drop leaf a"
+// expect: stdout "drop leaf b"
+// expect: stdout "drop leaf c"
+// expect: stdout "end"
+// expect: exit 0
+class Leaf {
+    tag: string
+    fn new(tag: string): Leaf { return Leaf { tag: tag }; }
+    destruct { echo "drop leaf ${tag}"; }
+}
+
+fn go(): void {
+    m = {"c": Leaf.new("c"), "a": Leaf.new("a"), "b": Leaf.new("b")};
+    echo "built";
+}
+
+echo "start";
+go();
+echo "end";

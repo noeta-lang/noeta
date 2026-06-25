@@ -1,0 +1,39 @@
+// Container-before-contained respects aliasing (spec §4 + §2): releasing a field destroys it only
+// if the field's last reference is the one being released. Here `shared` is held both by a local and
+// by `b`'s `inner` field (refcount 2). `b`'s last use is `b.label`, so `b` dies *there* (before the
+// `echo` that uses the label even prints): `Box.destruct` runs, then its `inner` field is released —
+// but `shared` survives, because the local `shared` still references it (refcount drops 2 → 1, no
+// destructor). `shared`'s destructor runs only later, at `shared.tag` — its own last use. So the
+// order is: `drop box b` (at `b.label`), `boxed b`, `drop leaf s` (at `shared.tag`), `still alive s`.
+// Both backends key on "is this the last reference?", so the deferral inside the container is
+// identical, and the differential proves it.
+// expect: stdout "start"
+// expect: stdout "drop box b"
+// expect: stdout "boxed b"
+// expect: stdout "drop leaf s"
+// expect: stdout "still alive s"
+// expect: stdout "end"
+// expect: exit 0
+class Leaf {
+    tag: string
+    fn new(tag: string): Leaf { return Leaf { tag: tag }; }
+    destruct { echo "drop leaf ${tag}"; }
+}
+
+class Box {
+    label: string
+    inner: Leaf
+    fn new(label: string, inner: Leaf): Box { return Box { label: label, inner: inner }; }
+    destruct { echo "drop box ${label}"; }
+}
+
+fn go(): void {
+    shared = Leaf.new("s");
+    b = Box.new("b", shared);
+    echo "boxed ${b.label}";
+    echo "still alive ${shared.tag}";
+}
+
+echo "start";
+go();
+echo "end";

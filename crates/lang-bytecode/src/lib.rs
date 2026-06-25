@@ -711,6 +711,14 @@ pub struct Module {
     /// Type names that `@derive(ToJson)` without a hand-written `to_json` method — the VM
     /// synthesizes a structural JSON serializer for `o.to_json()`.
     pub tojson_derives: Vec<String>,
+    /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
+    /// transitively-owned field / variant-payload / collection element (the checker's
+    /// destruct-reachability fixpoint). The VM's **container-before-contained field-walk gate**
+    /// (Phase 4.3, spec §4): an object/enum whose name is absent here owns no destructor in its
+    /// subtree and frees on the plain-release fast path; one that is present is walked
+    /// container-first, releasing each child recursively so contained destructors fire in declared
+    /// order. Includes every type with its own `destruct` (the fixpoint seeds with them).
+    pub destruct_reachable: Vec<String>,
     /// The number of inline-cache slots the program's cacheable call sites were assigned (one per
     /// `LoadField`/`CallMethod`). The VM allocates a per-run side array of this length, indexed by
     /// each op's `cache` field, to memoize the last receiver shape's field-slot / method prototype

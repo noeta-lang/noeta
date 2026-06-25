@@ -42,6 +42,14 @@ of the last owner, in **any** scope: global, local, nested block, loop body, or 
 - A value **moved out** (returned, or `?`-propagated — §6) is *not* destroyed at the move site; its
   ownership transfers and its destructor runs at the new owner's last use.
 
+**Temporaries are owners too (Phase-4.4 gap).** "Last use of the last owner" includes an unnamed ANF
+**temporary** that holds the last reference (a temp method/field receiver, a field projected out of a
+container that then dies, a discarded expression result). Phases 4.1–4.3 fire destructors at the drop
+points placed for *source variables*; a value that lives and dies entirely as a temp does **not** yet
+fire its `destruct` (it is still reclaimed — no leak — just silently). This is a known deviation from
+this rule, **consistent across both backends** (so the differential holds), closed by **Phase 4.4**
+(`phase-4-destruction.md` §4.4), which extends last-use firing to transiently-consumed temporaries.
+
 **Conservative timing (the safety invariant, README §2).** Static analysis chooses *where* to place
 the release; the **runtime refcount decides whether it fires**. A statically missed/late release
 costs promptness (the value lives to scope/teardown, still reclaimed — never a process leak) but is

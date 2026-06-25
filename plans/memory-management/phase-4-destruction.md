@@ -42,6 +42,34 @@ loop-iteration destruction, `?`/`break` interactions, **reentrant** destructors 
 constructs/destroys), and **aliased** values (RC>1 → destruction deferred to the true last reference,
 identical in both backends). Expect iteration; the differential + leak oracle are the proof.
 
+## 4.4 Temp last-use destructor firing (the §2 completion exposed by 4.3)
+
+4.1–4.2 fire destructors at the drop points the IR pass places for **source variables** (`DropVar`).
+**ANF temporaries** — the unnamed single-use `let %n = …` intermediates — are reclaimed differently:
+the IR-interpreter *moves* them (`Frame::take`) and the VM *retains-then-plain-releases* their
+registers (at reuse / frame teardown). Neither path runs `__destruct`. So a destructor-bearing value
+whose **last owning reference is an unnamed temp** never fires its destructor:
+
+- a method/field receiver that is a temp — `Leaf.new("x").announce()` (the receiver `Leaf` is dropped
+  with no `drop x`);
+- a field projected out of a container that then dies while the projection is live —
+  `b.inner.tag` (the `b.inner` temp outlives `b`, becomes the Leaf's last owner, and is plain-dropped);
+- a discarded expression-statement result of a destructor-bearing type.
+
+This is **pre-existing** (independent of 4.3) and **consistent across both backends** (the differential
+stays green — both fail to fire identically), so it is a latent correctness hole, not a divergence. It
+is a deviation from **spec §2** ("last use of the last owner … in *any* scope" — a temp is an owner),
+and 4.3 makes it visible because container-field projection is a common way to create such a temp.
+
+**4.4 closes it** by extending last-use destructor firing to temporaries: a temp whose single use does
+**not** transfer ownership into a persistent location (a binding, a container, a return) gets a
+destructor-aware drop at that use — the VM via a `release_value` (not plain `release`) at the consuming
+op / register overwrite, the IR-interpreter via `destroy_value` on the consumed-and-discarded value.
+The 4.3 construction-temp release (the compiler's `consume_operand`/`release_consumed`, which makes an
+aggregate the sole owner of an inline-built element) is the same idea applied to *constructor* operands;
+4.4 generalizes it to *every* transiently-consumed temp. Tests: `Leaf.new("x").method()` fires `drop x`;
+`b.inner.tag` fires the projected field's destructor at the temp's death; differential agrees.
+
 ## Verification gate
 
 - Conformance (expanded) + **differential 0 skipped / agree** on the new destructor output.

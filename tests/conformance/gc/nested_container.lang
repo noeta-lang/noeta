@@ -1,0 +1,40 @@
+// Container-before-contained is recursive and depth-first (spec §4): destroying `Outer` runs its
+// own `destruct`, then descends into `mid` — running `Mid.destruct`, then `Mid`'s own `inner` field
+// (`Inner.destruct`) — before unwinding. So the sequence is outer, mid, inner: each container tears
+// down its invariant before its parts disappear, all the way down. Both backends recurse the same
+// shape graph in the same order.
+// expect: stdout "start"
+// expect: stdout "built"
+// expect: stdout "drop outer o"
+// expect: stdout "drop mid m"
+// expect: stdout "drop inner i"
+// expect: stdout "end"
+// expect: exit 0
+class Inner {
+    tag: string
+    fn new(tag: string): Inner { return Inner { tag: tag }; }
+    destruct { echo "drop inner ${tag}"; }
+}
+
+class Mid {
+    tag: string
+    inner: Inner
+    fn new(tag: string): Mid { return Mid { tag: tag, inner: Inner.new("i") }; }
+    destruct { echo "drop mid ${tag}"; }
+}
+
+class Outer {
+    tag: string
+    mid: Mid
+    fn new(tag: string): Outer { return Outer { tag: tag, mid: Mid.new("m") }; }
+    destruct { echo "drop outer ${tag}"; }
+}
+
+fn go(): void {
+    o = Outer.new("o");
+    echo "built";
+}
+
+echo "start";
+go();
+echo "end";

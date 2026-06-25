@@ -394,6 +394,16 @@ pub struct DestructorRelevance {
     pub locals: HashSet<Span>,
     /// `(function span, parameter name)` of parameters whose type is destruct-reachable.
     pub params: HashSet<(Span, String)>,
+    /// **Type names** whose value, when destroyed, could run *some* `destruct` block — its own or a
+    /// transitively-owned field / variant-payload / collection element (the [`Checker::compute_relevance`]
+    /// fixpoint). This is the *per-type* projection of the same reachability the per-binding sets use;
+    /// the backends consume it as the **container-before-contained field-walk gate** (Phase 4.3, spec
+    /// §4): an object/enum whose name is absent here owns no destructor anywhere in its subtree, so it
+    /// frees on the plain-release fast path with no recursive destructor walk. (The drop-insertion pass
+    /// uses only `locals`/`params`; `passes_relevance` drops this field.) Includes every type with its
+    /// own `destruct` by construction (the fixpoint seeds with them), so own-destructor firing is never
+    /// gated away.
+    pub reachable_types: HashSet<String>,
 }
 
 impl Checker {
@@ -539,7 +549,10 @@ impl Checker {
                 break;
             }
         }
-        self.destruct_reachable = reachable;
+        self.destruct_reachable = reachable.clone();
+        // Export the per-type reachable set for the backends' field-walk gate (Phase 4.3), alongside
+        // the per-binding sets the drop pass reads.
+        self.relevance.reachable_types = reachable;
         self.record_param_relevance(program);
     }
 

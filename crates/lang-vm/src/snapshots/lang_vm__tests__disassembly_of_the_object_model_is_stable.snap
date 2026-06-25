@@ -1,6 +1,6 @@
 ---
 source: crates/lang-vm/src/lib.rs
-assertion_line: 4267
+assertion_line: 4443
 expression: module.disassemble()
 ---
 shapes:
@@ -30,9 +30,10 @@ params: 2, registers: 3
 code:
     0  MakeEnum    r0 <- shape s0()
     1  MakeRecord  r2 <- shape s1 {s0=r1, s1=r0}
-    2  Drop        r1
-    3  Return      r2
-    4  Halt
+    2  Drop        r0
+    3  Drop        r1
+    4  Return      r2
+    5  Halt
 === proto 2 ===
 params: 1, registers: 2
 code:

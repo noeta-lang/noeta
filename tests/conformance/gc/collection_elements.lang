@@ -1,0 +1,26 @@
+// Collections release their elements in iteration order (spec §4): a list in index order. `items`
+// is a list of destructor-bearing `Leaf`s; it has no `destruct` of its own (the contained values
+// carry the destructors). When the list dies at the end of `go`, each element is released in index
+// order, so the destructors fire a, b, c. Both backends walk the list in the same order; the
+// differential proves the sequence is identical.
+// expect: stdout "start"
+// expect: stdout "built"
+// expect: stdout "drop leaf a"
+// expect: stdout "drop leaf b"
+// expect: stdout "drop leaf c"
+// expect: stdout "end"
+// expect: exit 0
+class Leaf {
+    tag: string
+    fn new(tag: string): Leaf { return Leaf { tag: tag }; }
+    destruct { echo "drop leaf ${tag}"; }
+}
+
+fn go(): void {
+    items = [Leaf.new("a"), Leaf.new("b"), Leaf.new("c")];
+    echo "built";
+}
+
+echo "start";
+go();
+echo "end";

@@ -789,28 +789,95 @@ impl Interpreter {
         }
     }
 
-    /// Run an object's destructor if `value` is the last reference to a destructor-carrying
-    /// instance, then let it drop. Mirrors the VM's `release_value`.
+    /// Destroy `value` if it holds the last reference to a destructor-bearing structure, running
+    /// the observable `destruct` blocks in spec order. Mirrors the VM's `release_value`:
+    /// container-before-contained (spec §4) — an aggregate runs its own `destruct` first (its
+    /// fields still live), then releases its fields / payloads / elements in declared (object),
+    /// positional (enum), or iteration (list/set/map) order, each recursively firing its own
+    /// `destruct` at *its* last reference. A non-aggregate, or an aliased aggregate (refcount > 1),
+    /// simply lets its `Rc` drop here — memory is reclaimed, no destructor fires (deferred to the
+    /// final reference, §2). Closure-captured values are out of §4 scope (Phase 6 owns capture).
     fn destroy_value(&mut self, value: Value) {
-        let Value::Object(obj) = &value else { return };
-        if Rc::strong_count(obj) != 1 {
-            return;
+        match value {
+            Value::Object(obj) => self.destroy_object(obj),
+            Value::Enum(e) => self.destroy_enum(e),
+            Value::List(items) | Value::Set(items) => self.destroy_sequence(items),
+            Value::Map(entries) => self.destroy_map(entries),
+            // Scalars/functions/types/handles bear no destructor (a function's *captured* values
+            // are Phase-6 territory); their `Rc`/value drops here, reclaiming memory.
+            _ => {}
         }
-        let Some(body) = obj.def.destructor.clone() else {
-            return;
-        };
-        // Run the `destruct` block with the instance's fields and `self` in scope, like a
-        // parameterless method. It runs for its effects; its control flow/errors are not part
-        // of any expression's value, so they are swallowed at this boundary.
-        let scope = Scope::child(&self.scope);
-        for (name, field) in &obj.fields {
-            scope.declare(name.clone(), field.clone(), false);
+    }
+
+    /// Destroy a record/class instance: its own `destruct` (if any) first, then its fields in
+    /// declared order (spec §4). Only acts at the last reference; a destructor that resurrects
+    /// `self` (raising the count) leaves the box shared, so the field walk is skipped.
+    fn destroy_object(&mut self, obj: Rc<ObjectValue>) {
+        if Rc::strong_count(&obj) != 1 {
+            return; // aliased — this reference drops, destruction defers to the last (§2).
         }
-        scope.declare("self".to_string(), value.clone(), false);
-        let saved = std::mem::replace(&mut self.scope, scope);
-        let _ = self.exec_stmts(&body);
-        self.scope = saved;
-        // `value` drops here; being the last reference, the object is freed.
+        // 1. The container's own `destruct`, run like a parameterless method with the instance's
+        //    fields and `self` in scope. It runs for its effects; its control flow/errors are not
+        //    part of any expression's value, so they are swallowed at this boundary.
+        if let Some(body) = obj.def.destructor.clone() {
+            let scope = Scope::child(&self.scope);
+            for (name, field) in &obj.fields {
+                scope.declare(name.clone(), field.clone(), false);
+            }
+            scope.declare("self".to_string(), Value::Object(obj.clone()), false);
+            let saved = std::mem::replace(&mut self.scope, scope);
+            let _ = self.exec_stmts(&body);
+            self.scope = saved;
+        }
+        // 2. Then release each field, container-before-contained. We hold the last reference, so
+        //    take ownership of the box to move its fields out; `try_unwrap` fails iff the
+        //    destructor resurrected `self`, in which case the fields are not force-destroyed.
+        if let Ok(mut object) = Rc::try_unwrap(obj) {
+            let order: Vec<String> = object.def.fields.iter().map(|f| f.name.clone()).collect();
+            let mut fields = std::mem::take(&mut object.fields);
+            drop(object); // the emptied `ObjectValue` drops here (its `leak::dec` balances `new`).
+            // Declared field order for records/classes; any remainder (an opaque import has no
+            // declared `def.fields`) drains in the bag's sorted-key order — matching the VM's
+            // opaque shape, whose slots are the literal's fields in sorted-key order.
+            for name in order {
+                if let Some(field) = fields.remove(&name) {
+                    self.destroy_value(field);
+                }
+            }
+            for (_, field) in std::mem::take(&mut fields) {
+                self.destroy_value(field);
+            }
+        }
+    }
+
+    /// Destroy an enum value's payloads in positional order (enums carry no own `destruct`; only
+    /// classes do). Only at the last reference.
+    fn destroy_enum(&mut self, e: Rc<EnumValue>) {
+        if let Ok(ev) = Rc::try_unwrap(e) {
+            for field in ev.data {
+                self.destroy_value(field);
+            }
+        }
+    }
+
+    /// Destroy a list's or set's elements in iteration order. Only at the last reference; an
+    /// aliased collection's `Rc` simply drops.
+    fn destroy_sequence(&mut self, items: Rc<Vec<Value>>) {
+        if let Ok(items) = Rc::try_unwrap(items) {
+            for item in items {
+                self.destroy_value(item);
+            }
+        }
+    }
+
+    /// Destroy a map's values in sorted-key order (its keys are strings — no destructors). Only at
+    /// the last reference.
+    fn destroy_map(&mut self, entries: Rc<BTreeMap<String, Value>>) {
+        if let Ok(entries) = Rc::try_unwrap(entries) {
+            for (_, value) in entries {
+                self.destroy_value(value);
+            }
+        }
     }
 
     fn exec_stmt(&mut self, stmt: &Stmt) -> Eval<Flow> {

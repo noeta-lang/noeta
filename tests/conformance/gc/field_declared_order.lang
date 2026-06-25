@@ -1,0 +1,36 @@
+// Fields are released depth-first in **declared field order** (spec §4) — NOT reverse-construction
+// (that LIFO rule, §3, governs sibling *locals* in a scope, not the fields within one object).
+// `Pair` declares `first` then `second`; when a `Pair` dies, its own `destruct` runs, then `first`
+// is released (firing its destructor) before `second`. Both backends iterate the shape's declared
+// field order (the VM's slot order, eval's `def.fields`), so the order is identical by construction.
+// expect: stdout "start"
+// expect: stdout "built"
+// expect: stdout "drop pair p"
+// expect: stdout "drop leaf first"
+// expect: stdout "drop leaf second"
+// expect: stdout "end"
+// expect: exit 0
+class Leaf {
+    tag: string
+    fn new(tag: string): Leaf { return Leaf { tag: tag }; }
+    destruct { echo "drop leaf ${tag}"; }
+}
+
+class Pair {
+    label: string
+    first: Leaf
+    second: Leaf
+    fn new(label: string): Pair {
+        return Pair { label: label, first: Leaf.new("first"), second: Leaf.new("second") };
+    }
+    destruct { echo "drop pair ${label}"; }
+}
+
+fn go(): void {
+    p = Pair.new("p");
+    echo "built";
+}
+
+echo "start";
+go();
+echo "end";

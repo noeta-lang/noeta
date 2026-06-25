@@ -1,0 +1,33 @@
+// Container before contained (spec §4): destroying an object runs the container's own `destruct`
+// *first* — while its fields are still live — then releases its fields, each firing its own
+// `destruct`. When `o` dies at the end of `go`, `Outer.destruct` runs (with `inner` still readable),
+// then the `inner` field is released and `Inner.destruct` runs. The `Inner` is constructed inline and
+// moved straight into the field, so the field holds the only reference. Both backends walk the same
+// shape in the same order, so the differential proves the outer-then-inner sequence is identical.
+// expect: stdout "start"
+// expect: stdout "built"
+// expect: stdout "drop outer o"
+// expect: stdout "drop inner i"
+// expect: stdout "end"
+// expect: exit 0
+class Inner {
+    tag: string
+    fn new(tag: string): Inner { return Inner { tag: tag }; }
+    destruct { echo "drop inner ${tag}"; }
+}
+
+class Outer {
+    label: string
+    inner: Inner
+    fn new(label: string, inner: Inner): Outer { return Outer { label: label, inner: inner }; }
+    destruct { echo "drop outer ${label}"; }
+}
+
+fn go(): void {
+    o = Outer.new("o", Inner.new("i"));
+    echo "built";
+}
+
+echo "start";
+go();
+echo "end";

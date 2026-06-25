@@ -1,0 +1,29 @@
+// An enum value's variant payloads are contained values too (spec §4): destroying the enum releases
+// its payloads in positional order, firing their destructors. `Wrapper.Has(Leaf)` carries a
+// destructor-bearing `Leaf`; an enum has no `destruct` of its own (only classes do), so when the
+// enum value dies its payload `Leaf` is released and `Leaf.destruct` runs. The enum's type is
+// destruct-reachable through its variant payload, so both backends walk it.
+// expect: stdout "start"
+// expect: stdout "wrapped"
+// expect: stdout "drop leaf x"
+// expect: stdout "end"
+// expect: exit 0
+class Leaf {
+    tag: string
+    fn new(tag: string): Leaf { return Leaf { tag: tag }; }
+    destruct { echo "drop leaf ${tag}"; }
+}
+
+enum Wrapper {
+    Empty;
+    Has(leaf: Leaf);
+}
+
+fn go(): void {
+    w = Wrapper.Has(Leaf.new("x"));
+    echo "wrapped";
+}
+
+echo "start";
+go();
+echo "end";

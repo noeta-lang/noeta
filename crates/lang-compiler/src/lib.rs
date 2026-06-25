@@ -125,13 +125,21 @@ pub fn compile_with_sites(
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
-    compile_inner(program, type_of_sites, Some(passes_relevance(relevance)))
+    compile_inner(
+        program,
+        type_of_sites,
+        Some(passes_relevance(relevance)),
+        relevance.reachable_types.iter().cloned().collect(),
+    )
 }
 
 fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     relevance: Option<lang_ir_passes::Relevance>,
+    // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
+    // container-before-contained field-walk gate; not consumed by the compiler itself.
+    destruct_reachable: Vec<String>,
 ) -> Result<Module, Unsupported> {
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
@@ -176,6 +184,7 @@ fn compile_inner(
         destructors: module.destructors,
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
+        destruct_reachable,
         cache_slots: module.cache_slots,
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
         // tree-walker uses — so reflection is identical across backends by construction.
@@ -1528,6 +1537,49 @@ impl<'m> FnCompiler<'m> {
         Ok(regs.into_boxed_slice())
     }
 
+    /// Materialize an **aggregate-constructor operand**, recording (in `consumed`) the register to
+    /// release after the constructor runs. An aggregate op (`MakeList`/`MakeMap`/`MakeRecord`/
+    /// `MakeEnum`) *retains* each operand into the new heap value, so an **owned heap** operand — an
+    /// ANF temp or a freshly-materialized string/global/field/upvalue, held by no live binding — is
+    /// left with a now-redundant reference in its register. Releasing it promptly (a plain drop the
+    /// caller emits right after the constructor) makes the aggregate the **sole owner at this
+    /// point**, so a *same-frame* destruction sees refcount 1 and fires the contained destructor in
+    /// declared order — matching the tree-walker, which *moves* its temporaries into the aggregate
+    /// (`Frame::take`). A **borrowed** operand (a live local / `self`) is not released — its binding
+    /// keeps the reference, and the aggregate's own retained copy is what the later element drop
+    /// reclaims. An immediate constant (int/bool/unit/float) has no refcount, so nothing to release.
+    ///
+    /// The drop's read of the operand register also keeps it live across the constructor, so register
+    /// coalescing cannot fuse the operand with the constructor's destination — the release stays
+    /// sound by construction.
+    fn consume_operand(
+        &mut self,
+        atom: &Atom,
+        consumed: &mut Vec<Reg>,
+    ) -> Result<Reg, Unsupported> {
+        if let Atom::Const(c) = atom
+            && is_immediate_const(c)
+        {
+            return self.atom_reg(atom);
+        }
+        let (reg, owned) = self.atom_reg_owned(atom)?;
+        if owned {
+            consumed.push(reg);
+        }
+        Ok(reg)
+    }
+
+    /// Emit a plain drop for each owned-heap constructor operand recorded by [`Self::consume_operand`],
+    /// releasing the redundant reference the constructor's retain left behind.
+    fn release_consumed(&mut self, consumed: &[Reg]) {
+        for &reg in consumed {
+            self.code.push(Op::Drop {
+                reg,
+                relevant: false,
+            });
+        }
+    }
+
     /// Resolve a source-variable reference to a register holding its value, mirroring the
     /// tree-walker's name resolution (`Expr::Ident` evaluation).
     fn var_reg(&mut self, name: &str, span: Span) -> Result<Reg, Unsupported> {
@@ -1665,27 +1717,37 @@ impl<'m> FnCompiler<'m> {
                 Ok(())
             }
             Rvalue::List { items, .. } => {
-                let items = self.atom_regs(items)?;
-                self.code.push(Op::MakeList { dst, items });
+                let mut consumed = Vec::new();
+                let mut regs = Vec::with_capacity(items.len());
+                for item in items {
+                    regs.push(self.consume_operand(item, &mut consumed)?);
+                }
+                self.code.push(Op::MakeList {
+                    dst,
+                    items: regs.into_boxed_slice(),
+                });
+                self.release_consumed(&consumed);
                 Ok(())
             }
             Rvalue::Map { entries, span } => {
                 // Evaluate each key, check it is a string (matching M0's per-entry error timing),
                 // then the value — then assemble the map.
+                let mut consumed = Vec::new();
                 let mut pairs = Vec::with_capacity(entries.len());
                 for (key, value) in entries {
-                    let key_reg = self.atom_reg(key)?;
+                    let key_reg = self.consume_operand(key, &mut consumed)?;
                     self.code.push(Op::RequireMapKey {
                         reg: key_reg,
                         span: *span,
                     });
-                    let value_reg = self.atom_reg(value)?;
+                    let value_reg = self.consume_operand(value, &mut consumed)?;
                     pairs.push((key_reg, value_reg));
                 }
                 self.code.push(Op::MakeMap {
                     dst,
                     entries: pairs.into_boxed_slice(),
                 });
+                self.release_consumed(&consumed);
                 Ok(())
             }
             Rvalue::Range {
@@ -2059,8 +2121,9 @@ impl<'m> FnCompiler<'m> {
             type_name.to_string(),
             decl_fields.to_vec(),
         ));
+        let mut consumed = Vec::new();
         let spread_reg = match spread {
-            Some((a, _)) => Some(self.atom_reg(a)?),
+            Some((a, _)) => Some(self.consume_operand(a, &mut consumed)?),
             None => None,
         };
         let mut named: Vec<(u16, Reg)> = Vec::with_capacity(inits.len());
@@ -2070,7 +2133,7 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::Raise { idx });
                 return Ok(());
             };
-            let r = self.atom_reg(&init.value)?;
+            let r = self.consume_operand(&init.value, &mut consumed)?;
             named.push((slot as u16, r));
         }
         self.code.push(Op::MakeRecord {
@@ -2080,6 +2143,7 @@ impl<'m> FnCompiler<'m> {
             spread: spread_reg,
             span,
         });
+        self.release_consumed(&consumed);
         Ok(())
     }
 
@@ -2092,13 +2156,14 @@ impl<'m> FnCompiler<'m> {
         spread: &Option<(Atom, Span)>,
         dst: Reg,
     ) -> Result<(), Unsupported> {
+        let mut consumed = Vec::new();
         let spread_reg = match spread {
-            Some((a, _)) => Some(self.atom_reg(a)?),
+            Some((a, _)) => Some(self.consume_operand(a, &mut consumed)?),
             None => None,
         };
         let mut keys: Vec<(String, Reg)> = Vec::with_capacity(inits.len());
         for init in inits {
-            let r = self.atom_reg(&init.value)?;
+            let r = self.consume_operand(&init.value, &mut consumed)?;
             keys.push((init.name.clone(), r));
         }
         self.code.push(Op::MakeOpaque {
@@ -2107,6 +2172,7 @@ impl<'m> FnCompiler<'m> {
             keys: keys.into_boxed_slice(),
             spread: spread_reg,
         });
+        self.release_consumed(&consumed);
         Ok(())
     }
 
@@ -2131,8 +2197,17 @@ impl<'m> FnCompiler<'m> {
             fields,
             false,
         ));
-        let args = self.atom_regs(args)?;
-        self.code.push(Op::MakeEnum { dst, shape, args });
+        let mut consumed = Vec::new();
+        let mut arg_regs = Vec::with_capacity(args.len());
+        for a in args {
+            arg_regs.push(self.consume_operand(a, &mut consumed)?);
+        }
+        self.code.push(Op::MakeEnum {
+            dst,
+            shape,
+            args: arg_regs.into_boxed_slice(),
+        });
+        self.release_consumed(&consumed);
         Ok(())
     }
 
@@ -2448,6 +2523,16 @@ impl<'m> FnCompiler<'m> {
         self.patch_jump(jump_pos, end);
         Ok(())
     }
+}
+
+/// Whether a Core-IR constant materializes to an **immediate** (no heap allocation, no refcount):
+/// the unit/bool/int/float scalars. A string is heap, so it is *not* immediate. Used to skip the
+/// post-constructor operand release for immediates (nothing to release).
+fn is_immediate_const(c: &IrConst) -> bool {
+    matches!(
+        c,
+        IrConst::Unit | IrConst::Bool(_) | IrConst::Int(_) | IrConst::Float(_)
+    )
 }
 
 /// Map a Core-IR constant to its bytecode-pool [`Const`].

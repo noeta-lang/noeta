@@ -166,6 +166,12 @@ struct Vm<'m> {
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
     destructors: HashMap<String, u32>,
+    /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
+    /// transitively-owned field / variant-payload / collection element (the checker's
+    /// destruct-reachability fixpoint, threaded through the module). The container-before-contained
+    /// field-walk gate (Phase 4.3, spec §4): a value whose shape name is absent here owns no
+    /// destructor in its subtree and frees on the plain-release fast path.
+    destruct_reachable: HashSet<String>,
     /// Type names that `@derive(Comparable)` (without a hand-written `compare`): their instances
     /// get structural field-wise ordering for `< <= > >=`.
     comparable_derives: HashSet<String>,
@@ -254,6 +260,7 @@ fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
         .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
         .collect();
     let destructors = module.destructors.iter().cloned().collect();
+    let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
     let comparable_derives = module.comparable_derives.iter().cloned().collect();
     let tojson_derives = module.tojson_derives.iter().cloned().collect();
     let mut vm = Vm {
@@ -261,6 +268,7 @@ fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
         shapes: module.shapes.iter().cloned().map(Rc::new).collect(),
         methods,
         destructors,
+        destruct_reachable,
         comparable_derives,
         tojson_derives,
         globals: HashMap::new(),
@@ -1009,14 +1017,48 @@ impl<'m> Vm<'m> {
     /// destructor-relevant drop point: reassignment, program end, and (Phase 4) a destructor-
     /// relevant `Op::Drop` at a local's last use. A non-relevant release uses the plain `release`.
     fn release_value(&mut self, value: Value) {
-        if value.is_object()
-            && value.refcount() == 1
-            && let Some(shape) = value.shape()
-            && let Some(&proto) = self.destructors.get(&shape.name)
-        {
+        // Immediates, and any reference that is not the last, never run a destructor here: an
+        // immediate has none, and an alias survives (spec §2 — destruction defers to the final
+        // reference). Both take the plain release (a decrement; a free only at the true last ref).
+        if !value.is_pointer() || value.refcount() > 1 {
+            release(value);
+            return;
+        }
+        // The last reference. Take the slow container-before-contained path only if this subtree
+        // owns a destructor — its own (an object/enum whose `destruct` is in the table) or a
+        // contained one (`subtree_owns_destructor`). Otherwise the plain recursive free reclaims it
+        // with no per-node destructor lookups — the Phase-4.3 fast path for non-RAII data.
+        let own = value
+            .shape()
+            .and_then(|s| self.destructors.get(&s.name).copied());
+        if own.is_none() && !self.subtree_owns_destructor(value) {
+            release(value);
+            return;
+        }
+        // Container before contained (spec §4): the container's own `destruct` runs first, while
+        // its fields are still live; then each child is released in declared/iteration order — a
+        // child reaching zero runs its own `destruct`, recursively — and finally the container's
+        // own box is freed (children already released, so a shallow free that does not touch them).
+        if let Some(proto) = own {
             self.run_destructor(proto, value);
         }
-        release(value);
+        for child in value.gc_children() {
+            self.release_value(child);
+        }
+        value.gc_free_shallow();
+    }
+
+    /// Whether `value`'s subtree may contain a destructor — the container-before-contained
+    /// field-walk gate (spec §4, Phase 4.3). An object/enum is decided by its type name against the
+    /// checker's destruct-reachability set; a list/map/set is always walked because its element
+    /// types are erased at runtime (a non-relevant element then takes the fast path on its own);
+    /// any other value kind (string, closure, cell, handle, boxed int) is a leaf with no
+    /// destructor-bearing children, so it frees plainly.
+    fn subtree_owns_destructor(&self, value: Value) -> bool {
+        match value.shape() {
+            Some(shape) => self.destruct_reachable.contains(&shape.name),
+            None => value.is_list() || value.is_map() || value.is_set(),
+        }
     }
 
     /// Run an instance's `destruct` block on a fresh frame stack, with the instance in
@@ -3848,6 +3890,35 @@ mod tests {
         );
         assert_eq!(r.stdout, "start\nmade\nclose b\nclose a\n");
         assert_eq!(r.exit_code, 1);
+    }
+
+    #[test]
+    fn destroying_a_container_runs_its_destructor_then_its_fields_in_declared_order() {
+        // Phase 4.3 (spec §4): destroying an object runs the container's own `destruct` first (its
+        // fields still live), then releases its fields depth-first in declared order, each firing its
+        // own `destruct`. `Outer`'s two destructor-bearing `Leaf` fields are built inline (so the
+        // record holds the sole reference — the construction-temp release makes refcount 1 here), and
+        // `o` is a dead-store dropped at scope exit: `outer`, then `a`, then `b` (declared order).
+        let r = run(
+            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${tag}\"; }\n}\nclass Outer {\n  label: string\n  a: Leaf\n  b: Leaf\n  fn new(): Outer { return Outer { label: \"o\", a: Leaf.new(\"a\"), b: Leaf.new(\"b\") }; }\n  destruct { echo \"drop outer ${label}\"; }\n}\nfn go(): void {\n  o = Outer.new();\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
+        );
+        assert_eq!(
+            r.stdout,
+            "start\nbuilt\ndrop outer o\ndrop a\ndrop b\nend\n"
+        );
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn destroying_a_list_runs_its_elements_destructors_in_order() {
+        // Phase 4.3 (spec §4): a collection releases its elements in iteration order. The list has no
+        // `destruct`; its contained `Leaf`s do, and fire a, b, c (index order) when the list dies. The
+        // construction-temp releases make the list the sole owner, so each element is at refcount 1.
+        let r = run(
+            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${tag}\"; }\n}\nfn go(): void {\n  items = [Leaf.new(\"a\"), Leaf.new(\"b\"), Leaf.new(\"c\")];\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
+        );
+        assert_eq!(r.stdout, "start\nbuilt\ndrop a\ndrop b\ndrop c\nend\n");
+        assert_eq!(r.exit_code, 0);
     }
 
     #[test]
