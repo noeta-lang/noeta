@@ -1,22 +1,23 @@
 ---
 source: crates/lang-vm/src/lib.rs
+assertion_line: 4239
 expression: module.disassemble()
 ---
 === main ===
-params: 0, registers: 5
+params: 0, registers: 3
 constants:
   k0 = 6
 code:
     0  MakeClosure r0 <- proto 1 [0 captures]
     1  StoreGlobal "fib" <- r0
-    2  LoadGlobal  r2 <- "fib"
-    3  LoadConst   r3 <- k0
-    4  Call        r1 <- r2(r3)
-    5  Stringify   r4 <- display(r1)
-    6  Echo        r4
+    2  LoadGlobal  r1 <- "fib"
+    3  LoadConst   r2 <- k0
+    4  Call        r0 <- r1(r2)
+    5  Stringify   r1 <- display(r0)
+    6  Echo        r1
     7  Halt
 === proto 1 ===
-params: 1, registers: 12
+params: 1, registers: 4
 constants:
   k0 = 2
   k1 = 1
@@ -27,15 +28,15 @@ code:
     2  RequireCondBool r1 (if)
     3  JumpIfFalse r1 -> 5
     4  Return      r0
-    5  LoadConst   r4 <- k1
-    6  Binary      r3 <- r0 - r4
-    7  LoadGlobal  r6 <- "fib"
-    8  Call        r5 <- r6(r3)
-    9  LoadConst   r8 <- k2
-   10  Binary      r7 <- r0 - r8
+    5  LoadConst   r2 <- k1
+    6  Binary      r1 <- r0 - r2
+    7  LoadGlobal  r3 <- "fib"
+    8  Call        r2 <- r3(r1)
+    9  LoadConst   r3 <- k2
+   10  Binary      r1 <- r0 - r3
    11  Drop        r0
-   12  LoadGlobal  r10 <- "fib"
-   13  Call        r9 <- r10(r7)
-   14  Binary      r11 <- r5 + r9
-   15  Return      r11
+   12  LoadGlobal  r3 <- "fib"
+   13  Call        r0 <- r3(r1)
+   14  Binary      r1 <- r2 + r0
+   15  Return      r1
    16  Halt

@@ -1,43 +1,44 @@
 ---
 source: crates/lang-vm/src/lib.rs
+assertion_line: 4280
 expression: module.disassemble()
 ---
 shapes:
   s0 = enum E.Code(n)
 === main ===
-params: 0, registers: 6
+params: 0, registers: 3
 constants:
   k0 = 7
 code:
     0  MakeClosure r0 <- proto 1 [0 captures]
     1  StoreGlobal "describe" <- r0
-    2  LoadConst   r2 <- k0
-    3  MakeEnum    r1 <- shape s0(r2)
-    4  LoadGlobal  r4 <- "describe"
-    5  Call        r3 <- r4(r1)
-    6  Stringify   r5 <- display(r3)
-    7  Echo        r5
+    2  LoadConst   r1 <- k0
+    3  MakeEnum    r0 <- shape s0(r1)
+    4  LoadGlobal  r2 <- "describe"
+    5  Call        r1 <- r2(r0)
+    6  Stringify   r0 <- display(r1)
+    7  Echo        r0
     8  Halt
 === proto 1 ===
-params: 1, registers: 7
+params: 1, registers: 3
 constants:
   k0 = "empty"
   k1 = ""
   k2 = "code "
 code:
     0  MatchVariant r0 is E.Empty/0 else -> 4
-    1  LoadConst   r2 <- k0
-    2  Move        r1 <- r2
+    1  LoadConst   r1 <- k0
+    2  Move        r0 <- r1
     3  Jump        -> 14
     4  MatchVariant r0 is E.Code/1 else -> 13
-    5  ExtractField r3 <- r0.0
-    6  LoadConst   r4 <- k1
-    7  LoadConst   r5 <- k2
-    8  Binary      r4 <- r4 ~ r5
-    9  Stringify   r6 <- display(r3)
-   10  Binary      r4 <- r4 ~ r6
-   11  Move        r1 <- r4
+    5  ExtractField r1 <- r0.0
+    6  LoadConst   r2 <- k1
+    7  LoadConst   r0 <- k2
+    8  Binary      r2 <- r2 ~ r0
+    9  Stringify   r0 <- display(r1)
+   10  Binary      r2 <- r2 ~ r0
+   11  Move        r0 <- r2
    12  Jump        -> 14
    13  MatchFail   r0
-   14  Return      r1
+   14  Return      r0
    15  Halt

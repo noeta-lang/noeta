@@ -59,6 +59,7 @@ use lang_ir::{
 };
 
 mod freevars;
+mod regalloc;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
@@ -778,14 +779,19 @@ impl<'m> FnCompiler<'m> {
     }
 
     fn into_chunk(self, num_params: u16, defaults: Vec<(u16, u32)>) -> Chunk {
-        Chunk {
+        let mut chunk = Chunk {
             code: self.code,
             consts: self.consts,
             diagnostics: self.diags,
             num_params,
             num_registers: self.next_reg,
             defaults,
-        }
+        };
+        // Reuse-aware register coalescing (Phase 3.3): shrink the monotonically-allocated register
+        // set onto the smallest slot count liveness allows, so dead values are released promptly on
+        // slot reuse rather than at frame teardown.
+        regalloc::coalesce(&mut chunk);
+        chunk
     }
 
     fn alloc_reg(&mut self) -> Reg {

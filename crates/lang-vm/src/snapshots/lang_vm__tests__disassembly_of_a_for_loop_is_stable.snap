@@ -1,9 +1,10 @@
 ---
 source: crates/lang-vm/src/lib.rs
+assertion_line: 4252
 expression: module.disassemble()
 ---
 === main ===
-params: 0, registers: 15
+params: 0, registers: 7
 constants:
   k0 = 0
   k1 = 1
@@ -14,23 +15,23 @@ constants:
 code:
     0  LoadConst   r0 <- k0
     1  StoreGlobal "total" <- r0
-    2  LoadConst   r2 <- k1
-    3  LoadConst   r3 <- k2
-    4  LoadConst   r4 <- k3
-    5  MakeList    r1 <- [r2, r3, r4]
-    6  IterSnapshot r5 <- r1
-    7  ListLen     r6 <- len r5
-    8  LoadConst   r7 <- k4
-    9  LoadConst   r8 <- k5
-   10  Binary      r9 <- r7 < r6
-   11  JumpIfFalse r9 -> 18
-   12  ListGet     r10 <- r5[r7]
-   13  LoadGlobal  r12 <- "total"
-   14  Binary      r11 <- r12 + r10
-   15  StoreGlobal "total" <- r11
-   16  Binary      r7 <- r7 + r8
+    2  LoadConst   r1 <- k1
+    3  LoadConst   r2 <- k2
+    4  LoadConst   r3 <- k3
+    5  MakeList    r0 <- [r1, r2, r3]
+    6  IterSnapshot r1 <- r0
+    7  ListLen     r0 <- len r1
+    8  LoadConst   r2 <- k4
+    9  LoadConst   r3 <- k5
+   10  Binary      r4 <- r2 < r0
+   11  JumpIfFalse r4 -> 18
+   12  ListGet     r4 <- r1[r2]
+   13  LoadGlobal  r6 <- "total"
+   14  Binary      r5 <- r6 + r4
+   15  StoreGlobal "total" <- r5
+   16  Binary      r2 <- r2 + r3
    17  Jump        -> 10
-   18  LoadGlobal  r13 <- "total"
-   19  Stringify   r14 <- display(r13)
-   20  Echo        r14
+   18  LoadGlobal  r0 <- "total"
+   19  Stringify   r1 <- display(r0)
+   20  Echo        r1
    21  Halt

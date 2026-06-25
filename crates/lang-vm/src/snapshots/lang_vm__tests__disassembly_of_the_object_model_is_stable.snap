@@ -1,5 +1,6 @@
 ---
 source: crates/lang-vm/src/lib.rs
+assertion_line: 4267
 expression: module.disassemble()
 ---
 shapes:
@@ -9,7 +10,7 @@ methods:
   Order.new -> proto 1
   Order.tag -> proto 2
 === main ===
-params: 0, registers: 7
+params: 0, registers: 4
 constants:
   k0 = unit
   k1 = 7
@@ -19,18 +20,18 @@ code:
     2  MakeClosure r3 <- proto 1 [0 captures]
     3  Call        r0 <- r3(r1, r2)
     4  StoreGlobal "o" <- r0
-    5  LoadGlobal  r5 <- "o"
-    6  CallMethod  r4 <- r5.tag()
-    7  Stringify   r6 <- display(r4)
-    8  Echo        r6
+    5  LoadGlobal  r1 <- "o"
+    6  CallMethod  r0 <- r1.tag()
+    7  Stringify   r1 <- display(r0)
+    8  Echo        r1
     9  Halt
 === proto 1 ===
-params: 2, registers: 4
+params: 2, registers: 3
 code:
-    0  MakeEnum    r2 <- shape s0()
-    1  MakeRecord  r3 <- shape s1 {s0=r1, s1=r2}
+    0  MakeEnum    r0 <- shape s0()
+    1  MakeRecord  r2 <- shape s1 {s0=r1, s1=r0}
     2  Drop        r1
-    3  Return      r3
+    3  Return      r2
     4  Halt
 === proto 2 ===
 params: 1, registers: 2
