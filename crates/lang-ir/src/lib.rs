@@ -420,11 +420,18 @@ pub enum Decl {
     },
 }
 
-/// A lowered class: the surface declaration (for fields, derives, name, and the destructor
-/// body) paired with its methods lowered to IR funcs.
+/// A lowered class: the surface declaration (for fields, derives, and name) paired with its
+/// methods lowered to IR funcs and, when present, its `destruct` block lowered to a
+/// parameterless [`Func`].
 #[derive(Debug, Clone)]
 pub struct ClassDef {
     pub decl: Rc<lang_ast::ClassDecl>,
     pub methods: Vec<(String, Rc<Func>)>,
+    /// The `destruct { ... }` block lowered to a parameterless [`Func`] (fields in scope via the
+    /// receiver), or `None` for a class without one. The VM compiles this to a bytecode prototype
+    /// it runs when an instance's last reference drops. The IR *interpreter* ignores it and runs
+    /// the surface destructor on `decl` through the shared teardown path, so the Phase-1
+    /// faithfulness differential is unaffected.
+    pub destructor: Option<Rc<Func>>,
     pub span: Span,
 }

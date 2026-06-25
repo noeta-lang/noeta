@@ -31,9 +31,9 @@ params: 0, registers: 5
 constants:
   k0 = "ok"
 code:
-    0  LoadGlobal  r2 <- "validate"
-    1  Call        r1 <- r2()
-    2  TryUnwrap   r0 <- r1?
+    0  LoadGlobal  r1 <- "validate"
+    1  Call        r0 <- r1()
+    2  TryUnwrap   r2 <- r0?
     3  LoadConst   r4 <- k0
     4  MakeEnum    r3 <- shape s1(r4)
     5  Return      r3

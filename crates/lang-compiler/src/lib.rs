@@ -1,4 +1,16 @@
-//! The bytecode compiler: AST → [`Module`].
+//! The bytecode compiler: **Core IR → [`Module`]**.
+//!
+//! Since the memory-management migration's Phase 2 the compiler lowers the shared
+//! [A-normal-form Core IR][lang_ir] both backends run, not the surface AST: [`compile`] first
+//! lowers the parsed program to `lang_ir` (the same lowering the IR interpreter consumes), then
+//! emits bytecode from it. Because the IR has already named every intermediate value and fixed
+//! evaluation order, the compiler is a near-1:1 structural lowering — an IR `let v = a + b`
+//! becomes an `Op::Binary`, a constructor an `Op::MakeRecord`/`MakeEnum`, an IR `if` a branch —
+//! rather than re-deriving order by recursively flattening nested expressions. Type
+//! registration (shapes, the method/destructor proto table) still reads the surface declarations
+//! the IR carries verbatim. Register allocation stays monotonic this phase; the reuse-aware
+//! allocator and precise drops are the next phase's IR passes (which also re-establish the
+//! record-update/COW in-place reuse this phase drops — see the migration README).
 //!
 //! As of M1.5 the compiler lowers the **whole** M0 language: the literal/binding/arithmetic
 //! core (M1.0); **functions** (`fn`, calls, arrow closures, the `|>` pipeline, `return`,
@@ -36,17 +48,17 @@
 
 use std::collections::{HashMap, HashSet};
 
-use lang_ast::{
-    BinaryOp, Expr, FnDecl, ForPattern, ObjectLit, Param, Pattern, Program, Stmt, StrPart, TypeRef,
-};
+use lang_ast::{BinaryOp, Program, TypeRef};
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NarrowTarget, Op, Reg,
-    ReuseCheck,
+};
+use lang_ir::{
+    Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
+    Thunk,
 };
 
 mod freevars;
-use freevars::FnBody;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
@@ -88,24 +100,27 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
 
 /// Which record-update reuse the compiler may apply to a self-update `acc = Type { ...acc, f: v }`.
 ///
-/// This is a **benchmark ceiling**, not a behavior switch: every mode is observably identical (reuse
-/// is invisible to a value-semantics program). It exists so the perf bench can isolate the three
-/// points on the reuse spectrum on the *same* source. Production uses [`ReuseMode::Static`].
+/// **Inert since Phase 2 of the memory-management migration.** The AST-keyed record-update / COW
+/// in-place reuse this selected was dropped when the compiler moved onto the A-normal-form Core
+/// IR (ANF decomposes the `acc = Type { ...acc, … }` shape the recognizer depended on into a
+/// `let` + reassignment, scattering the temporaries it keyed on). Reuse is re-established —
+/// principally, on the IR — by Phase 3's RC/last-use passes, which the README says "subsume
+/// P-REUSE". The enum and [`compile_with_options`] are retained so the perf bench's API is
+/// unchanged; every mode now produces the same copying lowering (so the bench measures the
+/// transient regression Phase 3 recovers).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ReuseMode {
     /// No reuse — a self-update lowers to an ordinary copying `MakeRecord { spread }`. The baseline.
     Off,
-    /// Reuse via a runtime `refcount() == 1 && same-shape` check at the construct (the record
-    /// analogue of the COW list append). Always safe; pays a branch per construct.
+    /// Was: runtime `refcount() == 1 && same-shape` check at the construct. Now identical to [`Off`].
     Runtime,
-    /// Reuse with the runtime check **elided** wherever the linearity analysis proved sole
-    /// ownership; self-updates it could not prove fall back to [`ReuseMode::Runtime`]. Production.
+    /// Was: the runtime check elided where linearity was proved. Now identical to [`Off`].
     #[default]
     Static,
 }
 
-/// Compile under explicit [options][ReuseMode]. [`compile`] uses [`ReuseMode::Static`] (production);
-/// the perf bench threads each mode to measure the reuse spectrum on identical source.
+/// Compile under an explicit [reuse mode][ReuseMode]. Retained for the perf bench's API; the mode
+/// is inert since Phase 2 (see [`ReuseMode`]), so this is behavior-identical to [`compile`].
 pub fn compile_with_options(program: &Program, reuse: ReuseMode) -> Result<Module, Unsupported> {
     compile_inner(program, lang_check::resolve_type_of_sites(program), reuse)
 }
@@ -127,8 +142,13 @@ pub fn compile_with_sites(
 fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
-    reuse: ReuseMode,
+    _reuse: ReuseMode,
 ) -> Result<Module, Unsupported> {
+    // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
+    // lowering the IR interpreter consumes, so both backends execute one program (Phase 2).
+    let ir = lang_ir::lower(program).map_err(|u| Unsupported {
+        reason: format!("not yet lowered to the Core IR: {}", u.feature),
+    })?;
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
         shapes: Vec::new(),
@@ -140,15 +160,16 @@ fn compile_inner(
         module_globals: HashMap::new(),
         type_of_sites,
         cache_slots: 0,
-        reuse,
     };
+    // Type registration reads the surface declarations (shapes, derives, the method/destructor
+    // proto table) the IR carries verbatim; bodies are lowered from the IR.
     module.register_globals(program);
     module.register_types(program);
-    module.compile_methods(program)?;
+    module.compile_methods(&ir)?;
     let main = {
         let mut fc = FnCompiler::new(&mut module, true, None, Vec::new(), Vec::new());
-        fc.analyze_reuse(&program.stmts);
-        for stmt in &program.stmts {
+        fc.init_temps(ir.temp_count);
+        for stmt in &ir.top.stmts {
             fc.stmt(stmt)?;
         }
         fc.code.push(Op::Halt);
@@ -212,10 +233,6 @@ struct ModuleCompiler {
     /// takes the next id (module-global across all chunks); the total becomes [`Module::cache_slots`],
     /// sizing the VM's per-run cache array. See [`ModuleCompiler::next_cache_slot`].
     cache_slots: u32,
-    /// Which record-update reuse the perf bench asked for (production = [`ReuseMode::Static`]).
-    /// Read at each self-update site to pick `MakeRecord` (Off) vs `MakeRecordInPlace` (Runtime /
-    /// Static, the latter only where the linearity analysis cleared the accumulator).
-    reuse: ReuseMode,
 }
 
 impl ModuleCompiler {
@@ -233,13 +250,13 @@ impl ModuleCompiler {
     fn register_globals(&mut self, program: &Program) {
         for stmt in &program.stmts {
             match stmt {
-                Stmt::Binding { mut_decl, name, .. } => {
+                lang_ast::Stmt::Binding { mut_decl, name, .. } => {
                     self.module_globals.insert(name.clone(), *mut_decl);
                 }
-                Stmt::Fn(decl) => {
+                lang_ast::Stmt::Fn(decl) => {
                     self.module_globals.insert(decl.name.clone(), false);
                 }
-                Stmt::Use { path, names, .. } => {
+                lang_ast::Stmt::Use { path, names, .. } => {
                     for imported in names {
                         if is_native_module(path, &imported.name) {
                             self.module_globals.insert(imported.name.clone(), false);
@@ -273,7 +290,7 @@ impl ModuleCompiler {
         );
         for stmt in &program.stmts {
             match stmt {
-                Stmt::Record(decl) => {
+                lang_ast::Stmt::Record(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
                     if lang_ast::derives_trait(&decl.derives, "Comparable") {
                         self.comparable_derives.push(decl.name.clone());
@@ -286,7 +303,7 @@ impl ModuleCompiler {
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Record { fields });
                 }
-                Stmt::Class(decl) => {
+                lang_ast::Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
                     // A hand-written `compare` (via `impl Comparable`) takes precedence over the
                     // derived structural ordering.
@@ -321,7 +338,7 @@ impl ModuleCompiler {
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Class { fields, fns });
                 }
-                Stmt::Enum(decl) => {
+                lang_ast::Stmt::Enum(decl) => {
                     let variants = decl
                         .variants
                         .iter()
@@ -335,7 +352,7 @@ impl ModuleCompiler {
                     self.types
                         .insert(decl.name.clone(), TypeInfo::Enum { variants });
                 }
-                Stmt::Use { path, names, .. } => {
+                lang_ast::Stmt::Use { path, names, .. } => {
                     for imported in names {
                         // A `use std.{json}` native module resolves as a global value (bound at
                         // the `use` site), not an opaque type, so it is not registered here.
@@ -350,21 +367,25 @@ impl ModuleCompiler {
         }
     }
 
-    /// Pass 2: compile each class `fn` body into its reserved prototype. Methods see all
-    /// registered types (forward references work) and run with the receiver in register 0,
-    /// the declared parameters in registers `1..`, and field names resolving to the receiver.
-    fn compile_methods(&mut self, program: &Program) -> Result<(), Unsupported> {
-        for stmt in &program.stmts {
-            let Stmt::Class(decl) = stmt else { continue };
-            let field_set: HashSet<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
-            for method in &decl.methods {
-                let TypeInfo::Class { fns, .. } = &self.types[&decl.name] else {
+    /// Pass 2: compile each class method (and the `destruct` block) into its reserved prototype,
+    /// from the lowered IR. Methods see all registered types (forward references work) and run
+    /// with the receiver in register 0, the declared parameters in registers `1..`, and field
+    /// names resolving to the receiver.
+    fn compile_methods(&mut self, ir: &lang_ir::Program) -> Result<(), Unsupported> {
+        for stmt in &ir.top.stmts {
+            let Stmt::Decl(Decl::Class(class)) = stmt else {
+                continue;
+            };
+            let name = class.decl.name.clone();
+            let field_set: HashSet<String> =
+                class.decl.fields.iter().map(|f| f.name.clone()).collect();
+            for (method, func) in &class.methods {
+                let TypeInfo::Class { fns, .. } = &self.types[&name] else {
                     unreachable!("a class registered as non-class");
                 };
-                let proto = fns[&method.name];
-                let chunk = self.compile_fn_body(
-                    &method.params,
-                    Body::Block(&method.body),
+                let proto = fns[method];
+                let chunk = self.compile_func(
+                    func,
                     Some(MethodCtx {
                         fields: field_set.clone(),
                     }),
@@ -374,16 +395,15 @@ impl ModuleCompiler {
                 self.protos[proto as usize] = chunk;
             }
             // The `destruct` block compiles like a parameterless method (fields in scope).
-            if let Some(body) = &decl.destructor {
+            if let Some(func) = &class.destructor {
                 let proto = self
                     .destructors
                     .iter()
-                    .find(|(name, _)| name == &decl.name)
+                    .find(|(n, _)| n == &name)
                     .map(|(_, proto)| *proto)
                     .expect("a destructor proto was reserved in pass 1");
-                let chunk = self.compile_fn_body(
-                    &[],
-                    Body::Block(body),
+                let chunk = self.compile_func(
+                    func,
                     Some(MethodCtx {
                         fields: field_set.clone(),
                     }),
@@ -396,27 +416,47 @@ impl ModuleCompiler {
         Ok(())
     }
 
-    /// Compile one function/closure/method body into a [`Chunk`]. A `method` context reserves
+    /// Compile one IR [`Func`] (function/closure/method/`destruct` body) into a [`Chunk`].
+    fn compile_func(
+        &mut self,
+        func: &Func,
+        method: Option<MethodCtx>,
+        upvalues: Vec<(String, bool)>,
+        enclosing_locals: Vec<HashSet<String>>,
+    ) -> Result<Chunk, Unsupported> {
+        self.compile_chunk(
+            &func.params,
+            &func.defaults,
+            &func.body,
+            func.temp_count,
+            method,
+            upvalues,
+            enclosing_locals,
+        )
+    }
+
+    /// Compile a function-like body into a [`Chunk`]: its parameters, defaulted-parameter thunks,
+    /// and a [`Block`] body sized for `temp_count` frame temporaries. A `method` context reserves
     /// register 0 for the receiver (`self`) and resolves the class's field names against it.
     /// `upvalues` are the names (and mutability) this function captures from enclosing functions,
     /// in the order its parent will supply the cells; `enclosing_locals` are the enclosing
     /// functions' capturable local names (outermost first), so the function can lower its own
-    /// nested closures.
-    fn compile_fn_body(
+    /// nested closures. A body [`Block`] with a `tail` atom (a closure/arrow or a default thunk)
+    /// returns that atom; a block body without one falls off the end as an implicit unit return.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_chunk(
         &mut self,
-        params: &[Param],
-        body: Body<'_>,
+        params: &[String],
+        defaults: &[Option<Thunk>],
+        body: &Block,
+        temp_count: u32,
         method: Option<MethodCtx>,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
     ) -> Result<Chunk, Unsupported> {
         let is_method = method.is_some();
         let globals = self.global_names();
-        let fn_body = match body {
-            Body::Block(stmts) => FnBody::Block(stmts),
-            Body::Arrow(expr) => FnBody::Arrow(expr),
-        };
-        let analysis = freevars::analyze(params, fn_body, &enclosing_locals, &globals);
+        let analysis = freevars::analyze(params, defaults, body, &enclosing_locals, &globals);
 
         // The capturable layer this function exposes to its own nested closures. A method also
         // exposes `self`/its fields, but capturing them is left unsupported this slice — they go
@@ -439,16 +479,11 @@ impl ModuleCompiler {
         // `upvalues` is empty, so the thunk resolves globals only. Compiled before the body's
         // `FnCompiler` borrows `self`.
         let base: u16 = if is_method { 1 } else { 0 };
-        let mut defaults: Vec<(u16, u32)> = Vec::new();
-        for (j, param) in params.iter().enumerate() {
-            if let Some(default) = &param.default {
-                let proto = self.add_function(
-                    &[],
-                    Body::Arrow(default),
-                    upvalues.clone(),
-                    enclosing_locals.clone(),
-                )?;
-                defaults.push((base + j as u16, proto));
+        let mut default_pairs: Vec<(u16, u32)> = Vec::new();
+        for (j, default) in defaults.iter().enumerate() {
+            if let Some(thunk) = default {
+                let proto = self.add_thunk(thunk, upvalues.clone(), enclosing_locals.clone())?;
+                default_pairs.push((base + j as u16, proto));
             }
         }
 
@@ -456,6 +491,7 @@ impl ModuleCompiler {
         fc.celled = analysis.celled;
         fc.local_layer = local_layer;
         fc.forbidden = forbidden;
+        fc.init_temps(temp_count);
 
         // A method reserves register 0 for the receiver; ordinary functions do not.
         if is_method {
@@ -464,13 +500,13 @@ impl ModuleCompiler {
         fc.scopes.push(HashMap::new());
         for param in params {
             let reg = fc.alloc_reg();
-            let celled = fc.celled.contains(&param.name);
+            let celled = fc.celled.contains(param);
             // A captured parameter is boxed into a cell so the closure shares the live binding.
             if celled {
                 fc.code.push(Op::MakeCell { dst: reg, src: reg });
             }
             fc.scopes.last_mut().unwrap().insert(
-                param.name.clone(),
+                param.clone(),
                 Var {
                     reg,
                     mutable: false,
@@ -478,49 +514,50 @@ impl ModuleCompiler {
                 },
             );
         }
-        match body {
-            Body::Block(stmts) => {
-                fc.analyze_reuse(stmts);
-                for stmt in stmts {
-                    fc.stmt(stmt)?;
-                }
-            }
-            Body::Arrow(expr) => {
-                let t = fc.alloc_reg();
-                fc.expr(expr, t)?;
-                fc.code.push(Op::Return { src: t });
-            }
+        for stmt in &body.stmts {
+            fc.stmt(stmt)?;
         }
-        // A block body that falls off the end implicitly returns unit (M0's `exec_fn_body`).
+        // A value-position body (closure/arrow, default thunk) returns its tail atom; a block
+        // body that falls off the end implicitly returns unit (M0's `exec_fn_body`).
+        if let Some(tail) = &body.tail {
+            let src = fc.atom_reg(tail)?;
+            fc.code.push(Op::Return { src });
+        }
         fc.code.push(Op::Halt);
         let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
-        Ok(fc.into_chunk(num_params, defaults))
+        Ok(fc.into_chunk(num_params, default_pairs))
     }
 
-    /// Compile a `fn` body into a fresh prototype and return its index.
+    /// Compile an IR [`Func`] into a fresh prototype and return its index.
     fn add_function(
         &mut self,
-        params: &[Param],
-        body: Body<'_>,
+        func: &Func,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
     ) -> Result<u32, Unsupported> {
-        let chunk = self.compile_fn_body(params, body, None, upvalues, enclosing_locals)?;
+        let chunk = self.compile_func(func, None, upvalues, enclosing_locals)?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
     }
 
-    /// Compile an arrow closure body into a fresh prototype and return its index.
-    fn add_closure(
+    /// Compile a defaulted-parameter [`Thunk`] (a zero-parameter value-position body) into a fresh
+    /// prototype and return its index.
+    fn add_thunk(
         &mut self,
-        params: &[Param],
-        body: &Expr,
+        thunk: &Thunk,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
     ) -> Result<u32, Unsupported> {
-        let chunk =
-            self.compile_fn_body(params, Body::Arrow(body), None, upvalues, enclosing_locals)?;
+        let chunk = self.compile_chunk(
+            &[],
+            &[],
+            &thunk.body,
+            thunk.temp_count,
+            None,
+            upvalues,
+            enclosing_locals,
+        )?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
@@ -556,18 +593,17 @@ struct MethodCtx {
     fields: HashSet<String>,
 }
 
-/// A function body: a statement block (`fn`) or a single arrow expression (closure).
-enum Body<'a> {
-    Block(&'a [Stmt]),
-    Arrow(&'a Expr),
-}
-
 /// Per-prototype compilation state (one register file, one constant/diagnostic pool).
 struct FnCompiler<'m> {
     module: &'m mut ModuleCompiler,
     code: Vec<Op>,
     consts: Vec<Const>,
     diags: Vec<Diagnostic>,
+    /// The register holding each frame temporary's value, indexed by [`Temp`] index. ANF
+    /// temporaries are write-once and defined before use, so each slot is filled when its
+    /// defining `Stmt::Let` (or a `match`/`&&`/`??` destination) is lowered and read thereafter.
+    /// Sized to the frame's `temp_count` by [`Self::init_temps`].
+    temp_regs: Vec<Option<Reg>>,
     /// Register scopes, innermost last. Empty only in `main` at the global depth.
     scopes: Vec<HashMap<String, Var>>,
     /// Declared top-level globals and their mutability (tracked only in `main`).
@@ -595,18 +631,6 @@ struct FnCompiler<'m> {
     /// Enclosing-loop jump-patch sites, innermost last. Each `break`/`continue` records a pending
     /// `Jump` here; the loop patches them to its exit / continue target once those are known.
     loops: Vec<LoopCtx>,
-    /// Names of record-update accumulators this function's body proved **linear** (never aliased),
-    /// so a self-update `acc = Type { ...acc, … }` may reuse the allocation with the runtime check
-    /// elided (`ReuseCheck::Static`). Computed once before lowering; empty unless [`ModuleCompiler::reuse`]
-    /// is [`ReuseMode::Static`]. A self-update whose name is absent here still gets the runtime-checked
-    /// reuse. See [`linear_record_accumulators`].
-    linear_accs: HashSet<String>,
-    /// Whether a `LoadField`'s receiver temporary should be released immediately (drop insertion).
-    /// Set only while lowering a reuse construct's field initializers (`eval_in_place_named`), so a
-    /// self-update that *reads* the accumulator (`acc = T { ...acc, x: acc.x }`) frees the read's
-    /// temporary before the in-place mutation — restoring unique ownership. Off everywhere else, so
-    /// ordinary field reads (the common case) pay nothing. See `plans/perf/p-reuse-analysis.md`.
-    drop_receivers: bool,
 }
 
 /// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
@@ -637,10 +661,6 @@ struct GlobalInfo {
 /// mutable, for the child's reassignment check) paired with the `CaptureFrom` source the building
 /// frame uses to supply each cell. The two vectors are index-aligned.
 type CaptureLayout = (Vec<(String, bool)>, Vec<CaptureFrom>);
-
-/// The interned shape index and lowered `(slot, register)` named-field list for an in-place record
-/// construct ([`Op::MakeRecordInPlace`]), as produced by `eval_in_place_named`.
-type InPlaceNamed = (u32, Box<[(u16, Reg)]>);
 
 /// How a name resolves at a use site.
 enum Resolved {
@@ -680,6 +700,7 @@ impl<'m> FnCompiler<'m> {
             code: Vec::new(),
             consts: Vec::new(),
             diags: Vec::new(),
+            temp_regs: Vec::new(),
             scopes: Vec::new(),
             globals: HashMap::new(),
             next_reg: 0,
@@ -692,17 +713,28 @@ impl<'m> FnCompiler<'m> {
             enclosing_locals,
             local_layer: HashSet::new(),
             loops: Vec::new(),
-            linear_accs: HashSet::new(),
-            drop_receivers: false,
         }
     }
 
-    /// Populate [`Self::linear_accs`] from `stmts` when reuse is [`ReuseMode::Static`] — the
-    /// compile-time half of reuse analysis. Called once per function body before lowering.
-    fn analyze_reuse(&mut self, stmts: &[Stmt]) {
-        if self.module.reuse == ReuseMode::Static {
-            self.linear_accs = linear_record_accumulators(stmts);
-        }
+    /// Size the frame-temporary register map to `temp_count` (all slots initially unfilled).
+    /// Called once per body before lowering.
+    fn init_temps(&mut self, temp_count: u32) {
+        self.temp_regs = vec![None; temp_count as usize];
+    }
+
+    /// Allocate the register backing a temporary at its defining site (`let t = …`, or a
+    /// `match`/`&&`/`??` destination) and record it. A temp is write-once, so each slot is filled
+    /// exactly once.
+    fn define_temp(&mut self, t: Temp) -> Reg {
+        let reg = self.alloc_reg();
+        self.temp_regs[t.index()] = Some(reg);
+        reg
+    }
+
+    /// The register holding temporary `t`'s value. ANF guarantees the temp was defined before this
+    /// read, so the slot is filled.
+    fn temp_reg(&self, t: Temp) -> Reg {
+        self.temp_regs[t.index()].expect("ANF temporary read before it was defined")
     }
 
     /// The enclosing-locals chain to pass to one of *this* function's nested closures: the chain
@@ -790,19 +822,21 @@ impl<'m> FnCompiler<'m> {
         Resolved::Global
     }
 
-    /// Compute, for a nested closure/`fn` with the given params and body, the ordered upvalue
-    /// list (name + mutability) it captures and the matching `CaptureFrom` source for each (in
-    /// this — the building — function's terms). Returns `Unsupported` if a capture reaches a
-    /// method's `self`/field or cannot be sourced (e.g. a forward capture of a not-yet-declared
-    /// local), so such a program is skipped rather than miscompiled.
-    fn resolve_captures(
-        &self,
-        params: &[Param],
-        body: FnBody<'_>,
-    ) -> Result<CaptureLayout, Unsupported> {
+    /// Compute, for a nested closure/`fn` `func`, the ordered upvalue list (name + mutability) it
+    /// captures and the matching `CaptureFrom` source for each (in this — the building —
+    /// function's terms). Returns `Unsupported` if a capture reaches a method's `self`/field or
+    /// cannot be sourced (e.g. a forward capture of a not-yet-declared local), so such a program
+    /// is skipped rather than miscompiled.
+    fn resolve_captures(&self, func: &Func) -> Result<CaptureLayout, Unsupported> {
         let globals = self.module.global_names();
         let enclosing = self.child_enclosing();
-        let free = freevars::free_vars(params, body, &enclosing, &globals);
+        let free = freevars::free_vars(
+            &func.params,
+            &func.defaults,
+            &func.body,
+            &enclosing,
+            &globals,
+        );
         let mut upvalues = Vec::with_capacity(free.len());
         let mut captures = Vec::with_capacity(free.len());
         for name in free {
@@ -829,9 +863,29 @@ impl<'m> FnCompiler<'m> {
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
         match stmt {
+            // `let t = rvalue` — bind the operation's result to its frame temporary's register.
+            Stmt::Let { dst, rvalue, .. } => {
+                let reg = self.define_temp(*dst);
+                self.rvalue(rvalue, reg)
+            }
+            // A bare expression statement: evaluate for effect into a scratch register, discard.
+            Stmt::Eval { rvalue, .. } => {
+                let reg = self.alloc_reg();
+                self.rvalue(rvalue, reg)
+            }
+            // Releasing a discarded temporary promptly is a Phase-3 (precise-RC) concern; this
+            // phase keeps today's VM reclamation — frame teardown releases it — so `Drop` is a
+            // no-op here. (The IR *interpreter* honors it for its own destructor-timing fidelity.)
+            Stmt::Drop(_) => Ok(()),
+            Stmt::Bind {
+                mut_decl,
+                name,
+                name_span,
+                value,
+                ..
+            } => self.binding(*mut_decl, name, *name_span, value),
             Stmt::Echo { value, span } => {
-                let t = self.alloc_reg();
-                self.expr(value, t)?;
+                let t = self.atom_reg(value)?;
                 // Route a `Display` object through its `to_string`; identity otherwise.
                 let s = self.alloc_reg();
                 self.code.push(Op::Stringify {
@@ -842,21 +896,13 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::Echo { reg: s });
                 Ok(())
             }
-            Stmt::Binding {
-                mut_decl,
-                name,
-                name_span,
-                value,
-                ..
-            } => self.binding(*mut_decl, name, *name_span, value),
-            Stmt::Fn(decl) => self.declare_fn(decl),
             Stmt::Return { value, span } => self.return_stmt(value.as_ref(), *span),
             Stmt::If {
                 cond,
-                then_body,
-                else_body,
+                then_block,
+                else_block,
                 span,
-            } => self.if_stmt(cond, then_body, else_body.as_deref(), *span),
+            } => self.if_stmt(cond, then_block, else_block.as_ref(), *span),
             Stmt::For {
                 pattern,
                 iterable,
@@ -887,25 +933,36 @@ impl<'m> FnCompiler<'m> {
                     .push(site);
                 Ok(())
             }
-            Stmt::Expr { expr, .. } => {
-                // Evaluated for its side effects (and any error); the value is discarded.
-                let t = self.alloc_reg();
-                self.expr(expr, t)
-            }
-            // Type declarations are registered in the pre-pass and class methods compiled
-            // separately; as statements they emit no code (the tree-walker likewise just
-            // records them in scope). `namespace` is a no-op; a non-`std` `use` registers
-            // opaque stubs (also at compile time).
-            // A standalone `impl Trait for T {}` is a compile-time capability declaration (checked
-            // in the front end); a marker/capability impl emits no code.
-            Stmt::Record(_)
-            | Stmt::Class(_)
-            | Stmt::Enum(_)
-            | Stmt::Impl(_)
-            | Stmt::Namespace { .. } => Ok(()),
-            // `use std.{json, ...}` binds each native module as a global value (mirroring the
-            // tree-walker's `declare_use`); other imports emit nothing.
-            Stmt::Use { path, names, .. } => {
+            Stmt::Match {
+                scrutinee,
+                arms,
+                dst,
+                span,
+            } => self.match_stmt(scrutinee, arms, *dst, *span),
+            Stmt::Logical {
+                dst,
+                op,
+                left,
+                right,
+                span,
+            } => self.logical(*dst, *op, left, right, *span),
+            Stmt::Coalesce {
+                dst,
+                value,
+                fallback,
+                span,
+            } => self.coalesce(*dst, value, fallback, *span),
+            Stmt::Decl(decl) => self.decl(decl),
+        }
+    }
+
+    /// Lower a declaration statement. A `fn` binds a closure; type declarations were registered in
+    /// the pre-pass and emit no code; `use std.{json, ...}` binds each native module as a global.
+    fn decl(&mut self, decl: &Decl) -> Result<(), Unsupported> {
+        match decl {
+            Decl::Fn { name, func, .. } => self.declare_fn(name, func),
+            Decl::Class(_) | Decl::Enum(_) | Decl::Record(_) => Ok(()),
+            Decl::Use { path, names, .. } => {
                 for imported in names {
                     if is_native_module(path, &imported.name) {
                         let value = self.alloc_reg();
@@ -927,14 +984,9 @@ impl<'m> FnCompiler<'m> {
     /// local that may capture enclosing locals as upvalues; if it (or a sibling) captures the
     /// `fn` itself, the binding is celled — and the cell is created *before* the closure is built
     /// so a self-recursive `fn` can capture its own (still-unset) cell.
-    fn declare_fn(&mut self, decl: &FnDecl) -> Result<(), Unsupported> {
+    fn declare_fn(&mut self, name: &str, func: &Func) -> Result<(), Unsupported> {
         if self.at_global_depth() {
-            let proto = self.module.add_function(
-                &decl.params,
-                Body::Block(&decl.body),
-                Vec::new(),
-                Vec::new(),
-            )?;
+            let proto = self.module.add_function(func, Vec::new(), Vec::new())?;
             let t = self.alloc_reg();
             self.code.push(Op::MakeClosure {
                 dst: t,
@@ -942,15 +994,15 @@ impl<'m> FnCompiler<'m> {
                 captures: Box::new([]),
             });
             self.globals
-                .insert(decl.name.clone(), GlobalInfo { mutable: false });
+                .insert(name.to_string(), GlobalInfo { mutable: false });
             self.code.push(Op::StoreGlobal {
-                name: decl.name.clone(),
+                name: name.to_string(),
                 src: t,
             });
             return Ok(());
         }
 
-        let celled = self.celled.contains(&decl.name);
+        let celled = self.celled.contains(name);
         let reg = self.alloc_reg();
         if celled {
             // Pre-create the cell (holding unit) and bind the name, so the body's references to
@@ -963,7 +1015,7 @@ impl<'m> FnCompiler<'m> {
                 src: unit,
             });
             self.scopes.last_mut().unwrap().insert(
-                decl.name.clone(),
+                name.to_string(),
                 Var {
                     reg,
                     mutable: false,
@@ -971,12 +1023,9 @@ impl<'m> FnCompiler<'m> {
                 },
             );
         }
-        let (upvalues, captures) =
-            self.resolve_captures(&decl.params, FnBody::Block(&decl.body))?;
+        let (upvalues, captures) = self.resolve_captures(func)?;
         let enclosing = self.child_enclosing();
-        let proto =
-            self.module
-                .add_function(&decl.params, Body::Block(&decl.body), upvalues, enclosing)?;
+        let proto = self.module.add_function(func, upvalues, enclosing)?;
         let t = self.alloc_reg();
         self.code.push(Op::MakeClosure {
             dst: t,
@@ -986,49 +1035,49 @@ impl<'m> FnCompiler<'m> {
         if celled {
             self.code.push(Op::CellSet { cell: reg, src: t });
         } else {
-            self.declare_local(&decl.name, t, false);
+            self.declare_local(name, t, false);
         }
         Ok(())
     }
 
-    fn return_stmt(&mut self, value: Option<&Expr>, _span: Span) -> Result<(), Unsupported> {
-        let t = self.alloc_reg();
-        match value {
-            Some(expr) => self.expr(expr, t)?,
+    fn return_stmt(&mut self, value: Option<&Atom>, _span: Span) -> Result<(), Unsupported> {
+        let src = match value {
+            Some(atom) => self.atom_reg(atom)?,
             None => {
+                let t = self.alloc_reg();
                 let k = self.add_const(Const::Unit);
                 self.code.push(Op::LoadConst { dst: t, k });
+                t
             }
-        }
-        self.code.push(Op::Return { src: t });
+        };
+        self.code.push(Op::Return { src });
         Ok(())
     }
 
     /// `if cond { then } else { else }`, lowered to a bool-check and forward jumps. Mirrors
     /// the tree-walker: a non-bool condition is E0007 at the `if`'s span, and each branch
-    /// body runs in its own (block) scope.
+    /// body runs in its own (block) scope. The condition is a pre-computed bool atom.
     fn if_stmt(
         &mut self,
-        cond: &Expr,
-        then_body: &[Stmt],
-        else_body: Option<&[Stmt]>,
+        cond: &Atom,
+        then_block: &Block,
+        else_block: Option<&Block>,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let rc = self.alloc_reg();
-        self.expr(cond, rc)?;
+        let rc = self.atom_reg(cond)?;
         self.code.push(Op::RequireCondBool { reg: rc, span });
         let jf = self.code.len();
         self.code.push(Op::JumpIfFalse { reg: rc, target: 0 });
 
-        self.block(then_body)?;
+        self.block(then_block)?;
 
-        match else_body {
-            Some(else_body) => {
+        match else_block {
+            Some(else_block) => {
                 let j_end = self.code.len();
                 self.code.push(Op::Jump { target: 0 });
                 let else_start = self.code.len() as u32;
                 self.patch_jump(jf, else_start);
-                self.block(else_body)?;
+                self.block(else_block)?;
                 let end = self.code.len() as u32;
                 self.patch_jump(j_end, end);
             }
@@ -1047,17 +1096,18 @@ impl<'m> FnCompiler<'m> {
     fn for_stmt(
         &mut self,
         pattern: &ForPattern,
-        iterable: &Expr,
-        body: &[Stmt],
+        iterable: &Atom,
+        body: &Block,
         span: Span,
     ) -> Result<(), Unsupported> {
         // The loop's bookkeeping registers live in the enclosing frame (a list snapshot, its
-        // length, the running index, and a constant 1 to advance it).
+        // length, the running index, and a constant 1 to advance it). The iterable is a
+        // pre-computed atom, snapshotted once into a fresh register.
+        let src = self.atom_reg(iterable)?;
         let items = self.alloc_reg();
-        self.expr(iterable, items)?;
         self.code.push(Op::IterSnapshot {
             dst: items,
-            src: items,
+            src,
             span,
         });
         let len = self.alloc_reg();
@@ -1121,7 +1171,7 @@ impl<'m> FnCompiler<'m> {
                     self.bind_loop_var(second, second_reg);
                 }
             }
-            for stmt in body {
+            for stmt in &body.stmts {
                 self.stmt(stmt)?;
             }
             Ok(())
@@ -1156,11 +1206,11 @@ impl<'m> FnCompiler<'m> {
     /// `while <cond> { body }`, lowered to a top-tested loop: evaluate the condition, require it
     /// be a bool, exit if false, run the body in a fresh scope, then jump back. Mirrors the
     /// tree-walker — a bare reassignment in the body updates its enclosing binding's register, so
-    /// the condition makes progress.
-    fn while_stmt(&mut self, cond: &Expr, body: &[Stmt], span: Span) -> Result<(), Unsupported> {
+    /// the condition makes progress. The condition is a re-evaluated **block** (its `let`s plus a
+    /// tail bool atom); its straight-line code runs in the enclosing scope each iteration.
+    fn while_stmt(&mut self, cond: &Block, body: &Block, span: Span) -> Result<(), Unsupported> {
         let loop_top = self.code.len() as u32;
-        let rc = self.alloc_reg();
-        self.expr(cond, rc)?;
+        let rc = self.value_block(cond)?;
         self.code.push(Op::RequireCondBool { reg: rc, span });
         let exit_jump = self.code.len();
         self.code.push(Op::JumpIfFalse { reg: rc, target: 0 });
@@ -1204,17 +1254,31 @@ impl<'m> FnCompiler<'m> {
         );
     }
 
-    /// Compile a brace-delimited block in its own (block) scope.
-    fn block(&mut self, stmts: &[Stmt]) -> Result<(), Unsupported> {
+    /// Compile a statement-position block (an `if`/`while` body) in its own (block) scope.
+    fn block(&mut self, block: &Block) -> Result<(), Unsupported> {
         self.scopes.push(HashMap::new());
         let result = (|| {
-            for stmt in stmts {
+            for stmt in &block.stmts {
                 self.stmt(stmt)?;
             }
             Ok(())
         })();
         self.scopes.pop();
         result
+    }
+
+    /// Compile a value-position block (a `while` condition, a `&&`/`||` right operand, a `??`
+    /// fallback) **inline** in the current scope — its straight-line `let`s were sub-expressions,
+    /// not a new lexical scope — and return the register holding its tail atom.
+    fn value_block(&mut self, block: &Block) -> Result<Reg, Unsupported> {
+        for stmt in &block.stmts {
+            self.stmt(stmt)?;
+        }
+        let tail = block
+            .tail
+            .as_ref()
+            .expect("a value-position block always has a tail atom");
+        self.atom_reg(tail)
     }
 
     fn patch_jump(&mut self, at: usize, target: u32) {
@@ -1239,41 +1303,24 @@ impl<'m> FnCompiler<'m> {
         mut_decl: bool,
         name: &str,
         name_span: Span,
-        value: &Expr,
+        value: &Atom,
     ) -> Result<(), Unsupported> {
+        // The value is a pre-computed atom (its side effects already ran in the preceding `let`s);
+        // `atom_reg` only materializes the register holding it. The binding rule then applies — so
+        // a reassignment to an immutable still runs the value (no observable change), matching the
+        // tree-walker's `bind`.
+        let src = self.atom_reg(value)?;
+
         if mut_decl {
             if self.at_global_depth() {
-                let t = self.alloc_reg();
-                self.expr(value, t)?;
                 self.globals
                     .insert(name.to_string(), GlobalInfo { mutable: true });
                 self.code.push(Op::StoreGlobal {
                     name: name.to_string(),
-                    src: t,
+                    src,
                 });
-            } else if self.celled.contains(name) || self.scopes.last().unwrap().contains_key(name) {
-                // A captured local needs `MakeCell`; a re-`mut` of a name already in this scope reuses
-                // its register — both go through `declare_local`'s temp-and-move path.
-                let t = self.alloc_reg();
-                self.expr(value, t)?;
-                self.declare_local(name, t, true);
             } else {
-                // Drop insertion (Step A): a fresh non-celled local is evaluated **directly into its
-                // own register** — no retaining `Op::Move` from an initializer temp. The monotonic
-                // register machine never frees that temp until the frame ends, so the old `Move`
-                // left a freshly-built value at refcount 2 (temp + local), permanently blocking
-                // reuse on a local accumulator. Binding `name` *after* evaluating `value` keeps the
-                // initializer from resolving to the not-yet-bound local. See `p-reuse-analysis.md`.
-                let reg = self.alloc_reg();
-                self.expr(value, reg)?;
-                self.scopes.last_mut().unwrap().insert(
-                    name.to_string(),
-                    Var {
-                        reg,
-                        mutable: true,
-                        celled: false,
-                    },
-                );
+                self.declare_local(name, src, true);
             }
             return Ok(());
         }
@@ -1282,73 +1329,21 @@ impl<'m> FnCompiler<'m> {
         // captured upvalues, then globals — mirroring the tree-walker's outward `Scope::assign`),
         // else declare a fresh local.
         if let Some(var) = self.lookup_local(name) {
-            // Copy-on-write self-append (`acc ~= [x]`) for a mutable, non-celled local accumulator:
-            // the accumulator already lives in `var.reg` (its sole owner when unaliased), so the
-            // in-place op reads, mutates, and re-stores it there directly — no take-out op needed.
-            // A celled local is skipped (the value lives behind a shared cell, not the register).
-            if var.mutable
-                && !var.celled
-                && let Some(rhs) = self_append_rhs(name, value)
-            {
-                let rhs_reg = self.alloc_reg();
-                self.expr(rhs, rhs_reg)?;
-                self.code.push(Op::ConcatInPlace {
-                    dst: var.reg,
-                    lhs: var.reg,
-                    rhs: rhs_reg,
-                    span: value.span(),
-                });
-                return Ok(());
-            }
-            // Record-update reuse for a local self-update `acc = Type { ...acc, … }`. With drop
-            // insertion (Step A, no declaration `Move`) a non-celled local accumulator now lives at
-            // refcount 1 in `var.reg`, so the in-place op reads/mutates/re-stores it there directly.
-            // `Static` (check elided) is sound when the linearity analysis cleared `acc`; otherwise
-            // `Runtime`. A celled local stays behind a shared cell and is skipped.
-            if var.mutable
-                && !var.celled
-                && self.module.reuse != ReuseMode::Off
-                && let Some(lit) = record_self_update(name, value)
-                && let Some((kind, fields)) = self.record_kind_fields(&lit.type_name)
-            {
-                let check = self.reuse_check(name);
-                if let Some((shape, named)) = self.eval_in_place_named(lit, kind, &fields)? {
-                    self.code.push(Op::MakeRecordInPlace {
-                        dst: var.reg,
-                        shape,
-                        named,
-                        base: var.reg,
-                        check,
-                        span: value.span(),
-                    });
-                }
-                return Ok(());
-            }
-            let t = self.alloc_reg();
-            self.expr(value, t)?;
             if !var.mutable {
                 let idx = self.add_diag(immutable_diag(name, name_span));
                 self.code.push(Op::Raise { idx });
             } else if var.celled {
-                self.code.push(Op::CellSet {
-                    cell: var.reg,
-                    src: t,
-                });
+                self.code.push(Op::CellSet { cell: var.reg, src });
             } else {
-                self.code.push(Op::Move {
-                    dst: var.reg,
-                    src: t,
-                });
+                self.code.push(Op::Move { dst: var.reg, src });
             }
             return Ok(());
         }
 
         // A captured upvalue: reassign through its cell, enforcing the source binding's mutability.
         if let Some(&index) = self.upvalue_index.get(name) {
-            let t = self.alloc_reg();
-            self.expr(value, t)?;
             if self.upvalue_mut[index as usize] {
-                self.code.push(Op::UpvalueSet { index, src: t });
+                self.code.push(Op::UpvalueSet { index, src });
             } else {
                 let idx = self.add_diag(immutable_diag(name, name_span));
                 self.code.push(Op::Raise { idx });
@@ -1364,78 +1359,10 @@ impl<'m> FnCompiler<'m> {
             self.module.module_globals.get(name).copied()
         };
         if let Some(mutable) = global_mut {
-            // Copy-on-write self-append for a mutable global accumulator. The global has no register,
-            // so `TakeGlobal` moves it into a temp (leaving `unit`, no retain) — the accumulator's
-            // sole reference when unaliased — then the in-place op mutates it and `StoreGlobal`
-            // re-binds the result. Take-out happens before `rhs` is evaluated, matching the
-            // tree-walker (`rhs` cannot read the accumulator: the guard rejected any mention).
-            if mutable && let Some(rhs) = self_append_rhs(name, value) {
-                let acc_reg = self.alloc_reg();
-                self.code.push(Op::TakeGlobal {
-                    dst: acc_reg,
-                    name: name.to_string(),
-                    span: name_span,
-                });
-                let rhs_reg = self.alloc_reg();
-                self.expr(rhs, rhs_reg)?;
-                self.code.push(Op::ConcatInPlace {
-                    dst: acc_reg,
-                    lhs: acc_reg,
-                    rhs: rhs_reg,
-                    span: value.span(),
-                });
-                self.code.push(Op::StoreGlobal {
-                    name: name.to_string(),
-                    src: acc_reg,
-                });
-                return Ok(());
-            }
-            // Record-update reuse for a global self-update `acc = Type { ...acc, … }`. A global is
-            // stored via the **consuming** `StoreGlobal`, so it is refcount 1 — and stays so as long
-            // as it is not *read* (a `LoadGlobal` would retain it into a lingering temporary). The
-            // named initializers are evaluated *first* (while the global is intact — they may read
-            // `acc.field`, which then keeps the refcount above one and forces the runtime copy),
-            // then `TakeGlobal` moves the accumulator into a register the in-place op consumes, and
-            // `StoreGlobal` re-binds the result.
-            //
-            // `Static` (the compile-time-hoisted check elision) is sound here exactly when the
-            // linearity analysis proved `acc` is read only *after* its last update (so no temporary
-            // overlaps an in-place mutation) — the "fully in place" blind-overwrite loop. Otherwise
-            // `Runtime` keeps it correct (it copies when a read kept the refcount above one).
-            if mutable
-                && self.module.reuse != ReuseMode::Off
-                && let Some(lit) = record_self_update(name, value)
-                && let Some((kind, fields)) = self.record_kind_fields(&lit.type_name)
-            {
-                let check = self.reuse_check(name);
-                if let Some((shape, named)) = self.eval_in_place_named(lit, kind, &fields)? {
-                    let acc_reg = self.alloc_reg();
-                    self.code.push(Op::TakeGlobal {
-                        dst: acc_reg,
-                        name: name.to_string(),
-                        span: name_span,
-                    });
-                    self.code.push(Op::MakeRecordInPlace {
-                        dst: acc_reg,
-                        shape,
-                        named,
-                        base: acc_reg,
-                        check,
-                        span: value.span(),
-                    });
-                    self.code.push(Op::StoreGlobal {
-                        name: name.to_string(),
-                        src: acc_reg,
-                    });
-                }
-                return Ok(());
-            }
-            let t = self.alloc_reg();
-            self.expr(value, t)?;
             if mutable {
                 self.code.push(Op::StoreGlobal {
                     name: name.to_string(),
-                    src: t,
+                    src,
                 });
             } else {
                 let idx = self.add_diag(immutable_diag(name, name_span));
@@ -1445,17 +1372,15 @@ impl<'m> FnCompiler<'m> {
         }
 
         // Not found anywhere: a new immutable binding in the current scope.
-        let t = self.alloc_reg();
-        self.expr(value, t)?;
         if self.scopes.is_empty() {
             self.globals
                 .insert(name.to_string(), GlobalInfo { mutable: false });
             self.code.push(Op::StoreGlobal {
                 name: name.to_string(),
-                src: t,
+                src,
             });
         } else {
-            self.declare_local(name, t, false);
+            self.declare_local(name, src, false);
         }
         Ok(())
     }
@@ -1486,98 +1411,199 @@ impl<'m> FnCompiler<'m> {
         );
     }
 
-    /// Lower `expr` so its value ends up in register `dst`.
-    fn expr(&mut self, expr: &Expr, dst: Reg) -> Result<(), Unsupported> {
-        match expr {
-            Expr::Str { value, .. } => {
-                let k = self.add_const(Const::Str(value.clone()));
+    /// Produce a register holding `atom`'s value. A temporary or a directly-held local / `self`
+    /// resolves to its existing register (operands are read-only); a constant, or a celled /
+    /// captured / global / field name, is materialized into a fresh register.
+    fn atom_reg(&mut self, atom: &Atom) -> Result<Reg, Unsupported> {
+        match atom {
+            Atom::Const(c) => {
+                let dst = self.alloc_reg();
+                let k = self.add_const(const_value(c));
                 self.code.push(Op::LoadConst { dst, k });
+                Ok(dst)
             }
-            Expr::Int { value, .. } => {
-                let k = self.add_const(Const::Int(*value));
-                self.code.push(Op::LoadConst { dst, k });
+            Atom::Temp(t) => Ok(self.temp_reg(*t)),
+            Atom::Var { name, span } => self.var_reg(name, *span),
+        }
+    }
+
+    /// Materialize each atom in `atoms` into a register, in order.
+    fn atom_regs(&mut self, atoms: &[Atom]) -> Result<Box<[Reg]>, Unsupported> {
+        let mut regs = Vec::with_capacity(atoms.len());
+        for a in atoms {
+            regs.push(self.atom_reg(a)?);
+        }
+        Ok(regs.into_boxed_slice())
+    }
+
+    /// Resolve a source-variable reference to a register holding its value, mirroring the
+    /// tree-walker's name resolution (`Expr::Ident` evaluation).
+    fn var_reg(&mut self, name: &str, span: Span) -> Result<Reg, Unsupported> {
+        match self.resolve(name) {
+            // A directly-held local or the method receiver is read in place (operands are read-only;
+            // any op that stores the value retains it, so a later reassignment cannot disturb it).
+            Resolved::Local(reg) => Ok(reg),
+            Resolved::SelfRecv => Ok(0),
+            Resolved::CelledLocal(cell) => {
+                let dst = self.alloc_reg();
+                self.code.push(Op::CellGet { dst, cell });
+                Ok(dst)
             }
-            Expr::Float { value, .. } => {
-                let k = self.add_const(Const::Float(*value));
-                self.code.push(Op::LoadConst { dst, k });
+            Resolved::Upvalue(index) => {
+                let dst = self.alloc_reg();
+                self.code.push(Op::UpvalueGet { dst, index });
+                Ok(dst)
             }
-            Expr::Bool { value, .. } => {
-                let k = self.add_const(Const::Bool(*value));
-                self.code.push(Op::LoadConst { dst, k });
-            }
-            Expr::Ident { name, span } => match self.resolve(name) {
-                Resolved::Local(reg) => self.code.push(Op::Move { dst, src: reg }),
-                Resolved::CelledLocal(reg) => self.code.push(Op::CellGet { dst, cell: reg }),
-                Resolved::Upvalue(index) => self.code.push(Op::UpvalueGet { dst, index }),
-                Resolved::SelfRecv => self.code.push(Op::Move { dst, src: 0 }),
-                Resolved::Field => {
-                    let cache = self.module.next_cache_slot();
-                    self.code.push(Op::LoadField {
-                        dst,
-                        obj: 0,
-                        field: name.clone(),
-                        span: *span,
-                        cache,
-                    })
-                }
-                Resolved::Global => self.code.push(Op::LoadGlobal {
+            Resolved::Field => {
+                let dst = self.alloc_reg();
+                let cache = self.module.next_cache_slot();
+                self.code.push(Op::LoadField {
                     dst,
-                    name: name.clone(),
-                    span: *span,
-                }),
-                // `none` is the one prelude *value* (not a function): the `Option.none` variant.
-                Resolved::Prelude if name == "none" => {
-                    let shape = self.module.builtin_enum_shape("Option", "none");
-                    self.code.push(Op::MakeEnum {
-                        dst,
-                        shape,
-                        args: Box::new([]),
-                    });
+                    obj: 0,
+                    field: name.to_string(),
+                    span,
+                    cache,
+                });
+                Ok(dst)
+            }
+            Resolved::Global => {
+                let dst = self.alloc_reg();
+                self.code.push(Op::LoadGlobal {
+                    dst,
+                    name: name.to_string(),
+                    span,
+                });
+                Ok(dst)
+            }
+            // `none` is the one prelude *value* (not a function): the `Option.none` variant.
+            Resolved::Prelude if name == "none" => {
+                let dst = self.alloc_reg();
+                let shape = self.module.builtin_enum_shape("Option", "none");
+                self.code.push(Op::MakeEnum {
+                    dst,
+                    shape,
+                    args: Box::new([]),
+                });
+                Ok(dst)
+            }
+            // A bare reference to a collection builtin becomes a first-class native-function value (a
+            // direct call still uses `CallBuiltin`). Other prelude names used as values (the
+            // `Ok`/`Err`/`some` constructors, `panic`, `next_id`) are not yet first-class — skip.
+            Resolved::Prelude => match Builtin::from_name(name) {
+                Some(func) => {
+                    let dst = self.alloc_reg();
+                    self.code.push(Op::LoadNativeFn { dst, func });
+                    Ok(dst)
                 }
-                // A bare reference to a collection builtin becomes a first-class native-function
-                // value (a direct call still uses `CallBuiltin`). Other prelude names used as
-                // values (the `Ok`/`Err`/`some` constructors, `panic`, `next_id`) are not yet
-                // first-class, so they remain unsupported.
-                Resolved::Prelude => match Builtin::from_name(name) {
-                    Some(func) => self.code.push(Op::LoadNativeFn { dst, func }),
-                    None => return unsupported("reference to a prelude value/builtin"),
-                },
+                None => unsupported("reference to a prelude value/builtin"),
             },
-            Expr::Closure { params, body, .. } => {
-                // Resolve the closure's captures in this (the building) frame's terms, then
-                // compile its body with the matching upvalue layout and emit `MakeClosure` so the
-                // VM threads the captured cells into the new closure.
-                let (upvalues, captures) = self.resolve_captures(params, FnBody::Arrow(body))?;
-                let enclosing = self.child_enclosing();
-                let proto = self.module.add_closure(params, body, upvalues, enclosing)?;
-                self.code.push(Op::MakeClosure {
-                    dst,
-                    proto,
-                    captures: captures.into_boxed_slice(),
-                });
+        }
+    }
+
+    /// The register a result is written to: a temporary's allocated register, or — in a discard
+    /// position (`dst == None`) — a fresh scratch register.
+    fn dst_reg(&mut self, dst: Option<Temp>) -> Reg {
+        match dst {
+            Some(t) => self.define_temp(t),
+            None => self.alloc_reg(),
+        }
+    }
+
+    /// Lower a primitive operation ([`Rvalue`]) into register `dst`. Operands are already atoms
+    /// (ANF), so this is a near-1:1 mapping to bytecode — no recursive flattening.
+    fn rvalue(&mut self, rvalue: &Rvalue, dst: Reg) -> Result<(), Unsupported> {
+        match rvalue {
+            Rvalue::Use(atom) => {
+                // Copy the atom into `dst` (a retaining `Move`), so the temp is an independent
+                // snapshot even if its source is later reassigned.
+                let src = self.atom_reg(atom)?;
+                self.code.push(Op::Move { dst, src });
+                Ok(())
             }
-            Expr::List { items, .. } => {
-                let mut regs = Vec::with_capacity(items.len());
-                for item in items {
-                    let r = self.alloc_reg();
-                    self.expr(item, r)?;
-                    regs.push(r);
+            Rvalue::Unary { op, operand, span } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::Unary {
+                    op: *op,
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
+            // `&&`/`||` never reach here (they lower to `Stmt::Logical`); every other infix does.
+            Rvalue::Binary { op, lhs, rhs, span } => {
+                let a = self.atom_reg(lhs)?;
+                let b = self.atom_reg(rhs)?;
+                self.code.push(Op::Binary {
+                    op: *op,
+                    dst,
+                    a,
+                    b,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::Call { callee, args, span } => self.lower_call(callee, args, dst, *span),
+            Rvalue::Method {
+                receiver,
+                name,
+                args,
+                span,
+                ..
+            } => self.lower_method(receiver, name, args, dst, *span),
+            Rvalue::Field {
+                receiver,
+                name,
+                span,
+                ..
+            } => self.lower_field(receiver, name, dst, *span),
+            Rvalue::Index {
+                receiver,
+                index,
+                span,
+            } => {
+                let recv = self.atom_reg(receiver)?;
+                let idx = self.atom_reg(index)?;
+                self.code.push(Op::Index {
+                    dst,
+                    recv,
+                    index: idx,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::List { items, .. } => {
+                let items = self.atom_regs(items)?;
+                self.code.push(Op::MakeList { dst, items });
+                Ok(())
+            }
+            Rvalue::Map { entries, span } => {
+                // Evaluate each key, check it is a string (matching M0's per-entry error timing),
+                // then the value — then assemble the map.
+                let mut pairs = Vec::with_capacity(entries.len());
+                for (key, value) in entries {
+                    let key_reg = self.atom_reg(key)?;
+                    self.code.push(Op::RequireMapKey {
+                        reg: key_reg,
+                        span: *span,
+                    });
+                    let value_reg = self.atom_reg(value)?;
+                    pairs.push((key_reg, value_reg));
                 }
-                self.code.push(Op::MakeList {
+                self.code.push(Op::MakeMap {
                     dst,
-                    items: regs.into_boxed_slice(),
+                    entries: pairs.into_boxed_slice(),
                 });
+                Ok(())
             }
-            Expr::Range {
+            Rvalue::Range {
                 start,
                 end,
                 inclusive,
                 span,
             } => {
-                let start_reg = self.alloc_reg();
-                self.expr(start, start_reg)?;
-                let end_reg = self.alloc_reg();
-                self.expr(end, end_reg)?;
+                let start_reg = self.atom_reg(start)?;
+                let end_reg = self.atom_reg(end)?;
                 self.code.push(Op::MakeRange {
                     dst,
                     start: start_reg,
@@ -1585,105 +1611,41 @@ impl<'m> FnCompiler<'m> {
                     inclusive: *inclusive,
                     span: *span,
                 });
+                Ok(())
             }
-            Expr::Map { entries, span } => {
-                // Evaluate each key, check it is a string (matching M0's per-entry error
-                // timing), then evaluate the value — then assemble the map.
-                let mut pairs = Vec::with_capacity(entries.len());
-                for (key, value) in entries {
-                    let key_reg = self.alloc_reg();
-                    self.expr(key, key_reg)?;
-                    self.code.push(Op::RequireMapKey {
-                        reg: key_reg,
-                        span: *span,
-                    });
-                    let value_reg = self.alloc_reg();
-                    self.expr(value, value_reg)?;
-                    pairs.push((key_reg, value_reg));
-                }
-                self.code.push(Op::MakeMap {
+            Rvalue::Object {
+                type_name,
+                type_name_span,
+                fields,
+                spread,
+                span,
+            } => self.lower_object(type_name, *type_name_span, fields, spread, dst, *span),
+            Rvalue::Interp { parts, span } => self.lower_interp(parts, dst, *span),
+            Rvalue::Closure { func, .. } => {
+                // Resolve the closure's captures in this (the building) frame's terms, compile its
+                // body with the matching upvalue layout, and emit `MakeClosure` so the VM threads
+                // the captured cells into the new closure.
+                let (upvalues, captures) = self.resolve_captures(func)?;
+                let enclosing = self.child_enclosing();
+                let proto = self.module.add_function(func, upvalues, enclosing)?;
+                self.code.push(Op::MakeClosure {
                     dst,
-                    entries: pairs.into_boxed_slice(),
+                    proto,
+                    captures: captures.into_boxed_slice(),
                 });
+                Ok(())
             }
-            Expr::Interp { parts, span } => {
-                // Build the string by concatenating each part's display form, mirroring the
-                // tree-walker: literal text verbatim, a `{expr}` hole via its `display`. `~`
-                // concatenation already produces exactly that, so fold the parts with it.
-                let empty = self.add_const(Const::Str(String::new()));
-                self.code.push(Op::LoadConst { dst, k: empty });
-                for part in parts {
-                    let r = self.alloc_reg();
-                    match part {
-                        StrPart::Literal(text) => {
-                            let k = self.add_const(Const::Str(text.clone()));
-                            self.code.push(Op::LoadConst { dst: r, k });
-                        }
-                        StrPart::Hole(expr) => {
-                            self.expr(expr, r)?;
-                            // Route a `Display` object through its `to_string` before the
-                            // concatenation stringifies it; identity for every other value.
-                            self.code.push(Op::Stringify {
-                                dst: r,
-                                src: r,
-                                span: *span,
-                            });
-                        }
-                    }
-                    self.code.push(Op::Binary {
-                        op: BinaryOp::Concat,
-                        dst,
-                        a: dst,
-                        b: r,
-                        span: *span,
-                    });
-                }
-            }
-            Expr::Object(lit) => self.object_literal(lit, dst)?,
-            Expr::Member {
-                receiver,
-                name,
-                span,
-                ..
-            } => self.member(receiver, name, dst, *span)?,
-            Expr::Index {
-                receiver,
-                index,
-                span,
-            } => {
-                let recv = self.alloc_reg();
-                self.expr(receiver, recv)?;
-                let idx = self.alloc_reg();
-                self.expr(index, idx)?;
-                self.code.push(Op::Index {
-                    dst,
-                    recv,
-                    index: idx,
-                    span: *span,
-                });
-            }
-            Expr::Match {
-                scrutinee,
-                arms,
-                span,
-            } => self.match_expr(scrutinee, arms, dst, *span)?,
-            Expr::Try { expr, span } => {
-                let src = self.alloc_reg();
-                self.expr(expr, src)?;
+            Rvalue::Try { operand, span } => {
+                let src = self.atom_reg(operand)?;
                 self.code.push(Op::TryUnwrap {
                     dst,
                     src,
                     span: *span,
                 });
+                Ok(())
             }
-            Expr::Coalesce {
-                value,
-                fallback,
-                span,
-            } => self.coalesce(value, fallback, dst, *span)?,
-            Expr::As { expr, ty, .. } => {
-                let src = self.alloc_reg();
-                self.expr(expr, src)?;
+            Rvalue::As { operand, ty, .. } => {
+                let src = self.atom_reg(operand)?;
                 let target = narrow_target(ty);
                 let some_shape = self.module.builtin_enum_shape("Option", "some");
                 let none_shape = self.module.builtin_enum_shape("Option", "none");
@@ -1694,33 +1656,19 @@ impl<'m> FnCompiler<'m> {
                     some_shape,
                     none_shape,
                 });
+                Ok(())
             }
-            Expr::TypeTest { expr, ty, .. } => {
-                let src = self.alloc_reg();
-                self.expr(expr, src)?;
+            Rvalue::TypeTest { operand, ty, .. } => {
+                let src = self.atom_reg(operand)?;
                 let target = narrow_target(ty);
                 self.code.push(Op::IsType { dst, src, target });
+                Ok(())
             }
-            Expr::AttributesOf { ty, .. } => {
-                // The attribute type is resolved at compile time (closed-world); the VM reads the
-                // matching manifest entries from `Module::reflection` and materializes them.
-                let type_name = match ty {
-                    TypeRef::Named { name, .. } => name.clone(),
-                    _ => String::new(),
-                };
-                self.code.push(Op::AttributesOf { dst, type_name });
-            }
-            Expr::RolesOf { .. } => {
-                // The role index is resolved at compile time (closed-world); the VM reads the
-                // `(declaration, Role)` entries from `Module::reflection` and materializes them.
-                self.code.push(Op::RolesOf { dst });
-            }
-            Expr::TypeOf { value, span } => {
+            Rvalue::TypeOf { operand, span } => {
                 // Evaluate the operand for its side effects in both fidelities. When the checker
                 // resolved a concrete static type for this site, bake the precise `Type` constant
                 // (fidelity A); otherwise classify the runtime value's head constructor (fidelity B).
-                let src = self.alloc_reg();
-                self.expr(value, src)?;
+                let src = self.atom_reg(operand)?;
                 match self.module.type_of_sites.get(span) {
                     Some(repr) => self.code.push(Op::TypeOfStatic {
                         dst,
@@ -1728,138 +1676,84 @@ impl<'m> FnCompiler<'m> {
                     }),
                     None => self.code.push(Op::TypeOf { dst, src }),
                 }
+                Ok(())
             }
-            Expr::Invoke {
+            Rvalue::AttributesOf { ty, .. } => {
+                // The attribute type is resolved at compile time (closed-world); the VM reads the
+                // matching manifest entries from `Module::reflection` and materializes them.
+                let type_name = match ty {
+                    TypeRef::Named { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                self.code.push(Op::AttributesOf { dst, type_name });
+                Ok(())
+            }
+            Rvalue::RolesOf { .. } => {
+                self.code.push(Op::RolesOf { dst });
+                Ok(())
+            }
+            Rvalue::Invoke {
                 recv,
                 name,
                 args,
                 span,
-            } => {
-                // The receiver is a value (→ instance method) or a bare type name (→ associated
-                // function). A type name is not an ordinary value expression in the VM, so it is
-                // materialized into a first-class type handle here; any other receiver compiles
-                // normally (yielding an object). Both then flow through the runtime-dispatched
-                // `Op::Invoke`, which classifies the receiver and keys the existing method table.
-                let recv_reg = self.alloc_reg();
-                if let Expr::Ident {
-                    name: type_name, ..
-                } = recv.as_ref()
-                    && self.module.types.contains_key(type_name)
-                {
-                    self.code.push(Op::TypeValue {
-                        dst: recv_reg,
-                        name: type_name.clone(),
-                    });
-                } else {
-                    self.expr(recv, recv_reg)?;
+            } => self.lower_invoke(recv, name, args, dst, *span),
+        }
+    }
+
+    /// Lower a string interpolation: start from an empty string and fold each part's display form
+    /// in with `~` concatenation, mirroring the tree-walker (literal text verbatim, a hole via its
+    /// `display`). The interpolation's own span is used for each `Stringify`, matching M0.
+    fn lower_interp(
+        &mut self,
+        parts: &[InterpPart],
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let empty = self.add_const(Const::Str(String::new()));
+        self.code.push(Op::LoadConst { dst, k: empty });
+        for part in parts {
+            let r = self.alloc_reg();
+            match part {
+                InterpPart::Literal(text) => {
+                    let k = self.add_const(Const::Str(text.clone()));
+                    self.code.push(Op::LoadConst { dst: r, k });
                 }
-                let name_reg = self.alloc_reg();
-                self.expr(name, name_reg)?;
-                let args_reg = self.alloc_reg();
-                self.expr(args, args_reg)?;
-                // The `Result` wrapping shapes are resolved at compile time, so the VM builds
-                // identical `Ok`/`Err` values to the tree-walker's `builtin_enum` path.
-                let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
-                let err_shape = self.module.builtin_enum_shape("Result", "Err");
-                self.code.push(Op::Invoke {
-                    dst,
-                    recv: recv_reg,
-                    name: name_reg,
-                    args: args_reg,
-                    ok_shape,
-                    err_shape,
-                    span: *span,
-                });
-            }
-            Expr::Call { callee, args, span } => self.call(callee, args, None, dst, *span)?,
-            Expr::Pipeline { left, right, span } => self.pipeline(left, right, dst, *span)?,
-            Expr::Unary { op, operand, span } => {
-                self.expr(operand, dst)?;
-                self.code.push(Op::Unary {
-                    op: *op,
-                    dst,
-                    src: dst,
-                    span: *span,
-                });
-            }
-            Expr::Binary { op, lhs, rhs, span } => {
-                if matches!(op, BinaryOp::And | BinaryOp::Or) {
-                    self.logical(*op, lhs, rhs, dst, *span)?;
-                } else {
-                    self.expr(lhs, dst)?;
-                    let r = self.alloc_reg();
-                    self.expr(rhs, r)?;
-                    self.code.push(Op::Binary {
-                        op: *op,
-                        dst,
-                        a: dst,
-                        b: r,
-                        span: *span,
-                    });
+                InterpPart::Hole { atom, .. } => {
+                    let src = self.atom_reg(atom)?;
+                    // Route a `Display` object through its `to_string` before the concatenation
+                    // stringifies it; identity for every other value.
+                    self.code.push(Op::Stringify { dst: r, src, span });
                 }
             }
+            self.code.push(Op::Binary {
+                op: BinaryOp::Concat,
+                dst,
+                a: dst,
+                b: r,
+                span,
+            });
         }
         Ok(())
     }
 
-    /// Lower a call `callee(args)`, optionally with a `prepend`ed first argument (the value
-    /// threaded by the pipeline operator). Evaluation order mirrors the tree-walker exactly:
-    /// the prepended value first (it is computed before this point), then the callee, then
-    /// the remaining arguments left to right.
-    fn call(
+    /// Lower an ordinary call `callee(args)` (a method call is [`Rvalue::Method`], lowered
+    /// separately). A prelude function called directly by name routes to its dedicated op.
+    fn lower_call(
         &mut self,
-        callee: &Expr,
-        args: &[Expr],
-        prepend: Option<Reg>,
+        callee: &Atom,
+        args: &[Atom],
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        if let Expr::Member { receiver, name, .. } = callee {
-            // `Type.something(args)` where `Type` is a known type name: an enum-variant
-            // construction or an associated-function call, both resolved here at compile time.
-            if let Expr::Ident {
-                name: type_name, ..
-            } = &**receiver
-            {
-                if let Some(TypeInfo::Enum { .. }) = self.module.types.get(type_name) {
-                    return self.make_enum(type_name, name, args, prepend, dst, span);
-                }
-                if let Some(TypeInfo::Class { fns, .. }) = self.module.types.get(type_name)
-                    && let Some(&proto) = fns.get(name)
-                {
-                    return self.call_associated(proto, args, prepend, dst, span);
-                }
-            }
-            // Otherwise the receiver is a value: a runtime-dispatched method call (a user
-            // instance method, or a `count`/`enumerate` built-in — the VM decides).
-            let recv = self.alloc_reg();
-            self.expr(receiver, recv)?;
-            let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
-            arg_regs.extend(prepend);
-            for arg in args {
-                let r = self.alloc_reg();
-                self.expr(arg, r)?;
-                arg_regs.push(r);
-            }
-            let cache = self.module.next_cache_slot();
-            self.code.push(Op::CallMethod {
-                dst,
-                recv,
-                method: name.clone(),
-                args: arg_regs.into_boxed_slice(),
-                span,
-                cache,
-            });
-            return Ok(());
-        }
-        // A prelude function called directly by name. A user binding of the same name shadows
-        // the prelude (resolved as an ordinary call below).
-        if let Expr::Ident { name, .. } = callee
+        // A prelude function called directly by name. A user binding of the same name shadows the
+        // prelude (then `resolve` is not `Prelude`, so this falls to the ordinary call below).
+        if let Atom::Var { name, .. } = callee
             && matches!(self.resolve(name), Resolved::Prelude)
         {
             if let Some(builtin) = Builtin::from_name(name) {
                 // `len`/`map`/`filter`/`sum` — the collection builtins.
-                let args = self.eval_args(args, prepend)?;
+                let args = self.atom_regs(args)?;
                 self.code.push(Op::CallBuiltin {
                     dst,
                     builtin,
@@ -1870,228 +1764,80 @@ impl<'m> FnCompiler<'m> {
             }
             return match name.as_str() {
                 // `Ok(x)`/`Ok()`, `Err(e)`, `some(x)` — the Result/Option constructors.
-                "Ok" => self.make_result_option("Result", "Ok", args, prepend, dst, span),
-                "Err" => self.make_result_option("Result", "Err", args, prepend, dst, span),
-                "some" => self.make_result_option("Option", "some", args, prepend, dst, span),
-                "panic" => self.make_panic(args, prepend, dst, span),
-                "next_id" if prepend.is_none() && args.is_empty() => {
+                "Ok" => self.make_result_option("Result", "Ok", args, dst),
+                "Err" => self.make_result_option("Result", "Err", args, dst),
+                "some" => self.make_result_option("Option", "some", args, dst),
+                "panic" => self.make_panic(args, span),
+                "next_id" if args.is_empty() => {
                     self.code.push(Op::NextId { dst });
                     Ok(())
                 }
                 _ => unsupported("prelude function not in the VM subset"),
             };
         }
-        let callee_reg = self.alloc_reg();
-        self.expr(callee, callee_reg)?;
-        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
-        arg_regs.extend(prepend);
-        for arg in args {
-            let r = self.alloc_reg();
-            self.expr(arg, r)?;
-            arg_regs.push(r);
-        }
+        let callee_reg = self.atom_reg(callee)?;
+        let args = self.atom_regs(args)?;
         self.code.push(Op::Call {
             dst,
             callee: callee_reg,
-            args: arg_regs.into_boxed_slice(),
+            args,
             span,
         });
         Ok(())
     }
 
-    /// `left |> right`: thread `left` as `right`'s first argument, result into `dst`. `x |>
-    /// f(a)` is `f(x, a)`, `x |> f` is `f(x)`. The left operand is evaluated first (as in the
-    /// tree-walker), then the callee, then any further arguments.
-    fn pipeline(
+    /// Lower a method/associated call `receiver.name(args)`. A bare type-name receiver resolves at
+    /// compile time to an enum-variant construction or an associated-function call; any other
+    /// receiver is a runtime-dispatched instance method.
+    fn lower_method(
         &mut self,
-        left: &Expr,
-        right: &Expr,
+        receiver: &Atom,
+        name: &str,
+        args: &[Atom],
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let left_reg = self.alloc_reg();
-        self.expr(left, left_reg)?;
-        match right {
-            Expr::Call { callee, args, .. } => self.call(callee, args, Some(left_reg), dst, span),
-            // `x |> obj.m` is `obj.m(x)` — thread the piped value as the sole argument.
-            Expr::Member { .. } => self.call(right, &[], Some(left_reg), dst, span),
-            _ => {
-                // `x |> f` — call the value of `right` with the single threaded argument.
-                let callee_reg = self.alloc_reg();
-                self.expr(right, callee_reg)?;
-                self.code.push(Op::Call {
-                    dst,
-                    callee: callee_reg,
-                    args: Box::new([left_reg]),
-                    span,
-                });
-                Ok(())
+        // `Type.something(args)` where `Type` is a known type name. Keyed purely on the type
+        // registry (a same-named local does not shadow a type member), matching the tree-walker.
+        if let Atom::Var {
+            name: type_name, ..
+        } = receiver
+        {
+            if let Some(TypeInfo::Enum { .. }) = self.module.types.get(type_name) {
+                return self.make_enum(type_name, name, args, dst);
+            }
+            if let Some(TypeInfo::Class { fns, .. }) = self.module.types.get(type_name)
+                && let Some(&proto) = fns.get(name)
+            {
+                return self.call_associated(proto, args, dst, span);
             }
         }
-    }
-
-    /// `Type { field: value, ...spread }` — construct a record/class/opaque instance, or raise
-    /// the tree-walker's runtime error for an unknown type.
-    fn object_literal(&mut self, lit: &ObjectLit, dst: Reg) -> Result<(), Unsupported> {
-        match self.module.types.get(&lit.type_name) {
-            Some(TypeInfo::Record { fields }) => {
-                let fields = fields.clone();
-                self.make_record(lit, ShapeKind::Record, fields, dst)
-            }
-            Some(TypeInfo::Class { fields, .. }) => {
-                let fields = fields.clone();
-                self.make_record(lit, ShapeKind::Class, fields, dst)
-            }
-            Some(TypeInfo::Opaque) => self.make_opaque(lit, dst),
-            Some(TypeInfo::Enum { .. }) => unsupported("enum type used as a record literal"),
-            None => {
-                // The tree-walker looks the type up first and errors before touching fields.
-                let idx = self.add_diag(unknown_type_diag(&lit.type_name, lit.type_name_span));
-                self.code.push(Op::Raise { idx });
-                Ok(())
-            }
-        }
-    }
-
-    /// The reuse check for a self-update accumulator `name`: `Static` only when reuse is fully on
-    /// *and* the linearity analysis cleared `name`; otherwise the always-safe runtime check.
-    fn reuse_check(&self, name: &str) -> ReuseCheck {
-        if self.module.reuse == ReuseMode::Static && self.linear_accs.contains(name) {
-            ReuseCheck::Static
-        } else {
-            ReuseCheck::Runtime
-        }
-    }
-
-    /// The [`ShapeKind`] and declared field order of a record or class type, or `None` for an
-    /// opaque/enum/unknown type (which does not get record-update reuse).
-    fn record_kind_fields(&self, type_name: &str) -> Option<(ShapeKind, Vec<String>)> {
-        match self.module.types.get(type_name) {
-            Some(TypeInfo::Record { fields }) => Some((ShapeKind::Record, fields.clone())),
-            Some(TypeInfo::Class { fields, .. }) => Some((ShapeKind::Class, fields.clone())),
-            _ => None,
-        }
-    }
-
-    /// Intern the shape and lower the named initializers of a self-update record literal for
-    /// [`Op::MakeRecordInPlace`], returning `(shape, named)`. The spread base is **not** read here —
-    /// the caller supplies it as the consumed `base` register — so this runs identically whether the
-    /// accumulator is a local or a global. Returns `None` (after emitting a `Raise`) for an unknown
-    /// field, matching `make_record`'s tree-walker timing.
-    fn eval_in_place_named(
-        &mut self,
-        lit: &ObjectLit,
-        kind: ShapeKind,
-        fields: &[String],
-    ) -> Result<Option<InPlaceNamed>, Unsupported> {
-        let shape =
-            self.module
-                .intern_shape(Shape::object(kind, lit.type_name.clone(), fields.to_vec()));
-        let mut named: Vec<(u16, Reg)> = Vec::with_capacity(lit.fields.len());
-        // Free each `acc.field` read's receiver temporary at its last use while lowering these
-        // initializers, so a self-update that reads the accumulator keeps it uniquely owned for the
-        // in-place mutation. Restored after, so no other field read pays the extra `Drop`.
-        let prev = self.drop_receivers;
-        self.drop_receivers = true;
-        for init in &lit.fields {
-            let Some(slot) = fields.iter().position(|f| f == &init.name) else {
-                self.drop_receivers = prev;
-                let idx = self.add_diag(unknown_field_diag(
-                    &lit.type_name,
-                    &init.name,
-                    init.name_span,
-                ));
-                self.code.push(Op::Raise { idx });
-                return Ok(None);
-            };
-            let r = self.alloc_reg();
-            self.expr(&init.value, r)?;
-            named.push((slot as u16, r));
-        }
-        self.drop_receivers = prev;
-        Ok(Some((shape, named.into_boxed_slice())))
-    }
-
-    /// Construct a declared record/class instance. Field initializers are checked and
-    /// evaluated in source order (after the spread), reproducing the tree-walker's timing; the
-    /// full-initialization guarantee (E0009) is enforced at runtime by `MakeRecord`.
-    fn make_record(
-        &mut self,
-        lit: &ObjectLit,
-        kind: ShapeKind,
-        fields: Vec<String>,
-        dst: Reg,
-    ) -> Result<(), Unsupported> {
-        let shape =
-            self.module
-                .intern_shape(Shape::object(kind, lit.type_name.clone(), fields.clone()));
-        let spread = self.spread_reg(lit)?;
-        let mut named: Vec<(u16, Reg)> = Vec::with_capacity(lit.fields.len());
-        for init in &lit.fields {
-            let Some(slot) = fields.iter().position(|f| f == &init.name) else {
-                // An unknown field errors before its value is evaluated (tree-walker timing).
-                let idx = self.add_diag(unknown_field_diag(
-                    &lit.type_name,
-                    &init.name,
-                    init.name_span,
-                ));
-                self.code.push(Op::Raise { idx });
-                return Ok(());
-            };
-            let r = self.alloc_reg();
-            self.expr(&init.value, r)?;
-            named.push((slot as u16, r));
-        }
-        self.code.push(Op::MakeRecord {
+        // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
+        // method, or a `count`/`enumerate` built-in — the VM decides).
+        let recv = self.atom_reg(receiver)?;
+        let args = self.atom_regs(args)?;
+        let cache = self.module.next_cache_slot();
+        self.code.push(Op::CallMethod {
             dst,
-            shape,
-            named: named.into_boxed_slice(),
-            spread,
-            span: lit.span,
+            recv,
+            method: name.to_string(),
+            args,
+            span,
+            cache,
         });
         Ok(())
     }
 
-    /// Construct an opaque (`use`-imported) instance: any fields are accepted, the runtime
-    /// builds a sorted-key shape, and there are no field checks.
-    fn make_opaque(&mut self, lit: &ObjectLit, dst: Reg) -> Result<(), Unsupported> {
-        let spread = self.spread_reg(lit)?;
-        let mut keys: Vec<(String, Reg)> = Vec::with_capacity(lit.fields.len());
-        for init in &lit.fields {
-            let r = self.alloc_reg();
-            self.expr(&init.value, r)?;
-            keys.push((init.name.clone(), r));
-        }
-        self.code.push(Op::MakeOpaque {
-            dst,
-            type_name: lit.type_name.clone(),
-            keys: keys.into_boxed_slice(),
-            spread,
-        });
-        Ok(())
-    }
-
-    /// Evaluate an object literal's `...spread` base into a register, if present.
-    fn spread_reg(&mut self, lit: &ObjectLit) -> Result<Option<Reg>, Unsupported> {
-        match &lit.spread {
-            Some(spread) => {
-                let r = self.alloc_reg();
-                self.expr(spread, r)?;
-                Ok(Some(r))
-            }
-            None => Ok(None),
-        }
-    }
-
-    /// Bare member access: a no-data enum variant (`Status.Pending`) or a field load.
-    fn member(
+    /// Lower bare member access `receiver.name`: a no-data enum variant (`Status.Pending`) or a
+    /// field load.
+    fn lower_field(
         &mut self,
-        receiver: &Expr,
+        receiver: &Atom,
         name: &str,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        if let Expr::Ident {
+        if let Atom::Var {
             name: type_name, ..
         } = receiver
         {
@@ -2128,8 +1874,7 @@ impl<'m> FnCompiler<'m> {
                 Member::FieldAccess => {}
             }
         }
-        let obj = self.alloc_reg();
-        self.expr(receiver, obj)?;
+        let obj = self.atom_reg(receiver)?;
         let cache = self.module.next_cache_slot();
         self.code.push(Op::LoadField {
             dst,
@@ -2138,28 +1883,133 @@ impl<'m> FnCompiler<'m> {
             span,
             cache,
         });
-        // Drop insertion (Step B): inside a reuse construct's field initializers, `obj` is a
-        // freshly-allocated single-use temporary holding the receiver, dead after this `LoadField`.
-        // Releasing it now (instead of at frame teardown) restores the accumulator's unique ownership
-        // when the receiver *is* the accumulator (`acc.field` inside a self-update), so the update
-        // can still reuse in place. `dst != obj` (obj is allocated after dst), so this never frees
-        // the field we just loaded. Gated on `drop_receivers` so ordinary field reads pay nothing.
-        if self.drop_receivers {
-            self.code.push(Op::Drop { reg: obj });
-        }
         Ok(())
     }
 
-    /// Construct an enum variant carrying data (`OrderError.NegativePrice(i)`), optionally with
-    /// a pipeline-threaded leading value.
+    /// `Type { field: value, ...spread }` — construct a record/class/opaque instance, or raise the
+    /// tree-walker's runtime error for an unknown type.
+    fn lower_object(
+        &mut self,
+        type_name: &str,
+        type_name_span: Span,
+        fields: &[lang_ir::ObjectFieldInit],
+        spread: &Option<(Atom, Span)>,
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        match self.module.types.get(type_name) {
+            Some(TypeInfo::Record { fields: decl }) => {
+                let decl = decl.clone();
+                self.make_record(
+                    type_name,
+                    ShapeKind::Record,
+                    &decl,
+                    fields,
+                    spread,
+                    dst,
+                    span,
+                )
+            }
+            Some(TypeInfo::Class { fields: decl, .. }) => {
+                let decl = decl.clone();
+                self.make_record(
+                    type_name,
+                    ShapeKind::Class,
+                    &decl,
+                    fields,
+                    spread,
+                    dst,
+                    span,
+                )
+            }
+            Some(TypeInfo::Opaque) => self.make_opaque(type_name, fields, spread, dst),
+            Some(TypeInfo::Enum { .. }) => unsupported("enum type used as a record literal"),
+            None => {
+                // The tree-walker looks the type up first and errors before touching fields.
+                let idx = self.add_diag(unknown_type_diag(type_name, type_name_span));
+                self.code.push(Op::Raise { idx });
+                Ok(())
+            }
+        }
+    }
+
+    /// Construct a declared record/class instance. The full-initialization guarantee (E0009) is
+    /// enforced at runtime by `MakeRecord`; an unknown field is a compile-time-detected runtime
+    /// raise (its value atom was already computed by the preceding `let`s).
+    #[allow(clippy::too_many_arguments)]
+    fn make_record(
+        &mut self,
+        type_name: &str,
+        kind: ShapeKind,
+        decl_fields: &[String],
+        inits: &[lang_ir::ObjectFieldInit],
+        spread: &Option<(Atom, Span)>,
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let shape = self.module.intern_shape(Shape::object(
+            kind,
+            type_name.to_string(),
+            decl_fields.to_vec(),
+        ));
+        let spread_reg = match spread {
+            Some((a, _)) => Some(self.atom_reg(a)?),
+            None => None,
+        };
+        let mut named: Vec<(u16, Reg)> = Vec::with_capacity(inits.len());
+        for init in inits {
+            let Some(slot) = decl_fields.iter().position(|f| f == &init.name) else {
+                let idx = self.add_diag(unknown_field_diag(type_name, &init.name, init.name_span));
+                self.code.push(Op::Raise { idx });
+                return Ok(());
+            };
+            let r = self.atom_reg(&init.value)?;
+            named.push((slot as u16, r));
+        }
+        self.code.push(Op::MakeRecord {
+            dst,
+            shape,
+            named: named.into_boxed_slice(),
+            spread: spread_reg,
+            span,
+        });
+        Ok(())
+    }
+
+    /// Construct an opaque (`use`-imported) instance: any fields are accepted, the runtime builds a
+    /// sorted-key shape, and there are no field checks.
+    fn make_opaque(
+        &mut self,
+        type_name: &str,
+        inits: &[lang_ir::ObjectFieldInit],
+        spread: &Option<(Atom, Span)>,
+        dst: Reg,
+    ) -> Result<(), Unsupported> {
+        let spread_reg = match spread {
+            Some((a, _)) => Some(self.atom_reg(a)?),
+            None => None,
+        };
+        let mut keys: Vec<(String, Reg)> = Vec::with_capacity(inits.len());
+        for init in inits {
+            let r = self.atom_reg(&init.value)?;
+            keys.push((init.name.clone(), r));
+        }
+        self.code.push(Op::MakeOpaque {
+            dst,
+            type_name: type_name.to_string(),
+            keys: keys.into_boxed_slice(),
+            spread: spread_reg,
+        });
+        Ok(())
+    }
+
+    /// Construct an enum variant carrying data (`OrderError.NegativePrice(i)`).
     fn make_enum(
         &mut self,
         type_name: &str,
         variant: &str,
-        args: &[Expr],
-        prepend: Option<Reg>,
+        args: &[Atom],
         dst: Reg,
-        _span: Span,
     ) -> Result<(), Unsupported> {
         let fields = match self.module.types.get(type_name) {
             Some(TypeInfo::Enum { variants }) => match variants.get(variant) {
@@ -2174,42 +2024,27 @@ impl<'m> FnCompiler<'m> {
             fields,
             false,
         ));
-        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
-        arg_regs.extend(prepend);
-        for arg in args {
-            let r = self.alloc_reg();
-            self.expr(arg, r)?;
-            arg_regs.push(r);
-        }
-        self.code.push(Op::MakeEnum {
-            dst,
-            shape,
-            args: arg_regs.into_boxed_slice(),
-        });
+        let args = self.atom_regs(args)?;
+        self.code.push(Op::MakeEnum { dst, shape, args });
         Ok(())
     }
 
-    /// Call an associated function `Type.f(args)`. The method prototype reserves register 0
-    /// for `self`; an associated call has no receiver, so unit is passed there (the tree-walker
-    /// binds no `self` for a type-receiver call).
+    /// Call an associated function `Type.f(args)`. The method prototype reserves register 0 for
+    /// `self`; an associated call has no receiver, so unit is passed there.
     fn call_associated(
         &mut self,
         proto: u32,
-        args: &[Expr],
-        prepend: Option<Reg>,
+        args: &[Atom],
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
         let self_reg = self.alloc_reg();
         let k = self.add_const(Const::Unit);
         self.code.push(Op::LoadConst { dst: self_reg, k });
-        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 2);
+        let mut arg_regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
         arg_regs.push(self_reg);
-        arg_regs.extend(prepend);
-        for arg in args {
-            let r = self.alloc_reg();
-            self.expr(arg, r)?;
-            arg_regs.push(r);
+        for a in args {
+            arg_regs.push(self.atom_reg(a)?);
         }
         let callee = self.alloc_reg();
         self.code.push(Op::MakeClosure {
@@ -2226,35 +2061,16 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// Evaluate a `prepend` (the pipeline-threaded value, if any) followed by `args`, each into
-    /// a fresh register, returning the register list.
-    fn eval_args(
-        &mut self,
-        args: &[Expr],
-        prepend: Option<Reg>,
-    ) -> Result<Box<[Reg]>, Unsupported> {
-        let mut regs: Vec<Reg> = Vec::with_capacity(args.len() + 1);
-        regs.extend(prepend);
-        for arg in args {
-            let r = self.alloc_reg();
-            self.expr(arg, r)?;
-            regs.push(r);
-        }
-        Ok(regs.into_boxed_slice())
-    }
-
     /// Construct a built-in `Result`/`Option` value (`Ok`/`Err`/`some`). `Ok` accepts 0 or 1
     /// arguments (the void success `Ok()` and the wrapping `Ok(x)`); `Err`/`some` take 1.
     fn make_result_option(
         &mut self,
         enum_name: &str,
         variant: &str,
-        args: &[Expr],
-        prepend: Option<Reg>,
+        args: &[Atom],
         dst: Reg,
-        _span: Span,
     ) -> Result<(), Unsupported> {
-        let arg_regs = self.eval_args(args, prepend)?;
+        let arg_regs = self.atom_regs(args)?;
         let allowed = if variant == "Ok" { 0..=1 } else { 1..=1 };
         if !allowed.contains(&arg_regs.len()) {
             return unsupported("Result/Option constructor with an unexpected argument count");
@@ -2268,15 +2084,10 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `panic(msg)` — evaluate the message and emit the abort op (E0010).
-    fn make_panic(
-        &mut self,
-        args: &[Expr],
-        prepend: Option<Reg>,
-        _dst: Reg,
-        span: Span,
-    ) -> Result<(), Unsupported> {
-        let arg_regs = self.eval_args(args, prepend)?;
+    /// `panic(msg)` — evaluate the message and emit the abort op (E0010). The `dst` is unused (the
+    /// op aborts the program), matching the tree-walker.
+    fn make_panic(&mut self, args: &[Atom], span: Span) -> Result<(), Unsupported> {
+        let arg_regs = self.atom_regs(args)?;
         if arg_regs.len() != 1 {
             return unsupported("`panic` with an unexpected argument count");
         }
@@ -2287,54 +2098,106 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `value ?? fallback` — unwrap the success payload, or evaluate `fallback` on the empty
-    /// case (mirroring the tree-walker's `eval_coalesce`).
-    fn coalesce(
+    /// `invoke(recv, name, args)` — fallible by-name dispatch. A bare type-name receiver becomes a
+    /// first-class type handle; any other receiver compiles normally. Both flow through the
+    /// runtime-dispatched `Op::Invoke`.
+    fn lower_invoke(
         &mut self,
-        value: &Expr,
-        fallback: &Expr,
+        recv: &Atom,
+        name: &Atom,
+        args: &Atom,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let src = self.alloc_reg();
-        self.expr(value, src)?;
+        let recv_reg = if let Atom::Var {
+            name: type_name, ..
+        } = recv
+            && self.module.types.contains_key(type_name)
+        {
+            let r = self.alloc_reg();
+            self.code.push(Op::TypeValue {
+                dst: r,
+                name: type_name.clone(),
+            });
+            r
+        } else {
+            self.atom_reg(recv)?
+        };
+        let name_reg = self.atom_reg(name)?;
+        let args_reg = self.atom_reg(args)?;
+        let ok_shape = self.module.builtin_enum_shape("Result", "Ok");
+        let err_shape = self.module.builtin_enum_shape("Result", "Err");
+        self.code.push(Op::Invoke {
+            dst,
+            recv: recv_reg,
+            name: name_reg,
+            args: args_reg,
+            ok_shape,
+            err_shape,
+            span,
+        });
+        Ok(())
+    }
+
+    /// `value ?? fallback` — unwrap the success payload, or evaluate `fallback` on the empty case
+    /// (mirroring the tree-walker's `eval_coalesce`). `value` is a pre-computed atom; `fallback`
+    /// is a lazily-evaluated value block.
+    fn coalesce(
+        &mut self,
+        dst: Option<Temp>,
+        value: &Atom,
+        fallback: &Block,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let out = self.dst_reg(dst);
+        let src = self.atom_reg(value)?;
         let coalesce_pos = self.code.len();
         self.code.push(Op::Coalesce {
-            dst,
+            dst: out,
             src,
             fallback: 0,
             span,
         });
-        // Success path: `dst` is set, then jump past the fallback.
+        // Success path: `out` is set, then jump past the fallback.
         let jump_end = self.code.len();
         self.code.push(Op::Jump { target: 0 });
         let fallback_start = self.code.len() as u32;
         self.patch_jump(coalesce_pos, fallback_start);
-        self.expr(fallback, dst)?;
+        let fb = self.value_block(fallback)?;
+        self.code.push(Op::Move { dst: out, src: fb });
         let end = self.code.len() as u32;
         self.patch_jump(jump_end, end);
         Ok(())
     }
 
-    /// `match scrutinee { pattern => body, ... }` — lowered to a linear decision chain: each
-    /// arm tests its pattern (jumping to the next arm on mismatch), binds, evaluates its body
-    /// into `dst`, and jumps to the end. A value matching no arm hits `MatchFail` (E0007),
-    /// reproducing the tree-walker's runtime non-exhaustive-match error.
-    fn match_expr(
+    /// `match scrutinee { pattern => body, ... }` — a linear decision chain: each arm tests its
+    /// pattern (jumping to the next arm on mismatch), binds, evaluates its body, and jumps to the
+    /// end. A value matching no arm hits `MatchFail` (E0007). In expression position (`dst`
+    /// `Some`) each arm body is a value block whose tail is moved into the destination.
+    fn match_stmt(
         &mut self,
-        scrutinee: &Expr,
-        arms: &[lang_ast::MatchArm],
-        dst: Reg,
+        scrutinee: &Atom,
+        arms: &[lang_ir::Arm],
+        dst: Option<Temp>,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let s = self.alloc_reg();
-        self.expr(scrutinee, s)?;
+        let s = self.atom_reg(scrutinee)?;
+        let out = dst.map(|t| self.define_temp(t));
         let mut end_jumps: Vec<usize> = Vec::new();
         for arm in arms {
             let mut fail_jumps: Vec<usize> = Vec::new();
             self.scopes.push(HashMap::new());
             self.emit_pattern(&arm.pattern, s, &mut fail_jumps);
-            let body = self.expr(&arm.body, dst);
+            let body = (|| {
+                for stmt in &arm.body.stmts {
+                    self.stmt(stmt)?;
+                }
+                if let (Some(out), Some(tail)) = (out, &arm.body.tail) {
+                    let r = self.atom_reg(tail)?;
+                    self.code.push(Op::Move { dst: out, src: r });
+                }
+                Ok(())
+            })();
             self.scopes.pop();
             body?;
             end_jumps.push(self.code.len());
@@ -2353,9 +2216,9 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// Emit the test for one pattern against value register `reg`, recording into `fail_jumps`
-    /// the positions of every conditional that must jump to the arm's failure target. Bindings
-    /// alias the matched register into the current (arm) scope. Mirrors `match_pattern`.
+    /// Emit the test for one pattern against value register `reg`, recording into `fail_jumps` the
+    /// positions of every conditional that must jump to the arm's failure target. Bindings alias
+    /// the matched register into the current (arm) scope. Mirrors `match_pattern`.
     fn emit_pattern(&mut self, pattern: &Pattern, reg: Reg, fail_jumps: &mut Vec<usize>) {
         match pattern {
             Pattern::Wildcard { .. } => {}
@@ -2426,20 +2289,26 @@ impl<'m> FnCompiler<'m> {
         }
     }
 
-    /// Lower `a && b` / `a || b` to branches, matching the tree-walker's `eval_logical`:
-    /// the left operand must be a bool; on short-circuit its value is the result; otherwise
-    /// the right operand must be a bool and is the result.
+    /// Lower `a && b` / `a || b` to branches, matching the tree-walker's `eval_logical`: the left
+    /// operand (a pre-computed atom) must be a bool; on short-circuit its value is the result;
+    /// otherwise the right operand (a lazily-evaluated value block) must be a bool and is the
+    /// result.
     fn logical(
         &mut self,
+        dst: Option<Temp>,
         op: BinaryOp,
-        lhs: &Expr,
-        rhs: &Expr,
-        dst: Reg,
+        left: &Atom,
+        right: &Block,
         span: Span,
     ) -> Result<(), Unsupported> {
-        self.expr(lhs, dst)?;
+        let out = self.dst_reg(dst);
+        let left_reg = self.atom_reg(left)?;
+        self.code.push(Op::Move {
+            dst: out,
+            src: left_reg,
+        });
         self.code.push(Op::RequireBool {
-            reg: dst,
+            reg: out,
             side: BoolSide::Left,
             op,
             span,
@@ -2448,18 +2317,22 @@ impl<'m> FnCompiler<'m> {
         // Short-circuit: `&&` stops when the left is false, `||` when it is true.
         self.code.push(match op {
             BinaryOp::And => Op::JumpIfFalse {
-                reg: dst,
+                reg: out,
                 target: 0,
             },
             BinaryOp::Or => Op::JumpIfTrue {
-                reg: dst,
+                reg: out,
                 target: 0,
             },
             _ => unreachable!("logical only handles && and ||"),
         });
-        self.expr(rhs, dst)?;
+        let right_reg = self.value_block(right)?;
+        self.code.push(Op::Move {
+            dst: out,
+            src: right_reg,
+        });
         self.code.push(Op::RequireBool {
-            reg: dst,
+            reg: out,
             side: BoolSide::Right,
             op,
             span,
@@ -2470,241 +2343,14 @@ impl<'m> FnCompiler<'m> {
     }
 }
 
-/// If `value` is the copy-on-write self-append shape `name ~ rhs` (what `name = name ~ rhs` and
-/// `name ~= rhs` produce) and `rhs` does not itself mention `name`, return `rhs`. The guard mirrors
-/// the tree-walker's COW fast path: vacating `name`'s storage slot before evaluating `rhs` is only
-/// sound when `rhs` does not read `name`. A `None` falls through to the ordinary concat lowering.
-fn self_append_rhs<'a>(name: &str, value: &'a Expr) -> Option<&'a Expr> {
-    if let Expr::Binary {
-        op: BinaryOp::Concat,
-        lhs,
-        rhs,
-        ..
-    } = value
-        && let Expr::Ident { name: lhs_name, .. } = lhs.as_ref()
-        && lhs_name == name
-        && !rhs.mentions(name)
-    {
-        Some(rhs)
-    } else {
-        None
-    }
-}
-
-/// If `value` is a self-update record literal `Type { ...name, fields }` whose spread base is
-/// exactly the accumulator `name`, return the literal — the record analogue of [`self_append_rhs`].
-/// The base is then the *consumed* old value of `name` (its binding is reassigned to the result), so
-/// its allocation can be reused. Unlike the list-append case there is no `mentions` guard: the field
-/// initializers are evaluated *before* the base is taken, so `Type { ...acc, x: acc.x + 1 }` is fine.
-fn record_self_update<'a>(name: &str, value: &'a Expr) -> Option<&'a ObjectLit> {
-    if let Expr::Object(lit) = value
-        && let Some(spread) = &lit.spread
-        && let Expr::Ident { name: base, .. } = spread.as_ref()
-        && base == name
-    {
-        Some(lit)
-    } else {
-        None
-    }
-}
-
-// --- Reuse analysis: the compile-time half (Perceus/Roc-style) ---------------------------------
-//
-// A self-update record accumulator's `MakeRecordInPlace` may elide its runtime uniqueness check
-// (`ReuseCheck::Static`) only when the compiler can prove the accumulator is **linear** — the sole
-// owner of its object at the construct. The proof must account for how the register machine emits
-// reads: reading the accumulator anywhere (`acc.field`, `echo acc`, a method receiver, a spread in
-// *another* literal) lowers to a `Move`/`LoadGlobal` that **retains** the object into a temporary
-// register, and the machine frees no temporary until the frame ends. So *any* read leaves a lingering
-// reference and the accumulator is no longer uniquely owned. (The list COW dodges this because
-// `acc = acc ~ rhs` never reads `acc` except as the consumed base.) The only non-retaining occurrence
-// is the accumulator as the **consumed spread base of its own self-update** — which the reuse op takes
-// directly, without a `Move`. Hence the linearity rule below: `acc` may appear *only* there, and the
-// update's field initializers must not read it either. (This is the "fully in place" pattern; reusing
-// an accumulator that is *read* during the loop would need precise last-use drop insertion — the real
-// Perceus pass — which this backend lacks. See `plans/perf/p-reuse-analysis.md`.)
-
-/// The subset of self-update record accumulators in `stmts` proven linear (safe for static reuse):
-/// names that appear *only* as the consumed spread base of their own `name = Type { ...name, … }`
-/// reassignments, whose field initializers do not read `name`. Any other mention disqualifies the
-/// name (it would be retained into a temporary the backend never frees).
-fn linear_record_accumulators(stmts: &[Stmt]) -> HashSet<String> {
-    let mut candidates = HashSet::new();
-    collect_reuse_candidates(stmts, &mut candidates);
-    candidates.retain(|name| {
-        // A read of `name` *after* its last update is harmless — the lingering temporary it leaves
-        // cannot overlap any in-place mutation (those are all behind it). So only the statements up
-        // to and including the last update must use `name` solely as the consumed spread base; the
-        // tail may read it freely (e.g. `return acc` / `echo acc.x` after the loop). A read inside a
-        // loop that updates `name` is *not* in the tail (the loop re-runs), and `stmt_only_consumes`
-        // already forbids it by recursing into loop bodies.
-        match last_update_index(stmts, name) {
-            Some(last) => stmts[..=last].iter().all(|s| stmt_only_consumes(s, name)),
-            None => false,
-        }
-    });
-    candidates
-}
-
-/// The highest index of a top-level statement in `stmts` that contains (possibly nested in an
-/// `if`/`for`/`while`) a self-update of `name`. Statements after it execute after every update.
-fn last_update_index(stmts: &[Stmt], name: &str) -> Option<usize> {
-    stmts.iter().rposition(|s| contains_self_update(s, name))
-}
-
-/// Does `stmt` contain a self-update reassignment of `name` (directly or in a nested block body)?
-fn contains_self_update(stmt: &Stmt, name: &str) -> bool {
-    match stmt {
-        Stmt::Binding {
-            name: target,
-            value,
-            ..
-        } => target == name && record_self_update(name, value).is_some(),
-        Stmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            then_body.iter().any(|s| contains_self_update(s, name))
-                || else_body
-                    .as_ref()
-                    .is_some_and(|b| b.iter().any(|s| contains_self_update(s, name)))
-        }
-        Stmt::For { body, .. } | Stmt::While { body, .. } => {
-            body.iter().any(|s| contains_self_update(s, name))
-        }
-        _ => false,
-    }
-}
-
-/// Collect names that have a self-update record reassignment somewhere in this function's own
-/// statements (descending into `if`/`for`/`while` bodies, but not into nested fn/closure/class
-/// scopes — those run their own analysis).
-fn collect_reuse_candidates(stmts: &[Stmt], out: &mut HashSet<String>) {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Binding { name, value, .. } if record_self_update(name, value).is_some() => {
-                out.insert(name.clone());
-            }
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                collect_reuse_candidates(then_body, out);
-                if let Some(body) = else_body {
-                    collect_reuse_candidates(body, out);
-                }
-            }
-            Stmt::For { body, .. } | Stmt::While { body, .. } => {
-                collect_reuse_candidates(body, out)
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Does `stmt` use `name` *only* as the consumed spread base of a self-update (so it leaves no
-/// lingering reference)? Returns `false` as soon as `name` is mentioned in any retaining position.
-fn stmt_only_consumes(stmt: &Stmt, name: &str) -> bool {
-    match stmt {
-        Stmt::Binding {
-            name: target,
-            value,
-            ..
-        } => {
-            // `name = Type { ...name, fields }` where no field reads `name`: the only occurrence is
-            // the consumed spread base — not retained. Anything else: `name` must not appear at all.
-            if target == name
-                && let Some(lit) = record_self_update(name, value)
-                && lit.fields.iter().all(|f| !f.value.mentions(name))
-            {
-                true
-            } else {
-                !value.mentions(name)
-            }
-        }
-        Stmt::Echo { value, .. } | Stmt::Expr { expr: value, .. } => !value.mentions(name),
-        Stmt::Return { value, .. } => value.as_ref().is_none_or(|e| !e.mentions(name)),
-        Stmt::If {
-            cond,
-            then_body,
-            else_body,
-            ..
-        } => {
-            !cond.mentions(name)
-                && then_body.iter().all(|s| stmt_only_consumes(s, name))
-                && else_body
-                    .as_ref()
-                    .is_none_or(|b| b.iter().all(|s| stmt_only_consumes(s, name)))
-        }
-        Stmt::For { iterable, body, .. } => {
-            !iterable.mentions(name) && body.iter().all(|s| stmt_only_consumes(s, name))
-        }
-        Stmt::While { cond, body, .. } => {
-            !cond.mentions(name) && body.iter().all(|s| stmt_only_consumes(s, name))
-        }
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Namespace { .. } | Stmt::Use { .. } => {
-            true
-        }
-        // A declaration that references `name` could read it as a global or capture it — disqualify.
-        Stmt::Fn(decl) => !fn_mentions(decl, name),
-        Stmt::Impl(decl) => !decl.methods.iter().any(|m| fn_mentions(m, name)),
-        Stmt::Class(decl) => !decl.methods.iter().any(|m| fn_mentions(m, name)),
-        Stmt::Enum(decl) => !decl
-            .variants
-            .iter()
-            .any(|v| v.fields.iter().any(|p| param_default_mentions(p, name))),
-        Stmt::Record(_) => true,
-    }
-}
-
-fn fn_mentions(decl: &FnDecl, name: &str) -> bool {
-    decl.params.iter().any(|p| param_default_mentions(p, name))
-        || decl.body.iter().any(|s| stmt_mentions(s, name))
-}
-
-fn param_default_mentions(param: &Param, name: &str) -> bool {
-    param.default.as_ref().is_some_and(|d| d.mentions(name))
-}
-
-/// Fully conservative "does this statement mention `name` anywhere" — used inside nested declarations
-/// where any reference is treated as a disqualifying use.
-fn stmt_mentions(stmt: &Stmt, name: &str) -> bool {
-    match stmt {
-        Stmt::Echo { value, .. } | Stmt::Expr { expr: value, .. } => value.mentions(name),
-        Stmt::Binding { value, .. } => value.mentions(name),
-        Stmt::Return { value, .. } => value.as_ref().is_some_and(|e| e.mentions(name)),
-        Stmt::If {
-            cond,
-            then_body,
-            else_body,
-            ..
-        } => {
-            cond.mentions(name)
-                || then_body.iter().any(|s| stmt_mentions(s, name))
-                || else_body
-                    .as_ref()
-                    .is_some_and(|b| b.iter().any(|s| stmt_mentions(s, name)))
-        }
-        Stmt::For { iterable, body, .. } => {
-            iterable.mentions(name) || body.iter().any(|s| stmt_mentions(s, name))
-        }
-        Stmt::While { cond, body, .. } => {
-            cond.mentions(name) || body.iter().any(|s| stmt_mentions(s, name))
-        }
-        Stmt::Fn(decl) => fn_mentions(decl, name),
-        Stmt::Impl(decl) => decl.methods.iter().any(|m| fn_mentions(m, name)),
-        Stmt::Class(decl) => decl.methods.iter().any(|m| fn_mentions(m, name)),
-        Stmt::Enum(decl) => decl
-            .variants
-            .iter()
-            .any(|v| v.fields.iter().any(|p| param_default_mentions(p, name))),
-        Stmt::Break { .. }
-        | Stmt::Continue { .. }
-        | Stmt::Namespace { .. }
-        | Stmt::Use { .. }
-        | Stmt::Record(_) => false,
+/// Map a Core-IR constant to its bytecode-pool [`Const`].
+fn const_value(c: &IrConst) -> Const {
+    match c {
+        IrConst::Unit => Const::Unit,
+        IrConst::Bool(b) => Const::Bool(*b),
+        IrConst::Int(i) => Const::Int(*i),
+        IrConst::Float(f) => Const::Float(*f),
+        IrConst::Str(s) => Const::Str(s.clone()),
     }
 }
 

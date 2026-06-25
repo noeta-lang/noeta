@@ -3,8 +3,8 @@ source: crates/lang-vm/src/lib.rs
 expression: module.disassemble()
 ---
 shapes:
-  s0 = Class Order{id, status}
-  s1 = enum Status.Pending()
+  s0 = enum Status.Pending()
+  s1 = Class Order{id, status}
 methods:
   Order.new -> proto 1
   Order.tag -> proto 2
@@ -25,13 +25,12 @@ code:
     8  Echo        r6
     9  Halt
 === proto 1 ===
-params: 2, registers: 5
+params: 2, registers: 4
 code:
-    0  Move        r3 <- r1
-    1  MakeEnum    r4 <- shape s1()
-    2  MakeRecord  r2 <- shape s0 {s0=r3, s1=r4}
-    3  Return      r2
-    4  Halt
+    0  MakeEnum    r2 <- shape s0()
+    1  MakeRecord  r3 <- shape s1 {s0=r1, s1=r2}
+    2  Return      r3
+    3  Halt
 === proto 2 ===
 params: 1, registers: 2
 code:

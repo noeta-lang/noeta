@@ -22,23 +22,19 @@ constants:
   k1 = 1
   k2 = 2
 code:
-    0  Move        r1 <- r0
-    1  LoadConst   r2 <- k0
-    2  Binary      r1 <- r1 < r2
-    3  RequireCondBool r1 (if)
-    4  JumpIfFalse r1 -> 7
-    5  Move        r3 <- r0
-    6  Return      r3
-    7  LoadGlobal  r5 <- "fib"
-    8  Move        r6 <- r0
-    9  LoadConst   r7 <- k1
-   10  Binary      r6 <- r6 - r7
-   11  Call        r4 <- r5(r6)
-   12  LoadGlobal  r9 <- "fib"
-   13  Move        r10 <- r0
-   14  LoadConst   r11 <- k2
-   15  Binary      r10 <- r10 - r11
-   16  Call        r8 <- r9(r10)
-   17  Binary      r4 <- r4 + r8
-   18  Return      r4
-   19  Halt
+    0  LoadConst   r2 <- k0
+    1  Binary      r1 <- r0 < r2
+    2  RequireCondBool r1 (if)
+    3  JumpIfFalse r1 -> 5
+    4  Return      r0
+    5  LoadConst   r4 <- k1
+    6  Binary      r3 <- r0 - r4
+    7  LoadGlobal  r6 <- "fib"
+    8  Call        r5 <- r6(r3)
+    9  LoadConst   r8 <- k2
+   10  Binary      r7 <- r0 - r8
+   11  LoadGlobal  r10 <- "fib"
+   12  Call        r9 <- r10(r7)
+   13  Binary      r11 <- r5 + r9
+   14  Return      r11
+   15  Halt

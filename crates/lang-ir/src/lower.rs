@@ -213,9 +213,20 @@ impl Lowerer {
                     let func = self.lower_func(&m.params, BodyKind::Block(&m.body), m.span)?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
+                // The `destruct` block lowers to a parameterless block [`Func`] (fields resolve
+                // against the receiver, like a method), so the VM can compile it to a prototype.
+                let destructor = match &decl.destructor {
+                    Some(body) => Some(Rc::new(self.lower_func(
+                        &[],
+                        BodyKind::Block(body),
+                        decl.span,
+                    )?)),
+                    None => None,
+                };
                 out.push(Stmt::Decl(Decl::Class(ClassDef {
                     decl: Rc::new(decl.clone()),
                     methods,
+                    destructor,
                     span: decl.span,
                 })));
                 Ok(())

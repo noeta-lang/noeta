@@ -166,6 +166,9 @@ impl Printer<'_> {
         for (name, func) in &class.methods {
             self.func(&format!("method {name}"), func, indent + 1);
         }
+        if let Some(destructor) = &class.destructor {
+            self.func("destruct", destructor, indent + 1);
+        }
         self.line(indent, "}");
     }
 

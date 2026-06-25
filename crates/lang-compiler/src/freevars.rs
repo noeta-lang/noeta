@@ -1,4 +1,4 @@
-//! Free-variable analysis for closure conversion.
+//! Free-variable analysis for closure conversion, over the **Core IR**.
 //!
 //! A closure or nested `fn` may reference a binding from an enclosing function; the VM models
 //! that as an *upvalue* (a captured cell). To lower a function the compiler must know, before
@@ -7,33 +7,33 @@
 //! Both fall out of one question: **which names does a function body reference that resolve to
 //! a binding in an enclosing function?** — its *free variables*.
 //!
+//! The analysis runs on the lowered IR, which is *simpler* than the surface AST for this
+//! purpose: every operand is an [`Atom`], so only an [`Atom::Var`] contributes a reference
+//! (temporaries and constants never do); `|>` is gone (lowered to ordinary calls); and
+//! short-circuit operators are explicit [`Stmt::Logical`]/[`Stmt::Coalesce`] blocks. Source
+//! variable *names* survive lowering unchanged, so the locality rules are identical to the
+//! surface analysis they replace.
+//!
 //! The one wrinkle is the language's bare-assignment rule (matching the tree-walker's
 //! `Scope::assign`, which searches outward): a bare `x = v` *reassigns* an enclosing binding if
 //! one exists, and only declares a fresh local when the name is found nowhere outer. So locality
-//! is context-sensitive — a name is local to a function only if it is `mut`/param/for/`fn`-bound,
-//! or bare-assigned **and** absent from every enclosing function scope and the globals. The
-//! analysis therefore threads the enclosing function locals (capturable) and the module globals
-//! (not capturable) down through nesting.
+//! is context-sensitive — a name is local to a function only if it is `mut`/param/for/`fn`/match-
+//! bound, or bare-assigned **and** absent from every enclosing function scope and the globals.
+//! The analysis therefore threads the enclosing function locals (capturable) and the module
+//! globals (not capturable) down through nesting.
 
 use std::collections::{BTreeSet, HashSet};
 
-use lang_ast::{Expr, ForPattern, MatchArm, Param, Pattern, Stmt, StrPart};
-
-/// A function body as seen by the analysis: a statement block (`fn`/method) or a single arrow
-/// expression (closure).
-#[derive(Clone, Copy)]
-pub enum FnBody<'a> {
-    Block(&'a [Stmt]),
-    Arrow(&'a Expr),
-}
+use lang_ir::{Atom, Block, Decl, ForPattern, Pattern, Rvalue, Stmt, Thunk};
 
 /// The names a function body references that resolve to a binding in one of `enclosing_locals`
 /// (the enclosing functions' locals, outermost first) — i.e. the function's captured upvalues.
 /// `globals` is consulted only to decide bare-assignment locality (a bare assign to a global is
 /// a reassignment, not a new local), never reported as free.
 pub fn free_vars(
-    params: &[Param],
-    body: FnBody<'_>,
+    params: &[String],
+    defaults: &[Option<Thunk>],
+    body: &Block,
     enclosing_locals: &[HashSet<String>],
     globals: &HashSet<String>,
 ) -> BTreeSet<String> {
@@ -48,23 +48,14 @@ pub fn free_vars(
     // this function's locals as a new enclosing layer).
     let mut referenced: BTreeSet<String> = BTreeSet::new();
     let inner_enclosing = push_layer(enclosing_locals, local.clone());
-    match body {
-        FnBody::Block(stmts) => {
-            for stmt in stmts {
-                collect_refs_stmt(stmt, &inner_enclosing, globals, &mut referenced);
-            }
-        }
-        FnBody::Arrow(expr) => collect_refs_expr(expr, &inner_enclosing, globals, &mut referenced),
-    }
+    collect_refs_block(body, &inner_enclosing, globals, &mut referenced);
     // A parameter's default value is evaluated in the function's *definition* scope, not against
     // its own parameters/locals, so its references are collected one layer out (`enclosing_locals`,
     // not `inner_enclosing`). This is what lets a closure capture a variable used only by a default
     // (e.g. `fn(x, step = base) => ...` where the body never names `base`): the captured `base`
     // must be in the closure's upvalue set for the VM's default thunk to read it.
-    for p in params {
-        if let Some(default) = &p.default {
-            collect_refs_expr(default, enclosing_locals, globals, &mut referenced);
-        }
+    for default in defaults.iter().flatten() {
+        collect_refs_block(&default.body, enclosing_locals, globals, &mut referenced);
     }
 
     referenced
@@ -94,242 +85,75 @@ pub struct Analysis {
 /// Compute a function's [`Analysis`]. `celled` is the function's locals that appear free in some
 /// nested closure/`fn` — exactly the locals that must live in cells so the capture is shared.
 pub fn analyze(
-    params: &[Param],
-    body: FnBody<'_>,
+    params: &[String],
+    defaults: &[Option<Thunk>],
+    body: &Block,
     enclosing_locals: &[HashSet<String>],
     globals: &HashSet<String>,
 ) -> Analysis {
     let local = local_names(params, body, enclosing_locals, globals);
     let inner_enclosing = push_layer(enclosing_locals, local.clone());
     let mut nested: BTreeSet<String> = BTreeSet::new();
-    match body {
-        FnBody::Block(stmts) => {
-            for stmt in stmts {
-                collect_nested_frees_stmt(stmt, &inner_enclosing, globals, &mut nested);
-            }
-        }
-        FnBody::Arrow(expr) => {
-            collect_nested_frees_expr(expr, &inner_enclosing, globals, &mut nested)
-        }
+    collect_nested_frees_block(body, &inner_enclosing, globals, &mut nested);
+    // A default thunk is itself a sub-scope that may close over a function local; its captures, if
+    // local here, must be celled too. Defaults run in the definition scope, so they are analyzed
+    // one layer out (like `free_vars`).
+    for default in defaults.iter().flatten() {
+        collect_nested_frees_block(&default.body, enclosing_locals, globals, &mut nested);
     }
     let celled = nested.into_iter().filter(|n| local.contains(n)).collect();
     Analysis { local, celled }
 }
 
-/// Collect the free variables of the closures/`fn`s nested directly in a statement (not this
-/// statement's own ident references) — the names that, if local here, must be celled.
-fn collect_nested_frees_stmt(
-    stmt: &Stmt,
-    enclosing: &[HashSet<String>],
-    globals: &HashSet<String>,
-    out: &mut BTreeSet<String>,
-) {
-    match stmt {
-        Stmt::Fn(decl) => {
-            out.extend(free_vars(
-                &decl.params,
-                FnBody::Block(&decl.body),
-                enclosing,
-                globals,
-            ));
-        }
-        Stmt::Echo { value, .. } | Stmt::Expr { expr: value, .. } => {
-            collect_nested_frees_expr(value, enclosing, globals, out);
-        }
-        Stmt::Binding { value, .. } => collect_nested_frees_expr(value, enclosing, globals, out),
-        Stmt::Return { value, .. } => {
-            if let Some(value) = value {
-                collect_nested_frees_expr(value, enclosing, globals, out);
-            }
-        }
-        Stmt::If {
-            cond,
-            then_body,
-            else_body,
-            ..
-        } => {
-            collect_nested_frees_expr(cond, enclosing, globals, out);
-            for s in then_body {
-                collect_nested_frees_stmt(s, enclosing, globals, out);
-            }
-            if let Some(else_body) = else_body {
-                for s in else_body {
-                    collect_nested_frees_stmt(s, enclosing, globals, out);
-                }
-            }
-        }
-        Stmt::For { iterable, body, .. } => {
-            collect_nested_frees_expr(iterable, enclosing, globals, out);
-            for s in body {
-                collect_nested_frees_stmt(s, enclosing, globals, out);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            collect_nested_frees_expr(cond, enclosing, globals, out);
-            for s in body {
-                collect_nested_frees_stmt(s, enclosing, globals, out);
-            }
-        }
-        Stmt::Enum(_)
-        | Stmt::Record(_)
-        | Stmt::Class(_)
-        | Stmt::Impl(_)
-        | Stmt::Namespace { .. }
-        | Stmt::Use { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. } => {}
-    }
-}
-
-/// As [`collect_nested_frees_stmt`] for expressions: a nested closure contributes its free
-/// variables; every other expression is descended for closures it may contain.
-fn collect_nested_frees_expr(
-    expr: &Expr,
-    enclosing: &[HashSet<String>],
-    globals: &HashSet<String>,
-    out: &mut BTreeSet<String>,
-) {
-    match expr {
-        Expr::Closure { params, body, .. } => {
-            out.extend(free_vars(params, FnBody::Arrow(body), enclosing, globals));
-        }
-        Expr::Ident { .. }
-        | Expr::Str { .. }
-        | Expr::Int { .. }
-        | Expr::Float { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::RolesOf { .. }
-        | Expr::Bool { .. } => {}
-        Expr::Unary { operand, .. } => collect_nested_frees_expr(operand, enclosing, globals, out),
-        Expr::Binary { lhs, rhs, .. }
-        | Expr::Pipeline {
-            left: lhs,
-            right: rhs,
-            ..
-        } => {
-            collect_nested_frees_expr(lhs, enclosing, globals, out);
-            collect_nested_frees_expr(rhs, enclosing, globals, out);
-        }
-        Expr::Call { callee, args, .. } => {
-            collect_nested_frees_expr(callee, enclosing, globals, out);
-            for a in args {
-                collect_nested_frees_expr(a, enclosing, globals, out);
-            }
-        }
-        Expr::List { items, .. } => {
-            for it in items {
-                collect_nested_frees_expr(it, enclosing, globals, out);
-            }
-        }
-        Expr::Range { start, end, .. } => {
-            collect_nested_frees_expr(start, enclosing, globals, out);
-            collect_nested_frees_expr(end, enclosing, globals, out);
-        }
-        Expr::Map { entries, .. } => {
-            for (k, v) in entries {
-                collect_nested_frees_expr(k, enclosing, globals, out);
-                collect_nested_frees_expr(v, enclosing, globals, out);
-            }
-        }
-        Expr::Member { receiver, .. } => {
-            collect_nested_frees_expr(receiver, enclosing, globals, out)
-        }
-        Expr::Index {
-            receiver, index, ..
-        } => {
-            collect_nested_frees_expr(receiver, enclosing, globals, out);
-            collect_nested_frees_expr(index, enclosing, globals, out);
-        }
-        Expr::Interp { parts, .. } => {
-            for part in parts {
-                if let StrPart::Hole(e) = part {
-                    collect_nested_frees_expr(e, enclosing, globals, out);
-                }
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            collect_nested_frees_expr(scrutinee, enclosing, globals, out);
-            for arm in arms {
-                let mut bound = HashSet::new();
-                pattern_names(&arm.pattern, &mut bound);
-                let mut arm_refs = BTreeSet::new();
-                collect_nested_frees_expr(&arm.body, enclosing, globals, &mut arm_refs);
-                out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
-            }
-        }
-        Expr::Object(lit) => {
-            for f in &lit.fields {
-                collect_nested_frees_expr(&f.value, enclosing, globals, out);
-            }
-            if let Some(spread) = &lit.spread {
-                collect_nested_frees_expr(spread, enclosing, globals, out);
-            }
-        }
-        Expr::Try { expr, .. } | Expr::As { expr, .. } | Expr::TypeTest { expr, .. } => {
-            collect_nested_frees_expr(expr, enclosing, globals, out)
-        }
-        Expr::TypeOf { value, .. } => collect_nested_frees_expr(value, enclosing, globals, out),
-        Expr::Invoke {
-            recv, name, args, ..
-        } => {
-            collect_nested_frees_expr(recv, enclosing, globals, out);
-            collect_nested_frees_expr(name, enclosing, globals, out);
-            collect_nested_frees_expr(args, enclosing, globals, out);
-        }
-        Expr::Coalesce {
-            value, fallback, ..
-        } => {
-            collect_nested_frees_expr(value, enclosing, globals, out);
-            collect_nested_frees_expr(fallback, enclosing, globals, out);
-        }
-    }
-}
+// --- The function's own local bindings ---------------------------------------------------------
 
 /// The names this function binds as its own locals (params, `mut`/`fn`/for/match bindings, and
 /// bare assignments that do not reach an outer binding). Nested closures are opaque — their
 /// bindings belong to them, not here.
 fn local_names(
-    params: &[Param],
-    body: FnBody<'_>,
+    params: &[String],
+    body: &Block,
     enclosing_locals: &[HashSet<String>],
     globals: &HashSet<String>,
 ) -> HashSet<String> {
-    let mut enclosing_any: HashSet<String> = globals.clone();
+    let mut outer: HashSet<String> = globals.clone();
     for scope in enclosing_locals {
-        enclosing_any.extend(scope.iter().cloned());
+        outer.extend(scope.iter().cloned());
     }
-    let mut local: HashSet<String> = params.iter().map(|p| p.name.clone()).collect();
-    match body {
-        FnBody::Block(stmts) => {
-            for stmt in stmts {
-                collect_bindings_stmt(stmt, &enclosing_any, &mut local);
-            }
-        }
-        FnBody::Arrow(expr) => collect_bindings_expr(expr, &mut local),
-    }
+    let mut local: HashSet<String> = params.iter().cloned().collect();
+    collect_bindings_block(body, &outer, &mut local);
     local
 }
 
-/// Bindings a statement introduces into the current function (recursing into `if`/`for` bodies
-/// and match arms, but not into nested closures). `outer` is every enclosing-or-global name, used
-/// to decide whether a bare assignment is a fresh local.
+/// Bindings a block introduces into the current function (recursing into every sub-block and
+/// match arm, but not into nested closures/`fn`s — those own their bindings). `outer` is every
+/// enclosing-or-global name, used to decide whether a bare assignment is a fresh local.
+fn collect_bindings_block(block: &Block, outer: &HashSet<String>, local: &mut HashSet<String>) {
+    for stmt in &block.stmts {
+        collect_bindings_stmt(stmt, outer, local);
+    }
+}
+
 fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashSet<String>) {
     match stmt {
-        Stmt::Binding {
-            mut_decl,
-            name,
-            value,
-            ..
-        } => {
+        Stmt::Bind { mut_decl, name, .. } => {
             if *mut_decl || !outer.contains(name) {
                 local.insert(name.clone());
             }
-            collect_bindings_expr(value, local);
         }
-        Stmt::Fn(decl) => {
-            local.insert(decl.name.clone());
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_bindings_block(then_block, outer, local);
+            if let Some(else_block) = else_block {
+                collect_bindings_block(else_block, outer, local);
+            }
+        }
+        Stmt::While { cond, body, .. } => {
+            collect_bindings_block(cond, outer, local);
+            collect_bindings_block(body, outer, local);
         }
         Stmt::For { pattern, body, .. } => {
             match pattern {
@@ -341,139 +165,30 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
                     local.insert(second.clone());
                 }
             }
-            for s in body {
-                collect_bindings_stmt(s, outer, local);
-            }
+            collect_bindings_block(body, outer, local);
         }
-        Stmt::While { body, .. } => {
-            for s in body {
-                collect_bindings_stmt(s, outer, local);
-            }
-        }
-        Stmt::If {
-            then_body,
-            else_body,
-            ..
-        } => {
-            for s in then_body {
-                collect_bindings_stmt(s, outer, local);
-            }
-            if let Some(else_body) = else_body {
-                for s in else_body {
-                    collect_bindings_stmt(s, outer, local);
-                }
-            }
-        }
-        Stmt::Echo { value, .. } => collect_bindings_expr(value, local),
-        Stmt::Return { value, .. } => {
-            if let Some(value) = value {
-                collect_bindings_expr(value, local);
-            }
-        }
-        Stmt::Expr { expr, .. } => collect_bindings_expr(expr, local),
-        Stmt::Enum(_)
-        | Stmt::Record(_)
-        | Stmt::Class(_)
-        | Stmt::Impl(_)
-        | Stmt::Namespace { .. }
-        | Stmt::Use { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. } => {}
-    }
-}
-
-/// Match-arm pattern bindings introduce function locals too. We walk expressions only to reach
-/// those (and any nested in sub-expressions), treating closures as opaque.
-fn collect_bindings_expr(expr: &Expr, local: &mut HashSet<String>) {
-    match expr {
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            collect_bindings_expr(scrutinee, local);
+        Stmt::Match { arms, .. } => {
             for arm in arms {
                 pattern_names(&arm.pattern, local);
-                collect_bindings_expr(&arm.body, local);
+                collect_bindings_block(&arm.body, outer, local);
             }
         }
-        // A closure's bindings are its own; do not descend.
-        Expr::Closure { .. } => {}
-        Expr::Unary { operand, .. } => collect_bindings_expr(operand, local),
-        Expr::Binary { lhs, rhs, .. }
-        | Expr::Pipeline {
-            left: lhs,
-            right: rhs,
-            ..
-        } => {
-            collect_bindings_expr(lhs, local);
-            collect_bindings_expr(rhs, local);
+        Stmt::Logical { right, .. } => collect_bindings_block(right, outer, local),
+        Stmt::Coalesce { fallback, .. } => collect_bindings_block(fallback, outer, local),
+        Stmt::Decl(Decl::Fn { name, .. }) => {
+            // A nested `fn` binds its own name as a local here; its body is opaque (own scope).
+            local.insert(name.clone());
         }
-        Expr::Call { callee, args, .. } => {
-            collect_bindings_expr(callee, local);
-            for a in args {
-                collect_bindings_expr(a, local);
-            }
-        }
-        Expr::List { items, .. } => {
-            for it in items {
-                collect_bindings_expr(it, local);
-            }
-        }
-        Expr::Range { start, end, .. } => {
-            collect_bindings_expr(start, local);
-            collect_bindings_expr(end, local);
-        }
-        Expr::Map { entries, .. } => {
-            for (k, v) in entries {
-                collect_bindings_expr(k, local);
-                collect_bindings_expr(v, local);
-            }
-        }
-        Expr::Member { receiver, .. } => collect_bindings_expr(receiver, local),
-        Expr::Index {
-            receiver, index, ..
-        } => {
-            collect_bindings_expr(receiver, local);
-            collect_bindings_expr(index, local);
-        }
-        Expr::Interp { parts, .. } => {
-            for part in parts {
-                if let StrPart::Hole(e) = part {
-                    collect_bindings_expr(e, local);
-                }
-            }
-        }
-        Expr::Object(lit) => {
-            for f in &lit.fields {
-                collect_bindings_expr(&f.value, local);
-            }
-            if let Some(spread) = &lit.spread {
-                collect_bindings_expr(spread, local);
-            }
-        }
-        Expr::Try { expr, .. } | Expr::As { expr, .. } | Expr::TypeTest { expr, .. } => {
-            collect_bindings_expr(expr, local)
-        }
-        Expr::TypeOf { value, .. } => collect_bindings_expr(value, local),
-        Expr::Invoke {
-            recv, name, args, ..
-        } => {
-            collect_bindings_expr(recv, local);
-            collect_bindings_expr(name, local);
-            collect_bindings_expr(args, local);
-        }
-        Expr::Coalesce {
-            value, fallback, ..
-        } => {
-            collect_bindings_expr(value, local);
-            collect_bindings_expr(fallback, local);
-        }
-        Expr::Str { .. }
-        | Expr::Int { .. }
-        | Expr::Float { .. }
-        | Expr::Bool { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::RolesOf { .. }
-        | Expr::Ident { .. } => {}
+        // `let`/`eval` only bind temporaries (not source names); their rvalues introduce no source
+        // bindings (a nested closure is opaque). Every other statement binds nothing.
+        Stmt::Let { .. }
+        | Stmt::Eval { .. }
+        | Stmt::Echo { .. }
+        | Stmt::Return { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Drop(_)
+        | Stmt::Decl(_) => {}
     }
 }
 
@@ -496,8 +211,29 @@ fn pattern_names(pattern: &Pattern, out: &mut HashSet<String>) {
     }
 }
 
-/// Collect every name a statement references (descending into nested closures by bubbling up
-/// their own free variables, computed against `enclosing` extended with this layer).
+// --- Every name a body references --------------------------------------------------------------
+
+fn collect_refs_block(
+    block: &Block,
+    enclosing: &[HashSet<String>],
+    globals: &HashSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    for stmt in &block.stmts {
+        collect_refs_stmt(stmt, enclosing, globals, out);
+    }
+    if let Some(tail) = &block.tail {
+        atom_ref(tail, out);
+    }
+}
+
+/// Insert a [`Atom::Var`]'s name as a reference; temporaries and constants reference nothing.
+fn atom_ref(atom: &Atom, out: &mut BTreeSet<String>) {
+    if let Atom::Var { name, .. } = atom {
+        out.insert(name.clone());
+    }
+}
+
 fn collect_refs_stmt(
     stmt: &Stmt,
     enclosing: &[HashSet<String>],
@@ -505,167 +241,253 @@ fn collect_refs_stmt(
     out: &mut BTreeSet<String>,
 ) {
     match stmt {
-        Stmt::Echo { value, .. } => collect_refs_expr(value, enclosing, globals, out),
-        Stmt::Binding { name, value, .. } => {
+        Stmt::Let { rvalue, .. } | Stmt::Eval { rvalue, .. } => {
+            collect_refs_rvalue(rvalue, enclosing, globals, out)
+        }
+        Stmt::Bind { name, value, .. } => {
             // A bare-assignment target is itself a reference (it may reassign an outer binding).
             out.insert(name.clone());
-            collect_refs_expr(value, enclosing, globals, out);
+            atom_ref(value, out);
         }
-        Stmt::Fn(decl) => {
-            // The nested `fn`'s free variables bubble up (minus its own params/locals).
-            let inner = free_vars(&decl.params, FnBody::Block(&decl.body), enclosing, globals);
-            out.extend(inner);
-        }
+        Stmt::Echo { value, .. } => atom_ref(value, out),
         Stmt::Return { value, .. } => {
             if let Some(value) = value {
-                collect_refs_expr(value, enclosing, globals, out);
+                atom_ref(value, out);
             }
         }
         Stmt::If {
             cond,
-            then_body,
-            else_body,
+            then_block,
+            else_block,
             ..
         } => {
-            collect_refs_expr(cond, enclosing, globals, out);
-            for s in then_body {
-                collect_refs_stmt(s, enclosing, globals, out);
-            }
-            if let Some(else_body) = else_body {
-                for s in else_body {
-                    collect_refs_stmt(s, enclosing, globals, out);
-                }
-            }
-        }
-        Stmt::For { iterable, body, .. } => {
-            collect_refs_expr(iterable, enclosing, globals, out);
-            for s in body {
-                collect_refs_stmt(s, enclosing, globals, out);
+            atom_ref(cond, out);
+            collect_refs_block(then_block, enclosing, globals, out);
+            if let Some(else_block) = else_block {
+                collect_refs_block(else_block, enclosing, globals, out);
             }
         }
         Stmt::While { cond, body, .. } => {
-            collect_refs_expr(cond, enclosing, globals, out);
-            for s in body {
-                collect_refs_stmt(s, enclosing, globals, out);
+            collect_refs_block(cond, enclosing, globals, out);
+            collect_refs_block(body, enclosing, globals, out);
+        }
+        Stmt::For { iterable, body, .. } => {
+            atom_ref(iterable, out);
+            collect_refs_block(body, enclosing, globals, out);
+        }
+        Stmt::Match {
+            scrutinee, arms, ..
+        } => {
+            atom_ref(scrutinee, out);
+            for arm in arms {
+                // Names the arm pattern binds are local to the arm — collect the body's refs,
+                // then remove them so they are not reported as free.
+                let mut bound = HashSet::new();
+                pattern_names(&arm.pattern, &mut bound);
+                let mut arm_refs = BTreeSet::new();
+                collect_refs_block(&arm.body, enclosing, globals, &mut arm_refs);
+                out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
             }
         }
-        Stmt::Expr { expr, .. } => collect_refs_expr(expr, enclosing, globals, out),
-        Stmt::Enum(_)
-        | Stmt::Record(_)
-        | Stmt::Class(_)
-        | Stmt::Impl(_)
-        | Stmt::Namespace { .. }
-        | Stmt::Use { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. } => {}
+        Stmt::Logical { left, right, .. } => {
+            atom_ref(left, out);
+            collect_refs_block(right, enclosing, globals, out);
+        }
+        Stmt::Coalesce {
+            value, fallback, ..
+        } => {
+            atom_ref(value, out);
+            collect_refs_block(fallback, enclosing, globals, out);
+        }
+        Stmt::Decl(Decl::Fn { func, .. }) => {
+            // The nested `fn`'s free variables bubble up (minus its own params/locals).
+            out.extend(free_vars(
+                &func.params,
+                &func.defaults,
+                &func.body,
+                enclosing,
+                globals,
+            ));
+        }
+        Stmt::Decl(_) | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop(_) => {}
     }
 }
 
-/// Collect every name an expression references. A nested closure contributes its own free
-/// variables (computed one enclosing layer deeper).
-fn collect_refs_expr(
-    expr: &Expr,
+fn collect_refs_rvalue(
+    rvalue: &Rvalue,
     enclosing: &[HashSet<String>],
     globals: &HashSet<String>,
     out: &mut BTreeSet<String>,
 ) {
-    match expr {
-        Expr::Ident { name, .. } => {
-            out.insert(name.clone());
+    match rvalue {
+        Rvalue::Closure { func, .. } => {
+            out.extend(free_vars(
+                &func.params,
+                &func.defaults,
+                &func.body,
+                enclosing,
+                globals,
+            ));
         }
-        Expr::Closure { params, body, .. } => {
-            let inner = free_vars(params, FnBody::Arrow(body), enclosing, globals);
-            out.extend(inner);
+        _ => for_each_rvalue_atom(rvalue, &mut |atom| atom_ref(atom, out)),
+    }
+}
+
+// --- Nested closures' free variables (the celling decision) ------------------------------------
+
+/// Collect the free variables of the closures/`fn`s nested in `block` (not this block's own
+/// ident references) — the names that, if local here, must be celled.
+fn collect_nested_frees_block(
+    block: &Block,
+    enclosing: &[HashSet<String>],
+    globals: &HashSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    for stmt in &block.stmts {
+        collect_nested_frees_stmt(stmt, enclosing, globals, out);
+    }
+}
+
+fn collect_nested_frees_stmt(
+    stmt: &Stmt,
+    enclosing: &[HashSet<String>],
+    globals: &HashSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    match stmt {
+        Stmt::Let { rvalue, .. } | Stmt::Eval { rvalue, .. } => {
+            collect_nested_frees_rvalue(rvalue, enclosing, globals, out)
         }
-        Expr::Unary { operand, .. } => collect_refs_expr(operand, enclosing, globals, out),
-        Expr::Binary { lhs, rhs, .. }
-        | Expr::Pipeline {
-            left: lhs,
-            right: rhs,
+        Stmt::Decl(Decl::Fn { func, .. }) => {
+            out.extend(free_vars(
+                &func.params,
+                &func.defaults,
+                &func.body,
+                enclosing,
+                globals,
+            ));
+        }
+        Stmt::If {
+            then_block,
+            else_block,
             ..
         } => {
-            collect_refs_expr(lhs, enclosing, globals, out);
-            collect_refs_expr(rhs, enclosing, globals, out);
-        }
-        Expr::Call { callee, args, .. } => {
-            collect_refs_expr(callee, enclosing, globals, out);
-            for a in args {
-                collect_refs_expr(a, enclosing, globals, out);
+            collect_nested_frees_block(then_block, enclosing, globals, out);
+            if let Some(else_block) = else_block {
+                collect_nested_frees_block(else_block, enclosing, globals, out);
             }
         }
-        Expr::List { items, .. } => {
-            for it in items {
-                collect_refs_expr(it, enclosing, globals, out);
-            }
+        Stmt::While { cond, body, .. } => {
+            collect_nested_frees_block(cond, enclosing, globals, out);
+            collect_nested_frees_block(body, enclosing, globals, out);
         }
-        Expr::Range { start, end, .. } => {
-            collect_refs_expr(start, enclosing, globals, out);
-            collect_refs_expr(end, enclosing, globals, out);
-        }
-        Expr::Map { entries, .. } => {
-            for (k, v) in entries {
-                collect_refs_expr(k, enclosing, globals, out);
-                collect_refs_expr(v, enclosing, globals, out);
-            }
-        }
-        Expr::Member { receiver, .. } => collect_refs_expr(receiver, enclosing, globals, out),
-        Expr::Index {
-            receiver, index, ..
-        } => {
-            collect_refs_expr(receiver, enclosing, globals, out);
-            collect_refs_expr(index, enclosing, globals, out);
-        }
-        Expr::Interp { parts, .. } => {
-            for part in parts {
-                if let StrPart::Hole(e) = part {
-                    collect_refs_expr(e, enclosing, globals, out);
-                }
-            }
-        }
-        Expr::Match {
-            scrutinee, arms, ..
-        } => {
-            collect_refs_expr(scrutinee, enclosing, globals, out);
-            for MatchArm { pattern, body, .. } in arms {
-                // Names the arm pattern binds are local to the arm — collect the body's refs,
-                // then remove them so they are not reported as free.
+        Stmt::For { body, .. } => collect_nested_frees_block(body, enclosing, globals, out),
+        Stmt::Match { arms, .. } => {
+            for arm in arms {
                 let mut bound = HashSet::new();
-                pattern_names(pattern, &mut bound);
+                pattern_names(&arm.pattern, &mut bound);
                 let mut arm_refs = BTreeSet::new();
-                collect_refs_expr(body, enclosing, globals, &mut arm_refs);
+                collect_nested_frees_block(&arm.body, enclosing, globals, &mut arm_refs);
                 out.extend(arm_refs.into_iter().filter(|n| !bound.contains(n)));
             }
         }
-        Expr::Object(lit) => {
-            for f in &lit.fields {
-                collect_refs_expr(&f.value, enclosing, globals, out);
-            }
-            if let Some(spread) = &lit.spread {
-                collect_refs_expr(spread, enclosing, globals, out);
+        Stmt::Logical { right, .. } => collect_nested_frees_block(right, enclosing, globals, out),
+        Stmt::Coalesce { fallback, .. } => {
+            collect_nested_frees_block(fallback, enclosing, globals, out)
+        }
+        Stmt::Bind { .. }
+        | Stmt::Echo { .. }
+        | Stmt::Return { .. }
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Drop(_)
+        | Stmt::Decl(_) => {}
+    }
+}
+
+fn collect_nested_frees_rvalue(
+    rvalue: &Rvalue,
+    enclosing: &[HashSet<String>],
+    globals: &HashSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    if let Rvalue::Closure { func, .. } = rvalue {
+        out.extend(free_vars(
+            &func.params,
+            &func.defaults,
+            &func.body,
+            enclosing,
+            globals,
+        ));
+    }
+    // No other rvalue nests a function body — atoms cannot contain closures.
+}
+
+// --- Atom traversal of an rvalue's operands ----------------------------------------------------
+
+/// Visit each [`Atom`] operand of an rvalue (a [`Rvalue::Closure`]'s captured names are *not*
+/// reached this way — they are handled separately by the free-variable bubble-up).
+fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
+    match rvalue {
+        Rvalue::Use(a) => f(a),
+        Rvalue::Unary { operand, .. } => f(operand),
+        Rvalue::Binary { lhs, rhs, .. } => {
+            f(lhs);
+            f(rhs);
+        }
+        Rvalue::Call { callee, args, .. } => {
+            f(callee);
+            args.iter().for_each(&mut *f);
+        }
+        Rvalue::Method { receiver, args, .. } => {
+            f(receiver);
+            args.iter().for_each(&mut *f);
+        }
+        Rvalue::Field { receiver, .. } => f(receiver),
+        Rvalue::Index {
+            receiver, index, ..
+        } => {
+            f(receiver);
+            f(index);
+        }
+        Rvalue::List { items, .. } => items.iter().for_each(&mut *f),
+        Rvalue::Map { entries, .. } => {
+            for (k, v) in entries {
+                f(k);
+                f(v);
             }
         }
-        Expr::Try { expr, .. } | Expr::As { expr, .. } | Expr::TypeTest { expr, .. } => {
-            collect_refs_expr(expr, enclosing, globals, out)
+        Rvalue::Range { start, end, .. } => {
+            f(start);
+            f(end);
         }
-        Expr::TypeOf { value, .. } => collect_refs_expr(value, enclosing, globals, out),
-        Expr::Invoke {
+        Rvalue::Object { fields, spread, .. } => {
+            if let Some((a, _)) = spread {
+                f(a);
+            }
+            for init in fields {
+                f(&init.value);
+            }
+        }
+        Rvalue::Interp { parts, .. } => {
+            for part in parts {
+                if let lang_ir::InterpPart::Hole { atom, .. } = part {
+                    f(atom);
+                }
+            }
+        }
+        Rvalue::Try { operand, .. }
+        | Rvalue::As { operand, .. }
+        | Rvalue::TypeTest { operand, .. }
+        | Rvalue::TypeOf { operand, .. } => f(operand),
+        Rvalue::Invoke {
             recv, name, args, ..
         } => {
-            collect_refs_expr(recv, enclosing, globals, out);
-            collect_refs_expr(name, enclosing, globals, out);
-            collect_refs_expr(args, enclosing, globals, out);
+            f(recv);
+            f(name);
+            f(args);
         }
-        Expr::Coalesce {
-            value, fallback, ..
-        } => {
-            collect_refs_expr(value, enclosing, globals, out);
-            collect_refs_expr(fallback, enclosing, globals, out);
-        }
-        Expr::Str { .. }
-        | Expr::Int { .. }
-        | Expr::Float { .. }
-        | Expr::Bool { .. }
-        | Expr::AttributesOf { .. }
-        | Expr::RolesOf { .. } => {}
+        // No operands (or handled elsewhere).
+        Rvalue::Closure { .. } | Rvalue::AttributesOf { .. } | Rvalue::RolesOf { .. } => {}
     }
 }
