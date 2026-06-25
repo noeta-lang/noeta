@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use lang_conformance::{Stage, run_corpus, run_differential, run_faithfulness, run_leak_check};
+use lang_conformance::{Stage, run_corpus, run_differential, run_ir_corpus, run_leak_check};
 
 fn corpus_root() -> PathBuf {
     // crates/lang-conformance → workspace root → tests/conformance
@@ -59,9 +59,15 @@ fn conformance_corpus_passes() {
 /// Phase 6 fixes both (structural `Weak` parent for eval, wiring the collector for the VM) and
 /// removes the matching entries here. The oracle asserts the leak set equals *exactly* this list,
 /// so a brand-new leak fails the gate AND a fixed leak forces the allowlist to shrink.
+///
+/// The eval residency is measured on the **Core-IR interpreter** (the migration's Phase-4
+/// reference): its precise last-use drops reclaim a binding promptly rather than at scope
+/// teardown, which breaks `counter_nested_fn`'s capture cycle early — so that program, a known
+/// eval leak under the superseded AST walker, no longer leaks here. The cycles that remain
+/// (`capture_immutable_error`, `recursive_nested_fn`) are rooted in references no single-assignment
+/// local drop reaches, so they still await Phase 6.
 const KNOWN_LEAKS: &[(&str, &str)] = &[
     ("eval", "closures/capture_immutable_error.lang"),
-    ("eval", "closures/counter_nested_fn.lang"),
     ("eval", "closures/recursive_nested_fn.lang"),
     ("vm", "closures/recursive_nested_fn.lang"),
 ];
@@ -95,22 +101,24 @@ fn leak_oracle_residency_is_zero_except_known_cycles() {
 }
 
 #[test]
-fn ir_interpreter_is_faithful_to_the_tree_walker() {
-    // The faithfulness oracle (memory-management migration, Phase 1): every parse+check-clean
-    // program must produce a byte-for-byte identical `RunResult` run through the new Core-IR
-    // interpreter as through the AST tree-walker. The lowering is now total over the corpus, so
-    // this asserts both zero divergence AND 100% coverage (skipped == 0) — the Phase 1
-    // completion gate, which must not regress. (The skip mechanism remains, ready for any new
-    // AST node added ahead of its lowering.)
-    let report = run_faithfulness(&corpus_root(), None);
+fn ir_lowering_is_total_over_the_corpus() {
+    // The Core-IR interpreter is the reference (memory-management migration, Phase 4): every
+    // parse+check-clean program lowers and runs through it. This asserts the lowering stays
+    // **total** over the corpus (skipped == 0) — the floor the differential (IR interpreter vs VM)
+    // relies on to compare every program. (The skip mechanism remains, ready for any new AST node
+    // added ahead of its lowering.)
+    //
+    // Through Phase 3 this was the *faithfulness* oracle, which also asserted the IR interpreter
+    // matched the AST tree-walker byte-for-byte. Phase 4 promoted the IR interpreter to the
+    // reference; the AST walker can no longer reproduce its last-use destruction, so the equality
+    // assertion was retired (the live cross-check is now the differential). See `ir_corpus.rs`.
+    let report = run_ir_corpus(&corpus_root(), None);
     eprintln!("{}", report.to_human());
     assert!(
-        report.ok(),
-        "the Core-IR interpreter diverged from the tree-walker:\n{}",
+        report.ran > 0,
+        "the IR-corpus sweep ran no programs:\n{}",
         report.to_human()
     );
-    // The lowering is total over the corpus: every parse+check-clean program lowers and runs
-    // through the IR interpreter. This floor (the Phase 1 completion gate) must not regress.
     assert_eq!(
         report.skipped,
         0,
@@ -123,22 +131,22 @@ fn ir_interpreter_is_faithful_to_the_tree_walker() {
 fn no_local_is_read_after_its_drop() {
     // The static-≤-dynamic last-use property (memory-management Phase 3.x): a `DropVar` must never
     // fire before its binding's real last *dynamic* read. The drop-audit records every drop, rebind,
-    // and read in the IR interpreter; we run the whole corpus through the faithfulness sweep (which
-    // executes every lowered program via `run_ir`) with the audit active, and assert it observed
-    // zero use-after-drop violations — the static drop placement is sound against ground-truth
-    // execution, independent of the liveness reasoning that placed the drops.
+    // and read in the IR interpreter; we run the whole corpus through the IR-corpus sweep (which
+    // executes every lowered program via the reference) with the audit active, and assert it
+    // observed zero use-after-drop violations — the static drop placement is sound against
+    // ground-truth execution, independent of the liveness reasoning that placed the drops.
     lang_eval::drop_audit::begin();
-    let report = run_faithfulness(&corpus_root(), None);
+    let report = run_ir_corpus(&corpus_root(), None);
     let violations = lang_eval::drop_audit::end();
     // Guard against a vacuous pass: the sweep must actually have run programs through the IR path.
     assert!(
-        report.matched > 0,
-        "the faithfulness sweep ran no programs — the audit would be vacuous"
+        report.ran > 0,
+        "the IR-corpus sweep ran no programs — the audit would be vacuous"
     );
     assert_eq!(
         violations, 0,
         "use-after-drop: a DropVar fired before its binding's last dynamic read in {} of {} programs",
-        violations, report.matched
+        violations, report.ran
     );
 }
 

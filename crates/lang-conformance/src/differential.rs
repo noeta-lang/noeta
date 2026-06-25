@@ -1,24 +1,29 @@
 //! The differential oracle: run every corpus program through both backends and assert
 //! they produce identical [`RunResult`]s.
 //!
-//! This is the spine of M1's runtime-first sequence. The M0 tree-walker (`TreeWalkBackend`)
-//! is frozen as the reference; the M1 bytecode VM (`VmBackend`) must reproduce it exactly.
-//! Because the VM only compiles a growing subset of the language, programs it cannot lower
-//! yet are **skipped** (counted toward a climbing coverage percentage), never failed — so
-//! the VM can land one slice at a time while every program it *does* compile is proven
-//! identical to the oracle. Only observable output is compared (stdout / exit code /
-//! diagnostic code+span), never internal value representation, which is exactly why the two
-//! backends can use completely different value models.
+//! This is the spine of M1's runtime-first sequence. The reference is the Core-IR interpreter
+//! (`reference_run` — the tree-walk backend executing the drop-annotated Core IR); the M1
+//! bytecode VM (`VmBackend`) must reproduce it exactly. Both consume the *same* lowered,
+//! drop-annotated IR, so they are two independent executors (Rc tree-walk vs manual-RC register
+//! bytecode) of one program — and agree on last-use destruction by construction. Because the VM
+//! only compiles a growing subset of the language, programs it cannot lower yet are **skipped**
+//! (counted toward a climbing coverage percentage), never failed. Only observable output is
+//! compared (stdout / exit code / diagnostic code+span), never internal value representation,
+//! which is exactly why the two backends can use completely different value models.
+//!
+//! (Through Phase 3 the reference was the AST tree-walker, with the IR interpreter validated
+//! against it by the now-retired faithfulness oracle; Phase 4 promoted the IR interpreter to the
+//! reference, since last-use destruction is expressible only on the IR.)
 
 use std::path::Path;
 
 use lang_backend::RunResult;
 use lang_db::LangDatabase;
-use lang_eval::TreeWalkBackend;
 use lang_span::{Source, SourceId};
 use lang_vm::VmBackend;
 
 use crate::collect_cases;
+use crate::reference::reference_run;
 
 /// A backend disagreement on one program: the field that differed.
 #[derive(Debug, Clone)]
@@ -156,10 +161,12 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
         return;
     }
 
-    // Thread the checker's `type_of` site map (already memoized by the gate above) into eval, so
-    // the tree-walker does not re-run the checker — the VM reads it via the `bytecode` query.
-    let sites = lang_db::checked(&db, src).type_of_sites.clone();
-    let tree = TreeWalkBackend::new().run_with_sites(&parsed.0.program, sites);
+    // Thread the checker's `type_of` site map + destructor relevance (already memoized by the gate
+    // above) into the reference, which runs the same drop-annotated Core IR the VM compiles — so
+    // the differential cross-checks two independent executors of one IR.
+    let checked = lang_db::checked(&db, src);
+    let sites = checked.type_of_sites.clone();
+    let tree = reference_run(&parsed.0.program, sites, &checked.destructor_relevance);
     match &lang_db::bytecode(&db, src).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {
@@ -201,8 +208,9 @@ fn compare_backends_workspace(
         report.matched += 1;
         return;
     }
-    let sites = lang_db::linked_checked(&db, ws).type_of_sites.clone();
-    let tree = TreeWalkBackend::new().run_with_sites(program, sites);
+    let checked = lang_db::linked_checked(&db, ws);
+    let sites = checked.type_of_sites.clone();
+    let tree = reference_run(program, sites, &checked.destructor_relevance);
     match &lang_db::linked_bytecode(&db, ws).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {

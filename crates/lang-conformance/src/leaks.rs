@@ -15,11 +15,11 @@
 use std::path::Path;
 
 use lang_db::LangDatabase;
-use lang_eval::TreeWalkBackend;
 use lang_span::{Source, SourceId};
 use lang_vm::VmBackend;
 
 use crate::collect_cases;
+use crate::reference::reference_run;
 
 /// One program's nonzero residency on one backend.
 #[derive(Debug, Clone)]
@@ -135,11 +135,12 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     if !lang_db::checked(&db, src).diagnostics.is_empty() {
         return;
     }
-    let sites = lang_db::checked(&db, src).type_of_sites.clone();
+    let checked = lang_db::checked(&db, src);
+    let sites = checked.type_of_sites.clone();
 
-    // Tree-walker: measure the live `Rc`-aggregate delta across a full run.
+    // Reference (Core-IR interpreter): measure the live `Rc`-aggregate delta across a full run.
     let before = lang_eval::live_count();
-    let _ = TreeWalkBackend::new().run_with_sites(&parsed.0.program, sites);
+    let _ = reference_run(&parsed.0.program, sites, &checked.destructor_relevance);
     record(report, name, "eval", lang_eval::live_count() - before);
     report.eval_measured += 1;
 
@@ -167,10 +168,11 @@ fn measure_workspace(name: &str, raw: &lang_loader::RawWorkspace, report: &mut L
     if !lang_db::linked_checked(&db, ws).diagnostics.is_empty() {
         return;
     }
-    let sites = lang_db::linked_checked(&db, ws).type_of_sites.clone();
+    let checked = lang_db::linked_checked(&db, ws);
+    let sites = checked.type_of_sites.clone();
 
     let before = lang_eval::live_count();
-    let _ = TreeWalkBackend::new().run_with_sites(program, sites);
+    let _ = reference_run(program, sites, &checked.destructor_relevance);
     record(report, name, "eval", lang_eval::live_count() - before);
     report.eval_measured += 1;
 

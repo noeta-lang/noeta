@@ -98,18 +98,39 @@ fn run_linked(linked: &Linked) -> i32 {
     }
 
     // `lang run` executes against the real host (real `env`/`args`, real-disk IO) on a per-isolate
-    // tokio runtime (M2.3). The conformance differential keeps the deterministic sandbox, so this
-    // real-host path is never compared backend-to-backend.
-    let result = match lang_runtime::RealHost::new() {
-        Ok(host) => TreeWalkBackend::new().run_with_host_sites(
-            &linked.program,
-            Box::new(host),
-            checked.type_of_sites,
-        ),
+    // tokio runtime (M2.3). It runs the **Core-IR** path — the same drop-annotated IR the
+    // conformance reference and the VM execute — so a user's program gets the migration's last-use
+    // destruction semantics, not the superseded AST-walk timing. The conformance differential keeps
+    // the deterministic sandbox, so this real-host path is never compared backend-to-backend.
+    let host = match lang_runtime::RealHost::new() {
+        Ok(host) => host,
         Err(err) => {
             eprintln!("lang: cannot start the runtime: {err}");
             return 1;
         }
+    };
+    // Lower + insert the precise-RC drops exactly as the bytecode pipeline does (with the same
+    // destructor-relevance annotation), so `lang run` matches the reference. A program outside the
+    // lowering's subset falls back to the AST walker, the total reference (none in the corpus today).
+    let relevance = lang_ir_passes::Relevance {
+        locals: checked.destructor_relevance.locals.clone(),
+        params: checked.destructor_relevance.params.clone(),
+    };
+    let result = match lang_ir::lower(&linked.program) {
+        Ok(ir) => {
+            let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
+            TreeWalkBackend::new().run_ir_with_host(
+                &linked.program,
+                &ir,
+                Box::new(host),
+                checked.type_of_sites,
+            )
+        }
+        Err(_) => TreeWalkBackend::new().run_with_host_sites(
+            &linked.program,
+            Box::new(host),
+            checked.type_of_sites,
+        ),
     };
     print!("{}", result.stdout);
     let _ = io::stdout().flush();

@@ -17,6 +17,8 @@ lang-lexer = { workspace = true }
 lang-parser = { workspace = true }
 lang-eval = { workspace = true }
 lang-check = { workspace = true }
+lang-ir = { workspace = true }
+lang-ir-passes = { workspace = true }
 lang-loader = { workspace = true }
 lang-conformance = { workspace = true }
 lang-runtime = { workspace = true }

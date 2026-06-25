@@ -638,6 +638,8 @@ dependencies = [
  "lang-conformance",
  "lang-diagnostics",
  "lang-eval",
+ "lang-ir",
+ "lang-ir-passes",
  "lang-lexer",
  "lang-loader",
  "lang-parser",

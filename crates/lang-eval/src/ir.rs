@@ -83,6 +83,21 @@ impl TreeWalkBackend {
     ) -> RunResult {
         Interpreter::new(self.seed).run_ir(ast, ir, type_of_sites)
     }
+
+    /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`lang_stdlib::Host`]
+    /// (the real host) instead of the deterministic sandbox — the IR analogue of
+    /// [`TreeWalkBackend::run_with_host_sites`]. `lang run` uses this so its user-facing
+    /// execution goes through the same Core-IR reference (with last-use destruction) the
+    /// conformance oracle pins, rather than the superseded AST-walk path.
+    pub fn run_ir_with_host(
+        &self,
+        ast: &Program,
+        ir: &lang_ir::Program,
+        host: Box<dyn lang_stdlib::Host>,
+        type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+    ) -> RunResult {
+        Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites)
+    }
 }
 
 impl Interpreter {

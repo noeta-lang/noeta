@@ -22,20 +22,20 @@
 use std::path::{Path, PathBuf};
 
 use lang_diagnostics::Diagnostic;
-use lang_eval::TreeWalkBackend;
 use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId, SourceMap};
 
 mod differential;
 mod expectation;
-mod faithfulness;
+mod ir_corpus;
 mod leaks;
+mod reference;
 mod report;
 
 pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
-pub use faithfulness::{FaithReport, run_faithfulness};
+pub use ir_corpus::{IrCorpusReport, run_ir_corpus};
 pub use leaks::{Leak, LeakReport, run_leak_check};
 pub use report::{CaseResult, CaseStatus, Report};
 
@@ -91,15 +91,20 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // One `check_all` yields both the gate diagnostics and the `type_of` site map the eval
         // backend needs, so the checker runs once per case instead of again inside the backend.
         let mut type_of_sites = std::collections::HashMap::new();
+        let mut destructor_relevance = lang_check::DestructorRelevance::default();
         if stage == Stage::Eval && diagnostics.is_empty() {
             let checked = lang_check::check_all(&parsed.program);
             diagnostics.extend(checked.diagnostics);
             type_of_sites = checked.type_of_sites;
+            destructor_relevance = checked.destructor_relevance;
         }
 
-        // Only evaluate a program that checked cleanly and only when asked to.
+        // Only evaluate a program that checked cleanly and only when asked to. The reference is the
+        // Core-IR interpreter (the migration's Phase-4 reference semantics), so conformance pins the
+        // same last-use destruction the VM produces.
         if stage == Stage::Eval && diagnostics.is_empty() {
-            let result = TreeWalkBackend::new().run_with_sites(&parsed.program, type_of_sites);
+            let result =
+                reference::reference_run(&parsed.program, type_of_sites, &destructor_relevance);
             stdout = result.stdout;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
@@ -264,7 +269,11 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
             errors: errors_of_mapped(&linked.sources, &checked.diagnostics),
         };
     }
-    let result = TreeWalkBackend::new().run_with_sites(&linked.program, checked.type_of_sites);
+    let result = reference::reference_run(
+        &linked.program,
+        checked.type_of_sites,
+        &checked.destructor_relevance,
+    );
     Outcome {
         errors: errors_of_mapped(&linked.sources, &result.diagnostics),
         stdout: result.stdout,
