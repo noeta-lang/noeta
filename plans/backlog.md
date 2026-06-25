@@ -22,3 +22,38 @@ This file holds **forward-looking design ideas** that are worth keeping but are 
 2. **Shape-only vs. integrated validation.** Default the derived deserializer to **shape-only** (right fields, right types, predictable, zero-config) with **semantic validation as an explicit opt-in** — either a separate `validate()` step or a `@derive(FromJson, via: new)`-style hook routing through a fallible validating constructor. Lean shape-only-by-default with validation layered (consistent with the "credible version first, powerful version layered" discipline), but decide deliberately.
 
 **Provenance:** proposed in a separate design conversation (no codebase access); reviewed and corrected against the code + `architecture.md` on 2026-06-22 (ring conflation fixed; the type-system gating added).
+
+## Bit-level computation arc — bitwise ops → fixed-width integers → packed types & SIMD
+
+**Status:** full design plan written at **`plans/bitwise/README.md`** (not started). Provenance: arose
+from a user question (2026-06-25) — "do we support bitwise operators and masks, like the Zed rope
+optimizations?" Answer: **no support of any kind today** (no `& | ^ << >>`, no complement, no unsigned
+or fixed-width ints, no popcount/SIMD; the only integer type is signed i64).
+
+**The arc, in three independently-shippable tiers** (detail + slices + decision points in the README):
+1. **Tier B — bitwise/shift operators on `int`** (signed i64): `& | ^ <<`/`>>`, complement via `!`
+   (Rust-style, avoids the `~`-is-concat clash), hex/bin/octal literals + `_` separators, and the
+   popcount-class intrinsics (`count_ones`/`leading_zeros`/…). **Small and self-contained** — operators
+   are new `Op::Binary` discriminants resolved in the shared `apply_binary`, so both backends agree for
+   free; no value-repr change. High value (unblocks all flag/mask work). Two real hazards flagged: the
+   **`>>` vs nested-generics** lex clash (don't lex `>>` as one token — compose it in the expression
+   parser), and reusing the existing `Pipe` token for expression-position `|`.
+2. **Tier W — fixed-width integers** (`u8/u32/u64`, …): the layer that makes masks *correct* (defined
+   wraparound, logical zero-fill shift, no sign-extension, exact-width popcount). A real type-lattice +
+   checker + value-repr expansion — **the type-system track explicitly "gates packed-types/SIMD."**
+   Recommended repr: **erase-to-i64 + type-directed masking** (union-erasure philosophy — width in the
+   type, a shared mask helper in both backends, no new NaN-box tags). Four decision points to settle
+   with the user first (which types, subtyping, repr, overflow policy → recommend wrapping-by-default).
+3. **Tier P — packed types & SIMD** (`Simd<T, N>`): the Zed-blog class proper (SIMD scan, lane
+   reductions, **`movemask` → `trailing_zeros` = mask→index**). Milestone-scale; **prerequisite: const
+   generics** (`<const N: int>`, which the S-track's bounded *type* generics do not yet provide). Key
+   oracle move: **scalar fallback semantics first** (portable, both backends agree by construction);
+   real SIMD codegen is a later **perf-only** swap behind byte-identical semantics, gated on a bench.
+
+**Suggested sequencing:** Tier B in full is the cheap high-value start and may be all that's needed.
+Tier W only when *correct* unsigned masks are required (settle its decisions first). Tier P only when
+SIMD throughput is the goal and the const-generic prerequisite is resolved. Optional capstone: a `Rope`
+stdlib type (chunk-presence `u64` summary + SIMD newline scan) proving every primitive composes.
+
+**Next free diagnostic code at time of writing:** E0034 (E0033 went to Phase-5.2 mut-fields; provisional allocations E0034–E0039 in the
+README). When Tier B graduates into slices, strike this entry and point to them.
