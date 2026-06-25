@@ -1,0 +1,35 @@
+// `mut` field assignment (`x.f = v`, Phase 5.2): a `mut` field of a class instance can be assigned
+// in place, including compound forms (`+=`). Mutation has **value semantics** — a uniquely-owned
+// instance is updated in place, but an aliased snapshot (`snap = p`) keeps its own value (the shared
+// instance is copied first). A function-local accumulator mutates its field each iteration (the reuse
+// path). Both backends agree.
+// expect: stdout "16"
+// expect: stdout "a"
+// expect: stdout "0"
+// expect: stdout "99"
+// expect: stdout "10"
+// expect: exit 0
+class Counter {
+    mut count: int
+    label: string
+    fn new(label: string): Counter { return Counter { count: 0, label: label }; }
+}
+mut c = Counter.new("a");
+c.count = 5;
+c.count = c.count + 1;
+c.count += 10;
+echo c.count;
+echo c.label;
+
+mut p = Counter.new("p");
+snap = p;
+p.count = 99;
+echo snap.count;
+echo p.count;
+
+fn build(n: int): int {
+    mut acc = Counter.new("acc");
+    for i in 0..n { acc.count = acc.count + i; }
+    return acc.count;
+}
+echo build(5);

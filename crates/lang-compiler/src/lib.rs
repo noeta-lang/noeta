@@ -1800,6 +1800,14 @@ impl<'m> FnCompiler<'m> {
                 span,
                 ..
             } => self.lower_field(receiver, name, dst, *span),
+            Rvalue::SetField {
+                receiver,
+                name,
+                value,
+                reuse,
+                span,
+                ..
+            } => self.lower_set_field(receiver, name, value, *reuse, dst, *span),
             Rvalue::Index {
                 receiver,
                 index,
@@ -2124,6 +2132,72 @@ impl<'m> FnCompiler<'m> {
         // an owned temp, so `drop_temp_receiver` is already a no-op for it.
         self.drop_temp_receiver(receiver, recv);
         Ok(())
+    }
+
+    /// Lower a field assignment `receiver.name = value` (`x.f = v`, Phase 5.2). Forward the IR reuse
+    /// token to the op only when the receiver is a storage kind whose sole reference we can hand to
+    /// the in-place path: a directly-held **local** (its register *is* the binding) or a top-level
+    /// **global** (moved out with `TakeGlobal` so the in-place op sees refcount 1, the same shape as
+    /// the global record/list accumulator reuse). A celled/captured base — or an unmarked op — falls
+    /// through to the copying path (`reuse: false`), always correct value semantics. The value is
+    /// resolved *before* a `TakeGlobal` so moving the global out cannot vacate a slot it still reads.
+    fn lower_set_field(
+        &mut self,
+        receiver: &Atom,
+        field: &str,
+        value: &Atom,
+        reuse: bool,
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let val = self.atom_reg(value)?;
+        let reuse_base = if reuse {
+            if let Atom::Var { name, .. } = receiver {
+                match self.resolve(name) {
+                    Resolved::Local(reg) => Some(reg),
+                    Resolved::Global => {
+                        let reg = self.alloc_reg();
+                        self.code.push(Op::TakeGlobal {
+                            dst: reg,
+                            name: name.clone(),
+                            span,
+                        });
+                        Some(reg)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+        match reuse_base {
+            Some(obj) => {
+                self.code.push(Op::SetField {
+                    dst,
+                    obj,
+                    field: field.to_string(),
+                    value: val,
+                    reuse: true,
+                    span,
+                });
+                Ok(())
+            }
+            None => {
+                let obj = self.atom_reg(receiver)?;
+                self.code.push(Op::SetField {
+                    dst,
+                    obj,
+                    field: field.to_string(),
+                    value: val,
+                    reuse: false,
+                    span,
+                });
+                self.drop_temp_receiver(receiver, obj);
+                Ok(())
+            }
+        }
     }
 
     /// Lower bare member access `receiver.name`: a no-data enum variant (`Status.Pending`) or a

@@ -185,6 +185,10 @@ fn mark_self_updates(
                 && rebinds_temp(&stmts[i + 1], &base_name, dst)
             {
                 set_method_reuse(&mut stmts[i]);
+            } else if let Some((dst, base_name)) = setfield_self_update_candidate(&stmts[i])
+                && rebinds_temp(&stmts[i + 1], &base_name, dst)
+            {
+                set_setfield_reuse(&mut stmts[i]);
             } else if let Some((dst, type_name)) = object_reassign_candidate(&stmts[i])
                 && !own_destructors.contains(&type_name)
                 && let Some(target) = bind_target(&stmts[i + 1], dst)
@@ -392,6 +396,41 @@ fn set_binary_reuse(stmt: &mut Stmt) {
 fn set_method_reuse(stmt: &mut Stmt) {
     if let Stmt::Let {
         rvalue: Rvalue::Method { reuse, .. },
+        ..
+    } = stmt
+    {
+        *reuse = true;
+    }
+}
+
+/// If `stmt` is `let %t = SetField(Var(name), …)` whose assigned **value** does not mention `name`,
+/// return `(%t, name)` — the `x.f = v` field-assignment self-update shape. A value that is the bare
+/// receiver (`x.f = x`) is rejected: mutating the slot in place would make the field reference the
+/// post-assignment object (a self-cycle) instead of the pre-assignment value, so it is left to the
+/// copying path. (A temp/const value never mentions `name` — it was computed before the move-out.)
+fn setfield_self_update_candidate(stmt: &Stmt) -> Option<(Temp, String)> {
+    let Stmt::Let {
+        dst,
+        rvalue:
+            Rvalue::SetField {
+                receiver: Atom::Var { name, .. },
+                value,
+                ..
+            },
+        ..
+    } = stmt
+    else {
+        return None;
+    };
+    if atom_is_var(value, name) {
+        return None;
+    }
+    Some((*dst, name.clone()))
+}
+
+fn set_setfield_reuse(stmt: &mut Stmt) {
+    if let Stmt::Let {
+        rvalue: Rvalue::SetField { reuse, .. },
         ..
     } = stmt
     {

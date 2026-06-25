@@ -2531,6 +2531,53 @@ impl<'m> Vm<'m> {
                         }
                     }
                 }
+                Op::SetField {
+                    dst,
+                    obj,
+                    field,
+                    value,
+                    reuse,
+                    span,
+                } => {
+                    let v = frames[top].regs[*obj as usize];
+                    let val = frames[top].regs[*value as usize];
+                    let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
+                        return Err(self.error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            if v.is_object() {
+                                format!("type `{}` has no field `{field}`", v.shape().unwrap().name)
+                            } else {
+                                format!("cannot assign field `{field}` on {}", v.type_name())
+                            },
+                        ));
+                    };
+                    if *reuse {
+                        // The receiver's sole reference moves into this op (its register cleared, like
+                        // the map/record in-place paths), so the `refcount == 1` check below sees the
+                        // accumulator's reference and a `dst == obj` store is safe.
+                        frames[top].regs[*obj as usize] = Value::unit();
+                        if v.refcount() == 1 {
+                            // Unique: overwrite the slot in place (`replace_slot` retains the new
+                            // value); the displaced old value's `destruct` fires now (spec §5).
+                            let old = v.replace_slot(slot, val);
+                            self.release_value(old);
+                            set_reg(&mut frames[top].regs, *dst, v);
+                        } else {
+                            // Aliased: copy with the field replaced, preserving the alias's view, then
+                            // release the consumed receiver reference.
+                            let new = object_copy_with_slot(v, slot, val);
+                            release(v);
+                            set_reg(&mut frames[top].regs, *dst, new);
+                        }
+                    } else {
+                        // Unmarked: a functional update — copy with the field replaced, the receiver
+                        // register untouched (a temp receiver is dropped by the compiler-emitted Drop).
+                        let new = object_copy_with_slot(v, slot, val);
+                        set_reg(&mut frames[top].regs, *dst, new);
+                    }
+                    frames[top].pc += 1;
+                }
                 Op::NextId { dst } => {
                     let id = self.next_id;
                     self.next_id += 1;
@@ -3576,6 +3623,21 @@ fn stdlib_error_code(kind: lang_stdlib::ErrorKind) -> DiagnosticCode {
 /// `None` if any element is non-orderable or of a different kind. Mirrors the tree-walker's
 /// `canonical_set` so both backends build identical sets. The returned values are still shared
 /// (not retained) — the caller retains those it keeps.
+/// A shallow copy of object `obj` with slot `slot` replaced by `value` — the copy-on-write path for
+/// `x.f = v` on a shared (or unmarked) instance. Each slot of the new object (the unchanged ones and
+/// `value`) is retained, since `Value::object` adopts one reference per slot; `obj` itself is left
+/// untouched (the caller decides whether to release it). The caller must have checked `obj` is an
+/// object and `slot` is in range.
+fn object_copy_with_slot(obj: Value, slot: usize, value: Value) -> Value {
+    let shape = obj.shape().expect("object_copy_with_slot on a non-object");
+    let mut slots = obj.slots().expect("object_copy_with_slot on a non-object");
+    slots[slot] = value;
+    for &s in &slots {
+        retain(s);
+    }
+    Value::object(shape, slots)
+}
+
 fn canonical_set(items: &[Value]) -> Option<Vec<Value>> {
     if items.is_empty() {
         return Some(Vec::new());
@@ -4042,6 +4104,21 @@ mod tests {
             "fn build(): string {\n  mut s = #{};\n  for i in 0..3 { s = s.add(\"v${i}\"); }\n  s = s.add(\"v0\");\n  s = s.remove(\"v1\");\n  return \"${s.count()}\";\n}\necho build();\nmut t = #{\"a\", \"b\"};\nsnap = t;\nt = t.add(\"c\");\nt = t.remove(\"a\");\necho t;\necho snap;\n",
         );
         assert_eq!(r.stdout, "2\n{\"b\", \"c\"}\n{\"a\", \"b\"}\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn mut_field_set_reuse_paths() {
+        // VM-side in-place `mut` field assignment (`x.f = v`, Phase 5.2). Covers the in-place hit — a
+        // function-local accumulator overwrites its `mut` fields each iteration (its displaced HEAP
+        // field, a string, released each step) — and the copy fallback — an aliased snapshot
+        // (`snap = p`) keeps its value because the shared instance is copied before the write. The
+        // string field exercises the slot retain/release accounting; run under miri (no UAF / double
+        // free).
+        let r = run(
+            "class Box {\n  mut tag: string\n  mut n: int\n  fn new(): Box { return Box { tag: \"init\", n: 0 }; }\n}\nfn build(): string {\n  mut b = Box.new();\n  for i in 0..3 { b.n = b.n + i; b.tag = \"t${i}\"; }\n  return \"${b.tag} ${b.n}\";\n}\necho build();\nmut p = Box.new();\nsnap = p;\np.tag = \"changed\";\necho p.tag;\necho snap.tag;\n",
+        );
+        assert_eq!(r.stdout, "t2 3\nchanged\ninit\n");
         assert_eq!(r.exit_code, 0);
     }
 

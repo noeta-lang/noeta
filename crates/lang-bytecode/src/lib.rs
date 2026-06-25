@@ -417,6 +417,21 @@ pub enum Op {
         /// Assigned by the compiler.
         cache: u32,
     },
+    /// `dst = (obj with field = value)` — in-place field assignment (`x.f = v`, Phase 5.2),
+    /// **value semantics**. When `reuse` is set and `obj` is uniquely owned at runtime (`refcount
+    /// == 1`) its slot is overwritten in place (the displaced old value's `destruct` fires now) and
+    /// `obj` is consumed (its register cleared) into `dst`; otherwise a shallow copy with the field
+    /// replaced is produced, leaving any aliased observer's object untouched. `reuse` is the IR
+    /// reuse token (set only on the `x.f = v` self-update, for a directly-held local or a
+    /// `TakeGlobal`-moved global); an unmarked op always copies.
+    SetField {
+        dst: Reg,
+        obj: Reg,
+        field: String,
+        value: Reg,
+        reuse: bool,
+        span: Span,
+    },
     /// `dst = next_id()` — the deterministic seeded counter (1, 2, 3, …), reproducing the M0
     /// tree-walker's `IdGen` (seed 1).
     NextId {
@@ -981,6 +996,17 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::LoadField {
             dst, obj, field, ..
         } => format!("LoadField   r{dst} <- r{obj}.{field}"),
+        Op::SetField {
+            dst,
+            obj,
+            field,
+            value,
+            reuse,
+            ..
+        } => {
+            let marker = if *reuse { " [reuse]" } else { "" };
+            format!("SetField    r{dst} <- r{obj}.{field} = r{value}{marker}")
+        }
         Op::NextId { dst } => format!("NextId      r{dst}"),
         Op::Panic { msg, .. } => format!("Panic       r{msg}"),
         Op::TryUnwrap {

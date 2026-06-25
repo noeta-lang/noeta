@@ -623,6 +623,19 @@ pub enum Expr {
         ty: TypeRef,
         span: Span,
     },
+    /// In-place field assignment: `receiver.field = value` (Phase 5.2). The parser produces this
+    /// only as the value of the `x.field = v` reassignment desugar, where `receiver` is the bare
+    /// binding `x`; it evaluates to the (value-semantically) updated object, which the surrounding
+    /// `Stmt::Binding` stores back into `x`. The checker requires `field` to be a `mut` field of a
+    /// class (else E0033); both backends mutate the field **in place when the object is uniquely
+    /// owned** and copy-first when shared, so an aliased observer keeps the old value.
+    FieldSet {
+        receiver: Box<Expr>,
+        field: String,
+        field_span: Span,
+        value: Box<Expr>,
+        span: Span,
+    },
 }
 
 /// An all-fields object literal. `spread` (`..expr`) supplies values for fields not named
@@ -744,7 +757,8 @@ impl Expr {
             | Expr::TypeOf { span, .. }
             | Expr::RolesOf { span }
             | Expr::Invoke { span, .. }
-            | Expr::TypeTest { span, .. } => *span,
+            | Expr::TypeTest { span, .. }
+            | Expr::FieldSet { span, .. } => *span,
             Expr::Object(lit) => lit.span,
         }
     }
@@ -822,6 +836,9 @@ impl Expr {
                 args,
                 ..
             } => recv.mentions(name) || n.mentions(name) || args.mentions(name),
+            Expr::FieldSet {
+                receiver, value, ..
+            } => receiver.mentions(name) || value.mentions(name),
         }
     }
 }

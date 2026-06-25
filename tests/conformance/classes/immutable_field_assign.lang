@@ -1,0 +1,10 @@
+// Assigning a field that is not declared `mut` is E0033 — fields are immutable by default, so only a
+// `mut` field can be assigned with `x.f = v`. (An immutable field can still be functionally updated
+// via the spread literal `C { ...c, count: ... }`.)
+// expect: error E0033 at 10:3
+class Counter {
+    count: int
+    fn new(): Counter { return Counter { count: 0 }; }
+}
+mut c = Counter.new();
+c.count = 5;

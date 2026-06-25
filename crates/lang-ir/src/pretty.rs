@@ -227,6 +227,16 @@ impl Printer<'_> {
                 format!("{}.{}({}){}", atom(receiver), name, atoms(args), marker)
             }
             Rvalue::Field { receiver, name, .. } => format!("{}.{}", atom(receiver), name),
+            Rvalue::SetField {
+                receiver,
+                name,
+                value,
+                reuse,
+                ..
+            } => {
+                let marker = if *reuse { " [reuse]" } else { "" };
+                format!("{}.{} = {}{}", atom(receiver), name, atom(value), marker)
+            }
             Rvalue::Index {
                 receiver, index, ..
             } => format!("{}[{}]", atom(receiver), atom(index)),

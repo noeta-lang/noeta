@@ -581,6 +581,19 @@ impl Pretty for Expr {
             Expr::RolesOf { span: s } => {
                 out.push_str(&format!("(roles_of {})", span(*s)));
             }
+            Expr::FieldSet {
+                receiver,
+                field,
+                value,
+                span: s,
+                ..
+            } => {
+                out.push_str(&format!("(field-set {field} {}\n", span(*s)));
+                receiver.pretty(out, level + 1);
+                out.push('\n');
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::Invoke {
                 recv,
                 name,

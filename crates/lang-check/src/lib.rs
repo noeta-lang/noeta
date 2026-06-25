@@ -307,6 +307,10 @@ struct Checker {
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
     records: HashMap<String, Vec<(String, Type)>>,
+    /// Class name → the set of its fields declared `mut`. Drives the `x.f = v` field-assignment
+    /// check (Phase 5.2): only a `mut` field may be assigned in place (else E0033). Records never
+    /// have `mut` fields, so they never appear here.
+    mut_fields: HashMap<String, HashSet<String>>,
     /// Declared type → its kind (`Enum`/`Record`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
@@ -645,6 +649,15 @@ impl Checker {
                         .map(|f| (f.name.clone(), field_type(&f.ty)))
                         .collect();
                     self.records.insert(c.name.clone(), fields);
+                    let muts: HashSet<String> = c
+                        .fields
+                        .iter()
+                        .filter(|f| f.mut_field)
+                        .map(|f| f.name.clone())
+                        .collect();
+                    if !muts.is_empty() {
+                        self.mut_fields.insert(c.name.clone(), muts);
+                    }
                     self.types.insert(c.name.clone());
                     self.type_kinds
                         .insert(c.name.clone(), lang_types::TypeKind::Class);
@@ -2302,7 +2315,112 @@ impl Checker {
                 self.synth(args, env);
                 Type::Result(Box::new(Type::Dyn), Box::new(Type::Dyn))
             }
+            Expr::FieldSet {
+                receiver,
+                field,
+                field_span,
+                value,
+                ..
+            } => self.synth_field_set(receiver, field, *field_span, value, env),
         }
+    }
+
+    /// Type-check a field assignment `x.f = v` (Phase 5.2): the receiver must be a class instance,
+    /// the field must be declared `mut` (else E0033), and the value must be assignable to the
+    /// field's declared type (else E0007). The result is the receiver's own type — the surrounding
+    /// `Stmt::Binding` reassigns `x` to a value of the same type. A `dyn`/hole receiver defers to
+    /// runtime (the field cannot be resolved statically).
+    fn synth_field_set(
+        &mut self,
+        receiver: &Expr,
+        field: &str,
+        field_span: Span,
+        value: &Expr,
+        env: &mut Env,
+    ) -> Type {
+        let recv = self.synth(receiver, env);
+        let vty = self.synth(value, env);
+        if recv.defers_to_runtime() {
+            return recv;
+        }
+        let Type::Named(name, recv_args) = recv.clone() else {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::ImmutableField,
+                    field_span,
+                    format!("cannot assign to field `{field}`: `{recv}` is not a class instance"),
+                )
+                .with_help("only a `mut` field of a class instance can be assigned with `x.f = v`"),
+            );
+            return recv;
+        };
+        let is_mut = self
+            .mut_fields
+            .get(&name)
+            .is_some_and(|fields| fields.contains(field));
+        if !is_mut {
+            let exists = self
+                .records
+                .get(&name)
+                .is_some_and(|fs| fs.iter().any(|(n, _)| n == field));
+            let is_record = matches!(
+                self.type_kinds.get(&name),
+                Some(lang_types::TypeKind::Record)
+            );
+            let diag = if !exists {
+                Diagnostic::error(
+                    DiagnosticCode::ImmutableField,
+                    field_span,
+                    format!("type `{name}` has no field `{field}`"),
+                )
+            } else if is_record {
+                Diagnostic::error(
+                    DiagnosticCode::ImmutableField,
+                    field_span,
+                    format!("`{name}` is a record, whose fields are immutable"),
+                )
+                .with_help(format!(
+                    "build a new value with the spread literal `{name} {{ ...x, {field}: ... }}`"
+                ))
+            } else {
+                Diagnostic::error(
+                    DiagnosticCode::ImmutableField,
+                    field_span,
+                    format!("field `{field}` of `{name}` is not declared `mut`"),
+                )
+                .with_help(format!(
+                    "declare it `mut {field}: ...` to allow `x.{field} = ...`, or build a new value \
+                     with `{name} {{ ...x, {field}: ... }}`"
+                ))
+            };
+            self.diags.push(diag);
+            return recv;
+        }
+        // The field is `mut`; check the new value against its declared type, substituting the
+        // class's generic parameters from the receiver's type arguments (mirroring `synth_member`).
+        if let Some((_, fty)) = self
+            .records
+            .get(&name)
+            .and_then(|fs| fs.iter().find(|(n, _)| n == field))
+            .map(|(n, t)| (n.clone(), t.clone()))
+        {
+            let params = self.generic_types.get(&name).cloned().unwrap_or_default();
+            let subst: HashMap<String, Type> = params
+                .iter()
+                .cloned()
+                .zip(recv_args.iter().cloned())
+                .collect();
+            let pset: HashSet<String> = params.into_iter().collect();
+            let expected = erase_type_params(apply_subst(&fty, &subst), &pset);
+            if !self.assignable(&vty, &expected) {
+                self.diags.push(Diagnostic::error(
+                    DiagnosticCode::TypeMismatch,
+                    value.span(),
+                    format!("field `{field}` has type `{expected}`, but the value is `{vty}`"),
+                ));
+            }
+        }
+        recv
     }
 
     fn synth_binary(

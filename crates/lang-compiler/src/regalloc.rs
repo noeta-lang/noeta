@@ -249,6 +249,13 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*obj);
         }
+        Op::SetField {
+            dst, obj, value, ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*obj);
+            f.uses.push(*value);
+        }
         Op::NextId { dst } => f.def = Some(*dst),
         Op::Panic { msg, .. } => {
             f.uses.push(*msg);
@@ -641,6 +648,13 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::LoadField { dst, obj, .. } => {
             m(dst);
             m(obj);
+        }
+        Op::SetField {
+            dst, obj, value, ..
+        } => {
+            m(dst);
+            m(obj);
+            m(value);
         }
         Op::NextId { dst } => m(dst),
         Op::Panic { msg, .. } => m(msg),

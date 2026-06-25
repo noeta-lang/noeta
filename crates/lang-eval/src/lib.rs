@@ -1989,6 +1989,42 @@ impl Interpreter {
                     )),
                 }
             }
+            Expr::FieldSet {
+                receiver,
+                field,
+                value,
+                span,
+                ..
+            } => {
+                let recv = self.eval_expr(receiver)?;
+                let new_value = self.eval_expr(value)?;
+                match recv {
+                    Value::Object(object) => {
+                        if !object.fields.contains_key(field) {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!("type `{}` has no field `{field}`", object.def.name()),
+                            ));
+                        }
+                        // Value semantics: build a new instance with the field updated, leaving the
+                        // old object (held by any alias) unchanged. The AST walker is the reference
+                        // executor, so it always copies — observationally identical to the
+                        // in-place-when-unique backends (the IR interpreter and the VM).
+                        let mut fields = object.fields.clone();
+                        fields.insert(field.clone(), new_value);
+                        Ok(Value::Object(Rc::new(ObjectValue::new(
+                            object.def.clone(),
+                            fields,
+                        ))))
+                    }
+                    other => Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        *span,
+                        format!("cannot assign field `{field}` on {}", other.type_name()),
+                    )),
+                }
+            }
             Expr::Index {
                 receiver,
                 index,

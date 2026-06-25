@@ -780,6 +780,30 @@ impl Interpreter {
                 }
                 result
             }
+            lang_ir::Rvalue::SetField {
+                receiver,
+                name,
+                value,
+                reuse,
+                span,
+                ..
+            } => {
+                let new_value = self.eval_ir_atom(value, frame)?;
+                // A reuse-marked self-update (`x.f = v` ⟶ `x = SetField(x, f, v)`) moves the object
+                // out of its (being-reassigned) binding so a uniquely-owned instance can be mutated
+                // in place; an aliased instance copies. A non-`Var` receiver (or unmarked) reads the
+                // object value and copies (functional update). Either way value semantics hold.
+                if *reuse
+                    && let lang_ir::Atom::Var {
+                        name: recv_name, ..
+                    } = receiver
+                    && let Some(recv) = self.scope.take_mut(recv_name)
+                {
+                    return self.set_field_in_place(recv, name, new_value, *span);
+                }
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                self.set_field_in_place(recv, name, new_value, *span)
+            }
             lang_ir::Rvalue::Try {
                 operand,
                 on_error,
@@ -1095,6 +1119,50 @@ impl Interpreter {
                     .collect();
                 self.construct_object(type_name, type_name_span, field_values, spread, span)
             }
+        }
+    }
+
+    /// Set field `field` of an object to `new_value` with **value semantics** (`x.f = v`, Phase 5.2):
+    /// a uniquely-owned instance is mutated in place (the displaced old value fires its destructor now,
+    /// matching the copy baseline which would release it when the old object dies); an aliased instance
+    /// is copied with the field updated, so the other owner keeps its view. The IR-interpreter analogue
+    /// of the VM's `Op::SetField`; gated on the runtime refcount exactly as the VM is, so they agree.
+    fn set_field_in_place(
+        &mut self,
+        recv: Value,
+        field: &str,
+        new_value: Value,
+        span: Span,
+    ) -> Eval<Value> {
+        match recv {
+            Value::Object(mut rc) => {
+                if !rc.fields.contains_key(field) {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        span,
+                        format!("type `{}` has no field `{field}`", rc.def.name()),
+                    ));
+                }
+                if Rc::strong_count(&rc) == 1
+                    && let Some(obj) = Rc::get_mut(&mut rc)
+                {
+                    if let Some(old) = obj.fields.insert(field.to_string(), new_value) {
+                        self.destroy_value(old);
+                    }
+                    return Ok(Value::Object(rc));
+                }
+                let mut new_fields = rc.fields.clone();
+                new_fields.insert(field.to_string(), new_value);
+                Ok(Value::Object(Rc::new(crate::ObjectValue::new(
+                    Rc::clone(&rc.def),
+                    new_fields,
+                ))))
+            }
+            other => Err(self.runtime_error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("cannot assign field `{field}` on {}", other.type_name()),
+            )),
         }
     }
 

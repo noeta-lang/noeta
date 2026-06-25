@@ -80,6 +80,37 @@ fn record_update_read_src(n: usize) -> String {
     )
 }
 
+/// A **`mut` field-assignment** accumulator inside a function (`acc.f0 = acc.f0 + i`, Phase 5.2),
+/// returned after the loop. An 8-field class whose `mut f0` is overwritten each iteration. With the
+/// in-place field-set reuse it overwrites the single slot in place (O(1)); without it (the copy
+/// path) it clones all 8 slots per step — so the win is a constant factor proportional to the field
+/// count, like `record_update`. The field read keeps the accumulator uniquely owned at the write.
+fn field_assign_src(n: usize) -> String {
+    let fields: Vec<String> = (0..8)
+        .map(|i| {
+            if i == 0 {
+                "mut f0: int".to_string()
+            } else {
+                format!("f{i}: int")
+            }
+        })
+        .collect();
+    let inits: Vec<String> = (0..8).map(|i| format!("f{i}: 0")).collect();
+    format!(
+        "class Wide {{\n    {}\n}}\n\
+         fn build(n: int): int {{\n    \
+            mut acc = Wide {{ {} }};\n    \
+            for i in 0..n {{\n        \
+                acc.f0 = acc.f0 + i;\n    \
+            }}\n    \
+            return acc.f0;\n\
+         }}\n\
+         echo build({n});\n",
+        fields.join("\n    "),
+        inits.join(", "),
+    )
+}
+
 /// A list literal `[0, 1, 2, …, n-1]`, generated here so the iteration count is
 /// high without a giant source line in this file.
 fn int_list(n: usize) -> String {
@@ -319,6 +350,15 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     setacc.finish();
+
+    let mut fieldset = c.benchmark_group("vm_field_assign");
+    for &n in LOOP_SIZES {
+        let module = compile(&field_assign_src(n));
+        fieldset.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    fieldset.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

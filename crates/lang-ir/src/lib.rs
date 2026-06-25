@@ -198,6 +198,21 @@ pub enum Rvalue {
         name_span: Span,
         span: Span,
     },
+    /// In-place field assignment: `receiver.name = value` (Phase 5.2). Evaluates to the updated
+    /// object. Both backends set the field **in place when the object is uniquely owned** (the
+    /// reuse pass's `reuse` token, gated on the runtime refcount `== 1`) and **copy-first when
+    /// shared**, so value semantics hold for any aliased observer — like the collection/record
+    /// self-update reuse, it is observationally invisible, so the backends agree even reusing at
+    /// different points. `reuse` is set by the reuse pass on the `x.f = v` self-update shape
+    /// (`let %t = SetField(Var(x), …); Bind x = %t`); lowering always emits `false`.
+    SetField {
+        receiver: Atom,
+        name: String,
+        name_span: Span,
+        value: Atom,
+        reuse: bool,
+        span: Span,
+    },
     /// Index access: `receiver[index]`.
     Index {
         receiver: Atom,

@@ -504,6 +504,29 @@ impl Lowerer {
                     *span,
                 ))
             }
+            Expr::FieldSet {
+                receiver,
+                field,
+                field_span,
+                value,
+                span,
+            } => {
+                // Lower receiver then value (left-to-right), matching the tree-walker's order.
+                let receiver = self.lower_expr(receiver, out)?;
+                let value = self.lower_expr(value, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::SetField {
+                        receiver,
+                        name: field.clone(),
+                        name_span: *field_span,
+                        value,
+                        reuse: false,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Match {
                 scrutinee,
                 arms,

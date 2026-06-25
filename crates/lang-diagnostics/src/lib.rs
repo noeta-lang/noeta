@@ -121,6 +121,11 @@ pub enum DiagnosticCode {
     /// unbounded depth would overflow the stack (a hard crash); rejecting it past a generous limit
     /// turns adversarial or accidental deep nesting into an ordinary, recoverable diagnostic.
     NestingTooDeep,
+    /// A field assignment `x.f = v` targets a field that is not declared `mut` — fields are
+    /// immutable by default, and only a `mut` field of a class may be assigned in place (an
+    /// immutable field can still be functionally updated via the spread literal `T { ...x, f: v }`).
+    /// Also covers `x.f = v` on a receiver that is not a class instance (no assignable fields).
+    ImmutableField,
 }
 
 impl DiagnosticCode {
@@ -159,6 +164,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidAttributeTarget,
         DiagnosticCode::InvalidRole,
         DiagnosticCode::NestingTooDeep,
+        DiagnosticCode::ImmutableField,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -197,6 +203,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidAttributeTarget => "E0030",
             DiagnosticCode::InvalidRole => "E0031",
             DiagnosticCode::NestingTooDeep => "E0032",
+            DiagnosticCode::ImmutableField => "E0033",
         }
     }
 

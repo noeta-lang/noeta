@@ -241,6 +241,8 @@ b = Money { amount: 300, ..a };     // new Money; amount overridden, currency fr
 
 The spread fills every field you do not name, so the full-initialization guarantee still holds, and it respects the literal's visibility. It is **shallow by default** (safe, because immutability means shared substructure cannot be mutated); deep duplication is opt-in via `Clone` (`..a.deep_clone()`), never silent. This is the functional-update primitive (Rust `..old`, Elm `{ old | ... }`, Kotlin `.copy(...)`) unified into the creation literal rather than a separate feature. Because the spread names exactly the changed fields, change-tracking (e.g. for an ORM) is structurally explicit.
 
+**Field assignment (`x.f = v`).** A field declared `mut` can be assigned directly — `order.status = Status.Paid` (and the compound forms `count += 1`, `name ??= "anon"`). This is the in-place counterpart to the spread update: it requires both that the field is `mut` (assigning an immutable field is `E0033` — use the spread instead) and that the binding `x` is `mut` (it is a reassignment of `x`). Assignment keeps **value semantics**: a uniquely-owned instance is mutated in place, but an aliased one is copied first, so `b = a; a.f = v` never disturbs `b`. Mutation never surfaces as shared state — the runtime mutates in place only when it can prove the instance is uniquely owned, which is also what makes it O(1) in the common accumulator loop.
+
 ---
 
 ## 7. Collections

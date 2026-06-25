@@ -1916,6 +1916,70 @@ where
                                 span,
                             }
                         }
+                        // `x.f = v` (and `x.f OP= v`, `x.f ??= v`) — field assignment over a bare-name
+                        // receiver (no type annotation). It produces an `Expr::FieldSet` (the value
+                        // is the field's new value: the rhs for `=`, `x.f OP rhs` for a compound, the
+                        // coalesce for `??=`) wrapped in a reassignment of `x` — so `x` must be `mut`
+                        // (E0006) and the in-place reuse pass makes the common case mutate `x`'s field
+                        // in place. The checker requires `f` to be a `mut` field (E0033). A non-bare
+                        // receiver (`x.a.b = v`) falls through to the target error below.
+                        Expr::Member {
+                            receiver,
+                            name: field,
+                            name_span: field_span,
+                            span: member_span,
+                        } if ty.is_none() && matches!(receiver.as_ref(), Expr::Ident { .. }) => {
+                            let Expr::Ident {
+                                name,
+                                span: name_span,
+                            } = *receiver
+                            else {
+                                unreachable!("guarded above")
+                            };
+                            let read = || {
+                                Box::new(Expr::Member {
+                                    receiver: Box::new(Expr::Ident {
+                                        name: name.clone(),
+                                        span: name_span,
+                                    }),
+                                    name: field.clone(),
+                                    name_span: field_span,
+                                    span: member_span,
+                                })
+                            };
+                            let new_value = match op {
+                                AssignKind::Plain => rhs,
+                                AssignKind::Binary(binop) => Expr::Binary {
+                                    op: binop,
+                                    lhs: read(),
+                                    rhs: Box::new(rhs),
+                                    span,
+                                },
+                                AssignKind::Coalesce => Expr::Coalesce {
+                                    value: read(),
+                                    fallback: Box::new(rhs),
+                                    span,
+                                },
+                            };
+                            let value = Expr::FieldSet {
+                                receiver: Box::new(Expr::Ident {
+                                    name: name.clone(),
+                                    span: name_span,
+                                }),
+                                field,
+                                field_span,
+                                value: Box::new(new_value),
+                                span,
+                            };
+                            Stmt::Binding {
+                                mut_decl: false,
+                                name,
+                                name_span,
+                                ty: None,
+                                value,
+                                span,
+                            }
+                        }
                         Expr::Ident {
                             name,
                             span: name_span,
