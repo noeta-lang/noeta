@@ -376,6 +376,13 @@ pub enum MapMethod {
     Values,
     /// `has(key)` → `bool`, whether `key` is present.
     Has,
+    /// `set(key, value)` → a **new** map with `key` mapped to `value` (added or overwritten). Value
+    /// semantics — the receiver is unchanged; the reuse pass may make this an in-place mutation when
+    /// the receiver is uniquely owned (the map analog of the list `~` self-append).
+    Set,
+    /// `remove(key)` → a **new** map without `key` (a no-op copy if `key` is absent). Value semantics,
+    /// same in-place-reuse treatment as [`MapMethod::Set`].
+    Remove,
 }
 
 impl MapMethod {
@@ -384,6 +391,8 @@ impl MapMethod {
             "keys" => Some(MapMethod::Keys),
             "values" => Some(MapMethod::Values),
             "has" => Some(MapMethod::Has),
+            "set" => Some(MapMethod::Set),
+            "remove" => Some(MapMethod::Remove),
             _ => None,
         }
     }

@@ -459,6 +459,59 @@ impl Value {
         }
     }
 
+    /// Insert `key → value` into this map's backing buffer **in place**, returning the displaced
+    /// value (if `key` was already present). The caller must guarantee a uniquely-owned map
+    /// (`refcount == 1`) — this is the copy-on-write map-update fast path, so mutating the shared
+    /// buffer is sound only when no other owner can observe it. The map takes ownership of `value`
+    /// (the caller transfers a reference); the returned displaced value's reference is handed back to
+    /// the caller to release. Returns `None` (a no-op) if this is not a map.
+    pub fn map_insert(self, key: String, value: Value) -> Option<Value> {
+        debug_assert!(
+            !self.is_map() || heap::refcount(self) == 1,
+            "map_insert requires a uniquely-owned map (the COW invariant)"
+        );
+        if self.is_map() {
+            heap::with_payload_mut(self, |p| match p {
+                Payload::Map(entries) => entries.insert(key, value),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Remove `key` from this map's backing buffer **in place**, returning the removed value (if
+    /// present). Same uniqueness requirement and reference-handback contract as [`Value::map_insert`].
+    pub fn map_remove(self, key: &str) -> Option<Value> {
+        debug_assert!(
+            !self.is_map() || heap::refcount(self) == 1,
+            "map_remove requires a uniquely-owned map (the COW invariant)"
+        );
+        if self.is_map() {
+            heap::with_payload_mut(self, |p| match p {
+                Payload::Map(entries) => entries.remove(key),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A shallow clone of a map's `key → value` entries, if this is a map. As with
+    /// [`Value::map_values`], the copied values **share** the map's references and are *not*
+    /// retained; the caller decides whether to retain (e.g. when building a derived map with
+    /// [`Value::map`]).
+    pub fn map_entries(self) -> Option<BTreeMap<String, Value>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Map(entries) => Some(entries.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// Whether this is a shaped object (record/class/opaque instance).
     pub fn is_object(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Object { .. }))

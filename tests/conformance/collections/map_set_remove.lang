@@ -1,0 +1,17 @@
+// The Ring 1 map update methods `set`/`remove` (value semantics: each returns a NEW map, the
+// receiver is unchanged). `set` adds or overwrites a key; `remove` drops one (a no-op if absent).
+// An aliased snapshot taken before an update is never mutated by it. Both backends agree.
+// expect: stdout "[\"a\", \"b\"]"
+// expect: stdout "[1, 9]"
+// expect: stdout "[\"a\"]"
+// expect: stdout "[\"a\", \"b\"]"
+// expect: exit 0
+mut m = { "a": 1 };
+m = m.set("b", 2);
+seen = m;
+m = m.set("b", 9);
+echo m.keys();
+echo m.values();
+m = m.remove("b");
+echo m.keys();
+echo seen.keys();

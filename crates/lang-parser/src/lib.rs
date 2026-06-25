@@ -1873,6 +1873,49 @@ where
                 let span = ctx.to_span(e.span());
                 match tail {
                     Some((op, rhs)) => match lhs {
+                        // `m[k] = v` ⟶ `m = m.set(k, v)` — index-assignment sugar over a bare-name
+                        // receiver (plain `=`, no type annotation). It desugars to the value-semantics
+                        // `set` update (built-in on maps; a user type opts in by defining `set`), so a
+                        // reassignment of a `mut` binding; the in-place reuse pass then makes the common
+                        // `mut m` accumulator O(1) per update. A compound `m[k] += v` or an annotated
+                        // form is not an index-assignment — it falls through to the target error below.
+                        Expr::Index {
+                            receiver,
+                            index,
+                            span: idx_span,
+                        } if matches!(op, AssignKind::Plain)
+                            && ty.is_none()
+                            && matches!(receiver.as_ref(), Expr::Ident { .. }) =>
+                        {
+                            let Expr::Ident {
+                                name,
+                                span: name_span,
+                            } = *receiver
+                            else {
+                                unreachable!("guarded above")
+                            };
+                            let value = Expr::Call {
+                                callee: Box::new(Expr::Member {
+                                    receiver: Box::new(Expr::Ident {
+                                        name: name.clone(),
+                                        span: name_span,
+                                    }),
+                                    name: "set".to_string(),
+                                    name_span: idx_span,
+                                    span,
+                                }),
+                                args: vec![*index, rhs],
+                                span,
+                            };
+                            Stmt::Binding {
+                                mut_decl: false,
+                                name,
+                                name_span,
+                                ty: None,
+                                value,
+                                span,
+                            }
+                        }
                         Expr::Ident {
                             name,
                             span: name_span,

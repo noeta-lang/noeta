@@ -968,6 +968,74 @@ impl<'m> Vm<'m> {
                 let key = self.stdlib_string(name, args[0], span)?;
                 Ok(Value::bool(map.map_get(&key).is_some()))
             }
+            lang_stdlib::MapMethod::Set => {
+                self.stdlib_arity(name, args, 2, span)?;
+                let key = self.stdlib_string(name, args[0], span)?;
+                let mut new = map.map_entries().expect("map receiver");
+                new.insert(key, args[1]);
+                // The receiver is borrowed (untouched); the new map is a fresh owner, so retain each
+                // value it ends up holding exactly once. A displaced/absent value is simply not in
+                // `new`, so it keeps only the receiver's reference — no leak, no double-free.
+                for &value in new.values() {
+                    retain(value);
+                }
+                Ok(Value::map(new))
+            }
+            lang_stdlib::MapMethod::Remove => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let key = self.stdlib_string(name, args[0], span)?;
+                let mut new = map.map_entries().expect("map receiver");
+                new.remove(&key);
+                for &value in new.values() {
+                    retain(value);
+                }
+                Ok(Value::map(new))
+            }
+        }
+    }
+
+    /// Apply an in-place map update (`set`/`remove`) to a **consumed** map receiver (Phase 5.1c): the
+    /// caller has already taken the receiver's single reference out of its register. When uniquely
+    /// owned (`refcount == 1`) the backing buffer is mutated in place — O(1) — and the displaced value
+    /// (if any) fires its destructor now via `release_value`, matching the copy-and-reassign baseline
+    /// (which releases it when the old map dies at the reassignment). An aliased map copies (preserving
+    /// the other owner's view), then drops the consumed reference. Run under miri to validate refcounts.
+    fn map_update_in_place(
+        &mut self,
+        map: Value,
+        method: lang_stdlib::MapMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if map.refcount() != 1 {
+            // Aliased: copy, then release the reference we consumed from the receiver register.
+            let new = self.call_map_method(map, method, name, args, span)?;
+            release(map);
+            return Ok(new);
+        }
+        match method {
+            lang_stdlib::MapMethod::Set => {
+                self.stdlib_arity(name, args, 2, span)?;
+                let key = self.stdlib_string(name, args[0], span)?;
+                let value = args[1];
+                // The map gains an owned reference to the new value.
+                retain(value);
+                if let Some(old) = map.map_insert(key, value) {
+                    self.release_value(old);
+                }
+                Ok(map)
+            }
+            lang_stdlib::MapMethod::Remove => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let key = self.stdlib_string(name, args[0], span)?;
+                if let Some(old) = map.map_remove(&key) {
+                    self.release_value(old);
+                }
+                Ok(map)
+            }
+            // Only `set`/`remove` are routed to the in-place path by the dispatch guard.
+            _ => unreachable!("non-update map method on the in-place path"),
         }
     }
 
@@ -1553,8 +1621,34 @@ impl<'m> Vm<'m> {
                     args,
                     span,
                     cache,
+                    reuse,
                 } => {
                     let v = frames[top].regs[*recv as usize];
+                    // In-place map self-update (Phase 5.1c): a reuse-marked `m = m.set(k,v)` /
+                    // `m = m.remove(k)` whose runtime receiver is actually a map consumes the receiver
+                    // register and mutates the sole-owned backing buffer in place (an alias copies). A
+                    // non-map receiver — a user method that happens to be named `set` — falls through to
+                    // the ordinary dispatch below with the receiver intact.
+                    if *reuse
+                        && v.is_map()
+                        && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
+                        && matches!(
+                            map_method,
+                            lang_stdlib::MapMethod::Set | lang_stdlib::MapMethod::Remove
+                        )
+                    {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        // Consume the receiver: take its single reference out of the register without
+                        // releasing (a direct overwrite, like `ConcatInPlace`), so the refcount below
+                        // still counts the accumulator's reference and a `dst == recv` store is safe.
+                        frames[top].regs[*recv as usize] = Value::unit();
+                        let result =
+                            self.map_update_in_place(v, map_method, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, result);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // `json.parse(...)` — a Ring 2 native module function call, dispatched before
                     // the object/collection paths.
                     if let Some(module_name) = v.native_module_name() {
@@ -3683,6 +3777,21 @@ mod tests {
     }
 
     #[test]
+    fn map_update_reuse_paths() {
+        // VM-side in-place map update (`m[k] = v` ⟶ `m = m.set(k, v)`; Phase 5.1c). Covers the two
+        // runtime paths of a reuse-marked local map self-update: (1) the in-place hit — a uniquely-owned
+        // accumulator mutated in place, including overwriting a key (its displaced HEAP value released)
+        // and removing one; (2) the copy fallback — an aliased accumulator (`snap = m`) must keep `snap`
+        // at the pre-update value. String values exercise the slot retain/release accounting; run under
+        // miri to validate refcounts (no UAF / double free).
+        let r = run(
+            "fn build(): string {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = \"v${i}\"; }\n  m[\"k0\"] = \"x\";\n  m = m.remove(\"k1\");\n  return \"${m.values()} ${m.count()}\";\n}\necho build();\nmut acc = { \"a\": \"1\" };\nsnap = acc;\nacc[\"a\"] = \"9\";\nacc[\"b\"] = \"2\";\necho acc.values();\necho snap.values();\n",
+        );
+        assert_eq!(r.stdout, "[\"x\", \"v2\"] 2\n[\"9\", \"2\"]\n[\"1\"]\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn record_update_reuse_with_self_read() {
         // Drop insertion (Step B): a self-update that *reads* the accumulator
         // (`acc = Point { ...acc, x: acc.x + 1 }`) reuses in place — the `Drop` after the `acc.x`
@@ -4545,6 +4654,28 @@ mod tests {
         assert!(
             disasm.contains("TakeGlobal") && disasm.contains("MakeRecIP"),
             "expected TakeGlobal + in-place record reuse for a global accumulator, got:\n{disasm}"
+        );
+    }
+
+    #[test]
+    fn local_map_self_update_lowers_to_reuse_method_call() {
+        // Phase 5.1c: a function-local map accumulator updated with `m[k] = v` (desugaring to
+        // `m = m.set(k, v)`) must carry the in-place-reuse token to the VM — `CallMethod ... [reuse]` —
+        // so the dispatch mutates the uniquely-owned backing map in place rather than copying it. A
+        // top-level (global) map accumulator is the `TakeGlobal` case (a later slice; the IR
+        // interpreter already reuses it, and reuse is invisible, so the backends still agree).
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "fn build(): Map<string, int> {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = i; }\n  return m;\n}\necho build().count();\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        let disasm = module.disassemble();
+        assert!(
+            disasm.contains("[reuse]"),
+            "expected a reuse-marked method call for a local map self-update, got:\n{disasm}"
         );
     }
 

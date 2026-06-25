@@ -155,6 +155,18 @@ fn accumulate_src(n: usize) -> String {
     )
 }
 
+/// A function-local map accumulator built by repeated index-assignment `m[k] = i` (desugaring to
+/// `m = m.set(k, i)`) n times. Was O(n²) (each `set` copied the whole map); Phase 5.1c's in-place
+/// reuse (the receiver register is consumed and the uniquely-owned backing map mutated) brings it to
+/// O(n) — measured ~295× at n=8000 (791 ms → 2.7 ms), the gap widening with n. Local (in a function)
+/// because the VM's method-receiver reuse covers directly-held locals this slice; parameterized over
+/// n so the scaling is visible.
+fn map_accumulate_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    mut m = {{}};\n    for i in 0..{n} {{\n        m[\"k${{i}}\"] = i;\n    }}\n    return m.count();\n}}\necho build();\n"
+    )
+}
+
 /// A hot method-call + field-read site on the same receiver every iteration — the monomorphic
 /// dispatch/property pattern P-IC (inline caches) targets beyond the existing `property_access`.
 fn member_dispatch_src(n: usize) -> String {
@@ -259,6 +271,15 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     acc.finish();
+
+    let mut mapacc = c.benchmark_group("vm_map_accumulate");
+    for &n in LOOP_SIZES {
+        let module = compile(&map_accumulate_src(n));
+        mapacc.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    mapacc.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

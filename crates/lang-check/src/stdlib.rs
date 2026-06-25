@@ -85,6 +85,8 @@ fn map_method(name: &str, val: &Type) -> Option<Type> {
         "values" => list(val.clone()),
         "has" => Type::Bool,
         "count" => Type::Int,
+        // `set`/`remove` return a new map of the same type (keys are always strings).
+        "set" | "remove" => Type::Map(Box::new(Type::String), Box::new(val.clone())),
         _ => return None,
     })
 }
@@ -142,10 +144,11 @@ fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     })
 }
 
-fn map_params(name: &str, _val: &Type) -> Option<Vec<Type>> {
+fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "keys" | "values" | "count" => vec![],
-        "has" => vec![Type::String], // runtime map keys are strings
+        "has" | "remove" => vec![Type::String], // runtime map keys are strings
+        "set" => vec![Type::String, val.clone()], // `set(key, value)`
         _ => return None,
     })
 }

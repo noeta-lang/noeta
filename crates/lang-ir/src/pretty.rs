@@ -218,8 +218,14 @@ impl Printer<'_> {
                 receiver,
                 name,
                 args,
+                reuse,
                 ..
-            } => format!("{}.{}({})", atom(receiver), name, atoms(args)),
+            } => {
+                // The reuse token renders only when set (the rare collection method self-update), so
+                // every other method dump — and its golden — is unchanged.
+                let marker = if *reuse { " reuse" } else { "" };
+                format!("{}.{}({}){}", atom(receiver), name, atoms(args), marker)
+            }
             Rvalue::Field { receiver, name, .. } => format!("{}.{}", atom(receiver), name),
             Rvalue::Index {
                 receiver, index, ..

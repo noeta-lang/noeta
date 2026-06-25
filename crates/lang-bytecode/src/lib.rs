@@ -321,6 +321,14 @@ pub enum Op {
         /// shape → resolved method prototype, so a monomorphic site skips the `(type, method)`
         /// hashmap lookup (and its two `String` clones). Assigned by the compiler.
         cache: u32,
+        /// In-place-reuse token (Phase 5.1c, from the IR `Rvalue::Method.reuse`): set on a collection
+        /// **method self-update** `m = m.set(k, v)` whose receiver is a directly-held local. When the
+        /// runtime receiver is actually a map and `method` is an in-place-capable update (`set`/
+        /// `remove`), its sole-owned backing buffer is mutated in place (consuming the receiver
+        /// register) instead of copied; an aliased map, or any other receiver (a user method that
+        /// happens to be named `set`), takes the ordinary borrowing dispatch — so reuse stays
+        /// observationally invisible. Always `false` for a non-self-update call.
+        reuse: bool,
     },
     /// `dst = recv[index]` — index access (the `Index` trait / list element access), mirroring
     /// the tree-walker's `eval_index`. On an object it dispatches to the `get` method (pushing a
@@ -874,11 +882,13 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             recv,
             method,
             args,
+            reuse,
             ..
         } => {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            let marker = if *reuse { " [reuse]" } else { "" };
             format!(
-                "CallMethod  r{dst} <- r{recv}.{method}({})",
+                "CallMethod  r{dst} <- r{recv}.{method}({}){marker}",
                 args.join(", ")
             )
         }

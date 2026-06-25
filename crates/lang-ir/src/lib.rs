@@ -172,11 +172,21 @@ pub enum Rvalue {
     /// A method/associated call: `receiver.name(args)`. Kept distinct from [`Rvalue::Call`]
     /// so the interpreter can route it through method dispatch (built-in, stdlib, and
     /// user-defined) without reconstructing the receiver.
+    ///
+    /// `reuse` is the **in-place-reuse token** for a collection **method self-update** (`m = m.set(k,v)`
+    /// / the `m[k] = v` desugaring): set by the reuse-analysis pass ([`lang_ir_passes`], Phase 5) only
+    /// on a whitelisted update method whose `receiver` is the very binding the result is reassigned to
+    /// (and whose args do not mention it), so the old collection is dead after this call and its backing
+    /// buffer may be mutated in place. Each backend gates the actual reuse on the runtime receiver kind
+    /// and refcount (`== 1`), so an aliased or non-matching receiver copies — value semantics are
+    /// preserved either way (reuse is observationally invisible), so the two backends agree even if they
+    /// reuse at different points. Lowering always emits `false`.
     Method {
         receiver: Atom,
         name: String,
         name_span: Span,
         args: Vec<Atom>,
+        reuse: bool,
         span: Span,
     },
     /// Bare member access: `receiver.name`. Resolves to a field load, an enum-variant

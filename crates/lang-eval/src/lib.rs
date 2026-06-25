@@ -2954,6 +2954,20 @@ impl Interpreter {
                 let key = self.expect_std_string(name, &args[0], span)?;
                 Ok(Value::Bool(entries.contains_key(key)))
             }
+            lang_stdlib::MapMethod::Set => {
+                self.expect_std_arity(name, args, 2, span)?;
+                let key = self.expect_std_string(name, &args[0], span)?.to_string();
+                let mut new = entries.clone();
+                new.insert(key, args[1].clone());
+                Ok(Value::Map(Rc::new(new)))
+            }
+            lang_stdlib::MapMethod::Remove => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let key = self.expect_std_string(name, &args[0], span)?;
+                let mut new = entries.clone();
+                new.remove(key);
+                Ok(Value::Map(Rc::new(new)))
+            }
         }
     }
 

@@ -1,0 +1,29 @@
+// A function-local map accumulator built with `m[k] = …` (desugars to `m = m.set(k, …)`) — the case
+// the in-place reuse pass targets (the VM mutates the uniquely-owned backing map in place; the IR
+// interpreter does the same via `Rc::get_mut`). Overwriting an existing key and removing one both
+// work, and an aliased snapshot taken mid-build keeps its own value (value semantics hold whether the
+// update reused in place or copied). Both backends agree.
+// expect: stdout "[\"a\", \"b\", \"c\"]"
+// expect: stdout "[10, 2, 3]"
+// expect: stdout "3"
+// expect: stdout "[1, 2, 3]"
+// expect: exit 0
+fn build(): Map<string, int> {
+    mut m = {};
+    for i in 1..4 {
+        m["k${i}"] = i;
+    }
+    return m;
+}
+
+mut acc = { "a": 1 };
+acc["b"] = 2;
+acc["c"] = 3;
+snap = acc;
+acc["a"] = 10;
+echo acc.keys();
+echo acc.values();
+
+m = build();
+echo m.values().count();
+echo snap.values();

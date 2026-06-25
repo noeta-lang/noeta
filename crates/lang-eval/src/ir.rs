@@ -682,9 +682,37 @@ impl Interpreter {
                 receiver,
                 name,
                 args,
+                reuse,
                 span,
                 ..
             } => {
+                // In-place collection self-update (Phase 5.1c): a marked `m = m.set(k,v)` moves the
+                // receiver out of its (reassigned) binding so a uniquely-owned map can be mutated in
+                // place; mirrors the VM's reuse-aware dispatch. A non-map receiver (e.g. a user method
+                // named `set`) falls back to an ordinary consuming call with the moved-out value, so
+                // the following `Bind` still rebinds it. `take_mut` is name-keyed, so this reuses a
+                // local *or* a global accumulator (the VM does locals this slice; reuse is invisible,
+                // so the two backends still agree).
+                if *reuse
+                    && let lang_ir::Atom::Var {
+                        name: recv_name, ..
+                    } = receiver
+                {
+                    let values = self.eval_ir_atoms(args, frame)?;
+                    let recv = match self.scope.take_mut(recv_name) {
+                        Some(v) => v,
+                        None => self.eval_ir_atom(receiver, frame)?,
+                    };
+                    if matches!(&recv, Value::Map(_)) {
+                        if name == "set" && values.len() == 2 {
+                            return self.map_set_in_place(recv, values, *span);
+                        }
+                        if name == "remove" && values.len() == 1 {
+                            return self.map_remove_in_place(recv, values, *span);
+                        }
+                    }
+                    return self.call_method(recv, name, values, *span);
+                }
                 let recv = self.eval_ir_atom(receiver, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
                 if is_temp(receiver) {
@@ -822,6 +850,67 @@ impl Interpreter {
                 let name_val = self.eval_ir_atom(name, frame)?;
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)
+            }
+        }
+    }
+
+    /// In-place map `set` for a marked self-update `m = m.set(k, v)` (Phase 5.1c). The receiver has
+    /// already been moved out of its binding by the caller. When uniquely owned its backing map is
+    /// mutated in place (the displaced value, if any, fires its destructor now — matching the
+    /// copy-and-reassign baseline, which releases it when the old map dies); an aliased map copies,
+    /// preserving the other owner's view. `values` is `[key, value]`.
+    fn map_set_in_place(&mut self, recv: Value, mut values: Vec<Value>, span: Span) -> Eval<Value> {
+        let Value::Map(mut rc) = recv else {
+            unreachable!("caller checked the receiver is a map")
+        };
+        let new_value = values.pop().expect("set takes two args");
+        let key_value = values.pop().expect("set takes two args");
+        let Value::Str(key) = key_value else {
+            // Defensive: a non-string key cannot occur for a checked map `set`; rebuild via the
+            // ordinary path so the error (if any) matches.
+            return self.call_method(Value::Map(rc), "set", vec![key_value, new_value], span);
+        };
+        match Rc::get_mut(&mut rc) {
+            Some(map) => {
+                if let Some(old) = map.insert(key, new_value) {
+                    self.destroy_value(old);
+                }
+                Ok(Value::Map(rc))
+            }
+            None => {
+                let mut new = (*rc).clone();
+                new.insert(key, new_value);
+                Ok(Value::Map(Rc::new(new)))
+            }
+        }
+    }
+
+    /// In-place map `remove` for a marked self-update `m = m.remove(k)` (Phase 5.1c), the companion to
+    /// [`Interpreter::map_set_in_place`]. `values` is `[key]`.
+    fn map_remove_in_place(
+        &mut self,
+        recv: Value,
+        mut values: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        let Value::Map(mut rc) = recv else {
+            unreachable!("caller checked the receiver is a map")
+        };
+        let key_value = values.pop().expect("remove takes one arg");
+        let Value::Str(key) = key_value else {
+            return self.call_method(Value::Map(rc), "remove", vec![key_value], span);
+        };
+        match Rc::get_mut(&mut rc) {
+            Some(map) => {
+                if let Some(old) = map.remove(&key) {
+                    self.destroy_value(old);
+                }
+                Ok(Value::Map(rc))
+            }
+            None => {
+                let mut new = (*rc).clone();
+                new.remove(&key);
+                Ok(Value::Map(Rc::new(new)))
             }
         }
     }

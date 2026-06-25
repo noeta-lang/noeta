@@ -1775,9 +1775,10 @@ impl<'m> FnCompiler<'m> {
                 receiver,
                 name,
                 args,
+                reuse,
                 span,
                 ..
-            } => self.lower_method(receiver, name, args, dst, *span),
+            } => self.lower_method(receiver, name, args, *reuse, dst, *span),
             Rvalue::Field {
                 receiver,
                 name,
@@ -2056,6 +2057,7 @@ impl<'m> FnCompiler<'m> {
         receiver: &Atom,
         name: &str,
         args: &[Atom],
+        reuse: bool,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
@@ -2076,6 +2078,15 @@ impl<'m> FnCompiler<'m> {
         }
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
         // method, or a `count`/`enumerate` built-in — the VM decides).
+        //
+        // In-place collection self-update (Phase 5.1c): forward the IR reuse token to the op only when
+        // the receiver is a directly-held **local** — its register *is* the binding's sole storage, so
+        // the VM's reuse path can consume it and the runtime sees refcount 1 on the unique path. A
+        // global accumulator is the `TakeGlobal` case (a later slice; the IR interpreter already reuses
+        // it, and reuse is invisible, so the backends still agree). The VM's reuse branch additionally
+        // checks the runtime receiver kind, so a same-named user method only ever costs the flag.
+        let recv_reuse = reuse
+            && matches!(receiver, Atom::Var { name, .. } if matches!(self.resolve(name), Resolved::Local(_)));
         let recv = self.atom_reg(receiver)?;
         let args = self.atom_regs(args)?;
         let cache = self.module.next_cache_slot();
@@ -2086,7 +2097,11 @@ impl<'m> FnCompiler<'m> {
             args,
             span,
             cache,
+            reuse: recv_reuse,
         });
+        // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path), so
+        // the temp-receiver drop must not also fire — but a reuse receiver is always a `Var` local, not
+        // an owned temp, so `drop_temp_receiver` is already a no-op for it.
         self.drop_temp_receiver(receiver, recv);
         Ok(())
     }

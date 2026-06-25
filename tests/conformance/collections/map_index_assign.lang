@@ -1,0 +1,16 @@
+// Index-assignment sugar `m[k] = v` desugars to the value-semantics `m = m.set(k, v)`. Building a
+// map by repeated `m[k] = …` accumulation works, overwrites an existing key, and (value semantics) an
+// alias snapshotted before an assignment is not mutated by it. Both backends agree.
+// expect: stdout "[\"x\", \"y\", \"z\"]"
+// expect: stdout "[1, 20, 3]"
+// expect: stdout "[1, 2, 3]"
+// expect: exit 0
+mut m = {};
+m["x"] = 1;
+m["y"] = 2;
+m["z"] = 3;
+seen = m;
+m["y"] = 20;
+echo m.keys();
+echo m.values();
+echo seen.values();

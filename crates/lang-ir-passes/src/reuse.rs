@@ -156,9 +156,48 @@ fn mark_self_updates(mut stmts: Vec<Stmt>, own_destructors: &HashSet<String>) ->
             && rebinds_temp(&stmts[i + 1], &base_name, dst)
         {
             set_binary_reuse(&mut stmts[i]);
+        } else if let Some((dst, base_name)) = method_self_update_candidate(&stmts[i])
+            && rebinds_temp(&stmts[i + 1], &base_name, dst)
+        {
+            set_method_reuse(&mut stmts[i]);
         }
     }
     stmts
+}
+
+/// The built-in collection **update methods** whose self-update `x = x.m(args)` can reuse the
+/// receiver's backing buffer in place (each returns a new collection structurally derived from the
+/// receiver, with value semantics). The token is name-based — a same-named *user* method is filtered
+/// out at runtime by each backend's receiver-kind check, so a wrong mark only ever costs a copy.
+const REUSE_METHODS: &[&str] = &["set", "remove"];
+
+/// If `stmt` is `let %t = Var(name).m(args)` for a whitelisted update method `m` whose args do not
+/// mention `name`, return `(%t, name)` — the method self-update shape (`m = m.set(k, v)`, including
+/// the `m[k] = v` desugaring). The receiver must be a bare source variable (the reassignable
+/// accumulator); an arg mentioning it would read the slot after it is moved out, so the in-place op
+/// would be unsound (left to the copying call instead).
+fn method_self_update_candidate(stmt: &Stmt) -> Option<(Temp, String)> {
+    let Stmt::Let {
+        dst,
+        rvalue:
+            Rvalue::Method {
+                receiver: Atom::Var { name, .. },
+                name: method,
+                args,
+                ..
+            },
+        ..
+    } = stmt
+    else {
+        return None;
+    };
+    if !REUSE_METHODS.contains(&method.as_str()) {
+        return None;
+    }
+    if args.iter().any(|a| atom_is_var(a, name)) {
+        return None;
+    }
+    Some((*dst, name.clone()))
 }
 
 /// If `stmt` is `let %t = Type { ...Var(name), … }` (a reuse candidate by shape), return
@@ -240,6 +279,18 @@ fn set_object_reuse(stmt: &mut Stmt) {
 fn set_binary_reuse(stmt: &mut Stmt) {
     if let Stmt::Let {
         rvalue: Rvalue::Binary { reuse, .. },
+        ..
+    } = stmt
+    {
+        *reuse = true;
+    }
+}
+
+/// Set the reuse token on a `let _ = recv.m(args)` statement (the caller has already confirmed it is a
+/// [`method_self_update_candidate`]).
+fn set_method_reuse(stmt: &mut Stmt) {
+    if let Stmt::Let {
+        rvalue: Rvalue::Method { reuse, .. },
         ..
     } = stmt
     {
