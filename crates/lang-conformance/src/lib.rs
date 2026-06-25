@@ -29,11 +29,13 @@ use lang_span::{Source, SourceId, SourceMap};
 
 mod differential;
 mod expectation;
+mod faithfulness;
 mod leaks;
 mod report;
 
 pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
+pub use faithfulness::{FaithReport, run_faithfulness};
 pub use leaks::{Leak, LeakReport, run_leak_check};
 pub use report::{CaseResult, CaseStatus, Report};
 

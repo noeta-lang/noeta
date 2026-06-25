@@ -1,0 +1,405 @@
+//! The **Core IR** — a lowered, A-normal-form (ANF) second representation of the
+//! language, shared by every backend from the memory-management migration onward.
+//!
+//! # Why an IR, and why ANF
+//!
+//! The tree-walker and the register VM each re-derive evaluation order from the AST as
+//! they go. That works, but it leaves the *intermediate* values of an expression
+//! anonymous: in `acc.x + 1`, the receiver-field load `acc.x` has no AST node of its own,
+//! so neither backend can name it, compute its last use, or reuse its storage. The whole
+//! point of the Core IR is to make every intermediate value an explicitly **named** `let`
+//! binding over **atoms** (a constant or a name), so a later pass can compute precise
+//! last-use points and attach reference-counting decisions to concrete IR nodes.
+//!
+//! A-normal form gives exactly that: `acc.x + 1` lowers to `let t0 = acc.x; let t1 = t0 +
+//! 1`. Evaluation order — the tree-walker's order, which the VM already matches — becomes
+//! *explicit structure* (the `let` sequence) rather than something each backend rederives.
+//! That is a correctness win on its own, independent of reference counting.
+//!
+//! # Shape of the IR
+//!
+//! Control flow stays **structured** (no arbitrary `goto`): `if`/`while`/`for`/`match` are
+//! nodes with sub-[`Block`]s, not a basic-block graph. A structured tree keeps the
+//! backward last-use walk (a later phase) a simple structured traversal and keeps the IR
+//! tree-interpreter straightforward.
+//!
+//! Two storage classes are deliberately kept separate:
+//!
+//! * **Source variables** ([`Atom::Var`]) stay name-keyed and live in the runtime's lexical
+//!   scope chain. Closures capture them, reassignment flows through them, and end-of-program
+//!   destruction drains them — all exactly as before. Lowering never renames them.
+//! * **Temporaries** ([`Temp`]) are the anonymous intermediates ANF introduces. They are
+//!   frame-local (one flat store per function activation), write-once, and **never escape
+//!   into a closure** — a closure body only ever references source variables (which it
+//!   captures by name) plus its own params and temps. This separation is what lets a
+//!   temporary's storage be reclaimed at its last use without disturbing the scope model.
+//!
+//! # Reserved reference-counting slots
+//!
+//! IR nodes carry no `dup`/`drop`/`reuse`/`in-place` annotations *yet*. Those are filled by
+//! a later phase; this crate fixes the node shapes both backends will consume so that phase
+//! is purely additive. Until then the IR is a faithful, RC-neutral mirror of the AST.
+
+use std::rc::Rc;
+
+use lang_span::Span;
+
+pub use lang_ast::{BinaryOp, ForPattern, Pattern, TypeRef, UnaryOp};
+
+mod lower;
+pub use lower::{Unsupported, lower};
+
+/// A whole lowered program: the top-level statement stream plus the size of its temporary
+/// frame. Top-level source bindings still land in the global scope (so end-of-program
+/// destruction is unchanged); `temp_count` sizes the flat temporary store the interpreter
+/// allocates for the top-level activation.
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub top: Block,
+    /// The number of distinct [`Temp`]s used anywhere in `top` (the top-level frame size).
+    pub temp_count: u32,
+    pub span: Span,
+}
+
+/// A frame-local temporary: an ANF-introduced intermediate value. Write-once, read-many
+/// within its function activation, and never captured by a closure. Identified by a dense
+/// index into the activation's flat temporary store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct Temp(pub u32);
+
+impl Temp {
+    pub fn index(self) -> usize {
+        self.0 as usize
+    }
+}
+
+/// An **atom**: an operand that needs no further computation — a literal constant or a
+/// name. Every [`Rvalue`] operand is an atom; that is the defining property of A-normal
+/// form (nesting is flattened into preceding `let`s until only atoms remain).
+#[derive(Debug, Clone)]
+pub enum Atom {
+    /// A literal constant.
+    Const(Const),
+    /// A frame-local temporary, read from the activation's temporary store.
+    Temp(Temp),
+    /// A source-level variable, resolved through the lexical scope chain. Kept by name (not
+    /// renamed to a temp) so captures, reassignment, and end-of-scope destruction match the
+    /// tree-walker exactly.
+    Var { name: String, span: Span },
+}
+
+/// A literal constant operand.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Const {
+    Unit,
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Str(String),
+}
+
+/// One part of an interpolated string, with its holes reduced to atoms. A hole keeps the
+/// source span of its original expression so display-time diagnostics point at it exactly as
+/// the tree-walker's do.
+#[derive(Debug, Clone)]
+pub enum InterpPart {
+    Literal(String),
+    Hole { atom: Atom, span: Span },
+}
+
+/// A **primitive operation** over atoms — the right-hand side of a `let` (or an evaluated-
+/// for-effect statement). Each variant computes a single value from already-evaluated
+/// operands. Operations that *short-circuit* (`&&`, `||`, `??`) or that *branch on a value*
+/// (`match`, the `if`/`while`/`for` of the surface) are **not** here — those lower to the
+/// structured control-flow [`Stmt`]s, because their sub-expressions must not all be
+/// evaluated up-front into atoms.
+#[derive(Debug, Clone)]
+pub enum Rvalue {
+    /// Move/copy an atom into a temp (`let t = other`).
+    Use(Atom),
+    /// A prefix unary operation.
+    Unary {
+        op: UnaryOp,
+        operand: Atom,
+        span: Span,
+    },
+    /// A non-short-circuiting infix operation. `&&`/`||` are lowered to control flow and
+    /// never appear here; everything else (arithmetic, concat, comparisons, equality) does.
+    /// Operator-trait overloading on user objects is resolved by the interpreter, not the
+    /// IR.
+    Binary {
+        op: BinaryOp,
+        lhs: Atom,
+        rhs: Atom,
+        span: Span,
+    },
+    /// A call of a callee value: `callee(args)`.
+    Call {
+        callee: Atom,
+        args: Vec<Atom>,
+        span: Span,
+    },
+    /// A method/associated call: `receiver.name(args)`. Kept distinct from [`Rvalue::Call`]
+    /// so the interpreter can route it through method dispatch (built-in, stdlib, and
+    /// user-defined) without reconstructing the receiver.
+    Method {
+        receiver: Atom,
+        name: String,
+        name_span: Span,
+        args: Vec<Atom>,
+        span: Span,
+    },
+    /// Bare member access: `receiver.name`. Resolves to a field load, an enum-variant
+    /// constructor reference, or an associated-function reference, exactly as the
+    /// tree-walker's `Member` evaluation does.
+    Field {
+        receiver: Atom,
+        name: String,
+        name_span: Span,
+        span: Span,
+    },
+    /// Index access: `receiver[index]`.
+    Index {
+        receiver: Atom,
+        index: Atom,
+        span: Span,
+    },
+    /// A list literal `[a, b, c]`.
+    List { items: Vec<Atom>, span: Span },
+    /// A map literal `{k: v, ...}`.
+    Map {
+        entries: Vec<(Atom, Atom)>,
+        span: Span,
+    },
+    /// An integer range `start..end` / `start..=end`, eagerly materialized to a list.
+    Range {
+        start: Atom,
+        end: Atom,
+        inclusive: bool,
+        span: Span,
+    },
+    /// An all-fields object literal `Type { field: atom, ...spread }`.
+    Object {
+        type_name: String,
+        type_name_span: Span,
+        fields: Vec<(String, Atom)>,
+        spread: Option<Atom>,
+        span: Span,
+    },
+    /// An interpolated string with its holes reduced to atoms.
+    Interp { parts: Vec<InterpPart>, span: Span },
+    /// A closure construction: capture the current lexical scope around `func`'s template.
+    Closure { func: Rc<Func>, span: Span },
+    /// The `?` propagation operator: yield the success payload, or early-return the
+    /// `Err`/`none` from the enclosing function.
+    Try { operand: Atom, span: Span },
+    /// `expr.as<T>()` — narrow to `?T` (head-constructor match).
+    As {
+        operand: Atom,
+        ty: TypeRef,
+        span: Span,
+    },
+    /// `expr is T` — a `bool` head-constructor type test.
+    TypeTest {
+        operand: Atom,
+        ty: TypeRef,
+        span: Span,
+    },
+    /// `type_of(value)` — the runtime `Type` descriptor of a value.
+    TypeOf { operand: Atom, span: Span },
+    /// `attributes_of::<T>()` — the manifest's `#[T(...)]` attributes.
+    AttributesOf { ty: TypeRef, span: Span },
+    /// `roles_of()` — the `(declaration, Role)` index.
+    RolesOf { span: Span },
+    /// `invoke(recv, name, args)` — fallible by-name dispatch.
+    Invoke {
+        recv: Atom,
+        name: Atom,
+        args: Atom,
+        span: Span,
+    },
+}
+
+/// A statement in an IR [`Block`]. The `let`/`eval`/`bind`/`echo`/`return` forms are
+/// straight-line; the rest are structured control flow whose sub-[`Block`]s the interpreter
+/// walks recursively.
+#[derive(Debug, Clone)]
+pub enum Stmt {
+    /// Bind a primitive operation's result to a frame temporary: `let dst = rvalue`.
+    Let {
+        dst: Temp,
+        rvalue: Rvalue,
+        span: Span,
+    },
+    /// Evaluate an operation for its effect and discard the value (a bare expression
+    /// statement).
+    Eval { rvalue: Rvalue, span: Span },
+    /// A source binding or reassignment: `name = atom` / `mut name = atom`. Whether this
+    /// declares a new immutable binding or reassigns an existing one is a runtime decision
+    /// (the interpreter's `bind`), exactly as in the AST walker.
+    Bind {
+        mut_decl: bool,
+        name: String,
+        name_span: Span,
+        value: Atom,
+        span: Span,
+    },
+    /// `echo atom;` — display the atom and append a newline to stdout.
+    Echo { value: Atom, span: Span },
+    /// `return atom;` / `return;`.
+    Return { value: Option<Atom>, span: Span },
+    /// `break;`.
+    Break { span: Span },
+    /// `continue;`.
+    Continue { span: Span },
+    /// A statement `if cond { then } else { else_ }`. The condition is a pre-computed bool
+    /// atom; each arm is a statement-context block. (The `if … then … else` *expression* is
+    /// desugared to a `match` in the parser, so it arrives as [`Stmt::Match`], not here.)
+    If {
+        cond: Atom,
+        then_block: Block,
+        else_block: Option<Block>,
+        span: Span,
+    },
+    /// `while cond { body }`. The condition is re-evaluated each iteration, so it is a
+    /// **block** (computing into its tail atom) rather than a pre-computed atom; both the
+    /// condition block and the body run in the enclosing activation's temporary frame.
+    While {
+        cond: Block,
+        body: Block,
+        span: Span,
+    },
+    /// `for pattern in iterable { body }`. The iterable is pre-computed to an atom; the
+    /// loop pattern reuses the surface [`ForPattern`].
+    For {
+        pattern: ForPattern,
+        iterable: Atom,
+        body: Block,
+        span: Span,
+    },
+    /// `match scrutinee { arms }`. When the match is used as an expression its value is
+    /// written to `dst`; in statement position `dst` is `None`. Patterns reuse the surface
+    /// [`Pattern`] (matched by the interpreter's shared matcher).
+    Match {
+        scrutinee: Atom,
+        arms: Vec<Arm>,
+        dst: Option<Temp>,
+        span: Span,
+    },
+    /// `dst = left && right` (or `||`). The `left` operand is pre-computed to an atom; the
+    /// `right` operand `Block` (tail `Some`) is evaluated **only** when `left` does not
+    /// short-circuit. Modelled as a statement rather than an [`Rvalue`] precisely because
+    /// the right operand must not be evaluated up-front; the bool-operand checks match the
+    /// tree-walker's `&&`/`||` exactly. `dst` is `None` in discard position.
+    Logical {
+        dst: Option<Temp>,
+        op: BinaryOp,
+        left: Atom,
+        right: Block,
+        span: Span,
+    },
+    /// `dst = value ?? fallback`. `value` is pre-computed; the `fallback` block (tail
+    /// `Some`) runs **only** when `value` is `Err`/`none`. A statement for the same
+    /// laziness reason as [`Stmt::Logical`].
+    Coalesce {
+        dst: Option<Temp>,
+        value: Atom,
+        fallback: Block,
+        span: Span,
+    },
+    /// A declaration. `fn`/`class` carry lowered IR bodies; the rest carry the surface
+    /// declaration verbatim (they have no executable body, so the interpreter reuses the
+    /// tree-walker's registration unchanged).
+    Decl(Decl),
+}
+
+/// One arm of an IR `match`: a surface pattern and the block it runs. In expression
+/// position the block's `tail` is the arm's value (written to the match's `dst`).
+#[derive(Debug, Clone)]
+pub struct Arm {
+    pub pattern: Pattern,
+    pub body: Block,
+    pub span: Span,
+}
+
+/// A sequence of statements, optionally yielding a value. `tail` is `Some` when the block
+/// is in **expression** position — an arrow function body, a `match` arm, a `while`
+/// condition, or a defaulted-parameter thunk — and `None` in statement position. A block
+/// runs in its own child scope (mirroring the tree-walker's `exec_block`), but shares the
+/// enclosing activation's temporary frame.
+#[derive(Debug, Clone)]
+pub struct Block {
+    pub stmts: Vec<Stmt>,
+    pub tail: Option<Atom>,
+}
+
+impl Block {
+    /// A statement-position block (no value).
+    pub fn stmts(stmts: Vec<Stmt>) -> Block {
+        Block { stmts, tail: None }
+    }
+}
+
+/// The lowered template of a function, method, associated function, or closure. At runtime
+/// the interpreter pairs this with a captured scope to form a callable value; `params` and
+/// `defaults` mirror the surface signature, `body` is the lowered body (its `tail` is the
+/// value for an arrow body; a block body returns via [`Stmt::Return`] or unit), and
+/// `temp_count` sizes the activation's temporary frame.
+#[derive(Debug, Clone)]
+pub struct Func {
+    pub params: Vec<String>,
+    /// Each parameter's default thunk, parallel to `params` (`None` for a required
+    /// parameter). A default is evaluated in the *captured* scope when its argument is
+    /// omitted, so it carries its own temporary frame.
+    pub defaults: Vec<Option<Thunk>>,
+    pub body: Block,
+    /// The number of distinct [`Temp`]s used in `body` (the activation frame size). Default
+    /// thunks size their own frames; their temps are not counted here.
+    pub temp_count: u32,
+    pub span: Span,
+}
+
+/// A self-contained value-producing block with its own temporary frame — used for a
+/// defaulted parameter, which is evaluated independently in the closure's captured scope.
+/// `body.tail` is always `Some` (a default always produces a value).
+#[derive(Debug, Clone)]
+pub struct Thunk {
+    pub body: Block,
+    pub temp_count: u32,
+}
+
+/// A declaration node. `fn`/`class` carry lowered IR; `enum`/`record`/`use` carry the
+/// surface declaration unchanged (no executable body to lower).
+#[derive(Debug, Clone)]
+pub enum Decl {
+    /// `fn name(params) { body }`.
+    Fn {
+        name: String,
+        func: Rc<Func>,
+        span: Span,
+    },
+    /// `class Name { fields; methods; destruct { … } }`. Fields, derives, and the
+    /// destructor are read from the surface `decl`; methods are lowered to IR. (The
+    /// destructor body stays surface AST and is run by the shared end-of-program
+    /// destruction path, unchanged in this phase.)
+    Class(ClassDef),
+    /// An enum type declaration (no executable body).
+    Enum(Rc<lang_ast::EnumDecl>),
+    /// A record type declaration (no executable body).
+    Record(Rc<lang_ast::RecordDecl>),
+    /// A `use` import (binds names / native modules; no executable body).
+    Use {
+        path: Vec<String>,
+        names: Vec<lang_ast::UseName>,
+        span: Span,
+    },
+}
+
+/// A lowered class: the surface declaration (for fields, derives, name, and the destructor
+/// body) paired with its methods lowered to IR funcs.
+#[derive(Debug, Clone)]
+pub struct ClassDef {
+    pub decl: Rc<lang_ast::ClassDecl>,
+    pub methods: Vec<(String, Rc<Func>)>,
+    pub span: Span,
+}

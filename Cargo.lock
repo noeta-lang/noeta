@@ -675,6 +675,7 @@ dependencies = [
  "lang-db",
  "lang-diagnostics",
  "lang-eval",
+ "lang-ir",
  "lang-lexer",
  "lang-loader",
  "lang-parser",
@@ -721,6 +722,7 @@ dependencies = [
  "lang-builtins",
  "lang-check",
  "lang-diagnostics",
+ "lang-ir",
  "lang-lexer",
  "lang-parser",
  "lang-span",
@@ -734,6 +736,16 @@ version = "0.0.0"
 dependencies = [
  "lang-object",
  "lang-value",
+]
+
+[[package]]
+name = "lang-ir"
+version = "0.0.0"
+dependencies = [
+ "lang-ast",
+ "lang-diagnostics",
+ "lang-span",
+ "lang-types",
 ]
 
 [[package]]

@@ -20,6 +20,7 @@ use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
+mod ir;
 mod leak;
 mod ops;
 mod value;
@@ -2995,6 +2996,21 @@ impl Interpreter {
         }
         let left = self.eval_expr(lhs)?;
         let right = self.eval_expr(rhs)?;
+        self.apply_binary_op(op, left, right, span)
+    }
+
+    /// Apply a **non-short-circuiting** binary operator to already-evaluated operands,
+    /// including operator-trait dispatch on user objects. Extracted from [`Self::eval_binary`]
+    /// so the Core-IR interpreter (whose operands are pre-evaluated atoms) shares the exact
+    /// same semantics — the two backends agree by construction. `&&`/`||` never reach here;
+    /// they short-circuit in `eval_binary` / the IR's `Logical` statement.
+    fn apply_binary_op(
+        &mut self,
+        op: BinaryOp,
+        left: Value,
+        right: Value,
+        span: Span,
+    ) -> Eval<Value> {
         // Operator-trait dispatch on a user object: an arithmetic/concat operator (`Add` for `+`,
         // …) calls the matching method and uses its result directly; `==`/`!=` dispatch to the
         // `Equatable` `eq` method (`!=` negating the bool); and `< <= > >=` dispatch to the

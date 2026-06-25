@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use lang_conformance::{Stage, run_corpus, run_differential, run_leak_check};
+use lang_conformance::{Stage, run_corpus, run_differential, run_faithfulness, run_leak_check};
 
 fn corpus_root() -> PathBuf {
     // crates/lang-conformance → workspace root → tests/conformance
@@ -90,6 +90,23 @@ fn leak_oracle_residency_is_zero_except_known_cycles() {
         expected,
         "the leak-oracle set changed.\n  - a NEW pair ⇒ a real leak to fix or a regression\n  \
          - a MISSING pair ⇒ a debt was fixed; remove it from KNOWN_LEAKS\nfull report:\n{}",
+        report.to_human()
+    );
+}
+
+#[test]
+fn ir_interpreter_is_faithful_to_the_tree_walker() {
+    // The faithfulness oracle (memory-management migration, Phase 1): every program the Core-IR
+    // lowering can handle must produce a byte-for-byte identical `RunResult` when run through the
+    // new IR interpreter as through the AST tree-walker. Programs outside the lowering's current
+    // subset are skipped (not failed) — the climbing coverage gate that lets the IR land one
+    // slice at a time. The end state (every parse+check-clean program lowered) drives `skipped`
+    // to 0; until then this gate only asserts the IR never *diverges* on what it does run.
+    let report = run_faithfulness(&corpus_root(), None);
+    eprintln!("{}", report.to_human());
+    assert!(
+        report.ok(),
+        "the Core-IR interpreter diverged from the tree-walker:\n{}",
         report.to_human()
     );
 }
