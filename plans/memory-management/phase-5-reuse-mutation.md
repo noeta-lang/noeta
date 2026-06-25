@@ -4,12 +4,51 @@ With prompt reclamation (Phase 3) and reuse tokens represented on the IR, make r
 every constructor — as an IR pass, and unify mutable state with reuse: in-place mutation *is* reuse of
 a uniquely-owned cell.
 
+## Sub-slices
+
+The phase is sequenced as committable slices. The reuse-token machinery did **not** exist coming into
+Phase 5 (Phase 3 shipped only `liveness` + `drops`; the in-place VM ops `MakeRecordInPlace` /
+`ConcatInPlace` / `TakeGlobal` were retained-but-dead, emitted by nothing). So 5.1 *builds* the
+reuse-analysis pass and wires it to both backends, starting with the case the retained ops already
+cover.
+
+- **5.1a — record/class self-update reuse, function-local (DONE).** The reuse-analysis pass
+  (`lang-ir-passes/src/reuse.rs`, `thread_reuse`) marks a self-update `acc = Type { ...acc, f: v }`
+  (an `Rvalue::Object` whose spread base is the very binding the next `Bind` reassigns) with a new IR
+  token `Rvalue::Object.reuse`. Run after `insert_drops` in all three production pipelines (compiler,
+  `reference_run`, `lang run`) — a pure function of the IR, so the VM and the IR interpreter consume
+  identical tokens and agree by construction. Both backends consume the token when the spread base is
+  a directly-held **local**: the VM emits `Op::MakeRecordInPlace { check: Runtime }` (the base register
+  *is* the local's sole storage, so the op's move-out sees refcount 1 on the unique path and an alias
+  copies); the IR interpreter moves the accumulator out of its binding (`take_mut`) and mutates via
+  `Rc::get_mut` when unique, else copies. **Soundness beyond the runtime refcount:** reuse skips the
+  old allocation's *own* `destruct`, which the copy-and-destroy baseline runs every update (spec §5),
+  so the pass **excludes own-destructor types** (records never have one; classes iff they carry a
+  `destruct`), derived from the IR's class declarations. The displaced *changed* field still fires its
+  destructor on overwrite — VM via a new `Value::replace_slot` (retain-new, return-old-unfreed) routed
+  through `release_value`, the IR interpreter via `destroy_value` on the displaced field — so reuse is
+  observationally identical to copy-and-destroy and the differential stays in agreement.
+  **Measured (vm_record_update_read, 8-field local read-update accumulator): ~3.1× (159 → 51 ns/iter),
+  O(n) vs the copying O(n·fields).** Conformance 250 (+2 gc: replaced-field-destructor fires,
+  own-destructor-excluded), differential 242/0-skipped/agree, leak unchanged (the one known Phase-6
+  closure cycle), drop-audit 0, ir-corpus total, miri clean on the in-place + replaced-field paths,
+  clippy+fmt clean, +3 VM unit tests, no golden churn (no golden self-updates).
+- **5.1b — global accumulator reuse (`TakeGlobal` + `MakeRecordInPlace`), list self-append
+  (`ConcatInPlace`).** A top-level `mut acc` is a global, not a register; the `reuse` token is set but
+  the compiler currently falls back to a copying `MakeRecord` (5.1a handles locals only). 5.1b moves the
+  global out with `TakeGlobal` so the in-place op sees uniqueness, and extends the pass to the list
+  self-append `acc = acc ~ rhs` / `acc ~= rhs` (`ConcatInPlace`). This re-emits **all three** retained
+  ops from the IR pass; the standing obligation (delete them if unused) is then discharged.
+- **5.1c — map/enum constructors.** No retained in-place op exists for these; reuse needs net-new VM
+  ops + miri validation. Lower priority — decide value vs cost before building (surface as a decision
+  point, don't silently drop).
+
 ## 5.1 Reuse for all constructors (IR pass)
 
 Generalize reuse-token consumption from the P-REUSE record/list cases to **list, record, enum, and
-map** constructors. The Phase-3 pass already threads a token when a uniquely-owned value's `drop`
-precedes a same-shape constructor; this phase makes every constructor lowering *consume* an available
-token to reuse the allocation in place.
+map** constructors. The reuse-analysis pass threads a token when a uniquely-owned value's death
+precedes a same-shape constructor (5.1a: the record self-update); this phase makes every constructor
+lowering *consume* an available token to reuse the allocation in place.
 
 - **Subsumes and retires** the hand-rolled COW (`ConcatInPlace`/`TakeGlobal`) and targeted record reuse
   (`MakeRecordInPlace`) detection — now instances of one IR transformation, not syntax-matched special

@@ -836,6 +836,13 @@ impl Value {
     pub fn set_slot(self, index: usize, value: Value) {
         heap::set_slot(self, index, value);
     }
+
+    /// Overwrite object slot `index` with `value` (retaining the new occupant) and return the
+    /// displaced old value **without releasing it**, so the caller can run its destructor at the
+    /// right time. Panics if this is not an object. See [`heap::replace_slot`].
+    pub fn replace_slot(self, index: usize, value: Value) -> Value {
+        heap::replace_slot(self, index, value)
+    }
 }
 
 impl std::fmt::Debug for Value {

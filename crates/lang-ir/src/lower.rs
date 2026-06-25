@@ -653,6 +653,9 @@ impl Lowerer {
                         type_name_span: lit.type_name_span,
                         fields,
                         spread,
+                        // The reuse-analysis pass (Phase 5) sets this when it recognizes a self-update;
+                        // lowering is reuse-neutral.
+                        reuse: false,
                         span: lit.span,
                     },
                     lit.span,

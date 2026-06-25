@@ -34,6 +34,9 @@ pub fn reference_run(
     match lang_ir::lower(program) {
         Ok(ir) => {
             let ir = lang_ir_passes::insert_drops(&ir, Some(&to_relevance(relevance)));
+            // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM
+            // consume the same annotated IR (Phase 5).
+            let ir = lang_ir_passes::thread_reuse(&ir);
             TreeWalkBackend::new().run_ir(program, &ir, sites)
         }
         Err(_) => TreeWalkBackend::new().run_with_sites(program, sites),

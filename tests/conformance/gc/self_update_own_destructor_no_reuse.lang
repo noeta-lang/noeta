@@ -1,0 +1,25 @@
+// Phase 5.1a: a self-update of a type with its **own** `destruct` must NOT reuse the allocation —
+// reuse would silently skip the per-update destructor the copy-and-destroy baseline runs (spec §5:
+// a reassignment destroys the displaced value). The reuse pass excludes own-destructor types, so even
+// though `acc` is a directly-held function-local (otherwise reuse-eligible), `acc = Counter { ...acc,
+// n: 1 }` copies: the displaced `Counter 0` runs its destructor at the update, and the surviving
+// `Counter 1` runs its when `run` returns. If reuse had wrongly fired, the `drop counter 0` line would
+// be missing. Both backends agree.
+// expect: stdout "start"
+// expect: stdout "drop counter 0"
+// expect: stdout "end"
+// expect: stdout "drop counter 1"
+// expect: exit 0
+class Counter {
+    n: int
+    destruct { echo "drop counter ${n}"; }
+}
+
+fn run(): void {
+    mut acc = Counter { n: 0 };
+    echo "start";
+    acc = Counter { ...acc, n: 1 };
+    echo "end";
+}
+
+run();

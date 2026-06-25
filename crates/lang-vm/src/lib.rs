@@ -2049,12 +2049,17 @@ impl<'m> Vm<'m> {
                         ReuseCheck::Runtime => same_shape && base_val.refcount() == 1,
                     };
                     if reuse {
-                        // Reuse the allocation: overwrite only the changed slots (`set_slot`
-                        // retains the new value and releases the old). Every unchanged field keeps
-                        // base's reference, which transfers into the result — base *is* the result.
+                        // Reuse the allocation: overwrite only the changed slots. Every unchanged
+                        // field keeps base's reference, which transfers into the result — base *is*
+                        // the result. The displaced old field value is routed through `release_value`
+                        // (not a plain free) so its `destruct` fires at the right time — matching the
+                        // copy-and-destroy baseline, which would destroy the old base and its fields
+                        // (spec §4/§5). The reuse pass guarantees `base`'s own type has no destructor,
+                        // so reuse never skips a container destructor.
                         for (slot, reg) in named.iter() {
                             let v = frames[top].regs[*reg as usize];
-                            base_val.set_slot(*slot as usize, v);
+                            let old = base_val.replace_slot(*slot as usize, v);
+                            self.release_value(old);
                         }
                         set_reg(&mut frames[top].regs, *dst, base_val);
                         frames[top].pc += 1;
@@ -3693,6 +3698,20 @@ mod tests {
     }
 
     #[test]
+    fn in_place_reuse_fires_replaced_field_destructor() {
+        // Phase 5.1a: a function-local self-update of a destructor-free `Box` reuses in place, but the
+        // *replaced* field `r` (a destructor-bearing `Res`) must run its `destruct` at the update via
+        // the in-place path's `replace_slot` + `release_value`. Run under miri to validate the
+        // displaced field is released exactly once (no UAF / double-free) and the carried field `n`
+        // stays balanced.
+        let r = run(
+            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\nclass Box {\n  r: Res\n  n: int\n}\nfn run(): void {\n  mut acc = Box { r: Res.new(0), n: 7 };\n  acc = Box { ...acc, r: Res.new(1) };\n  echo \"n=${acc.n}\";\n}\nrun();\n",
+        );
+        assert_eq!(r.stdout, "drop 0\nn=7\ndrop 1\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn heap_element_list_concat_refcounts() {
         // Probe: concatenating lists of HEAP elements (strings) must keep element refcounts
         // balanced (no UAF / double free at teardown). Run under miri to validate.
@@ -3931,10 +3950,7 @@ mod tests {
         let r = run(
             "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\necho \"start\";\nR.new(\"a\").use_it();\nR.new(\"b\");\necho \"end\";\n",
         );
-        assert_eq!(
-            r.stdout,
-            "start\nuse a\nclose a\nclose b\nend\n"
-        );
+        assert_eq!(r.stdout, "start\nuse a\nclose a\nclose b\nend\n");
         assert_eq!(r.exit_code, 0);
     }
 
@@ -4487,6 +4503,27 @@ mod tests {
         let parsed = parse(&source, &lexed.tokens);
         let module = compile(&parsed.program).unwrap();
         insta::assert_snapshot!(module.disassemble());
+    }
+
+    #[test]
+    fn local_self_update_lowers_to_in_place_record_reuse() {
+        // Phase 5.1a: a self-update of a destructor-free type whose accumulator is a directly-held
+        // **function-local** must lower to the in-place `MakeRecordInPlace` (the reuse pass marks it,
+        // the compiler emits it) rather than a copying `MakeRecord` — the proof the reuse token reaches
+        // the VM. (A top-level global accumulator is the `TakeGlobal` case, a later slice.)
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "class P { x: int }\nfn run(): int {\n  mut acc = P { x: 0 };\n  acc = P { ...acc, x: acc.x + 1 };\n  return acc.x;\n}\necho run();\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        let disasm = module.disassemble();
+        assert!(
+            disasm.contains("MakeRecIP"),
+            "expected an in-place record-reuse op, got:\n{disasm}"
+        );
     }
 
     #[test]

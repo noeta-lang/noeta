@@ -238,6 +238,7 @@ impl Printer<'_> {
                 type_name,
                 fields,
                 spread,
+                reuse,
                 ..
             } => {
                 let mut parts: Vec<String> = fields
@@ -247,7 +248,10 @@ impl Printer<'_> {
                 if let Some((a, _)) = spread {
                     parts.push(format!("...{}", atom(a)));
                 }
-                format!("{} {{{}}}", type_name, parts.join(", "))
+                // The reuse token is only rendered when set, so non-self-update object dumps (and
+                // their goldens) are unchanged by Phase 5.
+                let marker = if *reuse { " reuse" } else { "" };
+                format!("{} {{{}}}{}", type_name, parts.join(", "), marker)
             }
             Rvalue::Interp { parts, .. } => {
                 let rendered: Vec<String> = parts

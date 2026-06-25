@@ -119,6 +119,8 @@ fn run_linked(linked: &Linked) -> i32 {
     let result = match lang_ir::lower(&linked.program) {
         Ok(ir) => {
             let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
+            // Thread reuse tokens (Phase 5), matching the bytecode pipeline and the reference runner.
+            let ir = lang_ir_passes::thread_reuse(&ir);
             TreeWalkBackend::new().run_ir_with_host(
                 &linked.program,
                 &ir,

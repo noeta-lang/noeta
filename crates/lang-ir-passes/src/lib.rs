@@ -7,6 +7,10 @@
 //!
 //! # What lives here so far
 //!
+//! [`reuse`] — an IR→IR transform threading **in-place-reuse tokens** onto constructors whose input
+//! allocation is dead at the construction point (Phase 5), so both backends reuse the storage rather
+//! than allocate afresh. The token only says *where to try*; the runtime refcount decides safety.
+//!
 //! [`liveness`] — a structured **backward dataflow** computing, for every **source variable**,
 //! the point(s) at which its last use occurs. (ANF temporaries are single-use by construction —
 //! each `let` has exactly one consumer — so their last use is trivial and handled directly by the
@@ -24,6 +28,8 @@
 
 pub mod drops;
 pub mod liveness;
+pub mod reuse;
 
 pub use drops::{Relevance, insert_drops};
 pub use liveness::{BlockLiveness, ProgramLiveness, StmtLiveness, VarSet, analyze};
+pub use reuse::thread_reuse;

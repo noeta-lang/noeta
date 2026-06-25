@@ -200,11 +200,21 @@ pub enum Rvalue {
     /// An all-fields object literal `Type { field: atom, ...spread }`. Field name spans and the
     /// spread's span are retained so construction diagnostics point exactly where the
     /// tree-walker's do.
+    ///
+    /// `reuse` is the **in-place-reuse token** the reuse-analysis pass ([`lang_ir_passes`], Phase 5):
+    /// `true` marks a *self-update* (`acc = Type { ...acc, f: v }`) where the `spread` base is the
+    /// very binding the result is reassigned to, so the base is dead after this construction and its
+    /// allocation may be reused. Both backends consume the same token — the VM via an in-place
+    /// `MakeRecordInPlace`, the IR interpreter via a move-out + `Rc::get_mut` — each gated on the
+    /// runtime refcount (`== 1`) so an aliased base falls back to a copy. Reuse is invisible to
+    /// observable behavior (value semantics; destructor timing of a replaced field is pinned by the
+    /// spec), so the differential stays in agreement. Lowering always emits `false`; the pass sets it.
     Object {
         type_name: String,
         type_name_span: Span,
         fields: Vec<ObjectFieldInit>,
         spread: Option<(Atom, Span)>,
+        reuse: bool,
         span: Span,
     },
     /// An interpolated string with its holes reduced to atoms.

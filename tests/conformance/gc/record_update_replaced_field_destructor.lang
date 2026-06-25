@@ -1,0 +1,31 @@
+// Phase 5.1a (spec §4/§5): in-place record reuse must still fire a *replaced* field's destructor.
+// `Box` has no own `destruct`, so the function-local self-update `acc = Box { ...acc, r: Res.new(1) }`
+// reuses the allocation in place (a directly-held local — the VM's `MakeRecordInPlace`, the IR
+// interpreter's move-out + `Rc::get_mut`). The displaced old `r` (Res 0) is the last reference to
+// that resource, so its destructor fires at the update, exactly as the copy-and-destroy baseline
+// would; the carried-over field `n` is untouched. When `run` returns, the surviving box's `r` (Res 1)
+// is destroyed. Both backends reuse and agree.
+// expect: stdout "start"
+// expect: stdout "drop res 0"
+// expect: stdout "end"
+// expect: stdout "drop res 1"
+// expect: exit 0
+class Res {
+    id: int
+    fn new(id: int): Res { return Res { id: id }; }
+    destruct { echo "drop res ${id}"; }
+}
+
+class Box {
+    r: Res
+    n: int
+}
+
+fn run(): void {
+    mut acc = Box { r: Res.new(0), n: 0 };
+    echo "start";
+    acc = Box { ...acc, r: Res.new(1) };
+    echo "end";
+}
+
+run();

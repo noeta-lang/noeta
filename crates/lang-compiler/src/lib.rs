@@ -52,6 +52,7 @@ use lang_ast::{BinaryOp, Program, TypeRef};
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NarrowTarget, Op, Reg,
+    ReuseCheck,
 };
 use lang_ir::{
     Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
@@ -150,6 +151,10 @@ fn compile_inner(
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
     })?;
     let ir = lang_ir_passes::insert_drops(&ir, relevance.as_ref());
+    // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of the
+    // drop-annotated IR, run identically by the IR interpreter (`reference_run`), so both backends
+    // reuse at the same points by construction.
+    let ir = lang_ir_passes::thread_reuse(&ir);
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
         shapes: Vec::new(),
@@ -1801,8 +1806,17 @@ impl<'m> FnCompiler<'m> {
                 type_name_span,
                 fields,
                 spread,
+                reuse,
                 span,
-            } => self.lower_object(type_name, *type_name_span, fields, spread, dst, *span),
+            } => self.lower_object(
+                type_name,
+                *type_name_span,
+                fields,
+                spread,
+                *reuse,
+                dst,
+                *span,
+            ),
             Rvalue::Interp { parts, span } => self.lower_interp(parts, dst, *span),
             Rvalue::Closure { func, .. } => {
                 // Resolve the closure's captures in this (the building) frame's terms, compile its
@@ -2088,12 +2102,14 @@ impl<'m> FnCompiler<'m> {
 
     /// `Type { field: value, ...spread }` — construct a record/class/opaque instance, or raise the
     /// tree-walker's runtime error for an unknown type.
+    #[allow(clippy::too_many_arguments)]
     fn lower_object(
         &mut self,
         type_name: &str,
         type_name_span: Span,
         fields: &[lang_ir::ObjectFieldInit],
         spread: &Option<(Atom, Span)>,
+        reuse: bool,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
@@ -2106,6 +2122,7 @@ impl<'m> FnCompiler<'m> {
                     &decl,
                     fields,
                     spread,
+                    reuse,
                     dst,
                     span,
                 )
@@ -2118,10 +2135,14 @@ impl<'m> FnCompiler<'m> {
                     &decl,
                     fields,
                     spread,
+                    reuse,
                     dst,
                     span,
                 )
             }
+            // Opaque/imported types have no fixed shape, so the in-place record-reuse op does not
+            // apply; the reuse pass never marks them (it excludes nothing here, but `make_opaque`
+            // simply ignores the token — the copying path is always correct).
             Some(TypeInfo::Opaque) => self.make_opaque(type_name, fields, spread, dst),
             Some(TypeInfo::Enum { .. }) => unsupported("enum type used as a record literal"),
             None => {
@@ -2144,6 +2165,7 @@ impl<'m> FnCompiler<'m> {
         decl_fields: &[String],
         inits: &[lang_ir::ObjectFieldInit],
         spread: &Option<(Atom, Span)>,
+        reuse: bool,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
@@ -2152,6 +2174,39 @@ impl<'m> FnCompiler<'m> {
             type_name.to_string(),
             decl_fields.to_vec(),
         ));
+        // In-place reuse (Phase 5): a self-update `acc = Type { ...acc, f: v }` whose spread base is a
+        // directly-held **local** can reuse that allocation. The base is read in place (no retain) and
+        // `MakeRecordInPlace` moves it out of its register — for a local the register *is* the binding's
+        // sole storage, so the runtime sees refcount 1 on the unique path and an alias forces a copy.
+        // A non-local base (a top-level global, a captured cell, an upvalue) is not handled in this
+        // slice — it falls through to the copying `MakeRecord`, which is always correct.
+        if reuse
+            && let Some((Atom::Var { name, .. }, _)) = spread
+            && let Resolved::Local(base) = self.resolve(name)
+        {
+            let mut consumed = Vec::new();
+            let mut named: Vec<(u16, Reg)> = Vec::with_capacity(inits.len());
+            for init in inits {
+                let Some(slot) = decl_fields.iter().position(|f| f == &init.name) else {
+                    let idx =
+                        self.add_diag(unknown_field_diag(type_name, &init.name, init.name_span));
+                    self.code.push(Op::Raise { idx });
+                    return Ok(());
+                };
+                let r = self.consume_operand(&init.value, &mut consumed)?;
+                named.push((slot as u16, r));
+            }
+            self.code.push(Op::MakeRecordInPlace {
+                dst,
+                shape,
+                named: named.into_boxed_slice(),
+                base,
+                check: ReuseCheck::Runtime,
+                span,
+            });
+            self.release_consumed(&consumed);
+            return Ok(());
+        }
         let mut consumed = Vec::new();
         let spread_reg = match spread {
             Some((a, _)) => Some(self.consume_operand(a, &mut consumed)?),

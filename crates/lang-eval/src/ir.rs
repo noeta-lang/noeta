@@ -743,8 +743,23 @@ impl Interpreter {
                 type_name_span,
                 fields,
                 spread,
+                reuse,
                 span,
             } => {
+                // In-place reuse (Phase 5): a marked self-update `acc = Type { ...acc, … }` moves the
+                // accumulator out of its (reassigned) binding and mutates it in place when uniquely
+                // owned, mirroring the VM's `MakeRecordInPlace`. The token guarantees the spread is the
+                // reassigned base; both backends gate on the runtime refcount so an alias copies.
+                if *reuse && let Some((lang_ir::Atom::Var { name, .. }, _)) = spread {
+                    return self.construct_object_reuse(
+                        type_name,
+                        *type_name_span,
+                        fields,
+                        name,
+                        *span,
+                        frame,
+                    );
+                }
                 let spread = match spread {
                     Some((atom, sp)) => Some((self.eval_ir_atom(atom, frame)?, *sp)),
                     None => None,
@@ -770,6 +785,71 @@ impl Interpreter {
                 let name_val = self.eval_ir_atom(name, frame)?;
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)
+            }
+        }
+    }
+
+    /// In-place record reuse for a marked self-update `acc = Type { ...acc, f: v }` (Phase 5, the
+    /// IR-interpreter analogue of the VM's `Op::MakeRecordInPlace`). The reuse pass guarantees the
+    /// spread base `base_name` is the very binding the result is reassigned to (so moving it out is
+    /// sound) and that `Type` has no own `destruct` (so reusing the allocation never skips a
+    /// container destructor). The accumulator is moved out of its binding; if it is uniquely owned
+    /// (no alias) its field map is mutated in place — only the overridden keys change, each
+    /// displacing its old value through `destroy_value` so a replaced field's `destruct` fires at the
+    /// right time (spec §4/§5); an aliased base copies, preserving the other owner's view. Both paths
+    /// gate on the runtime refcount exactly as the VM does, so the two backends agree.
+    fn construct_object_reuse(
+        &mut self,
+        type_name: &str,
+        type_name_span: Span,
+        fields: &[lang_ir::ObjectFieldInit],
+        base_name: &str,
+        span: Span,
+        frame: &mut Frame,
+    ) -> Eval<Value> {
+        // The override values are already-computed temps (ANF); read them in source order, matching
+        // the normal Object path's field evaluation.
+        let mut overrides: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+        for f in fields {
+            let value = self.eval_ir_atom(&f.value, frame)?;
+            overrides.push((f.name.clone(), value));
+        }
+        // Move the accumulator out of its (mutable, being-reassigned) binding.
+        match self.scope.take_mut(base_name) {
+            Some(Value::Object(mut rc)) if rc.def.name() == type_name && !rc.def.opaque => {
+                let def = Rc::clone(&rc.def);
+                // We hold the sole scope reference now; unique iff no other live alias.
+                if Rc::strong_count(&rc) == 1
+                    && let Some(obj) = Rc::get_mut(&mut rc)
+                {
+                    for (name, value) in overrides {
+                        if let Some(old) = obj.fields.insert(name, value) {
+                            self.destroy_value(old);
+                        }
+                    }
+                    return Ok(Value::Object(rc));
+                }
+                // Aliased (or a `get_mut` miss): copy, preserving the alias's view. The displaced
+                // fields live in `rc`, whose `Rc` drops at the end of this statement (releasing the
+                // scope's old reference); the alias keeps the original object.
+                let mut new_fields = rc.fields.clone();
+                for (name, value) in overrides {
+                    new_fields.insert(name, value);
+                }
+                Ok(Value::Object(Rc::new(crate::ObjectValue::new(
+                    def, new_fields,
+                ))))
+            }
+            // Defensive: the taken value is not a matching object (cannot happen for a check-clean
+            // self-update). Rebuild via the ordinary constructor with it as the spread base — the
+            // copying path the VM also falls back to on a shape mismatch.
+            other => {
+                let spread = other.map(|v| (v, span));
+                let field_values = overrides
+                    .into_iter()
+                    .map(|(name, value)| (name, span, value))
+                    .collect();
+                self.construct_object(type_name, type_name_span, field_values, spread, span)
             }
         }
     }
