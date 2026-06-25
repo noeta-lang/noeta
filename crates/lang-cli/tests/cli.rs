@@ -13,9 +13,15 @@ fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
 
-/// Write a one-off program to a uniquely named temp file and return its path.
+/// Write a one-off program into its own private temp *directory* and return its path. The
+/// directory isolation matters: `lang run` resolves sibling `.lang` modules from the entry's
+/// directory (M1.9), so a bare temp file dropped into the shared `std::env::temp_dir()` would make
+/// the loader scan — and parse — every other test's (or stray) `.lang` file as a candidate module.
+/// A dedicated directory guarantees the entry is the only module in scope.
 fn temp_program(name: &str, src: &str) -> PathBuf {
-    let path = std::env::temp_dir().join(format!("lang_cli_test_{name}.lang"));
+    let dir = std::env::temp_dir().join(format!("lang_cli_test_{name}"));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("main.lang");
     std::fs::write(&path, src).expect("write temp program");
     path
 }

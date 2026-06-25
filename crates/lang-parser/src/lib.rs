@@ -532,7 +532,84 @@ pub struct Parsed {
 }
 
 /// Parse a token stream into a [`Program`].
+/// The deepest delimiter nesting the parser accepts. The recursive-descent grammar uses stack
+/// proportional to `(`/`[`/`{` nesting, so unbounded depth would overflow the stack (a hard crash
+/// that the module loader's parse-error recovery cannot catch). Past this generous limit, deep
+/// nesting becomes an ordinary [`DiagnosticCode::NestingTooDeep`] (E0032) — no real program nests
+/// hundreds of delimiters deep, while an adversarial or generated one no longer crashes the process.
+const MAX_NESTING_DEPTH: usize = 256;
+
+/// Nesting depth up to which parsing runs inline on the caller's stack — chosen to stay well within
+/// the smallest stack a parse runs on (a ~2 MiB test thread). Beyond it, parsing moves to a worker
+/// thread with a large stack ([`DEEP_PARSE_STACK`]) so even input near [`MAX_NESTING_DEPTH`] cannot
+/// overflow whatever stack the caller happens to have. The overwhelming majority of programs nest
+/// far less than this and never leave the caller's thread.
+const INLINE_NESTING_DEPTH: usize = 16;
+
+/// Stack size for the deep-nesting worker thread — comfortably above what [`MAX_NESTING_DEPTH`]
+/// levels need (~tens of MiB), so the depth limit, not the stack, is the binding constraint.
+const DEEP_PARSE_STACK: usize = 64 * 1024 * 1024;
+
+/// Parse a token stream into a [`Program`]. Rejects pathologically deep delimiter nesting up front
+/// (E0032) and, for merely deep input, runs the recursive-descent grammar on a large-stack worker
+/// thread so it cannot overflow the caller's stack.
 pub fn parse(source: &Source, tokens: &[Token]) -> Parsed {
+    let (max_depth, overflow_span) = nesting_depth(tokens);
+    if let Some(span) = overflow_span {
+        // Stop before invoking the recursive parser: deeper than the stack can safely hold.
+        return Parsed {
+            program: Program {
+                stmts: Vec::new(),
+                span: Span::new_in(source.id(), 0, source.text().len() as u32),
+            },
+            diagnostics: vec![Diagnostic::error(
+                DiagnosticCode::NestingTooDeep,
+                span,
+                format!("nesting is too deep (the limit is {MAX_NESTING_DEPTH} levels)"),
+            )],
+        };
+    }
+    if max_depth > INLINE_NESTING_DEPTH {
+        // Deep but legal: parse on a worker thread whose stack is large enough that the depth limit
+        // above — not the caller's stack — is what bounds recursion. A scoped thread lets the
+        // closure borrow `source`/`tokens` directly; the owned [`Parsed`] crosses the join.
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(DEEP_PARSE_STACK)
+                .spawn_scoped(scope, || parse_inner(source, tokens))
+                .expect("spawn parse worker")
+                .join()
+                .expect("parse worker panicked")
+        })
+    } else {
+        parse_inner(source, tokens)
+    }
+}
+
+/// Maximum delimiter nesting depth (`(`/`[`/`{`) over the token stream, paired with the span of the
+/// token at which [`MAX_NESTING_DEPTH`] is first exceeded (if any). A cheap O(n) pre-pass over the
+/// tokens — no grammar, no recursion — so it is safe to run on any stack before the real parser.
+fn nesting_depth(tokens: &[Token]) -> (usize, Option<Span>) {
+    let mut depth: usize = 0;
+    let mut max = 0;
+    let mut overflow: Option<Span> = None;
+    for token in tokens {
+        match token.kind {
+            T::LParen | T::LBracket | T::LBrace => {
+                depth += 1;
+                max = max.max(depth);
+                if depth > MAX_NESTING_DEPTH && overflow.is_none() {
+                    overflow = Some(token.span);
+                }
+            }
+            T::RParen | T::RBracket | T::RBrace => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+    }
+    (max, overflow)
+}
+
+fn parse_inner(source: &Source, tokens: &[Token]) -> Parsed {
     let diags = RefCell::new(Vec::new());
     let ctx = Ctx {
         source,
@@ -2632,6 +2709,52 @@ mod tests {
         assert_eq!(
             parsed.diagnostics[0].code,
             DiagnosticCode::UnexpectedEndOfInput
+        );
+    }
+
+    #[test]
+    fn nesting_past_the_limit_is_rejected_not_overflowed() {
+        // Far deeper than any stack could parse: must surface E0032 instead of recursing.
+        let src = format!(
+            "x = {}{};",
+            "[".repeat(MAX_NESTING_DEPTH + 50),
+            "]".repeat(MAX_NESTING_DEPTH + 50)
+        );
+        let parsed = parse_str(&src);
+        assert_eq!(parsed.diagnostics.len(), 1);
+        assert_eq!(parsed.diagnostics[0].code, DiagnosticCode::NestingTooDeep);
+        // Rejected before parsing — no statements produced.
+        assert!(parsed.program.stmts.is_empty());
+    }
+
+    #[test]
+    fn deep_but_legal_nesting_parses_on_the_worker_stack() {
+        // Past the inline threshold but within the limit: parses cleanly (on the large-stack worker)
+        // rather than risking the caller's stack. A unit test thread is ~2 MiB, so this also proves
+        // the worker path is exercised.
+        let depth = INLINE_NESTING_DEPTH + 80;
+        let src = format!("x = {}1{};\n", "[".repeat(depth), "]".repeat(depth));
+        let parsed = parse_str(&src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "deep-but-legal nesting should parse: {:?}",
+            parsed.diagnostics
+        );
+        assert_eq!(parsed.program.stmts.len(), 1);
+    }
+
+    #[test]
+    fn exactly_at_the_limit_is_accepted() {
+        let src = format!(
+            "x = {}1{};\n",
+            "[".repeat(MAX_NESTING_DEPTH),
+            "]".repeat(MAX_NESTING_DEPTH)
+        );
+        let parsed = parse_str(&src);
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "exactly the limit should be accepted: {:?}",
+            parsed.diagnostics
         );
     }
 }

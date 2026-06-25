@@ -116,6 +116,11 @@ pub enum DiagnosticCode {
     /// than one), or labels a record that is not itself an attribute (a role rides on what an
     /// attribute attaches to, so the record must also be marked `@attribute`).
     InvalidRole,
+    /// An expression, type, or pattern nests delimiters (`(` `[` `{`) deeper than the parser
+    /// supports. The recursive-descent parser uses stack proportional to nesting depth, so an
+    /// unbounded depth would overflow the stack (a hard crash); rejecting it past a generous limit
+    /// turns adversarial or accidental deep nesting into an ordinary, recoverable diagnostic.
+    NestingTooDeep,
 }
 
 impl DiagnosticCode {
@@ -153,6 +158,7 @@ impl DiagnosticCode {
         DiagnosticCode::NotAnAttribute,
         DiagnosticCode::InvalidAttributeTarget,
         DiagnosticCode::InvalidRole,
+        DiagnosticCode::NestingTooDeep,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -190,6 +196,7 @@ impl DiagnosticCode {
             DiagnosticCode::NotAnAttribute => "E0029",
             DiagnosticCode::InvalidAttributeTarget => "E0030",
             DiagnosticCode::InvalidRole => "E0031",
+            DiagnosticCode::NestingTooDeep => "E0032",
         }
     }
 
