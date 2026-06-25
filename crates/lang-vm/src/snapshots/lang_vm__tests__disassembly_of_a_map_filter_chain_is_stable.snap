@@ -31,10 +31,11 @@ constants:
 code:
     0  LoadConst   r2 <- k0
     1  Binary      r1 <- r0 % r2
-    2  LoadConst   r4 <- k1
-    3  Binary      r3 <- r1 == r4
-    4  Return      r3
-    5  Halt
+    2  Drop        r0
+    3  LoadConst   r4 <- k1
+    4  Binary      r3 <- r1 == r4
+    5  Return      r3
+    6  Halt
 === proto 2 ===
 params: 1, registers: 3
 constants:
@@ -42,5 +43,6 @@ constants:
 code:
     0  LoadConst   r2 <- k0
     1  Binary      r1 <- r0 * r2
-    2  Return      r1
-    3  Halt
+    2  Drop        r0
+    3  Return      r1
+    4  Halt

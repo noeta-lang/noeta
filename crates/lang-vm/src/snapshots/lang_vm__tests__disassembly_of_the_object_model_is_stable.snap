@@ -29,8 +29,9 @@ params: 2, registers: 4
 code:
     0  MakeEnum    r2 <- shape s0()
     1  MakeRecord  r3 <- shape s1 {s0=r1, s1=r2}
-    2  Return      r3
-    3  Halt
+    2  Drop        r1
+    3  Return      r3
+    4  Halt
 === proto 2 ===
 params: 1, registers: 2
 code:

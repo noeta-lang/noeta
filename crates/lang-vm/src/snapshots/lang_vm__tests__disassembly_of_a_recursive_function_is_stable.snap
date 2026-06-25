@@ -33,8 +33,9 @@ code:
     8  Call        r5 <- r6(r3)
     9  LoadConst   r8 <- k2
    10  Binary      r7 <- r0 - r8
-   11  LoadGlobal  r10 <- "fib"
-   12  Call        r9 <- r10(r7)
-   13  Binary      r11 <- r5 + r9
-   14  Return      r11
-   15  Halt
+   11  Drop        r0
+   12  LoadGlobal  r10 <- "fib"
+   13  Call        r9 <- r10(r7)
+   14  Binary      r11 <- r5 + r9
+   15  Return      r11
+   16  Halt

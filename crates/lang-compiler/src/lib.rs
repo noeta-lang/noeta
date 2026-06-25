@@ -145,10 +145,14 @@ fn compile_inner(
     _reuse: ReuseMode,
 ) -> Result<Module, Unsupported> {
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
-    // lowering the IR interpreter consumes, so both backends execute one program (Phase 2).
+    // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
+    // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
+    // points; they lower to plain releases (prompt reclamation, no destructor) so this is
+    // behavior-neutral, reclaiming a local's value at its last use instead of at frame teardown.
     let ir = lang_ir::lower(program).map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
     })?;
+    let ir = lang_ir_passes::insert_drops(&ir);
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
         shapes: Vec::new(),
@@ -873,12 +877,22 @@ impl<'m> FnCompiler<'m> {
                 let reg = self.alloc_reg();
                 self.rvalue(rvalue, reg)
             }
-            // Releasing a discarded temporary promptly is a Phase-3 (precise-RC) concern; this
-            // phase keeps today's VM reclamation — frame teardown releases it — so `Drop` is a
-            // no-op here. (The IR *interpreter* honors it for its own destructor-timing fidelity.)
-            // A source-variable `DropVar` (Phase-3 drop-insertion) is likewise a no-op until the
-            // backend-lowering slice emits an `Op::Drop` on the binding's register.
-            Stmt::Drop(_) | Stmt::DropVar { .. } => Ok(()),
+            // A temporary `Drop` is still a no-op (today's reclamation frees it at frame teardown;
+            // the reuse-aware allocator handles temps in 3.3).
+            Stmt::Drop(_) => Ok(()),
+            // A source-variable drop (Phase 3 drop-insertion) releases the binding's value at its
+            // last use. Only a value held **directly** in a frame register is released here, via a
+            // plain `Op::Drop` (clears the register to unit, releasing the value with no destructor —
+            // destructor firing stays globals-only until Phase 4). A celled/captured local, an
+            // upvalue, a global, or a method field is left alone (the drop pass already excludes
+            // captured locals and globals; resolving to any of those means there is nothing this
+            // frame uniquely owns to release).
+            Stmt::DropVar { name, .. } => {
+                if let Resolved::Local(reg) = self.resolve(name) {
+                    self.code.push(Op::Drop { reg });
+                }
+                Ok(())
+            }
             Stmt::Bind {
                 mut_decl,
                 name,

@@ -582,6 +582,23 @@ impl Scope {
             .and_then(|parent| parent.take_mut(name))
     }
 
+    /// **Plainly** release the value of the nearest binding for `name` — replace it with `Unit`,
+    /// dropping the old value's `Rc` with **no** `destruct` block (that is `destroy_value`'s job,
+    /// reserved for globals until Phase 4). This is the IR `DropVar` operation (Phase 3): it
+    /// reclaims a function-local's value at its last use instead of at scope teardown. Searches
+    /// outward like [`Scope::assign`]; a no-op if `name` is not bound (the drop pass only targets
+    /// function-locals, never globals or captures, so the nearest binding is the intended local).
+    /// The binding itself stays (holding `Unit`), so scope-exit drain finds nothing more to free.
+    fn release_binding(&self, name: &str) {
+        if let Some(binding) = self.vars.borrow_mut().get_mut(name) {
+            binding.value = Value::Unit;
+            return;
+        }
+        if let Some(parent) = &self.parent {
+            parent.release_binding(name);
+        }
+    }
+
     /// Remove and return this scope's bindings in **reverse** declaration order, for
     /// deterministic destruction at scope exit.
     fn drain_reverse(&self) -> Vec<Value> {

@@ -227,10 +227,13 @@ impl Interpreter {
                 frame.drop(*t);
                 Ok(Flow::Normal)
             }
-            // A source-variable drop (Phase 3 drop-insertion). Not yet wired into this backend's
-            // reclamation — a no-op for now, so its presence is behavior-neutral — until the
-            // backend-lowering slice releases the binding's value here.
-            lang_ir::Stmt::DropVar { .. } => Ok(Flow::Normal),
+            // A source-variable drop (Phase 3 drop-insertion): plainly release the binding's value
+            // at its last use (no destructor — destructor firing stays globals-only until Phase 4),
+            // aligning this backend's reclamation timing with the VM's. Behavior-neutral.
+            lang_ir::Stmt::DropVar { name, .. } => {
+                self.scope.release_binding(name);
+                Ok(Flow::Normal)
+            }
             lang_ir::Stmt::Coalesce {
                 dst,
                 value,

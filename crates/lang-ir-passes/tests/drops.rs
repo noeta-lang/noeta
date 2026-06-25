@@ -148,6 +148,24 @@ fn a_local_holding_a_value_past_a_branch_is_dropped_after_its_use() {
 }
 
 #[test]
+fn a_local_captured_by_a_closure_is_never_dropped() {
+    // `tag` is captured by the returned closure (here through its *default* `label = tag`, which the
+    // body never names). It must not be dropped in the enclosing function — the closure reads it
+    // later through the shared captured scope. The capture over-approximation covers nested-closure
+    // defaults, not just bodies.
+    let program = lower(
+        "fn make(tag) {\n  return fn(s, label = tag) => label ~ s;\n}\nt = make(\"X\");\necho t(\"a\");\n",
+    );
+    let dropped = insert_drops(&program);
+    let d = collect(&dropped);
+    assert!(
+        !d.in_funcs.contains(&"tag".to_string()),
+        "captured `tag` must not be dropped, got {:?}",
+        d.in_funcs
+    );
+}
+
+#[test]
 fn idempotent_second_run_inserts_no_further_drops() {
     // Running the pass on already-annotated IR must not add drops (DropVar is not a use, and the
     // bindings already died at the same points).

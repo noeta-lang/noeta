@@ -188,6 +188,10 @@ fn compare(
             return;
         }
     };
+    // The IR interpreter consumes the **same** annotated IR the VM compiles (Phase 2 lowering +
+    // the Phase 3 drop-insertion pass), so faithfulness proves the precise-RC drops are
+    // behavior-neutral in the interpreter exactly as the differential proves it for the VM.
+    let ir = lang_ir_passes::insert_drops(&ir);
     let tree = TreeWalkBackend::new().run_with_sites(program, sites.clone());
     let ir_result = TreeWalkBackend::new().run_ir(program, &ir, sites);
     if tree == ir_result {

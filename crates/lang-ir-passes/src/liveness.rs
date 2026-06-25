@@ -68,6 +68,15 @@ pub struct StmtLiveness {
     pub sub: Vec<BlockLiveness>,
 }
 
+/// Every source-variable name appearing anywhere in a block (operands, bindings, nested closures,
+/// patterns) — a sound over-approximation of the names it reads, used by the drop pass to
+/// over-approximate closure captures.
+pub fn referenced_vars_in_block(block: &Block) -> VarSet {
+    let mut out = VarSet::new();
+    collect_block_vars(block, &mut out);
+    out
+}
+
 /// Compute liveness for a whole program.
 pub fn analyze(program: &Program) -> ProgramLiveness {
     // Top-level source bindings are globals; nothing is live after the program's last statement

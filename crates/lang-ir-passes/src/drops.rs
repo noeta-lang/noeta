@@ -253,6 +253,11 @@ fn single_assignment_locals(func: &Func, globals: &VarSet) -> VarSet {
     let mut bind_counts: HashMap<String, u32> = HashMap::new();
     let mut excluded: VarSet = VarSet::new();
     count_binds_block(&func.body, &mut bind_counts, &mut excluded);
+    // A local captured by a nested closure must never be dropped here: the closure outlives this
+    // death point and reads the value later (in eval through the shared scope; in the VM through a
+    // shared cell). Over-approximate captures as every name referenced anywhere inside a nested
+    // closure/`fn` body and exclude them — conservative (over-excludes → fewer drops → safe).
+    collect_captured(&func.body, &mut excluded);
 
     let mut droppable = VarSet::new();
     // A parameter is bound once (at entry); it stays droppable only if the body never reassigns it.
@@ -272,6 +277,59 @@ fn single_assignment_locals(func: &Func, globals: &VarSet) -> VarSet {
         }
     }
     droppable
+}
+
+/// Add to `out` every source-variable name referenced inside a nested closure / `fn` body within
+/// `block` (a superset of the names those closures capture). Recurses through control-flow blocks
+/// to find the closures, then collects *all* variable names in each closure body.
+fn collect_captured(block: &Block, out: &mut VarSet) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Let { rvalue, .. } | Stmt::Eval { rvalue, .. } => {
+                if let Rvalue::Closure { func, .. } = rvalue {
+                    collect_func_vars(func, out);
+                }
+            }
+            Stmt::Decl(Decl::Fn { func, .. }) => collect_func_vars(func, out),
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_captured(then_block, out);
+                if let Some(b) = else_block {
+                    collect_captured(b, out);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                collect_captured(cond, out);
+                collect_captured(body, out);
+            }
+            Stmt::For { body, .. } => collect_captured(body, out),
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_captured(&arm.body, out);
+                }
+            }
+            Stmt::Logical { right, .. } => collect_captured(right, out),
+            Stmt::Coalesce { fallback, .. } => collect_captured(fallback, out),
+            _ => {}
+        }
+    }
+}
+
+/// Collect every source-variable name a nested function captures — over-approximated as every name
+/// referenced anywhere in its body **and its parameter defaults** (a closure default is evaluated
+/// in the captured scope, so it captures the variables it names, even ones the body never uses).
+fn collect_func_vars(func: &Func, out: &mut VarSet) {
+    for name in liveness::referenced_vars_in_block(&func.body) {
+        out.insert(name);
+    }
+    for default in func.defaults.iter().flatten() {
+        for name in liveness::referenced_vars_in_block(&default.body) {
+            out.insert(name);
+        }
+    }
 }
 
 /// Count `Bind` sites per name within one function body (not descending into nested function
