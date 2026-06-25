@@ -742,8 +742,11 @@ dependencies = [
 name = "lang-ir"
 version = "0.0.0"
 dependencies = [
+ "insta",
  "lang-ast",
  "lang-diagnostics",
+ "lang-lexer",
+ "lang-parser",
  "lang-span",
  "lang-types",
 ]

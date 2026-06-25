@@ -96,17 +96,25 @@ fn leak_oracle_residency_is_zero_except_known_cycles() {
 
 #[test]
 fn ir_interpreter_is_faithful_to_the_tree_walker() {
-    // The faithfulness oracle (memory-management migration, Phase 1): every program the Core-IR
-    // lowering can handle must produce a byte-for-byte identical `RunResult` when run through the
-    // new IR interpreter as through the AST tree-walker. Programs outside the lowering's current
-    // subset are skipped (not failed) — the climbing coverage gate that lets the IR land one
-    // slice at a time. The end state (every parse+check-clean program lowered) drives `skipped`
-    // to 0; until then this gate only asserts the IR never *diverges* on what it does run.
+    // The faithfulness oracle (memory-management migration, Phase 1): every parse+check-clean
+    // program must produce a byte-for-byte identical `RunResult` run through the new Core-IR
+    // interpreter as through the AST tree-walker. The lowering is now total over the corpus, so
+    // this asserts both zero divergence AND 100% coverage (skipped == 0) — the Phase 1
+    // completion gate, which must not regress. (The skip mechanism remains, ready for any new
+    // AST node added ahead of its lowering.)
     let report = run_faithfulness(&corpus_root(), None);
     eprintln!("{}", report.to_human());
     assert!(
         report.ok(),
         "the Core-IR interpreter diverged from the tree-walker:\n{}",
+        report.to_human()
+    );
+    // The lowering is total over the corpus: every parse+check-clean program lowers and runs
+    // through the IR interpreter. This floor (the Phase 1 completion gate) must not regress.
+    assert_eq!(
+        report.skipped,
+        0,
+        "the Core-IR lowering must cover 100% of the comparable corpus; got:\n{}",
         report.to_human()
     );
 }

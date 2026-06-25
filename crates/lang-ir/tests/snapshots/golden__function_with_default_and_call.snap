@@ -1,0 +1,14 @@
+---
+source: crates/lang-ir/tests/golden.rs
+expression: "lower_dump(\"fn add(a: int, b: int = 10): int {\\n  return a + b;\\n}\\necho add(5);\\n\")"
+---
+program (temps: 1)
+  fn add(a, b) (temps: 1) {
+    default b (temps: 0) {
+      tail 10
+    }
+    let %0 = a + b
+    return %0
+  }
+  let %0 = call add(5)
+  echo %0

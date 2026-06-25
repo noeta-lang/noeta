@@ -1,0 +1,16 @@
+---
+source: crates/lang-ir/tests/golden.rs
+expression: "lower_dump(\"mut acc = 0;\\nfor i in 0..5 {\\n  if i % 2 == 0 {\\n    acc = acc + i;\\n  }\\n}\\necho acc;\\n\")"
+---
+program (temps: 4)
+  mut acc = 0
+  let %0 = 0..5
+  for i in %0 {
+    let %1 = i % 2
+    let %2 = %1 == 0
+    if %2 {
+      let %3 = acc + i
+      acc = %3
+    }
+  }
+  echo acc

@@ -1343,15 +1343,49 @@ impl Interpreter {
     }
 
     fn eval_object(&mut self, lit: &ObjectLit) -> Eval<Value> {
-        let def = match self.scope.lookup(&lit.type_name) {
+        // Evaluation order (preserved by the lowering's `let`-sequencing): the `..` spread
+        // first, then the named initializers left-to-right.
+        let spread = match &lit.spread {
+            Some(spread) => Some((self.eval_expr(spread)?, spread.span())),
+            None => None,
+        };
+        let mut field_values = Vec::with_capacity(lit.fields.len());
+        for init in &lit.fields {
+            let value = self.eval_expr(&init.value)?;
+            field_values.push((init.name.clone(), init.name_span, value));
+        }
+        self.construct_object(
+            &lit.type_name,
+            lit.type_name_span,
+            field_values,
+            spread,
+            lit.span,
+        )
+    }
+
+    /// Build a record/class instance from already-evaluated field values and an optional
+    /// already-evaluated `..` spread base. The full-initialization choke point, shared by the
+    /// AST walker's [`Self::eval_object`] and the Core-IR interpreter so both agree by
+    /// construction. The unknown-field and missing-field checks here are also enforced by the
+    /// type checker, so for a check-clean program they are defensive (and never fire on the
+    /// differential corpus); they keep the runtime honest for opaque/imported edges.
+    fn construct_object(
+        &mut self,
+        type_name: &str,
+        type_name_span: Span,
+        field_values: Vec<(String, Span, Value)>,
+        spread: Option<(Value, Span)>,
+        span: Span,
+    ) -> Eval<Value> {
+        let def = match self.scope.lookup(type_name) {
             Some(Value::Type(def)) => def,
             Some(other) => {
                 return Err(self.runtime_error(
                     DiagnosticCode::TypeMismatch,
-                    lit.type_name_span,
+                    type_name_span,
                     format!(
                         "`{}` is a {}, not a record or class type",
-                        lit.type_name,
+                        type_name,
                         other.type_name()
                     ),
                 ));
@@ -1359,8 +1393,8 @@ impl Interpreter {
             None => {
                 return Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
-                    lit.type_name_span,
-                    format!("cannot find type `{}` in this scope", lit.type_name),
+                    type_name_span,
+                    format!("cannot find type `{type_name}` in this scope"),
                 ));
             }
         };
@@ -1369,8 +1403,8 @@ impl Interpreter {
 
         // `...base` fills the unnamed fields first (named initializers override below). For
         // an opaque imported stub the field set is unknown, so the whole base is copied.
-        if let Some(spread) = &lit.spread {
-            match self.eval_expr(spread)? {
+        if let Some((base, spread_span)) = spread {
+            match base {
                 Value::Object(base) if def.opaque => {
                     for (name, value) in &base.fields {
                         fields.insert(name.clone(), value.clone());
@@ -1386,24 +1420,23 @@ impl Interpreter {
                 other => {
                     return Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
-                        spread.span(),
+                        spread_span,
                         format!("spread `..` expects an object, found {}", other.type_name()),
                     ));
                 }
             }
         }
 
-        for init in &lit.fields {
+        for (name, name_span, value) in field_values {
             // An opaque stub accepts any field (its real shape is unknown until M1).
-            if !def.opaque && !def.has_field(&init.name) {
+            if !def.opaque && !def.has_field(&name) {
                 return Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
-                    init.name_span,
-                    format!("type `{}` has no field `{}`", def.name(), init.name),
+                    name_span,
+                    format!("type `{}` has no field `{}`", def.name(), name),
                 ));
             }
-            let value = self.eval_expr(&init.value)?;
-            fields.insert(init.name.clone(), value);
+            fields.insert(name, value);
         }
 
         // The full-initialization guarantee applies only to types with a known field set;
@@ -1422,7 +1455,7 @@ impl Interpreter {
                 .join(", ");
             return Err(self.runtime_error(
                 DiagnosticCode::MissingField,
-                lit.span,
+                span,
                 format!(
                     "missing field(s) {list} in `{}` literal — every field must be set",
                     def.name()

@@ -47,7 +47,9 @@ use lang_span::Span;
 pub use lang_ast::{BinaryOp, ForPattern, Pattern, TypeRef, UnaryOp};
 
 mod lower;
+mod pretty;
 pub use lower::{Unsupported, lower};
+pub use pretty::dump;
 
 /// A whole lowered program: the top-level statement stream plus the size of its temporary
 /// frame. Top-level source bindings still land in the global scope (so end-of-program
@@ -96,6 +98,15 @@ pub enum Const {
     Int(i64),
     Float(f64),
     Str(String),
+}
+
+/// One `name: atom` initializer in an [`Rvalue::Object`] literal, keeping the field-name span
+/// for diagnostics.
+#[derive(Debug, Clone)]
+pub struct ObjectFieldInit {
+    pub name: String,
+    pub name_span: Span,
+    pub value: Atom,
 }
 
 /// One part of an interpolated string, with its holes reduced to atoms. A hole keeps the
@@ -178,12 +189,14 @@ pub enum Rvalue {
         inclusive: bool,
         span: Span,
     },
-    /// An all-fields object literal `Type { field: atom, ...spread }`.
+    /// An all-fields object literal `Type { field: atom, ...spread }`. Field name spans and the
+    /// spread's span are retained so construction diagnostics point exactly where the
+    /// tree-walker's do.
     Object {
         type_name: String,
         type_name_span: Span,
-        fields: Vec<(String, Atom)>,
-        spread: Option<Atom>,
+        fields: Vec<ObjectFieldInit>,
+        spread: Option<(Atom, Span)>,
         span: Span,
     },
     /// An interpolated string with its holes reduced to atoms.
@@ -311,6 +324,18 @@ pub enum Stmt {
     /// declaration verbatim (they have no executable body, so the interpreter reuses the
     /// tree-walker's registration unchanged).
     Decl(Decl),
+    /// Release a temporary's value now (drop its reference), rather than at activation end.
+    ///
+    /// ANF temporaries are **single-use**: every `let`-bound temp is read by exactly one
+    /// consumer, so the interpreter *moves* a temp's value out of its slot when read — its
+    /// reference then lives no longer than the corresponding intermediate in the tree-walker.
+    /// The one exception is the **discarded result of a bare expression statement**, which no
+    /// consumer reads; lowering emits a `Drop` for it so its reference is released at the end
+    /// of the statement (matching the tree-walker, where that intermediate drops there). This
+    /// is a faithfulness device — destructors are reference-count-gated, so a lingering temp
+    /// reference would suppress a destructor the tree-walker fires — not a reference-counting
+    /// optimization (those land in a later phase).
+    Drop(Temp),
 }
 
 /// One arm of an IR `match`: a surface pattern and the block it runs. In expression

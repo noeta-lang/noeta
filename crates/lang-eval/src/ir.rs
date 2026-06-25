@@ -48,15 +48,25 @@ impl Frame {
         }
     }
 
-    /// Read a temporary. A read before its write is a lowering bug, not a user error.
-    fn get(&self, t: lang_ir::Temp) -> Value {
+    /// Read a temporary, **moving** its value out of the slot. ANF temporaries are single-use,
+    /// so a temp is consumed exactly once; taking the value (rather than cloning) means its
+    /// reference lives no longer than the matching intermediate does in the tree-walker — which
+    /// keeps reference-count-gated destruction firing at the same points. A second read, or a
+    /// read before the defining `let`, is a lowering bug.
+    fn take(&mut self, t: lang_ir::Temp) -> Value {
         self.temps[t.index()]
-            .clone()
-            .expect("Core-IR temporary read before it was written (lowering bug)")
+            .take()
+            .expect("Core-IR temporary read before write or read twice (lowering bug)")
     }
 
     fn set(&mut self, t: lang_ir::Temp, value: Value) {
         self.temps[t.index()] = Some(value);
+    }
+
+    /// Release a temporary's value (the `Drop` statement): the discarded result of a bare
+    /// expression statement, whose reference must not outlive the statement.
+    fn drop(&mut self, t: lang_ir::Temp) {
+        self.temps[t.index()] = None;
     }
 }
 
@@ -213,6 +223,10 @@ impl Interpreter {
                 self.exec_ir_decl(decl);
                 Ok(Flow::Normal)
             }
+            lang_ir::Stmt::Drop(t) => {
+                frame.drop(*t);
+                Ok(Flow::Normal)
+            }
             lang_ir::Stmt::Coalesce {
                 dst,
                 value,
@@ -355,7 +369,7 @@ impl Interpreter {
             // No explicit return: a bare `break`/`continue` cannot escape a function boundary
             // (the checker rejects one outside a loop), so they fall through like `Normal`.
             Flow::Normal | Flow::Break | Flow::Continue => match &func.body.tail {
-                Some(atom) => self.eval_ir_atom(atom, &frame),
+                Some(atom) => self.eval_ir_atom(atom, &mut frame),
                 None => Ok(Value::Unit),
             },
         }
@@ -373,7 +387,7 @@ impl Interpreter {
             }
         }
         match &thunk.body.tail {
-            Some(atom) => self.eval_ir_atom(atom, &frame),
+            Some(atom) => self.eval_ir_atom(atom, &mut frame),
             None => {
                 unreachable!("a default-value thunk must have a tail expression (lowering bug)")
             }
@@ -453,12 +467,13 @@ impl Interpreter {
         Ok(Flow::Normal)
     }
 
-    /// Resolve an atom to a value: a constant, a frame temporary, or a lexical lookup. The
-    /// `Var` not-found path reproduces the AST walker's `Ident` diagnostic exactly.
-    fn eval_ir_atom(&mut self, atom: &lang_ir::Atom, frame: &Frame) -> Eval<Value> {
+    /// Resolve an atom to a value: a constant, a frame temporary (moved out — see
+    /// [`Frame::take`]), or a lexical lookup. The `Var` not-found path reproduces the AST
+    /// walker's `Ident` diagnostic exactly.
+    fn eval_ir_atom(&mut self, atom: &lang_ir::Atom, frame: &mut Frame) -> Eval<Value> {
         match atom {
             lang_ir::Atom::Const(c) => Ok(const_value(c)),
-            lang_ir::Atom::Temp(t) => Ok(frame.get(*t)),
+            lang_ir::Atom::Temp(t) => Ok(frame.take(*t)),
             lang_ir::Atom::Var { name, span } => match self.scope.lookup(name) {
                 Some(value) => Ok(value),
                 None => {
@@ -640,6 +655,24 @@ impl Interpreter {
                 };
                 Ok(self.materialize_attributes(type_name))
             }
+            lang_ir::Rvalue::Object {
+                type_name,
+                type_name_span,
+                fields,
+                spread,
+                span,
+            } => {
+                let spread = match spread {
+                    Some((atom, sp)) => Some((self.eval_ir_atom(atom, frame)?, *sp)),
+                    None => None,
+                };
+                let mut field_values = Vec::with_capacity(fields.len());
+                for f in fields {
+                    let value = self.eval_ir_atom(&f.value, frame)?;
+                    field_values.push((f.name.clone(), f.name_span, value));
+                }
+                self.construct_object(type_name, *type_name_span, field_values, spread, *span)
+            }
             lang_ir::Rvalue::Closure { func, .. } => {
                 Ok(Value::Function(Rc::new(self.make_ir_closure(func))))
             }
@@ -655,13 +688,11 @@ impl Interpreter {
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)
             }
-            // Lowered only in later slices.
-            other => unreachable!("Core-IR rvalue not yet interpreted: {other:?}"),
         }
     }
 
     /// Resolve a list of atoms to values, left-to-right.
-    fn eval_ir_atoms(&mut self, atoms: &[lang_ir::Atom], frame: &Frame) -> Eval<Vec<Value>> {
+    fn eval_ir_atoms(&mut self, atoms: &[lang_ir::Atom], frame: &mut Frame) -> Eval<Vec<Value>> {
         let mut values = Vec::with_capacity(atoms.len());
         for atom in atoms {
             values.push(self.eval_ir_atom(atom, frame)?);

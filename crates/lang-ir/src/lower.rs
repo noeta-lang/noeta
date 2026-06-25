@@ -40,6 +40,11 @@ pub struct Unsupported {
 }
 
 impl Unsupported {
+    /// Build an "outside the IR subset" marker. The lowering is now **total** over the current
+    /// AST — every construct lowers — so this is unused today; it is retained as the skip path
+    /// the transitional differential expects, ready for any new AST node added ahead of its
+    /// lowering (and to keep the one-slice-at-a-time discipline available).
+    #[allow(dead_code)]
     fn at(feature: &'static str, span: Span) -> Unsupported {
         Unsupported { feature, span }
     }
@@ -119,9 +124,13 @@ impl Lowerer {
                 Ok(())
             }
             AstStmt::Expr { expr, .. } => {
-                // Evaluate for effect; the result atom is discarded (the emitted `let`s carry
-                // any side effects).
-                let _ = self.lower_expr(expr, out)?;
+                // Evaluate for effect; the result atom is discarded. If it landed in a temp,
+                // release that temp here so its reference does not outlive the statement (the
+                // tree-walker drops the corresponding intermediate at the same point).
+                let atom = self.lower_expr(expr, out)?;
+                if let Atom::Temp(t) = atom {
+                    out.push(Stmt::Drop(t));
+                }
                 Ok(())
             }
             AstStmt::Return { value, span } => {
@@ -608,9 +617,125 @@ impl Lowerer {
                     *span,
                 ))
             }
-            // Not yet in the supported subset.
-            Expr::Pipeline { span, .. } => Err(Unsupported::at("pipeline", *span)),
-            Expr::Object(lit) => Err(Unsupported::at("object literal", lit.span)),
+            Expr::Object(lit) => {
+                // Evaluation order matches `eval_object`: the `..` spread first, then named
+                // initializers left-to-right.
+                let spread = match &lit.spread {
+                    Some(s) => Some((self.lower_expr(s, out)?, s.span())),
+                    None => None,
+                };
+                let mut fields = Vec::with_capacity(lit.fields.len());
+                for init in &lit.fields {
+                    let value = self.lower_expr(&init.value, out)?;
+                    fields.push(crate::ObjectFieldInit {
+                        name: init.name.clone(),
+                        name_span: init.name_span,
+                        value,
+                    });
+                }
+                Ok(self.emit(
+                    out,
+                    Rvalue::Object {
+                        type_name: lit.type_name.clone(),
+                        type_name_span: lit.type_name_span,
+                        fields,
+                        spread,
+                        span: lit.span,
+                    },
+                    lit.span,
+                ))
+            }
+            Expr::Pipeline { left, right, span } => self.lower_pipeline(left, right, *span, out),
+        }
+    }
+
+    /// Lower `left |> right`, desugaring to a call/method with `left` threaded as the leading
+    /// argument — mirroring `eval_pipeline`. `left` is evaluated first (matching the
+    /// tree-walker), then the callee/receiver, then any remaining arguments.
+    fn lower_pipeline(
+        &mut self,
+        left: &Expr,
+        right: &Expr,
+        span: Span,
+        out: &mut Vec<Stmt>,
+    ) -> Result<Atom, Unsupported> {
+        let left_atom = self.lower_expr(left, out)?;
+        match right {
+            // `x |> f(a)` ⟶ `f(x, a)`; `x |> obj.m(a)` ⟶ `obj.m(x, a)`.
+            Expr::Call { callee, args, span } => {
+                if let Expr::Member {
+                    receiver,
+                    name,
+                    name_span,
+                    ..
+                } = callee.as_ref()
+                {
+                    let receiver = self.lower_expr(receiver, out)?;
+                    let mut arg_atoms = vec![left_atom];
+                    for a in args {
+                        arg_atoms.push(self.lower_expr(a, out)?);
+                    }
+                    Ok(self.emit(
+                        out,
+                        Rvalue::Method {
+                            receiver,
+                            name: name.clone(),
+                            name_span: *name_span,
+                            args: arg_atoms,
+                            span: *span,
+                        },
+                        *span,
+                    ))
+                } else {
+                    let callee = self.lower_expr(callee, out)?;
+                    let mut arg_atoms = vec![left_atom];
+                    for a in args {
+                        arg_atoms.push(self.lower_expr(a, out)?);
+                    }
+                    Ok(self.emit(
+                        out,
+                        Rvalue::Call {
+                            callee,
+                            args: arg_atoms,
+                            span: *span,
+                        },
+                        *span,
+                    ))
+                }
+            }
+            // `x |> obj.m` ⟶ `obj.m(x)`.
+            Expr::Member {
+                receiver,
+                name,
+                name_span,
+                span,
+            } => {
+                let receiver = self.lower_expr(receiver, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Method {
+                        receiver,
+                        name: name.clone(),
+                        name_span: *name_span,
+                        args: vec![left_atom],
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            // `x |> f` ⟶ `f(x)`.
+            _ => {
+                let callee = self.lower_expr(right, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Call {
+                        callee,
+                        args: vec![left_atom],
+                        span,
+                    },
+                    span,
+                ))
+            }
         }
     }
 

@@ -12,5 +12,10 @@ lang-ast = { workspace = true }
 lang-types = { workspace = true }
 lang-diagnostics = { workspace = true }
 
+[dev-dependencies]
+lang-lexer = { workspace = true }
+lang-parser = { workspace = true }
+insta = { workspace = true }
+
 [lints]
 workspace = true
