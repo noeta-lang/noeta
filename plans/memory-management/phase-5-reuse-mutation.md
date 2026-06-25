@@ -80,18 +80,43 @@ lowering *consume* an available token to reuse the allocation in place.
 
 ## 5.2 Mutate-when-unique (mutable fields & `FileHandle`)
 
-The language has `mut` fields (grammar-present, not yet semantic) and a mutable `FileHandle`. Lower
-mutation to **in-place when unique, copy-first when shared** — the *same* uniqueness machinery as reuse:
+The language has `mut` fields (grammar-present, not yet semantic) and a mutable `FileHandle`.
 
-- `x.f = v` (and handle-cursor advance) mutate in place iff `x` is uniquely owned at that IR point
-  (uniqueness fact + runtime `RC == 1`); otherwise copy `x` first, preserving value semantics for any
-  aliased observer. O(1) on the common unique path, correct under aliasing.
-- `FileHandle` becomes a uniqueness-managed mutable value like any other — retire the `Rc<RefCell<…>>`
-  shared-mutable carve-out in eval and the special cell handling in the VM; mutation and reuse are one
-  pass, one runtime check.
-- Payoff of co-design: in-place reuse and in-place field mutation are the **same** IR/runtime path;
-  mutability never surfaces as shared state. (This is also what first makes object *cycles* possible —
-  hence cycles are the next phase.)
+- **5.2a — `mut` field assignment `x.f = v` (DONE, `472faed`).** `mut` fields became semantic: a
+  `mut` field of a class is assignable (plus `+=`/…/`??=`), with **value semantics** — in place when
+  the instance is uniquely owned (`RC == 1`), copy-first when shared, so an aliased observer keeps its
+  value. The desugar `x.f = v` ⟶ `x = SetField(x, f, v)` reuses the Phase-5 reuse machinery (new
+  `Rvalue::SetField` / `Op::SetField` / `replace_slot`-in-place; the reuse pass marks the self-update,
+  for a local *or* a `TakeGlobal`-moved global, guarding `x.f = x` to the copy path so the field is
+  the pre-assignment value, not a self-cycle). New **E0033** for assigning a non-`mut`/record/missing
+  field; the value is checked against the field type. **Foundational decision (confirmed with the
+  user):** class instances are value-semantic-with-COW — the "reference type" wording in
+  architecture §35 is a *representation* note (heap-allocated), consistent with structural equality
+  and the 5.1 reuse, not aliasing semantics. Bench `vm_field_assign` ~1.8× (8-field class), constant
+  factor ∝ field count. Conformance 262, differential 254/0/agree, leak clean, miri clean.
+
+- **5.2b — `FileHandle`: a reference type, by design (DONE — decided, no backend change).** The plan
+  originally proposed making `FileHandle` "a uniqueness-managed value like any other" and retiring the
+  `Rc<RefCell<…>>`. Investigation (with the user) found this conflicts with the handle's nature: a
+  handle is mutated **through a method call on an immutable binding** (`reader = fs.open(...);
+  reader.read_line()` advances the cursor across calls), which is *inherently* reference-semantic.
+  Value-semantics-COW would break the streaming API — once a handle is aliased, the cursor advance
+  would be lost to a discarded copy — or require deep-copy-on-every-assignment, a *bigger* carve-out
+  than the `Rc<RefCell>`. Every COW/immutability-first language draws the same line: data is value-
+  semantic, **resources (files/sockets/streams) are reference types or effect handles** — Swift makes
+  the byte buffer (`Data`) a COW value but `FileHandle` a reference *class*; Haskell's `Handle` lives
+  in `IO`; Clojure/OCaml use host references; Erlang a process; Roc/Koka thread state functionally
+  behind effects. **Decision: handles keep reference semantics** (option A). No backend change — both
+  backends already mutate the handle in place and agree; eval's `Rc<RefCell>` is the correct minimal
+  encoding of that interior mutability in safe Rust (not a carve-out), and the VM's heap-cell mutation
+  is its ordinary write path. Deliverable: pin the reference semantics under the differential
+  (`tests/conformance/std/fs_handle_alias.lang` — aliasing shares the cursor) and document the
+  rationale (handle module doc). If handles ever become value-semantic, the consistent path — per
+  Swift/Rust — is a `mut` binding + a mutating-receiver method (`mut self`), **not** COW.
+
+- Note (cycles): `mut` fields make object *cycles* possible (`node.next = node` falls to the copy
+  path, but a built-up cycle still leaks under refcounting) — reclaimed by the Phase-6 cycle
+  collector, as planned.
 
 ## 5.3 Cross-backend agreement
 

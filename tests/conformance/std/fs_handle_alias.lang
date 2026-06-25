@@ -1,0 +1,26 @@
+// File handles are a **reference type** (Phase 5.2b): an external, stateful resource with identity,
+// not value-semantic data. A handle is mutated in place through its methods (the cursor advances on
+// `read_line`/`read`, the buffer grows on `write`) — even through an *immutable* binding — and that
+// state is **shared** by every binding that aliases it. So aliasing a reader (`alias = reader`) and
+// reading through either alias advances the one shared cursor: the three reads below yield three
+// successive lines, not the same line thrice. This is deliberate — value semantics is for data;
+// resources (files, sockets, streams) have reference semantics, as in Swift (`FileHandle` is a
+// class), Haskell (`Handle` in `IO`), and Clojure. Both backends agree by construction.
+// expect: stdout "alpha"
+// expect: stdout "beta"
+// expect: stdout "gamma"
+// expect: stdout "<eof>"
+// expect: exit 0
+use std.{fs};
+
+out = fs.open("notes.txt", "w");
+out.write("alpha\nbeta\ngamma\n");
+out.close();
+
+reader = fs.open("notes.txt", "r");
+alias = reader;
+// Reads alternate between the two aliases; the shared cursor advances regardless of which is used.
+echo reader.read_line() ?? "<eof>";
+echo alias.read_line() ?? "<eof>";
+echo reader.read_line() ?? "<eof>";
+echo alias.read_line() ?? "<eof>";

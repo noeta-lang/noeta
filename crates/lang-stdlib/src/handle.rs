@@ -7,6 +7,23 @@
 //! in `Rc<RefCell<FileHandle>>`, the VM stores it in a heap `Payload::FileHandle`) makes that
 //! identity structural rather than a property the two backends each re-derive.
 //!
+//! ## A handle is a reference type — by design (Phase 5.2b)
+//!
+//! Unlike the language's data (strings, lists, maps, records — value-semantic, copy-on-write), a
+//! file handle has **reference semantics**: it is a stateful external *resource* with identity. Its
+//! methods mutate it in place (the cursor advances, the buffer grows) *through the method call* —
+//! even through an immutable binding — and that state is **shared** by every alias (`alias = reader`
+//! reads the same cursor). This is deliberate and matches every COW/immutability-first language:
+//! Swift makes the byte buffer (`Data`) a COW value but `FileHandle` a reference *class*; Haskell's
+//! `Handle` lives in `IO`; Clojure/OCaml use host reference objects; Erlang a process. The mutate-
+//! via-method-on-an-immutable-binding pattern these methods rely on is *inherently* reference-
+//! semantic, so making a handle value-semantic (COW) would break the streaming API (an aliased
+//! handle's cursor advance would be lost to a discarded copy). The tree-walker's `Rc<RefCell<…>>` is
+//! therefore the correct minimal encoding of that interior mutability in safe Rust, not a carve-out
+//! to retire; the VM's in-place heap-cell mutation is its ordinary heap-write path. Pinned by
+//! `tests/conformance/std/fs_handle_alias.lang`. (If handles ever become value-semantic, the
+//! consistent way — per Swift/Rust — is a `mut` binding + a mutating-receiver method, not COW.)
+//!
 //! ## State model
 //!
 //! `fs.open(path, mode)` returns a handle. In **read** mode the handle takes a *snapshot* of the
