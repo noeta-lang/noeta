@@ -114,6 +114,9 @@ impl Backend for TreeWalkBackend {
 /// between REPL entries.
 pub struct Session {
     interp: Interpreter,
+    /// The binding names present in a fresh interpreter (the prelude — `len`, `map`, `Ok`, …), so
+    /// `:bindings` can list only the *user's* bindings, not the built-ins.
+    prelude: std::collections::HashSet<String>,
 }
 
 impl std::fmt::Debug for Session {
@@ -126,9 +129,9 @@ impl std::fmt::Debug for Session {
 
 impl Session {
     pub fn new() -> Session {
-        Session {
-            interp: Interpreter::new(DEFAULT_SEED),
-        }
+        let interp = Interpreter::new(DEFAULT_SEED);
+        let prelude = interp.scope.names().into_iter().collect();
+        Session { interp, prelude }
     }
 
     /// Evaluate a program against the persistent scope. Returns just this batch's stdout
@@ -151,9 +154,66 @@ impl Session {
         self.interp.stdout.clear();
         self.interp.diagnostics.clear();
 
+        let value = self
+            .run_batch(program)
+            .filter(|v| !matches!(v, Value::Unit))
+            .map(|v| v.display());
+        self.take_output(value)
+    }
+
+    /// `:type <expr>` (REPL meta-command) — evaluate `program`'s trailing expression and report its
+    /// **runtime** type. The REPL is untyped at the session level (it runs no checker across
+    /// entries), so the type is read from the produced value, like the language's `type_of`. The
+    /// expression is evaluated (the only way to learn its type here), so any side effects run.
+    pub fn type_of(&mut self, program: &Program) -> SessionOutput {
+        let value = self.run_batch(program).map(|v| describe_type(&v));
+        self.take_output(value)
+    }
+
+    /// `:drop`/`:free <name>` (REPL meta-command) — unbind `name` and run its destructor now,
+    /// returning `true` if a binding existed. The REPL's top-level bindings are globals with
+    /// extended lifetime (they never auto-fire), so this is how a destructor is observed or an
+    /// object reclaimed interactively; any destructor output lands in the returned [`SessionOutput`].
+    pub fn drop_binding(&mut self, name: &str) -> (bool, SessionOutput) {
+        self.interp.stdout.clear();
+        self.interp.diagnostics.clear();
+        let found = match self.interp.scope.remove(name) {
+            Some(value) => {
+                self.interp.destroy_value(value);
+                true
+            }
+            None => false,
+        };
+        (found, self.take_output(None))
+    }
+
+    /// The live **user** binding names (REPL `:bindings`), excluding the prelude built-ins and the
+    /// internal trailing-expression sentinel.
+    pub fn binding_names(&self) -> Vec<String> {
+        self.interp
+            .scope
+            .names()
+            .into_iter()
+            .filter(|n| n != REPL_VALUE && !self.prelude.contains(n))
+            .collect()
+    }
+
+    /// Reset to a fresh session: a new global scope, id counter, and reflection — `:reset`.
+    pub fn reset(&mut self) {
+        self.interp = Interpreter::new(DEFAULT_SEED);
+        self.prelude = self.interp.scope.names().into_iter().collect();
+    }
+
+    /// Lower, run the precise-RC drop + reuse passes, and execute one batch on the Core-IR
+    /// interpreter in the **persistent** global scope, returning the value of a trailing bare
+    /// expression (captured via the reserved sentinel binding) when the batch completes cleanly.
+    /// Shared by [`Session::eval`] and [`Session::type_of`]; clears stdout/diagnostics first.
+    fn run_batch(&mut self, program: &Program) -> Option<Value> {
+        self.interp.stdout.clear();
+        self.interp.diagnostics.clear();
         // A trailing bare expression is rewritten to a binding of a reserved sentinel name, so its
-        // value is captured in scope (and read back for the REPL to echo) while it is evaluated
-        // exactly once on the IR path.
+        // value is captured in scope (and read back) while it is evaluated exactly once on the IR
+        // path.
         let (lowerable, captures_value) = rewrite_trailing_expr(program);
         let ir = lang_ir::lower(&lowerable)
             .expect("Core-IR lowering is total over the parsed language (the REPL only feeds parsed programs)");
@@ -164,23 +224,39 @@ impl Session {
         let ir = lang_ir_passes::thread_reuse(&ir);
         self.interp.reflection = lang_ast::reflect::build(&lowerable);
         let flow = self.interp.run_ir_batch(&ir);
-        // Only a cleanly-completed batch yields a value; a `return`/error before the sentinel
-        // binding leaves nothing to echo.
-        let value = match (flow, captures_value) {
-            (Ok(Flow::Normal), true) => self
-                .interp
-                .scope
-                .lookup(REPL_VALUE)
-                .filter(|v| !matches!(v, Value::Unit))
-                .map(|v| v.display()),
+        // **Remove** (not clone) the sentinel so an evaluated trailing value never lingers in scope.
+        // Keeping it bound would hold a reference to the value across entries, which would both leak
+        // it and — by raising the refcount — suppress a later `:drop`'s destructor on the same
+        // object. The taken value is owned by the caller (displayed / typed, then dropped). A
+        // `return`/error before the sentinel binding ran yields `None`.
+        let captured = self.interp.scope.remove(REPL_VALUE);
+        match (flow, captures_value) {
+            (Ok(Flow::Normal), true) => captured,
             _ => None,
-        };
+        }
+    }
 
+    /// Drain this batch's stdout and diagnostics into a [`SessionOutput`] with the given value.
+    fn take_output(&mut self, value: Option<String>) -> SessionOutput {
         SessionOutput {
             stdout: std::mem::take(&mut self.interp.stdout),
             diagnostics: std::mem::take(&mut self.interp.diagnostics),
             value,
         }
+    }
+}
+
+/// A readable runtime type label for the REPL `:type` command — the user-facing type name of a
+/// value. Objects and enums report their declared type name (`Res`, `Status`); collections and
+/// primitives report their kind (`list`, `int`); generics are erased, matching the language's
+/// head-constructor `type_of` fidelity.
+fn describe_type(value: &Value) -> String {
+    match value {
+        Value::Object(object) => object.def.name().to_string(),
+        Value::Enum(e) => e.enum_name.clone(),
+        Value::Type(def) => format!("type {}", def.name()),
+        Value::EnumType(def) => format!("enum type {}", def.name()),
+        other => other.type_name().to_string(),
     }
 }
 
@@ -676,6 +752,25 @@ impl Scope {
         self.parent
             .as_ref()
             .and_then(|parent| parent.take_for_drop(name))
+    }
+
+    /// Remove a binding **entirely**, returning its value so the caller can run its destructor
+    /// (the REPL `:drop`/`:free` meta-command). Unlike [`Scope::take_for_drop`], which leaves `Unit`
+    /// in the slot, the name is fully unbound afterward, so a later reference to it is an unknown
+    /// name. Searches outward through the chain like the other binding operations.
+    fn remove(&self, name: &str) -> Option<Value> {
+        if let Some(binding) = self.vars.borrow_mut().remove(name) {
+            self.order.borrow_mut().retain(|n| n != name);
+            drop_audit::on_drop(self as *const Scope as usize, name);
+            return Some(binding.value);
+        }
+        self.parent.as_ref().and_then(|parent| parent.remove(name))
+    }
+
+    /// The names bound directly in this scope, in declaration order (the REPL `:bindings` command
+    /// lists the persistent global scope's names).
+    fn names(&self) -> Vec<String> {
+        self.order.borrow().clone()
     }
 
     /// Remove and return this scope's bindings in **reverse** declaration order, for
@@ -4138,6 +4233,75 @@ mod tests {
             "fn use_it(): void { mut r = Res.new(1); echo \"using\"; }\nuse_it();",
         ));
         assert_eq!(out.stdout, "using\ndrop 1\n");
+    }
+
+    #[test]
+    fn session_meta_commands_drop_type_bindings_reset() {
+        let mut session = Session::new();
+        session.eval(&program_of(
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+        ));
+        session.eval(&program_of("mut r = Res.new(7);"));
+        session.eval(&program_of("x = 42;"));
+
+        // `:bindings` lists only user names (no prelude built-ins, no sentinel).
+        let mut names = session.binding_names();
+        names.sort();
+        assert_eq!(
+            names,
+            vec!["Res".to_string(), "r".to_string(), "x".to_string()]
+        );
+
+        // `:type` reports runtime types — the declared name for an object, the kind otherwise.
+        assert_eq!(
+            session.type_of(&program_of("r;")).value.as_deref(),
+            Some("Res")
+        );
+        assert_eq!(
+            session.type_of(&program_of("x + 1;")).value.as_deref(),
+            Some("int")
+        );
+        assert_eq!(
+            session.type_of(&program_of("[1, 2, 3];")).value.as_deref(),
+            Some("list")
+        );
+
+        // `:drop r` runs the destructor now and unbinds the name.
+        let (found, out) = session.drop_binding("r");
+        assert!(found);
+        assert_eq!(out.stdout, "drop 7\n");
+        assert!(!session.binding_names().contains(&"r".to_string()));
+        // Dropping an unknown name is a no-op miss.
+        assert!(!session.drop_binding("nope").0);
+
+        // `:reset` clears every user binding back to the bare prelude.
+        session.reset();
+        assert!(session.binding_names().is_empty());
+    }
+
+    #[test]
+    fn session_type_then_drop_still_fires_the_destructor() {
+        // Regression: evaluating a value for `:type` (or echoing a trailing expression) must not
+        // leave a lingering reference in the sentinel binding — otherwise an immediately following
+        // `:drop` of the same object would see refcount > 1 and skip its destructor.
+        let mut session = Session::new();
+        session.eval(&program_of(
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+        ));
+        session.eval(&program_of("mut a = Res.new(1);"));
+        // Type it (and, separately, echo it) — both go through the sentinel.
+        assert_eq!(
+            session.type_of(&program_of("a;")).value.as_deref(),
+            Some("Res")
+        );
+        assert_eq!(
+            session.eval(&program_of("a;")).value.as_deref(),
+            Some("Res {id: 1}")
+        );
+        // The destructor still fires on the very next drop.
+        let (found, out) = session.drop_binding("a");
+        assert!(found);
+        assert_eq!(out.stdout, "drop 1\n");
     }
 
     #[test]

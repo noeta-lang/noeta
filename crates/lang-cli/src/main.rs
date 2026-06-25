@@ -189,10 +189,21 @@ fn cmd_repl() -> ExitCode {
     eprint!("lang repl — type a statement, Ctrl-D to exit\n» ");
     let _ = io::stderr().flush();
 
+    eprintln!("type :help for commands");
     for line in stdin.lock().lines() {
         let Ok(line) = line else { break };
         // Skip blank lines when nothing is pending.
         if buffer.is_empty() && line.trim().is_empty() {
+            eprint!("» ");
+            let _ = io::stderr().flush();
+            continue;
+        }
+        // A `:`-prefixed line (when nothing is pending) is a REPL meta-command — tooling that lives
+        // outside the language grammar (`:type`, `:drop`, `:bindings`, `:reset`, `:help`, `:quit`).
+        if buffer.is_empty() && line.trim_start().starts_with(':') {
+            if repl_meta(&mut session, line.trim()) == MetaOutcome::Quit {
+                break;
+            }
             eprint!("» ");
             let _ = io::stderr().flush();
             continue;
@@ -214,6 +225,101 @@ fn cmd_repl() -> ExitCode {
     }
     eprintln!();
     ExitCode::SUCCESS
+}
+
+/// Whether a meta-command asked to leave the REPL.
+#[derive(PartialEq)]
+enum MetaOutcome {
+    Continue,
+    Quit,
+}
+
+/// Handle a `:`-prefixed REPL meta-command. These are REPL *tooling*, deliberately outside the
+/// language grammar (the language itself has no manual `drop`/`type` keyword): the REPL keeps
+/// top-level bindings alive across entries — extended lifetime, unlike compiled code's last-use
+/// destruction — so `:drop` is how a destructor is observed or an object reclaimed interactively,
+/// and `:type` reports a value's runtime type in a session that runs no checker.
+fn repl_meta(session: &mut Session, line: &str) -> MetaOutcome {
+    let body = line.strip_prefix(':').unwrap_or(line);
+    let mut parts = body.splitn(2, char::is_whitespace);
+    let cmd = parts.next().unwrap_or("");
+    let arg = parts.next().unwrap_or("").trim();
+    match cmd {
+        "quit" | "q" => return MetaOutcome::Quit,
+        "help" | "h" | "?" => print_repl_help(),
+        "reset" => {
+            session.reset();
+            eprintln!("(session reset)");
+        }
+        "bindings" | "b" => {
+            let names = session.binding_names();
+            if names.is_empty() {
+                eprintln!("(no bindings)");
+            } else {
+                println!("{}", names.join(", "));
+                let _ = io::stdout().flush();
+            }
+        }
+        "drop" | "free" => {
+            if arg.is_empty() {
+                eprintln!("usage: :drop <name>");
+            } else {
+                let (found, out) = session.drop_binding(arg);
+                print!("{}", out.stdout);
+                let _ = io::stdout().flush();
+                if found {
+                    eprintln!("(dropped `{arg}`)");
+                } else {
+                    eprintln!("no binding named `{arg}`");
+                }
+            }
+        }
+        "type" | "t" => {
+            if arg.is_empty() {
+                eprintln!("usage: :type <expr>");
+            } else {
+                repl_type(session, arg);
+            }
+        }
+        other => eprintln!("unknown command `:{other}` — try :help"),
+    }
+    MetaOutcome::Continue
+}
+
+/// `:type <expr>` — parse `expr`, evaluate it in the session, and print its runtime type.
+fn repl_type(session: &mut Session, expr: &str) {
+    let source = Source::new(SourceId::FIRST, "<repl-type>", format!("{expr};"));
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    let diags: Vec<Diagnostic> = lexed
+        .diagnostics
+        .iter()
+        .chain(parsed.diagnostics.iter())
+        .cloned()
+        .collect();
+    if !diags.is_empty() {
+        emit_diagnostics(&source, diags.iter());
+        return;
+    }
+    let out = session.type_of(&parsed.program);
+    print!("{}", out.stdout);
+    let _ = io::stdout().flush();
+    if !out.diagnostics.is_empty() {
+        emit_diagnostics(&source, out.diagnostics.iter());
+    } else if let Some(ty) = out.value {
+        println!("{ty}");
+        let _ = io::stdout().flush();
+    }
+}
+
+fn print_repl_help() {
+    eprintln!("REPL commands:");
+    eprintln!("  :type <expr>   show the runtime type of an expression (evaluates it)");
+    eprintln!("  :drop <name>   run a binding's destructor now and unbind it (alias :free)");
+    eprintln!("  :bindings      list the live bindings");
+    eprintln!("  :reset         clear all bindings and start fresh");
+    eprintln!("  :help          show this help");
+    eprintln!("  :quit          exit the REPL (or Ctrl-D)");
 }
 
 /// Try to evaluate the accumulated REPL buffer. Statements ending in `;`/`}` evaluate as-is;
