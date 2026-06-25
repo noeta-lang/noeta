@@ -188,6 +188,63 @@ fn member_dispatch_src(n: usize) -> String {
 /// the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
 const LOOP_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
 
+// --- Memory-management stress benches (architecture §0.3) — the pre-migration baseline the
+// memory-management track (`plans/memory-management/`) compares against. Each isolates a reclamation
+// cost: allocation churn, destructor firing, and deep-structure teardown. The cyclic-garbage bench is
+// deferred to Phase 6 (it needs a live cycle collector; today it would leak each iteration).
+
+/// **Allocation churn:** build and drop a short-lived record on every iteration. Each step allocates
+/// a fresh `Pair` and lets it die immediately — pure allocator + refcount-to-zero throughput, the
+/// path prompt reclamation (Phase 3) and reuse (Phase 5) most affect.
+fn mm_alloc_churn_src(n: usize) -> String {
+    format!(
+        "class Pair {{\n    a: int\n    b: int\n}}\n\
+         mut total = 0;\n\
+         for i in 0..{n} {{\n    \
+            p = Pair {{ a: i, b: i }};\n    \
+            total = total + p.a;\n\
+         }}\n\
+         echo total;\n"
+    )
+}
+
+/// **Destructor-heavy:** a `mut` global holding a `destruct`-bearing instance, reassigned every
+/// iteration. The reassignment destroys the displaced instance immediately (spec §5), so the
+/// destructor fires `n` times — the deterministic-destruction path Phase 4 generalizes to all scopes.
+/// The `destruct` body is side-effect-free (no `echo`) so the bench measures destructor *dispatch*,
+/// not output.
+fn mm_destructor_heavy_src(n: usize) -> String {
+    format!(
+        "class Res {{\n    id: int\n    \
+            fn new(id: int): Res {{ return Res {{ id: id }}; }}\n    \
+            destruct {{ x = id + 1; }}\n\
+         }}\n\
+         mut r = Res.new(0);\n\
+         for i in 0..{n} {{\n    \
+            r = Res.new(i);\n\
+         }}\n\
+         echo r.id;\n"
+    )
+}
+
+/// **Deep-structure free:** build one deeply-nested list `[[…[0]…]]` of the given depth, then let it
+/// fall out of scope at program end — a single recursive teardown through `free`'s child-release walk
+/// (spec §4, container-before-contained). Stresses the depth of reclamation rather than its rate.
+fn mm_deep_free_src(depth: usize) -> String {
+    let mut s = String::from("x = ");
+    s.push_str(&"[".repeat(depth));
+    s.push('0');
+    s.push_str(&"]".repeat(depth));
+    s.push_str(";\necho x.count();\n");
+    s
+}
+
+/// Nesting depth for the deep-free bench — deep enough that the recursive teardown dominates, but
+/// safely under the point where `free`'s recursive child-release overflows a small (2 MiB) thread
+/// stack (~200 levels). The recursion depth is a real reclamation limitation noted in the Phase-0
+/// baseline (a candidate for an iterative teardown later).
+const DEEP_FREE_DEPTH: usize = 100;
+
 fn vm_hot_paths(c: &mut Criterion) {
     let programs = [
         ("dispatch_fib", dispatch_src()),
@@ -258,6 +315,28 @@ fn vm_hot_paths(c: &mut Criterion) {
         }
     }
     read.finish();
+
+    // MM-stress baseline: allocation churn and destructor firing parameterized over n (so the later
+    // track can show prompt reclamation / reuse changed the constant or the slope), plus a single
+    // deep-structure teardown.
+    let mut mm = c.benchmark_group("vm_mm");
+    for &n in LOOP_SIZES {
+        let churn = compile(&mm_alloc_churn_src(n));
+        mm.bench_with_input(BenchmarkId::new("alloc_churn", n), &churn, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))))
+        });
+        let dtor = compile(&mm_destructor_heavy_src(n));
+        mm.bench_with_input(
+            BenchmarkId::new("destructor_heavy", n),
+            &dtor,
+            |b, module| b.iter(|| black_box(VmBackend::new().run_module(black_box(module)))),
+        );
+    }
+    let deep = compile(&mm_deep_free_src(DEEP_FREE_DEPTH));
+    mm.bench_function(BenchmarkId::new("deep_free", DEEP_FREE_DEPTH), |b| {
+        b.iter(|| black_box(VmBackend::new().run_module(black_box(&deep))))
+    });
+    mm.finish();
 }
 
 criterion_group!(benches, vm_hot_paths);

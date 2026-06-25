@@ -29,10 +29,12 @@ use lang_span::{Source, SourceId, SourceMap};
 
 mod differential;
 mod expectation;
+mod leaks;
 mod report;
 
 pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
+pub use leaks::{Leak, LeakReport, run_leak_check};
 pub use report::{CaseResult, CaseStatus, Report};
 
 /// Which pipeline stages to run a case through. Narrowing the stage makes an agent's

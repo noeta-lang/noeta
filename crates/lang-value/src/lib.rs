@@ -23,7 +23,7 @@
 mod heap;
 mod ops;
 
-pub use heap::Color;
+pub use heap::{Color, live_count, live_peak, reset_peak};
 pub use ops::{OpError, apply_binary, apply_unary, compare_primitive, structural_compare};
 
 use std::collections::BTreeMap;
@@ -1167,6 +1167,22 @@ mod tests {
             assert!(v.dec_ref());
             v.free();
         }
+    }
+
+    #[test]
+    fn live_count_tracks_alloc_and_free() {
+        // The leak oracle's measuring stick: every allocation bumps the live count and every
+        // reclamation drops it, so a build-then-free round trip returns to the starting value.
+        let before = live_count();
+        let s = Value::string("x");
+        let list = Value::list(vec![Value::string("a"), Value::string("b")]);
+        // string + (list + its two element strings) = 4 live objects.
+        assert_eq!(live_count(), before + 4);
+        assert!(s.dec_ref());
+        s.free();
+        assert!(list.dec_ref());
+        list.free(); // frees the list and recursively its two elements
+        assert_eq!(live_count(), before);
     }
 
     #[test]

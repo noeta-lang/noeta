@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use lang_conformance::{Stage, run_corpus, run_differential};
+use lang_conformance::{Stage, run_corpus, run_differential, run_leak_check};
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::lex;
@@ -50,6 +50,11 @@ enum Command {
         /// skipped; any divergence on a compiled program fails.
         #[arg(long)]
         differential: bool,
+        /// Run the leak oracle: execute every corpus program on both backends and report any
+        /// heap still live after it returns (residency 0 is the goal). Exits non-zero if any
+        /// program leaks — including the known nested-closure cycles Phase 6 will reap.
+        #[arg(long)]
+        check_leaks: bool,
         /// The corpus root directory.
         #[arg(long, default_value = "tests/conformance")]
         dir: PathBuf,
@@ -65,9 +70,12 @@ fn main() -> ExitCode {
             file,
             stage,
             differential,
+            check_leaks,
             dir,
         } => {
-            if differential {
+            if check_leaks {
+                cmd_leaks(file.as_deref(), &dir)
+            } else if differential {
                 cmd_differential(file.as_deref(), &dir)
             } else {
                 cmd_test(json, file.as_deref(), stage.as_deref(), &dir)
@@ -290,6 +298,20 @@ fn cmd_test(
 /// do not fail).
 fn cmd_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
     let report = run_differential(dir, file);
+    print!("{}", report.to_human());
+    if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Run the leak oracle over the corpus: every program executes on both backends and any heap
+/// still live after it returns is reported (architecture §0). Exits non-zero if any program
+/// leaks — the authoritative regression gate (with its known-debt allowlist) is the conformance
+/// corpus test; this is the developer-facing inspection view.
+fn cmd_leaks(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
+    let report = run_leak_check(dir, file);
     print!("{}", report.to_human());
     if report.ok() {
         ExitCode::SUCCESS

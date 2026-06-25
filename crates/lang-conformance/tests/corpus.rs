@@ -3,7 +3,7 @@
 
 use std::path::PathBuf;
 
-use lang_conformance::{Stage, run_corpus, run_differential};
+use lang_conformance::{Stage, run_corpus, run_differential, run_leak_check};
 
 fn corpus_root() -> PathBuf {
     // crates/lang-conformance → workspace root → tests/conformance
@@ -43,6 +43,53 @@ fn conformance_corpus_passes() {
     assert!(
         report.all_passed(),
         "conformance failures:\n{}",
+        report.to_human()
+    );
+}
+
+/// The leak oracle's **known debt**: `(backend, program)` pairs that leak at clean exit today
+/// because of reference cycles no live collector reaps yet (architecture §0/Phase 6). Every entry
+/// is a nested-function capture cycle:
+///
+/// - the tree-walker leaks a closure ↔ its child call-scope (the global drain only breaks the
+///   *global* scope's cycle, not one rooted in a nested scope);
+/// - the VM leaks the same cycle because its Bacon–Rajan trial-deletion collector is built but
+///   **dormant** (never wired).
+///
+/// Phase 6 fixes both (structural `Weak` parent for eval, wiring the collector for the VM) and
+/// removes the matching entries here. The oracle asserts the leak set equals *exactly* this list,
+/// so a brand-new leak fails the gate AND a fixed leak forces the allowlist to shrink.
+const KNOWN_LEAKS: &[(&str, &str)] = &[
+    ("eval", "closures/capture_immutable_error.lang"),
+    ("eval", "closures/counter_nested_fn.lang"),
+    ("eval", "closures/recursive_nested_fn.lang"),
+    ("vm", "closures/recursive_nested_fn.lang"),
+];
+
+#[test]
+fn leak_oracle_residency_is_zero_except_known_cycles() {
+    // The leak oracle (architecture §0): every program must reclaim all of its heap before it
+    // returns — residency 0 at clean exit, on *both* backends. A cycle leak or missed release
+    // shows up as a positive per-program residual. The only tolerated residuals are the cyclic
+    // ones in `KNOWN_LEAKS` (Phase-6 debt); any other leak — or any change to the known set —
+    // fails the gate.
+    let report = run_leak_check(&corpus_root(), None);
+    eprintln!("{}", report.to_human());
+
+    let mut found: Vec<(&str, &str)> = report
+        .leaks
+        .iter()
+        .map(|l| (l.backend, l.name.as_str()))
+        .collect();
+    found.sort_unstable();
+    let mut expected: Vec<(&str, &str)> = KNOWN_LEAKS.to_vec();
+    expected.sort_unstable();
+
+    assert_eq!(
+        found,
+        expected,
+        "the leak-oracle set changed.\n  - a NEW pair ⇒ a real leak to fix or a regression\n  \
+         - a MISSING pair ⇒ a debt was fixed; remove it from KNOWN_LEAKS\nfull report:\n{}",
         report.to_human()
     );
 }

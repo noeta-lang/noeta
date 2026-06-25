@@ -3429,6 +3429,47 @@ mod tests {
             .expect("program should be in the M1.0 subset")
     }
 
+    /// Peak heap residency for one program (architecture §0.3) — `reset_peak` before, `live_peak`
+    /// after, so the high-water mark is measured in isolation.
+    fn peak_residency(src: &str) -> usize {
+        lang_value::reset_peak();
+        let _ = run(src);
+        lang_value::live_peak()
+    }
+
+    #[test]
+    fn mm_peak_residency_baseline() {
+        // The pre-migration peak-residency snapshot for `plans/memory-management/phase-0-benchmarks`.
+        // Prints under `--nocapture`; asserts the meter reflects each program's footprint shape.
+
+        // Allocation churn: each short-lived record dies before the next is built ⇒ a small,
+        // n-independent peak (the reclaim-at-last-use shape we already have on a local temp).
+        let churn = "class Pair { a: int b: int }\nmut total = 0;\nfor i in 0..4000 { p = Pair { a: i, b: i }; total = total + p.a; }\necho total;\n";
+        let churn_peak = peak_residency(churn);
+
+        // A monotonically-growing accumulator of **heap** elements (records — ints would be immediate
+        // and never counted). Peak ≈ n live objects at the end: the genuinely-live structure prompt
+        // reclamation cannot shrink, but whose transient cost reuse/COW keeps O(n) not O(n²).
+        let accumulate = "class Pair { a: int b: int }\nmut acc = [];\nfor i in 0..4000 { acc ~= [Pair { a: i, b: i }]; }\necho acc.count();\n";
+        let accumulate_peak = peak_residency(accumulate);
+
+        // (Deep-nested teardown is benched separately on the optimized bench profile — its recursive
+        // `free` overflows this 2 MiB debug test thread at shallow depth, the MM limitation recorded
+        // in `phase-0-benchmarks.md`; it is not measured here.)
+
+        eprintln!(
+            "MM peak residency (objects): alloc_churn(n=4000)={churn_peak}  accumulate_records(n=4000)={accumulate_peak}"
+        );
+
+        // Shape assertions (not exact counts — those are the recorded baseline): churn stays small and
+        // n-independent; the record accumulator's peak scales with n.
+        assert!(churn_peak < 100, "alloc churn peak should be n-independent");
+        assert!(
+            accumulate_peak >= 4000,
+            "record-accumulator peak should scale with n"
+        );
+    }
+
     #[test]
     fn invoke_by_name_wraps_ok_and_err() {
         // `invoke` dispatches by runtime name: a hit wraps the return in `Result.Ok` (via the

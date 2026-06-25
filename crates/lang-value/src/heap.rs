@@ -9,6 +9,7 @@
 //! `lib.rs`, and freed by reconstructing the `Box`. Refcounts are non-atomic — the runtime
 //! is shared-nothing per isolate, so no value crosses a thread boundary.
 
+use std::cell::Cell;
 use std::collections::BTreeMap;
 use std::ptr;
 use std::rc::Rc;
@@ -18,6 +19,57 @@ use lang_object::Shape;
 use lang_stdlib::FileHandle;
 
 use crate::Value;
+
+// --- Live-heap accounting (the leak oracle, architecture §0/§5) ---
+//
+// A per-isolate (thread-local) count of live [`Obj`] allocations: bumped in [`alloc`], dropped in
+// every reclamation path ([`free`], [`free_shallow`]). The runtime is shared-nothing per isolate so
+// a thread-local is exactly per-isolate. The counter is the measuring stick for the leak oracle —
+// `live_count()` must return to its pre-run value once a program's globals and frames are released
+// (residency 0 at clean exit). It is a single integer, so it is always on (release builds pay one
+// non-atomic increment per allocation).
+
+thread_local! {
+    static LIVE: Cell<usize> = const { Cell::new(0) };
+    /// High-water mark of [`LIVE`] since the last [`reset_peak`] — the peak-residency meter
+    /// (architecture §0.3). Doubles the leak counter as a memory-footprint gauge: prompt last-use
+    /// reclamation (Phase 3) should cut this materially vs the reclaim-at-teardown baseline.
+    static PEAK: Cell<usize> = const { Cell::new(0) };
+}
+
+/// The number of live heap objects on this isolate's thread. Zero at a clean program exit; the
+/// leak oracle asserts the per-program delta is zero (a cycle leak or missed release shows up as a
+/// positive residual).
+pub fn live_count() -> usize {
+    LIVE.with(|c| c.get())
+}
+
+/// The peak live-object count since the last [`reset_peak`] — the peak-residency metric.
+pub fn live_peak() -> usize {
+    PEAK.with(|c| c.get())
+}
+
+/// Reset the peak high-water mark to the current live count, so the next run's peak is measured in
+/// isolation. Call before a measured run; read [`live_peak`] after.
+pub fn reset_peak() {
+    PEAK.with(|p| LIVE.with(|l| p.set(l.get())));
+}
+
+fn live_inc() {
+    LIVE.with(|c| {
+        let n = c.get() + 1;
+        c.set(n);
+        PEAK.with(|p| {
+            if n > p.get() {
+                p.set(n);
+            }
+        });
+    });
+}
+
+fn live_dec() {
+    LIVE.with(|c| c.set(c.get() - 1));
+}
 
 /// A heap object: a refcount header followed by its payload. `repr(C)` so the header is
 /// always first, though we only ever reach the payload through the typed `Box`.
@@ -109,6 +161,7 @@ pub(crate) enum Payload {
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
 pub(crate) fn alloc(payload: Payload) -> Value {
+    live_inc();
     let raw = Box::into_raw(Box::new(Obj {
         header: ObjHeader {
             refcount: 1,
@@ -185,6 +238,7 @@ pub(crate) fn free(value: Value) {
     // SAFETY: `value` is a pointer this module allocated, its refcount is zero (so no other
     // owner exists), and it is freed exactly once.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
+    live_dec();
     match &boxed.payload {
         Payload::List(items)
         | Payload::Set(items)
@@ -299,6 +353,7 @@ pub(crate) fn free_shallow(value: Value) {
     // SAFETY: the collector proved `value` is unreachable garbage and frees it exactly once;
     // children are freed by their own `free_shallow`, so they are not released here.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
+    live_dec();
     // Replace each child slot with an immediate so the `Vec`/`BTreeMap` drop does not touch
     // the (already independently freed) child objects — though dropping a `Value` is a no-op
     // regardless, this documents that ownership was surrendered.

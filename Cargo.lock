@@ -679,6 +679,7 @@ dependencies = [
  "lang-loader",
  "lang-parser",
  "lang-span",
+ "lang-value",
  "lang-vm",
  "serde",
  "serde_json",

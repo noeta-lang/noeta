@@ -20,8 +20,10 @@ use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
+mod leak;
 mod ops;
 mod value;
+pub use leak::live_count;
 pub use value::Value;
 
 // The `Backend`/`RunResult` seam moved into its own crate in M1 so the tree-walker and the
@@ -357,6 +359,13 @@ pub struct ObjectValue {
 }
 
 impl ObjectValue {
+    /// Build an instance, routing through the leak-oracle counter (paired with [`Drop`]). All
+    /// `ObjectValue` construction goes through here so the live count is exact.
+    fn new(def: Rc<TypeDef>, fields: BTreeMap<String, Value>) -> ObjectValue {
+        leak::inc();
+        ObjectValue { def, fields }
+    }
+
     /// `Type { field: value, ... }`. Fields are shown in declared order for records and
     /// classes; for an opaque imported stub (no declared fields) the actual bag is shown
     /// in key order.
@@ -384,6 +393,12 @@ impl ObjectValue {
     }
 }
 
+impl Drop for ObjectValue {
+    fn drop(&mut self) {
+        leak::dec();
+    }
+}
+
 impl std::fmt::Debug for ObjectValue {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "ObjectValue({})", self.display())
@@ -408,6 +423,31 @@ pub struct Closure {
     defaults: Vec<Option<Expr>>,
     body: FnBody,
     captured: Rc<Scope>,
+}
+
+impl Closure {
+    /// Build a closure, routing through the leak-oracle counter (paired with [`Drop`]). All
+    /// `Closure` construction goes through here so the live count is exact.
+    fn new(
+        params: Vec<String>,
+        defaults: Vec<Option<Expr>>,
+        body: FnBody,
+        captured: Rc<Scope>,
+    ) -> Closure {
+        leak::inc();
+        Closure {
+            params,
+            defaults,
+            body,
+            captured,
+        }
+    }
+}
+
+impl Drop for Closure {
+    fn drop(&mut self) {
+        leak::dec();
+    }
 }
 
 impl std::fmt::Debug for Closure {
@@ -447,8 +487,18 @@ enum AssignOutcome {
     NotFound,
 }
 
+impl Drop for Scope {
+    fn drop(&mut self) {
+        // The leak-oracle counterpart of construction (always paired, so a scope reclaimed by `Rc`
+        // drops the count; one kept alive by a capture cycle never does — which is the leak we want
+        // the oracle to report). See [`crate::leak`].
+        leak::dec();
+    }
+}
+
 impl Scope {
     fn global() -> Rc<Scope> {
+        leak::inc();
         Rc::new(Scope {
             vars: RefCell::new(HashMap::new()),
             order: RefCell::new(Vec::new()),
@@ -457,6 +507,7 @@ impl Scope {
     }
 
     fn child(parent: &Rc<Scope>) -> Rc<Scope> {
+        leak::inc();
         Rc::new(Scope {
             vars: RefCell::new(HashMap::new()),
             order: RefCell::new(Vec::new()),
@@ -957,12 +1008,12 @@ impl Interpreter {
     }
 
     fn declare_fn(&mut self, decl: &FnDecl) {
-        let closure = Closure {
-            params: decl.params.iter().map(|p| p.name.clone()).collect(),
-            defaults: decl.params.iter().map(|p| p.default.clone()).collect(),
-            body: FnBody::Block(decl.body.clone()),
-            captured: Rc::clone(&self.scope),
-        };
+        let closure = Closure::new(
+            decl.params.iter().map(|p| p.name.clone()).collect(),
+            decl.params.iter().map(|p| p.default.clone()).collect(),
+            FnBody::Block(decl.body.clone()),
+            Rc::clone(&self.scope),
+        );
         self.scope
             .declare(decl.name.clone(), Value::Function(Rc::new(closure)), false);
     }
@@ -1055,12 +1106,12 @@ impl Interpreter {
             .methods
             .iter()
             .map(|m| {
-                let closure = Closure {
-                    params: m.params.iter().map(|p| p.name.clone()).collect(),
-                    defaults: m.params.iter().map(|p| p.default.clone()).collect(),
-                    body: FnBody::Block(m.body.clone()),
-                    captured: Rc::clone(&self.scope),
-                };
+                let closure = Closure::new(
+                    m.params.iter().map(|p| p.name.clone()).collect(),
+                    m.params.iter().map(|p| p.default.clone()).collect(),
+                    FnBody::Block(m.body.clone()),
+                    Rc::clone(&self.scope),
+                );
                 (m.name.clone(), Rc::new(closure))
             })
             .collect();
@@ -1118,17 +1169,11 @@ impl Interpreter {
                             .map(|v| attr_value_to_eval(v, &self.reflection)),
                     )
                     .collect();
-                let t_value = Value::Object(Rc::new(ObjectValue {
-                    def: attr_def.clone(),
-                    fields: t_fields,
-                }));
+                let t_value = Value::Object(Rc::new(ObjectValue::new(attr_def.clone(), t_fields)));
                 let mut a_fields = BTreeMap::new();
                 a_fields.insert("target".to_string(), Value::Str(a.target.clone()));
                 a_fields.insert("value".to_string(), t_value);
-                Value::Object(Rc::new(ObjectValue {
-                    def: attributed_def.clone(),
-                    fields: a_fields,
-                }))
+                Value::Object(Rc::new(ObjectValue::new(attributed_def.clone(), a_fields)))
             })
             .collect();
         Value::List(Rc::new(items))
@@ -1155,10 +1200,7 @@ impl Interpreter {
                     "role".to_string(),
                     builtin_enum(&r.enum_name, &r.variant, Vec::new()),
                 );
-                Value::Object(Rc::new(ObjectValue {
-                    def: binding_def.clone(),
-                    fields,
-                }))
+                Value::Object(Rc::new(ObjectValue::new(binding_def.clone(), fields)))
             })
             .collect();
         Value::List(Rc::new(items))
@@ -1238,7 +1280,7 @@ impl Interpreter {
             for (k, v) in overrides {
                 fields.insert(k, v);
             }
-            let obj = Value::Object(Rc::new(ObjectValue { def, fields }));
+            let obj = Value::Object(Rc::new(ObjectValue::new(def, fields)));
             return Some(
                 self.bind(false, name, name_span, obj)
                     .map(|()| Flow::Normal),
@@ -1261,7 +1303,7 @@ impl Interpreter {
                     for (k, v) in overrides {
                         fields.insert(k, v);
                     }
-                    Value::Object(Rc::new(ObjectValue { def, fields }))
+                    Value::Object(Rc::new(ObjectValue::new(def, fields)))
                 }
             }
         } else {
@@ -1271,7 +1313,7 @@ impl Interpreter {
             for (k, v) in overrides {
                 fields.insert(k, v);
             }
-            Value::Object(Rc::new(ObjectValue { def, fields }))
+            Value::Object(Rc::new(ObjectValue::new(def, fields)))
         };
         self.scope.assign(name, new_value);
         Some(Ok(Flow::Normal))
@@ -1365,10 +1407,10 @@ impl Interpreter {
             ));
         }
 
-        Ok(Value::Object(Rc::new(ObjectValue {
-            def: Rc::clone(&def),
+        Ok(Value::Object(Rc::new(ObjectValue::new(
+            Rc::clone(&def),
             fields,
-        })))
+        ))))
     }
 
     /// Build an enum value from a type, a variant name, and its argument values.
@@ -1463,14 +1505,14 @@ impl Interpreter {
                 self.eval_unary(*op, value, *span)
             }
             Expr::Binary { op, lhs, rhs, span } => self.eval_binary(*op, lhs, rhs, *span),
-            Expr::Closure { params, body, .. } => Ok(Value::Function(Rc::new(Closure {
-                params: params.iter().map(|p| p.name.clone()).collect(),
+            Expr::Closure { params, body, .. } => Ok(Value::Function(Rc::new(Closure::new(
+                params.iter().map(|p| p.name.clone()).collect(),
                 // Closure parameters cannot declare defaults (the parser forbids it), so these are
                 // all `None`; kept parallel to `params` for a uniform call path.
-                defaults: params.iter().map(|p| p.default.clone()).collect(),
-                body: FnBody::Arrow((**body).clone()),
-                captured: Rc::clone(&self.scope),
-            }))),
+                params.iter().map(|p| p.default.clone()).collect(),
+                FnBody::Arrow((**body).clone()),
+                Rc::clone(&self.scope),
+            )))),
             Expr::Call { callee, args, span } => self.eval_call(callee, args, None, *span),
             Expr::Pipeline { left, right, span } => {
                 let left = self.eval_expr(left)?;
@@ -3254,7 +3296,7 @@ fn attr_value_to_eval(
             let def = Rc::new(fresh_type_def(type_name, &names, true));
             let f: BTreeMap<String, Value> =
                 fields.iter().map(|(n, v)| (n.clone(), recur(v))).collect();
-            Value::Object(Rc::new(ObjectValue { def, fields: f }))
+            Value::Object(Rc::new(ObjectValue::new(def, f)))
         }
         A::TypeRef(name) => build_type_value(&reflection.type_ref_repr(name)),
     }
@@ -3611,6 +3653,33 @@ mod tests {
 
     fn run(text: &str) -> RunResult {
         TreeWalkBackend::new().run(&program_of(text))
+    }
+
+    #[test]
+    fn leak_counter_round_trips_on_an_acyclic_program() {
+        // No top-level functions ⇒ no capture cycle ⇒ every scope, record, and list reclaims via
+        // `Rc`. The leak oracle's per-program residency delta is zero. Measured as a delta because
+        // a prior leaking test on this thread may have left a positive baseline (thread-local).
+        let before = live_count();
+        let r = run("type P = { x: int }; a = P { x: 1 }; b = [a, a]; echo a.x;");
+        assert_eq!(r.stdout, "1\n");
+        assert_eq!(live_count(), before, "acyclic program must reclaim fully");
+    }
+
+    #[test]
+    fn leak_counter_reclaims_a_top_level_function() {
+        // A top-level `fn` captures the global scope, which holds the function — a would-be `Rc`
+        // cycle. `destroy_globals` drains the global bindings at program end, dropping the closure
+        // and breaking the cycle, so the tree-walker *does* reclaim it: residency returns to
+        // baseline. (Capture cycles rooted below the global scope are the residual Phase 6 closes;
+        // the corpus-wide oracle measures whether any remain.)
+        let before = live_count();
+        run("fn f(): int { return 1; } echo f();");
+        assert_eq!(
+            live_count(),
+            before,
+            "top-level functions reclaim via destroy_globals"
+        );
     }
 
     fn program_of(text: &str) -> Program {
