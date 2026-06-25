@@ -903,34 +903,7 @@ impl Interpreter {
         span: Span,
     ) -> Eval<Flow> {
         let iterable_value = self.eval_expr(iterable)?;
-        let elements = match &iterable_value {
-            Value::List(items) => (**items).clone(),
-            // A set iterates in its canonical (sorted) order — deterministic, like the VM.
-            Value::Set(items) => (**items).clone(),
-            // Iterating a map yields its values, in deterministic key order.
-            Value::Map(entries) => entries.values().cloned().collect(),
-            // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
-            // `iter` method returns.
-            Value::Object(object) if object.def.methods.contains_key("iter") => {
-                match self.call_method(iterable_value.clone(), "iter", Vec::new(), span)? {
-                    Value::List(items) => (*items).clone(),
-                    other => {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::TypeMismatch,
-                            span,
-                            format!("`iter` must return a list, found {}", other.type_name()),
-                        ));
-                    }
-                }
-            }
-            other => {
-                return Err(self.runtime_error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!("cannot iterate over {}", other.type_name()),
-                ));
-            }
-        };
+        let elements = self.iter_elements(iterable_value, span)?;
 
         for element in elements {
             let child = Scope::child(&self.scope);
@@ -975,6 +948,36 @@ impl Interpreter {
                 Flow::Break => return Ok(Flow::Normal),
                 Flow::Continue | Flow::Normal => {}
             }
+        }
+    }
+
+    /// Materialize the elements a `for` loop iterates over: a list/set in canonical order, a
+    /// map's values in key order, or a user object's `Iterable` (`iter`) list. Shared by the
+    /// AST walker's `exec_for` and the Core-IR interpreter so both agree by construction.
+    fn iter_elements(&mut self, iterable: Value, span: Span) -> Eval<Vec<Value>> {
+        match &iterable {
+            Value::List(items) => Ok((**items).clone()),
+            // A set iterates in its canonical (sorted) order — deterministic, like the VM.
+            Value::Set(items) => Ok((**items).clone()),
+            // Iterating a map yields its values, in deterministic key order.
+            Value::Map(entries) => Ok(entries.values().cloned().collect()),
+            // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
+            // `iter` method returns.
+            Value::Object(object) if object.def.methods.contains_key("iter") => {
+                match self.call_method(iterable.clone(), "iter", Vec::new(), span)? {
+                    Value::List(items) => Ok((*items).clone()),
+                    other => Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`iter` must return a list, found {}", other.type_name()),
+                    )),
+                }
+            }
+            other => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("cannot iterate over {}", other.type_name()),
+            )),
         }
     }
 

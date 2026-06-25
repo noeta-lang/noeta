@@ -113,6 +113,71 @@ impl Lowerer {
                 let _ = self.lower_expr(expr, out)?;
                 Ok(())
             }
+            AstStmt::Return { value, span } => {
+                let atom = match value {
+                    Some(expr) => Some(self.lower_expr(expr, out)?),
+                    None => None,
+                };
+                out.push(Stmt::Return {
+                    value: atom,
+                    span: *span,
+                });
+                Ok(())
+            }
+            AstStmt::If {
+                cond,
+                then_body,
+                else_body,
+                span,
+            } => {
+                let cond = self.lower_expr(cond, out)?;
+                let then_block = self.lower_body(then_body)?;
+                let else_block = match else_body {
+                    Some(body) => Some(self.lower_body(body)?),
+                    None => None,
+                };
+                out.push(Stmt::If {
+                    cond,
+                    then_block,
+                    else_block,
+                    span: *span,
+                });
+                Ok(())
+            }
+            AstStmt::While { cond, body, span } => {
+                let cond = self.lower_value_block(cond)?;
+                let body = self.lower_body(body)?;
+                out.push(Stmt::While {
+                    cond,
+                    body,
+                    span: *span,
+                });
+                Ok(())
+            }
+            AstStmt::For {
+                pattern,
+                iterable,
+                body,
+                span,
+            } => {
+                let iterable = self.lower_expr(iterable, out)?;
+                let body = self.lower_body(body)?;
+                out.push(Stmt::For {
+                    pattern: pattern.clone(),
+                    iterable,
+                    body,
+                    span: *span,
+                });
+                Ok(())
+            }
+            AstStmt::Break { span } => {
+                out.push(Stmt::Break { span: *span });
+                Ok(())
+            }
+            AstStmt::Continue { span } => {
+                out.push(Stmt::Continue { span: *span });
+                Ok(())
+            }
             // Not yet in the supported subset — reported so the program is skipped.
             AstStmt::Fn(_) => Err(Unsupported::at("fn declaration", stmt.span())),
             AstStmt::Enum(_) => Err(Unsupported::at("enum declaration", stmt.span())),
@@ -121,13 +186,20 @@ impl Lowerer {
             AstStmt::Impl(_) => Err(Unsupported::at("impl declaration", stmt.span())),
             AstStmt::Namespace { .. } => Err(Unsupported::at("namespace", stmt.span())),
             AstStmt::Use { .. } => Err(Unsupported::at("use", stmt.span())),
-            AstStmt::Return { .. } => Err(Unsupported::at("return", stmt.span())),
-            AstStmt::If { .. } => Err(Unsupported::at("if", stmt.span())),
-            AstStmt::For { .. } => Err(Unsupported::at("for", stmt.span())),
-            AstStmt::While { .. } => Err(Unsupported::at("while", stmt.span())),
-            AstStmt::Break { .. } => Err(Unsupported::at("break", stmt.span())),
-            AstStmt::Continue { .. } => Err(Unsupported::at("continue", stmt.span())),
         }
+    }
+
+    /// Lower an expression into a fresh value-position [`Block`] (its computed `let`s plus a
+    /// tail atom). Used where an expression is re-evaluated or evaluated lazily — a `while`
+    /// condition, a defaulted parameter — so it cannot be hoisted into the surrounding
+    /// straight-line sequence.
+    fn lower_value_block(&mut self, expr: &Expr) -> Result<Block, Unsupported> {
+        let mut stmts = Vec::new();
+        let atom = self.lower_expr(expr, &mut stmts)?;
+        Ok(Block {
+            stmts,
+            tail: Some(atom),
+        })
     }
 
     /// Lower an expression to an [`Atom`], emitting the `let`s that compute any
@@ -261,22 +333,191 @@ impl Lowerer {
                     *span,
                 ))
             }
+            Expr::Call { callee, args, span } => {
+                // A call whose callee is a member access is a method call; otherwise an
+                // ordinary call. Evaluation order matches the tree-walker's `eval_call`:
+                // receiver/callee first, then arguments left-to-right.
+                if let Expr::Member {
+                    receiver,
+                    name,
+                    name_span,
+                    ..
+                } = callee.as_ref()
+                {
+                    let receiver = self.lower_expr(receiver, out)?;
+                    let arg_atoms = self.lower_args(args, out)?;
+                    Ok(self.emit(
+                        out,
+                        Rvalue::Method {
+                            receiver,
+                            name: name.clone(),
+                            name_span: *name_span,
+                            args: arg_atoms,
+                            span: *span,
+                        },
+                        *span,
+                    ))
+                } else {
+                    let callee = self.lower_expr(callee, out)?;
+                    let arg_atoms = self.lower_args(args, out)?;
+                    Ok(self.emit(
+                        out,
+                        Rvalue::Call {
+                            callee,
+                            args: arg_atoms,
+                            span: *span,
+                        },
+                        *span,
+                    ))
+                }
+            }
+            Expr::Member {
+                receiver,
+                name,
+                name_span,
+                span,
+            } => {
+                let receiver = self.lower_expr(receiver, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Field {
+                        receiver,
+                        name: name.clone(),
+                        name_span: *name_span,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::Match {
+                scrutinee,
+                arms,
+                span,
+            } => {
+                let scrut = self.lower_expr(scrutinee, out)?;
+                let mut ir_arms = Vec::with_capacity(arms.len());
+                for arm in arms {
+                    let body = self.lower_value_block(&arm.body)?;
+                    ir_arms.push(crate::Arm {
+                        pattern: arm.pattern.clone(),
+                        body,
+                        span: arm.span,
+                    });
+                }
+                let dst = self.fresh();
+                out.push(Stmt::Match {
+                    scrutinee: scrut,
+                    arms: ir_arms,
+                    dst: Some(dst),
+                    span: *span,
+                });
+                Ok(Atom::Temp(dst))
+            }
+            Expr::Try { expr, span } => {
+                let operand = self.lower_expr(expr, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Try {
+                        operand,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::Coalesce {
+                value,
+                fallback,
+                span,
+            } => {
+                let value = self.lower_expr(value, out)?;
+                let fallback = self.lower_value_block(fallback)?;
+                let dst = self.fresh();
+                out.push(Stmt::Coalesce {
+                    dst: Some(dst),
+                    value,
+                    fallback,
+                    span: *span,
+                });
+                Ok(Atom::Temp(dst))
+            }
+            Expr::As { expr, ty, span } => {
+                let operand = self.lower_expr(expr, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::As {
+                        operand,
+                        ty: ty.clone(),
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::TypeTest { expr, ty, span } => {
+                let operand = self.lower_expr(expr, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::TypeTest {
+                        operand,
+                        ty: ty.clone(),
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::TypeOf { value, span } => {
+                let operand = self.lower_expr(value, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::TypeOf {
+                        operand,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::AttributesOf { ty, span } => Ok(self.emit(
+                out,
+                Rvalue::AttributesOf {
+                    ty: ty.clone(),
+                    span: *span,
+                },
+                *span,
+            )),
+            Expr::RolesOf { span } => Ok(self.emit(out, Rvalue::RolesOf { span: *span }, *span)),
+            Expr::Invoke {
+                recv,
+                name,
+                args,
+                span,
+            } => {
+                let recv = self.lower_expr(recv, out)?;
+                let name = self.lower_expr(name, out)?;
+                let args = self.lower_expr(args, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Invoke {
+                        recv,
+                        name,
+                        args,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             // Not yet in the supported subset.
             Expr::Closure { span, .. } => Err(Unsupported::at("closure", *span)),
-            Expr::Call { span, .. } => Err(Unsupported::at("call", *span)),
             Expr::Pipeline { span, .. } => Err(Unsupported::at("pipeline", *span)),
-            Expr::Member { span, .. } => Err(Unsupported::at("member access", *span)),
-            Expr::Match { span, .. } => Err(Unsupported::at("match", *span)),
             Expr::Object(lit) => Err(Unsupported::at("object literal", lit.span)),
-            Expr::Try { span, .. } => Err(Unsupported::at("try `?`", *span)),
-            Expr::Coalesce { span, .. } => Err(Unsupported::at("coalesce `??`", *span)),
-            Expr::As { span, .. } => Err(Unsupported::at("`as` narrowing", *span)),
-            Expr::TypeTest { span, .. } => Err(Unsupported::at("`is` test", *span)),
-            Expr::AttributesOf { span, .. } => Err(Unsupported::at("attributes_of", *span)),
-            Expr::TypeOf { span, .. } => Err(Unsupported::at("type_of", *span)),
-            Expr::RolesOf { span } => Err(Unsupported::at("roles_of", *span)),
-            Expr::Invoke { span, .. } => Err(Unsupported::at("invoke", *span)),
         }
+    }
+
+    /// Lower a call's argument list left-to-right (the tree-walker's order).
+    fn lower_args(&mut self, args: &[Expr], out: &mut Vec<Stmt>) -> Result<Vec<Atom>, Unsupported> {
+        let mut atoms = Vec::with_capacity(args.len());
+        for arg in args {
+            atoms.push(self.lower_expr(arg, out)?);
+        }
+        Ok(atoms)
     }
 
     /// Lower `a && b` / `a || b` to a [`Stmt::Logical`] writing into a fresh temp, so the

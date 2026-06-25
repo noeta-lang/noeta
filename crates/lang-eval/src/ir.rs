@@ -155,9 +155,195 @@ impl Interpreter {
                 }
                 Ok(Flow::Normal)
             }
+            lang_ir::Stmt::Return { value, .. } => {
+                let value = match value {
+                    Some(atom) => self.eval_ir_atom(atom, frame)?,
+                    None => Value::Unit,
+                };
+                Ok(Flow::Return(value))
+            }
+            lang_ir::Stmt::Break { .. } => Ok(Flow::Break),
+            lang_ir::Stmt::Continue { .. } => Ok(Flow::Continue),
+            lang_ir::Stmt::If {
+                cond,
+                then_block,
+                else_block,
+                span,
+            } => {
+                let taken = match self.eval_ir_atom(cond, frame)? {
+                    Value::Bool(b) => b,
+                    other => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("`if` condition must be a bool, found {}", other.type_name()),
+                        ));
+                    }
+                };
+                if taken {
+                    self.exec_ir_block_scoped(then_block, frame)
+                } else if let Some(else_block) = else_block {
+                    self.exec_ir_block_scoped(else_block, frame)
+                } else {
+                    Ok(Flow::Normal)
+                }
+            }
+            lang_ir::Stmt::While {
+                cond, body, span, ..
+            } => self.exec_ir_while(cond, body, *span, frame),
+            lang_ir::Stmt::For {
+                pattern,
+                iterable,
+                body,
+                span,
+            } => self.exec_ir_for(pattern, iterable, body, *span, frame),
+            lang_ir::Stmt::Match {
+                scrutinee,
+                arms,
+                dst,
+                span,
+            } => {
+                let value = self.eval_ir_atom(scrutinee, frame)?;
+                self.exec_ir_match(value, arms, *dst, *span, frame)
+            }
+            lang_ir::Stmt::Coalesce {
+                dst,
+                value,
+                fallback,
+                span,
+            } => {
+                let v = self.eval_ir_atom(value, frame)?;
+                let result = match crate::try_branch(&v) {
+                    Some(crate::TryBranch::Success(inner)) => inner,
+                    Some(crate::TryBranch::Empty) => {
+                        self.eval_ir_block_value(fallback, frame, *span)?
+                    }
+                    None => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`??` expects a `Result` or `Option` on the left, found {}",
+                                v.type_name()
+                            ),
+                        ));
+                    }
+                };
+                if let Some(dst) = dst {
+                    frame.set(*dst, result);
+                }
+                Ok(Flow::Normal)
+            }
             // Lowered only in later slices; the lowering gates them out until then.
             other => unreachable!("Core-IR statement not yet interpreted: {other:?}"),
         }
+    }
+
+    /// Evaluate an IR `match`: try each arm's pattern in order, bind on the first match, run
+    /// that arm's body block in a child scope, and write its value to `dst`. Mirrors
+    /// `eval_match`, including the no-arm-matched runtime error.
+    fn exec_ir_match(
+        &mut self,
+        value: Value,
+        arms: &[lang_ir::Arm],
+        dst: Option<lang_ir::Temp>,
+        span: Span,
+        frame: &mut Frame,
+    ) -> Eval<Flow> {
+        for arm in arms {
+            if let Some(bindings) = crate::match_pattern(&arm.pattern, &value) {
+                let child = crate::Scope::child(&self.scope);
+                for (name, bound) in bindings {
+                    child.declare(name, bound, false);
+                }
+                let saved = std::mem::replace(&mut self.scope, child);
+                let result = self.eval_ir_block_value(&arm.body, frame, arm.span);
+                self.scope = saved;
+                let v = result?;
+                if let Some(dst) = dst {
+                    frame.set(dst, v);
+                }
+                return Ok(Flow::Normal);
+            }
+        }
+        Err(self.runtime_error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!("no match arm matched the value {}", value.display()),
+        ))
+    }
+
+    /// Run a statement-position block in a fresh child scope (the IR analogue of
+    /// `exec_block`), propagating any non-local flow. The temporary frame is shared with the
+    /// enclosing activation.
+    fn exec_ir_block_scoped(&mut self, block: &lang_ir::Block, frame: &mut Frame) -> Eval<Flow> {
+        let child = crate::Scope::child(&self.scope);
+        let saved = std::mem::replace(&mut self.scope, child);
+        let result = self.exec_ir_stmts(&block.stmts, frame);
+        self.scope = saved;
+        result
+    }
+
+    /// `while cond { body }` — mirrors `exec_while`: re-evaluate the condition block each
+    /// iteration (it must yield a bool), running the body in a fresh child scope.
+    fn exec_ir_while(
+        &mut self,
+        cond: &lang_ir::Block,
+        body: &lang_ir::Block,
+        span: Span,
+        frame: &mut Frame,
+    ) -> Eval<Flow> {
+        loop {
+            let taken = match self.eval_ir_block_value(cond, frame, span)? {
+                Value::Bool(b) => b,
+                other => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`while` condition must be a bool, found {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            };
+            if !taken {
+                return Ok(Flow::Normal);
+            }
+            match self.exec_ir_block_scoped(body, frame)? {
+                Flow::Return(value) => return Ok(Flow::Return(value)),
+                Flow::Break => return Ok(Flow::Normal),
+                Flow::Continue | Flow::Normal => {}
+            }
+        }
+    }
+
+    /// `for pattern in iterable { body }` — mirrors `exec_for`: materialize the elements, then
+    /// bind the pattern and run the body in a fresh child scope per element, honoring
+    /// `break`/`continue`/`return`.
+    fn exec_ir_for(
+        &mut self,
+        pattern: &lang_ir::ForPattern,
+        iterable: &lang_ir::Atom,
+        body: &lang_ir::Block,
+        span: Span,
+        frame: &mut Frame,
+    ) -> Eval<Flow> {
+        let iterable_value = self.eval_ir_atom(iterable, frame)?;
+        let elements = self.iter_elements(iterable_value, span)?;
+        for element in elements {
+            let child = crate::Scope::child(&self.scope);
+            self.bind_for_pattern(&child, pattern, element, span)?;
+            let saved = std::mem::replace(&mut self.scope, child);
+            let flow = self.exec_ir_stmts(&body.stmts, frame);
+            self.scope = saved;
+            match flow? {
+                Flow::Return(value) => return Ok(Flow::Return(value)),
+                Flow::Break => break,
+                Flow::Continue | Flow::Normal => {}
+            }
+        }
+        Ok(Flow::Normal)
     }
 
     /// Resolve an atom to a value: a constant, a frame temporary, or a lexical lookup. The
@@ -267,9 +453,110 @@ impl Interpreter {
                 }
                 Ok(Value::Str(out))
             }
+            lang_ir::Rvalue::Call { callee, args, span } => {
+                let callee = self.eval_ir_atom(callee, frame)?;
+                let values = self.eval_ir_atoms(args, frame)?;
+                self.call(callee, values, *span)
+            }
+            lang_ir::Rvalue::Method {
+                receiver,
+                name,
+                args,
+                span,
+                ..
+            } => {
+                let receiver = self.eval_ir_atom(receiver, frame)?;
+                let values = self.eval_ir_atoms(args, frame)?;
+                self.call_method(receiver, name, values, *span)
+            }
+            lang_ir::Rvalue::Field {
+                receiver,
+                name,
+                span,
+                ..
+            } => {
+                // Mirrors `eval_expr`'s `Member` arm: enum-variant constructor, object field
+                // load, or associated-function reference.
+                let receiver = self.eval_ir_atom(receiver, frame)?;
+                match receiver {
+                    Value::EnumType(def) => self.make_variant(&def, name, vec![], *span),
+                    Value::Object(object) => match object.fields.get(name) {
+                        Some(value) => Ok(value.clone()),
+                        None => Err(self.runtime_error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("type `{}` has no field `{name}`", object.def.name()),
+                        )),
+                    },
+                    Value::Type(def) => match def.methods.get(name) {
+                        Some(method) => Ok(Value::Function(Rc::clone(method))),
+                        None => Err(self.runtime_error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!("type `{}` has no associated function `{name}`", def.name()),
+                        )),
+                    },
+                    other => Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        *span,
+                        format!("no field `{name}` on {}", other.type_name()),
+                    )),
+                }
+            }
+            lang_ir::Rvalue::Try { operand, span } => {
+                let value = self.eval_ir_atom(operand, frame)?;
+                self.eval_try(value, *span)
+            }
+            lang_ir::Rvalue::As { operand, ty, .. } => {
+                let value = self.eval_ir_atom(operand, frame)?;
+                if crate::runtime_matches(&value, ty) {
+                    Ok(crate::builtin_enum("Option", "some", vec![value]))
+                } else {
+                    Ok(crate::builtin_enum("Option", "none", vec![]))
+                }
+            }
+            lang_ir::Rvalue::TypeTest { operand, ty, .. } => {
+                let value = self.eval_ir_atom(operand, frame)?;
+                Ok(Value::Bool(crate::runtime_matches(&value, ty)))
+            }
+            lang_ir::Rvalue::TypeOf { operand, span } => {
+                let v = self.eval_ir_atom(operand, frame)?;
+                match self.type_of_sites.get(span) {
+                    Some(repr) => Ok(crate::build_type_value(repr)),
+                    None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
+                }
+            }
+            lang_ir::Rvalue::AttributesOf { ty, .. } => {
+                let type_name = match ty {
+                    lang_ir::TypeRef::Named { name, .. } => name.as_str(),
+                    _ => "",
+                };
+                Ok(self.materialize_attributes(type_name))
+            }
+            lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
+            lang_ir::Rvalue::Invoke {
+                recv,
+                name,
+                args,
+                span,
+            } => {
+                let receiver = self.eval_ir_atom(recv, frame)?;
+                let name_val = self.eval_ir_atom(name, frame)?;
+                let args_val = self.eval_ir_atom(args, frame)?;
+                self.invoke_dynamic(receiver, name_val, args_val, *span)
+            }
             // Lowered only in later slices.
             other => unreachable!("Core-IR rvalue not yet interpreted: {other:?}"),
         }
+    }
+
+    /// Resolve a list of atoms to values, left-to-right.
+    fn eval_ir_atoms(&mut self, atoms: &[lang_ir::Atom], frame: &Frame) -> Eval<Vec<Value>> {
+        let mut values = Vec::with_capacity(atoms.len());
+        for atom in atoms {
+            values.push(self.eval_ir_atom(atom, frame)?);
+        }
+        Ok(values)
     }
 
     /// Evaluate `left && right` / `left || right` with the tree-walker's exact laziness and
