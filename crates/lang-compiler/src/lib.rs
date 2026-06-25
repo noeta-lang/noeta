@@ -113,40 +113,6 @@ fn passes_relevance(r: &lang_check::DestructorRelevance) -> lang_ir_passes::Rele
     }
 }
 
-/// Which record-update reuse the compiler may apply to a self-update `acc = Type { ...acc, f: v }`.
-///
-/// **Inert since Phase 2 of the memory-management migration.** The AST-keyed record-update / COW
-/// in-place reuse this selected was dropped when the compiler moved onto the A-normal-form Core
-/// IR (ANF decomposes the `acc = Type { ...acc, … }` shape the recognizer depended on into a
-/// `let` + reassignment, scattering the temporaries it keyed on). Reuse is re-established —
-/// principally, on the IR — by Phase 3's RC/last-use passes, which the README says "subsume
-/// P-REUSE". The enum and [`compile_with_options`] are retained so the perf bench's API is
-/// unchanged; every mode now produces the same copying lowering (so the bench measures the
-/// transient regression Phase 3 recovers).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum ReuseMode {
-    /// No reuse — a self-update lowers to an ordinary copying `MakeRecord { spread }`. The baseline.
-    Off,
-    /// Was: runtime `refcount() == 1 && same-shape` check at the construct. Now identical to [`Off`].
-    Runtime,
-    /// Was: the runtime check elided where linearity was proved. Now identical to [`Off`].
-    #[default]
-    Static,
-}
-
-/// Compile under an explicit [reuse mode][ReuseMode]. Retained for the perf bench's API; the mode
-/// is inert since Phase 2 (see [`ReuseMode`]), so this is behavior-identical to [`compile`].
-pub fn compile_with_options(program: &Program, reuse: ReuseMode) -> Result<Module, Unsupported> {
-    // The reuse bench does not exercise destructor-relevance; pass none (drops are conservatively
-    // relevant, behavior-identical in Phase 3 since the bit is unused).
-    compile_inner(
-        program,
-        lang_check::resolve_type_of_sites(program),
-        None,
-        reuse,
-    )
-}
-
 /// Compile a program using a **precomputed** `type_of` site map instead of re-deriving it.
 ///
 /// [`compile`] re-runs the checker (via `resolve_type_of_sites`) to obtain the map, which on a
@@ -159,19 +125,13 @@ pub fn compile_with_sites(
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
-    compile_inner(
-        program,
-        type_of_sites,
-        Some(passes_relevance(relevance)),
-        ReuseMode::default(),
-    )
+    compile_inner(program, type_of_sites, Some(passes_relevance(relevance)))
 }
 
 fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     relevance: Option<lang_ir_passes::Relevance>,
-    _reuse: ReuseMode,
 ) -> Result<Module, Unsupported> {
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The

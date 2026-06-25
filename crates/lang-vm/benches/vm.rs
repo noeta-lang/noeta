@@ -14,7 +14,6 @@ use std::hint::black_box;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 use lang_bytecode::Module;
-use lang_compiler::ReuseMode;
 use lang_lexer::lex;
 use lang_parser::parse;
 use lang_span::{Source, SourceId};
@@ -36,26 +35,11 @@ fn compile(src: &str) -> Module {
     lang_compiler::compile(&parsed.program).expect("bench program must be in the VM subset")
 }
 
-/// Like [`compile`] but under an explicit [`ReuseMode`] — used by the record-update reuse matrix to
-/// compile the *same* source three ways (no reuse / runtime-checked / statically-elided check).
-fn compile_reuse(src: &str, mode: ReuseMode) -> Module {
-    let source = Source::new(SourceId::FIRST, "bench.lang", src);
-    let lexed = lex(&source);
-    let parsed = parse(&source, &lexed.tokens);
-    assert!(
-        parsed.diagnostics.is_empty(),
-        "bench program must parse without diagnostics: {:?}",
-        parsed.diagnostics
-    );
-    lang_compiler::compile_with_options(&parsed.program, mode)
-        .expect("bench program must be in the VM subset")
-}
-
 /// A blind-overwrite record accumulator: an 8-field class whose global accumulator has one field
-/// overwritten each iteration (`acc = Wide { ...acc, f0: i }`). The plain path (`ReuseMode::Off`)
-/// allocates a fresh object and copies all 8 fields every step — O(n·fields); reuse mutates the one
-/// changed slot in place — O(n). The accumulator is read only after the loop, so it stays uniquely
-/// owned (a global, stored via the consuming `StoreGlobal`), letting both reuse modes fire.
+/// overwritten each iteration (`acc = Wide { ...acc, f0: i }`). Today's copying lowering allocates a
+/// fresh object and copies all 8 fields every step — O(n·fields). The accumulator is read only after
+/// the loop, so it stays uniquely owned (a global, stored via the consuming `StoreGlobal`) — the
+/// shape in-place reuse (memory-management Phase 5) will target to cut the slope to O(n).
 fn record_update_src(n: usize) -> String {
     let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
     let inits: Vec<String> = (0..8).map(|i| format!("f{i}: 0")).collect();
@@ -72,11 +56,10 @@ fn record_update_src(n: usize) -> String {
 }
 
 /// A **read-update** record accumulator inside a function (`acc = Wide { ...acc, f0: acc.f0 + 1 }`),
-/// returned after the loop. Before drop insertion this could not reuse — the `acc.f0` read retained
-/// the accumulator into a temporary the register machine never freed, so reuse fell back to a copy.
-/// With drop insertion (`Drop` after the `LoadField`, plus no declaration `Move` for the local) the
-/// accumulator stays uniquely owned, so `runtime` reuses in place. `off` vs `runtime` is the win drop
-/// insertion unlocked. (Static stays off — the analysis keeps read-updates on the runtime path.)
+/// returned after the loop. The `acc.f0` read keeps the accumulator uniquely owned at the construct
+/// (the IR's `Drop` after the `LoadField` plus 3.3b's no-`Move` local declaration), so once
+/// Phase-5 reuse lands it can mutate in place; today it still copies all 8 fields per step. Distinct
+/// from `record_update_src` in that the new field value depends on a field read of the old value.
 fn record_update_read_src(n: usize) -> String {
     let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
     let inits: Vec<String> = (0..8).map(|i| format!("f{i}: 0")).collect();
@@ -282,37 +265,29 @@ fn vm_hot_paths(c: &mut Criterion) {
     }
     disp.finish();
 
-    // Record-update reuse matrix: the same blind-overwrite accumulator compiled three ways isolates
-    // the two reuse axes — `off` vs `runtime` is the generalization win (allocation+copy elimination,
-    // O(n·fields)→O(n)); `runtime` vs `static` is the compile-time-hoist win (the elided refcount
-    // check). Parameterized over n so the complexity-class change is visible, not just a constant.
-    let modes = [
-        ("off", ReuseMode::Off),
-        ("runtime", ReuseMode::Runtime),
-        ("static", ReuseMode::Static),
-    ];
+    // Blind-overwrite record accumulator (`acc = Wide { ...acc, f0: i }`), parameterized over n so
+    // the complexity class is visible. Today's copying lowering is O(n·fields); the anchor for the
+    // Phase-5 in-place reuse that will cut it to O(n). (Was a three-mode `ReuseMode` matrix; the modes
+    // were retired with the inert P-REUSE machinery in memory-management Phase 3.3c — a single
+    // canonical compile remains.)
     let mut reuse = c.benchmark_group("vm_record_update");
-    for (label, mode) in modes {
-        for &n in LOOP_SIZES {
-            let module = compile_reuse(&record_update_src(n), mode);
-            reuse.bench_with_input(BenchmarkId::new(label, n), &module, |b, module| {
-                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))))
-            });
-        }
+    for &n in LOOP_SIZES {
+        let module = compile(&record_update_src(n));
+        reuse.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))))
+        });
     }
     reuse.finish();
 
-    // Read-update reuse, unlocked by drop insertion: `off` (copy) vs `runtime` (in-place). Without
-    // the `Drop` after `acc.f0`'s `LoadField`, `runtime` would fall back to a copy (refcount > 1), so
-    // this gap is exactly what drop insertion bought.
+    // Read-update accumulator (`acc = Wide { ...acc, f0: acc.f0 + 1 }`): the new value depends on a
+    // field read of the old, the distinct workload Phase-5 reuse must keep uniquely owned through the
+    // read. Same copying baseline today.
     let mut read = c.benchmark_group("vm_record_update_read");
-    for (label, mode) in [("off", ReuseMode::Off), ("runtime", ReuseMode::Runtime)] {
-        for &n in LOOP_SIZES {
-            let module = compile_reuse(&record_update_read_src(n), mode);
-            read.bench_with_input(BenchmarkId::new(label, n), &module, |b, module| {
-                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))))
-            });
-        }
+    for &n in LOOP_SIZES {
+        let module = compile(&record_update_read_src(n));
+        read.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))))
+        });
     }
     read.finish();
 
