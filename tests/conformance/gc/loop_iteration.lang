@@ -1,0 +1,36 @@
+// Loop-iteration destruction (spec §6, Phase 4.2a). A destructor-bearing local bound inside a loop
+// body is reclaimed at the **end of each iteration**, before the next one constructs its replacement
+// — not held to function teardown. Here `r` is a dead store after its single use, so no mid-block
+// last-use death is detected; the loop body's scope-exit drop reclaims it each pass. The accumulator
+// `total` is live across iterations (it flows around the back-edge), so it is *not* dropped — the
+// proof the pass respects `live_out`.
+// expect: stdout "start"
+// expect: stdout "use 0"
+// expect: stdout "close 0"
+// expect: stdout "use 1"
+// expect: stdout "close 1"
+// expect: stdout "use 2"
+// expect: stdout "close 2"
+// expect: stdout "sum 3"
+// expect: stdout "end"
+// expect: exit 0
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    fn use_it(): void { echo "use ${name}"; }
+    destruct { echo "close ${name}"; }
+}
+
+fn go(): void {
+    mut total = 0;
+    for i in 0..3 {
+        r = R.new("${i}");
+        r.use_it();
+        total = total + 1;
+    }
+    echo "sum ${total}";
+}
+
+echo "start";
+go();
+echo "end";

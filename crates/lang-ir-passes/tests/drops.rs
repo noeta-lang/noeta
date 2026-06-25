@@ -119,15 +119,34 @@ fn top_level_globals_are_never_dropped() {
 }
 
 #[test]
-fn reassigned_bindings_are_not_dropped() {
-    // `acc` is reassigned (mut decl + reassignment), so it is not single-assignment and keeps the
-    // existing reassignment-release + teardown behavior — the pass inserts no `DropVar` for it.
+fn reassigned_bindings_survivor_is_dropped_at_scope_exit() {
+    // `acc` is reassigned (mut decl + reassignment), so it is not single-assignment — the last-use
+    // pass skips it. Its *intermediate* value is released by the runtime at the assignment (spec §5);
+    // its *surviving* value is reclaimed by the Phase 4.2a scope-exit drop when `f` falls off its end.
     let program = lower("fn f() {\n  mut acc = 0;\n  acc = acc + 1;\n  echo acc;\n}\nf();\n");
     let dropped = insert_drops(&program, None);
     let d = collect(&dropped);
     assert!(
+        d.in_funcs.contains(&"acc".to_string()),
+        "reassigned acc's survivor must be dropped at scope exit, got {:?}",
+        d.in_funcs
+    );
+}
+
+#[test]
+fn an_accumulator_live_across_a_loop_is_not_dropped() {
+    // The Phase 4.2a scope-exit drop must respect `live_out`: `acc` flows around the loop's back-edge
+    // (read in a later iteration) and out to the `return`, so it is live at the loop body's exit and
+    // must NOT be dropped there — dropping it would null a slot still in use. The trailing `return`
+    // moves it out, so there is no function-exit drop either; `acc` appears in no drop set.
+    let program = lower(
+        "fn f() {\n  mut acc = 0;\n  while acc < 3 {\n    acc = acc + 1;\n  }\n  return acc;\n}\nf();\n",
+    );
+    let dropped = insert_drops(&program, None);
+    let d = collect(&dropped);
+    assert!(
         !d.in_funcs.contains(&"acc".to_string()),
-        "reassigned acc must not be dropped, got {:?}",
+        "accumulator live across the loop must not be dropped, got {:?}",
         d.in_funcs
     );
 }

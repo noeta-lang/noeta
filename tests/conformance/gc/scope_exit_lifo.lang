@@ -1,0 +1,27 @@
+// Reverse-construction order at scope exit (spec §3, Phase 4.2a). Three destructor-bearing locals
+// are all dead stores in the same scope; when the function falls off its end they are reclaimed in
+// **reverse construction order** — `c`, then `b`, then `a`. The scope-exit batch walks the block's
+// construction order in reverse, so both backends emit the same LIFO drop sequence.
+// expect: stdout "start"
+// expect: stdout "made"
+// expect: stdout "close c"
+// expect: stdout "close b"
+// expect: stdout "close a"
+// expect: stdout "end"
+// expect: exit 0
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    destruct { echo "close ${name}"; }
+}
+
+fn go(): void {
+    a = R.new("a");
+    b = R.new("b");
+    c = R.new("c");
+    echo "made";
+}
+
+echo "start";
+go();
+echo "end";

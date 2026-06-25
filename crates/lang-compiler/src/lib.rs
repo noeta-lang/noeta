@@ -1352,6 +1352,18 @@ impl<'m> FnCompiler<'m> {
             } else if var.celled {
                 self.code.push(Op::CellSet { cell: var.reg, src });
             } else {
+                // A reassignment destroys the **displaced** value (spec §5): its destructor runs at
+                // the assignment point if this was its last reference. The tree-walker does this
+                // unconditionally (`Scope::assign` → `destroy_value`), and `StoreGlobal` already
+                // does it for globals; for a local register, fire it explicitly before the overwrite
+                // (`Op::Drop` is destructor-aware and clears the slot, so the following `Move` writes
+                // into `unit`). Skip a degenerate self-assignment, where `src` *is* the slot.
+                if src != var.reg {
+                    self.code.push(Op::Drop {
+                        reg: var.reg,
+                        relevant: true,
+                    });
+                }
                 self.code.push(Op::Move { dst: var.reg, src });
             }
             return Ok(());

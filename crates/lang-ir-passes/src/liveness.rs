@@ -44,6 +44,11 @@ pub struct ProgramLiveness {
 pub struct BlockLiveness {
     /// The variables live on entry to the block (before its first statement) — its `live_in`.
     pub live_in: VarSet,
+    /// The variables live on **exit** from the block — the `live_out` it was analyzed against. For a
+    /// loop body this is the converged fixpoint set, so it includes names that flow around the
+    /// back-edge (live in a later iteration). The drop pass uses it to keep its scope-exit drops off
+    /// any value the block does not actually abandon.
+    pub live_out: VarSet,
     /// One entry per statement in `block.stmts`, in order.
     pub stmts: Vec<StmtLiveness>,
 }
@@ -101,6 +106,7 @@ fn analyze_block(block: &Block, live_out: &VarSet) -> BlockLiveness {
     }
     BlockLiveness {
         live_in: live,
+        live_out: live_out.clone(),
         stmts: stmts.into_iter().map(|s| s.unwrap()).collect(),
     }
 }

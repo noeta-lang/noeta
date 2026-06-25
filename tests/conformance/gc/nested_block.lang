@@ -1,0 +1,27 @@
+// Nested-block destruction (spec §2/§6, Phase 4.2a). A destructor-bearing local declared inside an
+// `if` block is reclaimed when control leaves that block, not deferred to the enclosing function's
+// teardown — so `close x` prints *before* `after block`. The value is a dead store (never read after
+// construction), which the liveness-death pass cannot place; the block's scope-exit drop reclaims it.
+// expect: stdout "start"
+// expect: stdout "in block"
+// expect: stdout "close x"
+// expect: stdout "after block"
+// expect: stdout "end"
+// expect: exit 0
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    destruct { echo "close ${name}"; }
+}
+
+fn go(c: bool): void {
+    if c {
+        inner = R.new("x");
+        echo "in block";
+    }
+    echo "after block";
+}
+
+echo "start";
+go(true);
+echo "end";

@@ -1,0 +1,29 @@
+// Reassignment + scope exit (spec §2/§5, Phase 4.2a). A reassigned local destroys its **displaced**
+// value at the assignment point (`close a` between the two reads of `r`), and its **surviving** value
+// when the scope falls off its end (`close b` before `go` returns). The single-assignment last-use
+// pass could not reach `r` (it is bound twice); the scope-exit drop reclaims the survivor. Both
+// backends execute the same IR drops, so the differential proves the order is identical.
+// expect: stdout "start"
+// expect: stdout "use a"
+// expect: stdout "close a"
+// expect: stdout "use b"
+// expect: stdout "close b"
+// expect: stdout "end"
+// expect: exit 0
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    fn use_it(): void { echo "use ${name}"; }
+    destruct { echo "close ${name}"; }
+}
+
+fn go(): void {
+    mut r = R.new("a");
+    r.use_it();
+    r = R.new("b");
+    r.use_it();
+}
+
+echo "start";
+go();
+echo "end";

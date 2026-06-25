@@ -3775,6 +3775,22 @@ mod tests {
     }
 
     #[test]
+    fn reassigning_a_local_destroys_displaced_then_survivor_at_scope_exit() {
+        // Phase 4.2a: a reassigned **local** (not a global) destroys its displaced value at the
+        // assignment via the `Op::Drop` the compiler emits before the overwriting `Op::Move`
+        // (`set_reg`'s plain release would not fire the destructor), and its surviving value via the
+        // function-body scope-exit drop. "first" closes between the two reads; "second" before return.
+        let r = run(
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\nfn go(): void {\n  mut r = R.new(\"first\");\n  r.use_it();\n  r = R.new(\"second\");\n  r.use_it();\n}\necho \"start\";\ngo();\necho \"end\";\n",
+        );
+        assert_eq!(
+            r.stdout,
+            "start\nuse first\nclose first\nuse second\nclose second\nend\n"
+        );
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn a_class_without_a_destructor_runs_nothing() {
         let r = run(
             "class R {\n  v: int\n  fn new(v: int): R { return R { v: v }; }\n}\nx = R.new(1);\necho \"done\";\n",
