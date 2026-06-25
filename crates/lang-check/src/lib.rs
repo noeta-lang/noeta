@@ -2468,6 +2468,22 @@ impl Checker {
                 stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
             }
             Expr::Member { receiver, name, .. } => {
+                // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
+                // conversions (PHP `tryFrom`/`from`), reserved on every enum type. Checked before the
+                // variant constructor so the names cannot be captured by a same-named variant.
+                if let Expr::Ident { name: tn, .. } = receiver.as_ref()
+                    && (name == "try_from" || name == "from")
+                    && lookup(env, tn).is_none()
+                    && self.enums.contains_key(tn)
+                {
+                    self.check_args(&[Type::String], 1, args, span, name);
+                    let ty = Type::Named(tn.clone(), Vec::new());
+                    return if name == "from" {
+                        ty
+                    } else {
+                        Type::Option(Box::new(ty))
+                    };
+                }
                 // `Type.Variant(args)` — an algebraic enum constructor applied to its data.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && self.is_enum_variant(tn, name)

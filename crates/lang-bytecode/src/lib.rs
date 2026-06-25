@@ -389,6 +389,22 @@ pub enum Op {
         shape: u32,
         args: Box<[Reg]>,
     },
+    /// `dst = Enum.try_from(s)` / `Enum.from(s)` — construct a **payload-free** enum case from the
+    /// string in `arg`, matched by case name (the PHP `tryFrom`/`from` pair). `cases` lists every
+    /// payload-free `(name, shape)` of the enum. On a hit: `from` (`panic = true`) yields the case
+    /// itself; `try_from` (`panic = false`) wraps it as `Option.some` (`some_shape`). On a miss:
+    /// `from` raises an `E0010` panic at `span`; `try_from` yields `Option.none` (`none_shape`). A
+    /// non-string `arg` raises `E0007`.
+    EnumFromStr {
+        dst: Reg,
+        arg: Reg,
+        enum_name: String,
+        cases: Box<[(String, u32)]>,
+        some_shape: u32,
+        none_shape: u32,
+        panic: bool,
+        span: Span,
+    },
     /// `dst = obj.field` — load an object field by name (resolved through the receiver's
     /// shape). A receiver that is not an object, or lacks the field, raises E0005 at `span`.
     LoadField {
@@ -951,6 +967,16 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::MakeEnum { dst, shape, args } => {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
             format!("MakeEnum    r{dst} <- shape s{shape}({})", args.join(", "))
+        }
+        Op::EnumFromStr {
+            dst,
+            arg,
+            enum_name,
+            panic,
+            ..
+        } => {
+            let kind = if *panic { "from" } else { "try_from" };
+            format!("EnumFromStr r{dst} <- {enum_name}.{kind}(r{arg})")
         }
         Op::LoadField {
             dst, obj, field, ..

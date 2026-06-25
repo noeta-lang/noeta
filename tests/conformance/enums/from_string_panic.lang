@@ -1,0 +1,10 @@
+// `Enum.from(s)` panics (E0010) when `s` names no case — the PHP `from` semantics (its companion
+// `try_from` returns `none` instead). Both backends abort identically.
+// expect: error E0010 at 10:6
+// expect: exit 1
+enum Status {
+    Pending;
+    Paid;
+}
+
+echo Status.from("Nope");

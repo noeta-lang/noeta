@@ -1773,6 +1773,60 @@ impl Interpreter {
         })))
     }
 
+    /// `MyEnum.try_from(s)` → `?MyEnum` (`some(case)` if `s` names a payload-free case, else `none`)
+    /// and `MyEnum.from(s)` → `MyEnum` (the case, or a panic if `s` names none) — the PHP `tryFrom`/
+    /// `from` pair, matched by case **name**. A payload-carrying variant is not name-constructible
+    /// (no payload to supply), so it never matches. The VM's `Op::EnumFromStr` mirrors this exactly.
+    fn enum_from_string(
+        &mut self,
+        def: &Rc<EnumDef>,
+        method: &str,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        if args.len() != 1 {
+            return Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`{}.{method}` takes one string argument", def.name()),
+            ));
+        }
+        let Value::Str(key) = &args[0] else {
+            return Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`{}.{method}` expects a string, found {}",
+                    def.name(),
+                    args[0].type_name()
+                ),
+            ));
+        };
+        let key = key.clone();
+        // Match only a payload-free case of this name (a payload variant cannot be built from a name).
+        let matched = def.variant(&key).is_some_and(|v| v.field_names.is_empty());
+        if matched {
+            let value = Value::Enum(Rc::new(EnumValue {
+                enum_name: def.name().to_string(),
+                variant: key,
+                data: vec![],
+            }));
+            if method == "from" {
+                Ok(value)
+            } else {
+                Ok(builtin_enum("Option", "some", vec![value]))
+            }
+        } else if method == "from" {
+            Err(self.runtime_error(
+                DiagnosticCode::Panic,
+                span,
+                format!("panic: `{}` has no case `{key}`", def.name()),
+            ))
+        } else {
+            Ok(builtin_enum("Option", "none", vec![]))
+        }
+    }
+
     /// Apply the binding rules: `mut` declares/overwrites a mutable binding in the
     /// current scope; a bare `name = expr` reassigns an existing (mutable) binding if
     /// one is in scope, errors on an immutable one, and otherwise introduces a new
@@ -2172,6 +2226,12 @@ impl Interpreter {
         span: Span,
     ) -> Eval<Value> {
         if let Value::EnumType(def) = &receiver {
+            // `MyEnum.try_from(s)` / `MyEnum.from(s)` — construct a payload-free case from its name
+            // string (the PHP `tryFrom`/`from` pair). Intercepted before variant construction so the
+            // built-in names cannot be shadowed by a same-named variant lookup.
+            if name == "try_from" || name == "from" {
+                return self.enum_from_string(&Rc::clone(def), name, args, span);
+            }
             return self.make_variant(&Rc::clone(def), name, args, span);
         }
         // `json.parse(...)` — a Ring 2 native module function call.

@@ -2068,6 +2068,11 @@ impl<'m> FnCompiler<'m> {
         } = receiver
         {
             if let Some(TypeInfo::Enum { .. }) = self.module.types.get(type_name) {
+                // `Enum.try_from(s)` / `Enum.from(s)` — string→case conversion (intercepted before
+                // variant construction, mirroring the checker and the tree-walker).
+                if name == "try_from" || name == "from" {
+                    return self.lower_enum_from_str(type_name, name == "from", args, dst, span);
+                }
                 return self.make_enum(type_name, name, args, dst);
             }
             if let Some(TypeInfo::Class { fns, .. }) = self.module.types.get(type_name)
@@ -2377,6 +2382,55 @@ impl<'m> FnCompiler<'m> {
             dst,
             shape,
             args: arg_regs.into_boxed_slice(),
+        });
+        self.release_consumed(&consumed);
+        Ok(())
+    }
+
+    /// `Enum.try_from(s)` / `Enum.from(s)` (`panic` = the `from` form) — lower the string→case
+    /// conversion. Interns the shape of every **payload-free** variant (the name-constructible ones)
+    /// plus the `Option` wrappers, and emits `Op::EnumFromStr`; the VM matches the runtime string
+    /// against the case names. The checker guarantees a single string argument.
+    fn lower_enum_from_str(
+        &mut self,
+        type_name: &str,
+        panic: bool,
+        args: &[Atom],
+        dst: Reg,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let variants = match self.module.types.get(type_name) {
+            Some(TypeInfo::Enum { variants }) => variants.clone(),
+            _ => unreachable!("lower_enum_from_str is only reached for enum types"),
+        };
+        let mut cases: Vec<(String, u32)> = variants
+            .into_iter()
+            .filter(|(_, fields)| fields.is_empty())
+            .map(|(vname, _)| {
+                let shape = self.module.intern_shape(Shape::enum_variant(
+                    type_name.to_string(),
+                    vname.clone(),
+                    Vec::new(),
+                    false,
+                ));
+                (vname, shape)
+            })
+            .collect();
+        // Stable order keeps the disassembly deterministic (the source `HashMap` is not ordered).
+        cases.sort_by(|a, b| a.0.cmp(&b.0));
+        let some_shape = self.module.builtin_enum_shape("Option", "some");
+        let none_shape = self.module.builtin_enum_shape("Option", "none");
+        let mut consumed = Vec::new();
+        let arg = self.consume_operand(&args[0], &mut consumed)?;
+        self.code.push(Op::EnumFromStr {
+            dst,
+            arg,
+            enum_name: type_name.to_string(),
+            cases: cases.into_boxed_slice(),
+            some_shape,
+            none_shape,
+            panic,
+            span,
         });
         self.release_consumed(&consumed);
         Ok(())

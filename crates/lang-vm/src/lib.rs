@@ -2252,6 +2252,58 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, Value::enum_value(shape, data));
                     frames[top].pc += 1;
                 }
+                Op::EnumFromStr {
+                    dst,
+                    arg,
+                    enum_name,
+                    cases,
+                    some_shape,
+                    none_shape,
+                    panic,
+                    span,
+                } => {
+                    let key = match frames[top].regs[*arg as usize].as_string() {
+                        Some(s) => s,
+                        None => {
+                            let kind = if *panic { "from" } else { "try_from" };
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`{enum_name}.{kind}` expects a string, found {}",
+                                    frames[top].regs[*arg as usize].type_name()
+                                ),
+                            ));
+                        }
+                    };
+                    let matched = cases.iter().find(|(name, _)| *name == key);
+                    let result = match matched {
+                        Some((_, shape_idx)) => {
+                            // Build the payload-free case; its single reference transfers onward.
+                            let shape = self.shapes[*shape_idx as usize].clone();
+                            let case = Value::enum_value(shape, Vec::new());
+                            if *panic {
+                                case
+                            } else {
+                                let some = self.shapes[*some_shape as usize].clone();
+                                Value::enum_value(some, vec![case])
+                            }
+                        }
+                        None if *panic => {
+                            return Err(self.error(
+                                DiagnosticCode::Panic,
+                                *span,
+                                format!("panic: `{enum_name}` has no case `{key}`"),
+                            ));
+                        }
+                        None => {
+                            let none = self.shapes[*none_shape as usize].clone();
+                            Value::enum_value(none, Vec::new())
+                        }
+                    };
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::LoadField {
                     dst,
                     obj,

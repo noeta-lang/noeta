@@ -241,6 +241,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
         }
+        Op::EnumFromStr { dst, arg, .. } => {
+            f.def = Some(*dst);
+            f.uses.push(*arg);
+        }
         Op::LoadField { dst, obj, .. } => {
             f.def = Some(*dst);
             f.uses.push(*obj);
@@ -629,6 +633,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             for r in args.iter_mut() {
                 m(r);
             }
+        }
+        Op::EnumFromStr { dst, arg, .. } => {
+            m(dst);
+            m(arg);
         }
         Op::LoadField { dst, obj, .. } => {
             m(dst);
