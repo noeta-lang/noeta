@@ -1,0 +1,29 @@
+---
+source: crates/lang-vm/src/lib.rs
+expression: module.disassemble()
+---
+=== main ===
+params: 0, registers: 2
+code:
+    0  MakeClosure r0 <- proto 1 [0 captures]
+    1  StoreGlobal "build" <- r0
+    2  LoadGlobal  r1 <- "build"
+    3  Call        r0 <- r1()
+    4  Stringify   r1 <- display(r0)
+    5  Echo        r1
+    6  Halt
+=== proto 1 ===
+params: 0, registers: 3
+constants:
+  k0 = 1
+  k1 = 2
+  k2 = 3
+code:
+    0  LoadConst   r1 <- k0
+    1  LoadConst   r2 <- k1
+    2  Binary      r0 <- r1 + r2
+    3  LoadConst   r2 <- k2
+    4  Binary      r1 <- r0 + r2
+    5  Drop        r0
+    6  Return      r1
+    7  Halt

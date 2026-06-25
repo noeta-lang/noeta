@@ -4307,6 +4307,23 @@ mod tests {
     }
 
     #[test]
+    fn disassembly_of_local_bindings_consumes_temporaries() {
+        // Each local declaration's value is a single-use temporary, so the local *adopts* the
+        // temporary's register (a consuming move, Phase 3.3b) instead of a retaining `Op::Move` into
+        // a fresh slot: the body holds no `Move` between the producing `Add` and the binding, and
+        // `registers` stays small. A borrowed source (`y = x`, an aliased live local) still copies.
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "fn build(): int {\n  a = 1 + 2;\n  b = a + 3;\n  return b;\n}\necho build();\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        insta::assert_snapshot!(module.disassemble());
+    }
+
+    #[test]
     fn closure_default_reads_a_captured_cell() {
         // A closure default that references a captured variable the body never otherwise names: the
         // default thunk shares the closure's upvalue layout and reads the captured cell. Exercises

@@ -1085,7 +1085,8 @@ impl<'m> FnCompiler<'m> {
         if celled {
             self.code.push(Op::CellSet { cell: reg, src: t });
         } else {
-            self.declare_local(name, t, false);
+            // `t` holds a just-built closure read nowhere else — the local adopts it (consuming move).
+            self.declare_local(name, t, true, false);
         }
         Ok(())
     }
@@ -1356,10 +1357,12 @@ impl<'m> FnCompiler<'m> {
         value: &Atom,
     ) -> Result<(), Unsupported> {
         // The value is a pre-computed atom (its side effects already ran in the preceding `let`s);
-        // `atom_reg` only materializes the register holding it. The binding rule then applies — so
-        // a reassignment to an immutable still runs the value (no observable change), matching the
-        // tree-walker's `bind`.
-        let src = self.atom_reg(value)?;
+        // `atom_reg_owned` only materializes the register holding it and reports whether a
+        // declaration may consume (adopt) that register. The binding rule then applies — so a
+        // reassignment to an immutable still runs the value (no observable change), matching the
+        // tree-walker's `bind`. (Only the declaration paths use `owned`; the store/reassign paths
+        // retain on write, so a borrowed source is fine there.)
+        let (src, owned) = self.atom_reg_owned(value)?;
 
         if mut_decl {
             if self.at_global_depth() {
@@ -1370,7 +1373,7 @@ impl<'m> FnCompiler<'m> {
                     src,
                 });
             } else {
-                self.declare_local(name, src, true);
+                self.declare_local(name, src, owned, true);
             }
             return Ok(());
         }
@@ -1430,25 +1433,37 @@ impl<'m> FnCompiler<'m> {
                 src,
             });
         } else {
-            self.declare_local(name, src, false);
+            self.declare_local(name, src, owned, false);
         }
         Ok(())
     }
 
-    /// Bind `name` to a fresh local register initialized from `src`, reusing the slot if the
-    /// name already exists in the innermost scope (a re-`mut` shadow). A captured (celled) local
-    /// boxes `src` into a fresh cell instead — re-run each time the binding executes (e.g. per
-    /// loop iteration), so each entry gets a distinct cell, matching the tree-walker's fresh
-    /// per-iteration scope.
-    fn declare_local(&mut self, name: &str, src: Reg, mutable: bool) {
+    /// Bind `name` to a local register initialized from `src`, reusing the slot if the name already
+    /// exists in the innermost scope (a re-`mut` shadow). A captured (celled) local boxes `src` into
+    /// a fresh cell instead — re-run each time the binding executes (e.g. per loop iteration), so
+    /// each entry gets a distinct cell, matching the tree-walker's fresh per-iteration scope.
+    ///
+    /// `owned` marks `src` as a value the binding may **consume**: a single-use ANF temporary or a
+    /// freshly materialized constant/global/field/closure that no live binding holds. When it is
+    /// (and we are not writing into an existing shadowed slot), the local **adopts** `src`'s register
+    /// as its home — a *consuming move* with no copying `Op::Move` (the value is already there). A
+    /// borrowed source (a directly-held local or `self`, whose slot another live binding owns) is
+    /// copied into a fresh slot so a later reassignment of either binding cannot disturb the other.
+    fn declare_local(&mut self, name: &str, src: Reg, owned: bool, mutable: bool) {
         let celled = self.celled.contains(name);
         let reg = match self.scopes.last().unwrap().get(name) {
+            // A re-`mut` shadow writes into the existing slot — no adoption.
             Some(v) => v.reg,
+            // An owned source: adopt its register as the local's home (consuming move).
+            None if owned => src,
+            // A borrowed source: copy into a fresh slot.
             None => self.alloc_reg(),
         };
         if celled {
+            // A captured local always boxes; an adopted owned source boxes *in place* (`dst == src`).
             self.code.push(Op::MakeCell { dst: reg, src });
-        } else {
+        } else if reg != src {
+            // A plain adoption (`reg == src`) needs no copy; only a fresh/shadowed slot does.
             self.code.push(Op::Move { dst: reg, src });
         }
         self.scopes.last_mut().unwrap().insert(
@@ -1474,6 +1489,26 @@ impl<'m> FnCompiler<'m> {
             }
             Atom::Temp(t) => Ok(self.temp_reg(*t)),
             Atom::Var { name, span } => self.var_reg(name, *span),
+        }
+    }
+
+    /// Like [`FnCompiler::atom_reg`], but also reports whether the returned register is **owned** —
+    /// freshly produced for this read and held by no other live binding, so a declaration may adopt
+    /// it as its home (a consuming move). The borrowed cases are a directly-held local or `self`,
+    /// whose slot another live binding owns; everything else (an ANF temporary — single-use by the
+    /// ANF invariant — a materialized constant/global/field/upvalue) is owned.
+    fn atom_reg_owned(&mut self, atom: &Atom) -> Result<(Reg, bool), Unsupported> {
+        match atom {
+            // A single-use temporary: this read is its only consumer, so its slot is free to adopt.
+            Atom::Temp(t) => Ok((self.temp_reg(*t), true)),
+            // A constant materializes into its own fresh register.
+            Atom::Const(_) => Ok((self.atom_reg(atom)?, true)),
+            Atom::Var { name, span } => match self.resolve(name) {
+                // A live local / receiver — its register is borrowed; copy on declaration.
+                Resolved::Local(_) | Resolved::SelfRecv => Ok((self.var_reg(name, *span)?, false)),
+                // Celled / upvalue / field / global / prelude — `var_reg` materializes a fresh slot.
+                _ => Ok((self.var_reg(name, *span)?, true)),
+            },
         }
     }
 
