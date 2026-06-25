@@ -1,0 +1,37 @@
+// Last-use destruction (memory-management migration, Phase 4): a destructor-bearing value held in
+// a function **local** runs its `destruct` when that local dies — at its last use, in the local's
+// own scope — not deferred to program end. Here `r`'s last use is the `r.use_it()` call; its
+// destructor fires right after the call returns, before the next statement. This generalizes the
+// globals-only rule (see `destruct_order.lang`): both backends fire at the same IR drop point, so
+// the differential proves identity.
+// expect: stdout "start"
+// expect: stdout "using r"
+// expect: stdout "closing r"
+// expect: stdout "after use"
+// expect: stdout "end"
+// expect: exit 0
+class Resource {
+    name: string
+
+    fn new(name: string): Resource {
+        return Resource { name: name };
+    }
+
+    fn use_it(): void {
+        echo "using ${name}";
+    }
+
+    destruct {
+        echo "closing ${name}";
+    }
+}
+
+fn scope(): void {
+    r = Resource.new("r");
+    r.use_it();
+    echo "after use";
+}
+
+echo "start";
+scope();
+echo "end";

@@ -875,15 +875,19 @@ impl<'m> FnCompiler<'m> {
             // the reuse-aware allocator handles temps in 3.3).
             Stmt::Drop(_) => Ok(()),
             // A source-variable drop (Phase 3 drop-insertion) releases the binding's value at its
-            // last use. Only a value held **directly** in a frame register is released here, via a
-            // plain `Op::Drop` (clears the register to unit, releasing the value with no destructor —
-            // destructor firing stays globals-only until Phase 4). A celled/captured local, an
-            // upvalue, a global, or a method field is left alone (the drop pass already excludes
-            // captured locals and globals; resolving to any of those means there is nothing this
-            // frame uniquely owns to release).
-            Stmt::DropVar { name, .. } => {
+            // last use. Only a value held **directly** in a frame register is released here, via
+            // `Op::Drop` (clears the register to unit). A celled/captured local, an upvalue, a
+            // global, or a method field is left alone (the drop pass already excludes captured
+            // locals and globals; resolving to any of those means there is nothing this frame
+            // uniquely owns to release). The IR's destructor-relevance bit (Phase 3.2b) rides along
+            // as `Op::Drop.relevant`: a relevant drop fires the value's `destruct` at this last use
+            // (Phase 4) if it is the final reference; an irrelevant one stays a plain release.
+            Stmt::DropVar { name, relevant, .. } => {
                 if let Resolved::Local(reg) = self.resolve(name) {
-                    self.code.push(Op::Drop { reg });
+                    self.code.push(Op::Drop {
+                        reg,
+                        relevant: *relevant,
+                    });
                 }
                 Ok(())
             }

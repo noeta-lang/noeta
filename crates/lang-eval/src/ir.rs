@@ -242,11 +242,19 @@ impl Interpreter {
                 frame.drop(*t);
                 Ok(Flow::Normal)
             }
-            // A source-variable drop (Phase 3 drop-insertion): plainly release the binding's value
-            // at its last use (no destructor — destructor firing stays globals-only until Phase 4),
-            // aligning this backend's reclamation timing with the VM's. Behavior-neutral.
-            lang_ir::Stmt::DropVar { name, .. } => {
-                self.scope.release_binding(name);
+            // A source-variable drop (Phase 3 drop-insertion): release the binding's value at its
+            // last use, aligning this backend's reclamation timing with the VM's. When the drop is
+            // destructor-relevant (Phase 4), take the value out and run `destroy_value`, firing its
+            // `destruct` block if this is the final reference (the VM's `release_value` mirror);
+            // otherwise the value reaches no destructor, so the plain `release_binding` is used.
+            lang_ir::Stmt::DropVar { name, relevant, .. } => {
+                if *relevant {
+                    if let Some(value) = self.scope.take_for_drop(name) {
+                        self.destroy_value(value);
+                    }
+                } else {
+                    self.scope.release_binding(name);
+                }
                 Ok(Flow::Normal)
             }
             lang_ir::Stmt::Coalesce {

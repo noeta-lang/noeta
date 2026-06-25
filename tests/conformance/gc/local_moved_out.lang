@@ -1,0 +1,31 @@
+// A value **moved out** of a scope is not destroyed at the move site (spec §2/§6): `inner` is
+// returned from `make`, transferring ownership to the caller, so its `destruct` does NOT fire as
+// `make`'s frame tears down — it fires once, later, when the binding it became (`g`, a global) is
+// destroyed at program end. This is the no-double-free guarantee for last-use destruction: the
+// drop pass never drops a returned value. Both backends agree by construction (same IR drops).
+// expect: stdout "start"
+// expect: stdout "made g"
+// expect: stdout "got it"
+// expect: stdout "close g"
+// expect: exit 0
+class R {
+    name: string
+
+    fn new(name: string): R {
+        return R { name: name };
+    }
+
+    destruct {
+        echo "close ${name}";
+    }
+}
+
+fn make(label: string): R {
+    inner = R.new(label);
+    echo "made ${label}";
+    return inner;
+}
+
+echo "start";
+g = make("g");
+echo "got it";

@@ -1005,10 +1005,9 @@ impl<'m> Vm<'m> {
 
     /// Release a value that may be the *last* reference to a destructor-carrying object. If so,
     /// the `destruct` block runs synchronously (with the instance's fields in scope) before the
-    /// object is freed — the deterministic destruction the spec requires. Used at the global
-    /// drop points (reassignment and program end); ordinary register releases use the plain
-    /// `release`, since a corpus destructible only ever lives in a global (its count never
-    /// reaches zero elsewhere).
+    /// object is freed — the deterministic destruction the spec requires. Used at every
+    /// destructor-relevant drop point: reassignment, program end, and (Phase 4) a destructor-
+    /// relevant `Op::Drop` at a local's last use. A non-relevant release uses the plain `release`.
     fn release_value(&mut self, value: Value) {
         if value.is_object()
             && value.refcount() == 1
@@ -1141,12 +1140,19 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, v);
                     frames[top].pc += 1;
                 }
-                Op::Drop { reg } => {
-                    // Release a dead single-use temporary at its last use and clear it to `unit` (so
+                Op::Drop { reg, relevant } => {
+                    // Release a dead binding/temporary at its last use and clear it to `unit` (so
                     // `set_reg`/teardown later release `unit`, never double-freeing). This frees the
-                    // `LoadField` receiver promptly, restoring the accumulator's unique ownership.
+                    // value promptly, restoring an accumulator's unique ownership. When the IR marked
+                    // the drop destructor-relevant (Phase 4), route it through `release_value` so a
+                    // `destruct` block fires here if this is the final owning reference; otherwise the
+                    // value provably reaches no destructor and the plain `release` is used.
                     let v = std::mem::replace(&mut frames[top].regs[*reg as usize], Value::unit());
-                    release(v);
+                    if *relevant {
+                        self.release_value(v);
+                    } else {
+                        release(v);
+                    }
                     frames[top].pc += 1;
                 }
                 Op::ConcatInPlace { dst, lhs, rhs, .. } => {
@@ -3741,6 +3747,21 @@ mod tests {
         );
         // Globals destroyed in reverse declaration order: b before a.
         assert_eq!(r.stdout, "body\nclose b\nclose a\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn destructor_fires_at_a_locals_last_use_not_at_program_end() {
+        // Phase 4: a destructor-bearing function **local** runs its `destruct` at its last use —
+        // here the `r.announce()` call — before the function returns, not deferred to program end.
+        // The bare `compile` path marks every drop conservatively relevant, so the local's
+        // `Op::Drop` routes through `release_value` and fires the destructor.
+        let r = run(
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn announce(): void { echo \"here ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\nfn scope(): void {\n  r = R.new(\"x\");\n  r.announce();\n  echo \"after\";\n}\necho \"start\";\nscope();\necho \"end\";\n",
+        );
+        // `r`'s last use is `r.announce()`; the destructor fires right after it returns, before
+        // "after" — and definitely before program end ("end").
+        assert_eq!(r.stdout, "start\nhere x\nclose x\nafter\nend\n");
         assert_eq!(r.exit_code, 0);
     }
 

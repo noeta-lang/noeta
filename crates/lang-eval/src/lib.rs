@@ -612,6 +612,22 @@ impl Scope {
         }
     }
 
+    /// Like [`Scope::release_binding`], but **returns** the displaced value (leaving `Unit` in the
+    /// slot) so the caller can run its `destruct` block if it holds the last reference — the
+    /// Phase-4 destructor-firing drop. Returns `None` if `name` is unbound. The audit poison and
+    /// outward search match `release_binding`; only the disposal differs (the caller owns the value
+    /// and decides whether a destructor fires, rather than the `Rc` dropping silently here).
+    fn take_for_drop(&self, name: &str) -> Option<Value> {
+        if let Some(binding) = self.vars.borrow_mut().get_mut(name) {
+            let value = std::mem::replace(&mut binding.value, Value::Unit);
+            drop_audit::on_drop(self as *const Scope as usize, name);
+            return Some(value);
+        }
+        self.parent
+            .as_ref()
+            .and_then(|parent| parent.take_for_drop(name))
+    }
+
     /// Remove and return this scope's bindings in **reverse** declaration order, for
     /// deterministic destruction at scope exit.
     fn drain_reverse(&self) -> Vec<Value> {

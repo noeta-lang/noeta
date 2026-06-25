@@ -1,0 +1,38 @@
+// Aliasing defers; siblings destroy in reverse-construction order (spec §2 + §3). `a` and `b` are
+// both passed to `show`, which binds them to its parameters `x`/`y` — a second reference each, so
+// `show`'s own parameter drops do NOT fire a destructor (refcount still > 1); the destructor runs
+// only when the final reference (`a`/`b` in `pair`) dies. `a` and `b` reach their last use together
+// at the `show(a, b)` call, so they die together and run in reverse-construction order: `b` then
+// `a`. Both backends key on "is this the last reference?" (eval `Rc::strong_count`, VM refcount), so
+// the differential proves the deferral and the order are identical.
+// expect: stdout "begin"
+// expect: stdout "show a b"
+// expect: stdout "closing b"
+// expect: stdout "closing a"
+// expect: stdout "done"
+// expect: exit 0
+class Resource {
+    name: string
+
+    fn new(name: string): Resource {
+        return Resource { name: name };
+    }
+
+    destruct {
+        echo "closing ${name}";
+    }
+}
+
+fn show(x: Resource, y: Resource): void {
+    echo "show ${x.name} ${y.name}";
+}
+
+fn pair(): void {
+    a = Resource.new("a");
+    b = Resource.new("b");
+    show(a, b);
+    echo "done";
+}
+
+echo "begin";
+pair();

@@ -88,7 +88,7 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::LoadGlobal { dst, .. } => f.def = Some(*dst),
         Op::StoreGlobal { src, .. } => f.uses.push(*src),
         Op::TakeGlobal { dst, .. } => f.def = Some(*dst),
-        Op::Drop { reg } => {
+        Op::Drop { reg, .. } => {
             // Reads then clears the register to unit: a use that kills the value.
             f.uses.push(*reg);
             f.def = Some(*reg);
@@ -467,7 +467,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::LoadGlobal { dst, .. } => m(dst),
         Op::StoreGlobal { src, .. } => m(src),
         Op::TakeGlobal { dst, .. } => m(dst),
-        Op::Drop { reg } => m(reg),
+        Op::Drop { reg, .. } => m(reg),
         Op::ConcatInPlace { dst, lhs, rhs, .. } => {
             m(dst);
             m(lhs);

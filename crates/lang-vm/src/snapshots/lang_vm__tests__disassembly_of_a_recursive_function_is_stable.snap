@@ -1,6 +1,6 @@
 ---
 source: crates/lang-vm/src/lib.rs
-assertion_line: 4239
+assertion_line: 4282
 expression: module.disassemble()
 ---
 === main ===
@@ -34,7 +34,7 @@ code:
     8  Call        r2 <- r3(r1)
     9  LoadConst   r3 <- k2
    10  Binary      r1 <- r0 - r3
-   11  Drop        r0
+   11  Drop        r0 ~destruct
    12  LoadGlobal  r3 <- "fib"
    13  Call        r0 <- r3(r1)
    14  Binary      r1 <- r2 + r0

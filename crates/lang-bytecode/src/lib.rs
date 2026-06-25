@@ -174,8 +174,14 @@ pub enum Op {
     /// reuse it in place even when the update *reads* the accumulator (`acc = T { ...acc, x: acc.x }`).
     /// Clearing to `unit` keeps it idempotent with `set_reg`'s release-on-overwrite and frame teardown
     /// (both then release `unit`, a no-op) — so no value is double-freed. See `p-reuse-analysis.md`.
+    ///
+    /// `relevant` (Phase 4, from the IR `DropVar`'s destructor-relevance bit): when `true`, the
+    /// release runs through the destructor-firing path (`release_value`) so a `destruct` block fires
+    /// at this last use if this is the final owning reference; when `false`, the value provably
+    /// reaches no destructor, so the plain `release` is used (the fast path, unchanged from Phase 3).
     Drop {
         reg: Reg,
+        relevant: bool,
     },
     /// `dst = lhs ~ rhs`, **consuming `lhs`** (the copy-on-write list-append fast path). `lhs` is the
     /// taken-out accumulator (its register is left `unit`); `rhs` is borrowed. When `lhs` is a
@@ -790,7 +796,10 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {name:?}"),
         Op::StoreGlobal { name, src } => format!("StoreGlobal {name:?} <- r{src}"),
         Op::TakeGlobal { dst, name, .. } => format!("TakeGlobal  r{dst} <- take({name:?})"),
-        Op::Drop { reg } => format!("Drop        r{reg}"),
+        Op::Drop { reg, relevant } => {
+            let tag = if *relevant { " ~destruct" } else { "" };
+            format!("Drop        r{reg}{tag}")
+        }
         Op::ConcatInPlace { dst, lhs, rhs, .. } => format!("ConcatIP    r{dst} <- r{lhs} ~ r{rhs}"),
         Op::MakeClosure {
             dst,
