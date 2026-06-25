@@ -100,6 +100,14 @@ pub enum Const {
     Str(String),
 }
 
+/// One owned local to drop on a `?`-operator's error path: its source name and whether its type is
+/// destructor-relevant (so the backend runs `destruct` only when it can fire). See [`Rvalue::Try`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct TryDrop {
+    pub name: String,
+    pub relevant: bool,
+}
+
 /// One `name: atom` initializer in an [`Rvalue::Object`] literal, keeping the field-name span
 /// for diagnostics.
 #[derive(Debug, Clone)]
@@ -204,8 +212,16 @@ pub enum Rvalue {
     /// A closure construction: capture the current lexical scope around `func`'s template.
     Closure { func: Rc<Func>, span: Span },
     /// The `?` propagation operator: yield the success payload, or early-return the
-    /// `Err`/`none` from the enclosing function.
-    Try { operand: Atom, span: Span },
+    /// `Err`/`none` from the enclosing function. `on_error` is the statically-computed list of
+    /// owned frame locals (name + destructor-relevance, innermost-scope-first reverse-construction
+    /// order) to drop on the **error** path before propagating — the drop pass fills it so a `?`
+    /// early-return reclaims abandoned values exactly as an explicit `return` does (Phase 4.2c).
+    /// The propagated operand is excluded (it is moved out).
+    Try {
+        operand: Atom,
+        on_error: Vec<TryDrop>,
+        span: Span,
+    },
     /// `expr.as<T>()` — narrow to `?T` (head-constructor match).
     As {
         operand: Atom,

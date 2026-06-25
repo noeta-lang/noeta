@@ -532,6 +532,8 @@ impl Lowerer {
                     out,
                     Rvalue::Try {
                         operand,
+                        // Filled by the drop-insertion pass; lowering emits none.
+                        on_error: Vec::new(),
                         span: *span,
                     },
                     *span,

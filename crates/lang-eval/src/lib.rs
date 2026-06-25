@@ -1886,6 +1886,41 @@ impl Interpreter {
         }
     }
 
+    /// `?` for the Core-IR interpreter: like [`eval_try`](Self::eval_try), but on the **error** path
+    /// it first runs `on_error` — the drop pass's statically-computed reclamation of the frame locals
+    /// this early return abandons (Phase 4.2c) — so a `?` propagation destroys them exactly as an
+    /// explicit `return` would, before the value unwinds to the caller.
+    fn eval_try_ir(
+        &mut self,
+        value: Value,
+        on_error: &[lang_ir::TryDrop],
+        span: Span,
+    ) -> Eval<Value> {
+        match try_branch(&value) {
+            Some(TryBranch::Success(inner)) => Ok(inner),
+            Some(TryBranch::Empty) => {
+                for drop in on_error {
+                    if drop.relevant {
+                        if let Some(v) = self.scope.take_for_drop(&drop.name) {
+                            self.destroy_value(v);
+                        }
+                    } else {
+                        self.scope.release_binding(&drop.name);
+                    }
+                }
+                Err(Unwind::Return(value))
+            }
+            None => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`?` expects a `Result` or `Option`, found {}",
+                    value.type_name()
+                ),
+            )),
+        }
+    }
+
     /// The `??` operator. On `Ok(x)`/`some(x)` it yields `x`; on `Err(_)`/`none` it
     /// evaluates and yields the `fallback` expression.
     fn eval_coalesce(&mut self, value: Value, fallback: &Expr, span: Span) -> Eval<Value> {

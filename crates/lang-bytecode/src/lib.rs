@@ -405,10 +405,14 @@ pub enum Op {
     },
     /// The `?` operator. If `src` is `Ok(x)`/`some(x)`, `dst = x` (unit for the void `Ok()`)
     /// and execution continues; if it is `Err(_)`/`none`, that value is early-returned from the
-    /// current frame (the M0 `Unwind::Return`); anything else raises E0007 at `span`.
+    /// current frame (the M0 `Unwind::Return`); anything else raises E0007 at `span`. On the
+    /// early-return path, the `(reg, relevant)` pairs in `on_error` are dropped first — the drop
+    /// pass's reclamation of the frame locals this `?` abandons, destructor-relevant ones firing
+    /// `destruct` (Phase 4.2c) — in the order given (innermost scope first, reverse-construction).
     TryUnwrap {
         dst: Reg,
         src: Reg,
+        on_error: Vec<(Reg, bool)>,
         span: Span,
     },
     /// The `??` operator. If `src` is `Ok(x)`/`some(x)`, `dst = x` and execution continues; if
@@ -928,7 +932,26 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         } => format!("LoadField   r{dst} <- r{obj}.{field}"),
         Op::NextId { dst } => format!("NextId      r{dst}"),
         Op::Panic { msg, .. } => format!("Panic       r{msg}"),
-        Op::TryUnwrap { dst, src, .. } => format!("TryUnwrap   r{dst} <- r{src}?"),
+        Op::TryUnwrap {
+            dst, src, on_error, ..
+        } => {
+            if on_error.is_empty() {
+                format!("TryUnwrap   r{dst} <- r{src}?")
+            } else {
+                let drops = on_error
+                    .iter()
+                    .map(|(r, relevant)| {
+                        if *relevant {
+                            format!("r{r}~")
+                        } else {
+                            format!("r{r}")
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("TryUnwrap   r{dst} <- r{src}? !drop[{drops}]")
+            }
+        }
         Op::Coalesce {
             dst, src, fallback, ..
         } => format!("Coalesce    r{dst} <- r{src} ?? -> {fallback}"),

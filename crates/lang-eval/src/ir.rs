@@ -655,9 +655,13 @@ impl Interpreter {
                     )),
                 }
             }
-            lang_ir::Rvalue::Try { operand, span } => {
+            lang_ir::Rvalue::Try {
+                operand,
+                on_error,
+                span,
+            } => {
                 let value = self.eval_ir_atom(operand, frame)?;
-                self.eval_try(value, *span)
+                self.eval_try_ir(value, on_error, *span)
             }
             lang_ir::Rvalue::As { operand, ty, .. } => {
                 let value = self.eval_ir_atom(operand, frame)?;

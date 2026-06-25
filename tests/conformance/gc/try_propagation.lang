@@ -1,0 +1,35 @@
+// `?`-propagation destruction (spec §6, Phase 4.2c). When `?` early-returns an `Err`/`none` from a
+// frame, the frame locals it abandons are destroyed before the value unwinds — exactly as an explicit
+// `return` would (Phase 4.2b). Here `run`'s `check(c)?` propagates `Err("bad")`; `r`, constructed
+// before the `?` and live past it, is reclaimed at the propagation point (`close r` before the
+// caller prints the `Err`). The drop pass attaches the abandoned-locals list statically to the `?`,
+// and both backends execute that same list on the error path — so the differential proves the order.
+// expect: stdout "start"
+// expect: stdout "close r"
+// expect: stdout "Err(bad)"
+// expect: stdout "after"
+// expect: exit 0
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    fn use_it(): void { echo "use ${name}"; }
+    destruct { echo "close ${name}"; }
+}
+
+fn check(c: bool): Result<int, string> {
+    if c {
+        return Ok(7);
+    }
+    return Err("bad");
+}
+
+fn run(c: bool): Result<string, string> {
+    r = R.new("r");
+    x = check(c)?;
+    r.use_it();
+    return Ok("got ${x}");
+}
+
+echo "start";
+echo run(false);
+echo "after";

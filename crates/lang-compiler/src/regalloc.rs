@@ -222,11 +222,17 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*msg);
             f.fallthrough = false; // aborts the program
         }
-        Op::TryUnwrap { dst, src, .. } => {
+        Op::TryUnwrap {
+            dst, src, on_error, ..
+        } => {
             // On the error path it early-returns from the frame; on success continues. Either way
-            // `dst` is defined on the continue path and `src` is read.
+            // `dst` is defined on the continue path and `src` is read. The `on_error` registers are
+            // read (dropped) on the error path, so they are uses too — keeping them live to this op.
             f.def = Some(*dst);
             f.uses.push(*src);
+            for (reg, _) in on_error.iter() {
+                f.uses.push(*reg);
+            }
         }
         Op::Coalesce {
             dst, src, fallback, ..
@@ -602,9 +608,14 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         }
         Op::NextId { dst } => m(dst),
         Op::Panic { msg, .. } => m(msg),
-        Op::TryUnwrap { dst, src, .. } => {
+        Op::TryUnwrap {
+            dst, src, on_error, ..
+        } => {
             m(dst);
             m(src);
+            for (reg, _) in on_error.iter_mut() {
+                m(reg);
+            }
         }
         Op::Coalesce { dst, src, .. } => {
             m(dst);

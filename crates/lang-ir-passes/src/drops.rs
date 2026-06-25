@@ -130,22 +130,38 @@ fn emit_exit_drops(
     moved_out: &VarSet,
     span: Span,
 ) {
+    for (name, relevant) in collect_exit_drops(scopes, kind, moved_out) {
+        out.push(Stmt::DropVar {
+            name,
+            span,
+            relevant,
+        });
+    }
+}
+
+/// The `(name, relevant)` list of values abandoned at an early exit — innermost scope first,
+/// reverse-construction within each, a name dropped once, excluding moved-out and already-dropped
+/// values. Shared by [`emit_exit_drops`] (which emits `DropVar` statements) and the `?` handler
+/// (which attaches them to [`Rvalue::Try`]).
+fn collect_exit_drops(
+    scopes: &[ScopeFrame],
+    kind: ExitKind,
+    moved_out: &VarSet,
+) -> Vec<(String, bool)> {
+    let mut drops = Vec::new();
     let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for frame in scopes.iter().rev() {
         for (name, relevant) in frame.constructed.iter().rev() {
             if moved_out.contains(name) || frame.dropped.contains(name) || !seen.insert(name) {
                 continue;
             }
-            out.push(Stmt::DropVar {
-                name: name.clone(),
-                span,
-                relevant: *relevant,
-            });
+            drops.push((name.clone(), *relevant));
         }
         if kind == ExitKind::Loop && frame.is_loop_body {
             break;
         }
     }
+    drops
 }
 
 /// Rewrite a function body: compute its liveness, its droppable single-assignment locals and their
@@ -321,11 +337,11 @@ fn rewrite_stmt(
     match stmt {
         Stmt::Let { dst, rvalue, span } => Stmt::Let {
             dst: *dst,
-            rvalue: rewrite_rvalue(rvalue, cx),
+            rvalue: rewrite_rvalue(rvalue, scopes, cx),
             span: *span,
         },
         Stmt::Eval { rvalue, span } => Stmt::Eval {
-            rvalue: rewrite_rvalue(rvalue, cx),
+            rvalue: rewrite_rvalue(rvalue, scopes, cx),
             span: *span,
         },
         Stmt::If {
@@ -443,14 +459,32 @@ fn rewrite_decl(decl: &Decl, cx: &Cx) -> Decl {
     }
 }
 
-/// Rewrite a [`Rvalue::Closure`]'s function body; all other rvalues are returned unchanged (they
-/// carry no nested function body).
-fn rewrite_rvalue(rvalue: &Rvalue, cx: &Cx) -> Rvalue {
+/// Rewrite a [`Rvalue::Closure`]'s function body, and fill a [`Rvalue::Try`]'s error-path drop list
+/// (Phase 4.2c). `?` early-returns the `Err`/`none` from the frame, so on that path the abandoned
+/// frame locals must be reclaimed exactly as at an explicit `return` — `collect_exit_drops` with
+/// `ExitKind::Frame` computes them, excluding the propagated operand (it is moved out). All other
+/// rvalues carry no nested function body or control flow and are returned unchanged.
+fn rewrite_rvalue(rvalue: &Rvalue, scopes: &[ScopeFrame], cx: &Cx) -> Rvalue {
     match rvalue {
         Rvalue::Closure { func, span } => Rvalue::Closure {
             func: Rc::new(rewrite_func(func, cx)),
             span: *span,
         },
+        Rvalue::Try { operand, span, .. } => {
+            let mut moved_out = VarSet::new();
+            if let lang_ir::Atom::Var { name, .. } = operand {
+                moved_out.insert(name.clone());
+            }
+            let on_error = collect_exit_drops(scopes, ExitKind::Frame, &moved_out)
+                .into_iter()
+                .map(|(name, relevant)| lang_ir::TryDrop { name, relevant })
+                .collect();
+            Rvalue::Try {
+                operand: operand.clone(),
+                on_error,
+                span: *span,
+            }
+        }
         other => other.clone(),
     }
 }

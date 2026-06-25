@@ -1696,11 +1696,26 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
-            Rvalue::Try { operand, span } => {
+            Rvalue::Try {
+                operand,
+                on_error,
+                span,
+            } => {
                 let src = self.atom_reg(operand)?;
+                // Resolve the drop pass's error-path locals to registers; on the `Err`/`none` path the
+                // VM drops these (firing destructors) before unwinding (Phase 4.2c). Owned frame-locals
+                // always resolve to a register; anything else is conservatively skipped.
+                let on_error: Vec<(Reg, bool)> = on_error
+                    .iter()
+                    .filter_map(|d| match self.resolve(&d.name) {
+                        Resolved::Local(reg) => Some((reg, d.relevant)),
+                        _ => None,
+                    })
+                    .collect();
                 self.code.push(Op::TryUnwrap {
                     dst,
                     src,
+                    on_error,
                     span: *span,
                 });
                 Ok(())

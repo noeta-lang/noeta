@@ -2162,7 +2162,12 @@ impl<'m> Vm<'m> {
                         format!("panic: {message}"),
                     ));
                 }
-                Op::TryUnwrap { dst, src, span } => {
+                Op::TryUnwrap {
+                    dst,
+                    src,
+                    on_error,
+                    span,
+                } => {
                     let v = frames[top].regs[*src as usize];
                     match try_classify(v) {
                         Some(TryOutcome::Success(inner)) => {
@@ -2174,6 +2179,20 @@ impl<'m> Vm<'m> {
                         // as `Op::Return` does (the M0 `Unwind::Return`).
                         Some(TryOutcome::Empty) => {
                             retain(v);
+                            // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
+                            // destructor-relevant ones fire `destruct`, in the drop pass's order. Each
+                            // is cleared to `unit`, so the teardown release below never double-frees.
+                            for (reg, relevant) in on_error.iter() {
+                                let dv = std::mem::replace(
+                                    &mut frames[top].regs[*reg as usize],
+                                    Value::unit(),
+                                );
+                                if *relevant {
+                                    self.release_value(dv);
+                                } else {
+                                    release(dv);
+                                }
+                            }
                             let finished = frames.pop().unwrap();
                             for r in &finished.regs {
                                 release(*r);
@@ -3787,6 +3806,18 @@ mod tests {
             r.stdout,
             "start\nuse first\nclose first\nuse second\nclose second\nend\n"
         );
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn question_mark_propagation_destroys_abandoned_locals() {
+        // Phase 4.2c: a `?` that early-returns an `Err` destroys the frame locals it abandons before
+        // unwinding (the `on_error` drops the compiler attaches to `Op::TryUnwrap`). `r` is live past
+        // the `?`, so `close r` fires on the error path, before the caller prints the propagated Err.
+        let r = run(
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nfn check(c: bool): Result<int, string> {\n  if c { return Ok(1); }\n  return Err(\"bad\");\n}\nfn go(c: bool): Result<int, string> {\n  r = R.new(\"r\");\n  x = check(c)?;\n  return Ok(x);\n}\necho \"start\";\necho go(false);\necho \"end\";\n",
+        );
+        assert_eq!(r.stdout, "start\nclose r\nErr(bad)\nend\n");
         assert_eq!(r.exit_code, 0);
     }
 
