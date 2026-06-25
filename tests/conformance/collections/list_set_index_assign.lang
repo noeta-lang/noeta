@@ -1,0 +1,27 @@
+// List element update: `xs.set(i, v)` (immutable, returns a new list) and the `xs[i] = v` index sugar
+// (desugars to `xs = xs.set(i, v)`). A function-local index-write accumulator overwrites every slot in
+// place (the reuse path; value semantics are invisible to the program); an aliased snapshot taken
+// before an update keeps its own value; an out-of-range index is E0016. Both backends agree.
+// expect: stdout "[10, 2, 30]"
+// expect: stdout "[0, 2, 4, 6]"
+// expect: stdout "[1, 2, 3]"
+// expect: exit 0
+mut xs = [1, 2, 3];
+xs[0] = 10;
+xs = xs.set(2, 30);
+seen = xs;
+echo xs;
+
+fn doubled(n: int): List<int> {
+    mut ys = 0..n;
+    for i in 0..n {
+        ys[i] = i * 2;
+    }
+    return ys;
+}
+echo doubled(4);
+
+mut zs = [1, 2, 3];
+snap = zs;
+zs[1] = 99;
+echo snap;

@@ -711,6 +711,9 @@ impl Interpreter {
                             return self.map_remove_in_place(recv, values, *span);
                         }
                     }
+                    if matches!(&recv, Value::List(_)) && name == "set" && values.len() == 2 {
+                        return self.list_set_in_place(recv, values, *span);
+                    }
                     return self.call_method(recv, name, values, *span);
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
@@ -850,6 +853,46 @@ impl Interpreter {
                 let name_val = self.eval_ir_atom(name, frame)?;
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)
+            }
+        }
+    }
+
+    /// In-place list `set` for a marked self-update `xs = xs.set(i, v)` (the `xs[i] = v` desugaring).
+    /// The receiver was moved out of its binding by the caller; when uniquely owned its slot `i` is
+    /// overwritten in place (the displaced element destroyed now, matching copy-and-reassign), else it
+    /// copies. An out-of-range index is E0016. `values` is `[index, value]`.
+    fn list_set_in_place(
+        &mut self,
+        recv: Value,
+        mut values: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        let Value::List(mut rc) = recv else {
+            unreachable!("caller checked the receiver is a list")
+        };
+        let new_value = values.pop().expect("set takes two args");
+        let index_value = values.pop().expect("set takes two args");
+        let Value::Int(i) = index_value else {
+            return self.call_method(Value::List(rc), "set", vec![index_value, new_value], span);
+        };
+        if i < 0 || i as usize >= rc.len() {
+            return Err(self.runtime_error(
+                DiagnosticCode::IndexOutOfBounds,
+                span,
+                format!("index {i} out of bounds for list of length {}", rc.len()),
+            ));
+        }
+        let i = i as usize;
+        match Rc::get_mut(&mut rc) {
+            Some(items) => {
+                let old = std::mem::replace(&mut items[i], new_value);
+                self.destroy_value(old);
+                Ok(Value::List(rc))
+            }
+            None => {
+                let mut new = (*rc).clone();
+                new[i] = new_value;
+                Ok(Value::List(Rc::new(new)))
             }
         }
     }

@@ -58,7 +58,7 @@ fn string_method(name: &str) -> Option<Type> {
 
 fn list_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
-        "reverse" | "sorted" | "slice" => list(elem.clone()),
+        "reverse" | "sorted" | "slice" | "set" => list(elem.clone()),
         "contains" => Type::Bool,
         "join" => Type::String,
         "first" | "last" => opt(elem.clone()),
@@ -73,7 +73,7 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
 fn set_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
         "contains" => Type::Bool,
-        "union" | "intersection" => set(elem.clone()),
+        "union" | "intersection" | "add" | "remove" => set(elem.clone()),
         "count" => Type::Int,
         _ => return None,
     })
@@ -131,6 +131,7 @@ fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
         "contains" => vec![elem.clone()],
         "join" => vec![Type::String],
         "slice" => vec![Type::Int, Type::Int],
+        "set" => vec![Type::Int, elem.clone()], // `set(index, value)`
         _ => return None,
     })
 }
@@ -138,7 +139,7 @@ fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
 fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
         "count" => vec![],
-        "contains" => vec![elem.clone()],
+        "contains" | "add" | "remove" => vec![elem.clone()],
         "union" | "intersection" => vec![set(elem.clone())],
         _ => return None,
     })

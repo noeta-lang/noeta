@@ -494,6 +494,26 @@ impl<'m> Vm<'m> {
                     }
                 }
             }
+            lang_stdlib::ListMethod::Set => {
+                self.stdlib_arity(name, args, 2, span)?;
+                let i = self.stdlib_int(name, args[0], span)?;
+                if i < 0 || i as usize >= items.len() {
+                    return Err(self.error(
+                        DiagnosticCode::IndexOutOfBounds,
+                        span,
+                        format!("index {i} out of bounds for list of length {}", items.len()),
+                    ));
+                }
+                // Replace the slot; the displaced old element is just dropped from the clone (it was
+                // never retained by `list_items`). Every element the new list ends up holding is
+                // retained once (the new list is a fresh owner).
+                let mut new = items;
+                new[i as usize] = args[1];
+                for &element in &new {
+                    retain(element);
+                }
+                Ok(Value::list(new))
+            }
         }
     }
 
@@ -546,6 +566,40 @@ impl<'m> Vm<'m> {
                                 .and_then(|v| v.as_bool())
                                 .unwrap_or(false)
                         })
+                    })
+                    .collect();
+                for &element in &kept {
+                    retain(element);
+                }
+                Ok(Value::set(kept))
+            }
+            lang_stdlib::SetMethod::Add => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let mut combined = items;
+                combined.push(args[0]);
+                match canonical_set(&combined) {
+                    Some(canonical) => {
+                        for &element in &canonical {
+                            retain(element);
+                        }
+                        Ok(Value::set(canonical))
+                    }
+                    None => {
+                        let error = lang_stdlib::unorderable_error(name);
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            lang_stdlib::SetMethod::Remove => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let target = args[0];
+                let kept: Vec<Value> = items
+                    .into_iter()
+                    .filter(|&item| {
+                        !apply_binary(BinaryOp::Eq, item, target)
+                            .ok()
+                            .and_then(|v| v.as_bool())
+                            .unwrap_or(false)
                     })
                     .collect();
                 for &element in &kept {
@@ -1000,6 +1054,41 @@ impl<'m> Vm<'m> {
     /// (if any) fires its destructor now via `release_value`, matching the copy-and-reassign baseline
     /// (which releases it when the old map dies at the reassignment). An aliased map copies (preserving
     /// the other owner's view), then drops the consumed reference. Run under miri to validate refcounts.
+    /// Apply an in-place list `set(index, value)` to a **consumed** list receiver (the caller has
+    /// taken its single reference out of the register). When uniquely owned (`refcount == 1`) the slot
+    /// is overwritten in place — O(1), the displaced element released — otherwise the list copies
+    /// (preserving an alias), then the consumed reference is dropped. An out-of-range index is E0016.
+    fn list_set_in_place(
+        &mut self,
+        list: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        let i = self.stdlib_int("set", args[0], span)?;
+        let len = list.list_len().unwrap_or(0);
+        if i < 0 || i as usize >= len {
+            release(list);
+            return Err(self.error(
+                DiagnosticCode::IndexOutOfBounds,
+                span,
+                format!("index {i} out of bounds for list of length {len}"),
+            ));
+        }
+        if list.refcount() == 1 {
+            let value = args[1];
+            retain(value);
+            let old = list.list_replace_slot(i as usize, value);
+            self.release_value(old);
+            Ok(list)
+        } else {
+            // Aliased: copy via the ordinary method, then drop the consumed reference.
+            let new =
+                self.call_list_method(list, lang_stdlib::ListMethod::Set, "set", args, span)?;
+            release(list);
+            Ok(new)
+        }
+    }
+
     fn map_update_in_place(
         &mut self,
         map: Value,
@@ -1645,6 +1734,17 @@ impl<'m> Vm<'m> {
                         frames[top].regs[*recv as usize] = Value::unit();
                         let result =
                             self.map_update_in_place(v, map_method, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, result);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    // In-place list self-update (`xs[i] = v` ⟶ `xs = xs.set(i, v)`): a uniquely-owned
+                    // list overwrites slot `i` in place (O(1)) instead of copying the whole list.
+                    if *reuse && v.is_list() && method == "set" {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        frames[top].regs[*recv as usize] = Value::unit();
+                        let result = self.list_set_in_place(v, &arg_values, *span)?;
                         set_reg(&mut frames[top].regs, *dst, result);
                         frames[top].pc += 1;
                         continue;
@@ -3840,6 +3940,20 @@ mod tests {
             "fn build(): string {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = \"v${i}\"; }\n  m[\"k0\"] = \"x\";\n  m = m.remove(\"k1\");\n  return \"${m.values()} ${m.count()}\";\n}\necho build();\nmut acc = { \"a\": \"1\" };\nsnap = acc;\nacc[\"a\"] = \"9\";\nacc[\"b\"] = \"2\";\necho acc.values();\necho snap.values();\n",
         );
         assert_eq!(r.stdout, "[\"x\", \"v2\"] 2\n[\"9\", \"2\"]\n[\"1\"]\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn list_set_reuse_paths() {
+        // VM-side in-place list `set` (`xs[i] = v` ⟶ `xs = xs.set(i, v)`). Covers the in-place hit — a
+        // function-local accumulator overwrites each slot in place, its displaced HEAP element released
+        // each step — and the copy fallback — an aliased accumulator (`snap = ys`) keeps its value.
+        // String elements exercise the slot retain/release accounting; run under miri (no UAF / double
+        // free).
+        let r = run(
+            "fn build(): string {\n  mut xs = [\"a\", \"b\", \"c\"];\n  for i in 0..3 { xs[i] = \"v${i}\"; }\n  return xs.join(\",\");\n}\necho build();\nmut ys = [\"x\", \"y\"];\nsnap = ys;\nys[0] = \"z\";\necho ys.join(\",\");\necho snap.join(\",\");\n",
+        );
+        assert_eq!(r.stdout, "v0,v1,v2\nz,y\nx,y\n");
         assert_eq!(r.exit_code, 0);
     }
 

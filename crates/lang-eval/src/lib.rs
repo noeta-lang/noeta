@@ -2555,6 +2555,20 @@ impl Interpreter {
                     }
                 }
             }
+            lang_stdlib::ListMethod::Set => {
+                self.expect_std_arity(name, args, 2, span)?;
+                let i = self.expect_std_int(name, &args[0], span)?;
+                if i < 0 || i as usize >= items.len() {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::IndexOutOfBounds,
+                        span,
+                        format!("index {i} out of bounds for list of length {}", items.len()),
+                    ));
+                }
+                let mut new = items.to_vec();
+                new[i as usize] = args[1].clone();
+                Ok(Value::List(Rc::new(new)))
+            }
         }
     }
 
@@ -2589,6 +2603,29 @@ impl Interpreter {
                 let kept: Vec<Value> = items
                     .iter()
                     .filter(|item| other.iter().any(|o| *item == o))
+                    .cloned()
+                    .collect();
+                Ok(Value::Set(Rc::new(kept)))
+            }
+            lang_stdlib::SetMethod::Add => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let mut combined = items.to_vec();
+                combined.push(args[0].clone());
+                // The new element must be orderable with the rest (a homogeneous set).
+                match canonical_set(&combined) {
+                    Some(canonical) => Ok(Value::Set(Rc::new(canonical))),
+                    None => {
+                        let error = lang_stdlib::unorderable_error(name);
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            lang_stdlib::SetMethod::Remove => {
+                self.expect_std_arity(name, args, 1, span)?;
+                // `items` is already canonical; filtering preserves sorted, de-duplicated order.
+                let kept: Vec<Value> = items
+                    .iter()
+                    .filter(|item| **item != args[0])
                     .cloned()
                     .collect();
                 Ok(Value::Set(Rc::new(kept)))

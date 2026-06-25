@@ -420,6 +420,28 @@ impl Value {
         }
     }
 
+    /// Overwrite list slot `index` **in place** with `value`, returning the displaced value (whose
+    /// reference is handed back to the caller to release). The caller must guarantee a uniquely-owned
+    /// list (`refcount == 1`) and an in-range `index` — the copy-on-write `xs[i] = v` fast path:
+    /// overwriting one slot of the existing buffer is O(1), versus cloning the whole list. Returns
+    /// `unit` (a no-op) if this is not a list or `index` is out of range.
+    pub fn list_replace_slot(self, index: usize, value: Value) -> Value {
+        debug_assert!(
+            !self.is_list() || heap::refcount(self) == 1,
+            "list_replace_slot requires a uniquely-owned list (the COW invariant)"
+        );
+        if self.is_pointer() {
+            heap::with_payload_mut(self, |p| match p {
+                Payload::List(items) if index < items.len() => {
+                    std::mem::replace(&mut items[index], value)
+                }
+                _ => Value::unit(),
+            })
+        } else {
+            Value::unit()
+        }
+    }
+
     /// A shallow copy of a list's elements, if this is a list. The copied values share the
     /// list's references (they are *not* retained); the caller decides whether to retain.
     pub fn list_items(self) -> Option<Vec<Value>> {

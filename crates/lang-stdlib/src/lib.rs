@@ -326,6 +326,11 @@ pub enum ListMethod {
     /// `to_set()` → a `Set` of the list's elements (sorted + de-duplicated); a non-orderable or
     /// mixed-kind element is an error.
     ToSet,
+    /// `set(index, value)` → a **new** list with `index` replaced by `value` (value semantics; the
+    /// receiver is unchanged). An out-of-range index is an error (E0016), as for index reads — `set`
+    /// replaces an existing position, it does not append. The reuse pass may make this an in-place
+    /// overwrite when the receiver is uniquely owned. This is the target of the `xs[i] = v` sugar.
+    Set,
 }
 
 impl ListMethod {
@@ -339,6 +344,7 @@ impl ListMethod {
             "first" => Some(ListMethod::First),
             "last" => Some(ListMethod::Last),
             "to_set" => Some(ListMethod::ToSet),
+            "set" => Some(ListMethod::Set),
             _ => None,
         }
     }
@@ -354,6 +360,11 @@ pub enum SetMethod {
     Union,
     /// `intersection(other)` → a new set with the elements in both `self` and `other`.
     Intersection,
+    /// `add(x)` → a **new** set with `x` added (a no-op copy if already present). Value semantics; the
+    /// single-element companion to `union`. Same in-place-reuse treatment as the other updates.
+    Add,
+    /// `remove(x)` → a **new** set without `x` (a no-op copy if absent). Value semantics.
+    Remove,
 }
 
 impl SetMethod {
@@ -362,6 +373,8 @@ impl SetMethod {
             "contains" => Some(SetMethod::Contains),
             "union" => Some(SetMethod::Union),
             "intersection" => Some(SetMethod::Intersection),
+            "add" => Some(SetMethod::Add),
+            "remove" => Some(SetMethod::Remove),
             _ => None,
         }
     }

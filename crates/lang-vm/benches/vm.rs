@@ -167,6 +167,17 @@ fn map_accumulate_src(n: usize) -> String {
     )
 }
 
+/// A function-local list index-write accumulator: build an n-element list once, then overwrite every
+/// slot via `xs[i] = …` (desugaring to `xs = xs.set(i, …)`) n times. Was O(n²) (each `set` copied the
+/// whole list); the in-place reuse (the receiver register is consumed and the uniquely-owned backing
+/// list's slot overwritten, O(1)) brings it to O(n) — measured ~54× at n=8000, the gap widening with
+/// n. Parameterized over n so the scaling is visible.
+fn list_index_write_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    mut xs = 0..{n};\n    for i in 0..{n} {{\n        xs[i] = i * 2;\n    }}\n    return xs.count();\n}}\necho build();\n"
+    )
+}
+
 /// A hot method-call + field-read site on the same receiver every iteration — the monomorphic
 /// dispatch/property pattern P-IC (inline caches) targets beyond the existing `property_access`.
 fn member_dispatch_src(n: usize) -> String {
@@ -280,6 +291,15 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     mapacc.finish();
+
+    let mut listidx = c.benchmark_group("vm_list_index_write");
+    for &n in LOOP_SIZES {
+        let module = compile(&list_index_write_src(n));
+        listidx.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    listidx.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {
