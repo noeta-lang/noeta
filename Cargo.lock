@@ -728,6 +728,7 @@ dependencies = [
  "lang-check",
  "lang-diagnostics",
  "lang-ir",
+ "lang-ir-passes",
  "lang-lexer",
  "lang-parser",
  "lang-span",

@@ -16,6 +16,16 @@ durable documentation.
   destruction). Either retire it (the IR-interpreter + leak oracle + property test + VM differential now
   cover its role) or keep a *semantics-updated* version as a permanent third oracle. Record the decision
   and rationale (README §2 independence tradeoff).
+- **REPL on the IR — DONE early (committed during Phase 5).** `Session::eval` now lowers each batch,
+  runs the precise-RC drop + reuse passes, and executes on the **Core-IR interpreter** in the persistent
+  global scope (a `pub(crate) run_ir_batch` running `exec_ir_stmts` with a per-batch `Frame`), falling
+  back to the AST walker only when lowering fails. A trailing bare expression is rewritten to a reserved
+  sentinel binding (`\0repl-value`) so its value is captured once and echoed. This removes the REPL as an
+  AST-walker user — so the walker's remaining roles narrow to (a) destructor/leaf executor the IR interp
+  reuses and (b) the totality fallback, both of which 7.1's retire-or-keep decision now covers cleanly.
+  Behavior change (accepted): the REPL now fires within-function destructors at last use, matching
+  `lang run`. Known limitation: reflection (`attributes_of`/`roles_of`) is rebuilt per batch (resolves
+  within an entry, not across entries) — cross-entry accumulation is a small follow-up if wanted.
 
 ## 7.2 The full benchmark vs the Phase-0 baseline
 

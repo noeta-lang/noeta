@@ -134,13 +134,64 @@ impl Session {
     /// Evaluate a program against the persistent scope. Returns just this batch's stdout
     /// and diagnostics; if the final statement is a bare expression, its non-unit value's
     /// display form is returned in `value` so the REPL can echo it (`1 + 2` → `3`).
+    ///
+    /// Execution goes through the **Core-IR interpreter** — the same canonical path as `lang run`
+    /// and the conformance reference — so the REPL inherits last-use destruction and in-place reuse
+    /// rather than the superseded AST-walk semantics. The batch is lowered, the precise-RC drop and
+    /// reuse passes are run (exactly as the bytecode pipeline does), and the top-level statements
+    /// execute in the **persistent** global scope with a fresh per-batch temporary frame, so
+    /// bindings, `fn`/`type`/`enum`/`class` declarations, and id continuity survive across entries.
+    /// A program outside the lowering's subset falls back to the AST tree-walker (the total
+    /// reference), preserving totality until the lowering is total (migration Phase 7).
     pub fn eval(&mut self, program: &Program) -> SessionOutput {
         self.interp.stdout.clear();
         self.interp.diagnostics.clear();
+
+        // A trailing bare expression is rewritten to a binding of a reserved sentinel name, so its
+        // value is captured in scope (and read back for the REPL to echo) while it is evaluated
+        // exactly once on the IR path.
+        let (lowerable, captures_value) = rewrite_trailing_expr(program);
+        let value = match lang_ir::lower(&lowerable) {
+            Ok(ir) => {
+                // Mirror the bytecode pipeline: precise-RC drops (no checker in the REPL, so drops
+                // are conservatively destructor-relevant) then reuse tokens. Reflection is rebuilt
+                // from this batch so within-entry `attributes_of`/`roles_of`/type queries resolve.
+                let ir = lang_ir_passes::insert_drops(&ir, None);
+                let ir = lang_ir_passes::thread_reuse(&ir);
+                self.interp.reflection = lang_ast::reflect::build(&lowerable);
+                let flow = self.interp.run_ir_batch(&ir);
+                // Only a cleanly-completed batch yields a value; a `return`/error before the
+                // sentinel binding leaves nothing to echo.
+                match (flow, captures_value) {
+                    (Ok(Flow::Normal), true) => self
+                        .interp
+                        .scope
+                        .lookup(REPL_VALUE)
+                        .filter(|v| !matches!(v, Value::Unit))
+                        .map(|v| v.display()),
+                    _ => None,
+                }
+            }
+            // Outside the lowering's subset: fall back to the AST walker (the total reference).
+            Err(_) => self.eval_ast(program),
+        };
+
+        SessionOutput {
+            stdout: std::mem::take(&mut self.interp.stdout),
+            diagnostics: std::mem::take(&mut self.interp.diagnostics),
+            value,
+        }
+    }
+
+    /// The AST-walker fallback for a batch the Core IR cannot lower yet. Mirrors the historical
+    /// session loop: run each statement in the persistent scope, echo a trailing bare expression's
+    /// non-unit value. (The walker fires destructors only at session end, which never comes, so its
+    /// destruction timing differs from the IR path — acceptable for the residual unlowered set,
+    /// which is empty over the corpus and shrinking to nothing by Phase 7.)
+    fn eval_ast(&mut self, program: &Program) -> Option<String> {
         let mut value = None;
         let last = program.stmts.len().saturating_sub(1);
         for (i, stmt) in program.stmts.iter().enumerate() {
-            // A trailing bare expression is evaluated for its value rather than discarded.
             if i == last
                 && let Stmt::Expr { expr, .. } = stmt
             {
@@ -159,11 +210,40 @@ impl Session {
                 Ok(Flow::Return(_)) | Err(_) => break,
             }
         }
-        SessionOutput {
-            stdout: std::mem::take(&mut self.interp.stdout),
-            diagnostics: std::mem::take(&mut self.interp.diagnostics),
-            value,
+        value
+    }
+}
+
+/// The reserved binding name a trailing bare REPL expression is rewritten into, so its value is
+/// captured in the persistent scope. Contains a NUL so it can never collide with a user identifier
+/// and never appears in displayed output.
+const REPL_VALUE: &str = "\0repl-value";
+
+/// If `program`'s final statement is a bare expression, return a copy with that statement rewritten
+/// to `mut <REPL_VALUE> = <expr>;` (so the IR path captures its value) and `true`; otherwise return
+/// the program unchanged and `false`. Only the trailing statement is touched — earlier bare
+/// expressions stay discarded statements.
+fn rewrite_trailing_expr(program: &Program) -> (Program, bool) {
+    match program.stmts.last() {
+        Some(Stmt::Expr { expr, span }) => {
+            let mut stmts = program.stmts.clone();
+            *stmts.last_mut().expect("non-empty: matched last") = Stmt::Binding {
+                mut_decl: true,
+                name: REPL_VALUE.to_string(),
+                name_span: *span,
+                ty: None,
+                value: expr.clone(),
+                span: *span,
+            };
+            (
+                Program {
+                    stmts,
+                    span: program.span,
+                },
+                true,
+            )
         }
+        _ => (program.clone(), false),
     }
 }
 
@@ -4062,6 +4142,46 @@ mod tests {
             session.eval(&program_of("next_id();")).value.as_deref(),
             Some("2")
         );
+    }
+
+    #[test]
+    fn session_persists_declarations_across_entries() {
+        // A `fn`/`class` declared in one entry is callable in a later one — the IR path registers
+        // declarations into the persistent global scope, exactly as the AST walker did.
+        let mut session = Session::new();
+        session.eval(&program_of("fn double(n: int): int { return n * 2; }"));
+        session.eval(&program_of("class Box { v: int }"));
+        let out = session.eval(&program_of("double(Box { v: 21 }.v);"));
+        assert_eq!(out.value.as_deref(), Some("42"));
+    }
+
+    #[test]
+    fn session_runs_destructors_at_last_use_via_the_ir() {
+        // The REPL now executes on the Core IR, so a destructor-bearing value created and dropped
+        // inside a called function fires its `destruct` at last use during the entry — the canonical
+        // last-use semantics `lang run` has, which the superseded AST-walk session never produced.
+        let mut session = Session::new();
+        session.eval(&program_of(
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+        ));
+        let out = session.eval(&program_of(
+            "fn use_it(): void { mut r = Res.new(1); echo \"using\"; }\nuse_it();",
+        ));
+        assert_eq!(out.stdout, "using\ndrop 1\n");
+    }
+
+    #[test]
+    fn session_trailing_value_is_not_stale_across_entries() {
+        // A trailing bare expression is captured via a reserved sentinel binding; an entry with no
+        // trailing expression must report `value: None`, never the prior entry's captured value.
+        let mut session = Session::new();
+        assert_eq!(
+            session.eval(&program_of("1 + 2;")).value.as_deref(),
+            Some("3")
+        );
+        let out = session.eval(&program_of("echo 9;"));
+        assert_eq!(out.stdout, "9\n");
+        assert_eq!(out.value, None);
     }
 
     #[test]

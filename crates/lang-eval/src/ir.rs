@@ -131,6 +131,18 @@ impl Interpreter {
         }
     }
 
+    /// Execute one REPL batch of lowered top-level statements **in the persistent global scope**,
+    /// with a fresh temporary frame sized to this batch. Unlike [`Interpreter::run_ir`] it does
+    /// *not* rebuild reflection (the [`Session`](crate::Session) sets it) and does *not* destroy the
+    /// global bindings afterward — the scope, its bindings, and its declarations persist across
+    /// batches, exactly as the REPL requires. ANF temporaries are per-batch and do not persist, so a
+    /// fresh `Frame` each call is correct. Returns the batch's terminating [`Flow`] (a top-level
+    /// `return`/error stops it, mirroring the AST-walker session loop).
+    pub(crate) fn run_ir_batch(&mut self, ir: &lang_ir::Program) -> Eval<Flow> {
+        let mut frame = Frame::new(ir.temp_count);
+        self.exec_ir_stmts(&ir.top.stmts, &mut frame)
+    }
+
     /// Execute a statement sequence in the current scope, stopping at the first non-local
     /// flow (`return`/`break`/`continue`) — the IR analogue of `exec_stmts`.
     fn exec_ir_stmts(&mut self, stmts: &[lang_ir::Stmt], frame: &mut Frame) -> Eval<Flow> {

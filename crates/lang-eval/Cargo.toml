@@ -11,6 +11,7 @@ lang-span = { workspace = true }
 lang-diagnostics = { workspace = true }
 lang-ast = { workspace = true }
 lang-ir = { workspace = true }
+lang-ir-passes = { workspace = true }
 lang-builtins = { workspace = true }
 lang-backend = { workspace = true }
 lang-stdlib = { workspace = true }
