@@ -3470,6 +3470,43 @@ mod tests {
         );
     }
 
+    /// A function with `n` **single-assignment** intermediate records chained `aᵢ = f(aᵢ₋₁)`, each
+    /// dead once the next is built. Returns a scalar so nothing heap stays live past the chain.
+    fn sequential_intermediates_src(n: usize) -> String {
+        let mut body = String::from("  a0 = Pair { a: 1, b: 1 };\n");
+        for i in 1..n {
+            body.push_str(&format!(
+                "  a{i} = Pair {{ a: a{prev}.a + 1, b: a{prev}.b }};\n",
+                prev = i - 1
+            ));
+        }
+        format!(
+            "class Pair {{ a: int b: int }}\nfn chain(): int {{\n{body}  return a{last}.a;\n}}\necho chain();\n",
+            last = n - 1
+        )
+    }
+
+    #[test]
+    fn mm_peak_residency_prompt_reclamation_is_n_independent() {
+        // The headline Phase-3 metric (memory-management `phase-3-rc-passes` gate): precise last-use
+        // drops reclaim a function-local the moment it dies, so a straight-line chain of n transient
+        // intermediates holds only ~the current+previous record live at once — an O(1), n-INDEPENDENT
+        // peak. Under the pre-migration reclaim-at-teardown model every aᵢ stayed live until `chain`
+        // returned, an O(n) peak. We prove the win by its shape: the peak must not grow with n.
+        let small = peak_residency(&sequential_intermediates_src(50));
+        let large = peak_residency(&sequential_intermediates_src(400));
+        eprintln!(
+            "MM peak residency (objects): sequential_intermediates n=50={small}  n=400={large}"
+        );
+        // n-independence is the proof of prompt reclamation: 8× the chain length leaves the peak flat
+        // (a tiny constant — the live window — not 8× larger). A generous bound absorbs allocator slack
+        // while still failing hard if drops regressed to teardown reclamation (which would be ≈ n).
+        assert!(
+            small < 20 && large < 20,
+            "prompt last-use reclamation should keep the intermediate-chain peak O(1); got n=50→{small}, n=400→{large}"
+        );
+    }
+
     #[test]
     fn invoke_by_name_wraps_ok_and_err() {
         // `invoke` dispatches by runtime name: a hit wraps the return in `Result.Ok` (via the

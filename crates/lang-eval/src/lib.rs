@@ -20,6 +20,7 @@ use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
+pub mod drop_audit;
 mod ir;
 mod leak;
 mod ops;
@@ -507,6 +508,8 @@ impl Drop for Scope {
         // drops the count; one kept alive by a capture cycle never does — which is the leak we want
         // the oracle to report). See [`crate::leak`].
         leak::dec();
+        // Clear any drop-audit poison keyed to this scope's address before it can be reused.
+        drop_audit::on_scope_drop(self as *const Scope as usize);
     }
 }
 
@@ -531,12 +534,17 @@ impl Scope {
 
     fn lookup(&self, name: &str) -> Option<Value> {
         if let Some(binding) = self.vars.borrow().get(name) {
+            // The drop audit (Phase 3.x) flags a read of a binding whose value was dropped here and
+            // not since rebound — a use-after-drop, i.e. a static death that preceded this real use.
+            drop_audit::on_read(self as *const Scope as usize, name);
             return Some(binding.value.clone());
         }
         self.parent.as_ref().and_then(|parent| parent.lookup(name))
     }
 
     fn declare(&self, name: String, value: Value, mutable: bool) {
+        // A (re)binding makes any prior drop of this name in this scope legitimate again.
+        drop_audit::on_bind(self as *const Scope as usize, &name);
         let mut vars = self.vars.borrow_mut();
         if vars
             .insert(name.clone(), Binding { value, mutable })
@@ -551,6 +559,8 @@ impl Scope {
     fn assign(&self, name: &str, value: Value) -> AssignOutcome {
         if let Some(binding) = self.vars.borrow_mut().get_mut(name) {
             return if binding.mutable {
+                // A reassignment rebinds the name: clear any drop poison for it in this scope.
+                drop_audit::on_bind(self as *const Scope as usize, name);
                 let old = std::mem::replace(&mut binding.value, value);
                 AssignOutcome::Assigned(old)
             } else {
@@ -592,6 +602,9 @@ impl Scope {
     fn release_binding(&self, name: &str) {
         if let Some(binding) = self.vars.borrow_mut().get_mut(name) {
             binding.value = Value::Unit;
+            // Poison this binding for the drop audit: a subsequent read before a rebind is a
+            // use-after-drop (a static death that preceded the real last use).
+            drop_audit::on_drop(self as *const Scope as usize, name);
             return;
         }
         if let Some(parent) = &self.parent {
@@ -3749,6 +3762,39 @@ mod tests {
 
     fn run(text: &str) -> RunResult {
         TreeWalkBackend::new().run(&program_of(text))
+    }
+
+    #[test]
+    fn drop_audit_flags_a_read_after_drop_and_not_a_legitimate_one() {
+        // Positive control for the Phase-3.x use-after-drop audit: the mechanism must actually fire
+        // on a synthetic static-before-dynamic death, so the corpus test asserting zero cannot pass
+        // vacuously. A read after `release_binding` is a violation; a read after a rebind is not.
+        let scope = Scope::global();
+
+        // (1) declare → drop → read  ⇒ one violation (the drop preceded this real use).
+        drop_audit::begin();
+        scope.declare("x".into(), Value::Int(1), false);
+        scope.release_binding("x");
+        let _ = scope.lookup("x");
+        assert_eq!(drop_audit::end(), 1, "a read after a drop must be flagged");
+
+        // (2) declare → drop → re-declare → read  ⇒ no violation (the rebind clears the poison).
+        drop_audit::begin();
+        scope.declare("y".into(), Value::Int(1), false);
+        scope.release_binding("y");
+        scope.declare("y".into(), Value::Int(2), false);
+        let _ = scope.lookup("y");
+        assert_eq!(
+            drop_audit::end(),
+            0,
+            "a read after a rebind must not be flagged"
+        );
+
+        // (3) declare → read (no drop)  ⇒ no violation.
+        drop_audit::begin();
+        scope.declare("z".into(), Value::Int(1), false);
+        let _ = scope.lookup("z");
+        assert_eq!(drop_audit::end(), 0, "an ordinary read must not be flagged");
     }
 
     #[test]

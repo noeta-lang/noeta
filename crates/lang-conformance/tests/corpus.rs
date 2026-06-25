@@ -120,6 +120,29 @@ fn ir_interpreter_is_faithful_to_the_tree_walker() {
 }
 
 #[test]
+fn no_local_is_read_after_its_drop() {
+    // The static-≤-dynamic last-use property (memory-management Phase 3.x): a `DropVar` must never
+    // fire before its binding's real last *dynamic* read. The drop-audit records every drop, rebind,
+    // and read in the IR interpreter; we run the whole corpus through the faithfulness sweep (which
+    // executes every lowered program via `run_ir`) with the audit active, and assert it observed
+    // zero use-after-drop violations — the static drop placement is sound against ground-truth
+    // execution, independent of the liveness reasoning that placed the drops.
+    lang_eval::drop_audit::begin();
+    let report = run_faithfulness(&corpus_root(), None);
+    let violations = lang_eval::drop_audit::end();
+    // Guard against a vacuous pass: the sweep must actually have run programs through the IR path.
+    assert!(
+        report.matched > 0,
+        "the faithfulness sweep ran no programs — the audit would be vacuous"
+    );
+    assert_eq!(
+        violations, 0,
+        "use-after-drop: a DropVar fired before its binding's last dynamic read in {} of {} programs",
+        violations, report.matched
+    );
+}
+
+#[test]
 fn differential_backends_agree() {
     // The differential oracle: every program the M1 VM can compile must produce a byte-for-
     // byte identical `RunResult` to the M0 tree-walker. Programs outside the VM's current
