@@ -188,6 +188,7 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
         | Stmt::Drop(_)
+        | Stmt::DropVar { .. }
         | Stmt::Decl(_) => {}
     }
 }
@@ -309,7 +310,11 @@ fn collect_refs_stmt(
                 globals,
             ));
         }
-        Stmt::Decl(_) | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop(_) => {}
+        Stmt::Decl(_)
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Drop(_)
+        | Stmt::DropVar { .. } => {}
     }
 }
 
@@ -401,6 +406,7 @@ fn collect_nested_frees_stmt(
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
         | Stmt::Drop(_)
+        | Stmt::DropVar { .. }
         | Stmt::Decl(_) => {}
     }
 }

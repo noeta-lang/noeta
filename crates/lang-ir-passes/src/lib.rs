@@ -22,6 +22,8 @@
 //! would be a use-after-free, so it must be impossible by construction. Over-approximating *uses*
 //! (e.g. a closure is taken to use every variable named in its body) is therefore always sound.
 
+pub mod drops;
 pub mod liveness;
 
+pub use drops::insert_drops;
 pub use liveness::{BlockLiveness, ProgramLiveness, StmtLiveness, VarSet, analyze};

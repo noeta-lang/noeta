@@ -67,6 +67,7 @@ impl Printer<'_> {
             Stmt::Break { .. } => self.line(indent, "break"),
             Stmt::Continue { .. } => self.line(indent, "continue"),
             Stmt::Drop(t) => self.line(indent, &format!("drop %{}", t.0)),
+            Stmt::DropVar { name, .. } => self.line(indent, &format!("drop {name}")),
             Stmt::If {
                 cond,
                 then_block,

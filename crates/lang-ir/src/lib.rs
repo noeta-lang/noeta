@@ -336,6 +336,17 @@ pub enum Stmt {
     /// reference would suppress a destructor the tree-walker fires — not a reference-counting
     /// optimization (those land in a later phase).
     Drop(Temp),
+    /// Release a **source variable's** value now, at its last use, rather than at scope/teardown
+    /// (memory-management migration, Phase 3). Inserted by the drop-insertion pass
+    /// ([`lang_ir_passes`]) at a binding's death point — only for function-local bindings, never a
+    /// top-level global (those stay teardown-reclaimed) and never an immediately-reassigned binding
+    /// (its displaced value is released by the reassignment itself). `name` resolves through the
+    /// runtime scope/register model exactly as a read would.
+    ///
+    /// In Phase 3 this lowers to a **plain reference release** in both backends (prompt memory
+    /// reclamation, the peak-residency win) and fires **no** destructor — destructor firing stays
+    /// globals-only until Phase 4, which flips local drops to the destructor-running release.
+    DropVar { name: String, span: Span },
 }
 
 /// One arm of an IR `match`: a surface pattern and the block it runs. In expression

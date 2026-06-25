@@ -227,6 +227,10 @@ impl Interpreter {
                 frame.drop(*t);
                 Ok(Flow::Normal)
             }
+            // A source-variable drop (Phase 3 drop-insertion). Not yet wired into this backend's
+            // reclamation — a no-op for now, so its presence is behavior-neutral — until the
+            // backend-lowering slice releases the binding's value here.
+            lang_ir::Stmt::DropVar { .. } => Ok(Flow::Normal),
             lang_ir::Stmt::Coalesce {
                 dst,
                 value,

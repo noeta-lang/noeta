@@ -876,7 +876,9 @@ impl<'m> FnCompiler<'m> {
             // Releasing a discarded temporary promptly is a Phase-3 (precise-RC) concern; this
             // phase keeps today's VM reclamation — frame teardown releases it — so `Drop` is a
             // no-op here. (The IR *interpreter* honors it for its own destructor-timing fidelity.)
-            Stmt::Drop(_) => Ok(()),
+            // A source-variable `DropVar` (Phase-3 drop-insertion) is likewise a no-op until the
+            // backend-lowering slice emits an `Op::Drop` on the binding's register.
+            Stmt::Drop(_) | Stmt::DropVar { .. } => Ok(()),
             Stmt::Bind {
                 mut_decl,
                 name,

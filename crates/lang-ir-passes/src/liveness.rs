@@ -142,11 +142,14 @@ fn analyze_stmt(stmt: &Stmt, live: &mut VarSet) -> StmtLiveness {
                 sub: Vec::new(),
             }
         }
-        // `break`/`continue` use no variables; the loop's structural analysis routes liveness.
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop(_) => StmtLiveness {
-            dies_here: VarSet::new(),
-            sub: Vec::new(),
-        },
+        // `break`/`continue` use no variables; the loop's structural analysis routes liveness. A
+        // `Drop`/`DropVar` is a release, not a use (and the analysis runs before drops are inserted).
+        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop(_) | Stmt::DropVar { .. } => {
+            StmtLiveness {
+                dies_here: VarSet::new(),
+                sub: Vec::new(),
+            }
+        }
         Stmt::If {
             cond,
             then_block,
@@ -451,7 +454,11 @@ fn collect_stmt_vars(stmt: &Stmt, out: &mut VarSet) {
                 collect_block_vars(&default.body, out);
             }
         }
-        Stmt::Decl(_) | Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop(_) => {}
+        Stmt::Decl(_)
+        | Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::Drop(_)
+        | Stmt::DropVar { .. } => {}
     }
 }
 
