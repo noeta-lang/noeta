@@ -3922,6 +3922,23 @@ mod tests {
     }
 
     #[test]
+    fn a_temp_used_only_as_a_receiver_fires_its_destructor() {
+        // Phase 4.4 (spec §2): a destructor-bearing value used only as a method receiver, or
+        // discarded as a bare statement, still fires at last use — a temp is an owner. `R.new("a")`
+        // is consumed by `.use_it()` (fires after the call); `R.new("b");` is discarded (fires at the
+        // statement). The compiler emits a destructor-aware `Op::Drop` of the receiver / discarded
+        // register where there was none before.
+        let r = run(
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\necho \"start\";\nR.new(\"a\").use_it();\nR.new(\"b\");\necho \"end\";\n",
+        );
+        assert_eq!(
+            r.stdout,
+            "start\nuse a\nclose a\nclose b\nend\n"
+        );
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
     fn a_class_without_a_destructor_runs_nothing() {
         let r = run(
             "class R {\n  v: int\n  fn new(v: int): R { return R { v: v }; }\n}\nx = R.new(1);\necho \"done\";\n",

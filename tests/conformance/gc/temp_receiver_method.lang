@@ -1,0 +1,21 @@
+// Phase 4.4 (spec §2): a destructor-bearing value used *only* as a method receiver still fires its
+// destructor at last use — a temp is an owner too. `Leaf.new("x")` is an unnamed temporary consumed
+// by `.announce()`; once the call returns the temp holds the last reference, so its `destruct` runs
+// right after (before "b"). Both backends fire it at the same point (eval destroys the temp receiver
+// after the call; the VM emits a destructor-aware `Op::Drop` of the receiver register), so the
+// differential proves agreement.
+// expect: stdout "a"
+// expect: stdout "use x"
+// expect: stdout "drop x"
+// expect: stdout "b"
+// expect: exit 0
+class Leaf {
+    tag: string
+    fn new(t: string): Leaf { return Leaf { tag: t }; }
+    fn announce(): void { echo "use ${tag}"; }
+    destruct { echo "drop ${tag}"; }
+}
+
+echo "a";
+Leaf.new("x").announce();
+echo "b";

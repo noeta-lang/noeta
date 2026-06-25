@@ -42,7 +42,7 @@ loop-iteration destruction, `?`/`break` interactions, **reentrant** destructors 
 constructs/destroys), and **aliased** values (RC>1 → destruction deferred to the true last reference,
 identical in both backends). Expect iteration; the differential + leak oracle are the proof.
 
-## 4.4 Temp last-use destructor firing (the §2 completion exposed by 4.3)
+## 4.4 Temp last-use destructor firing — DONE (the §2 completion exposed by 4.3)
 
 4.1–4.2 fire destructors at the drop points the IR pass places for **source variables** (`DropVar`).
 **ANF temporaries** — the unnamed single-use `let %n = …` intermediates — are reclaimed differently:
@@ -61,14 +61,30 @@ stays green — both fail to fire identically), so it is a latent correctness ho
 is a deviation from **spec §2** ("last use of the last owner … in *any* scope" — a temp is an owner),
 and 4.3 makes it visible because container-field projection is a common way to create such a temp.
 
-**4.4 closes it** by extending last-use destructor firing to temporaries: a temp whose single use does
-**not** transfer ownership into a persistent location (a binding, a container, a return) gets a
-destructor-aware drop at that use — the VM via a `release_value` (not plain `release`) at the consuming
-op / register overwrite, the IR-interpreter via `destroy_value` on the consumed-and-discarded value.
-The 4.3 construction-temp release (the compiler's `consume_operand`/`release_consumed`, which makes an
-aggregate the sole owner of an inline-built element) is the same idea applied to *constructor* operands;
-4.4 generalizes it to *every* transiently-consumed temp. Tests: `Leaf.new("x").method()` fires `drop x`;
-`b.inner.tag` fires the projected field's destructor at the temp's death; differential agrees.
+**4.4 closed it.** The gap is narrower than "every transient consumer": the failing cases are all
+**receiver temps** (`Resource.new().use()`, the `b.inner` projected in `b.inner.tag`, `N.new(3).val()`)
+plus **discarded bare-statement results** — function *arguments* already fire (they become named
+params), and aggregate *elements* fire via the 4.3 container walk. So 4.4 fires a destructor at exactly
+two new points, runtime-gated so non-destructor values are untouched:
+
+- **Receiver temps of field / method / index access.** When the receiver atom is an `Atom::Temp` (owned,
+  single-use by ANF — a named `Var`/`self` receiver is borrowed and fires at its own drop), the receiver
+  is destroyed after the access. IR-interpreter: `call_method`/`eval_index` consume the receiver, so it
+  is cloned for the call and the held copy is `destroy_value`d (last-reference-gated, so a method
+  returning `self` defers correctly); `Field` borrows, so the receiver is destroyed after the read.
+  VM: the compiler emits a destructor-aware `Op::Drop` of the receiver register after
+  `CallMethod`/`LoadField`/`Index` (`drop_temp_receiver`) — the drop's read also keeps the receiver live
+  across the access, so coalescing can't fuse it with the destination (same soundness lever as 4.3).
+- **Discarded bare-statement results.** `Stmt::Drop(temp)` was a VM no-op and an eval silent slot clear;
+  both now release destructor-aware (`Op::Drop{relevant:true}` / `destroy_value`), so `Resource.new();`
+  fires at the statement.
+
+`relevant: true` routes through `release_value`, which runtime-gates on reachability (a non-destructor
+or immediate result/receiver just frees), so no static per-temp type channel was needed. Gates:
+conformance 248 (+4 gc: temp_receiver_method, temp_field_projection, discarded_result,
+temp_receiver_nested), differential 240/0-skipped/agree, leak/drop-audit/ir-corpus green, miri clean on
+the firing paths, +1 VM unit test, 1 disasm golden (the discarded-`?`-result drop); fib hot-path golden
+byte-identical (no temp receivers / bare statements there, so the dispatch hot path is unaffected).
 
 ## Verification gate
 

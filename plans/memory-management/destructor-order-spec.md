@@ -42,13 +42,23 @@ of the last owner, in **any** scope: global, local, nested block, loop body, or 
 - A value **moved out** (returned, or `?`-propagated — §6) is *not* destroyed at the move site; its
   ownership transfers and its destructor runs at the new owner's last use.
 
-**Temporaries are owners too (Phase-4.4 gap).** "Last use of the last owner" includes an unnamed ANF
-**temporary** that holds the last reference (a temp method/field receiver, a field projected out of a
-container that then dies, a discarded expression result). Phases 4.1–4.3 fire destructors at the drop
-points placed for *source variables*; a value that lives and dies entirely as a temp does **not** yet
-fire its `destruct` (it is still reclaimed — no leak — just silently). This is a known deviation from
-this rule, **consistent across both backends** (so the differential holds), closed by **Phase 4.4**
-(`phase-4-destruction.md` §4.4), which extends last-use firing to transiently-consumed temporaries.
+**No manual `drop`/lifetime primitives (decided 2026-06-25).** The language deliberately offers no
+explicit early-`drop(x)` or extend-lifetime call. Under last-use, they would be near-redundant: last
+use already releases at the *earliest sound point*, so there is no "held to the closing brace" slack
+for an early drop to reclaim; and lifetime extension is just *referencing the value later* — the
+textual reference is the lifetime (the drop pass places drops at the liveness-computed last use, so a
+later mention always keeps the value alive, unlike Swift ARC's pre-last-use release that forced
+`withExtendedLifetime`). Both are escape hatches a block-scope model needs and a last-use model does
+not. (If a destructor fires earlier than wanted, the fix is to use the value at the point it should
+survive to.)
+
+**Temporaries are owners too (Phase 4.4).** "Last use of the last owner" includes an unnamed ANF
+**temporary** that holds the last reference (a temp method/field/index receiver, a field projected out
+of a container that then dies, a discarded expression-statement result). **Phase 4.4** extends last-use
+firing to these: a receiver temp is destroyed after the access that consumes it (firing iff it is the
+last reference, so a method returning `self` correctly defers), and a discarded bare-statement result
+is released destructor-aware. (A named-variable or `self` receiver is borrowed — it fires at its own
+binding drop — so only `Temp` receivers are destroyed here; constants are never destructor-bearing.)
 
 **Conservative timing (the safety invariant, README §2).** Static analysis chooses *where* to place
 the release; the **runtime refcount decides whether it fires**. A statically missed/late release

@@ -1,0 +1,21 @@
+// Phase 4.4 (spec §2): nested temp receivers each fire at their own last use. Both `N.new(3)` and
+// `N.new(4)` are unnamed temporaries used only as the receiver of `.val()`; each is destroyed right
+// after its call returns (the operands of `+` are the returned ints, not the `N`s). So "drop 3" and
+// "drop 4" fire as each `.val()` completes, before the sum is echoed. Two temp-receiver destructions
+// in one expression, agreed by both backends.
+// expect: stdout "a"
+// expect: stdout "drop 3"
+// expect: stdout "drop 4"
+// expect: stdout "7"
+// expect: stdout "b"
+// expect: exit 0
+class N {
+    v: int
+    fn new(v: int): N { return N { v: v }; }
+    fn val(): int { return v; }
+    destruct { echo "drop ${v}"; }
+}
+
+echo "a";
+echo N.new(3).val() + N.new(4).val();
+echo "b";

@@ -1,6 +1,6 @@
 ---
 source: crates/lang-vm/src/lib.rs
-assertion_line: 4293
+assertion_line: 4498
 expression: module.disassemble()
 ---
 shapes:
@@ -35,7 +35,8 @@ code:
     0  LoadGlobal  r1 <- "validate"
     1  Call        r0 <- r1()
     2  TryUnwrap   r1 <- r0?
-    3  LoadConst   r1 <- k0
-    4  MakeEnum    r0 <- shape s1(r1)
-    5  Return      r0
-    6  Halt
+    3  Drop        r1 ~destruct
+    4  LoadConst   r1 <- k0
+    5  MakeEnum    r0 <- shape s1(r1)
+    6  Return      r0
+    7  Halt

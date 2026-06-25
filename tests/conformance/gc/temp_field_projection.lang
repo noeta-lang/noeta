@@ -1,0 +1,27 @@
+// Phase 4.4 (spec §2): a field projected out of a container that then dies, leaving the projection
+// as the last owner, fires its destructor at the projection temp's last use. In `b.inner.tag`, the
+// `b.inner` temp (a `Leaf`) outlives `b` (a destructor-less `Box`): when `b` is destroyed its field
+// release finds the projection still referencing the Leaf (refcount 2 → no fire), and the Leaf's
+// `destruct` runs only when the projection temp is consumed by `.tag` — its true last reference. So
+// "drop x" prints when `.tag` reads it, before the "tag x" echo. Both backends fire at that point.
+// expect: stdout "a"
+// expect: stdout "drop x"
+// expect: stdout "tag x"
+// expect: stdout "b"
+// expect: exit 0
+class Leaf {
+    tag: string
+    fn new(t: string): Leaf { return Leaf { tag: t }; }
+    destruct { echo "drop ${tag}"; }
+}
+
+type Box = { inner: Leaf };
+
+fn go(): void {
+    b = Box { inner: Leaf.new("x") };
+    echo "tag ${b.inner.tag}";
+}
+
+echo "a";
+go();
+echo "b";

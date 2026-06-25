@@ -37,6 +37,14 @@ use crate::{
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
 /// [`lang_ir::Temp`]; a slot is `None` until its defining `let` runs.
+/// Whether an atom is an ANF temporary (vs a named source variable or a constant). A temp receiver
+/// is *owned* — single-use by the ANF invariant, holding no live binding — so after an access
+/// consumes it its destructor must fire at last use (Phase 4.4). A `Var` receiver is borrowed (its
+/// binding fires at its own drop), so it is left alone.
+fn is_temp(atom: &lang_ir::Atom) -> bool {
+    matches!(atom, lang_ir::Atom::Temp(_))
+}
+
 struct Frame {
     temps: Vec<Option<Value>>,
 }
@@ -61,12 +69,6 @@ impl Frame {
 
     fn set(&mut self, t: lang_ir::Temp, value: Value) {
         self.temps[t.index()] = Some(value);
-    }
-
-    /// Release a temporary's value (the `Drop` statement): the discarded result of a bare
-    /// expression statement, whose reference must not outlive the statement.
-    fn drop(&mut self, t: lang_ir::Temp) {
-        self.temps[t.index()] = None;
     }
 }
 
@@ -239,7 +241,12 @@ impl Interpreter {
                 Ok(Flow::Normal)
             }
             lang_ir::Stmt::Drop(t) => {
-                frame.drop(*t);
+                // The discarded result of a bare expression statement. Route it through
+                // `destroy_value` (not a silent slot clear) so a destructor-bearing value used only
+                // as a statement (`Resource.new();`) fires its `destruct` at its last reference —
+                // Phase 4.4 (a temp is an owner too, spec §2). Non-aggregates/aliased values no-op.
+                let value = frame.take(*t);
+                self.destroy_value(value);
                 Ok(Flow::Normal)
             }
             // A source-variable drop (Phase 3 drop-insertion): release the binding's value at its
@@ -603,9 +610,18 @@ impl Interpreter {
                 index,
                 span,
             } => {
-                let receiver = self.eval_ir_atom(receiver, frame)?;
-                let index = self.eval_ir_atom(index, frame)?;
-                self.eval_index(receiver, index, *span)
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let idx = self.eval_ir_atom(index, frame)?;
+                if is_temp(receiver) {
+                    // The receiver is an owned temporary whose only use is this access; fire its
+                    // destructor after (Phase 4.4). `eval_index` consumes the receiver, so clone for
+                    // the call and destroy the held copy — firing iff it is the last reference.
+                    let result = self.eval_index(recv.clone(), idx, *span);
+                    self.destroy_value(recv);
+                    result
+                } else {
+                    self.eval_index(recv, idx, *span)
+                }
             }
             lang_ir::Rvalue::Interp { parts, .. } => {
                 let mut out = String::new();
@@ -632,9 +648,19 @@ impl Interpreter {
                 span,
                 ..
             } => {
-                let receiver = self.eval_ir_atom(receiver, frame)?;
+                let recv = self.eval_ir_atom(receiver, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                self.call_method(receiver, name, values, *span)
+                if is_temp(receiver) {
+                    // An owned temp receiver (`Resource.new().use()`): fire its destructor after the
+                    // call (Phase 4.4). `call_method` consumes the receiver, so clone for the call
+                    // and destroy the held copy — last-reference-gated, so a method that returns
+                    // `self` (the result aliases it) correctly defers destruction.
+                    let result = self.call_method(recv.clone(), name, values, *span);
+                    self.destroy_value(recv);
+                    result
+                } else {
+                    self.call_method(recv, name, values, *span)
+                }
             }
             lang_ir::Rvalue::Field {
                 receiver,
@@ -643,10 +669,14 @@ impl Interpreter {
                 ..
             } => {
                 // Mirrors `eval_expr`'s `Member` arm: enum-variant constructor, object field
-                // load, or associated-function reference.
-                let receiver = self.eval_ir_atom(receiver, frame)?;
-                match receiver {
-                    Value::EnumType(def) => self.make_variant(&def, name, vec![], *span),
+                // load, or associated-function reference. The receiver is *borrowed* to read the
+                // field (cloned out), so an owned temp receiver — e.g. the `b.inner` projected out
+                // of a container in `b.inner.tag` — is destroyed afterward (Phase 4.4), firing its
+                // destructor iff it held the last reference (the field clone is a separate object,
+                // so it survives).
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let result = match &recv {
+                    Value::EnumType(def) => self.make_variant(def, name, vec![], *span),
                     Value::Object(object) => match object.fields.get(name) {
                         Some(value) => Ok(value.clone()),
                         None => Err(self.runtime_error(
@@ -668,7 +698,11 @@ impl Interpreter {
                         *span,
                         format!("no field `{name}` on {}", other.type_name()),
                     )),
+                };
+                if is_temp(receiver) {
+                    self.destroy_value(recv);
                 }
+                result
             }
             lang_ir::Rvalue::Try {
                 operand,

@@ -905,9 +905,19 @@ impl<'m> FnCompiler<'m> {
                 let reg = self.alloc_reg();
                 self.rvalue(rvalue, reg)
             }
-            // A temporary `Drop` is still a no-op (today's reclamation frees it at frame teardown;
-            // the reuse-aware allocator handles temps in 3.3).
-            Stmt::Drop(_) => Ok(()),
+            // The discarded result of a bare expression statement (`Resource.new();`). Release its
+            // register destructor-aware (Phase 4.4) so a destructor-bearing value used only as a
+            // statement fires its `destruct` at last use — a temp is an owner too (spec §2).
+            // `relevant: true` routes through `release_value`, which runtime-gates on reachability
+            // (a non-destructor/immediate result just frees, as the reuse allocator did before).
+            Stmt::Drop(t) => {
+                let reg = self.temp_reg(*t);
+                self.code.push(Op::Drop {
+                    reg,
+                    relevant: true,
+                });
+                Ok(())
+            }
             // A source-variable drop (Phase 3 drop-insertion) releases the binding's value at its
             // last use. Only a value held **directly** in a frame register is released here, via
             // `Op::Drop` (clears the register to unit). A celled/captured local, an upvalue, a
@@ -1580,6 +1590,24 @@ impl<'m> FnCompiler<'m> {
         }
     }
 
+    /// After an access (field / method / index) consumes a receiver register, release the receiver
+    /// if it was an owned ANF **temporary** — firing its destructor at last use (Phase 4.4): a
+    /// destructor-bearing value used *only* as a receiver (`Resource.new().use()`, the `b.inner`
+    /// projected in `b.inner.tag`) would otherwise never fire. A non-temp receiver (a live local or
+    /// a type name) is left alone — its binding fires at its own drop, or it is borrowed. The access
+    /// op retains whatever it keeps, so the temp's remaining register reference is now dead; the
+    /// drop's read also keeps it live across the access, so coalescing cannot fuse it with the
+    /// destination. `relevant: true` routes through `release_value`, which runtime-gates on
+    /// reachability (a non-destructor receiver simply frees, as register reuse did before).
+    fn drop_temp_receiver(&mut self, receiver: &Atom, recv: Reg) {
+        if matches!(receiver, Atom::Temp(_)) {
+            self.code.push(Op::Drop {
+                reg: recv,
+                relevant: true,
+            });
+        }
+    }
+
     /// Resolve a source-variable reference to a register holding its value, mirroring the
     /// tree-walker's name resolution (`Expr::Ident` evaluation).
     fn var_reg(&mut self, name: &str, span: Span) -> Result<Reg, Unsupported> {
@@ -1714,6 +1742,7 @@ impl<'m> FnCompiler<'m> {
                     index: idx,
                     span: *span,
                 });
+                self.drop_temp_receiver(receiver, recv);
                 Ok(())
             }
             Rvalue::List { items, .. } => {
@@ -1994,6 +2023,7 @@ impl<'m> FnCompiler<'m> {
             span,
             cache,
         });
+        self.drop_temp_receiver(receiver, recv);
         Ok(())
     }
 
@@ -2052,6 +2082,7 @@ impl<'m> FnCompiler<'m> {
             span,
             cache,
         });
+        self.drop_temp_receiver(receiver, obj);
         Ok(())
     }
 
