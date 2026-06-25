@@ -352,6 +352,7 @@ impl Lowerer {
                         op: *op,
                         lhs,
                         rhs,
+                        reuse: false,
                         span: *span,
                     },
                     *span,

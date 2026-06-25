@@ -1,0 +1,15 @@
+// A top-level (global) list accumulator self-appended with `~=` (Phase 5.1b): the compiler moves the
+// global out with `TakeGlobal` so the in-place `ConcatInPlace` sees unique ownership and extends the
+// backing buffer; the IR interpreter does the same via a move-out + `cow_concat`. Aliasing across the
+// global boundary still copies: snapshotting `g` into `seen` before the third append keeps `seen` at
+// the pre-append value (refcount > 1 forces the copy), so immutable list semantics hold. Heap (string)
+// elements exercise the element-retain accounting. Both backends agree.
+// expect: stdout "[\"a\", \"b\", \"c\"]"
+// expect: stdout "[\"a\", \"b\"]"
+// expect: exit 0
+mut g = ["a"];
+g ~= ["b"];
+seen = g;
+g ~= ["c"];
+echo g;
+echo seen;

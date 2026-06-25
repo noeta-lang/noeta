@@ -201,8 +201,17 @@ impl Printer<'_> {
         match rvalue {
             Rvalue::Use(a) => atom(a),
             Rvalue::Unary { op, operand, .. } => format!("{}{}", op.symbol(), atom(operand)),
-            Rvalue::Binary { op, lhs, rhs, .. } => {
-                format!("{} {} {}", atom(lhs), op.symbol(), atom(rhs))
+            Rvalue::Binary {
+                op,
+                lhs,
+                rhs,
+                reuse,
+                ..
+            } => {
+                // The reuse token is only rendered when set (the rare list self-append), so every
+                // other binary dump — and its golden — is unchanged by Phase 5.
+                let marker = if *reuse { " reuse" } else { "" };
+                format!("{} {} {}{}", atom(lhs), op.symbol(), atom(rhs), marker)
             }
             Rvalue::Call { callee, args, .. } => format!("call {}({})", atom(callee), atoms(args)),
             Rvalue::Method {

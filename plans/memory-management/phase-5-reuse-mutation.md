@@ -34,11 +34,31 @@ cover.
   closure cycle), drop-audit 0, ir-corpus total, miri clean on the in-place + replaced-field paths,
   clippy+fmt clean, +3 VM unit tests, no golden churn (no golden self-updates).
 - **5.1b — global accumulator reuse (`TakeGlobal` + `MakeRecordInPlace`), list self-append
-  (`ConcatInPlace`).** A top-level `mut acc` is a global, not a register; the `reuse` token is set but
-  the compiler currently falls back to a copying `MakeRecord` (5.1a handles locals only). 5.1b moves the
-  global out with `TakeGlobal` so the in-place op sees uniqueness, and extends the pass to the list
-  self-append `acc = acc ~ rhs` / `acc ~= rhs` (`ConcatInPlace`). This re-emits **all three** retained
-  ops from the IR pass; the standing obligation (delete them if unused) is then discharged.
+  (`ConcatInPlace`) (DONE).** A top-level `mut acc` is a global, not a register; 5.1a marked the
+  `reuse` token but the compiler fell back to a copying `MakeRecord`/`Op::Binary` for a global (it
+  handled directly-held locals only). 5.1b (1) **threads the reuse token onto the list self-append**:
+  a new `Rvalue::Binary.reuse` bit, set by `thread_reuse` on a `let %t = Var(acc) ~ rhs` immediately
+  followed by `acc = %t` — but only when `rhs` does not mention `acc` (else the right side would read
+  the moved-out slot; lists need no own-destructor exclusion since a concat destroys no element). (2)
+  **Consumes the token for a global base in both backends**: the compiler emits `TakeGlobal` (move the
+  global out so the in-place op sees unique ownership; the trailing reassignment stores the result
+  back) ahead of `MakeRecordInPlace` (record update) or `ConcatInPlace` (list append), with the
+  field/rhs operands resolved *before* `TakeGlobal` so a `g = T { ...g, x: g }` / `g ~= g` loads the
+  live value first. The IR interpreter's record path already took the base by name (`construct_object_reuse`
+  works for globals as-is); its concat path now mirrors via `take_mut` + the shared `cow_concat`. The
+  same `Runtime` refcount check (not `Static` — no linearity analysis here) gates reuse, so an alias
+  (`snap = g`, `h = g`) copies and preserves the other owner's view. This **re-emits all three retained
+  ops** (`TakeGlobal`, `ConcatInPlace`, the global `MakeRecordInPlace`); the standing
+  delete-if-unused obligation is discharged. **Measured (VM, both global accumulators):**
+  `vm_accumulate` (list self-append, `acc ~= [i]`) **O(n²) → O(n)** — −83% at n=1000 up to **−97%
+  (~31×) at n=8000**, the gap widening with n; `vm_record_update` (8-field global blind-overwrite)
+  **~2.6× constant-factor** (−60–64% across sizes; alloc + copy-8 → `TakeGlobal` + overwrite-1
+  in-place; both already O(n)). The local read-update path (`vm_record_update_read`, 5.1a) is
+  unchanged (p>0.05 — no regression). Conformance 251 (+1: heap-element global self-append under the
+  differential), differential 243/0-skipped/agree, leak 0 (known cycle only), drop-audit 0, ir-corpus
+  total, miri clean on the in-place + `TakeGlobal` + replaced-field paths, clippy+fmt clean, +2 VM
+  disasm tests (`global_self_update_lowers_to_take_global_plus_in_place_reuse`,
+  `self_append_lowers_to_in_place_concat`). No golden churn (the `reuse` marker renders only when set).
 - **5.1c — map/enum constructors.** No retained in-place op exists for these; reuse needs net-new VM
   ops + miri validation. Lower priority — decide value vs cost before building (surface as a decision
   point, don't silently drop).

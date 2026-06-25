@@ -562,7 +562,32 @@ impl Interpreter {
                 let value = self.eval_ir_atom(operand, frame)?;
                 self.eval_unary(*op, value, *span)
             }
-            lang_ir::Rvalue::Binary { op, lhs, rhs, span } => {
+            lang_ir::Rvalue::Binary {
+                op,
+                lhs,
+                rhs,
+                reuse,
+                span,
+            } => {
+                // In-place self-append (Phase 5.1b): a marked `acc = acc ~ rhs` moves the accumulator
+                // out of its (reassigned) binding and extends its list buffer in place when uniquely
+                // owned — the IR-interpreter analogue of the VM's `ConcatInPlace` (and the same
+                // `cow_concat` the AST walker uses). The `rhs` is evaluated *before* the accumulator is
+                // taken; the reuse pass guarantees `rhs` does not mention the base, so it never observes
+                // the vacated slot. The token is only ever set for `Concat` with a `Var` left, but the
+                // guards are explicit so any other shape falls through to the ordinary copying path.
+                if *reuse
+                    && *op == lang_ir::BinaryOp::Concat
+                    && let lang_ir::Atom::Var { name, .. } = lhs
+                {
+                    let right = self.eval_ir_atom(rhs, frame)?;
+                    if let Some(old) = self.scope.take_mut(name) {
+                        return Ok(crate::cow_concat(old, right));
+                    }
+                    // Defensive: not a mutable binding (cannot happen for a checked self-append).
+                    let left = self.eval_ir_atom(lhs, frame)?;
+                    return self.apply_binary_op(*op, left, right, *span);
+                }
                 let left = self.eval_ir_atom(lhs, frame)?;
                 let right = self.eval_ir_atom(rhs, frame)?;
                 self.apply_binary_op(*op, left, right, *span)

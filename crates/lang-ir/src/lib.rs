@@ -146,10 +146,21 @@ pub enum Rvalue {
     /// never appear here; everything else (arithmetic, concat, comparisons, equality) does.
     /// Operator-trait overloading on user objects is resolved by the interpreter, not the
     /// IR.
+    ///
+    /// `reuse` is the **in-place-reuse token** for a list **self-append** (`acc = acc ~ rhs`,
+    /// the desugaring of `acc ~= rhs`): set by the reuse-analysis pass ([`lang_ir_passes`],
+    /// Phase 5) only on a `Concat` whose `lhs` is the very binding the result is reassigned to
+    /// (and whose `rhs` does not mention that binding), so the old list is dead after this op
+    /// and its backing buffer may be extended in place. Both backends consume the same token —
+    /// the VM via `ConcatInPlace` (with a `TakeGlobal` first for a global accumulator), the IR
+    /// interpreter via a move-out (`take_mut`) + `cow_concat` — each gated on the runtime
+    /// refcount (`== 1`) so an aliased list copies. It is meaningful only for `Concat`; lowering
+    /// always emits `false` and the pass leaves every other operator untouched.
     Binary {
         op: BinaryOp,
         lhs: Atom,
         rhs: Atom,
+        reuse: bool,
         span: Span,
     },
     /// A call of a callee value: `callee(args)`.

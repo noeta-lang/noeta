@@ -2,25 +2,31 @@
 //! whose input allocation is provably dead at the construction point, so both backends can reuse the
 //! storage instead of allocating afresh (memory-management migration, Phase 5).
 //!
-//! # What it recognizes (this slice: record/class self-update)
+//! # What it recognizes (self-updates: record/class update + list self-append)
 //!
-//! The canonical, common reuse opportunity is a **self-update**:
+//! The canonical, common reuse opportunity is a **self-update** — a binding rebound to a value
+//! computed from its own old contents:
 //!
 //! ```text
-//! acc = Type { ...acc, f: v }
+//! acc = Type { ...acc, f: v }   // record/class update
+//! acc = acc ~ rhs               // list self-append (the `acc ~= rhs` desugaring)
 //! ```
 //!
-//! which lowers (ANF) to an adjacent pair — the constructor into a temp, then the reassignment:
+//! each of which lowers (ANF) to an adjacent pair — the op into a temp, then the reassignment:
 //!
 //! ```text
 //! let %t = Type { ...acc, f: v }   // Rvalue::Object, spread = Var(acc)
 //! acc = %t                          // Stmt::Bind, value = Temp(%t)
+//!
+//! let %t = acc ~ rhs                // Rvalue::Binary { op: Concat, lhs: Var(acc) }
+//! acc = %t                          // Stmt::Bind, value = Temp(%t)
 //! ```
 //!
-//! Here the spread base `acc` is the **same binding** the result is bound back into, so `acc`'s old
-//! value is displaced (dead) the instant the constructor finishes. Its allocation can therefore be
-//! reused — overwriting only the changed fields — rather than copied. The pass marks such an
-//! [`Rvalue::Object`] with `reuse = true`.
+//! In both, the input `acc` is the **same binding** the result is bound back into, so `acc`'s old
+//! value is displaced (dead) the instant the op finishes. Its allocation can therefore be reused —
+//! overwriting only the changed record fields, or extending the list's backing buffer in place —
+//! rather than copied. The pass marks the [`Rvalue::Object`] / [`Rvalue::Binary`] with
+//! `reuse = true`.
 //!
 //! # Why a shared IR token (not per-backend detection)
 //!
@@ -47,7 +53,7 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use lang_ir::{Arm, Atom, Block, ClassDef, Decl, Func, Program, Rvalue, Stmt, Temp};
+use lang_ir::{Arm, Atom, BinaryOp, Block, ClassDef, Decl, Func, Program, Rvalue, Stmt, Temp};
 
 /// Thread reuse tokens through a program, returning the annotated IR. Pure function of the input
 /// (the only derived state is the set of own-destructor type names, computed from the program's
@@ -128,19 +134,28 @@ fn rewrite_block(block: &Block, own_destructors: &HashSet<String>) -> Block {
     }
 }
 
-/// Set `reuse = true` on every `let %t = Type { ...acc, … }` immediately followed by `acc = %t` —
-/// the self-update shape, where the spread base is dead the moment the constructor completes — as
-/// long as `Type` has no own destructor (see the module note).
+/// Mark every adjacent **self-update** pair `let %t = <op over ...acc...>` immediately followed by
+/// `acc = %t`, where the input `acc` is dead the moment the op completes so its allocation may be
+/// reused. Two shapes qualify:
+///
+/// * a record/class update `acc = Type { ...acc, … }` ([`object_self_update_candidate`]) — marked
+///   unless `Type` has its own destructor (see the module note); and
+/// * a list self-append `acc = acc ~ rhs` ([`concat_self_append_candidate`]) — marked when `rhs`
+///   does not itself mention `acc` (else the right side would read the moved-out accumulator). Lists
+///   have no own destructor and a concat destroys no element (every element lives on in the result),
+///   so no destructor-exclusion is needed here.
 fn mark_self_updates(mut stmts: Vec<Stmt>, own_destructors: &HashSet<String>) -> Vec<Stmt> {
     for i in 0..stmts.len().saturating_sub(1) {
-        let Some((dst, spread_name, type_name)) = object_self_update_candidate(&stmts[i]) else {
-            continue;
-        };
-        if own_destructors.contains(&type_name) {
-            continue;
-        }
-        if rebinds_temp(&stmts[i + 1], &spread_name, dst) {
-            set_object_reuse(&mut stmts[i]);
+        if let Some((dst, spread_name, type_name)) = object_self_update_candidate(&stmts[i]) {
+            if !own_destructors.contains(&type_name)
+                && rebinds_temp(&stmts[i + 1], &spread_name, dst)
+            {
+                set_object_reuse(&mut stmts[i]);
+            }
+        } else if let Some((dst, base_name)) = concat_self_append_candidate(&stmts[i])
+            && rebinds_temp(&stmts[i + 1], &base_name, dst)
+        {
+            set_binary_reuse(&mut stmts[i]);
         }
     }
     stmts
@@ -166,6 +181,39 @@ fn object_self_update_candidate(stmt: &Stmt) -> Option<(Temp, String, String)> {
     Some((*dst, name.clone(), type_name.clone()))
 }
 
+/// If `stmt` is `let %t = Var(name) ~ rhs` (a list self-append by shape), return `(%t, name)`. The
+/// left operand must be a bare source variable (the reassignable accumulator), and `rhs` must **not**
+/// mention that variable — otherwise the right side would observe the slot after it is moved out, so
+/// the in-place op would be unsound (it is left to the copying `~` instead). Only `Concat` qualifies;
+/// every other operator is left untouched.
+fn concat_self_append_candidate(stmt: &Stmt) -> Option<(Temp, String)> {
+    let Stmt::Let {
+        dst,
+        rvalue:
+            Rvalue::Binary {
+                op: BinaryOp::Concat,
+                lhs: Atom::Var { name, .. },
+                rhs,
+                ..
+            },
+        ..
+    } = stmt
+    else {
+        return None;
+    };
+    if atom_is_var(rhs, name) {
+        return None;
+    }
+    Some((*dst, name.clone()))
+}
+
+/// Whether `atom` is a bare reference to the source variable `name` — used to reject a self-append
+/// whose right side mentions the accumulator (`acc ~= acc`). A temp/const operand never does (its
+/// value was computed by an earlier `let`, before the accumulator is moved out).
+fn atom_is_var(atom: &Atom, name: &str) -> bool {
+    matches!(atom, Atom::Var { name: n, .. } if n == name)
+}
+
 /// Whether `stmt` is `name = %t` — the reassignment of the spread base to the constructor's result,
 /// confirming the self-update.
 fn rebinds_temp(stmt: &Stmt, name: &str, dst: Temp) -> bool {
@@ -180,6 +228,18 @@ fn rebinds_temp(stmt: &Stmt, name: &str, dst: Temp) -> bool {
 fn set_object_reuse(stmt: &mut Stmt) {
     if let Stmt::Let {
         rvalue: Rvalue::Object { reuse, .. },
+        ..
+    } = stmt
+    {
+        *reuse = true;
+    }
+}
+
+/// Set the reuse token on a `let _ = lhs ~ rhs` statement (the caller has already confirmed it is a
+/// [`concat_self_append_candidate`]).
+fn set_binary_reuse(stmt: &mut Stmt) {
+    if let Stmt::Let {
+        rvalue: Rvalue::Binary { reuse, .. },
         ..
     } = stmt
     {

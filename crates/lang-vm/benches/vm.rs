@@ -36,10 +36,12 @@ fn compile(src: &str) -> Module {
 }
 
 /// A blind-overwrite record accumulator: an 8-field class whose global accumulator has one field
-/// overwritten each iteration (`acc = Wide { ...acc, f0: i }`). Today's copying lowering allocates a
-/// fresh object and copies all 8 fields every step — O(n·fields). The accumulator is read only after
-/// the loop, so it stays uniquely owned (a global, stored via the consuming `StoreGlobal`) — the
-/// shape in-place reuse (memory-management Phase 5) will target to cut the slope to O(n).
+/// overwritten each iteration (`acc = Wide { ...acc, f0: i }`). The accumulator is read only after
+/// the loop, so it stays uniquely owned (a global, stored via the consuming `StoreGlobal`). Phase
+/// 5.1b's global record reuse (`TakeGlobal` + `MakeRecordInPlace`) now overwrites the single field
+/// in place instead of allocating a fresh object and copying all 8 every step — a ~2.6× constant-
+/// factor cut (both were already O(n) in `n`; the win is the per-step work, alloc + 8 copies → 1
+/// in-place overwrite).
 fn record_update_src(n: usize) -> String {
     let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
     let inits: Vec<String> = (0..8).map(|i| format!("f{i}: 0")).collect();
@@ -138,9 +140,11 @@ fn allocation_src() -> String {
     )
 }
 
-/// The self-append accumulator `acc ~= [i]` n times. O(n²) today (each `~` copies the whole left
-/// list); the P-COW VM half (folded into P-GC) brings it to O(n). Parameterized over n so the
-/// scaling — not just a constant factor — is visible.
+/// The self-append accumulator `acc ~= [i]` n times. Was O(n²) (each `~` copied the whole left
+/// list); Phase 5.1b's `ConcatInPlace` (with a `TakeGlobal` exposing the global accumulator's unique
+/// ownership) extends the backing buffer in place, bringing it to O(n) — measured ~31× at n=8000,
+/// and the gap widens with n. Parameterized over n so the scaling — not just a constant factor — is
+/// visible.
 fn accumulate_src(n: usize) -> String {
     format!(
         "mut acc = [];\n\

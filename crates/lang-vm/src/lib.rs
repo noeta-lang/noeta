@@ -3668,12 +3668,12 @@ mod tests {
 
     #[test]
     fn record_update_reuse_paths() {
-        // VM-side record-update reuse (`acc = T { ...acc, … }`). Covers all three runtime paths of
-        // `Op::MakeRecordInPlace`: (1) the STATIC check-elided in-place mutation — a global
-        // blind-overwrite accumulator the linearity analysis cleared, with a HEAP field (`tag`)
-        // whose reference must transfer untouched across the reuse; (2) the RUNTIME copy fallback —
-        // an aliased accumulator (`snap = acc`) must keep `snap` at the pre-update value; (3) the
-        // RUNTIME in-place hit — a global whose update does not read it. Heap fields exercise the
+        // VM-side record-update reuse (`acc = T { ...acc, … }`). Covers the RUNTIME-checked
+        // `Op::MakeRecordInPlace` paths reached via a GLOBAL accumulator (`TakeGlobal` exposes the
+        // taken-out value's uniqueness; Phase 5.1b): (1) the in-place hit — a global whose update
+        // overwrites a field, with a HEAP field (`tag`) whose reference must transfer untouched across
+        // the reuse; (2) the copy fallback — an aliased accumulator (`snap = acc`) must keep `snap` at
+        // the pre-update value (the runtime refcount > 1 forces the copy). Heap fields exercise the
         // slot retain/release accounting; run under miri to validate refcounts (no UAF/double free).
         let r = run(
             "class Point {\n  x: int\n  tag: string\n  fn show(): string { return \"${x} ${tag}\"; }\n}\nmut acc = Point { x: -1, tag: \"k\" };\nfor i in 0..4 {\n  acc = Point { ...acc, x: i };\n}\necho acc.show();\nmut p = Point { x: 1, tag: \"a\" };\nsnap = p;\np = Point { ...p, x: 9 };\necho p.show();\necho snap.show();\n",
@@ -4510,7 +4510,8 @@ mod tests {
         // Phase 5.1a: a self-update of a destructor-free type whose accumulator is a directly-held
         // **function-local** must lower to the in-place `MakeRecordInPlace` (the reuse pass marks it,
         // the compiler emits it) rather than a copying `MakeRecord` — the proof the reuse token reaches
-        // the VM. (A top-level global accumulator is the `TakeGlobal` case, a later slice.)
+        // the VM. (A top-level global accumulator is the `TakeGlobal` case — see
+        // `global_self_update_lowers_to_take_global_plus_in_place_reuse`.)
         let source = Source::new(
             SourceId::FIRST,
             "t.lang",
@@ -4523,6 +4524,53 @@ mod tests {
         assert!(
             disasm.contains("MakeRecIP"),
             "expected an in-place record-reuse op, got:\n{disasm}"
+        );
+    }
+
+    #[test]
+    fn global_self_update_lowers_to_take_global_plus_in_place_reuse() {
+        // Phase 5.1b: a top-level (global) record accumulator's self-update must move the global out
+        // with `TakeGlobal` and reuse it in place with `MakeRecordInPlace` — not the copying
+        // `MakeRecord` the local-only 5.1a path fell back to for a global. Both ops together are the
+        // proof the global path is wired.
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "class P { x: int }\nmut acc = P { x: 0 };\nacc = P { ...acc, x: 5 };\necho acc.x;\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        let disasm = module.disassemble();
+        assert!(
+            disasm.contains("TakeGlobal") && disasm.contains("MakeRecIP"),
+            "expected TakeGlobal + in-place record reuse for a global accumulator, got:\n{disasm}"
+        );
+    }
+
+    #[test]
+    fn self_append_lowers_to_in_place_concat() {
+        // Phase 5.1b: a list self-append `acc ~= rhs` must lower to `ConcatInPlace` — for a global
+        // accumulator preceded by `TakeGlobal` (to expose unique ownership), and for a function-local
+        // accumulator directly on its register. The proof the concat reuse token reaches the VM rather
+        // than the copying `Op::Binary` (`~`).
+        let source = Source::new(
+            SourceId::FIRST,
+            "t.lang",
+            "mut g = [\"a\"];\ng ~= [\"b\"];\nfn build(): List<int> {\n  mut acc = [];\n  for i in 0..3 { acc ~= [i]; }\n  return acc;\n}\necho g;\necho build();\n",
+        );
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).unwrap();
+        let disasm = module.disassemble();
+        assert_eq!(
+            disasm.matches("ConcatIP").count(),
+            2,
+            "expected two in-place concats (global + local), got:\n{disasm}"
+        );
+        assert!(
+            disasm.contains("TakeGlobal"),
+            "expected the global self-append to be preceded by TakeGlobal, got:\n{disasm}"
         );
     }
 

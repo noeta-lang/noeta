@@ -1708,7 +1708,57 @@ impl<'m> FnCompiler<'m> {
                 Ok(())
             }
             // `&&`/`||` never reach here (they lower to `Stmt::Logical`); every other infix does.
-            Rvalue::Binary { op, lhs, rhs, span } => {
+            Rvalue::Binary {
+                op,
+                lhs,
+                rhs,
+                reuse,
+                span,
+            } => {
+                // In-place self-append (Phase 5.1b): a marked `acc = acc ~ rhs` whose accumulator is a
+                // directly-held local or a top-level global reuses that list's buffer via `ConcatInPlace`
+                // instead of the copying `~`. The right operand is resolved *before* the accumulator is
+                // taken so a `TakeGlobal` cannot vacate a slot the rhs still reads (the reuse pass also
+                // guarantees `rhs` does not mention the base). A celled/captured/upvalue base is not
+                // handled — it falls through to the copying `Op::Binary`, always correct.
+                if *reuse
+                    && *op == BinaryOp::Concat
+                    && let Atom::Var { name, .. } = lhs
+                {
+                    let b = self.atom_reg(rhs)?;
+                    let base = match self.resolve(name) {
+                        Resolved::Local(reg) => Some(reg),
+                        Resolved::Global => {
+                            let reg = self.alloc_reg();
+                            self.code.push(Op::TakeGlobal {
+                                dst: reg,
+                                name: name.clone(),
+                                span: *span,
+                            });
+                            Some(reg)
+                        }
+                        _ => None,
+                    };
+                    if let Some(base) = base {
+                        self.code.push(Op::ConcatInPlace {
+                            dst,
+                            lhs: base,
+                            rhs: b,
+                            span: *span,
+                        });
+                        return Ok(());
+                    }
+                    // Not a reusable base: build the copying concat with the already-resolved rhs.
+                    let a = self.atom_reg(lhs)?;
+                    self.code.push(Op::Binary {
+                        op: *op,
+                        dst,
+                        a,
+                        b,
+                        span: *span,
+                    });
+                    return Ok(());
+                }
                 let a = self.atom_reg(lhs)?;
                 let b = self.atom_reg(rhs)?;
                 self.code.push(Op::Binary {
@@ -2175,14 +2225,19 @@ impl<'m> FnCompiler<'m> {
             decl_fields.to_vec(),
         ));
         // In-place reuse (Phase 5): a self-update `acc = Type { ...acc, f: v }` whose spread base is a
-        // directly-held **local** can reuse that allocation. The base is read in place (no retain) and
-        // `MakeRecordInPlace` moves it out of its register — for a local the register *is* the binding's
-        // sole storage, so the runtime sees refcount 1 on the unique path and an alias forces a copy.
-        // A non-local base (a top-level global, a captured cell, an upvalue) is not handled in this
-        // slice — it falls through to the copying `MakeRecord`, which is always correct.
+        // directly-held **local** (Phase 5.1a) or a top-level **global** (Phase 5.1b) reuses that
+        // allocation. For a local the register *is* the binding's sole storage, read in place; for a
+        // global, `TakeGlobal` moves the value out of its slot so the in-place op sees unique ownership
+        // (the trailing reassignment stores the result back). `MakeRecordInPlace` then moves the base
+        // out of its register — the runtime sees refcount 1 on the unique path and an alias forces a
+        // copy. A captured cell or upvalue base is not handled — it falls through to the copying
+        // `MakeRecord`, which is always correct.
+        //
+        // The field operands are consumed *before* `TakeGlobal` runs, so a field that itself reads the
+        // global (`g = T { ...g, x: g }`) loads the live value before the slot is vacated.
         if reuse
             && let Some((Atom::Var { name, .. }, _)) = spread
-            && let Resolved::Local(base) = self.resolve(name)
+            && matches!(self.resolve(name), Resolved::Local(_) | Resolved::Global)
         {
             let mut consumed = Vec::new();
             let mut named: Vec<(u16, Reg)> = Vec::with_capacity(inits.len());
@@ -2196,6 +2251,21 @@ impl<'m> FnCompiler<'m> {
                 let r = self.consume_operand(&init.value, &mut consumed)?;
                 named.push((slot as u16, r));
             }
+            let base = match self.resolve(name) {
+                Resolved::Local(reg) => reg,
+                // A global: take its single owning reference out into a fresh register. (Resolved
+                // exactly once more here; the `matches!` guard above already proved it is one of the
+                // two handled cases.)
+                _ => {
+                    let reg = self.alloc_reg();
+                    self.code.push(Op::TakeGlobal {
+                        dst: reg,
+                        name: name.clone(),
+                        span,
+                    });
+                    reg
+                }
+            };
             self.code.push(Op::MakeRecordInPlace {
                 dst,
                 shape,
