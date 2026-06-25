@@ -91,6 +91,10 @@ pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
     pub type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
+    /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
+    /// so both backends derive identical annotations.
+    pub destructor_relevance: DestructorRelevance,
 }
 
 /// Type-check a program once, returning both its diagnostics and its resolved-type map. This is
@@ -100,11 +104,15 @@ pub fn check_all(program: &Program) -> Checked {
     let mut checker = Checker::default();
     checker.register_prelude();
     checker.collect(program);
+    // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
+    // relevance is recorded inline during `check_program`, and needs the reachable set ready).
+    checker.compute_relevance(program);
     checker.check_semantic_roles(program);
     checker.check_program(program);
     Checked {
         diagnostics: checker.diags,
         type_of_sites: checker.type_of_sites,
+        destructor_relevance: checker.relevance,
     }
 }
 
@@ -360,7 +368,32 @@ struct Checker {
     /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
     /// on the same program, so they emit identical `Type` values by construction.
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
+    destructor_classes: HashSet<String>,
+    /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
+    /// through the type's own block, its fields, or its collection elements (the fixpoint
+    /// [`compute_destruct_reachable`] computes). The input to per-binding destructor-relevance.
+    destruct_reachable: HashSet<String>,
+    /// The destructor-relevance of each binding (memory-management migration, Phase 3.2b): the
+    /// drop-insertion pass reads it to mark a `DropVar`'s `relevant` bit, which Phase 4 uses to skip
+    /// the destructor check for a value whose type can run no destructor.
+    relevance: DestructorRelevance,
     diags: Vec<Diagnostic>,
+}
+
+/// Which bindings hold a value whose drop could run a `destruct` block — the **destructor-relevance**
+/// the checker exports for the Phase-3 drop-insertion pass (memory-management migration). Sound and
+/// **conservative**: a binding absent here is provably non-relevant (its type reaches no destructor);
+/// a binding present here *may* be relevant, so its drop keeps the runtime destructor check. Two
+/// keyings because the Core IR identifies the two binding kinds differently: a local by its binding
+/// `name_span`, a parameter by `(its function's span, its name)` — the IR's `Func` carries the span
+/// and the parameter names, but not per-parameter spans.
+#[derive(Debug, Clone, Default)]
+pub struct DestructorRelevance {
+    /// `name_span`s of non-parameter bindings whose value's type is destruct-reachable.
+    pub locals: HashSet<Span>,
+    /// `(function span, parameter name)` of parameters whose type is destruct-reachable.
+    pub params: HashSet<(Span, String)>,
 }
 
 impl Checker {
@@ -475,6 +508,101 @@ impl Checker {
             .insert("Type".to_string(), lang_types::TypeKind::Enum);
     }
 
+    /// Compute destruct-reachability (Phase 3.2b), after [`Self::collect`] has registered every
+    /// type. A type name is reachable when dropping a value of that type could run *some* `destruct`
+    /// block: it has its own (a class in `destructor_classes`), or one of its fields / variant
+    /// payloads / collection elements does — a monotone fixpoint over the declared type graph. Then
+    /// records the parameters whose type is reachable (locals are recorded inline during checking).
+    fn compute_relevance(&mut self, program: &Program) {
+        let mut reachable = self.destructor_classes.clone();
+        loop {
+            let mut changed = false;
+            for (name, fields) in &self.records {
+                if !reachable.contains(name)
+                    && fields.iter().any(|(_, ty)| type_relevant(ty, &reachable))
+                {
+                    reachable.insert(name.clone());
+                    changed = true;
+                }
+            }
+            for (name, variants) in &self.enums {
+                if !reachable.contains(name)
+                    && variants
+                        .iter()
+                        .any(|v| v.fields.iter().any(|ty| type_relevant(ty, &reachable)))
+                {
+                    reachable.insert(name.clone());
+                    changed = true;
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        self.destruct_reachable = reachable;
+        self.record_param_relevance(program);
+    }
+
+    /// Whether a binding of type `ty` is destructor-relevant under the computed reachable set.
+    fn type_relevant(&self, ty: &Type) -> bool {
+        type_relevant(ty, &self.destruct_reachable)
+    }
+
+    /// Record each `fn`/method parameter whose declared type is destruct-reachable, keyed by
+    /// `(function span, parameter name)` — matching how the Core IR identifies a parameter (its
+    /// `Func.span` + the bare name). Parameter types come from the annotation (`param_type`), not
+    /// inference, so this is a standalone statement walk. Closure parameters (an `Expr::Closure`,
+    /// not a statement) are not recorded here, so they default to conservatively-relevant in the
+    /// drop pass — sound, and closure-parameter precision is marginal.
+    fn record_param_relevance(&mut self, program: &Program) {
+        for stmt in &program.stmts {
+            self.record_param_relevance_stmt(stmt);
+        }
+    }
+
+    fn record_param_relevance_fn(&mut self, fn_span: Span, params: &[Param], body: &[Stmt]) {
+        for p in params {
+            if self.type_relevant(&param_type(p)) {
+                self.relevance.params.insert((fn_span, p.name.clone()));
+            }
+        }
+        for stmt in body {
+            self.record_param_relevance_stmt(stmt);
+        }
+    }
+
+    fn record_param_relevance_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Fn(decl) => self.record_param_relevance_fn(decl.span, &decl.params, &decl.body),
+            Stmt::Class(c) => {
+                for m in c
+                    .methods
+                    .iter()
+                    .chain(c.impls.iter().flat_map(|b| b.methods.iter()))
+                {
+                    self.record_param_relevance_fn(m.span, &m.params, &m.body);
+                }
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                then_body
+                    .iter()
+                    .for_each(|s| self.record_param_relevance_stmt(s));
+                if let Some(b) = else_body {
+                    b.iter().for_each(|s| self.record_param_relevance_stmt(s));
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                body.iter()
+                    .for_each(|s| self.record_param_relevance_stmt(s));
+            }
+            _ => {}
+        }
+    }
+
     /// Pass 1: register every top-level declaration so forward references resolve before any
     /// body is checked. Mirrors the compiler's "register types first" pass.
     fn collect(&mut self, program: &Program) {
@@ -507,6 +635,10 @@ impl Checker {
                     self.types.insert(c.name.clone());
                     self.type_kinds
                         .insert(c.name.clone(), lang_types::TypeKind::Class);
+                    // A class with a `destruct { ... }` block seeds destruct-reachability (Phase 3.2b).
+                    if c.destructor.is_some() {
+                        self.destructor_classes.insert(c.name.clone());
+                    }
                     // A class satisfies a trait it `@derive`s or `impl`s; record both for bound
                     // enforcement (the `impl`/`derive` *names* are validated elsewhere).
                     self.record_trait_impls(
@@ -735,6 +867,7 @@ impl Checker {
             Stmt::Binding {
                 mut_decl,
                 name,
+                name_span,
                 ty,
                 value,
                 ..
@@ -747,10 +880,17 @@ impl Checker {
                         self.check_type_ref(ty);
                         let expected = Type::from_ref(ty);
                         self.check(value, &expected, env);
+                        // Record destructor-relevance of this binding for the drop-insertion pass.
+                        if self.type_relevant(&expected) {
+                            self.relevance.locals.insert(*name_span);
+                        }
                         bind(env, name, expected); // annotated = a fresh declaration
                     }
                     None => {
                         let vty = self.check(value, &Type::Unknown, env);
+                        if self.type_relevant(&vty) {
+                            self.relevance.locals.insert(*name_span);
+                        }
                         // An *immutable* binding to a context-free polymorphic literal (`x = []`,
                         // `m = {}`, `x = none`) can never be reassigned (that would be `E0006`), so
                         // its element/payload type is fixed yet undeterminable — `E0023`, fixable
@@ -3209,6 +3349,32 @@ fn field_type(ty: &Option<TypeRef>) -> Type {
 /// The declared type of a parameter, or `Unknown` when unannotated.
 fn param_type(p: &Param) -> Type {
     p.ty.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown)
+}
+
+/// Whether dropping a value of type `ty` could run *some* `destruct` block — destructor-relevance
+/// (Phase 3.2b), evaluated against the set of destruct-**reachable** type names. **Conservative in
+/// the "assume relevant" direction**: `dyn`/`Unknown`/a kind-type/a function value (which may own
+/// captures) and any named type or argument in `reachable` count as relevant; only the primitive
+/// scalars and aggregates built purely from non-relevant parts are ruled out. So a `false` result
+/// is a proof of non-relevance, while a `true` may be an over-approximation — exactly the direction
+/// that keeps Phase 4's destructor firing sound.
+fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
+    match ty {
+        // No value, or a primitive scalar: a drop runs no destructor.
+        Type::Unit | Type::Int | Type::Float | Type::Bool | Type::String => false,
+        // Missing information / the dynamic top / an abstract kind / a function value: assume relevant.
+        Type::Unknown | Type::Dyn | Type::Kind(_) | Type::Fn { .. } => true,
+        // Aggregates are relevant exactly when a part they own is.
+        Type::List(e) | Type::Set(e) | Type::Option(e) => type_relevant(e, reachable),
+        Type::Map(k, v) => type_relevant(k, reachable) || type_relevant(v, reachable),
+        Type::Result(t, e) => type_relevant(t, reachable) || type_relevant(e, reachable),
+        Type::Union(members) => members.iter().any(|m| type_relevant(m, reachable)),
+        // A declared type: relevant if it (transitively) reaches a destructor, or any type argument
+        // does (covers generic containers like `Box<Resource>`).
+        Type::Named(name, args) => {
+            reachable.contains(name) || args.iter().any(|a| type_relevant(a, reachable))
+        }
+    }
 }
 
 /// The number of *required* parameters: the leading run with no default value. With defaults

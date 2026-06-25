@@ -1431,3 +1431,71 @@ fn closure_default_may_reference_a_captured_variable() {
     let src = "fn make(tag: string): dyn {\n  return fn(s: string, label: string = tag) => label ~ s;\n}\necho 1;\n";
     assert!(codes(src).is_empty());
 }
+
+/// Parse `text` and return the checker's per-binding destructor-relevance (Phase 3.2b).
+fn relevance(text: &str) -> super::DestructorRelevance {
+    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
+    super::check_all(&parsed.program).destructor_relevance
+}
+
+#[test]
+fn no_destructors_means_no_relevant_bindings() {
+    // With no `destruct` block anywhere, no value's drop can run one, so nothing is relevant.
+    let r = relevance("x = 5;\nfn f(a: int) {\n  echo a;\n}\nf(1);\n");
+    assert!(r.locals.is_empty(), "locals: {:?}", r.locals);
+    assert!(r.params.is_empty(), "params: {:?}", r.params);
+}
+
+#[test]
+fn a_binding_of_a_destructor_bearing_type_is_relevant() {
+    // `x` is an `R` (which has a `destruct` block) and `use_it`'s parameter is an `R`, so both are
+    // recorded relevant; the `int` parameter `n` is not.
+    let src = "class R {\n  n: int\n  fn new(n: int): R { return R { n: n }; }\n  destruct { echo n; }\n}\nfn use_it(r: R) {\n  echo r.n;\n}\nx = R.new(1);\nuse_it(x);\n";
+    let r = relevance(src);
+    assert_eq!(
+        r.locals.len(),
+        1,
+        "the R-typed local `x` is relevant: {:?}",
+        r.locals
+    );
+    assert_eq!(
+        r.params.len(),
+        1,
+        "only the R-typed parameter `r` is relevant: {:?}",
+        r.params
+    );
+}
+
+#[test]
+fn a_primitive_binding_is_not_relevant_even_when_destructors_exist() {
+    // `R` has a destructor, but no binding/parameter here is `R`-typed, so relevance stays empty —
+    // relevance is per-value, not per-program.
+    let src = "class R {\n  n: int\n  destruct { echo n; }\n}\nfn g(a: int) {\n  echo a;\n}\nm = 5;\ng(1);\n";
+    let r = relevance(src);
+    assert!(
+        r.locals.is_empty(),
+        "primitive local not relevant: {:?}",
+        r.locals
+    );
+    assert!(
+        r.params.is_empty(),
+        "primitive param not relevant: {:?}",
+        r.params
+    );
+}
+
+#[test]
+fn a_list_of_a_destructor_bearing_type_is_relevant() {
+    // Dropping a `List<R>` releases its elements, which run `R`'s destructor — transitive reach.
+    let src = "class R {\n  n: int\n  destruct { echo n; }\n}\nfn collect(items: List<R>) {\n  echo len(items);\n}\necho 1;\n";
+    let r = relevance(src);
+    assert_eq!(
+        r.params.len(),
+        1,
+        "the List<R> parameter is relevant: {:?}",
+        r.params
+    );
+}

@@ -95,7 +95,21 @@ fn is_native_module(path: &[String], name: &str) -> bool {
 /// its reserved prototype; (3) compile the top-level program. Splitting (1) from (3) mirrors
 /// the tree-walker, whose type declarations are all evaluated before the driver code runs.
 pub fn compile(program: &Program) -> Result<Module, Unsupported> {
-    compile_with_sites(program, lang_check::resolve_type_of_sites(program))
+    let checked = lang_check::check_all(program);
+    compile_with_sites(
+        program,
+        checked.type_of_sites,
+        &checked.destructor_relevance,
+    )
+}
+
+/// Convert the checker's destructor-relevance into the drop pass's form (identical sets; the two
+/// crates keep separate types so `lang-ir-passes` needs no checker dependency).
+fn passes_relevance(r: &lang_check::DestructorRelevance) -> lang_ir_passes::Relevance {
+    lang_ir_passes::Relevance {
+        locals: r.locals.clone(),
+        params: r.params.clone(),
+    }
 }
 
 /// Which record-update reuse the compiler may apply to a self-update `acc = Type { ...acc, f: v }`.
@@ -122,7 +136,14 @@ pub enum ReuseMode {
 /// Compile under an explicit [reuse mode][ReuseMode]. Retained for the perf bench's API; the mode
 /// is inert since Phase 2 (see [`ReuseMode`]), so this is behavior-identical to [`compile`].
 pub fn compile_with_options(program: &Program, reuse: ReuseMode) -> Result<Module, Unsupported> {
-    compile_inner(program, lang_check::resolve_type_of_sites(program), reuse)
+    // The reuse bench does not exercise destructor-relevance; pass none (drops are conservatively
+    // relevant, behavior-identical in Phase 3 since the bit is unused).
+    compile_inner(
+        program,
+        lang_check::resolve_type_of_sites(program),
+        None,
+        reuse,
+    )
 }
 
 /// Compile a program using a **precomputed** `type_of` site map instead of re-deriving it.
@@ -135,13 +156,20 @@ pub fn compile_with_options(program: &Program, reuse: ReuseMode) -> Result<Modul
 pub fn compile_with_sites(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
-    compile_inner(program, type_of_sites, ReuseMode::default())
+    compile_inner(
+        program,
+        type_of_sites,
+        Some(passes_relevance(relevance)),
+        ReuseMode::default(),
+    )
 }
 
 fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    relevance: Option<lang_ir_passes::Relevance>,
     _reuse: ReuseMode,
 ) -> Result<Module, Unsupported> {
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
@@ -152,7 +180,7 @@ fn compile_inner(
     let ir = lang_ir::lower(program).map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
     })?;
-    let ir = lang_ir_passes::insert_drops(&ir);
+    let ir = lang_ir_passes::insert_drops(&ir, relevance.as_ref());
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
         shapes: Vec::new(),

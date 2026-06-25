@@ -146,8 +146,18 @@ fn compare_eval_paths(name: &str, text: &str, report: &mut FaithReport) {
         report.matched += 1;
         return;
     }
-    let sites = lang_db::checked(&db, src).type_of_sites.clone();
-    compare(name, &parsed.0.program, sites, report);
+    let checked = lang_db::checked(&db, src);
+    let sites = checked.type_of_sites.clone();
+    let relevance = to_relevance(&checked.destructor_relevance);
+    compare(name, &parsed.0.program, sites, relevance, report);
+}
+
+/// The drop pass's relevance form, copied from the checker's (identical sets).
+fn to_relevance(r: &lang_check::DestructorRelevance) -> lang_ir_passes::Relevance {
+    lang_ir_passes::Relevance {
+        locals: r.locals.clone(),
+        params: r.params.clone(),
+    }
 }
 
 fn compare_eval_paths_workspace(
@@ -169,8 +179,10 @@ fn compare_eval_paths_workspace(
         report.matched += 1;
         return;
     }
-    let sites = lang_db::linked_checked(&db, ws).type_of_sites.clone();
-    compare(name, program, sites, report);
+    let checked = lang_db::linked_checked(&db, ws);
+    let sites = checked.type_of_sites.clone();
+    let relevance = to_relevance(&checked.destructor_relevance);
+    compare(name, program, sites, relevance, report);
 }
 
 /// The shared comparison: lower the program (skip if unsupported), then run it through the
@@ -179,6 +191,7 @@ fn compare(
     name: &str,
     program: &lang_ast::Program,
     sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
+    relevance: lang_ir_passes::Relevance,
     report: &mut FaithReport,
 ) {
     let ir = match lang_ir::lower(program) {
@@ -189,9 +202,10 @@ fn compare(
         }
     };
     // The IR interpreter consumes the **same** annotated IR the VM compiles (Phase 2 lowering +
-    // the Phase 3 drop-insertion pass), so faithfulness proves the precise-RC drops are
-    // behavior-neutral in the interpreter exactly as the differential proves it for the VM.
-    let ir = lang_ir_passes::insert_drops(&ir);
+    // the Phase 3 drop-insertion pass, with the same destructor-relevance annotation), so
+    // faithfulness proves the precise-RC drops are behavior-neutral in the interpreter exactly as
+    // the differential proves it for the VM.
+    let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
     let tree = TreeWalkBackend::new().run_with_sites(program, sites.clone());
     let ir_result = TreeWalkBackend::new().run_ir(program, &ir, sites);
     if tree == ir_result {

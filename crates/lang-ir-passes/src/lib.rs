@@ -25,5 +25,5 @@
 pub mod drops;
 pub mod liveness;
 
-pub use drops::insert_drops;
+pub use drops::{Relevance, insert_drops};
 pub use liveness::{BlockLiveness, ProgramLiveness, StmtLiveness, VarSet, analyze};

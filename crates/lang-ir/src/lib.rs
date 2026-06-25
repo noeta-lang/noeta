@@ -346,7 +346,17 @@ pub enum Stmt {
     /// In Phase 3 this lowers to a **plain reference release** in both backends (prompt memory
     /// reclamation, the peak-residency win) and fires **no** destructor — destructor firing stays
     /// globals-only until Phase 4, which flips local drops to the destructor-running release.
-    DropVar { name: String, span: Span },
+    ///
+    /// `relevant` is the **destructor-relevance** annotation (Phase 3.2b): `true` if dropping this
+    /// binding's value could run *some* `destruct` block (its type transitively reaches one),
+    /// `false` if it provably cannot. Both backends ignore it in Phase 3 (every drop is a plain
+    /// release); Phase 4 reads it to skip the destructor-firing check for a `false` drop. Computed
+    /// from the checker's per-binding types; conservatively `true` when the type is unknown.
+    DropVar {
+        name: String,
+        span: Span,
+        relevant: bool,
+    },
 }
 
 /// One arm of an IR `match`: a surface pattern and the block it runs. In expression

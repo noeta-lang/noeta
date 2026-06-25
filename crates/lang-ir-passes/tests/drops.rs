@@ -95,7 +95,7 @@ fn walk_func(func: &Func, d: &mut Drops) {
 fn function_locals_are_dropped_at_their_last_use() {
     // `a` (a parameter) dies at its last read; `x` (a single-assignment local) dies at `echo x`.
     let program = lower("fn f(a) {\n  x = [a, a];\n  echo x;\n  echo 1;\n}\nf(5);\n");
-    let dropped = insert_drops(&program);
+    let dropped = insert_drops(&program, None);
     let d = collect(&dropped);
     assert!(
         d.in_funcs.contains(&"a".to_string()),
@@ -113,7 +113,7 @@ fn function_locals_are_dropped_at_their_last_use() {
 fn top_level_globals_are_never_dropped() {
     // Top-level bindings are globals; their reclamation stays at teardown (spec §2), so no `DropVar`.
     let program = lower("x = [1, 2];\necho x;\necho 3;\n");
-    let dropped = insert_drops(&program);
+    let dropped = insert_drops(&program, None);
     let d = collect(&dropped);
     assert!(d.top.is_empty(), "no top-level drops, got {:?}", d.top);
 }
@@ -123,7 +123,7 @@ fn reassigned_bindings_are_not_dropped() {
     // `acc` is reassigned (mut decl + reassignment), so it is not single-assignment and keeps the
     // existing reassignment-release + teardown behavior — the pass inserts no `DropVar` for it.
     let program = lower("fn f() {\n  mut acc = 0;\n  acc = acc + 1;\n  echo acc;\n}\nf();\n");
-    let dropped = insert_drops(&program);
+    let dropped = insert_drops(&program, None);
     let d = collect(&dropped);
     assert!(
         !d.in_funcs.contains(&"acc".to_string()),
@@ -138,7 +138,7 @@ fn a_local_holding_a_value_past_a_branch_is_dropped_after_its_use() {
     // real last use (the trailing `echo data`).
     let program =
         lower("fn f(n) {\n  data = [n];\n  if n > 0 {\n    echo n;\n  }\n  echo data;\n}\nf(1);\n");
-    let dropped = insert_drops(&program);
+    let dropped = insert_drops(&program, None);
     let d = collect(&dropped);
     assert!(
         d.in_funcs.contains(&"data".to_string()),
@@ -156,7 +156,7 @@ fn a_local_captured_by_a_closure_is_never_dropped() {
     let program = lower(
         "fn make(tag) {\n  return fn(s, label = tag) => label ~ s;\n}\nt = make(\"X\");\necho t(\"a\");\n",
     );
-    let dropped = insert_drops(&program);
+    let dropped = insert_drops(&program, None);
     let d = collect(&dropped);
     assert!(
         !d.in_funcs.contains(&"tag".to_string()),
@@ -170,12 +170,82 @@ fn idempotent_second_run_inserts_no_further_drops() {
     // Running the pass on already-annotated IR must not add drops (DropVar is not a use, and the
     // bindings already died at the same points).
     let program = lower("fn f(a) {\n  x = [a];\n  echo x;\n}\nf(2);\n");
-    let once = insert_drops(&program);
+    let once = insert_drops(&program, None);
     let once_count = collect(&once).in_funcs.len();
-    let twice = insert_drops(&once);
+    let twice = insert_drops(&once, None);
     let twice_count = collect(&twice).in_funcs.len();
     assert_eq!(
         once_count, twice_count,
         "drop insertion should be idempotent"
     );
+}
+
+/// The `relevant` bit of each in-function `DropVar`, by name.
+fn drop_relevance(program: &Program) -> std::collections::HashMap<String, bool> {
+    let mut out = std::collections::HashMap::new();
+    fn walk(block: &Block, in_func: bool, out: &mut std::collections::HashMap<String, bool>) {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::DropVar { name, relevant, .. } if in_func => {
+                    out.insert(name.clone(), *relevant);
+                }
+                Stmt::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    walk(then_block, in_func, out);
+                    if let Some(b) = else_block {
+                        walk(b, in_func, out);
+                    }
+                }
+                Stmt::While { body, .. } | Stmt::For { body, .. } => walk(body, in_func, out),
+                Stmt::Decl(Decl::Fn { func, .. }) => walk(&func.body, true, out),
+                _ => {}
+            }
+        }
+    }
+    walk(&program.top, false, &mut out);
+    out
+}
+
+/// Find the `name_span` of the first `Bind` of `name` inside the first nested function body.
+fn bind_span(program: &Program, name: &str) -> lang_span::Span {
+    fn find(block: &Block, name: &str) -> Option<lang_span::Span> {
+        for stmt in &block.stmts {
+            match stmt {
+                Stmt::Bind {
+                    name: n, name_span, ..
+                } if n == name => return Some(*name_span),
+                Stmt::Decl(Decl::Fn { func, .. }) => {
+                    if let Some(s) = find(&func.body, name) {
+                        return Some(s);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+    find(&program.top, name).expect("a binding of that name")
+}
+
+#[test]
+fn the_relevant_bit_reflects_the_relevance_oracle() {
+    // `x` is a single-assignment local dropped at its last use; its `relevant` bit must follow the
+    // oracle: true when its binding span is in `locals`, false when the oracle is present but omits
+    // it, and true (conservative) with no oracle at all.
+    let program = lower("fn f() {\n  x = [1];\n  echo x;\n}\nf();\n");
+    let span = bind_span(&program, "x");
+
+    let with = lang_ir_passes::Relevance {
+        locals: std::iter::once(span).collect(),
+        params: Default::default(),
+    };
+    assert!(drop_relevance(&insert_drops(&program, Some(&with)))["x"]);
+
+    let without = lang_ir_passes::Relevance::default();
+    assert!(!drop_relevance(&insert_drops(&program, Some(&without)))["x"]);
+
+    assert!(drop_relevance(&insert_drops(&program, None))["x"]);
 }

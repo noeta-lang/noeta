@@ -22,22 +22,49 @@
 //! observable output — the differential stays green, the leak oracle reaches zero sooner.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use lang_ir::{Arm, Block, ClassDef, Decl, Func, Program, Rvalue, Stmt};
 use lang_span::Span;
 
 use crate::liveness::{self, BlockLiveness, StmtLiveness, VarSet};
 
+/// The destructor-relevance of bindings, as the checker computes it (mirrors
+/// `lang_check::DestructorRelevance`; kept here so this crate needs no checker dependency — the
+/// caller copies the two sets across). A binding **absent** from both sets is provably non-relevant;
+/// a binding present *may* run a destructor. `None` passed to [`insert_drops`] means "no information"
+/// → every drop is conservatively relevant.
+#[derive(Debug, Clone, Default)]
+pub struct Relevance {
+    /// `name_span`s of non-parameter bindings whose value's type is destruct-reachable.
+    pub locals: std::collections::HashSet<Span>,
+    /// `(function span, parameter name)` of parameters whose type is destruct-reachable.
+    pub params: std::collections::HashSet<(Span, String)>,
+}
+
+/// A function's droppable locals mapped to their destructor-relevance bit.
+type DropSet = HashMap<String, bool>;
+
+/// Program-wide context threaded through the rewrite: the globals (never dropped) and the
+/// destructor-relevance oracle (`None` ⇒ conservatively relevant).
+struct Cx<'a> {
+    globals: &'a VarSet,
+    relevance: Option<&'a Relevance>,
+}
+
 /// Insert source-variable drops throughout a program, returning the annotated IR. The top level is
 /// a global scope (no drops); every function/method/closure body gets drops for its single-
-/// assignment locals.
-pub fn insert_drops(program: &Program) -> Program {
+/// assignment locals, each tagged with its destructor-relevance from `relevance`.
+pub fn insert_drops(program: &Program, relevance: Option<&Relevance>) -> Program {
     let globals = top_level_names(&program.top);
-    // The top-level block is a global scope: no `DropVar`s for its own bindings, but its nested
-    // function bodies are rewritten. An empty droppable set + a no-op liveness achieves exactly
-    // that (no name is ever droppable here), while `rewrite_block` still recurses into functions.
+    let cx = Cx {
+        globals: &globals,
+        relevance,
+    };
+    // The top-level block is a global scope: no `DropVar`s for its own bindings (an empty drop set),
+    // but `rewrite_block` still recurses into its nested function bodies.
     let live = liveness::analyze(program).top;
-    let top = rewrite_block(&program.top, &live, &VarSet::new(), &globals);
+    let top = rewrite_block(&program.top, &live, &DropSet::new(), &cx);
     Program {
         top,
         temp_count: program.temp_count,
@@ -47,12 +74,12 @@ pub fn insert_drops(program: &Program) -> Program {
 
 // --- Rewrite ------------------------------------------------------------------------------------
 
-/// Rewrite a function body: compute its liveness and single-assignment locals, then walk it
-/// inserting drops. Nested functions inside it are rewritten by recursion.
-fn rewrite_func(func: &Func, globals: &VarSet) -> Func {
+/// Rewrite a function body: compute its liveness, its droppable single-assignment locals and their
+/// relevance, then walk it inserting drops. Nested functions inside it are rewritten by recursion.
+fn rewrite_func(func: &Func, cx: &Cx) -> Func {
     let live = liveness_of_body(func);
-    let droppable = single_assignment_locals(func, globals);
-    let body = rewrite_block(&func.body, &live, &droppable, globals);
+    let droppable = drop_set(func, cx);
+    let body = rewrite_block(&func.body, &live, &droppable, cx);
     Func {
         params: func.params.clone(),
         // Default thunks run in the definition scope; this slice leaves them undropped (conservative).
@@ -76,20 +103,17 @@ fn liveness_of_body(func: &Func) -> BlockLiveness {
 /// Rewrite a block in parallel with its liveness, inserting `DropVar`s after straight-line deaths
 /// of droppable locals (reverse-construction LIFO when several die together) and recursing into
 /// nested control-flow blocks and function bodies.
-fn rewrite_block(
-    block: &Block,
-    live: &BlockLiveness,
-    droppable: &VarSet,
-    globals: &VarSet,
-) -> Block {
+fn rewrite_block(block: &Block, live: &BlockLiveness, droppable: &DropSet, cx: &Cx) -> Block {
     let mut out: Vec<Stmt> = Vec::with_capacity(block.stmts.len());
     for (stmt, sl) in block.stmts.iter().zip(&live.stmts) {
-        out.push(rewrite_stmt(stmt, sl, droppable, globals));
+        out.push(rewrite_stmt(stmt, sl, droppable, cx));
         if is_straight_line(stmt) {
             for name in lifo_deaths(&sl.dies_here, droppable) {
+                let relevant = droppable[&name];
                 out.push(Stmt::DropVar {
                     name,
                     span: stmt_span(stmt),
+                    relevant,
                 });
             }
         }
@@ -109,15 +133,15 @@ fn rewrite_block(
 /// Rewrite one statement: recurse into its nested control-flow blocks (using the matching
 /// sub-liveness) and into any function body it carries. Straight-line statements with no
 /// sub-structure are returned with their nested functions (if any) rewritten.
-fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &VarSet) -> Stmt {
+fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &DropSet, cx: &Cx) -> Stmt {
     match stmt {
         Stmt::Let { dst, rvalue, span } => Stmt::Let {
             dst: *dst,
-            rvalue: rewrite_rvalue(rvalue, globals),
+            rvalue: rewrite_rvalue(rvalue, cx),
             span: *span,
         },
         Stmt::Eval { rvalue, span } => Stmt::Eval {
-            rvalue: rewrite_rvalue(rvalue, globals),
+            rvalue: rewrite_rvalue(rvalue, cx),
             span: *span,
         },
         Stmt::If {
@@ -126,10 +150,10 @@ fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &Va
             else_block,
             span,
         } => {
-            let then_block = rewrite_block(then_block, &sl.sub[0], droppable, globals);
+            let then_block = rewrite_block(then_block, &sl.sub[0], droppable, cx);
             let else_block = else_block
                 .as_ref()
-                .map(|b| rewrite_block(b, &sl.sub[1], droppable, globals));
+                .map(|b| rewrite_block(b, &sl.sub[1], droppable, cx));
             Stmt::If {
                 cond: cond.clone(),
                 then_block,
@@ -138,8 +162,8 @@ fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &Va
             }
         }
         Stmt::While { cond, body, span } => Stmt::While {
-            cond: rewrite_block(cond, &sl.sub[0], droppable, globals),
-            body: rewrite_block(body, &sl.sub[1], droppable, globals),
+            cond: rewrite_block(cond, &sl.sub[0], droppable, cx),
+            body: rewrite_block(body, &sl.sub[1], droppable, cx),
             span: *span,
         },
         Stmt::For {
@@ -150,7 +174,7 @@ fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &Va
         } => Stmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
-            body: rewrite_block(body, &sl.sub[0], droppable, globals),
+            body: rewrite_block(body, &sl.sub[0], droppable, cx),
             span: *span,
         },
         Stmt::Match {
@@ -165,7 +189,7 @@ fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &Va
                 .zip(&sl.sub)
                 .map(|(arm, arm_live)| Arm {
                     pattern: arm.pattern.clone(),
-                    body: rewrite_block(&arm.body, arm_live, droppable, globals),
+                    body: rewrite_block(&arm.body, arm_live, droppable, cx),
                     span: arm.span,
                 })
                 .collect(),
@@ -182,7 +206,7 @@ fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &Va
             dst: *dst,
             op: *op,
             left: left.clone(),
-            right: rewrite_block(right, &sl.sub[0], droppable, globals),
+            right: rewrite_block(right, &sl.sub[0], droppable, cx),
             span: *span,
         },
         Stmt::Coalesce {
@@ -193,10 +217,10 @@ fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &Va
         } => Stmt::Coalesce {
             dst: *dst,
             value: value.clone(),
-            fallback: rewrite_block(fallback, &sl.sub[0], droppable, globals),
+            fallback: rewrite_block(fallback, &sl.sub[0], droppable, cx),
             span: *span,
         },
-        Stmt::Decl(decl) => Stmt::Decl(rewrite_decl(decl, globals)),
+        Stmt::Decl(decl) => Stmt::Decl(rewrite_decl(decl, cx)),
         // No nested blocks or functions: returned verbatim.
         Stmt::Bind { .. }
         | Stmt::Echo { .. }
@@ -208,11 +232,11 @@ fn rewrite_stmt(stmt: &Stmt, sl: &StmtLiveness, droppable: &VarSet, globals: &Va
     }
 }
 
-fn rewrite_decl(decl: &Decl, globals: &VarSet) -> Decl {
+fn rewrite_decl(decl: &Decl, cx: &Cx) -> Decl {
     match decl {
         Decl::Fn { name, func, span } => Decl::Fn {
             name: name.clone(),
-            func: std::rc::Rc::new(rewrite_func(func, globals)),
+            func: Rc::new(rewrite_func(func, cx)),
             span: *span,
         },
         Decl::Class(class) => Decl::Class(ClassDef {
@@ -220,12 +244,12 @@ fn rewrite_decl(decl: &Decl, globals: &VarSet) -> Decl {
             methods: class
                 .methods
                 .iter()
-                .map(|(n, f)| (n.clone(), std::rc::Rc::new(rewrite_func(f, globals))))
+                .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, cx))))
                 .collect(),
             destructor: class
                 .destructor
                 .as_ref()
-                .map(|f| std::rc::Rc::new(rewrite_func(f, globals))),
+                .map(|f| Rc::new(rewrite_func(f, cx))),
             span: class.span,
         }),
         Decl::Enum(_) | Decl::Record(_) | Decl::Use { .. } => decl.clone(),
@@ -234,13 +258,79 @@ fn rewrite_decl(decl: &Decl, globals: &VarSet) -> Decl {
 
 /// Rewrite a [`Rvalue::Closure`]'s function body; all other rvalues are returned unchanged (they
 /// carry no nested function body).
-fn rewrite_rvalue(rvalue: &Rvalue, globals: &VarSet) -> Rvalue {
+fn rewrite_rvalue(rvalue: &Rvalue, cx: &Cx) -> Rvalue {
     match rvalue {
         Rvalue::Closure { func, span } => Rvalue::Closure {
-            func: std::rc::Rc::new(rewrite_func(func, globals)),
+            func: Rc::new(rewrite_func(func, cx)),
             span: *span,
         },
         other => other.clone(),
+    }
+}
+
+/// Build the droppable-locals → relevance map for one function: the single-assignment locals
+/// (computed as before), each looked up in the relevance oracle. A parameter is keyed by
+/// `(func.span, name)`; a local by its `Bind` `name_span`; with no oracle (or a name that cannot
+/// be located) the drop is conservatively relevant.
+fn drop_set(func: &Func, cx: &Cx) -> DropSet {
+    let names = single_assignment_locals(func, cx.globals);
+    let mut bind_spans: HashMap<String, Span> = HashMap::new();
+    collect_bind_spans(&func.body, &mut bind_spans);
+    let params: std::collections::HashSet<&String> = func.params.iter().collect();
+    names
+        .into_iter()
+        .map(|name| {
+            let relevant = match cx.relevance {
+                None => true,
+                Some(r) => {
+                    if params.contains(&name) {
+                        r.params.contains(&(func.span, name.clone()))
+                    } else if let Some(span) = bind_spans.get(&name) {
+                        r.locals.contains(span)
+                    } else {
+                        true
+                    }
+                }
+            };
+            (name, relevant)
+        })
+        .collect()
+}
+
+/// Map each `Bind` name to its `name_span` within one function body (not descending into nested
+/// function bodies). Droppable locals are single-assignment, so each has a unique span here.
+fn collect_bind_spans(block: &Block, out: &mut HashMap<String, Span>) {
+    for stmt in &block.stmts {
+        match stmt {
+            Stmt::Bind {
+                name, name_span, ..
+            } => {
+                out.insert(name.clone(), *name_span);
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                collect_bind_spans(then_block, out);
+                if let Some(b) = else_block {
+                    collect_bind_spans(b, out);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                collect_bind_spans(cond, out);
+                collect_bind_spans(body, out);
+            }
+            Stmt::For { body, .. } => collect_bind_spans(body, out),
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    collect_bind_spans(&arm.body, out);
+                }
+            }
+            Stmt::Logical { right, .. } => collect_bind_spans(right, out),
+            Stmt::Coalesce { fallback, .. } => collect_bind_spans(fallback, out),
+            _ => {}
+        }
     }
 }
 
@@ -394,10 +484,10 @@ fn count_binds_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>, excluded: &m
 /// drop ordering. With a deterministic but coarse approximation: alphabetical descending, which is
 /// stable and only matters when several destructor-bearing locals die at the very same point (rare
 /// in this single-assignment slice). Precise construction-order LIFO arrives with broader coverage.
-fn lifo_deaths(dies_here: &VarSet, droppable: &VarSet) -> Vec<String> {
+fn lifo_deaths(dies_here: &VarSet, droppable: &DropSet) -> Vec<String> {
     let mut names: Vec<String> = dies_here
         .iter()
-        .filter(|n| droppable.contains(*n))
+        .filter(|n| droppable.contains_key(*n))
         .cloned()
         .collect();
     names.sort_unstable();

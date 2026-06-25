@@ -100,6 +100,10 @@ pub struct Ast(pub Parsed);
 pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     pub type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// Per-binding destructor-relevance (Phase 3.2b), threaded into the compiler so the drop pass
+    /// annotates each `DropVar` — carried here for the same reason as `type_of_sites` (compute the
+    /// checker's result once, reuse it without a second run).
+    pub destructor_relevance: lang_check::DestructorRelevance,
 }
 
 /// Compiler output: a [`Module`], or the first construct outside the VM's subset.
@@ -175,6 +179,7 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     Checked {
         diagnostics: out.diagnostics,
         type_of_sites: out.type_of_sites,
+        destructor_relevance: out.destructor_relevance,
     }
 }
 
@@ -186,8 +191,13 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
 #[salsa::tracked(returns(ref))]
 pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let parsed = ast(db, src);
-    let sites = checked(db, src).type_of_sites.clone();
-    Bytecode(lang_compiler::compile_with_sites(&parsed.0.program, sites))
+    let checked = checked(db, src);
+    let sites = checked.type_of_sites.clone();
+    Bytecode(lang_compiler::compile_with_sites(
+        &parsed.0.program,
+        sites,
+        &checked.destructor_relevance,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -283,11 +293,13 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             Checked {
                 diagnostics: out.diagnostics,
                 type_of_sites: out.type_of_sites,
+                destructor_relevance: out.destructor_relevance,
             }
         }
         Err(diags) => Checked {
             diagnostics: diags.clone(),
             type_of_sites: std::collections::HashMap::new(),
+            destructor_relevance: lang_check::DestructorRelevance::default(),
         },
     }
 }
@@ -300,8 +312,13 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
 pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
     match &linked(db, ws).0 {
         Ok(program) => {
-            let sites = linked_checked(db, ws).type_of_sites.clone();
-            Bytecode(lang_compiler::compile_with_sites(program, sites))
+            let checked = linked_checked(db, ws);
+            let sites = checked.type_of_sites.clone();
+            Bytecode(lang_compiler::compile_with_sites(
+                program,
+                sites,
+                &checked.destructor_relevance,
+            ))
         }
         Err(_) => Bytecode(lang_compiler::compile(&Program {
             stmts: Vec::new(),
