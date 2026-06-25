@@ -753,6 +753,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lang-ir-passes"
+version = "0.0.0"
+dependencies = [
+ "lang-ir",
+ "lang-lexer",
+ "lang-parser",
+ "lang-span",
+]
+
+[[package]]
 name = "lang-lexer"
 version = "0.0.0"
 dependencies = [

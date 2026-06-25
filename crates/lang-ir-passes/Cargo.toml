@@ -1,0 +1,18 @@
+[package]
+name = "lang-ir-passes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lang-ir = { workspace = true }
+lang-span = { workspace = true }
+
+[dev-dependencies]
+lang-lexer = { workspace = true }
+lang-parser = { workspace = true }
+
+[lints]
+workspace = true
