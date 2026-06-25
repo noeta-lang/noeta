@@ -1,0 +1,27 @@
+// Early-return destruction (spec §6, Phase 4.2b). A destructor-bearing local that is still in scope
+// when control leaves the function by a conditional `return` is reclaimed *at that return*, in
+// reverse-construction order — not leaked to teardown. Here `r`'s normal last use (`r.use_it()`) is
+// past the `return`, so on the taken path it never runs; the early-exit drop reclaims `r` before the
+// function returns. Both backends emit the same drop before the `return`, so the differential agrees.
+// expect: stdout "start"
+// expect: stdout "close r"
+// expect: stdout "end"
+// expect: exit 0
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    fn use_it(): void { echo "use ${name}"; }
+    destruct { echo "close ${name}"; }
+}
+
+fn go(c: bool): void {
+    r = R.new("r");
+    if c {
+        return;
+    }
+    r.use_it();
+}
+
+echo "start";
+go(true);
+echo "end";

@@ -87,6 +87,19 @@ fn walk_stmt(stmt: &Stmt, in_func: bool, d: &mut Drops) {
     }
 }
 
+/// The body block of a top-level `fn` declaration by name.
+fn func_body<'a>(program: &'a Program, name: &str) -> &'a Block {
+    program
+        .top
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            Stmt::Decl(Decl::Fn { name: n, func, .. }) if n == name => Some(&func.body),
+            _ => None,
+        })
+        .expect("function declaration")
+}
+
 fn walk_func(func: &Func, d: &mut Drops) {
     walk_block(&func.body, true, d);
 }
@@ -130,6 +143,40 @@ fn reassigned_bindings_survivor_is_dropped_at_scope_exit() {
         d.in_funcs.contains(&"acc".to_string()),
         "reassigned acc's survivor must be dropped at scope exit, got {:?}",
         d.in_funcs
+    );
+}
+
+#[test]
+fn a_local_live_past_an_early_return_is_dropped_before_it() {
+    // Phase 4.2b: `r`'s normal last use is past the `return`, so on the taken path it is abandoned —
+    // the early-exit drop must reclaim it. The `DropVar r` lands *inside the then-block, before the
+    // `Return`* (so it is reachable only on the path that actually returns).
+    let program =
+        lower("fn f(c) {\n  r = [1, 2];\n  if c {\n    return;\n  }\n  echo r;\n}\nf(true);\n");
+    let dropped = insert_drops(&program, None);
+    // Find the then-block of the `if` and assert a `DropVar r` precedes its `Return`.
+    let func = func_body(&dropped, "f");
+    let then_block = func
+        .stmts
+        .iter()
+        .find_map(|s| match s {
+            Stmt::If { then_block, .. } => Some(then_block),
+            _ => None,
+        })
+        .expect("if statement");
+    let drop_pos = then_block
+        .stmts
+        .iter()
+        .position(|s| matches!(s, Stmt::DropVar { name, .. } if name == "r"));
+    let ret_pos = then_block
+        .stmts
+        .iter()
+        .position(|s| matches!(s, Stmt::Return { .. }))
+        .expect("return in then-block");
+    assert!(
+        matches!(drop_pos, Some(d) if d < ret_pos),
+        "DropVar r must precede the return in the then-block, drops: {:?}",
+        then_block.stmts
     );
 }
 

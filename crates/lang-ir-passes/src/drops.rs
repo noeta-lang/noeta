@@ -1,25 +1,37 @@
-//! Drop-insertion pass (Phase 3.2): an IR→IR transform that places [`Stmt::DropVar`] at the
-//! last-use death points of function-local source variables, so their values are reclaimed
-//! promptly rather than held to scope/teardown.
+//! Drop-insertion pass: an IR→IR transform that places [`Stmt::DropVar`] at the end-of-life points
+//! of function-local source variables, so their values are reclaimed promptly rather than held to
+//! scope/teardown. Globals are never dropped here — the destructor-ordering spec keeps their timing.
 //!
-//! # What is dropped (deliberately conservative)
+//! # Where drops land
 //!
-//! This first slice drops only **single-assignment function locals**: a parameter that the body
-//! never reassigns, or a name bound exactly once in the function body, that is neither a top-level
-//! global (those stay teardown-reclaimed — the destructor-ordering spec keeps globals' timing) nor
-//! a loop/`match`-pattern binding. Restricting to single-assignment bindings sidesteps every
-//! reassignment-vs-drop double-free question (a reassigned binding's displaced value is already
-//! released by the reassignment itself, §5), and a drop is only emitted after a **straight-line**
-//! statement, never at a control-flow or `return` boundary. Everything outside this set is simply
-//! left to scope/teardown — sound by the "never too early" invariant (a missed drop costs only
-//! promptness). Wider coverage (reassigned accumulators, loop-scoped bindings, move-out at
-//! `return`/`?`) is layered on in later slices.
+//! Three placement rules, in increasing coverage:
 //!
-//! # Behavior
+//! * **Last use** (Phase 3.2) — a **single-assignment** local (a parameter never reassigned, or a
+//!   name bound exactly once) is dropped right after the straight-line statement at which it is last
+//!   read. This is the most prompt point and handles the common case.
+//! * **Scope exit** (Phase 4.2a) — when control falls off a block's end, every *owned* local
+//!   declared in that block whose value still occupies its slot is dropped in reverse-construction
+//!   order. This catches what last-use cannot: **dead stores** (never read, so no liveness death)
+//!   and **reassigned survivors** (the final value of a multi-bind local). Excluded are values still
+//!   **live at the block's exit** (`live_out` — flowing to an enclosing scope or around a loop's
+//!   back-edge) and values **moved out** through the block's `tail`.
+//! * **Early exit** (Phase 4.2b) — at a `return`/`break`/`continue`, the values abandoned as control
+//!   leaves are dropped before the terminator, innermost scope first and reverse-construction within
+//!   each: a `return` unwinds the whole frame, a `break`/`continue` only out to the nearest enclosing
+//!   loop body. The **moved-out** returned variable is excluded; a value already dropped at its last
+//!   use earlier on this path is not re-dropped.
 //!
-//! A [`Stmt::DropVar`] lowers to a plain reference release in both backends (Phase 3.3), firing no
-//! destructor, so inserting these drops changes reclamation *timing* (peak residency) but not
-//! observable output — the differential stays green, the leak oracle reaches zero sooner.
+//! Reassignment's *intermediate* displaced values are released by the runtime at the assignment
+//! point (spec §5), not here; and **non-local** exits the static pass cannot bracket — `?`
+//! propagation and panic — are handled by the runtime teardown backstop (Phase 4.2c).
+//!
+//! # Soundness
+//!
+//! Every rule errs in the **never-too-early** direction: a missed drop costs only promptness (the
+//! value lives to teardown, still reclaimed). A [`Stmt::DropVar`] / `Op::Drop` clears its slot, so a
+//! redundant drop is a guaranteed no-op — no double-free — while the runtime RC condition still gates
+//! whether a destructor actually fires. Both backends execute the same `DropVar`s at the same IR
+//! points, so destruction order agrees by construction (the differential proves it).
 
 use std::collections::HashMap;
 use std::rc::Rc;
@@ -66,7 +78,16 @@ pub fn insert_drops(program: &Program, relevance: Option<&Relevance>) -> Program
     let live = liveness::analyze(program).top;
     // The top level is the global scope: neither last-use nor scope-exit drops apply (globals are
     // teardown-reclaimed — the destructor-ordering spec keeps their timing), so both sets are empty.
-    let top = rewrite_block(&program.top, &live, &DropSet::new(), &DropSet::new(), &cx);
+    let mut scopes: Vec<ScopeFrame> = Vec::new();
+    let top = rewrite_block(
+        &program.top,
+        &live,
+        &DropSet::new(),
+        &DropSet::new(),
+        &cx,
+        &mut scopes,
+        false,
+    );
     Program {
         top,
         temp_count: program.temp_count,
@@ -75,6 +96,57 @@ pub fn insert_drops(program: &Program, relevance: Option<&Relevance>) -> Program
 }
 
 // --- Rewrite ------------------------------------------------------------------------------------
+
+/// One lexical scope on the rewrite's scope stack: the owned locals **constructed so far** in it (in
+/// construction order, each with its destructor-relevance), and whether it is a loop body. The stack
+/// lets an early-exit statement (Phase 4.2b) reclaim every value abandoned as control leaves —
+/// `return` unwinds the whole frame, `break`/`continue` only out to the nearest enclosing loop body.
+struct ScopeFrame {
+    constructed: Vec<(String, bool)>,
+    /// Names already reclaimed in this scope by a mid-block last-use drop, so an early exit reached
+    /// *after* that drop does not redundantly re-drop them. (An early exit reached *before* a local's
+    /// last use still drops it — that name is not yet in this set when the exit is emitted.)
+    dropped: std::collections::HashSet<String>,
+    is_loop_body: bool,
+}
+
+/// How far an early-exit unwinds: a `return` abandons the entire frame; a `break`/`continue` abandons
+/// only the scopes inside (and including) the nearest enclosing loop body.
+#[derive(Clone, Copy, PartialEq)]
+enum ExitKind {
+    Frame,
+    Loop,
+}
+
+/// Emit the drops for values abandoned at an early exit, **innermost scope first** and
+/// reverse-construction within each (spec §6 / §3). A value **moved out** (a returned source
+/// variable) is excluded; a name is dropped once even if it shadows an outer binding (the drop
+/// resolves to the nearest, and a redundant second drop on an already-cleared slot is a harmless
+/// no-op anyway). For `Loop`, unwinding stops after the nearest loop-body frame.
+fn emit_exit_drops(
+    out: &mut Vec<Stmt>,
+    scopes: &[ScopeFrame],
+    kind: ExitKind,
+    moved_out: &VarSet,
+    span: Span,
+) {
+    let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for frame in scopes.iter().rev() {
+        for (name, relevant) in frame.constructed.iter().rev() {
+            if moved_out.contains(name) || frame.dropped.contains(name) || !seen.insert(name) {
+                continue;
+            }
+            out.push(Stmt::DropVar {
+                name: name.clone(),
+                span,
+                relevant: *relevant,
+            });
+        }
+        if kind == ExitKind::Loop && frame.is_loop_body {
+            break;
+        }
+    }
+}
 
 /// Rewrite a function body: compute its liveness, its droppable single-assignment locals and their
 /// relevance, then walk it inserting drops. Nested functions inside it are rewritten by recursion.
@@ -87,7 +159,16 @@ fn rewrite_func(func: &Func, cx: &Cx) -> Func {
     // control falls off the block's end — the last-use drops above only catch values that die at a
     // straight-line use mid-block.
     let owned = owned_set(func, cx);
-    let body = rewrite_block(&func.body, &live, &droppable, &owned, cx);
+    let mut scopes: Vec<ScopeFrame> = Vec::new();
+    let body = rewrite_block(
+        &func.body,
+        &live,
+        &droppable,
+        &owned,
+        cx,
+        &mut scopes,
+        false,
+    );
     Func {
         params: func.params.clone(),
         // Default thunks run in the definition scope; this slice leaves them undropped (conservative).
@@ -121,24 +202,49 @@ fn rewrite_block(
     droppable: &DropSet,
     owned: &DropSet,
     cx: &Cx,
+    scopes: &mut Vec<ScopeFrame>,
+    is_loop_body: bool,
 ) -> Block {
+    scopes.push(ScopeFrame {
+        constructed: Vec::new(),
+        dropped: std::collections::HashSet::new(),
+        is_loop_body,
+    });
     let mut out: Vec<Stmt> = Vec::with_capacity(block.stmts.len());
-    // Names directly bound in this block, in first-construction order, and the ones a last-use drop
-    // already reclaimed here (a single-assignment local never rebinds, so "already dropped" is final
-    // — its slot stays empty to the block's end).
-    let mut construction_order: Vec<String> = Vec::new();
-    let mut dropped_here: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Construction order and the already-reclaimed set are accumulated into this block's scope frame,
+    // which the early-exit (`emit_exit_drops`) and the fall-through scope-exit drops both read.
     for (stmt, sl) in block.stmts.iter().zip(&live.stmts) {
+        // Record an owned local's construction into the current frame the moment it is bound, so a
+        // later early exit knows it must be reclaimed (and an earlier one knows it must not).
         if let Stmt::Bind { name, .. } = stmt
-            && !construction_order.contains(name)
+            && let Some(&relevant) = owned.get(name)
         {
-            construction_order.push(name.clone());
+            let frame = scopes.last_mut().expect("scope frame pushed above");
+            if !frame.constructed.iter().any(|(n, _)| n == name) {
+                frame.constructed.push((name.clone(), relevant));
+            }
         }
-        out.push(rewrite_stmt(stmt, sl, droppable, owned, cx));
+        // An early-exit statement abandons in-flight values: emit their drops *before* it (after it
+        // is unreachable), innermost scope first, excluding the moved-out value (spec §6).
+        match stmt {
+            Stmt::Return { value, span } => {
+                let moved_out = return_moved_out(value);
+                emit_exit_drops(&mut out, scopes, ExitKind::Frame, &moved_out, *span);
+            }
+            Stmt::Break { span } | Stmt::Continue { span } => {
+                emit_exit_drops(&mut out, scopes, ExitKind::Loop, &VarSet::new(), *span);
+            }
+            _ => {}
+        }
+        out.push(rewrite_stmt(stmt, sl, droppable, owned, cx, scopes));
         if is_straight_line(stmt) {
             for name in lifo_deaths(&sl.dies_here, droppable) {
                 let relevant = droppable[&name];
-                dropped_here.insert(name.clone());
+                scopes
+                    .last_mut()
+                    .expect("scope frame pushed above")
+                    .dropped
+                    .insert(name.clone());
                 out.push(Stmt::DropVar {
                     name,
                     span: stmt_span(stmt),
@@ -154,7 +260,14 @@ fn rewrite_block(
         matches!((&*a, &*b), (Stmt::DropVar { name: x, .. }, Stmt::DropVar { name: y, .. }) if x == y)
     });
     // Scope-exit drops — only when control falls off the end (an early-exit terminator routes its own
-    // drops in Phase 4.2b; appending here would be unreachable and could drop a moved-out value).
+    // drops above; appending here would be unreachable and could drop a moved-out value).
+    let frame = scopes.last().expect("scope frame pushed above");
+    let construction_order: Vec<String> = frame
+        .constructed
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect();
+    let dropped_here = frame.dropped.clone();
     if !ends_with_terminator(block) {
         let moved_out = tail_vars(block);
         for name in construction_order.into_iter().rev() {
@@ -177,10 +290,21 @@ fn rewrite_block(
             }
         }
     }
+    scopes.pop();
     Block {
         stmts: out,
         tail: block.tail.clone(),
     }
+}
+
+/// The source variable a `return` **moves out** (its value becomes the caller's), if the returned
+/// atom is a plain variable — it must be excluded from the frame's early-exit drops (spec §6).
+fn return_moved_out(value: &Option<lang_ir::Atom>) -> VarSet {
+    let mut out = VarSet::new();
+    if let Some(lang_ir::Atom::Var { name, .. }) = value {
+        out.insert(name.clone());
+    }
+    out
 }
 
 /// Rewrite one statement: recurse into its nested control-flow blocks (using the matching
@@ -192,6 +316,7 @@ fn rewrite_stmt(
     droppable: &DropSet,
     owned: &DropSet,
     cx: &Cx,
+    scopes: &mut Vec<ScopeFrame>,
 ) -> Stmt {
     match stmt {
         Stmt::Let { dst, rvalue, span } => Stmt::Let {
@@ -209,10 +334,11 @@ fn rewrite_stmt(
             else_block,
             span,
         } => {
-            let then_block = rewrite_block(then_block, &sl.sub[0], droppable, owned, cx);
+            let then_block =
+                rewrite_block(then_block, &sl.sub[0], droppable, owned, cx, scopes, false);
             let else_block = else_block
                 .as_ref()
-                .map(|b| rewrite_block(b, &sl.sub[1], droppable, owned, cx));
+                .map(|b| rewrite_block(b, &sl.sub[1], droppable, owned, cx, scopes, false));
             Stmt::If {
                 cond: cond.clone(),
                 then_block,
@@ -221,8 +347,8 @@ fn rewrite_stmt(
             }
         }
         Stmt::While { cond, body, span } => Stmt::While {
-            cond: rewrite_block(cond, &sl.sub[0], droppable, owned, cx),
-            body: rewrite_block(body, &sl.sub[1], droppable, owned, cx),
+            cond: rewrite_block(cond, &sl.sub[0], droppable, owned, cx, scopes, false),
+            body: rewrite_block(body, &sl.sub[1], droppable, owned, cx, scopes, true),
             span: *span,
         },
         Stmt::For {
@@ -233,7 +359,7 @@ fn rewrite_stmt(
         } => Stmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
-            body: rewrite_block(body, &sl.sub[0], droppable, owned, cx),
+            body: rewrite_block(body, &sl.sub[0], droppable, owned, cx, scopes, true),
             span: *span,
         },
         Stmt::Match {
@@ -241,20 +367,22 @@ fn rewrite_stmt(
             arms,
             dst,
             span,
-        } => Stmt::Match {
-            scrutinee: scrutinee.clone(),
-            arms: arms
-                .iter()
-                .zip(&sl.sub)
-                .map(|(arm, arm_live)| Arm {
+        } => {
+            let mut new_arms = Vec::with_capacity(arms.len());
+            for (arm, arm_live) in arms.iter().zip(&sl.sub) {
+                new_arms.push(Arm {
                     pattern: arm.pattern.clone(),
-                    body: rewrite_block(&arm.body, arm_live, droppable, owned, cx),
+                    body: rewrite_block(&arm.body, arm_live, droppable, owned, cx, scopes, false),
                     span: arm.span,
-                })
-                .collect(),
-            dst: *dst,
-            span: *span,
-        },
+                });
+            }
+            Stmt::Match {
+                scrutinee: scrutinee.clone(),
+                arms: new_arms,
+                dst: *dst,
+                span: *span,
+            }
+        }
         Stmt::Logical {
             dst,
             op,
@@ -265,7 +393,7 @@ fn rewrite_stmt(
             dst: *dst,
             op: *op,
             left: left.clone(),
-            right: rewrite_block(right, &sl.sub[0], droppable, owned, cx),
+            right: rewrite_block(right, &sl.sub[0], droppable, owned, cx, scopes, false),
             span: *span,
         },
         Stmt::Coalesce {
@@ -276,7 +404,7 @@ fn rewrite_stmt(
         } => Stmt::Coalesce {
             dst: *dst,
             value: value.clone(),
-            fallback: rewrite_block(fallback, &sl.sub[0], droppable, owned, cx),
+            fallback: rewrite_block(fallback, &sl.sub[0], droppable, owned, cx, scopes, false),
             span: *span,
         },
         Stmt::Decl(decl) => Stmt::Decl(rewrite_decl(decl, cx)),

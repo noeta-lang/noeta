@@ -1,0 +1,42 @@
+// Loop early-exit destruction (spec §6, Phase 4.2b). A local constructed in the iteration that
+// `break`s or `continue`s is reclaimed at that boundary — `break`/`continue` unwind only out to the
+// loop body, never the enclosing frame. Here iteration 1 constructs `r` then `continue`s before its
+// use, so `close 1` fires with no `use 1`; iteration 3 constructs `r` then `break`s, so `close 3`
+// fires with no `use 3`. The `total` accumulator lives across the loop and is reclaimed only at the
+// function's scope exit, after the loop — proving the loop drops do not touch enclosing-scope values.
+// expect: stdout "start"
+// expect: stdout "use 0"
+// expect: stdout "close 0"
+// expect: stdout "close 1"
+// expect: stdout "use 2"
+// expect: stdout "close 2"
+// expect: stdout "close 3"
+// expect: stdout "sum 2"
+// expect: stdout "end"
+// expect: exit 0
+class R {
+    name: string
+    fn new(name: string): R { return R { name: name }; }
+    fn use_it(): void { echo "use ${name}"; }
+    destruct { echo "close ${name}"; }
+}
+
+fn go(): void {
+    mut total = 0;
+    for i in 0..5 {
+        r = R.new("${i}");
+        if i == 1 {
+            continue;
+        }
+        if i == 3 {
+            break;
+        }
+        r.use_it();
+        total = total + 1;
+    }
+    echo "sum ${total}";
+}
+
+echo "start";
+go();
+echo "end";
