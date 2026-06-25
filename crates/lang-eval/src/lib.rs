@@ -236,10 +236,23 @@ impl Builtin {
     ];
 }
 
-/// The body of a user function: either a single arrow expression or a `{ ... }` block.
+/// The body of a user function: a single arrow expression, a `{ ... }` block, or a lowered
+/// Core-IR function. The AST walker only ever builds the first two; the Core-IR interpreter
+/// builds the third. Routing all three through the one `Closure` type is what lets the IR
+/// interpreter reuse the tree-walker's call machinery (`call_closure`/`call_method_on`)
+/// unchanged — one value model, one dispatch path.
 enum FnBody {
     Arrow(Expr),
     Block(Vec<Stmt>),
+    Ir(Rc<lang_ir::Func>),
+}
+
+/// A defaulted parameter's value expression. Parallel to [`FnBody`]: the AST walker stores
+/// the surface [`Expr`]; the Core-IR interpreter stores a lowered IR [`lang_ir::Thunk`].
+/// Either is evaluated in the closure's captured scope when its argument is omitted.
+enum DefaultThunk {
+    Ast(Expr),
+    Ir(lang_ir::Thunk),
 }
 
 /// The definition of an enum type, registered as an `EnumType` value.
@@ -417,11 +430,11 @@ impl PartialEq for ObjectValue {
 /// defined in (captured for closures and recursion).
 pub struct Closure {
     params: Vec<String>,
-    /// Each parameter's default-value expression, parallel to `params` (`None` for a required
+    /// Each parameter's default-value thunk, parallel to `params` (`None` for a required
     /// parameter). A call that omits a trailing argument evaluates the matching default in the
     /// closure's `captured` (definition/global) scope — never seeing other parameters or fields,
     /// matching the VM's globals-only default thunks.
-    defaults: Vec<Option<Expr>>,
+    defaults: Vec<Option<DefaultThunk>>,
     body: FnBody,
     captured: Rc<Scope>,
 }
@@ -431,7 +444,7 @@ impl Closure {
     /// `Closure` construction goes through here so the live count is exact.
     fn new(
         params: Vec<String>,
-        defaults: Vec<Option<Expr>>,
+        defaults: Vec<Option<DefaultThunk>>,
         body: FnBody,
         captured: Rc<Scope>,
     ) -> Closure {
@@ -1014,7 +1027,10 @@ impl Interpreter {
     fn declare_fn(&mut self, decl: &FnDecl) {
         let closure = Closure::new(
             decl.params.iter().map(|p| p.name.clone()).collect(),
-            decl.params.iter().map(|p| p.default.clone()).collect(),
+            decl.params
+                .iter()
+                .map(|p| p.default.clone().map(DefaultThunk::Ast))
+                .collect(),
             FnBody::Block(decl.body.clone()),
             Rc::clone(&self.scope),
         );
@@ -1112,7 +1128,10 @@ impl Interpreter {
             .map(|m| {
                 let closure = Closure::new(
                     m.params.iter().map(|p| p.name.clone()).collect(),
-                    m.params.iter().map(|p| p.default.clone()).collect(),
+                    m.params
+                        .iter()
+                        .map(|p| p.default.clone().map(DefaultThunk::Ast))
+                        .collect(),
                     FnBody::Block(m.body.clone()),
                     Rc::clone(&self.scope),
                 );
@@ -1513,7 +1532,10 @@ impl Interpreter {
                 params.iter().map(|p| p.name.clone()).collect(),
                 // Closure parameters cannot declare defaults (the parser forbids it), so these are
                 // all `None`; kept parallel to `params` for a uniform call path.
-                params.iter().map(|p| p.default.clone()).collect(),
+                params
+                    .iter()
+                    .map(|p| p.default.clone().map(DefaultThunk::Ast))
+                    .collect(),
                 FnBody::Arrow((**body).clone()),
                 Rc::clone(&self.scope),
             )))),
@@ -2756,6 +2778,7 @@ impl Interpreter {
         let result = match &closure.body {
             FnBody::Arrow(expr) => self.eval_expr(expr),
             FnBody::Block(stmts) => self.exec_fn_body(stmts),
+            FnBody::Ir(func) => self.exec_ir_fn_body(func),
         };
         self.scope = saved;
         catch_return(result)
@@ -2799,6 +2822,7 @@ impl Interpreter {
         let result = match &method.body {
             FnBody::Arrow(expr) => self.eval_expr(expr),
             FnBody::Block(stmts) => self.exec_fn_body(stmts),
+            FnBody::Ir(func) => self.exec_ir_fn_body(func),
         };
         self.scope = saved;
         catch_return(result)
@@ -2814,7 +2838,10 @@ impl Interpreter {
             .expect("an omitted argument must correspond to a defaulted parameter");
         let scope = Scope::child(&closure.captured);
         let saved = std::mem::replace(&mut self.scope, scope);
-        let result = self.eval_expr(default);
+        let result = match default {
+            DefaultThunk::Ast(expr) => self.eval_expr(expr),
+            DefaultThunk::Ir(thunk) => self.exec_ir_thunk(thunk),
+        };
         self.scope = saved;
         result
     }
@@ -3568,7 +3595,7 @@ fn catch_return(result: Eval<Value>) -> Eval<Value> {
 
 /// The number of required (non-defaulted) parameters: the leading run with no default value.
 /// `defaults` is parallel to a closure's parameter list, so this is the lowest legal argument count.
-fn required_count(defaults: &[Option<Expr>]) -> usize {
+fn required_count(defaults: &[Option<DefaultThunk>]) -> usize {
     defaults
         .iter()
         .position(Option::is_some)

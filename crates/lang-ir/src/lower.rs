@@ -20,10 +20,14 @@
 //! expose today; wiring that in is that phase's prerequisite, deliberately out of scope here
 //! so the Phase 1 IR stays a faithful, RC-neutral mirror of the AST.
 
-use lang_ast::{BinaryOp, Expr, Program as AstProgram, Stmt as AstStmt, StrPart};
+use std::rc::Rc;
+
+use lang_ast::{BinaryOp, Expr, Param, Program as AstProgram, Stmt as AstStmt, StrPart};
 use lang_span::Span;
 
-use crate::{Atom, Block, Const, InterpPart, Program, Rvalue, Stmt, Temp};
+use crate::{
+    Atom, Block, ClassDef, Const, Decl, Func, InterpPart, Program, Rvalue, Stmt, Temp, Thunk,
+};
 
 /// A construct the lowering does not yet handle. Carried back so the caller can skip the
 /// program (the transitional differential's "outside the IR subset" bucket), mirroring the
@@ -39,6 +43,13 @@ impl Unsupported {
     fn at(feature: &'static str, span: Span) -> Unsupported {
         Unsupported { feature, span }
     }
+}
+
+/// Where a function's body comes from: an arrow expression (its value is the return) or a
+/// statement block (returns via `return`, else unit).
+enum BodyKind<'a> {
+    Arrow(&'a Expr),
+    Block(&'a [AstStmt]),
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
@@ -178,15 +189,97 @@ impl Lowerer {
                 out.push(Stmt::Continue { span: *span });
                 Ok(())
             }
-            // Not yet in the supported subset — reported so the program is skipped.
-            AstStmt::Fn(_) => Err(Unsupported::at("fn declaration", stmt.span())),
-            AstStmt::Enum(_) => Err(Unsupported::at("enum declaration", stmt.span())),
-            AstStmt::Record(_) => Err(Unsupported::at("record declaration", stmt.span())),
-            AstStmt::Class(_) => Err(Unsupported::at("class declaration", stmt.span())),
-            AstStmt::Impl(_) => Err(Unsupported::at("impl declaration", stmt.span())),
-            AstStmt::Namespace { .. } => Err(Unsupported::at("namespace", stmt.span())),
-            AstStmt::Use { .. } => Err(Unsupported::at("use", stmt.span())),
+            AstStmt::Fn(decl) => {
+                let func = self.lower_func(&decl.params, BodyKind::Block(&decl.body), decl.span)?;
+                out.push(Stmt::Decl(Decl::Fn {
+                    name: decl.name.clone(),
+                    func: Rc::new(func),
+                    span: decl.span,
+                }));
+                Ok(())
+            }
+            AstStmt::Class(decl) => {
+                let mut methods = Vec::with_capacity(decl.methods.len());
+                for m in &decl.methods {
+                    let func = self.lower_func(&m.params, BodyKind::Block(&m.body), m.span)?;
+                    methods.push((m.name.clone(), Rc::new(func)));
+                }
+                out.push(Stmt::Decl(Decl::Class(ClassDef {
+                    decl: Rc::new(decl.clone()),
+                    methods,
+                    span: decl.span,
+                })));
+                Ok(())
+            }
+            AstStmt::Enum(decl) => {
+                out.push(Stmt::Decl(Decl::Enum(Rc::new(decl.clone()))));
+                Ok(())
+            }
+            AstStmt::Record(decl) => {
+                out.push(Stmt::Decl(Decl::Record(Rc::new(decl.clone()))));
+                Ok(())
+            }
+            AstStmt::Use { path, names, span } => {
+                out.push(Stmt::Decl(Decl::Use {
+                    path: path.clone(),
+                    names: names.clone(),
+                    span: *span,
+                }));
+                Ok(())
+            }
+            // A standalone `impl` and a `namespace` have no runtime effect in the tree-walker
+            // (both are `Ok(Flow::Normal)` no-ops), so they lower to nothing.
+            AstStmt::Impl(_) | AstStmt::Namespace { .. } => Ok(()),
         }
+    }
+
+    /// Lower a function/method/closure into an IR [`Func`] with its own temporary frame. The
+    /// enclosing frame's temporary counter is saved and restored, so a nested function (a
+    /// closure inside a function body) is numbered independently and the outer numbering
+    /// continues afterward.
+    fn lower_func(
+        &mut self,
+        params: &[Param],
+        body: BodyKind<'_>,
+        span: Span,
+    ) -> Result<Func, Unsupported> {
+        let outer = self.temps;
+        self.temps = 0;
+        let param_names = params.iter().map(|p| p.name.clone()).collect();
+        // Defaults are evaluated in the captured scope at call time, each in its own frame, so
+        // lower each as a self-contained thunk (this also restores `self.temps` to 0 between
+        // thunks, keeping the body's numbering independent).
+        let mut defaults = Vec::with_capacity(params.len());
+        for p in params {
+            match &p.default {
+                Some(expr) => defaults.push(Some(self.lower_thunk(expr)?)),
+                None => defaults.push(None),
+            }
+        }
+        let body = match body {
+            BodyKind::Arrow(expr) => self.lower_value_block(expr)?,
+            BodyKind::Block(stmts) => self.lower_body(stmts)?,
+        };
+        let temp_count = self.temps;
+        self.temps = outer;
+        Ok(Func {
+            params: param_names,
+            defaults,
+            body,
+            temp_count,
+            span,
+        })
+    }
+
+    /// Lower a defaulted-parameter expression into a self-contained value-producing [`Thunk`]
+    /// with its own temporary frame (defaults run independently in the captured scope).
+    fn lower_thunk(&mut self, expr: &Expr) -> Result<Thunk, Unsupported> {
+        let outer = self.temps;
+        self.temps = 0;
+        let body = self.lower_value_block(expr)?;
+        let temp_count = self.temps;
+        self.temps = outer;
+        Ok(Thunk { body, temp_count })
     }
 
     /// Lower an expression into a fresh value-position [`Block`] (its computed `let`s plus a
@@ -504,8 +597,18 @@ impl Lowerer {
                     *span,
                 ))
             }
+            Expr::Closure { params, body, span } => {
+                let func = self.lower_func(params, BodyKind::Arrow(body), *span)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Closure {
+                        func: Rc::new(func),
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             // Not yet in the supported subset.
-            Expr::Closure { span, .. } => Err(Unsupported::at("closure", *span)),
             Expr::Pipeline { span, .. } => Err(Unsupported::at("pipeline", *span)),
             Expr::Object(lit) => Err(Unsupported::at("object literal", lit.span)),
         }

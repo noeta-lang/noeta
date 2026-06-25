@@ -30,7 +30,10 @@ use lang_ast::Program;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
-use crate::{Eval, Flow, Interpreter, RunResult, TreeWalkBackend, Unwind, Value};
+use crate::{
+    Closure, DefaultThunk, Eval, FieldSpec, Flow, FnBody, Interpreter, RunResult, TreeWalkBackend,
+    TypeDef, Unwind, Value,
+};
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
 /// [`lang_ir::Temp`]; a slot is `None` until its defining `let` runs.
@@ -206,6 +209,10 @@ impl Interpreter {
                 let value = self.eval_ir_atom(scrutinee, frame)?;
                 self.exec_ir_match(value, arms, *dst, *span, frame)
             }
+            lang_ir::Stmt::Decl(decl) => {
+                self.exec_ir_decl(decl);
+                Ok(Flow::Normal)
+            }
             lang_ir::Stmt::Coalesce {
                 dst,
                 value,
@@ -234,8 +241,6 @@ impl Interpreter {
                 }
                 Ok(Flow::Normal)
             }
-            // Lowered only in later slices; the lowering gates them out until then.
-            other => unreachable!("Core-IR statement not yet interpreted: {other:?}"),
         }
     }
 
@@ -271,6 +276,108 @@ impl Interpreter {
             span,
             format!("no match arm matched the value {}", value.display()),
         ))
+    }
+
+    /// Register a declaration. `fn`/`class` build IR-bodied closures; `enum`/`record`/`use`
+    /// carry no executable body, so they reuse the tree-walker's registration unchanged.
+    fn exec_ir_decl(&mut self, decl: &lang_ir::Decl) {
+        match decl {
+            lang_ir::Decl::Fn { name, func, .. } => {
+                let closure = self.make_ir_closure(func);
+                self.scope
+                    .declare(name.clone(), Value::Function(Rc::new(closure)), false);
+            }
+            lang_ir::Decl::Class(class) => self.declare_ir_class(class),
+            lang_ir::Decl::Enum(decl) => self.declare_enum(decl),
+            lang_ir::Decl::Record(decl) => self.declare_record(decl),
+            lang_ir::Decl::Use { path, names, .. } => self.declare_use(path, names),
+        }
+    }
+
+    /// Build a closure value from a lowered IR function template, capturing the current
+    /// lexical scope — the IR analogue of `declare_fn`'s/`Expr::Closure`'s construction.
+    fn make_ir_closure(&self, func: &Rc<lang_ir::Func>) -> Closure {
+        Closure::new(
+            func.params.clone(),
+            func.defaults
+                .iter()
+                .map(|d| d.clone().map(DefaultThunk::Ir))
+                .collect(),
+            FnBody::Ir(Rc::clone(func)),
+            Rc::clone(&self.scope),
+        )
+    }
+
+    /// Register a class whose methods are IR-bodied closures. Mirrors `declare_class`: fields,
+    /// derives, and the (still-surface) destructor come from the carried declaration; the
+    /// methods are the lowered IR funcs.
+    fn declare_ir_class(&mut self, class: &lang_ir::ClassDef) {
+        let decl = &class.decl;
+        let fields = decl
+            .fields
+            .iter()
+            .map(|f| FieldSpec {
+                name: f.name.clone(),
+                mutable: f.mut_field,
+            })
+            .collect();
+        let methods = class
+            .methods
+            .iter()
+            .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
+            .collect();
+        let def = TypeDef {
+            name: decl.name.clone(),
+            fields,
+            methods,
+            destructor: decl.destructor.clone().map(Rc::new),
+            is_record: false,
+            // A hand-written `compare`/`to_json` takes precedence over derivation — the same
+            // rule `declare_class` applies.
+            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
+                && !decl.methods.iter().any(|m| m.name == "compare"),
+            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
+                && !decl.methods.iter().any(|m| m.name == "to_json"),
+            opaque: false,
+        };
+        self.scope
+            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+    }
+
+    /// Run a lowered function body as a call: allocate its temporary frame, run its
+    /// statements, and yield the explicit `return` value, else the arrow tail, else unit.
+    /// Mirrors `exec_fn_body` (block) and arrow-body evaluation. Called from the shared call
+    /// machinery (`call_closure`/`call_method_on`) when a closure has an IR body.
+    pub(crate) fn exec_ir_fn_body(&mut self, func: &lang_ir::Func) -> Eval<Value> {
+        let mut frame = Frame::new(func.temp_count);
+        match self.exec_ir_stmts(&func.body.stmts, &mut frame)? {
+            Flow::Return(value) => Ok(value),
+            // No explicit return: a bare `break`/`continue` cannot escape a function boundary
+            // (the checker rejects one outside a loop), so they fall through like `Normal`.
+            Flow::Normal | Flow::Break | Flow::Continue => match &func.body.tail {
+                Some(atom) => self.eval_ir_atom(atom, &frame),
+                None => Ok(Value::Unit),
+            },
+        }
+    }
+
+    /// Evaluate a defaulted-parameter thunk in its own temporary frame (the current scope is
+    /// the closure's captured scope, set up by `eval_default`). A default always yields a
+    /// value, so its block has a tail and produces no non-local flow. Called from `eval_default`.
+    pub(crate) fn exec_ir_thunk(&mut self, thunk: &lang_ir::Thunk) -> Eval<Value> {
+        let mut frame = Frame::new(thunk.temp_count);
+        match self.exec_ir_stmts(&thunk.body.stmts, &mut frame)? {
+            Flow::Normal => {}
+            Flow::Return(_) | Flow::Break | Flow::Continue => {
+                unreachable!("a default-value thunk cannot produce non-local flow (lowering bug)")
+            }
+        }
+        match &thunk.body.tail {
+            Some(atom) => self.eval_ir_atom(atom, &frame),
+            None => {
+                unreachable!("a default-value thunk must have a tail expression (lowering bug)")
+            }
+        }
     }
 
     /// Run a statement-position block in a fresh child scope (the IR analogue of
@@ -532,6 +639,9 @@ impl Interpreter {
                     _ => "",
                 };
                 Ok(self.materialize_attributes(type_name))
+            }
+            lang_ir::Rvalue::Closure { func, .. } => {
+                Ok(Value::Function(Rc::new(self.make_ir_closure(func))))
             }
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
             lang_ir::Rvalue::Invoke {
