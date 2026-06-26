@@ -4,6 +4,32 @@ Phase 5's mutable fields make object cycles possible — close the one hole RC c
 LXR-principled backup trace *if it earns its place*, benchmark it against the dormant trial-deletion
 collector, and make leaks impossible to ship undetected. The Phase-0 leak oracle is the judge.
 
+## Status — the residency-0 gate is MET (both backends)
+
+The verification gate's core — **leak-oracle residency 0 on every program, both backends** — is now
+achieved (`KNOWN_LEAKS` is empty). It was reached by building the **backup mark-sweep first** (6.2,
+not the planned 6.1-first order — decided with the user: it leaves the hot unsafe `free` path
+untouched and is trivially correct for the exit-time gate, where wiring the dormant trial-deletion
+collector would have meant making the core refcount path Bacon–Rajan-aware):
+
+- **VM (`2f720cd`):** a live-object **registry** (`lang-value/heap.rs`) + `lang_gc::collect_trace`
+  stop-the-world mark-sweep, run once at clean exit rooted at the live globals. Reaps the
+  `recursive_nested_fn` closure↔cell cycle. miri-clean.
+- **eval (this commit):** the tree-walker has no heap to sweep (its values are Rust `Rc`s), so it
+  reaps the `Rc<Scope>` ↔ `Rc<Closure>` capture cycle structurally: every captured scope is recorded
+  weakly ([`CAPTURED_SCOPES`]); at clean exit, after global teardown, any still-live captured scope is
+  reachable only through a capture cycle, so clearing its bindings lets `Rc` cascade-free it. The
+  exit-time analogue of the VM sweep.
+
+**Still open (lower priority, not on the residency-0 critical path):** trial-deletion wiring (6.1) +
+the **6.4 head-to-head benchmark** that picks the default collector; **destructor-on-collect** (a
+cycle whose members carry a `destruct` — the closure/scope cycles targeted here carry none, so both
+reapers free without running destructors, a documented follow-up); **in-run safepoint collection**
+(both reapers run only at clean exit, which bounds the gate but not the peak residency of a program
+that builds cycles in a loop); and the eval **structural** `Weak`-parent option (6.3) is now moot for
+the gate (the reaper covers it). Registry overhead is ~10% on the heaviest alloc-churn micro-bench —
+the per-alloc cost the 6.4 benchmark weighs.
+
 ## 6.1 Wire the dormant trial-deletion collector
 
 `lang-gc`'s Bacon–Rajan collector is complete and miri-tested but never called. Wire it:

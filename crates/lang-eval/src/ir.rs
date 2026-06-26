@@ -123,6 +123,8 @@ impl Interpreter {
             Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => {}
         }
         self.destroy_globals();
+        // Reap any closure-capture cycle left after teardown (Phase 6.3), so residency reaches 0.
+        self.reap_captured_scope_cycles();
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
             stdout: self.stdout,

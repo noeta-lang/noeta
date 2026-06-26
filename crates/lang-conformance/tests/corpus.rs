@@ -67,11 +67,12 @@ fn conformance_corpus_passes() {
 /// **aborts** (an immutable reassignment), and the Phase-4.2c-ii panic/abort teardown now fires its
 /// frame's reclamation as the abort unwinds, so it too no longer leaks.
 ///
-/// **Phase 6 (in progress):** the **VM** now reaps the `recursive_nested_fn` closure↔cell cycle with
-/// the backup mark-sweep trace at clean exit, so that residual is gone. The matching **eval** cycle
-/// (an `Rc<Scope>` ↔ `Rc<Closure>` knot) still leaks — the tree-walker has no collector over its
-/// Rust-`Rc` value graph yet (Phase 6.3) — so it is the one remaining tolerated residual.
-const KNOWN_LEAKS: &[(&str, &str)] = &[("eval", "closures/recursive_nested_fn.lang")];
+/// **Phase 6 closed the last cyclic debt:** the **VM** reaps closure↔cell cycles with the backup
+/// mark-sweep trace at clean exit (rooted at the live globals), and the **eval** tree-walker reaps
+/// its `Rc<Scope>` ↔ `Rc<Closure>` capture cycles by clearing the bindings of any captured scope
+/// still live after global teardown. So residency is now **0 on both backends for every program** —
+/// this allowlist is empty, and any leak at all fails the gate.
+const KNOWN_LEAKS: &[(&str, &str)] = &[];
 
 #[test]
 fn leak_oracle_residency_is_zero_except_known_cycles() {

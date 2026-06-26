@@ -10,7 +10,7 @@
 
 use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 
 use lang_ast::{
     BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, ObjectLit, Pattern, Program,
@@ -568,7 +568,10 @@ pub struct Closure {
 
 impl Closure {
     /// Build a closure, routing through the leak-oracle counter (paired with [`Drop`]). All
-    /// `Closure` construction goes through here so the live count is exact.
+    /// `Closure` construction goes through here so the live count is exact. Capturing a scope is the
+    /// one way the tree-walker can tie a reference cycle (`scope → vars → closure → captured → scope`,
+    /// e.g. a self-recursive nested `fn`), which `Rc` alone cannot reclaim — so the captured scope is
+    /// recorded as a cycle-collection candidate (Phase 6.3, [`register_captured_scope`]).
     fn new(
         params: Vec<String>,
         defaults: Vec<Option<DefaultThunk>>,
@@ -576,6 +579,7 @@ impl Closure {
         captured: Rc<Scope>,
     ) -> Closure {
         leak::inc();
+        register_captured_scope(&captured);
         Closure {
             params,
             defaults,
@@ -583,6 +587,33 @@ impl Closure {
             captured,
         }
     }
+}
+
+thread_local! {
+    /// Every scope a closure has captured this run, held **weakly** so membership never keeps a
+    /// scope alive. The Phase-6.3 eval cycle reaper ([`Interpreter::reap_captured_scope_cycles`])
+    /// walks it at clean exit: a captured scope still live after global teardown is reachable only
+    /// through a capture cycle (the tree-walker's analogue of the VM's mark-sweep over the heap
+    /// registry), so breaking its bindings lets `Rc` cascade-free it.
+    static CAPTURED_SCOPES: RefCell<Vec<Weak<Scope>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Record a captured scope as a candidate cycle root (a weak reference, so it imposes no ownership).
+///
+/// A `Weak` keeps the scope's `Rc` *control block* allocated even after the scope itself is freed, so
+/// the buffer is **self-pruned**: when it has doubled past 64, dead handles (whose scope is already
+/// gone) are dropped, freeing those headers. Without this a long-lived session (the REPL drives the
+/// per-batch path, which never reaches the exit reaper) or a closure-heavy loop would pin one header
+/// per closure ever created. Pruning at power-of-two lengths makes it amortized O(1) and bounds the
+/// buffer to ~2× the live captured-scope set.
+fn register_captured_scope(scope: &Rc<Scope>) {
+    CAPTURED_SCOPES.with(|r| {
+        let mut reg = r.borrow_mut();
+        if reg.len() >= 64 && reg.len().is_power_of_two() {
+            reg.retain(|w| w.strong_count() > 0);
+        }
+        reg.push(Rc::downgrade(scope));
+    });
 }
 
 impl Drop for Closure {
@@ -907,6 +938,8 @@ impl Interpreter {
         // Destroy the top-level bindings at program end, in reverse declaration order, running
         // each destructor on its last reference — the deterministic destruction the spec wants.
         self.destroy_globals();
+        // Reap any closure-capture cycle left after teardown (Phase 6.3), so residency reaches 0.
+        self.reap_captured_scope_cycles();
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
             stdout: self.stdout,
@@ -919,6 +952,25 @@ impl Interpreter {
     fn destroy_globals(&mut self) {
         for value in self.scope.drain_reverse() {
             self.destroy_value(value);
+        }
+    }
+
+    /// Reap reference cycles the tree-walker tied through closure capture (Phase 6.3) — the eval
+    /// analogue of the VM's backup mark-sweep. Run **once at clean exit, after [`destroy_globals`]**:
+    /// at that point every legitimately-live binding has been torn down, so any captured scope still
+    /// alive is reachable only through a `scope ↔ closure` capture cycle that `Rc` cannot break.
+    /// Clearing such a scope's bindings drops its closures' references, and the cascade frees the
+    /// closures and then the scope itself (`Rc` reaching zero). Each scope is held alive by the
+    /// upgraded handle for the duration of its own clear, so nothing is freed mid-mutation. Idempotent
+    /// (a scope cleared as a side effect of an earlier one simply fails to upgrade); the global scope,
+    /// already drained, is a harmless no-op.
+    fn reap_captured_scope_cycles(&mut self) {
+        let candidates = CAPTURED_SCOPES.with(|r| std::mem::take(&mut *r.borrow_mut()));
+        for weak in candidates {
+            if let Some(scope) = weak.upgrade() {
+                scope.vars.borrow_mut().clear();
+                scope.order.borrow_mut().clear();
+            }
         }
     }
 
