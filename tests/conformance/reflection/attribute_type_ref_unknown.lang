@@ -3,7 +3,7 @@
 // expect: error E0013 at 8:10
 // expect: exit 1
 @attribute
-type Encode = { codec: Type };
+struct Encode { codec: Type }
 
 #[Encode(codec: Nonexistent)]
-type Payload = { id: int };
+struct Payload { id: int }

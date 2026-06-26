@@ -1,7 +1,7 @@
-// The capability gate: a record is usable as `#[Foo(...)]` only if it implements the marker trait
-// `Attribute`. `Plain` is a record but is never marked, so attaching it is rejected (E0029).
+// The capability gate: a struct is usable as `#[Foo(...)]` only if it implements the marker trait
+// `Attribute`. `Plain` is a struct but is never marked, so attaching it is rejected (E0029).
 // expect: error E0029 at 6:3
 // expect: exit 1
-type Plain = { path: string };
+struct Plain { path: string }
 #[Plain("/x")]
-type Users = { id: int };
+struct Users { id: int }

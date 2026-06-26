@@ -2,7 +2,7 @@
 // expect: stdout "done"
 // expect: exit 0
 @attribute
-type Marker = {};
+struct Marker {  }
 
 mut n = 0;
 for m in attributes_of::<Marker>() {

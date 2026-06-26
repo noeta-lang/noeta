@@ -1,6 +1,6 @@
-// A role rides on what an attribute attaches to, so `@role(...)` may only tag a record that is
-// itself an attribute (`@attribute`). Tagging a plain record is a checker error (E0031).
-// expect: error E0031 at 6:6
+// A role rides on what an attribute attaches to, so `@role(...)` may only tag a struct that is
+// itself an attribute (`@attribute`). Tagging a plain struct is a checker error (E0031).
+// expect: error E0031 at 6:8
 // expect: exit 1
 @role(Semantic.EntryPoint)
-type Route = { path: string };
+struct Route { path: string }

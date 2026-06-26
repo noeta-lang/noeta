@@ -13,7 +13,7 @@ namespace App.Orders;
 
 use App.Models.User;
 
-type Item = { price: float, qty: int };
+struct Item { price: float qty: int }
 
 enum Status: string {
     Pending = "pending";

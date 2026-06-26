@@ -7,7 +7,7 @@
 
 use crate::{
     ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ImplDecl, ObjectLit, Param, Pattern,
-    Program, RecordDecl, Stmt, StrPart, TypeParam, TypeRef,
+    Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef,
 };
 use lang_span::Span;
 
@@ -76,7 +76,7 @@ impl Pretty for Stmt {
             }
             Stmt::Fn(decl) => decl.pretty(out, level),
             Stmt::Enum(decl) => decl.pretty(out, level),
-            Stmt::Record(decl) => decl.pretty(out, level),
+            Stmt::Struct(decl) => decl.pretty(out, level),
             Stmt::Class(decl) => decl.pretty(out, level),
             Stmt::Impl(decl) => decl.pretty(out, level),
             Stmt::Namespace { path, span: s } => {
@@ -272,12 +272,12 @@ fn pub_str(is_public: bool) -> &'static str {
     if is_public { "pub " } else { "" }
 }
 
-impl Pretty for RecordDecl {
+impl Pretty for StructDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
         let fields: Vec<String> = self.fields.iter().map(field_decl_str).collect();
         out.push_str(&format!(
-            "(record {}{}{} [{}] {})",
+            "(struct {}{}{} [{}] {})",
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),

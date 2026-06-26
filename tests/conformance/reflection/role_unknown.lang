@@ -4,4 +4,4 @@
 // expect: exit 1
 @attribute
 @role(Semantic.Bogus)
-type Route = { path: string };
+struct Route { path: string }

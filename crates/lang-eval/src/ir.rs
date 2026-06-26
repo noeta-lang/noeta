@@ -346,7 +346,7 @@ impl Interpreter {
         ))
     }
 
-    /// Register a declaration. `fn`/`class` build IR-bodied closures; `enum`/`record`/`use`
+    /// Register a declaration. `fn`/`class` build IR-bodied closures; `enum`/`struct`/`use`
     /// carry no executable body, so they reuse the tree-walker's registration unchanged.
     fn exec_ir_decl(&mut self, decl: &lang_ir::Decl) {
         match decl {
@@ -357,7 +357,7 @@ impl Interpreter {
             }
             lang_ir::Decl::Class(class) => self.declare_ir_class(class),
             lang_ir::Decl::Enum(decl) => self.declare_enum(decl),
-            lang_ir::Decl::Record(decl) => self.declare_record(decl),
+            lang_ir::Decl::Struct(s) => self.declare_ir_struct(s),
             lang_ir::Decl::Use { path, names, .. } => self.declare_use(path, names),
         }
     }
@@ -374,6 +374,41 @@ impl Interpreter {
             FnBody::Ir(Rc::clone(func)),
             Rc::clone(&self.scope),
         )
+    }
+
+    /// Register a struct (the value kind) whose methods are IR-bodied closures. Mirrors
+    /// [`Self::declare_ir_class`] but `is_struct: true` and never a destructor (structs are pure
+    /// data). Fields/derives come from the carried surface declaration; methods are lowered IR funcs.
+    fn declare_ir_struct(&mut self, strukt: &lang_ir::StructDef) {
+        let decl = &strukt.decl;
+        let fields = decl
+            .fields
+            .iter()
+            .map(|f| FieldSpec {
+                name: f.name.clone(),
+                mutable: f.mut_field,
+            })
+            .collect();
+        let methods = strukt
+            .methods
+            .iter()
+            .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
+            .collect();
+        let def = TypeDef {
+            name: decl.name.clone(),
+            fields,
+            methods,
+            destructor: None,
+            is_struct: true,
+            // A hand-written `compare`/`to_json` takes precedence over derivation.
+            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
+                && !decl.methods.iter().any(|m| m.name == "compare"),
+            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
+                && !decl.methods.iter().any(|m| m.name == "to_json"),
+            opaque: false,
+        };
+        self.scope
+            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
     }
 
     /// Register a class whose methods are IR-bodied closures. Mirrors `declare_class`: fields,
@@ -399,7 +434,7 @@ impl Interpreter {
             fields,
             methods,
             destructor: decl.destructor.clone().map(Rc::new),
-            is_record: false,
+            is_struct: false,
             // A hand-written `compare`/`to_json` takes precedence over derivation — the same
             // rule `declare_class` applies.
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
@@ -850,7 +885,7 @@ impl Interpreter {
             } => {
                 // In-place reuse (Phase 5): a marked self-update `acc = Type { ...acc, … }` moves the
                 // accumulator out of its (reassigned) binding and mutates it in place when uniquely
-                // owned, mirroring the VM's `MakeRecordInPlace`. The token guarantees the spread is the
+                // owned, mirroring the VM's `MakeStructInPlace`. The token guarantees the spread is the
                 // reassigned base; both backends gate on the runtime refcount so an alias copies.
                 if *reuse && let Some((lang_ir::Atom::Var { name, .. }, _)) = spread {
                     return self.construct_object_reuse(
@@ -1059,8 +1094,8 @@ impl Interpreter {
         }
     }
 
-    /// In-place record reuse for a marked self-update `acc = Type { ...acc, f: v }` (Phase 5, the
-    /// IR-interpreter analogue of the VM's `Op::MakeRecordInPlace`). The reuse pass guarantees the
+    /// In-place struct reuse for a marked self-update `acc = Type { ...acc, f: v }` (Phase 5, the
+    /// IR-interpreter analogue of the VM's `Op::MakeStructInPlace`). The reuse pass guarantees the
     /// spread base `base_name` is the very binding the result is reassigned to (so moving it out is
     /// sound) and that `Type` has no own `destruct` (so reusing the allocation never skips a
     /// container destructor). The accumulator is moved out of its binding; if it is uniquely owned

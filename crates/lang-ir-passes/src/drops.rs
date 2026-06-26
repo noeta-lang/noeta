@@ -455,7 +455,7 @@ fn rewrite_decl(decl: &Decl, cx: &Cx) -> Decl {
                 .map(|f| Rc::new(rewrite_func(f, cx))),
             span: class.span,
         }),
-        Decl::Enum(_) | Decl::Record(_) | Decl::Use { .. } => decl.clone(),
+        Decl::Enum(_) | Decl::Struct(_) | Decl::Use { .. } => decl.clone(),
     }
 }
 

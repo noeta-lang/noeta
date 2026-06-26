@@ -1,6 +1,6 @@
 // A container with NO `destruct` of its own still releases its fields, firing *their* destructors
 // (spec §4). This is the gap Phase 4.3 closes: before it, a field destructor only fired if the
-// container itself had a destructor (or was a global at program end). `Box` is a plain record whose
+// container itself had a destructor (or was a global at program end). `Box` is a plain struct whose
 // only field is a destructor-bearing `Inner`; when the `Box` dies at the end of `go`, `Inner.destruct`
 // must still run. The container-before-contained set (the checker's destruct-reachability) marks
 // `Box` reachable *through* its field, so both backends walk it even though it has no `destruct`.
@@ -15,7 +15,7 @@ class Inner {
     destruct { echo "drop inner ${tag}"; }
 }
 
-type Box = { inner: Inner };
+struct Box { inner: Inner }
 
 fn go(): void {
     b = Box { inner: Inner.new("i") };

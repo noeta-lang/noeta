@@ -1,10 +1,10 @@
-// `max` requires `T: Comparable`, but `Point` neither derives nor impls `Comparable`. A record
+// `max` requires `T: Comparable`, but `Point` neither derives nor impls `Comparable`. A struct
 // literal has the concrete type `Point`, so instantiating `T = Point` at the call site breaks the
 // bound and is rejected (`E0025`) — the static guarantee the bound exists to give, caught before
 // the program could reach the runtime's "cannot compare objects" failure.
 // expect: error E0025 at 12:6
 // expect: exit 1
-type Point = { x: int, y: int };
+struct Point { x: int y: int }
 fn max<T: Comparable>(a: T, b: T): T {
     if a > b { return a; }
     return b;

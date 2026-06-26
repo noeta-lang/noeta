@@ -1,4 +1,4 @@
-// Phase 5.1a (spec §4/§5): in-place record reuse must still fire a *replaced* field's destructor.
+// Phase 5.1a (spec §4/§5): in-place struct reuse must still fire a *replaced* field's destructor.
 // `Box` has no own `destruct`, so the function-local self-update `acc = Box { ...acc, r: Res.new(1) }`
 // reuses the allocation in place (a directly-held local — the VM's `MakeRecordInPlace`, the IR
 // interpreter's move-out + `Rc::get_mut`). The displaced old `r` (Res 0) is the last reference to

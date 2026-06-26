@@ -1,5 +1,5 @@
-// `@semantic` marks an *enum* role-eligible; placing it on a record is a checker error (E0031).
+// `@semantic` marks an *enum* role-eligible; placing it on a struct is a checker error (E0031).
 // expect: error E0031 at 4:2
 // expect: exit 1
 @semantic
-type Route = { path: string };
+struct Route { path: string }

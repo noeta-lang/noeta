@@ -9,7 +9,7 @@
 // expect: stdout "cls"
 // expect: exit 0
 enum Color { Red; Green; }
-type Point = { x: int };
+struct Point { x: int }
 class Box {
     v: int
     fn new(v: int): Box { return Box { v: v }; }
@@ -22,10 +22,10 @@ echo describe(Color.Red);
 // `dyn` narrows to a kind with `is` — a runtime kind test, identical in both backends.
 d: dyn = Color.Green;
 echo d is Enum;
-echo d is Record;
+echo d is Struct;
 
 p: dyn = Point { x: 1 };
-who: string = if p is Record then "rec" else "no";
+who: string = if p is Struct then "rec" else "no";
 echo who;
 
 b: dyn = Box.new(3);

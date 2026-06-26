@@ -201,7 +201,7 @@ pub enum Rvalue {
     /// In-place field assignment: `receiver.name = value` (Phase 5.2). Evaluates to the updated
     /// object. Both backends set the field **in place when the object is uniquely owned** (the
     /// reuse pass's `reuse` token, gated on the runtime refcount `== 1`) and **copy-first when
-    /// shared**, so value semantics hold for any aliased observer — like the collection/record
+    /// shared**, so value semantics hold for any aliased observer — like the collection/struct
     /// self-update reuse, it is observationally invisible, so the backends agree even reusing at
     /// different points. `reuse` is set by the reuse pass on the `x.f = v` self-update shape
     /// (`let %t = SetField(Var(x), …); Bind x = %t`); lowering always emits `false`.
@@ -241,7 +241,7 @@ pub enum Rvalue {
     /// `true` marks a *self-update* (`acc = Type { ...acc, f: v }`) where the `spread` base is the
     /// very binding the result is reassigned to, so the base is dead after this construction and its
     /// allocation may be reused. Both backends consume the same token — the VM via an in-place
-    /// `MakeRecordInPlace`, the IR interpreter via a move-out + `Rc::get_mut` — each gated on the
+    /// `MakeStructInPlace`, the IR interpreter via a move-out + `Rc::get_mut` — each gated on the
     /// runtime refcount (`== 1`) so an aliased base falls back to a copy. Reuse is invisible to
     /// observable behavior (value semantics; destructor timing of a replaced field is pinned by the
     /// spec), so the differential stays in agreement. Lowering always emits `false`; the pass sets it.
@@ -476,7 +476,7 @@ pub struct Thunk {
     pub temp_count: u32,
 }
 
-/// A declaration node. `fn`/`class` carry lowered IR; `enum`/`record`/`use` carry the
+/// A declaration node. `fn`/`class` carry lowered IR; `enum`/`struct`/`use` carry the
 /// surface declaration unchanged (no executable body to lower).
 #[derive(Debug, Clone)]
 pub enum Decl {
@@ -493,8 +493,9 @@ pub enum Decl {
     Class(ClassDef),
     /// An enum type declaration (no executable body).
     Enum(Rc<lang_ast::EnumDecl>),
-    /// A record type declaration (no executable body).
-    Record(Rc<lang_ast::RecordDecl>),
+    /// `struct Name { fields; methods }` — the value kind. Like [`Decl::Class`] but with no
+    /// `destruct`; fields/derives are read from the surface `decl`, methods are lowered to IR.
+    Struct(StructDef),
     /// A `use` import (binds names / native modules; no executable body).
     Use {
         path: Vec<String>,
@@ -516,5 +517,15 @@ pub struct ClassDef {
     /// the surface destructor on `decl` through the shared teardown path, so the Phase-1
     /// faithfulness differential is unaffected.
     pub destructor: Option<Rc<Func>>,
+    pub span: Span,
+}
+
+/// A lowered struct (the value kind): the surface declaration (for fields, derives, and name)
+/// paired with its methods lowered to IR funcs. Mirrors [`ClassDef`] but carries no destructor —
+/// a struct is pure data and never has a `destruct` block.
+#[derive(Debug, Clone)]
+pub struct StructDef {
+    pub decl: Rc<lang_ast::StructDecl>,
+    pub methods: Vec<(String, Rc<Func>)>,
     pub span: Span,
 }

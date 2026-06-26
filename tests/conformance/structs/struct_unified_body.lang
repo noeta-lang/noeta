@@ -1,0 +1,24 @@
+// The unified declaration body: a `struct` (the value kind) may carry a `pub` field, a `mut`
+// field, and inherent methods — the same body grammar as a `class`, minus `destruct`. Methods read
+// fields directly (no `self.`), exactly as class methods do. Runs identically on both backends.
+// expect: stdout "hits"
+// expect: stdout "7"
+// expect: stdout "8"
+// expect: stdout "100"
+// expect: exit 0
+struct Counter {
+    pub label: string
+    mut count: int
+
+    fn next(): int { return count + 1; }
+}
+
+c = Counter { label: "hits", count: 7 };
+echo c.label;
+echo c.count;
+echo c.next();
+
+// A struct is value-semantic, so `m.count = v` rebinds `m` (copy-on-write) and thus needs `mut m`.
+mut m = Counter { label: "x", count: 1 };
+m.count = 100;
+echo m.count;

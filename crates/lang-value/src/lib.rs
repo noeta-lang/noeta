@@ -216,7 +216,7 @@ impl Value {
         heap::alloc(Payload::Map(entries))
     }
 
-    /// A heap object (refcount 1): a record/class/opaque instance laying out `slots` in the
+    /// A heap object (refcount 1): a struct/class/opaque instance laying out `slots` in the
     /// `shape`'s field order. The object takes ownership of one reference to each slot value.
     pub fn object(shape: Rc<Shape>, slots: Vec<Value>) -> Value {
         heap::alloc(Payload::Object { shape, slots })
@@ -607,7 +607,7 @@ impl Value {
         }
     }
 
-    /// Whether this is a shaped object (record/class/opaque instance).
+    /// Whether this is a shaped object (struct/class/opaque instance).
     pub fn is_object(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Object { .. }))
     }
@@ -1264,7 +1264,7 @@ mod tests {
     #[test]
     fn objects_display_in_slot_order_and_free_their_slots() {
         let shape = Rc::new(Shape::object(
-            ShapeKind::Record,
+            ShapeKind::Struct,
             "Item",
             vec!["price".into(), "qty".into()],
         ));
@@ -1293,7 +1293,7 @@ mod tests {
     fn structural_compare_orders_objects_lexicographically() {
         use std::cmp::Ordering;
         let shape = Rc::new(Shape::object(
-            ShapeKind::Record,
+            ShapeKind::Struct,
             "Version",
             vec!["major".into(), "minor".into()],
         ));

@@ -15,7 +15,7 @@ class Leaf {
     destruct { echo "drop ${tag}"; }
 }
 
-type Box = { inner: Leaf };
+struct Box { inner: Leaf }
 
 fn go(): void {
     b = Box { inner: Leaf.new("x") };

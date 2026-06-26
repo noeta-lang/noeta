@@ -1,8 +1,8 @@
-// The capability gate: `attributes_of::<T>()` requires `T` to be a record marked
-// `@attribute`. `Plain` is a plain record, so the query is rejected (E0029).
+// The capability gate: `attributes_of::<T>()` requires `T` to be a struct marked
+// `@attribute`. `Plain` is a plain struct, so the query is rejected (E0029).
 // expect: error E0029 at 7:10
 // expect: exit 1
-type Plain = { path: string };
+struct Plain { path: string }
 
 routes = attributes_of::<Plain>();
 echo routes;

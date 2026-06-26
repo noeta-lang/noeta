@@ -101,11 +101,11 @@ greet("Ada", "Hi");  // "Hi, Ada!"
 
 ---
 
-## 5. Types, records, enums
+## 5. Types, structs, enums
 
 ```
-// structural record — value type, structural equality
-type Item = { price: float, qty: int };
+// structural struct — value type, structural equality
+struct Item { price: float; qty: int }
 
 // plain enum (equivalent to PHP's backed enum)
 enum Status: string {
@@ -121,10 +121,10 @@ enum OrderError {
 }
 ```
 
-**Packed value types** (architecture §3.1). A record whose fields are all primitives can be marked `packed` to get an unboxed, contiguous, value-semantics layout — no header, no shape, passed by value. This is what makes SIMD-amenable types (`Vec3`, `Quat`, `Mat4`, colors) fast, and it pairs with operator traits (§9.6) for an elegant surface:
+**Packed value types** (architecture §3.1). A struct whose fields are all primitives can be marked `packed` to get an unboxed, contiguous, value-semantics layout — no header, no shape, passed by value. This is what makes SIMD-amenable types (`Vec3`, `Quat`, `Mat4`, colors) fast, and it pairs with operator traits (§9.6) for an elegant surface:
 
 ```
-packed type Vec3 = { x: f32, y: f32, z: f32 };
+packed struct Vec3 { x: f32; y: f32; z: f32 }
 // Vec3 implements Add/Sub/Mul (operator traits), so:
 position = position + velocity * dt;       // reads naturally, lays out flat
 
@@ -155,7 +155,7 @@ fn describe(x: dyn): string {
 
 **Union types (a *closed* `dyn`).** A union `A | B` is a `dyn` whose membership is a static, finite set — written only where you declare it, never produced by inference. A value of any member widens into it; you narrow back out with `.as<T>()`, `is`, or an `is`-pattern `match`. Because the member set is *closed*, a `match` with an `is T` arm per member is **exhaustive with no `_`** — the closed-world guarantee a union buys over `dyn` (a `dyn` match, being open, still needs a `_`).
 
-**Abstract kind-types (`Enum` · `Record` · `Class`).** Each is the supertype of every declared type of that kind — `Enum` accepts any enum value, `Record` any record, `Class` any class instance (the PHP `UnitEnum` / Java `java.lang.Enum` / C# `System.Enum` model). They sit between a concrete type and `dyn`: a concrete value widens in implicitly (`Color.Red` is an `Enum`), and you narrow back out with `is` / `.as<T>()` (`x is Enum` is a runtime kind test; `x.as<WebRole>()` recovers the concrete enum). They are **abstract** — no value *has* a kind-type at runtime (every value is a concrete enum/record/class); a kind-type appears only in a static position (a field, parameter, or return), as a bound weaker than a concrete type but stronger than `dyn`. A `match` over a kind-typed value is open, so it needs a `_`. (This is what `roles_of()` returns each binding's `role` as — "some enum.")
+**Abstract kind-types (`Enum` · `Struct` · `Class`).** Each is the supertype of every declared type of that kind — `Enum` accepts any enum value, `Struct` any struct, `Class` any class instance (the PHP `UnitEnum` / Java `java.lang.Enum` / C# `System.Enum` model). They sit between a concrete type and `dyn`: a concrete value widens in implicitly (`Color.Red` is an `Enum`), and you narrow back out with `is` / `.as<T>()` (`x is Enum` is a runtime kind test; `x.as<WebRole>()` recovers the concrete enum). They are **abstract** — no value *has* a kind-type at runtime (every value is a concrete enum/struct/class); a kind-type appears only in a static position (a field, parameter, or return), as a bound weaker than a concrete type but stronger than `dyn`. A `match` over a kind-typed value is open, so it needs a `_`. (This is what `roles_of()` returns each binding's `role` as — "some enum.")
 
 ```
 fn label(x: int | string): string {
@@ -258,7 +258,7 @@ empty = #{};                                         // the empty set (an empty 
 doubled = nums |> map(fn(n) => n * 2);
 ```
 
-A set is an ordered, de-duplicated collection of a single orderable primitive (int, float, or string). The `#{...}` literal is sugar for `[...].to_set()`; sets support `contains`/`union`/`intersection`, `len`, and `for` iteration in sorted order. Maps are string-keyed and their keys are *expressions* evaluated to strings (`{key: 1}` uses the value of `key`), so an anonymous *record* is written with its type name (`Point { x: 1 }`), not a bare brace.
+A set is an ordered, de-duplicated collection of a single orderable primitive (int, float, or string). The `#{...}` literal is sugar for `[...].to_set()`; sets support `contains`/`union`/`intersection`, `len`, and `for` iteration in sorted order. Maps are string-keyed and their keys are *expressions* evaluated to strings (`{key: 1}` uses the value of `key`), so an anonymous *struct* is written with its type name (`Point { x: 1 }`), not a bare brace.
 
 ---
 
@@ -560,11 +560,11 @@ class User {
 
 A derive may carry **generic type arguments**: `Serialize<Format>` is the format-parameterized serializer (`@derive(Serialize<Json>)` synthesizes the structural `to_json`), the format chosen from a blessed vocabulary (`Json` to start). Supplying the wrong number of arguments — `@derive(Serialize)`, `@derive(Comparable<int>)` — is an arity error (E0014); an unknown format is E0013. The other derivable traits (`Equatable`, `Comparable`, `Display`, `Clone`) are nullary.
 
-**Attributes are just records** used in annotation position — no special construct (architecture §9.13). A record opts in as an attribute with the **`@attribute` directive**; its `#[...]` arguments then map to the record's fields (positional in declaration order, named by name), the one unambiguous construction a record has — which is exactly why **attributes are records, not classes** (a class has only convention-named constructors, with no canonical one to call). A `#[...]` may attach to any declaration site — a type, a function, a method, a field/property, or an enum variant. Placement can be constrained by listing the permitted **target kinds** in the directive (`Record`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`); a bare `@attribute` attaches anywhere. A misplaced use is a compile error (E0030):
+**Attributes are just structs** used in annotation position — no special construct (architecture §9.13). A struct opts in as an attribute with the **`@attribute` directive**; its `#[...]` arguments then map to the struct's fields (positional in declaration order, named by name), the one unambiguous construction a struct has — which is exactly why **attributes are structs, not classes** (a class has only convention-named constructors, with no canonical one to call). A `#[...]` may attach to any declaration site — a type, a function, a method, a field/property, or an enum variant. Placement can be constrained by listing the permitted **target kinds** in the directive (`Struct`, `Class`, `Enum`, `Function`, `Method`, `Field`, `Variant`); a bare `@attribute` attaches anywhere. A misplaced use is a compile error (E0030):
 
 ```
 @attribute(Method, Function)                   // opt-in + constrain placement
-type Route = { path: string };                 // a record; #[Route(...)] fills `path`
+struct Route { path: string }                  // a struct; #[Route(...)] fills `path`
 
 class UserController {
     #[Route("/users")]                         // OK — Method is permitted
@@ -572,22 +572,22 @@ class UserController {
 }
 
 #[Route("/x")]                                 // E0030 — Route does not attach to a type
-type User = { id: int };
+struct User { id: int }
 ```
 
-A record can still carry *behavior* via a standalone `impl SomeTrait for Route {}` (so "records only" costs no expressiveness); and a bare `@attribute` (no kinds) is the common "attaches anywhere" case.
+A struct can still carry *behavior* via a standalone `impl SomeTrait for Route {}` (so "structs only" costs no expressiveness); and a bare `@attribute` (no kinds) is the common "attaches anywhere" case.
 
-**Attribute arguments are a constant literal tree.** Beyond scalars, an argument may be a list, map, set, enum value, or a nested record literal — composed arbitrarily — plus a **type reference** (a bare type name, like C# `typeof(Foo)`). The one rule is *no comptime*: an argument is materialized at manifest-build time without running user code, so it is literals and compositions of literals only — never an expression (`1 + 2`), a call, or a name read of runtime state. The checker type-checks the whole tree recursively against the attribute's field types (E0007), and a bare name must resolve to a real type (E0013):
+**Attribute arguments are a constant literal tree.** Beyond scalars, an argument may be a list, map, set, enum value, or a nested struct literal — composed arbitrarily — plus a **type reference** (a bare type name, like C# `typeof(Foo)`). The one rule is *no comptime*: an argument is materialized at manifest-build time without running user code, so it is literals and compositions of literals only — never an expression (`1 + 2`), a call, or a name read of runtime state. The checker type-checks the whole tree recursively against the attribute's field types (E0007), and a bare name must resolve to a real type (E0013):
 
 ```
 @attribute
-type Endpoint = {
-    methods: List<Method>,                 // a list of enum values
-    limits:  Map<string, int>,             // a map
-    tags:    Set<string>,                  // a set (#{...})
-    fallback: Limits,                      // a nested record literal
-    codec:   Type,                         // a type reference
-};
+struct Endpoint {
+    methods: List<Method>                 // a list of enum values
+    limits:  Map<string, int>             // a map
+    tags:    Set<string>                  // a set (#{...})
+    fallback: Limits                      // a nested struct literal
+    codec:   Type                         // a type reference
+}
 
 #[Endpoint(
     methods: [Method.Get, Method.Post],
@@ -596,7 +596,7 @@ type Endpoint = {
     fallback: Limits { rps: 1, burst: 2 },
     codec:   JsonCodec,
 )]
-type Users = { id: int };
+struct Users { id: int }
 ```
 
 A bare name disambiguates cleanly: `Enum.Variant` (or a built-in `Ok(5)`/`none`) is an **enum value**, while an unqualified name is a **type reference** — materialized as the reflection `Type` (`type_of`'s result type), so it is matchable (`match codec { Type.Named(n, _) => … }`) *and* operational: `invoke` accepts a `Type` value as its receiver, dispatching the named type's associated function, so a stored type-ref is constructible, not just inspectable.
@@ -612,13 +612,13 @@ for r in routes {
 }
 ```
 
-The same index powers the LSP and static analysis ("show every `#[Route]`", "who consumes `#[Entity]`", jump-to-all-usages). Attributes carry no behavior beyond being records — they reduce to records + traits + the manifest, all of which exist for other reasons.
+The same index powers the LSP and static analysis ("show every `#[Route]`", "who consumes `#[Entity]`", jump-to-all-usages). Attributes carry no behavior beyond being structs — they reduce to structs + traits + the manifest, all of which exist for other reasons.
 
 **Runtime reflection** exists for the genuinely dynamic minority, unified with the type system and fallible by design:
 
 ```
 match type_of(value) {
-    Type.Record(name, _) => "record ${name}",
+    Type.Struct(name, _) => "struct ${name}",
     Type.Enum(name, _)   => "enum ${name}",
     Type.Class(name, _)  => "class ${name}",
     Type.List(elem)      => "list",
@@ -626,8 +626,8 @@ match type_of(value) {
     _                    => "other",
 }
 // `type_of` reports the value's concrete type, distinguishing the three nominal kinds
-// (`Type.Enum`/`Type.Record`/`Type.Class`) so a consumer can branch on kind from the result alone.
-// The abstract `Enum`/`Record`/`Class` *types* are the static-bound counterpart (`roles_of()`'s
+// (`Type.Enum`/`Type.Struct`/`Type.Class`) so a consumer can branch on kind from the result alone.
+// The abstract `Enum`/`Struct`/`Class` *types* are the static-bound counterpart (`roles_of()`'s
 // `role` is `Enum`); the runtime kind test on a value is `x is Enum`.
 
 // By-name invocation — the single fallible primitive. The name is a runtime string; the result is
@@ -647,15 +647,15 @@ enum WebRole { Controller, Middleware, ErrorHandler }
 
 @attribute(Function, Method)
 @role(Semantic.EntryPoint)                         // a built-in role
-type Route = { path: string };
+struct Route { path: string }
 
 @attribute
 @role(Semantic.Sink)
-type Persist = { table: string };
+struct Persist { table: string }
 
 @attribute(Function, Method)
 @role(WebRole.Controller)                          // a framework-specific role
-type Page = { path: string };
+struct Page { path: string }
 
 // the built-in vocabulary, implicitly @semantic
 @semantic enum Semantic { EntryPoint, PersistenceBoundary, TrustBoundary, Sink, Layer }
@@ -674,7 +674,7 @@ for binding in roles_of() {
 }
 ```
 
-`@role(...)` is declarative — a fixed `Enum.Variant` name, **not** a user-evaluated `fn role(): Enum` (which would require compile-time execution of user code; the project avoids comptime, exactly as for attribute placement). Multiple roles may tag one declaration (each becomes its own binding). Only a record marked `@attribute` may carry `@role` (the role rides on what the attribute attaches to; otherwise E0031), a class/enum cannot (attributes are records only), and the named variant must be **fieldless** — a *parameterized* role (`Layer(name)`), whose payload would be evaluated per use site, is deferred as a comptime enhancement. `@semantic` marks enums only (on a record/class it is E0031). Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
+`@role(...)` is declarative — a fixed `Enum.Variant` name, **not** a user-evaluated `fn role(): Enum` (which would require compile-time execution of user code; the project avoids comptime, exactly as for attribute placement). Multiple roles may tag one declaration (each becomes its own binding). Only a struct marked `@attribute` may carry `@role` (the role rides on what the attribute attaches to; otherwise E0031), a class/enum cannot (attributes are structs only), and the named variant must be **fieldless** — a *parameterized* role (`Layer(name)`), whose payload would be evaluated per use site, is deferred as a comptime enhancement. `@semantic` marks enums only (on a struct/class it is E0031). Agents query the labeled graph through MCP tools (`list_roles`/`trace_from`/`flows_between`); architecture §12.7.
 
 ---
 
@@ -763,7 +763,7 @@ namespace App.Orders;
 
 use App.Models.User;
 
-type Item = { price: float, qty: int };
+struct Item { price: float; qty: int }
 
 enum Status: string {
     Pending = "pending";

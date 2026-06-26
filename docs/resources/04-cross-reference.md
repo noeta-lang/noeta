@@ -38,7 +38,7 @@
 |---|---|---|---|---|
 | Traits & built-in protocols (operators) | §9.2 | §9.6 | M1 | Replaces all PHP magic methods. |
 | `@derive(...)` (built-in derives) | §9.13 | §9.6, §9.7 | M1 | Compiler-implemented codegen; no user derives. |
-| `#[...]` attributes (records + traits + manifest) | §9.13 | §9.7 | M1 | Data attributes, distinct from `@derive`; no bespoke construct, no comptime. |
+| `#[...]` attributes (structs + traits + manifest) | §9.13 | §9.7 | M1 | Data attributes, distinct from `@derive`; no bespoke construct, no comptime. |
 | Reflection (compile-time + runtime, closed-world) | §9.13 | §9.7 | M1 / M3 (runtime tail) | Distinct from `eval`. |
 | No comptime / no user macros (decision) | §9.13 | §9.7 | — | Stated non-goal. |
 

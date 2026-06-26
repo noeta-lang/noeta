@@ -1,5 +1,5 @@
 // Attribute arguments are a constant literal tree: lists, maps, sets, enum values, and nested
-// record literals compose recursively and round-trip through the manifest into a correctly-built
+// struct literals compose recursively and round-trip through the manifest into a correctly-built
 // attribute instance. Both backends materialize the same value from the shared reflection artifact,
 // so the read-back agrees across the differential by construction.
 // expect: stdout "/users"
@@ -12,16 +12,19 @@
 // expect: exit 0
 enum Method { Get; Post; }
 
-type Limits = { rps: int, burst: int };
+struct Limits {
+    rps: int
+    burst: int
+}
 
 @attribute
-type Endpoint = {
-    path: string,
-    methods: List<Method>,
-    limits: Map<string, int>,
-    tags: Set<string>,
-    fallback: Limits,
-};
+struct Endpoint {
+    path: string
+    methods: List<Method>
+    limits: Map<string, int>
+    tags: Set<string>
+    fallback: Limits
+}
 
 #[Endpoint(
     path: "/users",
@@ -30,7 +33,7 @@ type Endpoint = {
     tags: #{"y", "x"},
     fallback: Limits { rps: 1, burst: 2 },
 )]
-type Users = { id: int };
+struct Users { id: int }
 
 for e in attributes_of::<Endpoint>() {
     echo e.value.path;

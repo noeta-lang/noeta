@@ -35,10 +35,10 @@ fn compile(src: &str) -> Module {
     lang_compiler::compile(&parsed.program).expect("bench program must be in the VM subset")
 }
 
-/// A blind-overwrite record accumulator: an 8-field class whose global accumulator has one field
+/// A blind-overwrite struct accumulator: an 8-field class whose global accumulator has one field
 /// overwritten each iteration (`acc = Wide { ...acc, f0: i }`). The accumulator is read only after
 /// the loop, so it stays uniquely owned (a global, stored via the consuming `StoreGlobal`). Phase
-/// 5.1b's global record reuse (`TakeGlobal` + `MakeRecordInPlace`) now overwrites the single field
+/// 5.1b's global struct reuse (`TakeGlobal` + `MakeStructInPlace`) now overwrites the single field
 /// in place instead of allocating a fresh object and copying all 8 every step — a ~2.6× constant-
 /// factor cut (both were already O(n) in `n`; the win is the per-step work, alloc + 8 copies → 1
 /// in-place overwrite).
@@ -57,7 +57,7 @@ fn record_update_src(n: usize) -> String {
     )
 }
 
-/// A **read-update** record accumulator inside a function (`acc = Wide { ...acc, f0: acc.f0 + 1 }`),
+/// A **read-update** struct accumulator inside a function (`acc = Wide { ...acc, f0: acc.f0 + 1 }`),
 /// returned after the loop. The `acc.f0` read keeps the accumulator uniquely owned at the construct
 /// (the IR's `Drop` after the `LoadField` plus 3.3b's no-`Move` local declaration), so once
 /// Phase-5 reuse lands it can mutate in place; today it still copies all 8 fields per step. Distinct
@@ -244,7 +244,7 @@ const LOOP_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
 // cost: allocation churn, destructor firing, and deep-structure teardown. The cyclic-garbage bench is
 // deferred to Phase 6 (it needs a live cycle collector; today it would leak each iteration).
 
-/// **Allocation churn:** build and drop a short-lived record on every iteration. Each step allocates
+/// **Allocation churn:** build and drop a short-lived struct on every iteration. Each step allocates
 /// a fresh `Pair` and lets it die immediately — pure allocator + refcount-to-zero throughput, the
 /// path prompt reclamation (Phase 3) and reuse (Phase 5) most affect.
 fn mm_alloc_churn_src(n: usize) -> String {
@@ -385,7 +385,7 @@ fn vm_hot_paths(c: &mut Criterion) {
     }
     disp.finish();
 
-    // Blind-overwrite record accumulator (`acc = Wide { ...acc, f0: i }`), parameterized over n so
+    // Blind-overwrite struct accumulator (`acc = Wide { ...acc, f0: i }`), parameterized over n so
     // the complexity class is visible. Today's copying lowering is O(n·fields); the anchor for the
     // Phase-5 in-place reuse that will cut it to O(n). (Was a three-mode `ReuseMode` matrix; the modes
     // were retired with the inert P-REUSE machinery in memory-management Phase 3.3c — a single

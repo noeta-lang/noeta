@@ -1,11 +1,11 @@
-// Generic records (`type Pair<A, B>`) and generic enums (`enum Opt<T>`) parse, check, and run
+// Generic records (`struct Pair<A, B>`) and generic enums (`enum Opt<T>`) parse, check, and run
 // with their type parameters erased. Identical under both backends.
 // expect: stdout "1"
 // expect: stdout "x"
 // expect: stdout "7"
 // expect: stdout "empty"
 // expect: exit 0
-type Pair<A, B> = { first: A, second: B };
+struct Pair<A, B> { first: A second: B }
 enum Opt<T> { None; Some(value: T); }
 
 p = Pair { first: 1, second: "x" };

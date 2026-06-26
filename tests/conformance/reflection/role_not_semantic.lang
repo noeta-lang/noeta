@@ -4,6 +4,6 @@
 // expect: exit 1
 @attribute
 @role(Plain.A)
-type Route = { path: string };
+struct Route { path: string }
 
 enum Plain { A; B; }

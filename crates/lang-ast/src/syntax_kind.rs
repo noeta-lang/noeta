@@ -108,7 +108,7 @@ pub enum SyntaxKind {
     Pattern,
     EnumDecl,
     VariantDecl,
-    RecordDecl,
+    StructDecl,
     ClassDecl,
     FieldDecl,
     NamespaceDecl,
@@ -152,7 +152,7 @@ impl SyntaxKind {
                 | SyntaxKind::Pattern
                 | SyntaxKind::EnumDecl
                 | SyntaxKind::VariantDecl
-                | SyntaxKind::RecordDecl
+                | SyntaxKind::StructDecl
                 | SyntaxKind::ClassDecl
                 | SyntaxKind::FieldDecl
                 | SyntaxKind::NamespaceDecl

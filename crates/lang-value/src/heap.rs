@@ -585,7 +585,7 @@ pub(crate) fn set_slot(object: Value, index: usize, value: Value) {
 /// Overwrite object slot `index` with `value` (retaining the new occupant) and **return** the
 /// displaced old value without releasing it — the caller owns it and decides its disposal (e.g. a
 /// destructor-firing `release_value` rather than a plain free). The reference-count-neutral variant
-/// of [`set_slot`], used by in-place record reuse so a replaced field's `destruct` fires at the
+/// of [`set_slot`], used by in-place struct reuse so a replaced field's `destruct` fires at the
 /// right time (spec §4/§5).
 pub(crate) fn replace_slot(object: Value, index: usize, value: Value) -> Value {
     let obj = unsafe { &mut *obj_ptr(object) };

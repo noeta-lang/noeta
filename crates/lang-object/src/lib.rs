@@ -1,6 +1,6 @@
 //! Shapes: the layout descriptor for the object model.
 //!
-//! A [`Shape`] is the "hidden class" of a heap aggregate — a record/class instance or an
+//! A [`Shape`] is the "hidden class" of a heap aggregate — a struct/class instance or an
 //! enum value. It names the type, lists the slots in a fixed order, and (for enums) records
 //! the variant. The runtime value (`lang-value`) stores a flat slot array plus a shared
 //! handle to its shape, so two aggregates built the same way point at *one* shape rather than
@@ -15,7 +15,7 @@
 //! performance layer over this representation — invisible in observable output — and are
 //! deferred to a later optimization pass; field/slot resolution here is a direct lookup.
 
-/// What kind of aggregate a [`Shape`] describes. Records and classes differ only in whether
+/// What kind of aggregate a [`Shape`] describes. Structs and classes differ only in whether
 /// they carry methods (tracked by the compiler, not the shape); both lay out flat field
 /// slots in declared order. `Opaque` is a `use`-imported stub whose real field set is unknown
 /// until a literal supplies it (its slots are the literal's fields in sorted-key order, so its
@@ -23,7 +23,7 @@
 /// `(enum, variant)` pair; its slots are the variant's positional data fields.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ShapeKind {
-    Record,
+    Struct,
     Class,
     Opaque,
     Enum,
@@ -37,7 +37,7 @@ pub struct Shape {
     pub kind: ShapeKind,
     /// The type name for an object, or the enum name for an enum value.
     pub name: String,
-    /// Slot names in slot order: declared fields (record/class), sorted fields (opaque), or
+    /// Slot names in slot order: declared fields (struct/class), sorted fields (opaque), or
     /// the variant's positional data-field names (enum).
     pub fields: Vec<String>,
     /// The variant name (enum shapes only).
@@ -47,7 +47,7 @@ pub struct Shape {
 }
 
 impl Shape {
-    /// A record/class/opaque object shape with the given ordered slot names.
+    /// A struct/class/opaque object shape with the given ordered slot names.
     pub fn object(kind: ShapeKind, name: impl Into<String>, fields: Vec<String>) -> Shape {
         Shape {
             kind,
@@ -88,7 +88,7 @@ mod tests {
     #[test]
     fn slot_lookup_follows_declared_order() {
         let shape = Shape::object(
-            ShapeKind::Record,
+            ShapeKind::Struct,
             "Item",
             vec!["price".into(), "qty".into()],
         );

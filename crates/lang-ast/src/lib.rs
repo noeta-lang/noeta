@@ -49,12 +49,12 @@ pub enum Stmt {
     Fn(FnDecl),
     /// An enum declaration (plain, backed, or algebraic).
     Enum(EnumDecl),
-    /// A structural record type alias: `type Item = { price: float, qty: int };`.
-    Record(RecordDecl),
+    /// A struct declaration: `struct Item { price: float; qty: int }` — the value kind.
+    Struct(StructDecl),
     /// A class declaration: `class Order { fields... methods... }`.
     Class(ClassDecl),
     /// A standalone `impl Trait for Type { ... }` declaration — implementing a built-in trait
-    /// for a type from *outside* its declaration. This is how a bodiless record (`type Route =
+    /// for a type from *outside* its declaration. This is how a bodiless struct (`struct Route
     /// {...}`) declares a capability such as `impl Serialize for Route {}`; it works uniformly
     /// for classes too. The target must be a type declared in the same module (the orphan rule).
     Impl(ImplDecl),
@@ -115,46 +115,54 @@ impl Stmt {
             | Stmt::Expr { span, .. } => *span,
             Stmt::Fn(decl) => decl.span,
             Stmt::Enum(decl) => decl.span,
-            Stmt::Record(decl) => decl.span,
+            Stmt::Struct(decl) => decl.span,
             Stmt::Class(decl) => decl.span,
             Stmt::Impl(decl) => decl.span,
         }
     }
 }
 
-/// A structural record type alias (`type Item = { price: float, qty: int };`). A value
-/// type with structural equality; all fields immutable. Constructed via the all-fields
-/// literal (`Item { price: 9.99, qty: 2 }`).
+/// A struct declaration (`struct Item { price: float; qty: int }`) — the **value** kind. Value
+/// semantics with structural equality; `mut` fields opt-in; constructed via the all-fields literal
+/// (`Item { price: 9.99, qty: 2 }`). May carry inherent methods and in-body `impl Trait { ... }`
+/// blocks (the unified body grammar), but never a `destruct` (pure data — that is class-only).
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecordDecl {
+pub struct StructDecl {
     pub name: String,
     pub name_span: Span,
     /// Whether the declaration is `pub` (exported from its module for `use`). Module-private by
     /// default.
     pub is_public: bool,
-    /// Generic type parameters (`type Pair<A, B> = {...}`). Erased at runtime — they exist for
+    /// Generic type parameters (`struct Pair<A, B> {...}`). Erased at runtime — they exist for
     /// the checker; empty for a non-generic type.
     pub type_params: Vec<TypeParam>,
     pub fields: Vec<FieldDecl>,
+    /// All callable methods, including the ones flattened out of `impl` blocks — so the existing
+    /// `(type, method)` dispatch machinery resolves an operator's trait method with no change.
+    /// Mirrors [`ClassDecl::methods`].
+    pub methods: Vec<FnDecl>,
+    /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in
+    /// `methods`; these entries let the checker validate each trait and its required signatures.
+    pub impls: Vec<ImplBlock>,
     /// Leading `@derive(...)` codegen directives (e.g. `@derive(Equatable, Clone)`), flattened
     /// across all directive lines. Validated by the checker; drives compiler codegen.
     pub derives: Vec<DeriveSpec>,
     /// Leading `#[...]` data attributes (e.g. `#[Route("/x")]`). Parsed and attached; collected
-    /// into the compiler-built manifest, and gated by the checker (each must name a record marked
+    /// into the compiler-built manifest, and gated by the checker (each must name a struct marked
     /// `@attribute`, and its arguments must construct it).
     pub attrs: Vec<Attribute>,
-    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary record; `Some(kinds)` ⇒ this
-    /// record is usable as an attribute. The `kinds` are the placement restriction from
+    /// The `@attribute` opt-in directive (P2.5): `None` ⇒ an ordinary struct; `Some(kinds)` ⇒ this
+    /// struct is usable as an attribute. The `kinds` are the placement restriction from
     /// `@attribute(Method, Function, …)` — empty (bare `@attribute`) ⇒ attaches anywhere. Attributes
-    /// are **records only**; the same directive on a class/enum is a checker error.
+    /// are **structs only**; the same directive on a class/enum is a checker error.
     pub attribute: Option<Vec<(String, Span)>>,
     /// The `@role(Enum.Variant)` semantic-role tags: `None` ⇒ no role; `Some(tags)` ⇒ this attribute
     /// confers each named architectural role on every declaration it annotates. Multiple roles are
     /// allowed (a thing may be both an `EntryPoint` and a `TrustBoundary`). The checker validates each
-    /// (a fieldless variant of a `@semantic` enum, on a record that is also `@attribute`) — `E0031`.
+    /// (a fieldless variant of a `@semantic` enum, on a struct that is also `@attribute`) — `E0031`.
     pub role: Option<Vec<RoleTag>>,
     /// The `@semantic` directive (a misplacement here — it marks *enums* role-eligible). `Some(span)`
-    /// on a record is always a checker error (`E0031`), carried so the checker can point at it.
+    /// on a struct is always a checker error (`E0031`), carried so the checker can point at it.
     pub semantic: Option<Span>,
     pub span: Span,
 }
@@ -174,7 +182,7 @@ pub struct RoleTag {
 
 /// A **data attribute** in annotation position (`#[Route("/x")]`, `#[lint(level: warn)]`). The
 /// surface is a name with optional literal arguments (positional or named); semantically it is a
-/// record instance attached as metadata, discovered via the compiler-built manifest and acted on
+/// struct instance attached as metadata, discovered via the compiler-built manifest and acted on
 /// by a consumer (router, DI, lint runner). It carries no codegen meaning — code generation is the
 /// separate `@derive(...)` directive (a type declaration's `derives` list).
 #[derive(Debug, Clone, PartialEq)]
@@ -183,7 +191,7 @@ pub struct Attribute {
     pub name_span: Span,
     /// The arguments inside the parentheses. Empty for a bare `#[Marker]`. Each argument is a
     /// literal (positional `#[Route("/x")]` or named `#[Cache(ttl: 60)]`) — attribute arguments
-    /// construct the attribute record, so they are the all-fields-literal subset, not arbitrary
+    /// construct the attribute struct, so they are the all-fields-literal subset, not arbitrary
     /// expressions.
     pub args: Vec<AttrArg>,
     pub span: Span,
@@ -200,8 +208,8 @@ pub struct AttrArg {
 }
 
 /// A literal value in attribute-argument position — the **constant literal tree** that may
-/// construct an attribute record: scalars plus the collection and nominal literals, composed
-/// recursively (a `List` of `Record`s of `Enum`s is one tree). Never an expression — no `1 + 2`,
+/// construct an attribute struct: scalars plus the collection and nominal literals, composed
+/// recursively (a `List` of `Struct`s of `Enum`s is one tree). Never an expression — no `1 + 2`,
 /// no call, no closure, nothing that reads runtime state — so the whole value materializes at
 /// manifest-build time without running user code. (This is Java/C# annotation arguments.)
 #[derive(Debug, Clone, PartialEq)]
@@ -212,7 +220,7 @@ pub enum AttrValue {
     Bool(bool),
     /// A list literal `[a, b, c]`.
     List(Vec<AttrValue>),
-    /// A set literal `#{a, b, c}` (the `#`-prefix disambiguates it from map/record).
+    /// A set literal `#{a, b, c}` (the `#`-prefix disambiguates it from map/struct).
     Set(Vec<AttrValue>),
     /// A map literal `{ "k": v }`. Keys are string literals (runtime maps are string-keyed).
     Map(Vec<(String, AttrValue)>),
@@ -223,8 +231,8 @@ pub enum AttrValue {
         variant: String,
         args: Vec<AttrValue>,
     },
-    /// A record literal `Point { x: 1 }` (the named type prefix disambiguates it from a map).
-    Record {
+    /// A struct literal `Point { x: 1 }` (the named type prefix disambiguates it from a map).
+    Struct {
         type_name: String,
         fields: Vec<(String, AttrValue)>,
     },
@@ -278,7 +286,7 @@ pub struct ImplBlock {
 
 /// A standalone `impl Trait for Type { ... }` declaration (top-level, not inside a class body).
 /// Implements a built-in trait for a type from outside its declaration — the mechanism by which
-/// a bodiless record declares a capability (`impl Serialize for Route {}`). The checker validates
+/// a bodiless struct declares a capability (`impl Serialize for Route {}`). The checker validates
 /// the trait, requires `target` to be a type declared in the same module (orphan rule), records
 /// the satisfaction for bound/gate checks, and folds it into the target's trait coherence.
 #[derive(Debug, Clone, PartialEq)]
@@ -319,15 +327,15 @@ pub struct ClassDecl {
     pub derives: Vec<DeriveSpec>,
     /// Leading `#[...]` data attributes on the class.
     pub attrs: Vec<Attribute>,
-    /// A misplaced `@attribute` directive (attributes are records only); see
-    /// [`RecordDecl::attribute`]. `Some` here is always a checker error — kept so the checker can
+    /// A misplaced `@attribute` directive (attributes are structs only); see
+    /// [`StructDecl::attribute`]. `Some` here is always a checker error — kept so the checker can
     /// point at the mistake rather than silently dropping it.
     pub attribute: Option<Vec<(String, Span)>>,
     /// A misplaced `@role(...)` tag (attributes — and thus roles — are records only); see
-    /// [`RecordDecl::role`]. `Some` here is always a checker error, kept so the checker can report it.
+    /// [`StructDecl::role`]. `Some` here is always a checker error, kept so the checker can report it.
     pub role: Option<Vec<RoleTag>>,
     /// A misplaced `@semantic` directive (it marks enums; a class is never role-eligible); see
-    /// [`RecordDecl::semantic`]. `Some` is always a checker error, kept so the checker can report it.
+    /// [`StructDecl::semantic`]. `Some` is always a checker error, kept so the checker can report it.
     pub semantic: Option<Span>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
@@ -336,14 +344,18 @@ pub struct ClassDecl {
     pub span: Span,
 }
 
-/// One field of a record or class: a name, an optional `mut` marker (classes only), and
-/// its declared type. The type is parsed but unchecked in M0.
+/// One field of a struct or class: a name, an optional `mut` marker, an optional `pub` visibility
+/// marker, and its declared type.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FieldDecl {
     pub name: String,
     pub name_span: Span,
-    /// Whether the field was declared `mut` (class fields only; always false for records).
+    /// Whether the field was declared `mut` (opt-in mutability).
     pub mut_field: bool,
+    /// Whether the field was declared `pub`. Parsed in slice 1; visibility is **not yet enforced**
+    /// (slice 2). The settled model: struct fields default public, class fields default private with
+    /// per-field `pub` opt-in — so this bit is the explicit `pub` marker, read by slice-2 enforcement.
+    pub is_public: bool,
     pub ty: Option<TypeRef>,
     /// Leading `#[...]` data attributes on the field/property (attribute-system pass 2, P2.4b).
     /// Captured in the reflection manifest like a type's or method's attributes; `@derive` is not
@@ -570,7 +582,7 @@ pub enum Expr {
         arms: Vec<MatchArm>,
         span: Span,
     },
-    /// An all-fields object literal: `Order { id: 1, ...base }`. Constructs a record or
+    /// An all-fields object literal: `Order { id: 1, ...base }`. Constructs a struct or
     /// class instance; the evaluator requires every declared field to be set.
     Object(ObjectLit),
     /// The `?` propagation operator: `expr?`. On `Ok(x)`/`some(x)` it yields `x`; on
@@ -594,7 +606,7 @@ pub enum Expr {
         span: Span,
     },
     /// The reflection query `attributes_of::<T>()` — a compile-time-resolved lookup into the build
-    /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` record
+    /// manifest that returns the materialized `#[T(...)]` attributes (each as a real `T` struct
     /// paired with its annotated target). `ty` is the attribute type between the angle brackets.
     AttributesOf { ty: TypeRef, span: Span },
     /// The reflection query `type_of(value)` — the runtime [`Type`] descriptor of a value. At this

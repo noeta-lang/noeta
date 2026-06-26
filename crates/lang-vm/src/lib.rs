@@ -232,7 +232,7 @@ fn try_classify(v: Value) -> Option<TryOutcome> {
 /// Whether a value matches a narrowing target (`x.as<T>()`). Generics are erased, so only the
 /// runtime **head constructor** is tested. The primitive/collection kinds compare against
 /// [`Value::type_name`] — the same canonical strings the M0 tree-walker matches on, so both
-/// backends decide a narrowing identically; `Named` (a user record/class/enum, or the built-in
+/// backends decide a narrowing identically; `Named` (a user struct/class/enum, or the built-in
 /// `Option`/`Result`) matches by shape name; `Dyn` always matches (no-op narrowing).
 fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
     let kind = match target {
@@ -252,8 +252,8 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::AnyEnum => {
             return v.shape().is_some_and(|s| s.kind == ShapeKind::Enum);
         }
-        NarrowTarget::AnyRecord => {
-            return v.shape().is_some_and(|s| s.kind == ShapeKind::Record);
+        NarrowTarget::AnyStruct => {
+            return v.shape().is_some_and(|s| s.kind == ShapeKind::Struct);
         }
         NarrowTarget::AnyClass => {
             return v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
@@ -348,12 +348,12 @@ fn execute_with_collector(
 
 impl<'m> Vm<'m> {
     /// Materialize the `#[type_name(...)]` attributes from the module manifest into a
-    /// `List<Attributed<T>>` — each a real `T` record (built from its stored args) paired with its
+    /// `List<Attributed<T>>` — each a real `T` struct (built from its stored args) paired with its
     /// target. Shapes are built fresh from the shared reflection info; because shape equality is
     /// structural (name + fields), they match the tree-walker's by construction.
     fn materialize_attributes(&self, type_name: &str) -> Value {
         let attributed_shape = Rc::new(Shape::object(
-            ShapeKind::Record,
+            ShapeKind::Struct,
             "Attributed",
             vec!["target".to_string(), "value".to_string()],
         ));
@@ -361,7 +361,7 @@ impl<'m> Vm<'m> {
         let fields: Vec<String> = info.map(|t| t.fields.clone()).unwrap_or_default();
         let kind = match info.map(|t| t.kind) {
             Some(lang_ast::reflect::TypeKind::Class) => ShapeKind::Class,
-            _ => ShapeKind::Record,
+            _ => ShapeKind::Struct,
         };
         let items: Vec<Value> = self
             .module
@@ -388,10 +388,10 @@ impl<'m> Vm<'m> {
     /// Materialize the `(declaration, Role)` index from the module's reflection info into a
     /// `List<RoleBinding>` — each `{ target: string, role: Role }`. Shapes are built fresh; because
     /// shape equality is structural (name + variant + fields), the `Role` enum and `RoleBinding`
-    /// record match the tree-walker's by construction. (P2.7.)
+    /// struct match the tree-walker's by construction. (P2.7.)
     fn materialize_roles(&self) -> Value {
         let binding_shape = Rc::new(Shape::object(
-            ShapeKind::Record,
+            ShapeKind::Struct,
             "RoleBinding",
             vec!["target".to_string(), "role".to_string()],
         ));
@@ -2322,7 +2322,7 @@ impl<'m> Vm<'m> {
                         format!("cannot index a value of type {}", v.type_name()),
                     ));
                 }
-                Op::MakeRecord {
+                Op::MakeStruct {
                     dst,
                     shape,
                     named,
@@ -2378,7 +2378,7 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
                     frames[top].pc += 1;
                 }
-                Op::MakeRecordInPlace {
+                Op::MakeStructInPlace {
                     dst,
                     shape,
                     named,
@@ -2427,7 +2427,7 @@ impl<'m> Vm<'m> {
                         frames[top].pc += 1;
                     } else {
                         // Aliased or a different shape: build a fresh object exactly like
-                        // `MakeRecord` (spreading base's fields), then release the consumed base.
+                        // `MakeStruct` (spreading base's fields), then release the consumed base.
                         let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
                         for (i, field) in shape.fields.iter().enumerate() {
                             if let Some(value) = base_val.field(field) {
@@ -2648,7 +2648,7 @@ impl<'m> Vm<'m> {
                     };
                     if *reuse {
                         // The receiver's sole reference moves into this op (its register cleared, like
-                        // the map/record in-place paths), so the `refcount == 1` check below sees the
+                        // the map/struct in-place paths), so the `refcount == 1` check below sees the
                         // accumulator's reference and a `dst == obj` store is safe.
                         frames[top].regs[*obj as usize] = Value::unit();
                         if v.refcount() == 1 {
@@ -3786,7 +3786,7 @@ fn vm_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         "function" => TypeRepr::Fn(Vec::new(), dyn_()),
         "object" => match v.shape().map(|s| s.kind) {
             Some(ShapeKind::Class) => TypeRepr::Class(shape_name(), Vec::new()),
-            _ => TypeRepr::Record(shape_name(), Vec::new()),
+            _ => TypeRepr::Struct(shape_name(), Vec::new()),
         },
         "enum" => match shape_name().as_str() {
             "Option" => TypeRepr::Option(dyn_()),
@@ -3817,7 +3817,7 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
             vec![build_type_value(k), build_type_value(v)]
         }
         TypeRepr::Enum(name, args)
-        | TypeRepr::Record(name, args)
+        | TypeRepr::Struct(name, args)
         | TypeRepr::Class(name, args)
         | TypeRepr::Named(name, args) => vec![
             Value::string(name),
@@ -3841,7 +3841,7 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
 }
 
 /// Convert a manifest attribute-argument literal tree to a VM value (for materializing an attribute
-/// record), recursing through the collection and nominal literals. A type reference materializes as
+/// struct), recursing through the collection and nominal literals. A type reference materializes as
 /// the reflection `Type` ADT classified by the named type's *kind* (via the shared
 /// [`reflect::ReflectionInfo::type_ref_repr`]); a set is canonicalized exactly like the runtime
 /// `to_set`. Mirrors the tree-walker's `attr_value_to_eval` element-for-element, so the materialized
@@ -3874,9 +3874,9 @@ fn attr_value_to_vm(
             variant,
             args,
         } => make_attr_enum(enum_name, variant, args.iter().map(recur).collect()),
-        A::Record { type_name, fields } => {
+        A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
-            let shape = Rc::new(Shape::object(ShapeKind::Record, type_name, names));
+            let shape = Rc::new(Shape::object(ShapeKind::Struct, type_name, names));
             let values: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
             Value::object(shape, values)
         }
@@ -3884,7 +3884,7 @@ fn attr_value_to_vm(
     }
 }
 
-/// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Record`/`Class`/
+/// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Struct`/`Class`/
 /// `Enum`, whose first payload is the type's name), return that name — so a stored type reference
 /// can be used as an `invoke` receiver. Mirrors the tree-walker's `reflection_type_name`.
 fn reflection_type_name(value: Value) -> Option<String> {
@@ -3893,7 +3893,7 @@ fn reflection_type_name(value: Value) -> Option<String> {
         && shape
             .variant
             .as_deref()
-            .is_some_and(|v| matches!(v, "Named" | "Record" | "Class" | "Enum"));
+            .is_some_and(|v| matches!(v, "Named" | "Struct" | "Class" | "Enum"));
     if is_nominal {
         return value
             .enum_data()?
@@ -4076,7 +4076,7 @@ mod tests {
         // The pre-migration peak-residency snapshot for `plans/memory-management/phase-0-benchmarks`.
         // Prints under `--nocapture`; asserts the meter reflects each program's footprint shape.
 
-        // Allocation churn: each short-lived record dies before the next is built ⇒ a small,
+        // Allocation churn: each short-lived struct dies before the next is built ⇒ a small,
         // n-independent peak (the reclaim-at-last-use shape we already have on a local temp).
         let churn = "class Pair { a: int b: int }\nmut total = 0;\nfor i in 0..4000 { p = Pair { a: i, b: i }; total = total + p.a; }\necho total;\n";
         let churn_peak = peak_residency(churn);
@@ -4096,7 +4096,7 @@ mod tests {
         );
 
         // Shape assertions (not exact counts — those are the recorded baseline): churn stays small and
-        // n-independent; the record accumulator's peak scales with n.
+        // n-independent; the struct accumulator's peak scales with n.
         assert!(churn_peak < 100, "alloc churn peak should be n-independent");
         assert!(
             accumulate_peak >= 4000,
@@ -4124,7 +4124,7 @@ mod tests {
     fn mm_peak_residency_prompt_reclamation_is_n_independent() {
         // The headline Phase-3 metric (memory-management `phase-3-rc-passes` gate): precise last-use
         // drops reclaim a function-local the moment it dies, so a straight-line chain of n transient
-        // intermediates holds only ~the current+previous record live at once — an O(1), n-INDEPENDENT
+        // intermediates holds only ~the current+previous struct live at once — an O(1), n-INDEPENDENT
         // peak. Under the pre-migration reclaim-at-teardown model every aᵢ stayed live until `chain`
         // returned, an O(n) peak. We prove the win by its shape: the peak must not grow with n.
         let small = peak_residency(&sequential_intermediates_src(50));
@@ -4155,11 +4155,11 @@ mod tests {
 
     #[test]
     fn type_of_distinguishes_nominal_kinds() {
-        // `type_of` classifies a value's shape kind into `Type.Enum`/`Type.Record`/`Type.Class`
+        // `type_of` classifies a value's shape kind into `Type.Enum`/`Type.Struct`/`Type.Class`
         // (not a collapsed `Named`). Exercises `vm_type_repr` + `build_type_value`'s kind arms and
         // their refcount handoff.
         let r = run(
-            "enum E { A; }\ntype R = { x: int };\nclass C {\n  v: int\n  fn new(): C { return C { v: 1 }; }\n}\nfn k(t: Type): string { return match t { Type.Enum(n, _) => \"e:${n}\", Type.Record(n, _) => \"r:${n}\", Type.Class(n, _) => \"c:${n}\", _ => \"?\" }; }\necho k(type_of(E.A));\necho k(type_of(R { x: 1 }));\necho k(type_of(C.new()));\n",
+            "enum E { A; }\nstruct R { x: int }\nclass C {\n  v: int\n  fn new(): C { return C { v: 1 }; }\n}\nfn k(t: Type): string { return match t { Type.Enum(n, _) => \"e:${n}\", Type.Struct(n, _) => \"r:${n}\", Type.Class(n, _) => \"c:${n}\", _ => \"?\" }; }\necho k(type_of(E.A));\necho k(type_of(R { x: 1 }));\necho k(type_of(C.new()));\n",
         );
         assert_eq!(r.stdout, "e:E\nr:R\nc:C\n");
         assert_eq!(r.exit_code, 0);
@@ -4167,10 +4167,10 @@ mod tests {
 
     #[test]
     fn abstract_kind_is_tests() {
-        // `is Enum`/`Record`/`Class` are runtime kind tests over a `dyn` value, keyed on the
+        // `is Enum`/`Struct`/`Class` are runtime kind tests over a `dyn` value, keyed on the
         // value's shape kind. Exercises the new `narrow_matches` arms in the VM.
         let r = run(
-            "enum E { A; }\ntype R = { x: int };\nclass C {\n  v: int\n  fn new(): C { return C { v: 1 }; }\n}\ne: dyn = E.A;\nrec: dyn = R { x: 1 };\nc: dyn = C.new();\necho e is Enum;\necho rec is Record;\necho c is Class;\necho e is Record;\n",
+            "enum E { A; }\nstruct R { x: int }\nclass C {\n  v: int\n  fn new(): C { return C { v: 1 }; }\n}\ne: dyn = E.A;\nrec: dyn = R { x: 1 };\nc: dyn = C.new();\necho e is Enum;\necho rec is Struct;\necho c is Class;\necho e is Struct;\n",
         );
         assert_eq!(r.stdout, "true\ntrue\ntrue\nfalse\n");
         assert_eq!(r.exit_code, 0);
@@ -4180,9 +4180,9 @@ mod tests {
     fn roles_of_materializes_the_index() {
         // `roles_of()` materializes the `(declaration, role)` index into a `List<RoleBinding>`,
         // each carrying a fresh `string` target and the named enum value. Exercises `materialize_roles`
-        // and `make_role` plus the refcount handoff of the freshly-built list/record/enum values.
+        // and `make_role` plus the refcount handoff of the freshly-built list/struct/enum values.
         let r = run(
-            "@attribute(Function)\n@role(Semantic.EntryPoint)\ntype Route = { path: string };\n#[Route(\"/x\")]\nfn handle(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Semantic.EntryPoint => \"${b.target}=entry\", _ => \"other\" };\n}\n",
+            "@attribute(Function)\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\n#[Route(\"/x\")]\nfn handle(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Semantic.EntryPoint => \"${b.target}=entry\", _ => \"other\" };\n}\n",
         );
         assert_eq!(r.stdout, "handle=entry\n");
         assert_eq!(r.exit_code, 0);
@@ -4215,7 +4215,7 @@ mod tests {
     #[test]
     fn record_update_reuse_paths() {
         // VM-side record-update reuse (`acc = T { ...acc, … }`). Covers the RUNTIME-checked
-        // `Op::MakeRecordInPlace` paths reached via a GLOBAL accumulator (`TakeGlobal` exposes the
+        // `Op::MakeStructInPlace` paths reached via a GLOBAL accumulator (`TakeGlobal` exposes the
         // taken-out value's uniqueness; Phase 5.1b): (1) the in-place hit — a global whose update
         // overwrites a field, with a HEAP field (`tag`) whose reference must transfer untouched across
         // the reuse; (2) the copy fallback — an aliased accumulator (`snap = acc`) must keep `snap` at
@@ -4288,9 +4288,9 @@ mod tests {
 
     #[test]
     fn record_reassign_reuse_paths() {
-        // VM-side whole-value record reassignment reuse (`p = P { … }`, no spread; Phase 5 general
-        // reassignment). The reuse pass injects a `...p` spread (a record literal sets every field, so
-        // it is value-identical), so this lowers to `MakeRecordInPlace` overwriting *all* slots — the
+        // VM-side whole-value struct reassignment reuse (`p = P { … }`, no spread; Phase 5 general
+        // reassignment). The reuse pass injects a `...p` spread (a struct literal sets every field, so
+        // it is value-identical), so this lowers to `MakeStructInPlace` overwriting *all* slots — the
         // in-place hit reuses `p`'s cell across the loop (its displaced HEAP field `tag` released each
         // step), while an aliased reassignment (`snap = q`) copies to preserve `snap`. Run under miri to
         // validate the all-slot overwrite's retain/release accounting (no UAF / double free).
@@ -4535,7 +4535,7 @@ mod tests {
         // Phase 4.3 (spec §4): destroying an object runs the container's own `destruct` first (its
         // fields still live), then releases its fields depth-first in declared order, each firing its
         // own `destruct`. `Outer`'s two destructor-bearing `Leaf` fields are built inline (so the
-        // record holds the sole reference — the construction-temp release makes refcount 1 here), and
+        // struct holds the sole reference — the construction-temp release makes refcount 1 here), and
         // `o` is a dead-store dropped at scope exit: `outer`, then `a`, then `b` (declared order).
         let r = run(
             "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${tag}\"; }\n}\nclass Outer {\n  label: string\n  a: Leaf\n  b: Leaf\n  fn new(): Outer { return Outer { label: \"o\", a: Leaf.new(\"a\"), b: Leaf.new(\"b\") }; }\n  destruct { echo \"drop outer ${label}\"; }\n}\nfn go(): void {\n  o = Outer.new();\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
@@ -4584,7 +4584,7 @@ mod tests {
     #[test]
     fn record_literal_field_access_and_structural_equality() {
         let r = run(
-            "type Item = { price: float, qty: int };\na = Item { price: 2.5, qty: 4 };\necho a.price;\necho a.price * a.qty;\nb = Item { price: 2.5, qty: 4 };\necho a == b;\n",
+            "struct Item { price: float qty: int }\na = Item { price: 2.5, qty: 4 };\necho a.price;\necho a.price * a.qty;\nb = Item { price: 2.5, qty: 4 };\necho a == b;\n",
         );
         assert_eq!(r.stdout, "2.5\n10.0\ntrue\n");
         assert_eq!(r.exit_code, 0);
@@ -4592,13 +4592,13 @@ mod tests {
 
     #[test]
     fn object_displays_as_a_literal() {
-        let r = run("type Pt = { x: int, y: int };\necho Pt { x: 1, y: 2 };\n");
+        let r = run("struct Pt { x: int y: int }\necho Pt { x: 1, y: 2 };\n");
         assert_eq!(r.stdout, "Pt {x: 1, y: 2}\n");
     }
 
     #[test]
     fn missing_field_is_e0009() {
-        let r = run("type P = { x: int, y: int };\np = P { x: 1 };\n");
+        let r = run("struct P { x: int y: int }\np = P { x: 1 };\n");
         assert_eq!(r.exit_code, 1);
         assert_eq!(
             r.diagnostics[0].code,
@@ -4926,7 +4926,7 @@ mod tests {
         // The `fn(it) => it.price * it.qty` closure captures nothing enclosing, so it compiles
         // even though it is defined inside a method (true upvalue capture stays unsupported).
         let r = run(
-            "type Item = { price: float, qty: int };\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return items |> map(fn(it) => it.price * it.qty) |> sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
+            "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return items |> map(fn(it) => it.price * it.qty) |> sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
         );
         assert_eq!(r.stdout, "13.0\n");
         assert_eq!(r.exit_code, 0);
@@ -5111,7 +5111,7 @@ mod tests {
 
     #[test]
     fn disassembly_of_the_object_model_is_stable() {
-        // A record literal, a class with a constructor + an instance method (showing the
+        // A struct literal, a class with a constructor + an instance method (showing the
         // shape and method tables, field loads, and enum construction).
         let source = Source::new(
             SourceId::FIRST,
@@ -5127,8 +5127,8 @@ mod tests {
     #[test]
     fn local_self_update_lowers_to_in_place_record_reuse() {
         // Phase 5.1a: a self-update of a destructor-free type whose accumulator is a directly-held
-        // **function-local** must lower to the in-place `MakeRecordInPlace` (the reuse pass marks it,
-        // the compiler emits it) rather than a copying `MakeRecord` — the proof the reuse token reaches
+        // **function-local** must lower to the in-place `MakeStructInPlace` (the reuse pass marks it,
+        // the compiler emits it) rather than a copying `MakeStruct` — the proof the reuse token reaches
         // the VM. (A top-level global accumulator is the `TakeGlobal` case — see
         // `global_self_update_lowers_to_take_global_plus_in_place_reuse`.)
         let source = Source::new(
@@ -5148,9 +5148,9 @@ mod tests {
 
     #[test]
     fn global_self_update_lowers_to_take_global_plus_in_place_reuse() {
-        // Phase 5.1b: a top-level (global) record accumulator's self-update must move the global out
-        // with `TakeGlobal` and reuse it in place with `MakeRecordInPlace` — not the copying
-        // `MakeRecord` the local-only 5.1a path fell back to for a global. Both ops together are the
+        // Phase 5.1b: a top-level (global) struct accumulator's self-update must move the global out
+        // with `TakeGlobal` and reuse it in place with `MakeStructInPlace` — not the copying
+        // `MakeStruct` the local-only 5.1a path fell back to for a global. Both ops together are the
         // proof the global path is wired.
         let source = Source::new(
             SourceId::FIRST,

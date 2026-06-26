@@ -47,7 +47,7 @@
 //!
 //! - **Unknown type (`E0013`)** — a type annotation (a parameter, return, field, enum backing,
 //!   or generic argument) naming a type that resolves to nothing: not a built-in, not a declared
-//!   record/class/enum, not a name brought in by a `use`, and not a generic type parameter in
+//!   struct/class/enum, not a name brought in by a `use`, and not a generic type parameter in
 //!   scope. This was deferred until M1.9 for a reason — before module resolution, "undeclared"
 //!   could not be told apart from "valid but imported", so flagging it risked a false positive on
 //!   e.g. a `?User` annotation whose `User` came from a `use`. Now that the loader merges resolved
@@ -59,7 +59,7 @@
 //!   against the declared return type (an `E0007` mismatch on a concrete violation).
 //!
 //! The engine is bidirectional with local inference (see above), deliberately **not** classical
-//! Hindley–Milner: subtyping (`dyn` widening, directional method resolution, record width) is
+//! Hindley–Milner: subtyping (`dyn` widening, directional method resolution, struct width) is
 //! load-bearing and defeats HM's symmetric unification. The fallback to [`Type::Unknown`] is gone
 //! at every typed boundary; only an un-inferable *interior* type stays tolerated, by design.
 
@@ -67,7 +67,7 @@ use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
     AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FnDecl, ForPattern,
-    ImplBlock, ImplDecl, MatchArm, Param, Pattern, Program, RecordDecl, Stmt, StrPart, TypeParam,
+    ImplBlock, ImplDecl, MatchArm, Param, Pattern, Program, Stmt, StrPart, StructDecl, TypeParam,
     TypeRef, UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
@@ -147,8 +147,8 @@ fn type_to_repr_top(
     kinds: &HashMap<String, lang_types::TypeKind>,
 ) -> Option<lang_ast::reflect::TypeRepr> {
     match ty {
-        // An abstract kind-type (`Enum`/`Record`/`Class`) has no precise static head — the runtime
-        // value is a concrete enum/record/class — so it defers to the runtime `type_of` path.
+        // An abstract kind-type (`Enum`/`Struct`/`Class`) has no precise static head — the runtime
+        // value is a concrete enum/struct/class — so it defers to the runtime `type_of` path.
         Type::Dyn | Type::Unknown | Type::Union(_) | Type::Kind(_) => None,
         concrete => Some(type_to_repr(concrete, kinds)),
     }
@@ -157,7 +157,7 @@ fn type_to_repr_top(
 /// Total projection of a checker [`Type`] onto a reflection [`TypeRepr`], used for the nested
 /// element/argument types once a concrete head is committed. A nested hole, `dyn`, or union erases
 /// to [`TypeRepr::Dyn`] (the runtime erases generics anyway; nested-union fidelity is out of scope).
-/// A nominal type is classified into its kind variant (`Enum`/`Record`/`Class`) via `kinds`,
+/// A nominal type is classified into its kind variant (`Enum`/`Struct`/`Class`) via `kinds`,
 /// matching the runtime classification; an unknown-kind name falls back to `Named`.
 fn type_to_repr(
     ty: &Type,
@@ -180,7 +180,7 @@ fn type_to_repr(
             let args = args.iter().map(rec).collect();
             match kinds.get(n) {
                 Some(lang_types::TypeKind::Enum) => TypeRepr::Enum(n.clone(), args),
-                Some(lang_types::TypeKind::Record) => TypeRepr::Record(n.clone(), args),
+                Some(lang_types::TypeKind::Struct) => TypeRepr::Struct(n.clone(), args),
                 Some(lang_types::TypeKind::Class) => TypeRepr::Class(n.clone(), args),
                 None => TypeRepr::Named(n.clone(), args),
             }
@@ -205,7 +205,7 @@ struct VariantInfo {
 /// value), so they live only in the checker.
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetKind {
-    Record,
+    Struct,
     Class,
     Enum,
     Function,
@@ -218,7 +218,7 @@ impl TargetKind {
     /// The directive spelling (`@attribute(Method, …)`) ⇄ kind, also used in diagnostics.
     fn from_name(name: &str) -> Option<TargetKind> {
         Some(match name {
-            "Record" => TargetKind::Record,
+            "Struct" => TargetKind::Struct,
             "Class" => TargetKind::Class,
             "Enum" => TargetKind::Enum,
             "Function" => TargetKind::Function,
@@ -231,7 +231,7 @@ impl TargetKind {
 
     fn label(self) -> &'static str {
         match self {
-            TargetKind::Record => "Record",
+            TargetKind::Struct => "Struct",
             TargetKind::Class => "Class",
             TargetKind::Enum => "Enum",
             TargetKind::Function => "Function",
@@ -311,7 +311,7 @@ struct Checker {
     /// check (Phase 5.2): only a `mut` field may be assigned in place (else E0033). Records never
     /// have `mut` fields, so they never appear here.
     mut_fields: HashMap<String, HashSet<String>>,
-    /// Declared type → its kind (`Enum`/`Record`/`Class`). Drives the abstract kind-type
+    /// Declared type → its kind (`Enum`/`Struct`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
     type_kinds: HashMap<String, lang_types::TypeKind>,
@@ -339,13 +339,13 @@ struct Checker {
     /// `(trait_name, trait_span)` occurrences. Collected in pass 1 so each type's coherence check
     /// (`check_coherence`) counts standalone impls alongside its `@derive`s and in-body `impl`s.
     standalone_impls: HashMap<String, Vec<(String, Span)>>,
-    /// Every record marked `@attribute` — the names usable in `#[...]` annotation position (P2.5,
+    /// Every struct marked `@attribute` — the names usable in `#[...]` annotation position (P2.5,
     /// the opt-in that replaced the `Attribute` marker trait). The E0029 capability gate and
-    /// `attributes_of::<T>()` both consult this set. Attributes are **records only**.
+    /// `attributes_of::<T>()` both consult this set. Attributes are **structs only**.
     attributes: HashSet<String>,
     /// Every enum marked `@semantic` (plus the built-in `Semantic`) — the enums whose fieldless
     /// variants may be named by a `@role(Enum.Variant)` tag. The role-validation pass consults this
-    /// set, so it runs after `collect` has registered every declaration (a record's `@role` may name
+    /// set, so it runs after `collect` has registered every declaration (a struct's `@role` may name
     /// a `@semantic` enum declared later in the file).
     semantic_enums: HashSet<String>,
     /// An attribute's optional placement restriction from `@attribute(Method, Function, …)`:
@@ -414,7 +414,7 @@ impl Checker {
     /// Register built-in prelude types the checker must know regardless of the program. Run before
     /// `collect` so a user declaration of the same name shadows it (matching the backends, which
     /// register `Ordering` the same way). `Attributed<T> { target: string, value: T }` is the
-    /// element type of `attributes_of::<T>()`'s result; it is an ordinary generic record so member
+    /// element type of `attributes_of::<T>()`'s result; it is an ordinary generic struct so member
     /// access (`a.target`, `a.value`) and `value`'s instantiation to `T` reuse the generic path.
     fn register_prelude(&mut self) {
         self.types.insert("Attributed".to_string());
@@ -431,12 +431,12 @@ impl Checker {
         self.generic_types
             .insert("Attributed".to_string(), vec!["T".to_string()]);
         self.type_kinds
-            .insert("Attributed".to_string(), lang_types::TypeKind::Record);
+            .insert("Attributed".to_string(), lang_types::TypeKind::Struct);
         self.register_type_enum();
         self.register_semantic_prelude();
     }
 
-    /// Register the prelude `Semantic` enum and `RoleBinding` record. `Semantic` is the language's
+    /// Register the prelude `Semantic` enum and `RoleBinding` struct. `Semantic` is the language's
     /// built-in role vocabulary (every variant payload-free, so matchable bare) and is implicitly
     /// `@semantic`, so `@role(Semantic.EntryPoint)` is always valid; a user promotes any enum to the
     /// same status with `@semantic`. `RoleBinding { target: string, role: Enum }` is the element type
@@ -463,7 +463,7 @@ impl Checker {
             .insert(lang_ast::reflect::SEMANTIC_ENUM.to_string());
         self.type_kinds.insert(
             lang_ast::reflect::ROLE_BINDING.to_string(),
-            lang_types::TypeKind::Record,
+            lang_types::TypeKind::Struct,
         );
         self.types
             .insert(lang_ast::reflect::ROLE_BINDING.to_string());
@@ -502,7 +502,7 @@ impl Checker {
             });
         }
         // The three nominal kinds + the unknown-kind `Named` fallback all carry `(name, args)`.
-        for name in ["Enum", "Record", "Class", "Named"] {
+        for name in ["Enum", "Struct", "Class", "Named"] {
             variants.push(VariantInfo {
                 name: name.to_string(),
                 fields: vec![Type::String, list_of_ty()],
@@ -625,16 +625,28 @@ impl Checker {
     fn collect(&mut self, program: &Program) {
         for stmt in &program.stmts {
             match stmt {
-                Stmt::Record(r) => {
+                Stmt::Struct(r) => {
                     let fields = r
                         .fields
                         .iter()
                         .map(|f| (f.name.clone(), field_type(&f.ty)))
                         .collect();
                     self.records.insert(r.name.clone(), fields);
+                    // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
+                    // write is a copy-on-write rebind). Register them exactly as for a class; the
+                    // binding-`mut` requirement that distinguishes the two is a slice-2 refinement.
+                    let muts: HashSet<String> = r
+                        .fields
+                        .iter()
+                        .filter(|f| f.mut_field)
+                        .map(|f| f.name.clone())
+                        .collect();
+                    if !muts.is_empty() {
+                        self.mut_fields.insert(r.name.clone(), muts);
+                    }
                     self.types.insert(r.name.clone());
                     self.type_kinds
-                        .insert(r.name.clone(), lang_types::TypeKind::Record);
+                        .insert(r.name.clone(), lang_types::TypeKind::Struct);
                     self.record_trait_impls(&r.name, r.derives.iter().map(|d| d.name.as_str()));
                     self.record_attribute(&r.name, r.attribute.as_deref());
                     self.generic_types.insert(
@@ -674,7 +686,7 @@ impl Checker {
                             .map(|d| d.name.as_str())
                             .chain(c.impls.iter().map(|b| b.trait_name.as_str())),
                     );
-                    // Attributes are records only: `@attribute` on a class is an error (E0029).
+                    // Attributes are structs only: `@attribute` on a class is an error (E0029).
                     if c.attribute.is_some() {
                         self.diags.push(
                             Diagnostic::error(
@@ -1022,7 +1034,7 @@ impl Checker {
                 }
             }
             Stmt::Fn(decl) => self.check_fn(decl, env, &[], TargetKind::Function),
-            Stmt::Record(r) => self.check_record(r),
+            Stmt::Struct(r) => self.check_struct(r, env),
             Stmt::Class(c) => self.check_class(c, env),
             Stmt::Enum(e) => self.check_enum(e),
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
@@ -1174,16 +1186,29 @@ impl Checker {
         }
     }
 
-    fn check_record(&mut self, r: &RecordDecl) {
+    fn check_struct(&mut self, r: &StructDecl, env: &mut Env) {
         let saved = self.enter_type_params(&r.type_params);
+        let fields: Vec<(String, Type)> = r
+            .fields
+            .iter()
+            .map(|f| (f.name.clone(), field_type(&f.ty)))
+            .collect();
         for f in &r.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
         self.check_derives(&r.derives);
         let standalone = self.standalone_for(&r.name);
-        self.check_coherence(&r.derives, &[], &standalone);
-        self.check_attrs(&r.attrs, TargetKind::Record);
+        // A struct carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
+        // checked exactly as a class's — coherence over its impls, then each method body.
+        self.check_coherence(&r.derives, &r.impls, &standalone);
+        self.check_attrs(&r.attrs, TargetKind::Struct);
+        for block in &r.impls {
+            self.check_impl(block);
+        }
+        for method in &r.methods {
+            self.check_fn(method, env, &fields, TargetKind::Method);
+        }
         self.type_params = saved;
     }
 
@@ -1383,7 +1408,7 @@ impl Checker {
 
     /// Validate a standalone `impl Trait for T {}` declaration. Two checks beyond the shared
     /// trait-side validation ([`Self::check_trait_impl`], also run): the **orphan rule** — `T` must
-    /// be a record/class/enum declared in this module, not a built-in or a `use`-imported name
+    /// be a struct/class/enum declared in this module, not a built-in or a `use`-imported name
     /// (E0013) — and the **pass-1 body restriction** — only empty-body marker/capability impls are
     /// supported (a body with methods needs runtime dispatch in both backends, a later slice).
     /// Coherence is enforced together with the target's `@derive`s/in-body impls in
@@ -1552,12 +1577,12 @@ impl Checker {
         }
     }
 
-    /// Validate the `#[...]` data attributes on a declaration. An attribute reduces to a record
+    /// Validate the `#[...]` data attributes on a declaration. An attribute reduces to a struct
     /// constructed in annotation position, so two things are checked: the **capability gate** —
-    /// `#[Foo(...)]` requires `Foo` to be a record marked `@attribute` — and, when it is, the
+    /// `#[Foo(...)]` requires `Foo` to be a struct marked `@attribute` — and, when it is, the
     /// **construction** — the arguments must
     /// build a valid `Foo` (every field set once, each literal assignable to its field), the same
-    /// all-fields-literal contract any record construction obeys. The old `#[derive(...)]` codegen
+    /// all-fields-literal contract any struct construction obeys. The old `#[derive(...)]` codegen
     /// spelling is still rejected up front (E0017).
     fn check_attrs(&mut self, attrs: &[Attribute], target: TargetKind) {
         for attr in attrs {
@@ -1575,7 +1600,7 @@ impl Checker {
                 );
                 continue;
             }
-            // The capability gate: only a record marked `@attribute` may be used as `#[Foo(...)]`.
+            // The capability gate: only a struct marked `@attribute` may be used as `#[Foo(...)]`.
             if !self.attributes.contains(&attr.name) {
                 self.diags.push(
                     Diagnostic::error(
@@ -1619,7 +1644,7 @@ impl Checker {
     }
 
     /// Check that a `#[Foo(...)]` attribute's arguments construct a valid `Foo` — the all-fields
-    /// contract of any record literal, applied to the literal arguments. Positional arguments bind
+    /// contract of any struct literal, applied to the literal arguments. Positional arguments bind
     /// to fields in declaration order, named arguments by name; each field must be set exactly once
     /// (unset → `E0009`, unknown/overflowing → `E0005`) and each literal value must be assignable
     /// to its field's type (`E0007`). An identifier argument carries no static type, so its value
@@ -1681,7 +1706,7 @@ impl Checker {
     /// Recursively check an attribute-argument literal tree against the field type it must construct
     /// (`E0007` on a mismatch). Descends into composite literals — a list/set against `List<T>`/
     /// `Set<T>` checks each element against `T`, a map against `Map<K,V>` checks each value against
-    /// `V`, a record literal against a record type checks each named field — and validates the
+    /// `V`, a struct literal against a struct type checks each named field — and validates the
     /// nominal cases (enum value, type reference) by assignability. A `dyn`/`Unknown` expectation
     /// imposes nothing (the interior-hole tolerance the rest of the checker keeps). `field`/`span`
     /// locate the diagnostic.
@@ -1721,10 +1746,10 @@ impl Checker {
                 }
                 Type::Map(Box::new(Type::String), Box::new(Type::Dyn))
             }
-            AttrValue::Record { type_name, fields } => {
+            AttrValue::Struct { type_name, fields } => {
                 let rec_ty = Type::Named(type_name.clone(), Vec::new());
                 if self.assignable(&rec_ty, expected) {
-                    self.check_attr_record_fields(type_name, fields, span);
+                    self.check_attr_struct_fields(type_name, fields, span);
                     return;
                 }
                 rec_ty
@@ -1770,10 +1795,10 @@ impl Checker {
         }
     }
 
-    /// Check a record-literal attribute argument's named fields against the declared record's field
+    /// Check a struct-literal attribute argument's named fields against the declared struct's field
     /// types. Unknown field names and missing fields are tolerated here (the lenient interior
     /// posture); only the values supplied for declared fields are type-checked.
-    fn check_attr_record_fields(
+    fn check_attr_struct_fields(
         &mut self,
         type_name: &str,
         fields: &[(String, AttrValue)],
@@ -2221,7 +2246,7 @@ impl Checker {
                 let target = Type::from_ref(ty);
                 // Narrowing is the explicit way *out* of an open type: the dynamic top `dyn`, an
                 // un-inferred hole (which defers), a **union** (a *closed* `dyn`), or an abstract
-                // **kind-type** (`Enum`/`Record`/`Class` — narrow to a concrete member). A value
+                // **kind-type** (`Enum`/`Struct`/`Class` — narrow to a concrete member). A value
                 // whose static type is already a single concrete type has nothing dynamic to narrow
                 // — that is an `E0028`.
                 if !src.defers_to_runtime() && !matches!(src, Type::Union(_) | Type::Kind(_)) {
@@ -2253,7 +2278,7 @@ impl Checker {
             Expr::AttributesOf { ty, span } => {
                 self.check_type_ref(ty);
                 let target = Type::from_ref(ty);
-                // The type argument must itself be an attribute — a record marked `@attribute` (the
+                // The type argument must itself be an attribute — a struct marked `@attribute` (the
                 // same capability gate as a `#[T(...)]` use). Otherwise the manifest holds no `T` to
                 // materialize.
                 let is_attribute = matches!(&target, Type::Named(n, _)
@@ -2363,25 +2388,14 @@ impl Checker {
                 .records
                 .get(&name)
                 .is_some_and(|fs| fs.iter().any(|(n, _)| n == field));
-            let is_record = matches!(
-                self.type_kinds.get(&name),
-                Some(lang_types::TypeKind::Record)
-            );
+            // Both `struct` (value) and `class` (reference) fields are immutable unless declared
+            // `mut`; the unified body grammar gives them the same rule and the same diagnostic.
             let diag = if !exists {
                 Diagnostic::error(
                     DiagnosticCode::ImmutableField,
                     field_span,
                     format!("type `{name}` has no field `{field}`"),
                 )
-            } else if is_record {
-                Diagnostic::error(
-                    DiagnosticCode::ImmutableField,
-                    field_span,
-                    format!("`{name}` is a record, whose fields are immutable"),
-                )
-                .with_help(format!(
-                    "build a new value with the spread literal `{name} {{ ...x, {field}: ... }}`"
-                ))
             } else {
                 Diagnostic::error(
                     DiagnosticCode::ImmutableField,
@@ -2755,8 +2769,8 @@ impl Checker {
         }
     }
 
-    /// Register a record's `@attribute` opt-in (P2.5). `kinds` is `None` for an ordinary record and
-    /// `Some(list)` when the record is marked `@attribute`: the record joins [`Self::attributes`]
+    /// Register a struct's `@attribute` opt-in (P2.5). `kinds` is `None` for an ordinary struct and
+    /// `Some(list)` when the struct is marked `@attribute`: the struct joins [`Self::attributes`]
     /// (usable in `#[...]` position), and any placement kinds (`@attribute(Method, …)`) are validated
     /// — each must be a fixed [`TargetKind`] (unknown → `E0030` at its span) — and recorded so each
     /// use site can be checked. A bare `@attribute` (empty list) is an attribute with no placement
@@ -2787,20 +2801,20 @@ impl Checker {
 
     /// Validate every `@semantic` directive and `@role(Enum.Variant)` tag in the program (`E0031`).
     /// Runs **after** `collect`, so the full set of `@semantic` enums is known regardless of source
-    /// order. A `@semantic` on a record/class is a misplacement (it marks enums only); a `@role`
-    /// must tag a record that is itself an attribute and must name a fieldless variant of a
+    /// order. A `@semantic` on a struct/class is a misplacement (it marks enums only); a `@role`
+    /// must tag a struct that is itself an attribute and must name a fieldless variant of a
     /// `@semantic` enum. Well-formed tags are surfaced purely by `reflect::build`, so nothing is
     /// stored here.
     fn check_semantic_roles(&mut self, program: &Program) {
         for stmt in &program.stmts {
             match stmt {
-                Stmt::Record(r) => {
+                Stmt::Struct(r) => {
                     self.check_misplaced_semantic(r.semantic, &r.name, "record");
                     self.check_role_tags(r.name_span, r.role.as_deref(), r.attribute.is_some());
                 }
                 Stmt::Class(c) => {
                     self.check_misplaced_semantic(c.semantic, &c.name, "class");
-                    // A role tags an attribute, and attributes are records only, so `@role` on a
+                    // A role tags an attribute, and attributes are structs only, so `@role` on a
                     // class is an error (E0031).
                     if c.role.is_some() {
                         self.diags.push(
@@ -2824,7 +2838,7 @@ impl Checker {
     }
 
     /// Flag a `@semantic` directive on a non-enum declaration (`E0031`): it marks enums role-eligible
-    /// and has no meaning on a record or class.
+    /// and has no meaning on a struct or class.
     fn check_misplaced_semantic(&mut self, semantic: Option<Span>, name: &str, kind: &str) {
         if let Some(span) = semantic {
             self.diags.push(
@@ -2838,8 +2852,8 @@ impl Checker {
         }
     }
 
-    /// Validate a record's `@role(Enum.Variant)` tags. Each must name a **fieldless** variant of a
-    /// `@semantic` enum, and may only tag a record that is itself an attribute (`@attribute`) — the
+    /// Validate a struct's `@role(Enum.Variant)` tags. Each must name a **fieldless** variant of a
+    /// `@semantic` enum, and may only tag a struct that is itself an attribute (`@attribute`) — the
     /// role rides on what the attribute attaches to. Multiple roles are allowed. Each violation is
     /// `E0031` at its span; `name_span` locates the declaration for the "not an attribute" case.
     fn check_role_tags(

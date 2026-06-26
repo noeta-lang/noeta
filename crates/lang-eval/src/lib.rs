@@ -14,7 +14,7 @@ use std::rc::{Rc, Weak};
 
 use lang_ast::{
     BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, ObjectLit, Pattern, Program,
-    RecordDecl, Stmt, StrPart, TypeRef, UnaryOp,
+    Stmt, StrPart, StructDecl, TypeRef, UnaryOp,
 };
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
@@ -409,9 +409,9 @@ impl EnumValue {
     }
 }
 
-/// The definition of a record or class type, registered as a [`Value::Type`].
+/// The definition of a struct or class type, registered as a [`Value::Type`].
 ///
-/// Records and classes share one representation: a record is just a class with no
+/// Structs and classes share one representation: a struct is just a class with no
 /// methods. `new`/`draft`/etc. are ordinary entries in `methods` (associated functions
 /// returning the type); the distinction between an associated function and an instance
 /// method is made at the call site (a type receiver vs. an instance receiver), not here.
@@ -422,8 +422,8 @@ pub struct TypeDef {
     /// The class's `destruct` block, if any — run by the runtime when the last reference to an
     /// instance drops (not directly callable). Shared so an `ObjectValue` can reach it.
     destructor: Option<Rc<Vec<Stmt>>>,
-    /// Whether this came from a `type X = {...}` record (vs. a `class`). Cosmetic in M0.
-    is_record: bool,
+    /// Whether this came from a `struct X {...}` struct (vs. a `class`). Cosmetic in M0.
+    is_struct: bool,
     /// Whether the type `@derive(Comparable)`s without a hand-written `compare`: its instances
     /// get structural field-wise ordering for `< <= > >=`.
     derives_comparable: bool,
@@ -451,7 +451,7 @@ impl std::fmt::Debug for TypeDef {
         // Methods hold `Rc<Closure>` whose captured scope can be cyclic; never recurse.
         f.debug_struct("TypeDef")
             .field("name", &self.name)
-            .field("is_record", &self.is_record)
+            .field("is_struct", &self.is_struct)
             .field("opaque", &self.opaque)
             .finish_non_exhaustive()
     }
@@ -466,7 +466,7 @@ struct FieldSpec {
     mutable: bool,
 }
 
-/// A record or class instance: its type and the values of its fields. Immutable in M0
+/// A struct or class instance: its type and the values of its fields. Immutable in M0
 /// (`..` structural update produces a new object rather than mutating one).
 pub struct ObjectValue {
     def: Rc<TypeDef>,
@@ -522,7 +522,7 @@ impl std::fmt::Debug for ObjectValue {
 
 impl PartialEq for ObjectValue {
     fn eq(&self, other: &ObjectValue) -> bool {
-        // Structural equality: same type name and equal fields (M0 records and classes).
+        // Structural equality: same type name and equal fields (M0 structs and classes).
         self.def.name == other.def.name && self.fields == other.fields
     }
 }
@@ -836,7 +836,7 @@ struct Interpreter {
     type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
     /// Whether the record-update reuse fast path (`try_record_reuse`) is enabled. Always `true` in
     /// production; the perf bench flips it off to measure the gain on identical input (the
-    /// tree-walker has no `MakeRecord` op to toggle, so the knob lives here instead).
+    /// tree-walker has no `MakeStruct` op to toggle, so the knob lives here instead).
     record_reuse: bool,
 }
 
@@ -993,7 +993,7 @@ impl Interpreter {
         }
     }
 
-    /// Destroy a record/class instance: its own `destruct` (if any) first, then its fields in
+    /// Destroy a struct/class instance: its own `destruct` (if any) first, then its fields in
     /// declared order (spec §4). Only acts at the last reference; a destructor that resurrects
     /// `self` (raising the count) leaves the box shared, so the field walk is skipped.
     fn destroy_object(&mut self, obj: Rc<ObjectValue>) {
@@ -1114,7 +1114,7 @@ impl Interpreter {
                     return Ok(Flow::Normal);
                 }
                 // Record-update reuse: `acc = Type { ...acc, … }` (the generalization of the COW
-                // append to record construction). Returns `None` — having done nothing observable —
+                // append to struct construction). Returns `None` — having done nothing observable —
                 // when the fast path does not apply, so we fall through to the ordinary path.
                 if let Some(result) = self.try_record_reuse(*mut_decl, name, *name_span, value) {
                     return result;
@@ -1131,8 +1131,8 @@ impl Interpreter {
                 self.declare_enum(decl);
                 Ok(Flow::Normal)
             }
-            Stmt::Record(decl) => {
-                self.declare_record(decl);
+            Stmt::Struct(decl) => {
+                self.declare_struct(decl);
                 Ok(Flow::Normal)
             }
             Stmt::Class(decl) => {
@@ -1366,9 +1366,9 @@ impl Interpreter {
             .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
     }
 
-    /// Register a structural record type. Records have fields but no methods; they are
+    /// Register a structural struct type. Structs have fields but no methods; they are
     /// constructed via the all-fields literal and compared structurally.
-    fn declare_record(&mut self, decl: &RecordDecl) {
+    fn declare_struct(&mut self, decl: &StructDecl) {
         let fields = decl
             .fields
             .iter()
@@ -1377,14 +1377,35 @@ impl Interpreter {
                 mutable: f.mut_field,
             })
             .collect();
+        // A struct carries inherent + `impl`-block methods (the unified body), compiled to
+        // closures capturing the current (global) scope exactly like a class's methods.
+        let methods = decl
+            .methods
+            .iter()
+            .map(|m| {
+                let closure = Closure::new(
+                    m.params.iter().map(|p| p.name.clone()).collect(),
+                    m.params
+                        .iter()
+                        .map(|p| p.default.clone().map(DefaultThunk::Ast))
+                        .collect(),
+                    FnBody::Block(m.body.clone()),
+                    Rc::clone(&self.scope),
+                );
+                (m.name.clone(), Rc::new(closure))
+            })
+            .collect();
         let def = TypeDef {
             name: decl.name.clone(),
             fields,
-            methods: HashMap::new(),
+            methods,
             destructor: None,
-            is_record: true,
-            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable"),
-            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize"),
+            is_struct: true,
+            // A hand-written `compare`/`to_json` takes precedence over derivation.
+            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
+                && !decl.methods.iter().any(|m| m.name == "compare"),
+            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
+                && !decl.methods.iter().any(|m| m.name == "to_json"),
             opaque: false,
         };
         self.scope
@@ -1409,7 +1430,7 @@ impl Interpreter {
                     fields: Vec::new(),
                     methods: HashMap::new(),
                     destructor: None,
-                    is_record: false,
+                    is_struct: false,
                     derives_comparable: false,
                     derives_tojson: false,
                     opaque: true,
@@ -1452,7 +1473,7 @@ impl Interpreter {
             fields,
             methods,
             destructor: decl.destructor.clone().map(Rc::new),
-            is_record: false,
+            is_struct: false,
             // A hand-written `compare` (via `impl Comparable`) takes precedence over derivation.
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
@@ -1465,21 +1486,21 @@ impl Interpreter {
             .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
     }
 
-    /// Construct a record/class instance from an all-fields object literal. This is the
+    /// Construct a struct/class instance from an all-fields object literal. This is the
     /// full-initialization choke point: every declared field must end up set (by a named
     /// initializer or the `..` spread), or it is a [`DiagnosticCode::MissingField`] error.
     /// Materialize the `#[type_name(...)]` attributes from the manifest into a `List<Attributed<T>>`
-    /// — each a real `T` record (built from its stored args) paired with its target. Builds fresh
+    /// — each a real `T` struct (built from its stored args) paired with its target. Builds fresh
     /// `TypeDef`s from the shared reflection info; the VM builds the matching shapes the same way, so
     /// the materialized values agree across backends by construction.
     fn materialize_attributes(&self, type_name: &str) -> Value {
         let info = self.reflection.type_named(type_name);
         let fields: Vec<String> = info.map(|t| t.fields.clone()).unwrap_or_default();
-        let is_record = !matches!(
+        let is_struct = !matches!(
             info.map(|t| t.kind),
             Some(lang_ast::reflect::TypeKind::Class)
         );
-        let attr_def = Rc::new(fresh_type_def(type_name, &fields, is_record));
+        let attr_def = Rc::new(fresh_type_def(type_name, &fields, is_struct));
         let attributed_def = Rc::new(fresh_type_def(
             "Attributed",
             &["target".to_string(), "value".to_string()],
@@ -1539,7 +1560,7 @@ impl Interpreter {
     }
 
     /// Tree-walker record-update reuse for a self-update `acc = Type { ...acc, … }`: the
-    /// generalization of the COW list append to record construction. Returns `None` — having done
+    /// generalization of the COW list append to struct construction. Returns `None` — having done
     /// nothing observable — when the fast path does not apply (not a self-update, an opaque/foreign
     /// base, or a non-object value), so the caller runs the ordinary `eval_object`. When the
     /// accumulator is the **sole owner** of a same-type object its backing field map is mutated in
@@ -1672,7 +1693,7 @@ impl Interpreter {
         )
     }
 
-    /// Build a record/class instance from already-evaluated field values and an optional
+    /// Build a struct/class instance from already-evaluated field values and an optional
     /// already-evaluated `..` spread base. The full-initialization choke point, shared by the
     /// AST walker's [`Self::eval_object`] and the Core-IR interpreter so both agree by
     /// construction. The unknown-field and missing-field checks here are also enforced by the
@@ -3741,8 +3762,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
             "Result" => TypeRepr::Result(dyn_(), dyn_()),
             other => TypeRepr::Enum(other.to_string(), Vec::new()),
         },
-        Value::Object(o) if o.def.is_record => {
-            TypeRepr::Record(o.def.name().to_string(), Vec::new())
+        Value::Object(o) if o.def.is_struct => {
+            TypeRepr::Struct(o.def.name().to_string(), Vec::new())
         }
         Value::Object(o) => TypeRepr::Class(o.def.name().to_string(), Vec::new()),
         // A type value, module, file handle, or enum-type has no nameable lattice type → the top.
@@ -3772,7 +3793,7 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
             vec![build_type_value(k), build_type_value(v)]
         }
         TypeRepr::Enum(name, args)
-        | TypeRepr::Record(name, args)
+        | TypeRepr::Struct(name, args)
         | TypeRepr::Class(name, args)
         | TypeRepr::Named(name, args) => vec![
             Value::Str(name.clone()),
@@ -3789,9 +3810,9 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
     builtin_enum(TYPE_ENUM, repr.variant_name(), data)
 }
 
-/// A minimal `TypeDef` for a reflection-materialized record (no methods, derives, or destructor) —
+/// A minimal `TypeDef` for a reflection-materialized struct (no methods, derives, or destructor) —
 /// the tree-walker counterpart to the VM's fresh `Shape`. Both carry only name + field names.
-fn fresh_type_def(name: &str, fields: &[String], is_record: bool) -> TypeDef {
+fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
     TypeDef {
         name: name.to_string(),
         fields: fields
@@ -3803,14 +3824,14 @@ fn fresh_type_def(name: &str, fields: &[String], is_record: bool) -> TypeDef {
             .collect(),
         methods: HashMap::new(),
         destructor: None,
-        is_record,
+        is_struct,
         derives_comparable: false,
         derives_tojson: false,
         opaque: false,
     }
 }
 
-/// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Record`/`Class`/
+/// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Struct`/`Class`/
 /// `Enum`, whose first payload is the type's name), return that name — so a stored type reference
 /// can be used as an `invoke` receiver. Mirrors the VM's `reflection_type_name`.
 fn reflection_type_name(value: &Value) -> Option<String> {
@@ -3818,7 +3839,7 @@ fn reflection_type_name(value: &Value) -> Option<String> {
         return None;
     };
     if ev.enum_name == lang_ast::reflect::TYPE_ENUM
-        && matches!(ev.variant.as_str(), "Named" | "Record" | "Class" | "Enum")
+        && matches!(ev.variant.as_str(), "Named" | "Struct" | "Class" | "Enum")
         && let Some(Value::Str(name)) = ev.data.first()
     {
         return Some(name.clone());
@@ -3828,7 +3849,7 @@ fn reflection_type_name(value: &Value) -> Option<String> {
 
 /// Convert a manifest attribute-argument literal tree to a tree-walker value, recursing through the
 /// collection and nominal literals. A type reference materializes as the reflection `Type` ADT
-/// classified by the named type's *kind* (`Type.Record`/`Enum`/`Class`, or `Type.Named` for an
+/// classified by the named type's *kind* (`Type.Struct`/`Enum`/`Class`, or `Type.Named` for an
 /// unknown-kind name) via the shared [`reflect::ReflectionInfo::type_ref_repr`]; a set is
 /// canonicalized exactly like the runtime `to_set` (sorted/deduped when orderable, else insertion
 /// order). The VM's `attr_value_to_vm` builds the matching values the same way, so the materialized
@@ -3861,7 +3882,7 @@ fn attr_value_to_eval(
             variant,
             args,
         } => builtin_enum(enum_name, variant, args.iter().map(recur).collect()),
-        A::Record { type_name, fields } => {
+        A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
             let def = Rc::new(fresh_type_def(type_name, &names, true));
             let f: BTreeMap<String, Value> =
@@ -3895,11 +3916,11 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
             "List" | "list" => matches!(value, Value::List(_)),
             "Map" | "map" => matches!(value, Value::Map(_)),
             "Set" | "set" => matches!(value, Value::Set(_)),
-            // Abstract kind-types match any value of that declaration kind (records and classes are
-            // both `Object`s, told apart by `TypeDef::is_record`).
+            // Abstract kind-types match any value of that declaration kind (structs and classes are
+            // both `Object`s, told apart by `TypeDef::is_struct`).
             "Enum" => matches!(value, Value::Enum(_)),
-            "Record" => matches!(value, Value::Object(o) if o.def.is_record),
-            "Class" => matches!(value, Value::Object(o) if !o.def.is_record),
+            "Struct" => matches!(value, Value::Object(o) if o.def.is_struct),
+            "Class" => matches!(value, Value::Object(o) if !o.def.is_struct),
             // `Option`/`Result` are enums whose shape name is the type name, like a user enum.
             other => match value {
                 Value::Object(object) => object.def.name() == other,
@@ -4260,11 +4281,11 @@ mod tests {
 
     #[test]
     fn leak_counter_round_trips_on_an_acyclic_program() {
-        // No top-level functions ⇒ no capture cycle ⇒ every scope, record, and list reclaims via
+        // No top-level functions ⇒ no capture cycle ⇒ every scope, struct, and list reclaims via
         // `Rc`. The leak oracle's per-program residency delta is zero. Measured as a delta because
         // a prior leaking test on this thread may have left a positive baseline (thread-local).
         let before = live_count();
-        let r = run("type P = { x: int }; a = P { x: 1 }; b = [a, a]; echo a.x;");
+        let r = run("struct P { x: int } a = P { x: 1 }; b = [a, a]; echo a.x;");
         assert_eq!(r.stdout, "1\n");
         assert_eq!(live_count(), before, "acyclic program must reclaim fully");
     }
@@ -4715,13 +4736,13 @@ mod tests {
 
     #[test]
     fn record_literal_and_field_access() {
-        let src = "type Item = { price: float, qty: int }; a = Item { price: 2.5, qty: 4 }; echo a.price; echo a.price * a.qty;";
+        let src = "struct Item { price: float qty: int } a = Item { price: 2.5, qty: 4 }; echo a.price; echo a.price * a.qty;";
         assert_eq!(run(src).stdout, "2.5\n10.0\n");
     }
 
     #[test]
     fn records_compare_structurally() {
-        let src = "type P = { x: int, y: int }; a = P { x: 1, y: 2 }; b = P { x: 1, y: 2 }; c = P { x: 1, y: 9 }; echo a == b; echo a == c;";
+        let src = "struct P { x: int y: int } a = P { x: 1, y: 2 }; b = P { x: 1, y: 2 }; c = P { x: 1, y: 9 }; echo a == b; echo a == c;";
         assert_eq!(run(src).stdout, "true\nfalse\n");
     }
 
@@ -4766,13 +4787,13 @@ mod tests {
 
     #[test]
     fn unknown_field_in_literal_is_an_error() {
-        let result = run("type R = { a: int }; r = R { a: 1, b: 2 };");
+        let result = run("struct R { a: int } r = R { a: 1, b: 2 };");
         assert_eq!(result.diagnostics[0].code, DiagnosticCode::UnknownName);
     }
 
     #[test]
     fn object_displays_as_a_literal() {
-        let src = "type Pt = { x: int, y: int }; echo Pt { x: 1, y: 2 };";
+        let src = "struct Pt { x: int y: int } echo Pt { x: 1, y: 2 };";
         assert_eq!(run(src).stdout, "Pt {x: 1, y: 2}\n");
     }
 

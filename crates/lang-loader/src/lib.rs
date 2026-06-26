@@ -365,19 +365,19 @@ fn collision_error(entry: &Source, path: &[String], name: &UseName) -> LoadDiagn
 fn decl_is_public(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Class(d) => d.is_public,
-        Stmt::Record(d) => d.is_public,
+        Stmt::Struct(d) => d.is_public,
         Stmt::Enum(d) => d.is_public,
         Stmt::Fn(d) => d.is_public,
         _ => false,
     }
 }
 
-/// The name a top-level declaration introduces (a class, record, enum, or function); `None` for
+/// The name a top-level declaration introduces (a class, struct, enum, or function); `None` for
 /// statements that declare no importable name.
 fn decl_name(stmt: &Stmt) -> Option<&str> {
     match stmt {
         Stmt::Class(decl) => Some(&decl.name),
-        Stmt::Record(decl) => Some(&decl.name),
+        Stmt::Struct(decl) => Some(&decl.name),
         Stmt::Enum(decl) => Some(&decl.name),
         Stmt::Fn(decl) => Some(&decl.name),
         _ => None,

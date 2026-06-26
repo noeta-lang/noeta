@@ -3,7 +3,7 @@
 // expect: error E0030 at 8:3
 // expect: exit 1
 @attribute(Method)
-type Route = { method: string };
+struct Route { method: string }
 
 #[Route("GET")]
-type User = { id: int };
+struct User { id: int }

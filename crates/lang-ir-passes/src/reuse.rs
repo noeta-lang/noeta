@@ -2,13 +2,13 @@
 //! whose input allocation is provably dead at the construction point, so both backends can reuse the
 //! storage instead of allocating afresh (memory-management migration, Phase 5).
 //!
-//! # What it recognizes (self-updates: record/class update + list self-append)
+//! # What it recognizes (self-updates: struct/class update + list self-append)
 //!
 //! The canonical, common reuse opportunity is a **self-update** — a binding rebound to a value
 //! computed from its own old contents:
 //!
 //! ```text
-//! acc = Type { ...acc, f: v }   // record/class update
+//! acc = Type { ...acc, f: v }   // struct/class update
 //! acc = acc ~ rhs               // list self-append (the `acc ~= rhs` desugaring)
 //! ```
 //!
@@ -24,7 +24,7 @@
 //!
 //! In both, the input `acc` is the **same binding** the result is bound back into, so `acc`'s old
 //! value is displaced (dead) the instant the op finishes. Its allocation can therefore be reused —
-//! overwriting only the changed record fields, or extending the list's backing buffer in place —
+//! overwriting only the changed struct fields, or extending the list's backing buffer in place —
 //! rather than copied. The pass marks the [`Rvalue::Object`] / [`Rvalue::Binary`] with
 //! `reuse = true`.
 //!
@@ -32,8 +32,8 @@
 //!
 //! Putting the decision on the IR both backends execute means they reuse at the **same** point by
 //! construction (architecture §2): the VM lowers the marked constructor to an in-place
-//! `MakeRecordInPlace`, the IR interpreter moves the base out and mutates it via `Rc::get_mut`. This
-//! retires the old syntax-matched COW/record-reuse detection in favor of one IR transformation.
+//! `MakeStructInPlace`, the IR interpreter moves the base out and mutates it via `Rc::get_mut`. This
+//! retires the old syntax-matched COW/struct-reuse detection in favor of one IR transformation.
 //!
 //! # Soundness
 //!
@@ -44,7 +44,7 @@
 //! One semantic constraint, though, is *not* runtime-deferrable: reusing the old allocation means the
 //! old value's **own `destruct` block never fires**, whereas the copy-and-destroy baseline destroys
 //! the displaced base (running its destructor) on every self-update (spec §5). So a self-update is
-//! only reuse-eligible when its type has **no own `destruct` block** — every record qualifies (records
+//! only reuse-eligible when its type has **no own `destruct` block** — every struct qualifies (structs
 //! are bodiless), and a class qualifies iff it carries no destructor. The pass therefore excludes
 //! own-destructor types (derived from the IR's class declarations). The *changed* field's displaced
 //! value still has its destructor fired on overwrite, by both backends — keeping reuse observationally
@@ -152,7 +152,7 @@ fn rewrite_block(
 /// `acc = %t`, where the input `acc` is dead the moment the op completes so its allocation may be
 /// reused. Two shapes qualify:
 ///
-/// * a record/class update `acc = Type { ...acc, … }` ([`object_self_update_candidate`]) — marked
+/// * a struct/class update `acc = Type { ...acc, … }` ([`object_self_update_candidate`]) — marked
 ///   unless `Type` has its own destructor (see the module note); and
 /// * a list self-append `acc = acc ~ rhs` ([`concat_self_append_candidate`]) — marked when `rhs`
 ///   does not itself mention `acc` (else the right side would read the moved-out accumulator). Lists
@@ -165,7 +165,7 @@ fn mark_self_updates(
 ) -> Vec<Stmt> {
     // Names bound before a given point — by an earlier statement here, or in an enclosing scope
     // (`initial_bound`) — so a `Bind` of one is a **reassignment** (its old value is displaced)
-    // rather than a first declaration: the condition that makes a whole-value record reassignment
+    // rather than a first declaration: the condition that makes a whole-value struct reassignment
     // reuse-eligible (see `object_reassign_candidate`). Seeding from the enclosing scope is what
     // catches the common loop accumulator (`mut acc` before the loop, `acc = T { … }` inside it).
     let mut bound: HashSet<String> = initial_bound.clone();
@@ -194,8 +194,8 @@ fn mark_self_updates(
                 && let Some(target) = bind_target(&stmts[i + 1], dst)
                 && bound.contains(&target)
             {
-                // A whole-value record reassignment `x = T { … }` (all fields, no spread). Because a
-                // record literal sets *every* field, it is semantically identical to the self-update
+                // A whole-value struct reassignment `x = T { … }` (all fields, no spread). Because a
+                // struct literal sets *every* field, it is semantically identical to the self-update
                 // `x = T { ...x, … }` (the spread is fully overridden) — so injecting the `...x` spread
                 // makes it a self-update the existing reuse path turns into an in-place overwrite of
                 // `x`'s old cell. Sound because the type system fixes `x`'s type, so `...x` is always a
@@ -298,7 +298,7 @@ fn atom_is_var(atom: &Atom, name: &str) -> bool {
     matches!(atom, Atom::Var { name: n, .. } if n == name)
 }
 
-/// If `stmt` is `let %t = Type { … }` with **no** spread (a whole-value record/class literal), return
+/// If `stmt` is `let %t = Type { … }` with **no** spread (a whole-value struct/class literal), return
 /// `(%t, Type)` — a reassignment-reuse candidate (the caller still checks the result is reassigned to
 /// an already-bound binding). A literal *with* a spread is a self-update, handled separately.
 fn object_reassign_candidate(stmt: &Stmt) -> Option<(Temp, String)> {
@@ -331,10 +331,10 @@ fn bind_target(stmt: &Stmt, dst: Temp) -> Option<String> {
     }
 }
 
-/// Turn a whole-value record reassignment `let %t = Type { … }` into the self-update
+/// Turn a whole-value struct reassignment `let %t = Type { … }` into the self-update
 /// `let %t = Type { ...target, … }` and mark it for reuse: the injected spread is the binding the
 /// result is reassigned to, so the existing in-place path reuses its old cell (every field is
-/// overwritten, since a record literal sets them all). The spread carries the object's own span.
+/// overwritten, since a struct literal sets them all). The spread carries the object's own span.
 fn inject_object_reassign_reuse(stmt: &mut Stmt, target: &str) {
     if let Stmt::Let {
         rvalue:
@@ -577,6 +577,6 @@ fn rewrite_decl(decl: &Decl, od: &HashSet<String>) -> Decl {
                 .map(|f| Rc::new(rewrite_func(f, od))),
             span: class.span,
         }),
-        Decl::Enum(_) | Decl::Record(_) | Decl::Use { .. } => decl.clone(),
+        Decl::Enum(_) | Decl::Struct(_) | Decl::Use { .. } => decl.clone(),
     }
 }

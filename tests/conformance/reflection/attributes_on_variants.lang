@@ -8,7 +8,7 @@
 // expect: stdout "experimental"
 // expect: exit 0
 @attribute
-type Note = { text: string };
+struct Note { text: string }
 
 enum Status {
     Active;

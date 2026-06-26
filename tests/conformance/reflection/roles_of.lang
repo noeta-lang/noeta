@@ -14,15 +14,15 @@ enum WebRole { Controller; Middleware; }
 
 @attribute(Function)
 @role(Semantic.EntryPoint)
-type Route = { path: string };
+struct Route { path: string }
 
 @attribute
 @role(Semantic.Sink)
-type Persist = { table: string };
+struct Persist { table: string }
 
 @attribute(Function)
 @role(WebRole.Controller)
-type Page = { path: string };
+struct Page { path: string }
 
 #[Route("/users")]
 fn handleUsers(): int { return 1; }

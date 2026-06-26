@@ -252,11 +252,11 @@ fn instance_keeps_its_type_argument() {
 
 #[test]
 fn generic_class_enforces_its_bound_at_construction() {
-    // `Pair<T: Comparable>` constructed with a non-`Comparable` record is `E0025`; with an `int`,
+    // `Pair<T: Comparable>` constructed with a non-`Comparable` struct is `E0025`; with an `int`,
     // clean. The class's bound is instantiated from the constructor argument.
     let cls =
         "class Pair<T: Comparable> { a: T\n  fn new(x: T): Pair<T> { return Pair { a: x }; } }\n";
-    let bad = format!("type Bad = {{ v: int }};\n{cls}p = Pair.new(Bad {{ v: 1 }});\n");
+    let bad = format!("struct Bad {{ v: int }}\n{cls}p = Pair.new(Bad {{ v: 1 }});\n");
     assert_eq!(codes(&bad), ["E0025"]);
     let good = format!("{cls}p = Pair.new(7);\n");
     assert!(codes(&good).is_empty());
@@ -285,7 +285,7 @@ fn arithmetic_on_an_unbounded_type_parameter_is_reported() {
 fn arithmetic_on_a_concrete_type_without_the_trait_is_reported() {
     // A concrete user type that does not `impl Add` cannot be used with `+`: `E0007` (the runtime's
     // "cannot apply"), now caught statically. A type that *does* `impl Add` is accepted.
-    let bad = "type P = { x: int };\na = P { x: 1 };\nb = P { x: 2 };\necho a + b;\n";
+    let bad = "struct P { x: int }\na = P { x: 1 };\nb = P { x: 2 };\necho a + b;\n";
     assert_eq!(codes(bad), ["E0007"]);
     let good = "class M { n: int\n  impl Add { fn add(o: M): M { return o; } } }\n\
                 a = M { n: 1 };\nb = M { n: 2 };\necho a + b;\n";
@@ -294,9 +294,9 @@ fn arithmetic_on_a_concrete_type_without_the_trait_is_reported() {
 
 #[test]
 fn ordering_on_a_concrete_non_comparable_type_is_reported() {
-    // Ordering now checks concrete types too: a record that does not derive/`impl Comparable` is
+    // Ordering now checks concrete types too: a struct that does not derive/`impl Comparable` is
     // `E0007`; a `@derive(Comparable)` type is accepted.
-    let bad = "type P = { x: int };\na = P { x: 1 };\nb = P { x: 2 };\necho a < b;\n";
+    let bad = "struct P { x: int }\na = P { x: 1 };\nb = P { x: 2 };\necho a < b;\n";
     assert_eq!(codes(bad), ["E0007"]);
     let good = "@derive(Comparable)\nclass V { n: int }\n\
                 a = V { n: 1 };\nb = V { n: 2 };\necho a < b;\n";
@@ -312,8 +312,8 @@ fn generic_call_with_satisfied_primitive_bound_is_clean() {
 
 #[test]
 fn generic_call_violating_a_bound_is_reported() {
-    // A record literal has the concrete type `P`, which does not satisfy `Comparable`: `E0025`.
-    let src = "type P = { x: int };\n\
+    // A struct literal has the concrete type `P`, which does not satisfy `Comparable`: `E0025`.
+    let src = "struct P { x: int }\n\
                fn max<T: Comparable>(a: T, b: T): T { return a; }\n\
                echo max(P { x: 1 }, P { x: 2 });\n";
     assert_eq!(codes(src), ["E0025"]);
@@ -337,7 +337,7 @@ fn user_type_deriving_the_bound_satisfies_it() {
 
 #[test]
 fn annotations_do_not_produce_false_positives() {
-    let src = "type Item = { price: float };\n\
+    let src = "struct Item { price: float }\n\
                fn f(xs: List<Item>): Result<void, string> { return Ok(); }\n";
     assert!(codes(src).is_empty());
 }
@@ -410,9 +410,9 @@ fn two_impl_blocks_for_same_trait_conflict() {
 
 #[test]
 fn standalone_marker_impl_is_accepted() {
-    // A bodiless record declares a capability via a same-module standalone `impl` — the mechanism
-    // that lets a record (which has no body) participate in a trait. No diagnostics.
-    let src = "type Route = { path: string };\nimpl Clone for Route {}\n";
+    // A bodiless struct declares a capability via a same-module standalone `impl` — the mechanism
+    // that lets a struct (which has no body) participate in a trait. No diagnostics.
+    let src = "struct Route { path: string }\nimpl Clone for Route {}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -426,28 +426,28 @@ fn standalone_impl_for_undeclared_type_is_orphan() {
 #[test]
 fn generic_serialize_derive_checks_clean() {
     // `@derive(Serialize<Json>)` is the format-parameterized serializer; a valid format checks clean.
-    let src = "@derive(Serialize<Json>)\ntype Point = { x: int };\n";
+    let src = "@derive(Serialize<Json>)\nstruct Point { x: int }\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn serialize_derive_requires_a_format() {
     // `Serialize` is generic, so a bare `@derive(Serialize)` is an arity error (E0014).
-    let src = "@derive(Serialize)\ntype Point = { x: int };\n";
+    let src = "@derive(Serialize)\nstruct Point { x: int }\n";
     assert_eq!(codes(src), ["E0014"]);
 }
 
 #[test]
 fn serialize_derive_rejects_an_unknown_format() {
     // A `Serialize` format argument must be a blessed format; `Xml` is unknown (E0013).
-    let src = "@derive(Serialize<Xml>)\ntype Point = { x: int };\n";
+    let src = "@derive(Serialize<Xml>)\nstruct Point { x: int }\n";
     assert_eq!(codes(src), ["E0013"]);
 }
 
 #[test]
 fn nullary_derive_rejects_type_arguments() {
     // A non-generic derivable trait takes no type arguments (E0014).
-    let src = "@derive(Comparable<int>)\ntype Point = { x: int };\n";
+    let src = "@derive(Comparable<int>)\nstruct Point { x: int }\n";
     assert_eq!(codes(src), ["E0014"]);
 }
 
@@ -455,20 +455,20 @@ fn nullary_derive_rejects_type_arguments() {
 fn standalone_impl_counts_toward_coherence() {
     // Coherence spans all three implementation forms: a `@derive` and a standalone `impl` of the
     // same trait for one type conflict, just like two derives or two in-body impls.
-    let src = "@derive(Clone)\ntype Route = { path: string };\nimpl Clone for Route {}\n";
+    let src = "@derive(Clone)\nstruct Route { path: string }\nimpl Clone for Route {}\n";
     assert_eq!(codes(src), ["E0027"]);
 }
 
 #[test]
 fn standalone_impl_with_methods_is_unsupported() {
     // Pass 1 supports only empty-body capability impls; a body with methods is rejected (E0015).
-    let src = "type Route = { path: string };\nimpl Clone for Route {\n  fn extra(): int { return 1; }\n}\n";
+    let src = "struct Route { path: string }\nimpl Clone for Route {\n  fn extra(): int { return 1; }\n}\n";
     assert_eq!(codes(src), ["E0015"]);
 }
 
 #[test]
 fn attribute_on_a_class_is_rejected() {
-    // Attributes are records only — `@attribute` on a class is E0029 (the arguments have no
+    // Attributes are structs only — `@attribute` on a class is E0029 (the arguments have no
     // unambiguous constructor to map to).
     let src = "@attribute\nclass Route {\n  path: string\n}\n";
     assert_eq!(codes(src), ["E0029"]);
@@ -476,10 +476,9 @@ fn attribute_on_a_class_is_rejected() {
 
 #[test]
 fn bare_attribute_record_is_usable_anywhere() {
-    // A bare `@attribute` (no kinds) opts the record in with no placement restriction, so a use on
+    // A bare `@attribute` (no kinds) opts the struct in with no placement restriction, so a use on
     // any site — here a top-level function — is accepted.
-    let src =
-        "@attribute\ntype Tag = { name: string };\n#[Tag(\"x\")]\nfn f(): int { return 0; }\n";
+    let src = "@attribute\nstruct Tag { name: string }\n#[Tag(\"x\")]\nfn f(): int { return 0; }\n";
     assert!(codes(src).is_empty());
 }
 
@@ -487,7 +486,7 @@ fn bare_attribute_record_is_usable_anywhere() {
 fn attributes_of_on_an_attribute_type_checks_clean() {
     // `attributes_of::<Route>()` is `List<Attributed<Route>>`, so `r.target` is a string and
     // `r.value` is a `Route` whose `.path` is a string — all resolve without diagnostics.
-    let src = "@attribute\ntype Route = { path: string };\n#[Route(\"/x\")]\ntype Users = { id: int };\nfor r in attributes_of::<Route>() {\n  echo r.target;\n  echo r.value.path;\n}\n";
+    let src = "@attribute\nstruct Route { path: string }\n#[Route(\"/x\")]\nstruct Users { id: int }\nfor r in attributes_of::<Route>() {\n  echo r.target;\n  echo r.value.path;\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -495,37 +494,37 @@ fn attributes_of_on_an_attribute_type_checks_clean() {
 fn attribute_on_a_function_checks_clean() {
     // A `#[...]` on a function is validated like one on a type: the capability gate plus the
     // all-fields construction check, both satisfied here.
-    let src = "@attribute\ntype Route = { method: string };\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    let src = "@attribute\nstruct Route { method: string }\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn concrete_type_is_assignable_to_its_abstract_kind() {
-    // A declared enum/record/class widens into the matching abstract kind-type at a boundary.
-    let src = "enum E { A; B; }\ntype R = { x: int };\nfn takeE(e: Enum): int { return 1; }\nfn takeR(r: Record): int { return 1; }\necho takeE(E.A);\nv = R { x: 1 };\necho takeR(v);\n";
+    // A declared enum/struct/class widens into the matching abstract kind-type at a boundary.
+    let src = "enum E { A; B; }\nstruct R { x: int }\nfn takeE(e: Enum): int { return 1; }\nfn takeR(r: Struct): int { return 1; }\necho takeE(E.A);\nv = R { x: 1 };\necho takeR(v);\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn wrong_kind_is_a_type_error() {
-    // The kinds are distinct: a record is not an enum (E0007 at the call).
-    let src = "type R = { x: int };\nfn takeE(e: Enum): int { return 1; }\nv = R { x: 1 };\necho takeE(v);\n";
+    // The kinds are distinct: a struct is not an enum (E0007 at the call).
+    let src = "struct R { x: int }\nfn takeE(e: Enum): int { return 1; }\nv = R { x: 1 };\necho takeE(v);\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 
 #[test]
 fn dyn_narrows_to_an_abstract_kind() {
     // `dyn` → a kind via `is`/`.as<>()` is a valid (runtime) narrow, not E0028.
-    let src = "enum E { A; }\nx: dyn = E.A;\necho x is Enum;\ny = x.as<Record>();\n";
+    let src = "enum E { A; }\nx: dyn = E.A;\necho x is Enum;\ny = x.as<Struct>();\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn role_tag_on_an_attribute_checks_clean() {
-    // A `@role(Semantic.EntryPoint)` tag on a record that is also `@attribute` is well-formed;
+    // A `@role(Semantic.EntryPoint)` tag on a struct that is also `@attribute` is well-formed;
     // `roles_of()` then type-checks as `List<RoleBinding>` whose `.role` is an `Enum` and `.target`
     // a string.
-    let src = "@attribute\n@role(Semantic.EntryPoint)\ntype Route = { path: string };\nfor b in roles_of() {\n  echo b.target;\n}\n";
+    let src = "@attribute\n@role(Semantic.EntryPoint)\nstruct Route { path: string }\nfor b in roles_of() {\n  echo b.target;\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -533,14 +532,14 @@ fn role_tag_on_an_attribute_checks_clean() {
 fn role_must_be_a_known_variant() {
     // `@role(Enum.Variant)` must name an existing variant of the `@semantic` enum — an unknown
     // variant is E0031.
-    let src = "@attribute\n@role(Semantic.Bogus)\ntype Route = { path: string };\n";
+    let src = "@attribute\n@role(Semantic.Bogus)\nstruct Route { path: string }\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
 #[test]
 fn role_must_name_a_semantic_enum() {
     // A `@role` whose enum is not `@semantic` is E0031 — only a promoted enum's variants are roles.
-    let src = "enum Plain { A; B; }\n@attribute\n@role(Plain.A)\ntype Route = { path: string };\n";
+    let src = "enum Plain { A; B; }\n@attribute\n@role(Plain.A)\nstruct Route { path: string }\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
@@ -548,42 +547,42 @@ fn role_must_name_a_semantic_enum() {
 fn role_on_a_user_semantic_enum_checks_clean() {
     // A user enum marked `@semantic` makes its fieldless variants role-eligible (declared after the
     // attribute that references it — the validation pass runs after all types are collected).
-    let src = "@attribute\n@role(WebRole.Controller)\ntype Route = { path: string };\n@semantic\nenum WebRole { Controller; Middleware; }\n";
+    let src = "@attribute\n@role(WebRole.Controller)\nstruct Route { path: string }\n@semantic\nenum WebRole { Controller; Middleware; }\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn role_must_be_qualified() {
     // A bare `@role(Variant)` with no enum qualifier is E0031 — a role is always `Enum.Variant`.
-    let src = "@attribute\n@role(EntryPoint)\ntype Route = { path: string };\n";
+    let src = "@attribute\n@role(EntryPoint)\nstruct Route { path: string }\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
 #[test]
 fn role_variant_must_be_fieldless() {
     // A payload-carrying variant cannot be a role (its payload would need comptime per use site).
-    let src = "@semantic\nenum WebRole { Tagged(name: string); }\n@attribute\n@role(WebRole.Tagged)\ntype Route = { path: string };\n";
+    let src = "@semantic\nenum WebRole { Tagged(name: string); }\n@attribute\n@role(WebRole.Tagged)\nstruct Route { path: string }\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
 #[test]
 fn semantic_on_a_record_is_misplaced() {
-    // `@semantic` marks enums; on a record it is a misplacement (E0031).
-    let src = "@semantic\ntype Route = { path: string };\n";
+    // `@semantic` marks enums; on a struct it is a misplacement (E0031).
+    let src = "@semantic\nstruct Route { path: string }\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
 #[test]
 fn role_requires_the_record_be_an_attribute() {
     // A role rides on an attribute, so `@role` without `@attribute` is E0031.
-    let src = "@role(Semantic.EntryPoint)\ntype Route = { path: string };\n";
+    let src = "@role(Semantic.EntryPoint)\nstruct Route { path: string }\n";
     assert_eq!(codes(src), ["E0031"]);
 }
 
 #[test]
 fn multiple_roles_on_one_declaration_check_clean() {
     // A declaration may carry several roles; each becomes its own binding.
-    let src = "@attribute\n@role(Semantic.EntryPoint, Semantic.TrustBoundary)\ntype Route = { path: string };\n";
+    let src = "@attribute\n@role(Semantic.EntryPoint, Semantic.TrustBoundary)\nstruct Route { path: string }\n";
     assert!(codes(src).is_empty());
 }
 
@@ -591,22 +590,22 @@ fn multiple_roles_on_one_declaration_check_clean() {
 fn role_match_is_exhaustive_over_a_wildcard() {
     // `b.role` is the abstract `Enum` kind, an open domain matchable by `Enum.Variant`; a `_` arm
     // covers the rest.
-    let src = "@attribute\n@role(Semantic.Sink)\ntype Db = { table: string };\n#[Db(\"users\")]\nfn w(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Semantic.Sink => \"s\", _ => \"o\" };\n}\n";
+    let src = "@attribute\n@role(Semantic.Sink)\nstruct Db { table: string }\n#[Db(\"users\")]\nfn w(): int { return 1; }\nfor b in roles_of() {\n  echo match b.role { Semantic.Sink => \"s\", _ => \"o\" };\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attribute_on_a_method_checks_clean() {
     // The same validation reaches a class method's attributes (through `check_fn`).
-    let src = "@attribute\ntype Route = { method: string };\nclass Api {\n  id: int\n  #[Route(\"GET\")]\n  fn list(): string { return \"[]\"; }\n}\n";
+    let src = "@attribute\nstruct Route { method: string }\nclass Api {\n  id: int\n  #[Route(\"GET\")]\n  fn list(): string { return \"[]\"; }\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn structured_attribute_args_check_clean() {
-    // A composite literal tree (list of enums, map, set, nested record) type-checks recursively
+    // A composite literal tree (list of enums, map, set, nested struct) type-checks recursively
     // against the attribute's field types.
-    let src = "enum Method { Get; Post; }\ntype Limits = { rps: int };\n@attribute\ntype Endpoint = { methods: List<Method>, limits: Map<string, int>, tags: Set<string>, fallback: Limits };\n#[Endpoint(methods: [Method.Get, Method.Post], limits: { \"r\": 1 }, tags: #{\"a\"}, fallback: Limits { rps: 1 })]\ntype Users = { id: int };\n";
+    let src = "enum Method { Get; Post; }\nstruct Limits { rps: int }\n@attribute\nstruct Endpoint { methods: List<Method> limits: Map<string, int> tags: Set<string> fallback: Limits }\n#[Endpoint(methods: [Method.Get, Method.Post], limits: { \"r\": 1 }, tags: #{\"a\"}, fallback: Limits { rps: 1 })]\nstruct Users { id: int }\n";
     assert!(codes(src).is_empty());
 }
 
@@ -614,14 +613,14 @@ fn structured_attribute_args_check_clean() {
 fn structured_attribute_arg_nested_mismatch() {
     // A wrong element type inside a composite argument is caught recursively (E0007): a string in a
     // `List<int>` field.
-    let src = "@attribute\ntype Nums = { xs: List<int> };\n#[Nums(xs: [1, \"two\"])]\ntype Page = { id: int };\n";
+    let src = "@attribute\nstruct Nums { xs: List<int> }\n#[Nums(xs: [1, \"two\"])]\nstruct Page { id: int }\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 
 #[test]
-fn structured_attribute_arg_record_field_mismatch() {
-    // A nested record literal's field value is checked against the declared record field type.
-    let src = "type Limits = { rps: int };\n@attribute\ntype Endpoint = { fallback: Limits };\n#[Endpoint(fallback: Limits { rps: \"x\" })]\ntype Page = { id: int };\n";
+fn structured_attribute_arg_struct_field_mismatch() {
+    // A nested struct literal's field value is checked against the declared struct field type.
+    let src = "struct Limits { rps: int }\n@attribute\nstruct Endpoint { fallback: Limits }\n#[Endpoint(fallback: Limits { rps: \"x\" })]\nstruct Page { id: int }\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 
@@ -643,43 +642,43 @@ fn invoke_result_is_a_concrete_result_not_a_hole() {
 
 #[test]
 fn attribute_on_a_function_must_be_an_attribute() {
-    // The E0029 gate applies on a function too: `Plain` is a record but not marked `@attribute`.
-    let src = "type Plain = { method: string };\n#[Plain(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    // The E0029 gate applies on a function too: `Plain` is a struct but not marked `@attribute`.
+    let src = "struct Plain { method: string }\n#[Plain(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
     assert_eq!(codes(src), ["E0029"]);
 }
 
 #[test]
 fn attribute_on_record_and_class_fields_checks_clean() {
-    // A `#[...]` on a record field and on a class field is validated like any other attribute use.
-    let src = "@attribute\ntype Column = { name: string };\ntype User = {\n  #[Column(\"uid\")]\n  id: int,\n};\nclass Account {\n  #[Column(\"bal\")]\n  balance: int\n}\n";
+    // A `#[...]` on a struct field and on a class field is validated like any other attribute use.
+    let src = "@attribute\nstruct Column { name: string }\nstruct User { #[Column(\"uid\")] id: int }\nclass Account {\n  #[Column(\"bal\")]\n  balance: int\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attribute_on_a_field_must_be_an_attribute() {
     // The E0029 gate reaches field attributes too.
-    let src = "type Plain = { name: string };\ntype User = {\n  #[Plain(\"x\")]\n  id: int,\n};\n";
+    let src = "struct Plain { name: string }\nstruct User { #[Plain(\"x\")] id: int }\n";
     assert_eq!(codes(src), ["E0029"]);
 }
 
 #[test]
 fn attachable_to_permits_a_listed_kind() {
     // `@attribute(Function)` allows the attribute on a top-level function.
-    let src = "@attribute(Function)\ntype Route = { method: string };\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
+    let src = "@attribute(Function)\nstruct Route { method: string }\n#[Route(\"GET\")]\nfn greet(): string { return \"hi\"; }\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attachable_to_rejects_an_unlisted_kind() {
     // `@attribute(Method)` forbids the attribute on a type declaration → E0030.
-    let src = "@attribute(Method)\ntype Route = { method: string };\n#[Route(\"GET\")]\ntype User = { id: int };\n";
+    let src = "@attribute(Method)\nstruct Route { method: string }\n#[Route(\"GET\")]\nstruct User { id: int }\n";
     assert_eq!(codes(src), ["E0030"]);
 }
 
 #[test]
 fn attachable_to_with_an_unknown_kind_is_rejected() {
     // The kind vocabulary is closed; an unknown name in the directive is E0030.
-    let src = "@attribute(Bogus)\ntype Route = { method: string };\n";
+    let src = "@attribute(Bogus)\nstruct Route { method: string }\n";
     assert_eq!(codes(src), ["E0030"]);
 }
 
@@ -687,28 +686,28 @@ fn attachable_to_with_an_unknown_kind_is_rejected() {
 fn attachable_to_field_only_attribute_rejects_a_method() {
     // A field-only attribute (`@attribute(Field)`) on a method is E0030 — exercising the
     // method/function target axis added in P2.4.
-    let src = "@attribute(Field)\ntype Column = { name: string };\nclass Api {\n  #[Column(\"x\")]\n  fn list(): int { return 0; }\n}\n";
+    let src = "@attribute(Field)\nstruct Column { name: string }\nclass Api {\n  #[Column(\"x\")]\n  fn list(): int { return 0; }\n}\n";
     assert_eq!(codes(src), ["E0030"]);
 }
 
 #[test]
 fn attribute_on_an_enum_variant_checks_clean() {
     // A `#[...]` on an enum variant (plain or algebraic) is validated like any other attribute use.
-    let src = "@attribute\ntype Note = { text: string };\nenum Status {\n  Active;\n  #[Note(\"gone\")]\n  Archived;\n}\n";
+    let src = "@attribute\nstruct Note { text: string }\nenum Status {\n  Active;\n  #[Note(\"gone\")]\n  Archived;\n}\n";
     assert!(codes(src).is_empty());
 }
 
 #[test]
 fn attribute_on_a_variant_must_be_an_attribute() {
     // The E0029 gate reaches enum-variant attributes too.
-    let src = "type Plain = { text: string };\nenum Status {\n  #[Plain(\"x\")]\n  Active;\n}\n";
+    let src = "struct Plain { text: string }\nenum Status {\n  #[Plain(\"x\")]\n  Active;\n}\n";
     assert_eq!(codes(src), ["E0029"]);
 }
 
 #[test]
 fn attributes_of_on_a_non_attribute_is_rejected() {
     // The capability gate, mirroring a `#[Foo]` use: the type argument must be marked `@attribute`.
-    let src = "type Plain = { path: string };\nrs = attributes_of::<Plain>();\n";
+    let src = "struct Plain { path: string }\nrs = attributes_of::<Plain>();\n";
     assert_eq!(codes(src), ["E0029"]);
 }
 
@@ -820,10 +819,10 @@ fn old_derive_attribute_spelling_is_reported() {
 
 #[test]
 fn data_attribute_marked_with_capability_is_accepted() {
-    // `#[Route(...)]` is valid when `Route` is a record marked `@attribute`,
+    // `#[Route(...)]` is valid when `Route` is a struct marked `@attribute`,
     // and the arguments construct it (the positional value fills `path`).
     let src =
-        "@attribute\ntype Route = { path: string };\n#[Route(\"/x\")]\nclass P {\n  x: int\n}\n";
+        "@attribute\nstruct Route { path: string }\n#[Route(\"/x\")]\nclass P {\n  x: int\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -837,14 +836,14 @@ fn unmarked_attribute_is_rejected() {
 #[test]
 fn attribute_missing_field_is_reported() {
     // The construction check: `#[Route]` with no argument leaves `path` unset (E0009).
-    let src = "@attribute\ntype Route = { path: string };\n#[Route]\nclass P {\n  x: int\n}\n";
+    let src = "@attribute\nstruct Route { path: string }\n#[Route]\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0009"]);
 }
 
 #[test]
 fn attribute_argument_type_mismatch_is_reported() {
     // The construction check: a literal whose type does not match its field is E0007.
-    let src = "@attribute\ntype Route = { path: string };\n#[Route(42)]\nclass P {\n  x: int\n}\n";
+    let src = "@attribute\nstruct Route { path: string }\n#[Route(42)]\nclass P {\n  x: int\n}\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 

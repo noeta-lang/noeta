@@ -8,7 +8,7 @@
 // expect: stdout "GET"
 // expect: exit 0
 @attribute
-type Route = { method: string };
+struct Route { method: string }
 
 #[Route("GET")]
 fn greet(): string { return "hi"; }

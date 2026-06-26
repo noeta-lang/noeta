@@ -7,4 +7,4 @@ enum WebRole { Tagged(name: string); }
 
 @attribute
 @role(WebRole.Tagged)
-type Route = { path: string };
+struct Route { path: string }

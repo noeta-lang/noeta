@@ -151,7 +151,7 @@ impl Printer<'_> {
             Decl::Fn { name, func, .. } => self.func(&format!("fn {name}"), func, indent),
             Decl::Class(class) => self.class(class, indent),
             Decl::Enum(d) => self.line(indent, &format!("enum {}", d.name)),
-            Decl::Record(d) => self.line(indent, &format!("record {}", d.name)),
+            Decl::Struct(d) => self.line(indent, &format!("struct {}", d.decl.name)),
             Decl::Use { path, names, .. } => {
                 let names: Vec<&str> = names.iter().map(|n| n.name.as_str()).collect();
                 self.line(

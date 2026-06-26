@@ -1,4 +1,4 @@
-// `@attribute(Method, Function)` opts a record in as an attribute and restricts where `#[Route(...)]`
+// `@attribute(Method, Function)` opts a struct in as an attribute and restricts where `#[Route(...)]`
 // may attach. A use on a permitted kind (here a top-level function) is accepted, and the attribute
 // still surfaces through `attributes_of`. The restriction is a pure compile-time placement check, so
 // both backends run the (accepted) program identically.
@@ -6,7 +6,7 @@
 // expect: stdout "GET"
 // expect: exit 0
 @attribute(Method, Function)
-type Route = { method: string };
+struct Route { method: string }
 
 #[Route("GET")]
 fn handler(): string { return "ok"; }

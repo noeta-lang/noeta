@@ -57,7 +57,7 @@ fn accumulate_src(n: usize) -> String {
 /// reveals the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
 const ACC_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
 
-/// A blind-overwrite record accumulator (`acc = Wide { ...acc, f0: i }`) — the tree-walker analogue
+/// A blind-overwrite struct accumulator (`acc = Wide { ...acc, f0: i }`) — the tree-walker analogue
 /// of the VM `vm_record_update` bench. Reuse mutates the uniquely-owned object's field map in place
 /// instead of cloning the whole `BTreeMap` + every field reference each step. Eight fields so the
 /// per-step copy cost is visible.

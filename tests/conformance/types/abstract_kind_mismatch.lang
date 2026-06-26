@@ -1,8 +1,8 @@
-// The abstract kinds are distinct: a record is not an enum, so passing a record value where an
-// `Enum` is expected is a type error (E0007). (A class is likewise not a `Record`.)
+// The abstract kinds are distinct: a struct is not an enum, so passing a struct value where an
+// `Enum` is expected is a type error (E0007). (A class is likewise not a `Struct`.)
 // expect: error E0007 at 10:6
 // expect: exit 1
-type Point = { x: int };
+struct Point { x: int }
 
 fn take(e: Enum): int { return 1; }
 

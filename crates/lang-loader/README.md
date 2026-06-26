@@ -14,7 +14,7 @@ use App.Models.User;
 use App.Billing.{Invoice, Receipt};
 ```
 
-— resolve against those declared namespaces: each imported name's *real* declaration (a class, record, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
+— resolve against those declared namespaces: each imported name's *real* declaration (a class, struct, enum, or function) is pulled from the providing module and **merged into a single `Program`** ahead of the entry's own statements. Both backends then run the merged program unchanged, so the differential oracle is preserved by construction — there is no module-aware runtime, only one linked program.
 
 ## Backward-compatible by construction
 

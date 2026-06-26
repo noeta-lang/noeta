@@ -12,7 +12,7 @@
 // expect: stdout "false"
 // expect: stdout "true"
 // expect: exit 0
-type Point = { x: int, y: int };
+struct Point { x: int y: int }
 
 fn is_int(v: dyn): bool { return v is int; }
 fn is_list(v: dyn): bool { return v is List<int>; }

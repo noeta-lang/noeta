@@ -43,10 +43,10 @@ pub enum Value {
     EnumType(Rc<EnumDef>),
     /// An enum *value* (e.g. `Status.Pending` or `OrderError.NegativePrice(2)`).
     Enum(Rc<EnumValue>),
-    /// A record or class *type* (e.g. the value `Order`), used to construct instances
+    /// A struct or class *type* (e.g. the value `Order`), used to construct instances
     /// and call associated functions (`Order.new(...)`).
     Type(Rc<TypeDef>),
-    /// A record or class *instance* — a bag of named field values.
+    /// A struct or class *instance* — a bag of named field values.
     Object(Rc<ObjectValue>),
     /// A Ring 2 native module (e.g. `json`), bound by `use std.{...}`; `module.func(args)`
     /// dispatches to native code.

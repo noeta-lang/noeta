@@ -1,9 +1,9 @@
-// `+` is trait-backed (`Add`). A plain record is neither numeric nor `impl`s `Add`, so applying
+// `+` is trait-backed (`Add`). A plain struct is neither numeric nor `impl`s `Add`, so applying
 // `+` to two of them is a static type error (`E0007`) — the operator-trait check now covers
 // concrete user types, not only generics, catching what was previously a runtime failure.
 // expect: error E0007 at 9:6
 // expect: exit 1
-type P = { x: int };
+struct P { x: int }
 a = P { x: 1 };
 b = P { x: 2 };
 echo a + b;

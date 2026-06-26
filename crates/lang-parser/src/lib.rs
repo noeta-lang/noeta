@@ -31,8 +31,8 @@ use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
     AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit,
-    FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RecordDecl,
-    RoleTag, Stmt, StrPart, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RoleTag, Stmt,
+    StrPart, StructDecl, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -208,13 +208,13 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
                 _ => Err(not_literal()),
             }
         }
-        // A record literal `Name { field: value }` (no spread — every field is given explicitly).
+        // A struct literal `Name { field: value }` (no spread — every field is given explicitly).
         Expr::Object(lit) if lit.spread.is_none() => {
             let mut fields = Vec::with_capacity(lit.fields.len());
             for field in &lit.fields {
                 fields.push((field.name.clone(), expr_to_attr_value(&field.value)?));
             }
-            Ok(AttrValue::Record {
+            Ok(AttrValue::Struct {
                 type_name: lit.type_name.clone(),
                 fields,
             })
@@ -290,7 +290,7 @@ fn directive_role_tag(arg: DirectiveArg) -> RoleTag {
 }
 
 /// Attach leading `@derive(...)` directives and `#[...]` data attributes to the type declaration
-/// they precede. Both are only valid on class/record/enum declarations; the grammar only ever
+/// they precede. Both are only valid on class/struct/enum declarations; the grammar only ever
 /// pairs them with one of those.
 fn attach_decorators(
     stmt: Stmt,
@@ -312,21 +312,21 @@ fn attach_decorators(
         Stmt::Class(mut c) => {
             c.derives = derives;
             c.attrs = attrs;
-            // `@attribute`/`@role`/`@semantic` on a class is invalid (attributes are records only,
+            // `@attribute`/`@role`/`@semantic` on a class is invalid (attributes are structs only,
             // `@semantic` marks enums); carried so the checker can report it.
             c.attribute = attribute;
             c.role = role;
             c.semantic = semantic;
             Stmt::Class(c)
         }
-        Stmt::Record(mut r) => {
+        Stmt::Struct(mut r) => {
             r.derives = derives;
             r.attrs = attrs;
             r.attribute = attribute;
             r.role = role;
             // `@semantic` marks enums, not records; carried so the checker can report the misplacement.
             r.semantic = semantic;
-            Stmt::Record(r)
+            Stmt::Struct(r)
         }
         Stmt::Enum(mut e) => {
             // An enum cannot be an attribute, so a stray `@attribute`/`@role` is dropped;
@@ -348,9 +348,9 @@ fn set_public(stmt: Stmt, is_public: bool) -> Stmt {
             d.is_public = is_public;
             Stmt::Class(d)
         }
-        Stmt::Record(mut d) => {
+        Stmt::Struct(mut d) => {
             d.is_public = is_public;
-            Stmt::Record(d)
+            Stmt::Struct(d)
         }
         Stmt::Enum(mut d) => {
             d.is_public = is_public;
@@ -1480,9 +1480,9 @@ where
             .map(Option::unwrap_or_default);
 
         // A literal value in attribute-argument position. Attribute arguments construct the attribute
-        // record at manifest-build time without running user code, so they are the constant
+        // struct at manifest-build time without running user code, so they are the constant
         // literal-tree subset, not arbitrary expressions. We parse the **full expression grammar**
-        // (so list/map/set/record/enum literals reuse one grammar — no parallel literal parser to
+        // (so list/map/set/struct/enum literals reuse one grammar — no parallel literal parser to
         // drift) and then fold the result into an [`AttrValue`] tree, rejecting any non-literal node.
         // Defined here (above `fn_decl`) so attributes can lead a function/method declaration as well
         // as a type declaration.
@@ -1514,7 +1514,7 @@ where
                 span: ctx.to_span(e.span()),
             });
         // `#[ Name ]` or `#[ Name(arg, arg) ]` — a data attribute in annotation position, yielding
-        // the bare [`Attribute`]. A record instance attached as metadata, consumed via the manifest;
+        // the bare [`Attribute`]. A struct instance attached as metadata, consumed via the manifest;
         // it carries no codegen meaning (codegen is `@derive`). Arguments are literals.
         let attr_decl = just(T::Hash)
             .ignore_then(just(T::LBracket))
@@ -1616,73 +1616,31 @@ where
                 })
             });
 
-        // Structural record alias: `type Item = { price: float, qty: int };`. Record fields are
-        // comma-separated `name: type` and always immutable; a field may carry leading `#[...]`
-        // attributes (P2.4b).
-        let record_field = attr_decl
+        // A field in a `struct` or `class` body: `#[...]? pub? mut? name: type` (newline-separated,
+        // no terminator). `pub` (parsed in slice 1, *enforced* in slice 2) and `mut` are both opt-in;
+        // a field may carry leading `#[...]` attributes (P2.4b). Disambiguated from a method by the
+        // token after any leading `#[...]` (`fn` opens a method; `pub`/`mut`/a name opens a field).
+        let object_field = attr_decl
             .clone()
             .repeated()
             .collect::<Vec<_>>()
-            .then(id.clone())
-            .then_ignore(just(T::Colon))
-            .then(type_parser(ctx))
-            .map_with(move |((attrs, (name, name_span)), ty), e| FieldDecl {
-                name,
-                name_span,
-                mut_field: false,
-                ty: Some(ty),
-                attrs,
-                span: ctx.to_span(e.span()),
-            });
-        let record_decl = just(T::TypeKw)
-            .ignore_then(id.clone())
-            .then(type_params.clone())
-            .then_ignore(just(T::Eq))
-            .then(
-                record_field
-                    .separated_by(just(T::Comma))
-                    .allow_trailing()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(T::LBrace), just(T::RBrace)),
-            )
-            .then_ignore(just(T::Semicolon))
-            .map_with(move |(((name, name_span), type_params), fields), e| {
-                Stmt::Record(RecordDecl {
-                    name,
-                    name_span,
-                    is_public: false,
-                    type_params,
-                    fields,
-                    derives: Vec::new(),
-                    attrs: Vec::new(),
-                    attribute: None,
-                    role: None,
-                    semantic: None,
-                    span: ctx.to_span(e.span()),
-                })
-            });
-
-        // Class body member: a field (`#[...]? mut? name: type`, no terminator) or a method
-        // (`#[...]? fn ...`). Disambiguated by the token after any leading `#[...]` (`fn` vs
-        // `mut`/name). A field may carry leading `#[...]` attributes (P2.4b).
-        let class_field = attr_decl
-            .clone()
-            .repeated()
-            .collect::<Vec<_>>()
+            .then(just(T::PubKw).or_not())
             .then(just(T::MutKw).or_not())
             .then(id.clone())
             .then_ignore(just(T::Colon))
             .then(type_parser(ctx))
-            .map_with(move |(((attrs, mut_kw), (name, name_span)), ty), e| {
-                ClassMember::Field(FieldDecl {
+            .map_with(
+                move |((((attrs, pub_kw), mut_kw), (name, name_span)), ty), e| FieldDecl {
                     name,
                     name_span,
                     mut_field: mut_kw.is_some(),
+                    is_public: pub_kw.is_some(),
                     ty: Some(ty),
                     attrs,
                     span: ctx.to_span(e.span()),
-                })
-            });
+                },
+            );
+        let class_field = object_field.clone().map(ClassMember::Field);
         // A bare `#[...]? fn ...` declaration, shared by plain class methods and `impl`-block
         // methods. Leading `#[...]` attributes attach to the method (P2.4).
         let method = attr_decl
@@ -1734,7 +1692,7 @@ where
             .ignore_then(block.clone())
             .map(ClassMember::Destructor);
         // `impl Trait for Type { ... }` — a *standalone* (top-level) trait implementation, the
-        // mechanism by which a bodiless record declares a capability (`impl Serialize for Route
+        // mechanism by which a bodiless struct declares a capability (`impl Serialize for Route
         // {}`). The `for Type` is what distinguishes it from the class-body `impl Trait { ... }`
         // above. The checker requires `Type` to be declared in the same module (orphan rule).
         let standalone_impl = just(T::ImplKw)
@@ -1760,6 +1718,56 @@ where
                     })
                 },
             );
+        // A struct declaration: `struct Name<T> { fields; methods; impl Trait { ... } }` — the value
+        // kind. The **same unified body grammar** as a class, minus `destruct` (pure data has no
+        // destructor — that capability is class-only). Replaces the retired `struct X { ... }` form.
+        let struct_decl = just(T::StructKw)
+            .ignore_then(id.clone())
+            .then(type_params.clone())
+            .then(
+                choice((
+                    class_method.clone(),
+                    class_impl.clone(),
+                    class_field.clone(),
+                ))
+                .repeated()
+                .collect::<Vec<_>>()
+                .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(move |(((name, name_span), type_params), members), e| {
+                let mut fields = Vec::new();
+                let mut methods = Vec::new();
+                let mut impls = Vec::new();
+                for member in members {
+                    match member {
+                        ClassMember::Field(field) => fields.push(field),
+                        ClassMember::Method(method) => methods.push(method),
+                        ClassMember::Impl(block) => {
+                            methods.extend(block.methods.iter().cloned());
+                            impls.push(block);
+                        }
+                        // A `struct` body's grammar offers no `destruct`, so this is unreachable;
+                        // ignore defensively rather than panic.
+                        ClassMember::Destructor(_) => {}
+                    }
+                }
+                Stmt::Struct(StructDecl {
+                    name,
+                    name_span,
+                    is_public: false,
+                    type_params,
+                    fields,
+                    methods,
+                    impls,
+                    derives: Vec::new(),
+                    attrs: Vec::new(),
+                    attribute: None,
+                    role: None,
+                    semantic: None,
+                    span: ctx.to_span(e.span()),
+                })
+            });
+
         let class_decl = just(T::ClassKw)
             .ignore_then(id.clone())
             .then(type_params.clone())
@@ -2082,14 +2090,14 @@ where
         // above `fn_decl`) so type declarations and function declarations parse the same attribute.
         let attribute = attr_decl.clone().map(Decorator::Attr);
 
-        // Decorators attach only to type declarations (class/record/enum). Leading `@derive(...)`
+        // Decorators attach only to type declarations (class/struct/enum). Leading `@derive(...)`
         // directives and `#[...]` attributes are collected in order and partitioned onto the parsed
         // declaration; the checker validates each.
         let attributed_type_decl = choice((derive_directive, attribute))
             .repeated()
             .collect::<Vec<_>>()
             .then(just(T::PubKw).or_not())
-            .then(choice((enum_decl, record_decl, class_decl)))
+            .then(choice((enum_decl, struct_decl, class_decl)))
             .map(move |((decorators, pub_kw), stmt)| {
                 let mut derives: Vec<DeriveSpec> = Vec::new();
                 let mut attrs: Vec<Attribute> = Vec::new();
@@ -2489,14 +2497,14 @@ mod tests {
         // `@semantic` marks the enum role-eligible; `@role(Enum.Variant)` parses each dotted pair
         // into a `RoleTag`, accumulating across multiple roles on one declaration.
         let parsed = parse_str(
-            "@semantic\nenum WebRole { Controller; Middleware; }\n@attribute\n@role(Semantic.EntryPoint, WebRole.Controller)\ntype Route = { path: string };\n",
+            "@semantic\nenum WebRole { Controller; Middleware; }\n@attribute\n@role(Semantic.EntryPoint, WebRole.Controller)\nstruct Route { path: string }\n",
         );
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let Stmt::Enum(e) = &parsed.program.stmts[0] else {
             panic!("expected enum");
         };
         assert!(e.semantic.is_some(), "@semantic should mark the enum");
-        let Stmt::Record(r) = &parsed.program.stmts[1] else {
+        let Stmt::Struct(r) = &parsed.program.stmts[1] else {
             panic!("expected record");
         };
         let roles = r.role.as_ref().expect("@role tags");
@@ -2511,9 +2519,9 @@ mod tests {
     fn parses_generic_derive_with_type_argument() {
         // `@derive(Serialize<Json>)` parses the derive argument with the full type grammar, so the
         // `DeriveSpec` carries the trait name plus its generic type arguments; a plain derive has none.
-        let parsed = parse_str("@derive(Comparable, Serialize<Json>)\ntype Point = { x: int };\n");
+        let parsed = parse_str("@derive(Comparable, Serialize<Json>)\nstruct Point { x: int }\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let Stmt::Record(r) = &parsed.program.stmts[0] else {
+        let Stmt::Struct(r) = &parsed.program.stmts[0] else {
             panic!("expected record");
         };
         assert_eq!(r.derives.len(), 2);
@@ -2531,9 +2539,9 @@ mod tests {
     fn parses_unqualified_role_with_empty_enum() {
         // A bare `@role(Variant)` parses with an empty `enum_name`, so the checker can require the
         // qualifier (E0031) rather than the parser rejecting it.
-        let parsed = parse_str("@attribute\n@role(EntryPoint)\ntype Route = { path: string };\n");
+        let parsed = parse_str("@attribute\n@role(EntryPoint)\nstruct Route { path: string }\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
-        let Stmt::Record(r) = &parsed.program.stmts[0] else {
+        let Stmt::Struct(r) = &parsed.program.stmts[0] else {
             panic!("expected record");
         };
         let roles = r.role.as_ref().expect("@role tags");
@@ -2587,8 +2595,8 @@ mod tests {
         // Declarations carry their generic parameters (erased at runtime, kept for the checker).
         let class = pretty("class Box<T> { value: T fn get(): T { return value; } }");
         assert!(class.contains("(class Box<T>"), "{class}");
-        let record = pretty("type Pair<A, B> = { first: A, second: B };");
-        assert!(record.contains("(record Pair<A, B>"), "{record}");
+        let strukt = pretty("struct Pair<A, B> { first: A second: B }");
+        assert!(strukt.contains("(struct Pair<A, B>"), "{strukt}");
         let enom = pretty("enum Opt<T> { None; Some(value: T); }");
         assert!(enom.contains("(enum Opt<T>"), "{enom}");
         // A non-generic declaration renders exactly as before (no angle brackets).
@@ -2600,10 +2608,10 @@ mod tests {
     fn parses_pub_visibility() {
         // `pub` marks a declaration exported from its module (after any decorators).
         assert!(pretty("pub class User { id: int }").contains("(class pub User ["));
-        assert!(pretty("pub type Pair = { a: int };").contains("(record pub Pair ["));
+        assert!(pretty("pub struct Pair { a: int }").contains("(struct pub Pair ["));
         assert!(pretty("pub enum Color { Red; }").contains("(enum pub Color ["));
         assert!(pretty("pub fn helper(): int { return 1; }").contains("(fn pub helper ["));
-        assert!(pretty("@derive(Comparable) pub type V = { n: int };").contains("(record pub V ["));
+        assert!(pretty("@derive(Comparable) pub struct V { n: int }").contains("(struct pub V ["));
         // A module-private declaration renders exactly as before.
         assert!(pretty("class P { x: int }").contains("(class P ["));
     }
@@ -2675,9 +2683,9 @@ mod tests {
     }
 
     #[test]
-    fn record_and_class_and_object_literal() {
+    fn struct_and_class_and_object_literal() {
         insta::assert_snapshot!(pretty(
-            "type Item = { price: float, qty: int }; class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ...base };"
+            "struct Item { price: float qty: int } class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ...base };"
         ));
     }
 

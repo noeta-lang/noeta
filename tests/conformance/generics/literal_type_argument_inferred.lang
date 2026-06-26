@@ -1,4 +1,4 @@
-// A record/object literal now infers its type arguments from its field values: `Box { value: 5 }`
+// A struct/object literal now infers its type arguments from its field values: `Box { value: 5 }`
 // is `Box<int>`, so `b.value` is precisely `int` and passing it where an `int` is expected
 // type-checks and runs. Previously a literal's arguments were unspecified. Both backends agree.
 // expect: stdout "5"

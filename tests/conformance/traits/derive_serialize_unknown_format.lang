@@ -3,4 +3,4 @@
 // expect: error E0013 at 5:19
 // expect: exit 1
 @derive(Serialize<Xml>)
-type Point = { x: int };
+struct Point { x: int }

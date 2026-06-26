@@ -4,7 +4,7 @@
 // expect: stdout "10.0"
 // expect: stdout "7"
 // expect: exit 0
-type Item = { price: float, qty: int };
+struct Item { price: float qty: int }
 
 enum Status: string {
     Pending = "pending";

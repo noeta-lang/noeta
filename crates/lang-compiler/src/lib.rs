@@ -5,7 +5,7 @@
 //! lowers the parsed program to `lang_ir` (the same lowering the IR interpreter consumes), then
 //! emits bytecode from it. Because the IR has already named every intermediate value and fixed
 //! evaluation order, the compiler is a near-1:1 structural lowering — an IR `let v = a + b`
-//! becomes an `Op::Binary`, a constructor an `Op::MakeRecord`/`MakeEnum`, an IR `if` a branch —
+//! becomes an `Op::Binary`, a constructor an `Op::MakeStruct`/`MakeEnum`, an IR `if` a branch —
 //! rather than re-deriving order by recursively flattening nested expressions. Type
 //! registration (shapes, the method/destructor proto table) still reads the surface declarations
 //! the IR carries verbatim. Register allocation stays monotonic this phase; the reuse-aware
@@ -200,8 +200,13 @@ fn compile_inner(
 /// What a top-level type name denotes, with the layout/dispatch data the compiler needs to
 /// lower object literals, member access, method calls, and enum construction.
 enum TypeInfo {
-    /// A structural record (`type X = {...}`): declared field order.
-    Record { fields: Vec<String> },
+    /// A struct (`struct X { ... }`) — the value kind: declared field order, plus each `fn`'s
+    /// reserved prototype index (a struct `fn` dispatches as `X.f(...)` / `obj.f(...)`, exactly
+    /// like a class method — the unified body grammar shares the dispatch machinery).
+    Struct {
+        fields: Vec<String>,
+        fns: HashMap<String, u32>,
+    },
     /// A class: declared field order plus each `fn`'s reserved prototype index (a class `fn`
     /// is callable both as an associated function `X.f(...)` and as an instance method
     /// `obj.f(...)`, so one prototype serves both — see [`ModuleCompiler::compile_methods`]).
@@ -297,18 +302,37 @@ impl ModuleCompiler {
         );
         for stmt in &program.stmts {
             match stmt {
-                lang_ast::Stmt::Record(decl) => {
+                lang_ast::Stmt::Struct(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
-                    if lang_ast::derives_trait(&decl.derives, "Comparable") {
+                    // A hand-written `compare`/`to_json` (via an `impl` block) takes precedence over
+                    // the derived version — same rule as a class.
+                    if lang_ast::derives_trait(&decl.derives, "Comparable")
+                        && !decl.methods.iter().any(|m| m.name == "compare")
+                    {
                         self.comparable_derives.push(decl.name.clone());
                     }
                     // `@derive(Serialize<Json>)` synthesizes the structural JSON serializer (`Json`
                     // is the only format today, so it maps to the existing `to_json` codegen).
-                    if lang_ast::derives_trait(&decl.derives, "Serialize") {
+                    if lang_ast::derives_trait(&decl.derives, "Serialize")
+                        && !decl.methods.iter().any(|m| m.name == "to_json")
+                    {
                         self.tojson_derives.push(decl.name.clone());
                     }
+                    // Reserve a prototype per method, shared by associated-fn and instance-method
+                    // dispatch (a struct `fn` is callable both ways, exactly like a class method).
+                    let mut fns = HashMap::new();
+                    for method in &decl.methods {
+                        let proto = self.protos.len() as u32;
+                        self.protos.push(Chunk::placeholder());
+                        fns.insert(method.name.clone(), proto);
+                        self.methods.push(MethodEntry {
+                            type_name: decl.name.clone(),
+                            method: method.name.clone(),
+                            proto,
+                        });
+                    }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Record { fields });
+                        .insert(decl.name.clone(), TypeInfo::Struct { fields, fns });
                 }
                 lang_ast::Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
@@ -374,12 +398,35 @@ impl ModuleCompiler {
         }
     }
 
-    /// Pass 2: compile each class method (and the `destruct` block) into its reserved prototype,
-    /// from the lowered IR. Methods see all registered types (forward references work) and run
-    /// with the receiver in register 0, the declared parameters in registers `1..`, and field
-    /// names resolving to the receiver.
+    /// Pass 2: compile each class/struct method (and a class's `destruct` block) into its reserved
+    /// prototype, from the lowered IR. Methods see all registered types (forward references work)
+    /// and run with the receiver in register 0, the declared parameters in registers `1..`, and
+    /// field names resolving to the receiver.
     fn compile_methods(&mut self, ir: &lang_ir::Program) -> Result<(), Unsupported> {
         for stmt in &ir.top.stmts {
+            // A struct shares the class method-dispatch machinery (the unified body), minus the
+            // `destruct` block — so compile its methods into the prototypes reserved in pass 1.
+            if let Stmt::Decl(Decl::Struct(strukt)) = stmt {
+                let name = strukt.decl.name.clone();
+                let field_set: HashSet<String> =
+                    strukt.decl.fields.iter().map(|f| f.name.clone()).collect();
+                for (method, func) in &strukt.methods {
+                    let TypeInfo::Struct { fns, .. } = &self.types[&name] else {
+                        unreachable!("a struct registered as non-struct");
+                    };
+                    let proto = fns[method];
+                    let chunk = self.compile_func(
+                        func,
+                        Some(MethodCtx {
+                            fields: field_set.clone(),
+                        }),
+                        Vec::new(),
+                        Vec::new(),
+                    )?;
+                    self.protos[proto as usize] = chunk;
+                }
+                continue;
+            }
             let Stmt::Decl(Decl::Class(class)) = stmt else {
                 continue;
             };
@@ -1024,7 +1071,7 @@ impl<'m> FnCompiler<'m> {
     fn decl(&mut self, decl: &Decl) -> Result<(), Unsupported> {
         match decl {
             Decl::Fn { name, func, .. } => self.declare_fn(name, func),
-            Decl::Class(_) | Decl::Enum(_) | Decl::Record(_) => Ok(()),
+            Decl::Class(_) | Decl::Enum(_) | Decl::Struct(_) => Ok(()),
             Decl::Use { path, names, .. } => {
                 for imported in names {
                     if is_native_module(path, &imported.name) {
@@ -1568,7 +1615,7 @@ impl<'m> FnCompiler<'m> {
     }
 
     /// Materialize an **aggregate-constructor operand**, recording (in `consumed`) the register to
-    /// release after the constructor runs. An aggregate op (`MakeList`/`MakeMap`/`MakeRecord`/
+    /// release after the constructor runs. An aggregate op (`MakeList`/`MakeMap`/`MakeStruct`/
     /// `MakeEnum`) *retains* each operand into the new heap value, so an **owned heap** operand — an
     /// ANF temp or a freshly-materialized string/global/field/upvalue, held by no live binding — is
     /// left with a now-redundant reference in its register. Releasing it promptly (a plain drop the
@@ -2098,7 +2145,10 @@ impl<'m> FnCompiler<'m> {
                 }
                 return self.make_enum(type_name, name, args, dst);
             }
-            if let Some(TypeInfo::Class { fns, .. }) = self.module.types.get(type_name)
+            // An associated function `Type.f(...)` resolves at compile time for both kinds — struct
+            // and class share the dispatch table (the unified body).
+            if let Some(TypeInfo::Class { fns, .. } | TypeInfo::Struct { fns, .. }) =
+                self.module.types.get(type_name)
                 && let Some(&proto) = fns.get(name)
             {
                 return self.call_associated(proto, args, dst, span);
@@ -2138,7 +2188,7 @@ impl<'m> FnCompiler<'m> {
     /// token to the op only when the receiver is a storage kind whose sole reference we can hand to
     /// the in-place path: a directly-held **local** (its register *is* the binding) or a top-level
     /// **global** (moved out with `TakeGlobal` so the in-place op sees refcount 1, the same shape as
-    /// the global record/list accumulator reuse). A celled/captured base — or an unmarked op — falls
+    /// the global struct/list accumulator reuse). A celled/captured base — or an unmarked op — falls
     /// through to the copying path (`reuse: false`), always correct value semantics. The value is
     /// resolved *before* a `TakeGlobal` so moving the global out cannot vacate a slot it still reads.
     fn lower_set_field(
@@ -2259,7 +2309,7 @@ impl<'m> FnCompiler<'m> {
         Ok(())
     }
 
-    /// `Type { field: value, ...spread }` — construct a record/class/opaque instance, or raise the
+    /// `Type { field: value, ...spread }` — construct a struct/class/opaque instance, or raise the
     /// tree-walker's runtime error for an unknown type.
     #[allow(clippy::too_many_arguments)]
     fn lower_object(
@@ -2273,11 +2323,11 @@ impl<'m> FnCompiler<'m> {
         span: Span,
     ) -> Result<(), Unsupported> {
         match self.module.types.get(type_name) {
-            Some(TypeInfo::Record { fields: decl }) => {
+            Some(TypeInfo::Struct { fields: decl, .. }) => {
                 let decl = decl.clone();
                 self.make_record(
                     type_name,
-                    ShapeKind::Record,
+                    ShapeKind::Struct,
                     &decl,
                     fields,
                     spread,
@@ -2299,7 +2349,7 @@ impl<'m> FnCompiler<'m> {
                     span,
                 )
             }
-            // Opaque/imported types have no fixed shape, so the in-place record-reuse op does not
+            // Opaque/imported types have no fixed shape, so the in-place struct-reuse op does not
             // apply; the reuse pass never marks them (it excludes nothing here, but `make_opaque`
             // simply ignores the token — the copying path is always correct).
             Some(TypeInfo::Opaque) => self.make_opaque(type_name, fields, spread, dst),
@@ -2313,8 +2363,8 @@ impl<'m> FnCompiler<'m> {
         }
     }
 
-    /// Construct a declared record/class instance. The full-initialization guarantee (E0009) is
-    /// enforced at runtime by `MakeRecord`; an unknown field is a compile-time-detected runtime
+    /// Construct a declared struct/class instance. The full-initialization guarantee (E0009) is
+    /// enforced at runtime by `MakeStruct`; an unknown field is a compile-time-detected runtime
     /// raise (its value atom was already computed by the preceding `let`s).
     #[allow(clippy::too_many_arguments)]
     fn make_record(
@@ -2337,10 +2387,10 @@ impl<'m> FnCompiler<'m> {
         // directly-held **local** (Phase 5.1a) or a top-level **global** (Phase 5.1b) reuses that
         // allocation. For a local the register *is* the binding's sole storage, read in place; for a
         // global, `TakeGlobal` moves the value out of its slot so the in-place op sees unique ownership
-        // (the trailing reassignment stores the result back). `MakeRecordInPlace` then moves the base
+        // (the trailing reassignment stores the result back). `MakeStructInPlace` then moves the base
         // out of its register — the runtime sees refcount 1 on the unique path and an alias forces a
         // copy. A captured cell or upvalue base is not handled — it falls through to the copying
-        // `MakeRecord`, which is always correct.
+        // `MakeStruct`, which is always correct.
         //
         // The field operands are consumed *before* `TakeGlobal` runs, so a field that itself reads the
         // global (`g = T { ...g, x: g }`) loads the live value before the slot is vacated.
@@ -2375,7 +2425,7 @@ impl<'m> FnCompiler<'m> {
                     reg
                 }
             };
-            self.code.push(Op::MakeRecordInPlace {
+            self.code.push(Op::MakeStructInPlace {
                 dst,
                 shape,
                 named: named.into_boxed_slice(),
@@ -2401,7 +2451,7 @@ impl<'m> FnCompiler<'m> {
             let r = self.consume_operand(&init.value, &mut consumed)?;
             named.push((slot as u16, r));
         }
-        self.code.push(Op::MakeRecord {
+        self.code.push(Op::MakeStruct {
             dst,
             shape,
             named: named.into_boxed_slice(),
@@ -2912,7 +2962,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             "Map" | "map" => NarrowTarget::Map,
             "Set" | "set" => NarrowTarget::Set,
             "Enum" => NarrowTarget::AnyEnum,
-            "Record" => NarrowTarget::AnyRecord,
+            "Struct" => NarrowTarget::AnyStruct,
             "Class" => NarrowTarget::AnyClass,
             other => NarrowTarget::Named(other.to_string()),
         },
@@ -2946,7 +2996,7 @@ mod tests {
 
     #[test]
     fn bare_attribute_has_no_args() {
-        let m = manifest("#[Entity]\ntype User = { id: int };\n");
+        let m = manifest("#[Entity]\nstruct User { id: int }\n");
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].target, "User");
         assert_eq!(m[0].name, "Entity");
@@ -2957,7 +3007,7 @@ mod tests {
     fn positional_literal_args_reach_the_manifest() {
         // The richer-argument case: a string literal survives end-to-end into the manifest as a
         // typed value (not the identifier-only form of the earlier prototype).
-        let m = manifest("#[Route(\"/users\")]\ntype Users = { id: int };\n");
+        let m = manifest("#[Route(\"/users\")]\nstruct Users { id: int }\n");
         assert_eq!(m.len(), 1);
         assert_eq!(m[0].args.len(), 1);
         assert_eq!(m[0].args[0].name, None);
@@ -2966,7 +3016,7 @@ mod tests {
 
     #[test]
     fn named_and_mixed_literal_args_reach_the_manifest() {
-        let m = manifest("#[Cache(ttl: 60, eager: true)]\ntype Page = { id: int };\n");
+        let m = manifest("#[Cache(ttl: 60, eager: true)]\nstruct Page { id: int }\n");
         assert_eq!(m[0].args.len(), 2);
         assert_eq!(m[0].args[0].name, Some("ttl".to_string()));
         assert_eq!(m[0].args[0].value, AttrValue::Int(60));
@@ -2979,7 +3029,7 @@ mod tests {
         // P2.0's parity guarantee: the VM-side artifact (in the compiled `Module`) is *exactly*
         // what `lang_ast::reflect::build` produces from the AST — the same pure builder the
         // tree-walker calls. So both backends agree on reflection by construction, no drift.
-        let src = "#[Entity]\ntype User = { id: int };\nenum Color { Red; Rgb(r: int); }\n";
+        let src = "#[Entity]\nstruct User { id: int }\nenum Color { Red; Rgb(r: int); }\n";
         let source = Source::new(SourceId::FIRST, "t.lang", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
@@ -2997,13 +3047,13 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.lang",
-            "type Point = { x: int, y: int };\nenum Color { Red; Rgb(r: int); }\n",
+            "struct Point { x: int y: int }\nenum Color { Red; Rgb(r: int); }\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         let reflection = compile(&parsed.program).expect("compiles").reflection;
         let point = reflection.type_named("Point").expect("Point registered");
-        assert_eq!(point.kind, lang_ast::reflect::TypeKind::Record);
+        assert_eq!(point.kind, lang_ast::reflect::TypeKind::Struct);
         assert_eq!(point.fields, vec!["x".to_string(), "y".to_string()]);
         let color = reflection.type_named("Color").expect("Color registered");
         assert_eq!(color.kind, lang_ast::reflect::TypeKind::Enum);

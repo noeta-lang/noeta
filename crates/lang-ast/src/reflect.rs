@@ -11,7 +11,7 @@ use crate::{AttrArg, AttrValue, Attribute, FieldDecl, Program, Stmt};
 pub struct ReflectionInfo {
     /// Every `#[...]` data attribute, in source order, each keyed by the declaration it annotates.
     pub manifest: Vec<AttributeRecord>,
-    /// Every declared record/class/enum, in source order.
+    /// Every declared struct/class/enum, in source order.
     pub types: Vec<TypeInfo>,
     /// The `(declaration, role)` index: for every declaration bearing an attribute that carries a
     /// `@role(Enum.Variant)` tag, the declaration's name paired with that role's enum and variant.
@@ -38,9 +38,9 @@ impl ReflectionInfo {
     /// The reflection [`TypeRepr`] of a **type reference** by name — a bare type name used as a value
     /// (`#[Encode(codec: JsonCodec)]`). Reports the same precise constructor a `type_of` over a value
     /// of that type would: a built-in scalar/collection maps to its lattice variant (`int` →
-    /// `Type.Int`, `list` → `Type.List(Dyn)`), and a declared type maps by *kind* (`Type.Record`/
+    /// `Type.Int`, `list` → `Type.List(Dyn)`), and a declared type maps by *kind* (`Type.Struct`/
     /// `Enum`/`Class`). Only a name with no known classification — an opaque import, or one of the
-    /// abstract kind-types `Enum`/`Record`/`Class` used directly — stays `Type.Named`, the honest
+    /// abstract kind-types `Enum`/`Struct`/`Class` used directly — stays `Type.Named`, the honest
     /// unknown-kind fallback. Both backends build a type-ref through this one function, so the
     /// materialized `Type` value agrees across the differential by construction.
     pub fn type_ref_repr(&self, name: &str) -> TypeRepr {
@@ -58,7 +58,7 @@ impl ReflectionInfo {
             "Option" => TypeRepr::Option(dyn_box()),
             "Result" => TypeRepr::Result(dyn_box(), dyn_box()),
             _ => match self.type_named(name).map(|t| t.kind) {
-                Some(TypeKind::Record) => TypeRepr::Record(name.to_string(), Vec::new()),
+                Some(TypeKind::Struct) => TypeRepr::Struct(name.to_string(), Vec::new()),
                 Some(TypeKind::Class) => TypeRepr::Class(name.to_string(), Vec::new()),
                 Some(TypeKind::Enum) => TypeRepr::Enum(name.to_string(), Vec::new()),
                 None => TypeRepr::Named(name.to_string(), Vec::new()),
@@ -67,7 +67,7 @@ impl ReflectionInfo {
     }
 }
 
-/// One `#[Name(args)]` attached to a declaration. Semantically a record instance attached as
+/// One `#[Name(args)]` attached to a declaration. Semantically a struct instance attached as
 /// metadata; the runtime materializes it from the stored args (pass 2).
 #[derive(Debug, Clone, PartialEq)]
 pub struct AttributeRecord {
@@ -96,7 +96,7 @@ pub struct RoleRecord {
 /// The kind of a declared type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
-    Record,
+    Struct,
     Class,
     Enum,
 }
@@ -133,10 +133,10 @@ pub fn build(program: &Program) -> ReflectionInfo {
     let mut role_of: Vec<(String, (String, String))> = Vec::new();
     for stmt in &program.stmts {
         match stmt {
-            Stmt::Record(decl) => {
+            Stmt::Struct(decl) => {
                 push_attrs(&mut manifest, &decl.name, &decl.attrs);
                 push_field_attrs(&mut manifest, &decl.name, &decl.fields);
-                // A role tag rides on the attribute record; record each (validated) `Enum.Variant`
+                // A role tag rides on the attribute struct; record each (validated) `Enum.Variant`
                 // so every declaration the attribute annotates inherits it. A malformed `@role`
                 // never reaches a runnable program (the checker rejects it).
                 if let Some(roles) = decl.role.as_ref() {
@@ -149,7 +149,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                 }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
-                    kind: TypeKind::Record,
+                    kind: TypeKind::Struct,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
                     variants: Vec::new(),
                 });
@@ -221,7 +221,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
     }
 }
 
-/// Resolve an attribute's arguments to its record's field values, in declaration order — the shared
+/// Resolve an attribute's arguments to its struct's field values, in declaration order — the shared
 /// mapping both backends use to materialize the attribute instance, so they build identical values.
 /// Positional arguments fill fields left to right; named arguments bind by field name. The use-site
 /// construction check (E0009/E0007/E0005) guarantees a well-formed program supplies exactly one
@@ -277,12 +277,12 @@ pub enum TypeRepr {
     Map(Box<TypeRepr>, Box<TypeRepr>),
     Result(Box<TypeRepr>, Box<TypeRepr>),
     /// A declared **enum** type by name, with its type arguments. The reflection `Type` ADT
-    /// distinguishes the three nominal kinds (so a consumer can branch on enum-vs-record-vs-class
+    /// distinguishes the three nominal kinds (so a consumer can branch on enum-vs-struct-vs-class
     /// from a `type_of` result alone); both backends classify a value's shape kind into the matching
     /// variant. Type arguments are erased to `Dyn` at runtime fidelity, precise at compile-time.
     Enum(String, Vec<TypeRepr>),
-    /// A declared **record** type by name, with its type arguments.
-    Record(String, Vec<TypeRepr>),
+    /// A declared **struct** type by name, with its type arguments.
+    Struct(String, Vec<TypeRepr>),
     /// A declared **class** type by name, with its type arguments.
     Class(String, Vec<TypeRepr>),
     /// A nominal type whose **kind is not statically known** — an opaque imported type at
@@ -310,7 +310,7 @@ impl TypeRepr {
             TypeRepr::Map(_, _) => "Map",
             TypeRepr::Result(_, _) => "Result",
             TypeRepr::Enum(_, _) => "Enum",
-            TypeRepr::Record(_, _) => "Record",
+            TypeRepr::Struct(_, _) => "Struct",
             TypeRepr::Class(_, _) => "Class",
             TypeRepr::Named(_, _) => "Named",
             TypeRepr::Fn(_, _) => "Fn",
@@ -327,7 +327,7 @@ pub const TYPE_ENUM: &str = "Type";
 /// `@semantic` directive; `Semantic` is implicitly semantic.
 pub const SEMANTIC_ENUM: &str = "Semantic";
 
-/// The `RoleBinding` prelude record's name — `{ target: string, role: Enum }`, the element type of
+/// The `RoleBinding` prelude struct's name — `{ target: string, role: Enum }`, the element type of
 /// `roles_of()`'s result list. `role` is typed as the abstract `Enum` kind because a binding's role
 /// may be any `@semantic` enum (the built-in `Semantic` or a user one), not a single fixed type.
 pub const ROLE_BINDING: &str = "RoleBinding";

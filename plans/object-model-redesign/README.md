@@ -326,28 +326,41 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
 - Distinct from the **inferred-static type-system** track (the checker) and the **type-system-direction**
   memory — this is the object/value *model*, not type *inference*.
 
-## Open questions (settle before slicing)
+## Open questions — SETTLED (2026-06-26 design session)
 
-1. **Generics** across the kinds (`struct Box<T>`, `class Cell<T>`, `enum Option<T>`) — mostly unchanged,
-   but confirm variance/erasure interplay with reference identity for `class<T>`.
-2. **Visibility** details — `pub` fields vs private-literal-by-default for classes (encapsulation); does
-   a struct field of `class` type force the struct boxed? (Yes — expected.)
-3. **`mut` bindings vs reference classes** — `mut x` (rebind the binding) vs `x.f = v` (mutate through
-   the reference). For a reference class, `x.f = v` needs no `mut` binding (it mutates the shared
-   instance, not the binding); for a value struct it's a reassignment (needs `mut`). Spell this out — it
-   diverges from Phase 5.2's struct rule.
-4. **Exact spellings** — `@dev` vs `@tier` for the *declaration* directive (usage is settled as
-   `@<tier> { }`); tuple access (`.0` vs a method); and the parser rule for block-form directives.
-5. **Enum-body** — land with the redesign, or as an independent follow-on (it's self-contained).
+1. **Generics** — **full reification (C#-style)** is the committed end-state, but as its **own
+   milestone-scale track AFTER** this taxonomy arc; slices 1–6 run under today's **erasure**. Identity
+   (`===`) is per-allocation, independent of type args, so nothing in the arc depends on the generics
+   model. Monomorphization rejected (wrong shape for the IR-interpreter + register-VM).
+2. **Visibility** — `struct` fields default **public** (transparent data; literal-constructible
+   anywhere); `class` fields default **private** with per-field `pub` opt-in. **Parsed in slice 1**
+   (optional `pub` on a field); **enforced in slice 2** (private-default + literal-gating). A struct
+   field of `class` type still forces the struct boxed (confirmed). Construction stays the
+   visibility-gated literal + an associated `fn` (the existing `new`-by-convention method; no new syntax).
+3. **`mut` rule (asymmetric)** — `struct` `x.f = v` needs the field `mut` **and** a `mut x` binding (it's
+   COW sugar for `x = {…x, f:v}`, a rebind); `class` `x.f = v` needs **only** the field `mut` (mutates
+   the shared instance). The struct side already falls out of the binding-reassignment analysis in
+   slice 1; the class relaxation is slice 2.
+4. **Spellings** — the declaration directive is **`@tier`** (not `@dev`); the primitive is
+   `name + content-kind + inclusion-rule`, generalizing to build-profile tiers (e.g. a `@debug` tier).
+   Tuple access is **`.0`/`.1`**.
+5. **Enum-body** — lands as **slice 3** (part of this arc).
 
 ## Suggested slicing
 
 1. **Rename + unify declaration syntax** (`record`→`struct`, retire `type X={}`, one body grammar). Pure
-   surface; large but mechanical.
+   surface; large but mechanical. **✅ DONE (2026-06-26)** — `struct` keyword + unified body (fields with
+   `pub`/`mut`, inherent methods, in-body `impl`, no `destruct`); `type X={}` retired (`type` reserved);
+   internal `Record`→`Struct` rename across all crates incl. the reflection `Type.Struct` surface; struct
+   methods wired end-to-end through the class-parallel path (IR `StructDef`, compiler protos/dispatch,
+   both eval backends, checker method-body validation). Gates green: conformance 266/0, differential
+   agrees (0-skipped), leak residency 0 both backends, clippy/fmt clean, miri clean.
 2. **class = reference** (the semantic core): identity, `===`, `!Send`, in-place shared mutation; move
-   the value-mutation machinery to `struct`. The load-bearing slice.
+   the value-mutation machinery to `struct`; enforce field visibility (private-default classes). The
+   load-bearing slice.
 3. **Enum bodies** (methods + in-body impls). Self-contained.
 4. **Tuples** (value, positional, destructuring, patterns).
 5. **Field defaults** (opt-in per field). Independent.
-6. **Dev-tier blocks** — the primitive (`@dev` tiers + content-kind + DCE gate + manifest) with **`test`
-   first**, then `bench`/`doc`.
+6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + DCE gate + manifest) with
+   **`test` first**, then `bench`/`doc`. (The dev-tier section above predates the settled spelling and
+   still says `@dev`; the directive is **`@tier`** — see settled open-question 4.)

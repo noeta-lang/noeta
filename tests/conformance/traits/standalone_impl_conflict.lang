@@ -2,6 +2,6 @@
 // capability twice for one type is rejected (E0027), pointing at the later occurrence.
 // expect: error E0027 at 7:6
 // expect: exit 1
-type Route = { path: string };
+struct Route { path: string }
 impl Clone for Route {}
 impl Clone for Route {}

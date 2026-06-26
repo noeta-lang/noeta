@@ -10,10 +10,10 @@ class Widget {
 }
 
 @attribute
-type Builds = { target: Type };
+struct Builds { target: Type }
 
 #[Builds(target: Widget)]
-type Factory = { id: int };
+struct Factory { id: int }
 
 for b in attributes_of::<Builds>() {
     result = invoke(b.value.target, "make", [7]);

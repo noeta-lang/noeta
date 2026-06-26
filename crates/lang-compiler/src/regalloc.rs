@@ -206,7 +206,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*recv);
             f.uses.push(*index);
         }
-        Op::MakeRecord {
+        Op::MakeStruct {
             dst, named, spread, ..
         } => {
             f.def = Some(*dst);
@@ -217,7 +217,7 @@ fn op_facts(op: &Op) -> OpFacts {
                 f.uses.push(*s);
             }
         }
-        Op::MakeRecordInPlace {
+        Op::MakeStructInPlace {
             dst, named, base, ..
         } => {
             f.def = Some(*dst);
@@ -604,7 +604,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(recv);
             m(index);
         }
-        Op::MakeRecord {
+        Op::MakeStruct {
             dst, named, spread, ..
         } => {
             m(dst);
@@ -615,7 +615,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
                 m(s);
             }
         }
-        Op::MakeRecordInPlace {
+        Op::MakeStructInPlace {
             dst, named, base, ..
         } => {
             m(dst);

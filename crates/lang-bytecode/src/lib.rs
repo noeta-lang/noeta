@@ -104,14 +104,14 @@ pub enum NarrowTarget {
     Named(String),
     /// A union target (`x.as<int | string>()`): matches if the value matches **any** member.
     AnyOf(Vec<NarrowTarget>),
-    /// An abstract kind-type target (`x.as<Enum>()` / `x is Record`): matches any value of that
+    /// An abstract kind-type target (`x.as<Enum>()` / `x is Struct`): matches any value of that
     /// declaration kind, regardless of which concrete type it is.
     AnyEnum,
-    AnyRecord,
+    AnyStruct,
     AnyClass,
 }
 
-/// How a [`Op::MakeRecordInPlace`] is allowed to reuse its consumed `base` object's allocation.
+/// How a [`Op::MakeStructInPlace`] is allowed to reuse its consumed `base` object's allocation.
 ///
 /// This is the compile-time half of reuse analysis: the compiler always knows the construct is a
 /// *self-update* (`acc = Type { ...acc, f: v }`, so `base` is consumed), but whether the in-place
@@ -341,12 +341,12 @@ pub enum Op {
         index: Reg,
         span: Span,
     },
-    /// `dst = Type { named..., ...spread }` — construct a declared record/class instance whose
+    /// `dst = Type { named..., ...spread }` — construct a declared struct/class instance whose
     /// layout is `shapes[shape]`. `named` gives each provided field's slot index and value
     /// register; `spread` (if present) is a base object every still-unset declared slot is
     /// copied from. A declared slot left unset by both raises E0009 ("missing field(s) ...")
     /// at `span`.
-    MakeRecord {
+    MakeStruct {
         dst: Reg,
         shape: u32,
         named: Box<[(u16, Reg)]>,
@@ -355,15 +355,15 @@ pub enum Op {
     },
     /// `dst = Type { named..., ...base }` for a **self-update** (`acc = Type { ...acc, f: v }`),
     /// where `base` holds the consumed accumulator — its single reference has been moved into the
-    /// `base` register (cleared before this op, transferring the ref), the record analogue of
+    /// `base` register (cleared before this op, transferring the ref), the struct analogue of
     /// [`Op::ConcatInPlace`]. When `base` is uniquely owned and already the target `shape`, its
     /// allocation is **reused**: only the `named` slots are overwritten (each unchanged field's
     /// reference transfers from `base` to the result), avoiding the allocation and per-field
-    /// retain a plain `MakeRecord { spread }` performs. `check` selects the runtime-checked or the
+    /// retain a plain `MakeStruct { spread }` performs. `check` selects the runtime-checked or the
     /// statically-proven path (see [`ReuseCheck`]); the runtime path and the `Static`-but-aliased
-    /// fallback build a fresh object exactly like `MakeRecord` and release `base`. The missing-field
+    /// fallback build a fresh object exactly like `MakeStruct` and release `base`. The missing-field
     /// guarantee holds by construction (a same-shape base provides every field).
-    MakeRecordInPlace {
+    MakeStructInPlace {
         dst: Reg,
         shape: u32,
         named: Box<[(u16, Reg)]>,
@@ -483,7 +483,7 @@ pub enum Op {
         target: NarrowTarget,
     },
     /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
-    /// module manifest, each materialized into a `T` record and paired with its target. `type_name`
+    /// module manifest, each materialized into a `T` struct and paired with its target. `type_name`
     /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
     AttributesOf {
         dst: Reg,
@@ -733,7 +733,7 @@ pub struct MethodEntry {
 /// A compiled module: the prototype table plus the object-model side tables. `protos[0]` is
 /// the top-level program; the rest are functions, closures, and methods, referenced by
 /// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
-/// (referenced by index from `MakeRecord`/`MakeEnum`); `methods` is the instance-method
+/// (referenced by index from `MakeStruct`/`MakeEnum`); `methods` is the instance-method
 /// dispatch table.
 #[derive(Debug, Clone)]
 pub struct Module {
@@ -926,7 +926,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Index {
             dst, recv, index, ..
         } => format!("Index       r{dst} <- r{recv}[r{index}]"),
-        Op::MakeRecord {
+        Op::MakeStruct {
             dst,
             shape,
             named,
@@ -941,11 +941,11 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
                 parts.push(format!("..r{base}"));
             }
             format!(
-                "MakeRecord  r{dst} <- shape s{shape} {{{}}}",
+                "MakeStruct  r{dst} <- shape s{shape} {{{}}}",
                 parts.join(", ")
             )
         }
-        Op::MakeRecordInPlace {
+        Op::MakeStructInPlace {
             dst,
             shape,
             named,

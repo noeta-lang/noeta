@@ -1,13 +1,13 @@
-// Materialization maps positional and named attribute arguments onto the record's fields, so a
+// Materialization maps positional and named attribute arguments onto the struct's fields, so a
 // multi-field attribute round-trips through the manifest into a correctly-built instance.
 // expect: stdout "60"
 // expect: stdout "true"
 // expect: exit 0
 @attribute
-type Cache = { ttl: int, eager: bool };
+struct Cache { ttl: int eager: bool }
 
 #[Cache(ttl: 60, eager: true)]
-type Page = { id: int };
+struct Page { id: int }
 
 for c in attributes_of::<Cache>() {
     echo c.value.ttl;

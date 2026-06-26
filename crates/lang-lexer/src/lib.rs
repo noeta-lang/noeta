@@ -56,6 +56,12 @@ pub enum TokenKind {
     EnumKw,
     #[token("match")]
     MatchKw,
+    /// Reserved: the value-kind declaration keyword `struct Name { ... }`. Replaces the retired
+    /// `type X = { ... }` struct form.
+    #[token("struct")]
+    StructKw,
+    /// Reserved for a future type-alias feature; no grammar consumes it today (the `type X = { ... }`
+    /// struct form was retired in favour of `struct`).
     #[token("type")]
     TypeKw,
     #[token("class")]
@@ -250,6 +256,7 @@ impl TokenKind {
             TokenKind::InKw => "InKw",
             TokenKind::EnumKw => "EnumKw",
             TokenKind::MatchKw => "MatchKw",
+            TokenKind::StructKw => "StructKw",
             TokenKind::TypeKw => "TypeKw",
             TokenKind::ClassKw => "ClassKw",
             TokenKind::DestructKw => "DestructKw",
@@ -335,6 +342,7 @@ impl TokenKind {
             TokenKind::InKw => "`in`",
             TokenKind::EnumKw => "`enum`",
             TokenKind::MatchKw => "`match`",
+            TokenKind::StructKw => "`struct`",
             TokenKind::TypeKw => "`type`",
             TokenKind::ClassKw => "`class`",
             TokenKind::DestructKw => "`destruct`",

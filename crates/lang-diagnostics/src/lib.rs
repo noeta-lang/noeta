@@ -104,8 +104,8 @@ pub enum DiagnosticCode {
     /// already a known concrete type has nothing dynamic to narrow, so the `as` is a mistake.
     InvalidNarrow,
     /// A `#[Foo(...)]` data attribute names a type that is not usable in annotation position — `Foo`
-    /// is not a record marked `@attribute`. Attributes are records opted in with that directive
-    /// (also reported here when `@attribute` is placed on a class/enum — attributes are records only),
+    /// is not a struct marked `@attribute`. Attributes are structs opted in with that directive
+    /// (also reported here when `@attribute` is placed on a class/enum — attributes are structs only),
     /// so an unmarked or non-existent type cannot be attached as metadata.
     NotAnAttribute,
     /// A `#[Foo(...)]` attribute is attached to a declaration kind it does not permit. An attribute
@@ -113,8 +113,8 @@ pub enum DiagnosticCode {
     /// on any other kind (or naming an unknown kind in the directive) is this error.
     InvalidAttributeTarget,
     /// An `@role(...)` directive is malformed: it names an unknown role, supplies no role (or more
-    /// than one), or labels a record that is not itself an attribute (a role rides on what an
-    /// attribute attaches to, so the record must also be marked `@attribute`).
+    /// than one), or labels a struct that is not itself an attribute (a role rides on what an
+    /// attribute attaches to, so the struct must also be marked `@attribute`).
     InvalidRole,
     /// An expression, type, or pattern nests delimiters (`(` `[` `{`) deeper than the parser
     /// supports. The recursive-descent parser uses stack proportional to nesting depth, so an

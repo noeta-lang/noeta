@@ -1,7 +1,7 @@
 //! The type lattice: the vocabulary the M1 checker reasons in.
 //!
 //! Pure data, no inference logic (that lives in `lang-check`). A [`Type`] is either a concrete
-//! type (`int`, `List<T>`, a named record/class/enum, a function), [`Type::Unknown`] — the
+//! type (`int`, `List<T>`, a named struct/class/enum, a function), [`Type::Unknown`] — the
 //! internal **inference hole** — or [`Type::Dyn`], the explicit, user-nameable **top type**.
 //!
 //! ## Two tops, on purpose (the inferred-static design)
@@ -43,16 +43,16 @@ pub use traits::{BUILTIN_TRAITS, BuiltinTrait, SERIALIZE_FORMATS, operator_trait
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TypeKind {
     Enum,
-    Record,
+    Struct,
     Class,
 }
 
 impl TypeKind {
-    /// The user-facing type name (`Enum`/`Record`/`Class`).
+    /// The user-facing type name (`Enum`/`Struct`/`Class`).
     pub fn name(self) -> &'static str {
         match self {
             TypeKind::Enum => "Enum",
-            TypeKind::Record => "Record",
+            TypeKind::Struct => "Struct",
             TypeKind::Class => "Class",
         }
     }
@@ -88,7 +88,7 @@ pub enum Type {
     Option(Box<Type>),
     /// `Result<T, E>`.
     Result(Box<Type>, Box<Type>),
-    /// A declared record/class/enum (or an imported type), with its type **arguments** —
+    /// A declared struct/class/enum (or an imported type), with its type **arguments** —
     /// `Box<int>` is `Named("Box", [Int])`, a non-generic `Order` is `Named("Order", [])`. Carrying
     /// the arguments lets a generic container keep its element type through an instance (so
     /// `box.get()` is `int`, not `dyn`, and an instance method enforces the class's bounds).
@@ -99,12 +99,12 @@ pub enum Type {
         ret: Box<Type>,
     },
     /// An **abstract kind-type** — the supertype of every declared type of one kind: `Enum`
-    /// (any enum value), `Record` (any record), `Class` (any class instance). The PHP `UnitEnum` /
+    /// (any enum value), `Struct` (any struct), `Class` (any class instance). The PHP `UnitEnum` /
     /// Java `java.lang.Enum` / C# `System.Enum` model, generalized to the three nominal kinds. A
     /// concrete `Named(n, …)` widens into `Kind(k)` when `n` is a declared type of kind `k` — a
     /// **registry-dependent** rule the pure lattice cannot decide, so it lives in the checker
     /// (`assignable`), not in [`Self::subtype`]. Abstract: no runtime value *has* a kind-type (every
-    /// value is a concrete enum/record/class); it appears only in static positions (a field,
+    /// value is a concrete enum/struct/class); it appears only in static positions (a field,
     /// parameter, or return type) as a bound weaker than a concrete type but stronger than `dyn`.
     Kind(TypeKind),
     /// A declared **union** `A | B | …` — a *closed* `dyn` whose membership is a static, finite
@@ -240,7 +240,7 @@ impl Type {
                 | "Option"
                 | "Result"
                 | "Enum"
-                | "Record"
+                | "Struct"
                 | "Class"
         )
     }
@@ -315,7 +315,7 @@ impl Type {
                     "Option" => Type::Option(Box::new(arg(0))),
                     "Result" => Type::Result(Box::new(arg(0)), Box::new(arg(1))),
                     "Enum" => Type::Kind(TypeKind::Enum),
-                    "Record" => Type::Kind(TypeKind::Record),
+                    "Struct" => Type::Kind(TypeKind::Struct),
                     "Class" => Type::Kind(TypeKind::Class),
                     _ => Type::Named(name.clone(), args.iter().map(Type::from_ref).collect()),
                 }

@@ -1,18 +1,18 @@
 // Attribute parameters: a `#[...]` attribute may carry literal arguments — positional
-// (`"/users"`) and named (`method: "GET"`, `ttl: 60`) — which must construct the attribute record
+// (`"/users"`) and named (`method: "GET"`, `ttl: 60`) — which must construct the attribute struct
 // (`path` positional, `method`/`ttl` named). They are inert at runtime (collected into the build
 // manifest, never executed), so the program runs identically in both backends.
 // expect: stdout "1"
 // expect: exit 0
 @attribute
-type Route = { path: string, method: string };
+struct Route { path: string method: string }
 
 @attribute
-type Cache = { ttl: int };
+struct Cache { ttl: int }
 
 #[Route("/users", method: "GET")]
 #[Cache(ttl: 60)]
-type Users = { id: int };
+struct Users { id: int }
 
 u = Users { id: 1 };
 echo u.id;

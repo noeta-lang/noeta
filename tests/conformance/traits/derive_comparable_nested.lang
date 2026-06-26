@@ -6,10 +6,10 @@
 // expect: stdout "true"
 // expect: exit 0
 @derive(Comparable)
-type Version = { major: int, minor: int };
+struct Version { major: int minor: int }
 
 @derive(Comparable)
-type Release = { version: Version, build: int };
+struct Release { version: Version build: int }
 
 a = Release { version: Version { major: 1, minor: 9 }, build: 5 };
 b = Release { version: Version { major: 1, minor: 10 }, build: 0 };

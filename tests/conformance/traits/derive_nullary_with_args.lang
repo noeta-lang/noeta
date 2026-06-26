@@ -3,4 +3,4 @@
 // expect: error E0014 at 5:9
 // expect: exit 1
 @derive(Comparable<int>)
-type Point = { x: int };
+struct Point { x: int }
