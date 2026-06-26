@@ -363,17 +363,20 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
      per-type `structural_eq` bit on `Shape` (VM) + `TypeDef` (tree-walker), computed identically so
      both backends agree even on nested class fields. New **E0034** (`===` on a value operand). Next
      free **E0035**.
-   - **2b — reference in-place mutation.** Class `x.f = v` mutates the shared instance (visible
-     through every alias), no COW fork; struct keeps COW. Eval needs `RefCell` interior mutability on
-     `ObjectValue.fields` (a plain `Rc<…>` can't mutate a shared instance); the VM already writes
-     slots through a raw pointer, so it just skips the COW-copy branch for a class. `mut x` still
-     required at this step.
-   - **2b′ — asymmetric `mut` relaxation.** Class `x.f = v` needs only the field `mut`, **not** a
-     `mut x` binding (it is in-place, not a rebind). Implemented at the reassignment site (the parser
-     wraps `x.f=v` as a reassignment of `x`): skip the immutable-reassignment check (E0006) when the
-     new value is a **class instance identical (same allocation) to the binding's current value** —
-     which precisely captures in-place class mutation and excludes struct field-sets (value kind,
-     even when uniquely-owned-COW reuses the allocation) and class *rebinds* to a different instance.
+   - **2b — reference in-place mutation. ✅ DONE (`aee8d65`).** Class `x.f = v` mutates the shared
+     instance (visible through every alias), no COW fork; struct keeps COW. Eval got `RefCell`
+     interior mutability on `ObjectValue.fields` (a plain `Rc<…>` can't mutate a shared instance);
+     the VM already writes slots through a raw pointer, so it skips the COW-copy branch for a class.
+     `mut x` still required at this step.
+   - **2b′ — asymmetric `mut` relaxation. ✅ DONE.** Class `x.f = v` needs only the field `mut`,
+     **not** a `mut x` binding (it is in-place, not a rebind). Implemented via the **static checker**
+     option (chosen with the user): the checker now tracks per-binding mutability (`VarBinding`) and
+     rejects a **struct** field-set on an immutable receiver statically (kind-aware E0006); a `class`
+     field-set is always allowed. Both backends then **skip the immutable-reassignment check for
+     field-set binds** — a new `field_assign` flag on IR `Stmt::Bind` (set by lowering when the
+     value is an `Expr::FieldSet`) routes the tree-walker through `assign_force` and tells the VM
+     compiler not to emit the E0006 raise. So a class field can be assigned through an immutable
+     binding or a **function parameter** (reference passing), while a struct still requires `mut`.
    - **2c — eval object-cycle collection.** Reference classes can finally form cycles
      (`a.next=b; b.next=a`); the VM's heap collector already reclaims them, but the tree-walker only
      had a *closure-capture* cycle reaper (object cycles were impossible under value semantics). Add

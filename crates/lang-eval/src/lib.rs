@@ -740,6 +740,22 @@ impl Scope {
         }
     }
 
+    /// Reassign an existing binding **ignoring** its mutability — used for a field-set `x.f = v`
+    /// (object-model slice 2b′), where the checker has already enforced the kind-aware `mut` rule (a
+    /// `struct` field-set on an immutable binding is a static E0006; a `class` field-set mutates the
+    /// shared instance in place, and the rebind merely restores `x` to that same instance).
+    fn assign_force(&self, name: &str, value: Value) -> AssignOutcome {
+        if let Some(binding) = self.vars.borrow_mut().get_mut(name) {
+            drop_audit::on_bind(self as *const Scope as usize, name);
+            let old = std::mem::replace(&mut binding.value, value);
+            return AssignOutcome::Assigned(old);
+        }
+        match &self.parent {
+            Some(parent) => parent.assign_force(name, value),
+            None => AssignOutcome::NotFound,
+        }
+    }
+
     /// Take the value out of an existing **mutable** binding (replacing it with `Unit`),
     /// searching outward through the chain like [`Scope::assign`]. Returns the displaced value, or
     /// `None` if the nearest binding for `name` is immutable or absent (in which case the caller
@@ -1158,8 +1174,16 @@ impl Interpreter {
                 if let Some(result) = self.try_record_reuse(*mut_decl, name, *name_span, value) {
                     return result;
                 }
+                // A field-set `x.f = v` is parsed as this reassignment of `x` with an
+                // `Expr::FieldSet` value; skip the immutable-binding check (object-model slice 2b′ —
+                // the checker enforces the `struct` case statically; a `class` mutates in place).
+                let is_field_assign = matches!(value, Expr::FieldSet { .. });
                 let value = self.eval_expr(value)?;
-                self.bind(*mut_decl, name, *name_span, value)?;
+                if is_field_assign {
+                    self.bind_field_assign(name, *name_span, value)?;
+                } else {
+                    self.bind(*mut_decl, name, *name_span, value)?;
+                }
                 Ok(Flow::Normal)
             }
             Stmt::Fn(decl) => {
@@ -1929,11 +1953,35 @@ impl Interpreter {
     /// one is in scope, errors on an immutable one, and otherwise introduces a new
     /// immutable binding locally.
     fn bind(&mut self, mut_decl: bool, name: &str, name_span: Span, value: Value) -> Eval<()> {
+        self.bind_inner(mut_decl, false, name, name_span, value)
+    }
+
+    /// As [`Self::bind`], but for the reassignment wrapping a field-set `x.f = v` (object-model
+    /// slice 2b′): the immutable-binding check is skipped, because the checker already enforced the
+    /// kind-aware `mut` rule statically — a `struct` field-set on an immutable `x` is a static
+    /// E0006, and a `class` field-set mutates in place (this rebind restores `x` to that instance).
+    fn bind_field_assign(&mut self, name: &str, name_span: Span, value: Value) -> Eval<()> {
+        self.bind_inner(false, true, name, name_span, value)
+    }
+
+    fn bind_inner(
+        &mut self,
+        mut_decl: bool,
+        field_assign: bool,
+        name: &str,
+        name_span: Span,
+        value: Value,
+    ) -> Eval<()> {
         if mut_decl {
             self.scope.declare(name.to_string(), value, true);
             return Ok(());
         }
-        match self.scope.assign(name, value.clone()) {
+        let outcome = if field_assign {
+            self.scope.assign_force(name, value.clone())
+        } else {
+            self.scope.assign(name, value.clone())
+        };
+        match outcome {
             // Reassignment drops the displaced value, running its destructor if it was the
             // last reference (the deterministic destruction the spec requires).
             AssignOutcome::Assigned(old) => {

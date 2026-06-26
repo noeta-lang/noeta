@@ -1007,8 +1007,9 @@ impl<'m> FnCompiler<'m> {
                 name,
                 name_span,
                 value,
+                field_assign,
                 ..
-            } => self.binding(*mut_decl, name, *name_span, value),
+            } => self.binding(*mut_decl, *field_assign, name, *name_span, value),
             Stmt::Echo { value, span } => {
                 let t = self.atom_reg(value)?;
                 // Route a `Display` object through its `to_string`; identity otherwise.
@@ -1427,6 +1428,7 @@ impl<'m> FnCompiler<'m> {
     fn binding(
         &mut self,
         mut_decl: bool,
+        field_assign: bool,
         name: &str,
         name_span: Span,
         value: &Atom,
@@ -1457,7 +1459,10 @@ impl<'m> FnCompiler<'m> {
         // captured upvalues, then globals — mirroring the tree-walker's outward `Scope::assign`),
         // else declare a fresh local.
         if let Some(var) = self.lookup_local(name) {
-            if !var.mutable {
+            // A field-set `x.f = v` skips the immutability check (object-model slice 2b′): the
+            // checker has already rejected a `struct` field-set on an immutable `x` statically, and a
+            // `class` field-set mutates in place (this store just restores `x` to that instance).
+            if !var.mutable && !field_assign {
                 let idx = self.add_diag(immutable_diag(name, name_span));
                 self.code.push(Op::Raise { idx });
             } else if var.celled {
@@ -1497,7 +1502,7 @@ impl<'m> FnCompiler<'m> {
 
         // A captured upvalue: reassign through its cell, enforcing the source binding's mutability.
         if let Some(&index) = self.upvalue_index.get(name) {
-            if self.upvalue_mut[index as usize] {
+            if self.upvalue_mut[index as usize] || field_assign {
                 self.code.push(Op::UpvalueSet { index, src });
             } else {
                 let idx = self.add_diag(immutable_diag(name, name_span));
@@ -1514,7 +1519,7 @@ impl<'m> FnCompiler<'m> {
             self.module.module_globals.get(name).copied()
         };
         if let Some(mutable) = global_mut {
-            if mutable {
+            if mutable || field_assign {
                 self.code.push(Op::StoreGlobal {
                     name: name.to_string(),
                     src,

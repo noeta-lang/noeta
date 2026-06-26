@@ -173,10 +173,15 @@ impl Interpreter {
                 name,
                 name_span,
                 value,
+                field_assign,
                 ..
             } => {
                 let value = self.eval_ir_atom(value, frame)?;
-                self.bind(*mut_decl, name, *name_span, value)?;
+                if *field_assign {
+                    self.bind_field_assign(name, *name_span, value)?;
+                } else {
+                    self.bind(*mut_decl, name, *name_span, value)?;
+                }
                 Ok(Flow::Normal)
             }
             lang_ir::Stmt::Echo { value, span } => {

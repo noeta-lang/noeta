@@ -271,28 +271,57 @@ struct GenericInfo {
     raw_ret: Type,
 }
 
-/// A lexical scope stack: each frame maps a name to its inferred type. Inner frames shadow.
-type Env = Vec<HashMap<String, Type>>;
+/// One binding in a scope frame: its inferred type and whether it was declared `mut`. The `mutable`
+/// bit drives the kind-aware `x.f = v` rule (object-model slice 2b′): a value `struct` field-set is
+/// a rebind of `x`, so `x` must be `mut` (E0006); a reference `class` field-set mutates in place and
+/// needs no `mut` binding.
+#[derive(Clone)]
+struct VarBinding {
+    ty: Type,
+    mutable: bool,
+}
+
+/// A lexical scope stack: each frame maps a name to its binding. Inner frames shadow.
+type Env = Vec<HashMap<String, VarBinding>>;
 
 fn lookup(env: &Env, name: &str) -> Option<Type> {
-    env.iter().rev().find_map(|frame| frame.get(name).cloned())
+    env.iter()
+        .rev()
+        .find_map(|frame| frame.get(name).map(|b| b.ty.clone()))
+}
+
+/// Whether `name`'s nearest in-scope binding was declared `mut` (false if unbound).
+fn lookup_mutable(env: &Env, name: &str) -> bool {
+    env.iter()
+        .rev()
+        .find_map(|frame| frame.get(name).map(|b| b.mutable))
+        .unwrap_or(false)
 }
 
 fn bind(env: &mut Env, name: &str, ty: Type) {
+    bind_with(env, name, ty, false);
+}
+
+/// Declare a `mut` binding (a fresh, reassignable name).
+fn bind_mut(env: &mut Env, name: &str, ty: Type) {
+    bind_with(env, name, ty, true);
+}
+
+fn bind_with(env: &mut Env, name: &str, ty: Type, mutable: bool) {
     if let Some(frame) = env.last_mut() {
-        frame.insert(name.to_string(), ty);
+        frame.insert(name.to_string(), VarBinding { ty, mutable });
     }
 }
 
 /// Bind the result of an *assignment* `name = value` (not a `mut`/annotated declaration). If the
-/// name already exists in an enclosing frame it is a reassignment — update the type *there*, so a
-/// refinement made inside a nested scope (an accumulator built up in a loop body, `acc = acc ~
-/// [x]`) persists after that scope rather than reverting to the pre-loop type. Only a name not yet
-/// in scope is a fresh binding, placed in the innermost frame.
+/// name already exists in an enclosing frame it is a reassignment — update the type *there* (keeping
+/// its `mut`-ness), so a refinement made inside a nested scope (an accumulator built up in a loop
+/// body, `acc = acc ~ [x]`) persists after that scope rather than reverting to the pre-loop type.
+/// Only a name not yet in scope is a fresh (immutable) binding, placed in the innermost frame.
 fn assign(env: &mut Env, name: &str, ty: Type) {
     for frame in env.iter_mut().rev() {
-        if frame.contains_key(name) {
-            frame.insert(name.to_string(), ty);
+        if let Some(b) = frame.get_mut(name) {
+            b.ty = ty;
             return;
         }
     }
@@ -922,7 +951,12 @@ impl Checker {
                         if self.type_relevant(&expected) {
                             self.relevance.locals.insert(*name_span);
                         }
-                        bind(env, name, expected); // annotated = a fresh declaration
+                        // Annotated = a fresh declaration; carry its `mut`-ness for the field-set rule.
+                        if *mut_decl {
+                            bind_mut(env, name, expected);
+                        } else {
+                            bind(env, name, expected);
+                        }
                     }
                     None => {
                         let vty = self.check(value, &Type::Unknown, env);
@@ -951,7 +985,7 @@ impl Checker {
                         // a bare `x = …` reassigns an existing binding in its declaring scope so a
                         // refinement persists past a nested scope, else introduces a fresh binding.
                         if *mut_decl {
-                            bind(env, name, vty);
+                            bind_mut(env, name, vty);
                         } else {
                             assign(env, name, vty);
                         }
@@ -2379,6 +2413,34 @@ impl Checker {
             );
             return recv;
         };
+        // Asymmetric `mut` rule (object-model slice 2b′): a value `struct` field-set is desugared to
+        // a rebind of the receiver (`x = T { ...x, f: v }`), so the receiver binding must be `mut`
+        // (E0006); a reference `class` field-set mutates the shared instance in place, needing no
+        // `mut` binding. (The field itself must still be declared `mut` — E0033, checked below.)
+        if matches!(
+            self.type_kinds.get(&name),
+            Some(lang_types::TypeKind::Struct)
+        ) && let Expr::Ident {
+            name: recv_name,
+            span: recv_span,
+        } = receiver
+            && !lookup_mutable(env, recv_name)
+        {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::ImmutableAssignment,
+                    *recv_span,
+                    format!(
+                        "cannot assign to field `{field}`: `{recv_name}` is an immutable binding, \
+                         and a `struct` field-set rebinds it"
+                    ),
+                )
+                .with_help(format!(
+                    "declare it `mut {recv_name} = ...` (a value `struct` is updated by rebinding); \
+                     a reference `class` field mutates in place without `mut`"
+                )),
+            );
+        }
         let is_mut = self
             .mut_fields
             .get(&name)

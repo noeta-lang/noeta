@@ -114,12 +114,17 @@ impl Lowerer {
                 span,
                 ..
             } => {
+                // A `x.f = v` field-set is parsed as a reassignment of `x` whose value is an
+                // `Expr::FieldSet`; flag it so the backends skip the immutable-reassignment check
+                // (object-model slice 2b′ — the checker enforces the `struct` case statically).
+                let field_assign = matches!(value, Expr::FieldSet { .. });
                 let atom = self.lower_expr(value, out)?;
                 out.push(Stmt::Bind {
                     mut_decl: *mut_decl,
                     name: name.clone(),
                     name_span: *name_span,
                     value: atom,
+                    field_assign,
                     span: *span,
                 });
                 Ok(())

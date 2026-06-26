@@ -1,0 +1,21 @@
+// Object-model slice 2b′ — the asymmetric `mut` rule. A reference `class` field-set mutates the
+// shared instance in place, so it needs only a `mut` *field*, not a `mut` *binding*: an immutable
+// binding — or even a function parameter — can have its `mut` fields assigned. Because the instance
+// is shared, mutating it through a function is visible to the caller. (A value `struct` field-set
+// rebinds, so it does require a `mut` binding — see struct_field_set_needs_mut.) Both backends agree.
+// expect: stdout "5"
+// expect: stdout "6"
+// expect: exit 0
+class Box {
+    mut n: int
+    fn new(n: int): Box { return Box { n: n }; }
+}
+
+fn bump(b: Box): void {   // `b` is an immutable parameter binding
+    b.n = b.n + 1;        // allowed — a class field mutates in place, no `mut` binding needed
+}
+
+b = Box.new(5);       // an immutable binding
+echo b.n;             // 5
+bump(b);              // mutate through a function; the caller's instance changes
+echo b.n;             // 6

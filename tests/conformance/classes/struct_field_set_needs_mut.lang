@@ -1,0 +1,9 @@
+// Object-model slice 2b′ — the other half of the asymmetric `mut` rule. A value `struct` field-set
+// `p.x = v` desugars to a rebind of `p` (`p = Point { ...p, x: v }`), so `p` must be a `mut` binding
+// — an immutable one is E0006 at check time. The field *is* declared `mut`, so this isolates the
+// binding-`mut` requirement (contrast class_field_no_mut_binding, where a class needs no `mut`).
+// expect: error E0006 at 9:1
+struct Point { mut x: int  mut y: int }
+
+p = Point { x: 1, y: 2 };
+p.x = 9;

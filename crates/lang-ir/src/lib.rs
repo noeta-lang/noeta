@@ -317,6 +317,11 @@ pub enum Stmt {
         name: String,
         name_span: Span,
         value: Atom,
+        /// True when this bind is the reassignment wrapping a field-set `x.f = v` (object-model
+        /// slice 2b′). The backends **skip the immutable-reassignment check (E0006)** for it: a
+        /// reference `class` field-set mutates in place (the rebind just restores `x`), and a value
+        /// `struct` field-set on an immutable `x` is already rejected *statically* by the checker.
+        field_assign: bool,
         span: Span,
     },
     /// `echo atom;` — display the atom and append a newline to stdout.
