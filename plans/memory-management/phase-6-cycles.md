@@ -21,14 +21,25 @@ collector would have meant making the core refcount path Bacon–Rajan-aware):
   reachable only through a capture cycle, so clearing its bindings lets `Rc` cascade-free it. The
   exit-time analogue of the VM sweep.
 
-**Still open (lower priority, not on the residency-0 critical path):** trial-deletion wiring (6.1) +
-the **6.4 head-to-head benchmark** that picks the default collector; **destructor-on-collect** (a
-cycle whose members carry a `destruct` — the closure/scope cycles targeted here carry none, so both
-reapers free without running destructors, a documented follow-up); **in-run safepoint collection**
+**Trial-deletion wiring + the 6.4 benchmark are DONE** (`1fec764`) — default `Trace`, `TrialDeletion`
+behind a flag; see `phase-6-benchmarks.md`. **Destructor-on-collect + the external-reference fix are
+DONE** (this commit): both collectors now *return* the garbage they identify, and the VM runs each
+fresh member's `__destruct` (while the dead subgraph is still allocated) and — for the trace, whose
+shallow free does not release children — drops references a garbage member holds to *live* values,
+before freeing. Key insight: **value semantics makes object cycles impossible** (a shared mutation
+copies), so the only cycles are closure self-capture; a cycle *member* therefore never carries a
+destructor, but a destructor-bearing value **captured** by the cycle is itself dead and fires its
+`destruct` here. The eval reaper mirrors it (drains + `destroy_value`s the captured bindings). Reclaim
+runs in `Trace` mode so a destructor's internal release can't re-buffer a pinned member. Cross-backend
+order is best-effort (spec §6); tests are order-independent. Conformance 265 (+`gc/cycle_capture_
+destructor`, `gc/cycle_external_ref`), differential agrees, residency 0 both backends + both modes,
+miri-clean.
+
+**Still open (lower priority, not on the residency-0 critical path):** **in-run safepoint collection**
 (both reapers run only at clean exit, which bounds the gate but not the peak residency of a program
-that builds cycles in a loop); and the eval **structural** `Weak`-parent option (6.3) is now moot for
-the gate (the reaper covers it). Registry overhead is ~10% on the heaviest alloc-churn micro-bench —
-the per-alloc cost the 6.4 benchmark weighs.
+that builds cycles in a loop); the **intrusive free-list** registry (the 6.4 follow-up that would
+close the trace's acyclic overhead). The eval **structural** `Weak`-parent option (6.3) is moot (the
+reaper covers it). Registry overhead is ~10% on the heaviest alloc-churn micro-bench.
 
 ## 6.1 Wire the dormant trial-deletion collector
 

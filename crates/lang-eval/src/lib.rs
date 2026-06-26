@@ -959,17 +959,28 @@ impl Interpreter {
     /// analogue of the VM's backup mark-sweep. Run **once at clean exit, after [`destroy_globals`]**:
     /// at that point every legitimately-live binding has been torn down, so any captured scope still
     /// alive is reachable only through a `scope ↔ closure` capture cycle that `Rc` cannot break.
-    /// Clearing such a scope's bindings drops its closures' references, and the cascade frees the
-    /// closures and then the scope itself (`Rc` reaching zero). Each scope is held alive by the
-    /// upgraded handle for the duration of its own clear, so nothing is freed mid-mutation. Idempotent
-    /// (a scope cleared as a side effect of an earlier one simply fails to upgrade); the global scope,
-    /// already drained, is a harmless no-op.
+    ///
+    /// Each such scope's bindings are **drained and destroyed** (Phase-6 destructor-on-collect): a
+    /// captured destructor-bearing value held only by the dead cycle fires its `__destruct` at its last
+    /// reference, exactly as the VM runs destructors on the values its collector reclaims. (Object
+    /// cycles cannot form under value semantics, so a binding is never itself a cycle member with a
+    /// destructor; the destructor-bearing values are the *captured* leaves, as on the VM side.) Draining
+    /// also breaks the cycle, so `Rc` reclaims the closures and the scope. The upgraded handle keeps the
+    /// scope alive across its own drain; intra-cycle order is best-effort (spec §6), matching the VM.
     fn reap_captured_scope_cycles(&mut self) {
         let candidates = CAPTURED_SCOPES.with(|r| std::mem::take(&mut *r.borrow_mut()));
         for weak in candidates {
             if let Some(scope) = weak.upgrade() {
-                scope.vars.borrow_mut().clear();
+                let values: Vec<Value> = scope
+                    .vars
+                    .borrow_mut()
+                    .drain()
+                    .map(|(_, binding)| binding.value)
+                    .collect();
                 scope.order.borrow_mut().clear();
+                for value in values {
+                    self.destroy_value(value);
+                }
             }
         }
     }

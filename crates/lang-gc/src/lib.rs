@@ -8,13 +8,17 @@
 //!
 //! The acyclic floor: `retain` bumps the count, `release` drops it and frees at zero (running
 //! `__destruct` is the VM's job, since a destructor needs the interpreter). Reference cycles —
-//! objects kept alive only by referencing each other — escape refcounting; the
-//! [`CycleCollector`] reclaims them by **Bacon–Rajan synchronous trial deletion**.
+//! objects kept alive only by referencing each other (under value semantics, only a self-recursive
+//! closure capturing itself) — escape refcounting and are reaped by a **cycle collector** (Phase 6).
 //!
-//! The collector is correct and `miri`-tested, but **not yet wired into the VM's `release`
-//! path**: the current language cannot form a cycle (objects are immutable after construction,
-//! so no program can tie a knot), so there is no cyclic garbage to buffer. It activates once
-//! field mutation lands and `release` begins buffering candidate roots.
+//! Two collectors are wired and selected by [`lang_value::CollectorMode`]: the default
+//! [`collect_trace`] (a backup mark-sweep over the live-object registry) and [`collect_trial_deletion`]
+//! (Bacon–Rajan synchronous trial deletion, fed by the release path's candidate buffer). Each
+//! *identifies* the garbage and hands it back as a [`Garbage`] set for the VM to reclaim — running
+//! `__destruct` on the dead members that carry one before freeing. The dormant [`CycleCollector`]
+//! struct below is the original trial-deletion prototype, retained for its unit tests of the shared
+//! `mark_gray`/`scan`/`gather_white` primitives. (`plans/memory-management/phase-6-benchmarks.md` has
+//! the trace-vs-trial head-to-head and the default-collector rationale.)
 
 use std::collections::HashSet;
 
@@ -35,26 +39,41 @@ pub fn release(value: Value) {
     value.release();
 }
 
+/// The unreachable objects a collection identified, handed back to the interpreter to **reclaim**
+/// (run `__destruct`, then free) — the collector never runs user code itself, since a destructor
+/// needs the interpreter. See [`lang_value`]'s reclaim contract and the VM's `reclaim_cycle_garbage`.
+#[derive(Debug, Default)]
+pub struct Garbage {
+    /// Members reclaimed for the first time: their `__destruct` (if any) must run **before** they
+    /// are freed, while the rest of the dead subgraph is still allocated (container-before-contained).
+    pub fresh: Vec<Value>,
+    /// Members whose `__destruct` already ran on the release path (trial-deletion's deferred-dealloc
+    /// objects): free only, never re-run their destructor.
+    pub already_destructed: Vec<Value>,
+    /// Whether a `fresh` member's references to **live** (surviving) values must be released as it is
+    /// freed. The trace needs this — `gc_free_shallow` does not release children, so a garbage object
+    /// pointing at a live one would otherwise leave that live value over-counted. Trial deletion has
+    /// already corrected those edges via its trial-decrement, so it sets this `false`.
+    pub release_external: bool,
+}
+
 /// **Backup mark-sweep trace** (Phase 6, the LXR-principled backup collector): a stop-the-world
-/// trace over the live-object registry that reclaims everything unreachable from `roots` —
-/// reference cycles and floating garbage alike, the cases refcounting alone cannot. Run at a
-/// safepoint (the root set must be fully walkable): the interpreter enumerates its roots (globals,
-/// live frame registers, open upvalue cells) and hands them here. Marks reachable objects, then
-/// frees the unmarked via `gc_free_shallow` in a flat pass over a registry snapshot (so the graph is
-/// intact during marking and no object is touched after it is freed).
+/// trace over the live-object registry that finds everything unreachable from `roots` — reference
+/// cycles and floating garbage alike, the cases refcounting alone cannot. Run at a safepoint (the
+/// root set must be fully walkable): the interpreter enumerates its roots (globals, live frame
+/// registers, open upvalue cells) and hands them here. Marks reachable objects and **returns** the
+/// unmarked for the interpreter to reclaim (so `__destruct` can run before the free).
 ///
 /// Colors: `alloc` paints every object `Black`; this trace paints reachable objects `Gray` and
-/// resets survivors to `Black`, so `Black`-after-mark == unreachable garbage. (`gc_free_shallow`
-/// does not run `__destruct` — destructor-bearing cycles are a documented follow-up; the closure/
-/// scope cycles this phase targets carry none.)
-pub fn collect_trace(roots: &[Value]) {
+/// resets survivors to `Black`, so `Black`-after-mark == unreachable garbage.
+pub fn collect_trace(roots: &[Value]) -> Garbage {
     for &root in roots {
         mark(root);
     }
     let live = lang_value::live_objects();
     // Garbage is everything the mark did not reach; identify it *before* resetting survivors (which
     // also become `Black`), so the two are distinguishable.
-    let garbage: Vec<Value> = live
+    let fresh: Vec<Value> = live
         .iter()
         .copied()
         .filter(|v| v.gc_color() != Color::Gray)
@@ -64,8 +83,10 @@ pub fn collect_trace(roots: &[Value]) {
             v.gc_set_color(Color::Black);
         }
     }
-    for v in garbage {
-        v.gc_free_shallow();
+    Garbage {
+        fresh,
+        already_destructed: Vec::new(),
+        release_external: true,
     }
 }
 
@@ -81,7 +102,7 @@ pub fn collect_trace(roots: &[Value]) {
 /// restores any subgraph still externally referenced; `CollectRoots` frees what stays white (the
 /// genuine cycles). Reuses the same `mark_gray`/`scan`/`gather_white` primitives as the dormant
 /// [`CycleCollector`].
-pub fn collect_trial_deletion() {
+pub fn collect_trial_deletion() -> Garbage {
     let roots = lang_value::take_candidates();
     let mut gray_roots = Vec::new();
     let mut deferred = Vec::new();
@@ -105,22 +126,29 @@ pub fn collect_trial_deletion() {
     for &s in &gray_roots {
         scan(s);
     }
-    let mut garbage = Vec::new();
+    let mut white = Vec::new();
     for &s in &gray_roots {
-        gather_white(s, &mut garbage);
+        gather_white(s, &mut white);
     }
-    // All traversal is done; reclaim. `freed` dedups by address so nothing is freed — or even
-    // dereferenced — twice (a deferred object pulled into a cycle is reclaimed here and skipped below).
-    let mut freed: HashSet<u64> = HashSet::with_capacity(garbage.len() + deferred.len());
-    for v in garbage {
-        if freed.insert(v.bits()) {
-            v.gc_free_shallow();
-        }
-    }
-    for v in deferred {
-        if freed.insert(v.bits()) {
-            v.gc_free_shallow();
-        }
+    // Classify for the interpreter to reclaim, deduped by address so a member is never returned (and
+    // so never freed or dereferenced) twice — a deferred object pulled into a cycle by `mark_gray` is
+    // returned as `fresh` (the cycle path) and dropped from `already_destructed`. The trial-decrement
+    // already corrected every external edge, so `release_external` is false. White members have not
+    // had `__destruct` run (they died only now, inside the cycle); deferred ones already did, on the
+    // release path that buffered them.
+    let mut seen: HashSet<u64> = HashSet::with_capacity(white.len() + deferred.len());
+    let fresh: Vec<Value> = white
+        .into_iter()
+        .filter(|v| seen.insert(v.bits()))
+        .collect();
+    let already_destructed: Vec<Value> = deferred
+        .into_iter()
+        .filter(|v| seen.insert(v.bits()))
+        .collect();
+    Garbage {
+        fresh,
+        already_destructed,
+        release_external: false,
     }
 }
 

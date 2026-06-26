@@ -1,0 +1,25 @@
+// A reclaimed cycle that references a LIVE value must not over-count it (Phase 6 — the trace's
+// external-reference fix). The self-recursive `rec` ties a closure↔cell cycle AND captures the live
+// global `g`. When the cycle is collected, freeing its members must release their reference to `g`
+// (which survives — the global still holds it); otherwise `g` would be left over-counted, leaking and
+// never running its `destruct`. So `g` is still usable after collection (`echo g.id` → 99) and its
+// destructor fires exactly once at program end (`drop 99`). Both backends agree.
+// expect: stdout "99"
+// expect: stdout "99"
+// expect: stdout "drop 99"
+// expect: exit 0
+class Res {
+    id: int
+    fn new(id: int): Res { return Res { id: id }; }
+    destruct { echo "drop ${id}"; }
+}
+g = Res.new(99);
+fn make(): int {
+    fn rec(n: int): int {
+        if n <= 0 { return g.id; }
+        return rec(n - 1);
+    }
+    return rec(2);
+}
+echo make();
+echo g.id;

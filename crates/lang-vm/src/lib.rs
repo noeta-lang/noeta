@@ -323,7 +323,8 @@ fn execute_with_collector(
     // and global release has had a chance to buffer the cycle's roots.
     if mode == lang_value::CollectorMode::Trace {
         let roots: Vec<Value> = vm.globals.values().copied().collect();
-        collect_trace(&roots);
+        let garbage = collect_trace(&roots);
+        vm.reclaim_cycle_garbage(garbage);
     }
     // Destroy the globals at program end in reverse declaration order, running each
     // destructor on its last reference — the deterministic destruction the spec requires.
@@ -333,7 +334,8 @@ fn execute_with_collector(
         }
     }
     if mode == lang_value::CollectorMode::TrialDeletion {
-        lang_gc::collect_trial_deletion();
+        let garbage = lang_gc::collect_trial_deletion();
+        vm.reclaim_cycle_garbage(garbage);
     }
 
     let exit_code = if vm.diagnostics.is_empty() { 0 } else { 1 };
@@ -1264,6 +1266,61 @@ impl<'m> Vm<'m> {
     /// object is freed — the deterministic destruction the spec requires. Used at every
     /// destructor-relevant drop point: reassignment, program end, and (Phase 4) a destructor-
     /// relevant `Op::Drop` at a local's last use. A non-relevant release uses the plain `release`.
+    /// Reclaim the garbage a cycle collector identified (Phase 6 destructor-on-collect + the trace's
+    /// external-reference fix). Runs each fresh member's `__destruct` while the whole dead subgraph is
+    /// still allocated (container-before-contained — a destructor may read a sibling's fields), then —
+    /// for the trace, whose shallow free does not release children — drops every reference a freed
+    /// member holds to a still-**live** value so that value is not left over-counted, and finally frees
+    /// every member. Members are pinned across the destructor + release phases so a side effect there
+    /// cannot free one early; `gc_free_shallow` reclaims the box regardless of that pinned count. Object
+    /// cycles cannot form under value semantics (a shared mutation copies), so a *member* never carries
+    /// a destructor — but a destructor-bearing value **captured** by a cycle's closure is itself dead,
+    /// and this is where its `__destruct` fires. Intra-cycle order is best-effort (spec §6); the eval
+    /// reaper mirrors the behavior so the differential agrees on order-independent programs.
+    fn reclaim_cycle_garbage(&mut self, garbage: lang_gc::Garbage) {
+        let lang_gc::Garbage {
+            fresh,
+            already_destructed,
+            release_external,
+        } = garbage;
+        // Reclaim in `Trace` mode regardless of the active collector: the members are pinned below, so
+        // in `TrialDeletion` mode a destructor's internal `release` of a (refcount-inflated) member
+        // would see it survive and **re-buffer it as a candidate** — a stale entry pointing at memory
+        // this reclaim then frees. Trace buffers nothing; the frees here are explicit `free_shallow`
+        // either way. Restored after (a no-op at clean exit, but correct if a safepoint ever calls this).
+        let saved_mode = lang_value::collector_mode();
+        lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
+        for &g in fresh.iter().chain(&already_destructed) {
+            retain(g);
+        }
+        for &g in &fresh {
+            if let Some(proto) = g
+                .shape()
+                .and_then(|s| self.destructors.get(&s.name).copied())
+            {
+                self.run_destructor(proto, g);
+            }
+        }
+        if release_external {
+            let dead: HashSet<u64> = fresh
+                .iter()
+                .chain(&already_destructed)
+                .map(|v| v.bits())
+                .collect();
+            for &g in &fresh {
+                for child in g.gc_children() {
+                    if !dead.contains(&child.bits()) {
+                        self.release_value(child);
+                    }
+                }
+            }
+        }
+        for g in fresh.into_iter().chain(already_destructed) {
+            g.gc_free_shallow();
+        }
+        lang_value::set_collector_mode(saved_mode);
+    }
+
     fn release_value(&mut self, value: Value) {
         // Immediates, and any reference that is not the last, never run a destructor here: an
         // immediate has none, and an alias survives (spec §2 — destruction defers to the final
@@ -3942,6 +3999,20 @@ mod tests {
         lang_value::reset_peak();
         let _ = run(src);
         lang_value::live_peak()
+    }
+
+    #[test]
+    fn destructor_runs_on_collected_cycle_capture() {
+        // Phase-6 destructor-on-collect: a self-recursive nested `fn` (the closure↔cell cycle) also
+        // captures a destructor-bearing `Res`. After the call the whole subgraph — cycle + captured
+        // `Res` — is unreachable garbage that only the collector reclaims; reclaiming it must run the
+        // captured `Res`'s `destruct` (its last reference died with the cycle). So `drop 7` prints at
+        // program-exit collection, after `make()`'s own `7`.
+        let r = run(
+            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\nfn make(): int {\n  r = Res.new(7);\n  fn rec(n: int): int { if n <= 0 { return r.id; } return rec(n - 1); }\n  return rec(2);\n}\necho make();\n",
+        );
+        assert_eq!(r.stdout, "7\ndrop 7\n");
+        assert_eq!(r.exit_code, 0);
     }
 
     #[test]

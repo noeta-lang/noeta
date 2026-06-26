@@ -1,0 +1,23 @@
+// Destructor-on-collect (Phase 6): a self-recursive nested `fn` ties a closure↔cell reference cycle
+// that refcounting cannot reclaim, AND captures a destructor-bearing `Res`. Once `make()` returns the
+// whole subgraph — the cycle and the captured `Res` — is unreachable garbage; reclaiming it runs the
+// captured `Res`'s `destruct` (its last reference died with the cycle). So `drop 7` prints during the
+// program-exit cycle collection, after `make()`'s own `7`. Both backends agree (the VM runs it on the
+// values its collector reclaims; the tree-walker on the bindings its capture-cycle reaper drains).
+// expect: stdout "7"
+// expect: stdout "drop 7"
+// expect: exit 0
+class Res {
+    id: int
+    fn new(id: int): Res { return Res { id: id }; }
+    destruct { echo "drop ${id}"; }
+}
+fn make(): int {
+    r = Res.new(7);
+    fn rec(n: int): int {
+        if n <= 0 { return r.id; }
+        return rec(n - 1);
+    }
+    return rec(2);
+}
+echo make();
