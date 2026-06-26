@@ -1,0 +1,44 @@
+// Object-model slice 2 — the equality model. A reference `class` has **identity**: `===` asks
+// *same instance* and `==` defaults to identity too (unless the class is `Equatable`). A value
+// `struct` has no identity — it compares **structurally**. So two separately-built classes with
+// equal fields are `==`-unequal (distinct instances) while two equal structs are `==`-equal; an
+// alias of a class is `===` the original. A class that `@derive(Equatable)` opts `==` back into
+// structural comparison, but `===` still answers identity. Both backends agree by construction
+// (identity = same allocation in each).
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: exit 0
+class Node {
+    value: int
+    fn new(value: int): Node { return Node { value: value }; }
+}
+
+struct Point { x: int y: int }
+
+@derive(Equatable)
+class Tag {
+    name: string
+    fn new(name: string): Tag { return Tag { name: name }; }
+}
+
+a = Node.new(1);
+b = Node.new(1);
+echo a == b;       // false — distinct instances, no Equatable → identity
+echo a === b;      // false — not the same instance
+alias = a;
+echo a === alias;  // true — alias is the same instance
+echo a == alias;   // true — identity again, same instance
+
+echo Point { x: 1, y: 2 } == Point { x: 1, y: 2 };  // true — structural value equality
+
+t1 = Tag.new("x");
+t2 = Tag.new("x");
+echo t1 == t2;     // true — @derive(Equatable) makes `==` structural
+echo t1 != t2;     // false — negation of the structural `==`
+echo t1 === t2;    // false — `===` is always identity, distinct instances

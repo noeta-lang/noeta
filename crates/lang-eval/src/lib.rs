@@ -424,6 +424,12 @@ pub struct TypeDef {
     destructor: Option<Rc<Vec<Stmt>>>,
     /// Whether this came from a `struct X {...}` struct (vs. a `class`). Cosmetic in M0.
     is_struct: bool,
+    /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
+    /// (object-model slice 2): true for a value `struct`/opaque, or a `class` that is `Equatable`
+    /// (derives it or hand-`impl`s `eq`); false only for a plain `class` (`==` → identity). Mirrors
+    /// the VM `Shape::structural_eq`, computed from the same inputs so both backends agree — even on
+    /// a *nested* class field, where the method-dispatch path is unavailable.
+    structural_eq: bool,
     /// Whether the type `@derive(Comparable)`s without a hand-written `compare`: its instances
     /// get structural field-wise ordering for `< <= > >=`.
     derives_comparable: bool,
@@ -1401,6 +1407,8 @@ impl Interpreter {
             methods,
             destructor: None,
             is_struct: true,
+            // A value kind: `==` is always structural.
+            structural_eq: true,
             // A hand-written `compare`/`to_json` takes precedence over derivation.
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
@@ -1431,6 +1439,9 @@ impl Interpreter {
                     methods: HashMap::new(),
                     destructor: None,
                     is_struct: false,
+                    // An opaque import has no known fields; treat `==` structurally (matches the
+                    // VM's `ShapeKind::Opaque` default), not as class identity.
+                    structural_eq: true,
                     derives_comparable: false,
                     derives_tojson: false,
                     opaque: true,
@@ -1474,6 +1485,10 @@ impl Interpreter {
             methods,
             destructor: decl.destructor.clone().map(Rc::new),
             is_struct: false,
+            // A reference `class`: `==` is identity unless the class is `Equatable` (derives it or
+            // hand-`impl`s `eq`), which opts back into structural comparison.
+            structural_eq: lang_ast::derives_trait(&decl.derives, "Equatable")
+                || decl.methods.iter().any(|m| m.name == "eq"),
             // A hand-written `compare` (via `impl Comparable`) takes precedence over derivation.
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
@@ -3825,6 +3840,8 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
         methods: HashMap::new(),
         destructor: None,
         is_struct,
+        // No derive context here; a struct compares structurally, a class by identity.
+        structural_eq: is_struct,
         derives_comparable: false,
         derives_tojson: false,
         opaque: false,

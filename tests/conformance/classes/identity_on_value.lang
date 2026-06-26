@@ -1,0 +1,9 @@
+// `===`/`!==` ask reference identity, which only a reference `class` has. Applying it to a value
+// `struct` (or any value type) is E0034 — there is no instance to compare; structural `==` is the
+// right tool. (A `dyn` operand defers, since it may hold a class at runtime.)
+// expect: error E0034 at 9:1
+struct Point { x: int y: int }
+
+p1 = Point { x: 1, y: 2 };
+p2 = Point { x: 1, y: 2 };
+p1 === p2;

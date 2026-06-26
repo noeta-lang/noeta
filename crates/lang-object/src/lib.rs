@@ -32,7 +32,7 @@ pub enum ShapeKind {
 /// The layout of one aggregate kind: its type name, the ordered slot names, and — for an
 /// enum — the variant name and whether it is a built-in `Result`/`Option` (which display with
 /// their bare constructor, `Ok(x)`/`none`, rather than `Type.Variant`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone)]
 pub struct Shape {
     pub kind: ShapeKind,
     /// The type name for an object, or the enum name for an enum value.
@@ -44,17 +44,64 @@ pub struct Shape {
     pub variant: Option<String>,
     /// Whether this is a built-in `Result`/`Option` enum, affecting only display.
     pub builtin_result_option: bool,
+    /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
+    /// (object-model slice 2). True for every value kind (`struct`/`enum`/opaque) and for a
+    /// reference `class` that is `Equatable` (derives it or hand-`impl`s `eq`); false only for a
+    /// plain `class` with no `Equatable`, whose `==` falls back to identity (*same instance*). A
+    /// derived property of the named type — deliberately **excluded from equality/hashing** below
+    /// (it is not part of a shape's structural identity, which is name + fields + variant).
+    pub structural_eq: bool,
+}
+
+// `structural_eq` is type metadata, not part of a shape's structural identity (two shapes are "the
+// same shape" iff same kind/name/fields/variant/result-option). Hand-implemented to exclude it so a
+// shape built without derive context (e.g. reflection materialization) still matches the compiler's
+// interned shape for the same type.
+impl PartialEq for Shape {
+    fn eq(&self, other: &Shape) -> bool {
+        self.kind == other.kind
+            && self.name == other.name
+            && self.fields == other.fields
+            && self.variant == other.variant
+            && self.builtin_result_option == other.builtin_result_option
+    }
+}
+impl Eq for Shape {}
+impl std::hash::Hash for Shape {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.kind.hash(state);
+        self.name.hash(state);
+        self.fields.hash(state);
+        self.variant.hash(state);
+        self.builtin_result_option.hash(state);
+    }
 }
 
 impl Shape {
-    /// A struct/class/opaque object shape with the given ordered slot names.
+    /// A struct/class/opaque object shape with the given ordered slot names. `==` defaults to
+    /// structural for every kind except a plain `class` (reference identity); a class that is
+    /// `Equatable` must be built via [`Shape::object_equatable`].
     pub fn object(kind: ShapeKind, name: impl Into<String>, fields: Vec<String>) -> Shape {
+        let structural_eq = kind != ShapeKind::Class;
+        Shape::object_equatable(kind, name, fields, structural_eq)
+    }
+
+    /// A struct/class/opaque object shape with an explicit `structural_eq` — used by the compiler,
+    /// which knows whether a `class` is `Equatable` (derives it or hand-`impl`s `eq`) and so whether
+    /// its `==` is structural rather than reference identity.
+    pub fn object_equatable(
+        kind: ShapeKind,
+        name: impl Into<String>,
+        fields: Vec<String>,
+        structural_eq: bool,
+    ) -> Shape {
         Shape {
             kind,
             name: name.into(),
             fields,
             variant: None,
             builtin_result_option: false,
+            structural_eq,
         }
     }
 
@@ -72,6 +119,8 @@ impl Shape {
             fields,
             variant: Some(variant.into()),
             builtin_result_option,
+            // Enums are a value kind: `==` is structural.
+            structural_eq: true,
         }
     }
 

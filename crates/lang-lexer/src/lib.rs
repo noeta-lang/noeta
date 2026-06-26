@@ -180,6 +180,10 @@ pub enum TokenKind {
     FatArrow,
     #[token("|>")]
     PipeGt,
+    #[token("===")]
+    EqEqEq,
+    #[token("!==")]
+    NotEqEq,
     #[token("==")]
     EqEq,
     #[token("!=")]
@@ -295,6 +299,8 @@ impl TokenKind {
             TokenKind::RBracket => "RBracket",
             TokenKind::FatArrow => "FatArrow",
             TokenKind::PipeGt => "PipeGt",
+            TokenKind::EqEqEq => "EqEqEq",
+            TokenKind::NotEqEq => "NotEqEq",
             TokenKind::EqEq => "EqEq",
             TokenKind::NotEq => "NotEq",
             TokenKind::LtEq => "LtEq",
@@ -381,6 +387,8 @@ impl TokenKind {
             TokenKind::RBracket => "`]`",
             TokenKind::FatArrow => "`=>`",
             TokenKind::PipeGt => "`|>`",
+            TokenKind::EqEqEq => "`===`",
+            TokenKind::NotEqEq => "`!==`",
             TokenKind::EqEq => "`==`",
             TokenKind::NotEq => "`!=`",
             TokenKind::LtEq => "`<=`",

@@ -126,6 +126,11 @@ pub enum DiagnosticCode {
     /// immutable field can still be functionally updated via the spread literal `T { ...x, f: v }`).
     /// Also covers `x.f = v` on a receiver that is not a class instance (no assignable fields).
     ImmutableField,
+    /// A reference-identity comparison `===`/`!==` is applied to a non-reference operand. Identity
+    /// (*same instance*) is only meaningful for the reference kind `class`; value kinds (`struct`,
+    /// `enum`, tuples, scalars) have no identity to ask about — compare them with `==`. A `dyn`
+    /// operand defers (it may hold a class at runtime).
+    InvalidIdentityCompare,
 }
 
 impl DiagnosticCode {
@@ -165,6 +170,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidRole,
         DiagnosticCode::NestingTooDeep,
         DiagnosticCode::ImmutableField,
+        DiagnosticCode::InvalidIdentityCompare,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -204,6 +210,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidRole => "E0031",
             DiagnosticCode::NestingTooDeep => "E0032",
             DiagnosticCode::ImmutableField => "E0033",
+            DiagnosticCode::InvalidIdentityCompare => "E0034",
         }
     }
 

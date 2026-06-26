@@ -162,6 +162,7 @@ fn compile_inner(
         destructors: Vec::new(),
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
+        structural_eq_types: HashSet::new(),
         types: HashMap::new(),
         module_globals: HashMap::new(),
         type_of_sites,
@@ -231,6 +232,11 @@ struct ModuleCompiler {
     destructors: Vec<(String, u32)>,
     comparable_derives: Vec<String>,
     tojson_derives: Vec<String>,
+    /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
+    /// every `struct`, plus a `class` that is `Equatable` (derives it or hand-`impl`s `eq`). A
+    /// `class` absent here compares by reference identity. Mirrors the tree-walker's
+    /// `TypeDef::structural_eq` so both backends agree (object-model slice 2).
+    structural_eq_types: HashSet<String>,
     types: HashMap<String, TypeInfo>,
     /// Every top-level value global's name and whether it is mutable. Computed before any body
     /// is compiled so a nested function can resolve a global (and check its mutability on
@@ -304,6 +310,8 @@ impl ModuleCompiler {
             match stmt {
                 lang_ast::Stmt::Struct(decl) => {
                     let fields = decl.fields.iter().map(|f| f.name.clone()).collect();
+                    // A value `struct` always compares structurally.
+                    self.structural_eq_types.insert(decl.name.clone());
                     // A hand-written `compare`/`to_json` (via an `impl` block) takes precedence over
                     // the derived version — same rule as a class.
                     if lang_ast::derives_trait(&decl.derives, "Comparable")
@@ -336,6 +344,13 @@ impl ModuleCompiler {
                 }
                 lang_ast::Stmt::Class(decl) => {
                     let fields: Vec<String> = decl.fields.iter().map(|f| f.name.clone()).collect();
+                    // A reference `class` compares structurally only if it is `Equatable` — derives
+                    // it or hand-`impl`s `eq`; otherwise `==` falls back to reference identity.
+                    if lang_ast::derives_trait(&decl.derives, "Equatable")
+                        || decl.methods.iter().any(|m| m.name == "eq")
+                    {
+                        self.structural_eq_types.insert(decl.name.clone());
+                    }
                     // A hand-written `compare` (via `impl Comparable`) takes precedence over the
                     // derived structural ordering.
                     if lang_ast::derives_trait(&decl.derives, "Comparable")
@@ -2378,10 +2393,12 @@ impl<'m> FnCompiler<'m> {
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let shape = self.module.intern_shape(Shape::object(
+        let structural_eq = self.module.structural_eq_types.contains(type_name);
+        let shape = self.module.intern_shape(Shape::object_equatable(
             kind,
             type_name.to_string(),
             decl_fields.to_vec(),
+            structural_eq,
         ));
         // In-place reuse (Phase 5): a self-update `acc = Type { ...acc, f: v }` whose spread base is a
         // directly-held **local** (Phase 5.1a) or a top-level **global** (Phase 5.1b) reuses that

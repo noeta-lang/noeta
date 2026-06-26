@@ -1255,12 +1255,20 @@ where
             infix(left(5), just(T::GtEq), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Ge, l, r, e)
             }),
-            infix(left(4), just(T::EqEq), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Eq, l, r, e)
-            }),
-            infix(left(4), just(T::NotEq), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Ne, l, r, e)
-            }),
+            // The four equality/identity operators share precedence 4; they fold through one
+            // `infix` entry (the op-parser tags each token with its `BinaryOp`) to stay under
+            // chumsky's max pratt-ops tuple arity. `==`/`!=` are structural-or-`Equatable`;
+            // `===`/`!==` are reference identity (class only, checker-gated E0034).
+            infix(
+                left(4),
+                choice((
+                    just(T::EqEq).to(BinaryOp::Eq),
+                    just(T::NotEq).to(BinaryOp::Ne),
+                    just(T::EqEqEq).to(BinaryOp::Identity),
+                    just(T::NotEqEq).to(BinaryOp::NotIdentity),
+                )),
+                move |l, op, r, e| binary(ctx, op, l, r, e),
+            ),
             infix(left(3), just(T::AmpAmp), move |l, _, r, e| {
                 binary(ctx, BinaryOp::And, l, r, e)
             }),

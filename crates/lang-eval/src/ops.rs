@@ -5,6 +5,7 @@
 //! evaluates them directly.)
 
 use std::cmp::Ordering;
+use std::rc::Rc;
 
 use lang_ast::{BinaryOp, UnaryOp};
 use lang_diagnostics::DiagnosticCode;
@@ -37,6 +38,8 @@ pub fn apply_binary(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, 
         }
         BinaryOp::Eq => Ok(Value::Bool(values_equal(left, right))),
         BinaryOp::Ne => Ok(Value::Bool(!values_equal(left, right))),
+        BinaryOp::Identity => Ok(Value::Bool(values_identical(left, right))),
+        BinaryOp::NotIdentity => Ok(Value::Bool(!values_identical(left, right))),
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => compare(op, left, right),
         BinaryOp::And | BinaryOp::Or => {
             unreachable!("logical operators short-circuit and are handled by the interpreter")
@@ -122,11 +125,34 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Set(a), Value::Set(b)) => a == b,
         (Value::Map(a), Value::Map(b)) => a == b,
         (Value::Enum(a), Value::Enum(b)) => a == b,
-        (Value::Object(a), Value::Object(b)) => a == b,
+        // Object `==` is kind-dependent (object-model slice 2): a value `struct` compares
+        // **structurally** (the `ObjectValue` `PartialEq`), while a reference `class` defaults to
+        // **identity** (same `Rc` allocation). A class's structural opt-in is `impl Equatable`,
+        // dispatched in `apply_binary_op` *before* this fallback, so a class reaching here has no
+        // `eq` and compares by identity. (Mirrors the VM's `values_equal`.)
+        (Value::Object(a), Value::Object(b)) => {
+            if a.def.structural_eq {
+                a == b
+            } else {
+                Rc::ptr_eq(a, b)
+            }
+        }
         // File handles compare by their full shared state, matching the VM's `values_equal`.
         (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
         (Value::Unit, Value::Unit) => true,
         _ => false,
+    }
+}
+
+/// Reference identity for `===`/`!==` (object-model slice 2): two objects are identical iff they
+/// are the **same `Rc` allocation**. For non-object operands `===` has no reference to ask about,
+/// so it falls back to [`values_equal`] — keeping the operator total and agreeing with the VM,
+/// while the checker restricts `===` to reference (class) operands (E0034). Independent of
+/// `Equatable`.
+fn values_identical(left: &Value, right: &Value) -> bool {
+    match (left, right) {
+        (Value::Object(a), Value::Object(b)) => Rc::ptr_eq(a, b),
+        _ => values_equal(left, right),
     }
 }
 

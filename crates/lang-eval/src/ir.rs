@@ -400,6 +400,8 @@ impl Interpreter {
             methods,
             destructor: None,
             is_struct: true,
+            // A value kind: `==` is always structural.
+            structural_eq: true,
             // A hand-written `compare`/`to_json` takes precedence over derivation.
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
                 && !decl.methods.iter().any(|m| m.name == "compare"),
@@ -435,6 +437,10 @@ impl Interpreter {
             methods,
             destructor: decl.destructor.clone().map(Rc::new),
             is_struct: false,
+            // A reference `class`: `==` is identity unless the class is `Equatable` (derives it or
+            // hand-`impl`s `eq`) — the same rule `declare_class` applies.
+            structural_eq: lang_ast::derives_trait(&decl.derives, "Equatable")
+                || decl.methods.iter().any(|m| m.name == "eq"),
             // A hand-written `compare`/`to_json` takes precedence over derivation — the same
             // rule `declare_class` applies.
             derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")

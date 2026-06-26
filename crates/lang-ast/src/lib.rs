@@ -890,6 +890,11 @@ pub enum BinaryOp {
     Concat,
     Eq,
     Ne,
+    /// Reference identity `===` — *same instance* (class only). Never overloadable: independent of
+    /// `Equatable`, it always asks whether two operands are the same allocation.
+    Identity,
+    /// Reference non-identity `!==` — the negation of [`BinaryOp::Identity`].
+    NotIdentity,
     Lt,
     Le,
     Gt,
@@ -909,6 +914,8 @@ impl BinaryOp {
             BinaryOp::Concat => "~",
             BinaryOp::Eq => "==",
             BinaryOp::Ne => "!=",
+            BinaryOp::Identity => "===",
+            BinaryOp::NotIdentity => "!==",
             BinaryOp::Lt => "<",
             BinaryOp::Le => "<=",
             BinaryOp::Gt => ">",
@@ -933,6 +940,8 @@ impl BinaryOp {
             BinaryOp::Rem
             | BinaryOp::Eq
             | BinaryOp::Ne
+            | BinaryOp::Identity
+            | BinaryOp::NotIdentity
             | BinaryOp::Lt
             | BinaryOp::Le
             | BinaryOp::Gt

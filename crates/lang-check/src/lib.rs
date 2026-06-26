@@ -2492,6 +2492,41 @@ impl Checker {
             // `==`/`!=` are universal (structural equality fallback) and the logical operators take
             // bools; none impose a trait bound, so none is checked here.
             BinaryOp::Eq | BinaryOp::Ne | BinaryOp::And | BinaryOp::Or => Type::Bool,
+            // `===`/`!==` ask reference identity (*same instance*), meaningful only for the
+            // reference kind `class`. A definitely-value operand (scalar, collection, struct/enum,
+            // tuple, fn) has no identity → E0034; a `dyn`/hole or class (or a union of them) defers.
+            BinaryOp::Identity | BinaryOp::NotIdentity => {
+                if !self.is_reference_comparable(&lt) || !self.is_reference_comparable(&rt) {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::InvalidIdentityCompare,
+                        span,
+                        format!(
+                            "`{}` compares reference identity, which only a `class` has; \
+                             `{lt}` and `{rt}` are value types — compare them with `==`",
+                            op.symbol(),
+                        ),
+                    ));
+                }
+                Type::Bool
+            }
+        }
+    }
+
+    /// Whether `ty` may be a **reference (`class`) instance**, so `===`/`!==` is meaningful on it.
+    /// True for a `dyn`/inference hole (may hold a class at runtime), the `Class` kind-type, a
+    /// concrete `class` (or an as-yet-unresolved named type, deferring to its own diagnostic), and a
+    /// union all of whose members qualify. False for every definitely-value type (scalars,
+    /// collections, `struct`/`enum`, functions) — those drive E0034.
+    fn is_reference_comparable(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Unknown | Type::Dyn => true,
+            Type::Kind(lang_types::TypeKind::Class) => true,
+            Type::Named(n, _) => matches!(
+                self.type_kinds.get(n),
+                Some(lang_types::TypeKind::Class) | None
+            ),
+            Type::Union(members) => members.iter().all(|m| self.is_reference_comparable(m)),
+            _ => false,
         }
     }
 

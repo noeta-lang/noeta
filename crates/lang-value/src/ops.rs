@@ -50,6 +50,8 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
         }
         BinaryOp::Eq => Ok(Value::bool(values_equal(left, right))),
         BinaryOp::Ne => Ok(Value::bool(!values_equal(left, right))),
+        BinaryOp::Identity => Ok(Value::bool(values_identical(left, right))),
+        BinaryOp::NotIdentity => Ok(Value::bool(!values_identical(left, right))),
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => compare(op, left, right),
         BinaryOp::And | BinaryOp::Or => {
             unreachable!("logical operators short-circuit and are lowered to branches")
@@ -199,11 +201,18 @@ fn values_equal(left: Value, right: Value) -> bool {
     if left.is_unit() && right.is_unit() {
         return true;
     }
-    // Objects compare structurally: same type and equal fields (M0's `ObjectValue` eq).
+    // Object `==` is kind-dependent (object-model slice 2): a value `struct` compares
+    // **structurally** (same type + equal fields), while a reference `class` defaults to
+    // **identity** (same instance) — its structural-equality opt-in is `impl Equatable`, which the
+    // compiler dispatches *before* reaching this fallback, so a class seen here has no `eq` and
+    // falls to identity. (Mirrors the tree-walker's `values_equal`.)
     if let (Some(sa), Some(sb)) = (left.shape(), right.shape())
         && left.is_object()
         && right.is_object()
     {
+        if !sa.structural_eq {
+            return left.0 == right.0;
+        }
         return sa.name == sb.name
             && sa.fields == sb.fields
             && slices_equal(&left.slots().unwrap(), &right.slots().unwrap());
@@ -237,6 +246,18 @@ fn values_equal(left: Value, right: Value) -> bool {
         return a == b;
     }
     false
+}
+
+/// Reference identity for `===`/`!==` (object-model slice 2): two heap objects are identical iff
+/// they are the **same allocation** (their NaN-boxed words encode the same pointer, so bit-equality
+/// is pointer-equality). For non-object operands `===` has no reference to ask about, so it falls
+/// back to [`values_equal`] — keeping the operator total and agreeing with the tree-walker, while
+/// the checker restricts `===` to reference (class) operands (E0034). Independent of `Equatable`.
+fn values_identical(left: Value, right: Value) -> bool {
+    if left.is_object() && right.is_object() {
+        return left.0 == right.0;
+    }
+    values_equal(left, right)
 }
 
 /// Element-wise [`values_equal`] over two equal-length slot/data arrays.
