@@ -1,0 +1,16 @@
+---
+source: crates/lang-parser/src/lib.rs
+assertion_line: 2923
+expression: "pretty(\"@test { fn adds() { return add(1, 2); } } @derive(Comparable) struct P { x: int } echo 1;\")"
+---
+(program @0..89
+  (tier test @0..41
+    (fn adds [] @8..39
+      (return @20..37
+        (call @27..36
+          (ident add @27..30)
+          (int 1 @31..32)
+          (int 2 @34..35)))))
+  (struct P [x] @62..81)
+  (echo @82..89
+    (int 1 @87..88)))

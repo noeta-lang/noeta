@@ -137,6 +137,10 @@ pub enum DiagnosticCode {
     /// through a method/constructor. (A value `struct`'s fields are always public, so this never
     /// fires for a struct.)
     PrivateField,
+    /// A **dev-tier block** `@<tier> { … }` names a tier that is not declared/active (object-model
+    /// slice 6): a typo (`@tset { }`) or a tier not provided by the build profile. Surfaced rather
+    /// than silently ignored so a misspelled tier's content is not invisibly dropped.
+    UnknownTier,
 }
 
 impl DiagnosticCode {
@@ -178,6 +182,7 @@ impl DiagnosticCode {
         DiagnosticCode::ImmutableField,
         DiagnosticCode::InvalidIdentityCompare,
         DiagnosticCode::PrivateField,
+        DiagnosticCode::UnknownTier,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -219,6 +224,7 @@ impl DiagnosticCode {
             DiagnosticCode::ImmutableField => "E0033",
             DiagnosticCode::InvalidIdentityCompare => "E0034",
             DiagnosticCode::PrivateField => "E0035",
+            DiagnosticCode::UnknownTier => "E0036",
         }
     }
 

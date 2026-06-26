@@ -1,0 +1,17 @@
+// A dev-tier block `@test { … }` (object-model slice 6) is co-located developer-tooling content
+// that the build includes only when its tier is **active**. With no tier active (a normal run / the
+// conformance harness), the block is **stripped before lowering** — its `fn`s are never compiled or
+// run, so its side effects are absent and the program's own output is unchanged. The strip happens
+// identically on both backends (both lower the same program), so the differential agrees.
+// expect: stdout "5"
+// expect: stdout "done"
+// expect: exit 0
+fn add(a: int, b: int): int { return a + b; }
+
+@test {
+    fn adds() { echo "the test body must not run"; }
+    fn also() { echo "neither must this"; }
+}
+
+echo add(2, 3);
+echo "done";

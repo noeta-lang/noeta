@@ -355,6 +355,11 @@ impl Lowerer {
             // A standalone `impl` and a `namespace` have no runtime effect in the tree-walker
             // (both are `Ok(Flow::Normal)` no-ops), so they lower to nothing.
             AstStmt::Impl(_) | AstStmt::Namespace { .. } => Ok(()),
+            // A dev-tier block reaching lowering is an *inactive* residual (object-model slice 6):
+            // the tier-strip pass already spliced any *active* block's items into the statement
+            // stream and dropped the inactive ones, so an inactive block lowers to nothing (stripped
+            // from the build, identically on both backends since both lower the same program).
+            AstStmt::TierBlock { .. } => Ok(()),
         }
     }
 

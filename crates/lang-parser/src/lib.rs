@@ -2343,6 +2343,26 @@ where
                 )
             });
 
+        // A **dev-tier block** `@<tier> { items }` (object-model slice 6): the directive grammar in
+        // its standalone *block* form (vs. the leading-decorator annotation form). Tried before
+        // `attributed_type_decl` so `@test { … }` is read as a block; a `@derive(...) struct` finds
+        // no `{` after the directive and backtracks to the decorator path. The body is a sequence of
+        // statements (test `fn`s at the top level); the strip pass resolves active vs inactive.
+        let tier_block = just(T::At)
+            .ignore_then(id.clone())
+            .then(
+                stmt.clone()
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(move |((tier, tier_span), items), e| Stmt::TierBlock {
+                tier,
+                tier_span,
+                items,
+                span: ctx.to_span(e.span()),
+            });
+
         choice((
             echo,
             mut_binding,
@@ -2354,6 +2374,7 @@ where
             continue_,
             fn_decl,
             standalone_impl,
+            tier_block,
             attributed_type_decl,
             namespace_decl,
             use_decl,
@@ -2890,6 +2911,17 @@ mod tests {
     fn struct_and_class_and_object_literal() {
         insta::assert_snapshot!(pretty(
             "struct Item { price: float qty: int } class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ...base };"
+        ));
+    }
+
+    #[test]
+    fn tier_block_parses() {
+        // A `@<tier> { items }` dev-tier block (object-model slice 6) parses as a standalone block
+        // statement carrying its declarations. It coexists with the `@derive(...)` decorator form:
+        // `@derive(Comparable) struct` still attaches the decorator (the parser backtracks from the
+        // block path when no `{` follows the directive), proving the two `@`-forms don't collide.
+        insta::assert_snapshot!(pretty(
+            "@test { fn adds() { return add(1, 2); } } @derive(Comparable) struct P { x: int } echo 1;"
         ));
     }
 

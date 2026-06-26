@@ -106,6 +106,20 @@ pub enum Stmt {
     Continue { span: Span },
     /// A bare expression used for its effect: `expr;`.
     Expr { expr: Expr, span: Span },
+    /// A **dev-tier block** `@<tier> { items }` (object-model slice 6): co-located
+    /// developer-tooling content (a `@test { … }` block of test `fn`s, etc.) the build includes
+    /// only when the tier is **active** and strips otherwise. `tier` names the directive (`test`);
+    /// `items` are its contained declarations/statements. The tier-strip front-end pass resolves
+    /// these before checking/lowering — an *active* block's `items` are spliced into the enclosing
+    /// statement list, an *inactive* block is dropped — so by the time the checker and lowering run,
+    /// only inactive residuals remain: the checker validates the tier name (a typo is a diagnostic,
+    /// not a silent vanish) and lowering emits nothing for them.
+    TierBlock {
+        tier: String,
+        tier_span: Span,
+        items: Vec<Stmt>,
+        span: Span,
+    },
 }
 
 impl Stmt {
@@ -122,7 +136,8 @@ impl Stmt {
             | Stmt::While { span, .. }
             | Stmt::Break { span }
             | Stmt::Continue { span }
-            | Stmt::Expr { span, .. } => *span,
+            | Stmt::Expr { span, .. }
+            | Stmt::TierBlock { span, .. } => *span,
             Stmt::Fn(decl) => decl.span,
             Stmt::Enum(decl) => decl.span,
             Stmt::Struct(decl) => decl.span,

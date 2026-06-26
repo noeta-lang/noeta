@@ -204,6 +204,20 @@ impl Pretty for Stmt {
                 expr.pretty(out, level + 1);
                 out.push(')');
             }
+            Stmt::TierBlock {
+                tier,
+                items,
+                span: s,
+                ..
+            } => {
+                indent(out, level);
+                out.push_str(&format!("(tier {tier} {}", span(*s)));
+                for item in items {
+                    out.push('\n');
+                    item.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
         }
     }
 }

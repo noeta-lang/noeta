@@ -76,6 +76,12 @@ use lang_types::{BuiltinTrait, Type};
 
 mod stdlib;
 
+/// The built-in dev-tier names recognized in slice 6 (object-model). A `@<tier> { … }` block
+/// against any other name is an `E0036` (a typo must not silently vanish). These are hardcoded for
+/// now; once `@tier` declarations + the package manifest land, the active set becomes dynamic (a
+/// build profile's resolved provider-map) and this constant gives way to that set.
+const BUILTIN_TIERS: &[&str] = &["test", "bench", "doc", "debug"];
+
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
 /// backends need. The two were once harvested by separate public entry points ([`check`] and
 /// [`resolve_type_of_sites`]), each re-running the whole checker; a CLI `run` therefore
@@ -1188,6 +1194,32 @@ impl Checker {
             Stmt::Enum(e) => self.check_enum(e, env),
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
+            // A dev-tier block reaching the checker is an *inactive* residual (object-model
+            // slice 6): the strip pass already spliced any *active* block's items into the
+            // statement stream (where they are checked as ordinary declarations) and dropped the
+            // inactive ones. So we validate only the tier name — a typo must not silently vanish
+            // (E0036) — and do not type-check the (stripped) items.
+            Stmt::TierBlock {
+                tier, tier_span, ..
+            } => {
+                if !BUILTIN_TIERS.contains(&tier.as_str()) {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::UnknownTier,
+                            *tier_span,
+                            format!("unknown dev-tier `@{tier}`"),
+                        )
+                        .with_help(format!(
+                            "the built-in tiers are {}",
+                            BUILTIN_TIERS
+                                .iter()
+                                .map(|t| format!("`@{t}`"))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        )),
+                    );
+                }
+            }
         }
     }
 

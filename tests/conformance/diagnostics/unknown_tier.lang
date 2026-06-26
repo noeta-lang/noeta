@@ -1,0 +1,9 @@
+// A dev-tier block naming a tier that is not a built-in (a typo, or a tier the build profile does
+// not provide) is an UnknownTier (E0036) — surfaced, not silently dropped, so a misspelled `@tset`
+// does not invisibly discard its content. The built-in tiers are `@test`/`@bench`/`@doc`/`@debug`.
+// expect: error E0036 at 6:2
+// expect: exit 1
+@tset {
+    fn x() { echo "hi"; }
+}
+echo 1;
