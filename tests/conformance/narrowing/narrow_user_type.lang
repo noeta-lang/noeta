@@ -5,12 +5,12 @@
 // expect: stdout "none"
 // expect: exit 0
 class Point {
-    x: int
-    y: int
+    pub x: int
+    pub y: int
 }
 
 class Other {
-    v: int
+    pub v: int
 }
 
 fn as_point(x: dyn): ?Point {

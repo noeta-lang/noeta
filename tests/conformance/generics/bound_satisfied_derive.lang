@@ -6,7 +6,7 @@
 // expect: exit 0
 @derive(Comparable)
 class Box {
-    n: int
+    pub n: int
 }
 fn max<T: Comparable>(a: T, b: T): T {
     if a > b { return a; }

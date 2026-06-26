@@ -4,7 +4,7 @@
 // expect: stdout "5"
 // expect: exit 0
 class Box<T> {
-    value: T
+    pub value: T
 }
 fn need_int(n: int): int { return n; }
 b = Box { value: 5 };

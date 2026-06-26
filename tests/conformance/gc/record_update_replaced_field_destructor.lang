@@ -17,8 +17,8 @@ class Res {
 }
 
 class Box {
-    r: Res
-    n: int
+    pub r: Res
+    pub n: int
 }
 
 fn run(): void {

@@ -389,8 +389,18 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
      (`ObjHeader::seq` / `ObjectValue::seq`) so cyclic `destruct` order agrees (the VM's live-object
      registry is a `HashSet`, otherwise arbitrary). Leak residency 0 on cyclic graphs, both backends;
      differential agrees on cyclic `destruct` output.
-   - **2d — field-visibility enforcement.** `struct` fields default public, `class` fields default
-     private with per-field `pub`; enforce on field read + literal construction (parsed in slice 1).
+   - **2d — field-visibility enforcement. ✅ DONE.** `struct` fields are always public; `class`
+     fields default private with per-field `pub` opt-in (parsed in slice 1, now enforced). New
+     **E0035 PrivateField** on read `x.f`, write `x.f = v`, and literal construction `T { f: v }` of
+     a private field from outside the declaring type. Privacy is **type-scoped** (chosen with the
+     user): a private field is visible inside the type's own methods/destructor on `self` *and* any
+     same-type value (so `Equatable`/`compare` can read `other.x`) — the checker tracks
+     `current_type` + a `private_fields` registry. Migration (chosen with the user): externally-read
+     class fields were marked `pub`; the `orders` demo's external `Order { … }` was routed through
+     `Order.new(...)` (idiomatic constructor). Next free **E0036**.
+
+**SLICE 2 (class = reference) IS COMPLETE** (2a equality model, 2b reference mutation, 2b′ asymmetric
+`mut`, 2c cycle collection, 2d visibility; `!Send` deferred to the concurrency milestone).
    - **DEFERRED (confirmed with user, 2026-06-26): `!Send` across isolates.** Unenforceable today —
      no isolate boundary / value-transfer point exists in the codebase, so any check would be
      untested dead code. Revisit at the concurrency milestone (the slice that adds `spawn`/channels),

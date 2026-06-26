@@ -8,7 +8,7 @@
 // expect: stdout "9"
 // expect: exit 0
 class Box {
-    mut n: int
+    pub mut n: int
     fn new(n: int): Box { return Box { n: n }; }
 }
 

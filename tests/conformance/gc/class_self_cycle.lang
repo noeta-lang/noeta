@@ -5,7 +5,7 @@
 // expect: stdout "drop 7"
 // expect: exit 0
 class Node {
-    mut next: ?Node
+    pub mut next: ?Node
     id: int
     fn new(id: int): Node { return Node { next: none, id: id }; }
     destruct { echo "drop ${id}"; }

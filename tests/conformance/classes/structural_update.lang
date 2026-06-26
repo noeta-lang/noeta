@@ -6,7 +6,7 @@
 // expect: stdout "500 USD"
 // expect: exit 0
 class Money {
-    amount: int
+    pub amount: int
     currency: string
 
     fn new(amount: int, currency: string): Money {

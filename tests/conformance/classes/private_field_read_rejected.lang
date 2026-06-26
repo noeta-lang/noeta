@@ -1,0 +1,12 @@
+// Object-model slice 2d — a `class` field is private by default: reading it from outside the class
+// is E0035. (The same field is freely read inside the class's own method, `show`.) Expose it with
+// `pub`, or read it through a method.
+// expect: error E0035 at 12:8
+class Account {
+    balance: int
+    fn new(): Account { return Account { balance: 42 }; }
+    fn show(): int { return balance; }
+}
+
+a = Account.new();
+echo a.balance;

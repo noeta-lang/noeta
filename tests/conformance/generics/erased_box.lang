@@ -6,7 +6,7 @@
 // expect: stdout "42 and hello"
 // expect: exit 0
 class Box<T> {
-    value: T
+    pub value: T
 
     fn new(v: T): Box<T> {
         return Box { value: v };

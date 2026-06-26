@@ -11,7 +11,7 @@
 // expect: stdout "drop counter 1"
 // expect: exit 0
 class Counter {
-    n: int
+    pub n: int
     destruct { echo "drop counter ${n}"; }
 }
 

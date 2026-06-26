@@ -6,8 +6,8 @@
 // expect: stdout "4 0"
 // expect: exit 0
 class Point {
-    x: int
-    y: int
+    pub x: int
+    pub y: int
 
     fn show(): string {
         return "${x} ${y}";

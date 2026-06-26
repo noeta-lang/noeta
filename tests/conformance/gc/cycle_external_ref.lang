@@ -9,7 +9,7 @@
 // expect: stdout "drop 99"
 // expect: exit 0
 class Res {
-    id: int
+    pub id: int
     fn new(id: int): Res { return Res { id: id }; }
     destruct { echo "drop ${id}"; }
 }

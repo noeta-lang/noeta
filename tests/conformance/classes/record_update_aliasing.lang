@@ -8,8 +8,8 @@
 // expect: stdout "1 USD"
 // expect: exit 0
 class Money {
-    amount: int
-    currency: string
+    pub amount: int
+    pub currency: string
 
     fn show(): string {
         return "${amount} ${currency}";

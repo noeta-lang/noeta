@@ -15,13 +15,13 @@
 // expect: stdout "end"
 // expect: exit 0
 class Leaf {
-    tag: string
+    pub tag: string
     fn new(tag: string): Leaf { return Leaf { tag: tag }; }
     destruct { echo "drop leaf ${tag}"; }
 }
 
 class Box {
-    label: string
+    pub label: string
     inner: Leaf
     fn new(label: string, inner: Leaf): Box { return Box { label: label, inner: inner }; }
     destruct { echo "drop box ${label}"; }

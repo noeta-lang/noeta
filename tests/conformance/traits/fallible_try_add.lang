@@ -9,7 +9,7 @@ enum MoneyError {
 }
 
 class Money {
-    amount: int
+    pub amount: int
     currency: string
 
     fn new(amount: int, currency: string): Money {

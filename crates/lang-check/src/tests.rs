@@ -231,7 +231,7 @@ fn associated_call_is_typed_precisely() {
 fn literal_infers_its_type_arguments_from_fields() {
     // `Box { value: <v> }` infers `T` from the field value, so the element type is tracked: a
     // string-built box's field is a `string` (mismatch against `int`), an int-built one is clean.
-    let cls = "class Box<T> { value: T }\nfn need_int(n: int): int { return n; }\n";
+    let cls = "class Box<T> { pub value: T }\nfn need_int(n: int): int { return n; }\n";
     let bad = format!("{cls}b = Box {{ value: \"hi\" }};\necho need_int(b.value);\n");
     assert_eq!(codes(&bad), ["E0007"]);
     let ok = format!("{cls}b = Box {{ value: 5 }};\necho need_int(b.value);\n");
@@ -287,7 +287,7 @@ fn arithmetic_on_a_concrete_type_without_the_trait_is_reported() {
     // "cannot apply"), now caught statically. A type that *does* `impl Add` is accepted.
     let bad = "struct P { x: int }\na = P { x: 1 };\nb = P { x: 2 };\necho a + b;\n";
     assert_eq!(codes(bad), ["E0007"]);
-    let good = "class M { n: int\n  impl Add { fn add(o: M): M { return o; } } }\n\
+    let good = "class M { pub n: int\n  impl Add { fn add(o: M): M { return o; } } }\n\
                 a = M { n: 1 };\nb = M { n: 2 };\necho a + b;\n";
     assert!(codes(good).is_empty());
 }
@@ -298,7 +298,7 @@ fn ordering_on_a_concrete_non_comparable_type_is_reported() {
     // `E0007`; a `@derive(Comparable)` type is accepted.
     let bad = "struct P { x: int }\na = P { x: 1 };\nb = P { x: 2 };\necho a < b;\n";
     assert_eq!(codes(bad), ["E0007"]);
-    let good = "@derive(Comparable)\nclass V { n: int }\n\
+    let good = "@derive(Comparable)\nclass V { pub n: int }\n\
                 a = V { n: 1 };\nb = V { n: 2 };\necho a < b;\n";
     assert!(codes(good).is_empty());
 }
@@ -329,7 +329,7 @@ fn generic_call_argument_mismatch_after_binding_is_reported() {
 
 #[test]
 fn user_type_deriving_the_bound_satisfies_it() {
-    let src = "@derive(Comparable)\nclass B { n: int }\n\
+    let src = "@derive(Comparable)\nclass B { pub n: int }\n\
                fn max<T: Comparable>(a: T, b: T): T { return a; }\n\
                echo max(B { n: 1 }, B { n: 2 });\n";
     assert!(codes(src).is_empty());

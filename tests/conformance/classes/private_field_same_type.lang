@@ -1,0 +1,21 @@
+// Object-model slice 2d — type-scoped privacy. A `class` field is private by default, but a private
+// field is accessible inside the declaring type's own methods on ANY same-type value, not only
+// `self` — so an `Equatable` `eq` can read `other.x`/`other.y`. External code never touches the
+// private fields directly; it goes through the public `==`. Both backends agree.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+class Point {
+    x: int
+    y: int
+    fn new(x: int, y: int): Point { return Point { x: x, y: y }; }
+    impl Equatable {
+        fn eq(other: Point): bool { return x == other.x && y == other.y; }
+    }
+}
+
+a = Point.new(1, 2);
+b = Point.new(1, 2);
+c = Point.new(3, 4);
+echo a == b;   // true — `eq` reads `other`'s private fields from inside `Point`
+echo a == c;   // false

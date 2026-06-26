@@ -12,7 +12,7 @@ enum Status: string {
 }
 
 class Order {
-    id: int
+    pub id: int
     items: List<Item>
     mut status: Status
 

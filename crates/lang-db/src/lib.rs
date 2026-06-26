@@ -417,7 +417,7 @@ mod tests {
         let a = Source::new(
             SourceId(1),
             "a.lang",
-            "namespace App.A;\npub class Foo { x: int }\n",
+            "namespace App.A;\npub class Foo { pub x: int }\n",
         );
         let ws = workspace(&db, &entry, std::slice::from_ref(&a));
 
@@ -484,7 +484,7 @@ mod tests {
         let a = Source::new(
             SourceId(1),
             "a.lang",
-            "namespace App.A;\npub class Foo { x: int }\n",
+            "namespace App.A;\npub class Foo { pub x: int }\n",
         );
         let b = Source::new(
             SourceId(2),

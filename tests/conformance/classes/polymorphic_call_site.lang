@@ -11,13 +11,13 @@
 // expect: stdout "2"
 // expect: exit 0
 class Dog {
-    legs: int
+    pub legs: int
     fn sound(): string { return "woof"; }
 }
 
 class Bird {
-    wings: int
-    legs: int
+    pub wings: int
+    pub legs: int
     fn sound(): string { return "tweet"; }
 }
 

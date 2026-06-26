@@ -5,7 +5,7 @@
 // expect: stdout "10"
 // expect: exit 0
 class Counter {
-    start: int
+    pub start: int
 
     fn from(start: int = 0): Counter {
         return Counter { start: start };

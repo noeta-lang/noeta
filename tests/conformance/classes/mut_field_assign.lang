@@ -10,8 +10,8 @@
 // expect: stdout "10"
 // expect: exit 0
 class Counter {
-    mut count: int
-    label: string
+    pub mut count: int
+    pub label: string
     fn new(label: string): Counter { return Counter { count: 0, label: label }; }
 }
 mut c = Counter.new("a");

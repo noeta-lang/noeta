@@ -10,7 +10,7 @@
 // expect: stdout "b"
 // expect: exit 0
 class Leaf {
-    tag: string
+    pub tag: string
     fn new(t: string): Leaf { return Leaf { tag: t }; }
     destruct { echo "drop ${tag}"; }
 }

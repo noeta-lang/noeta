@@ -131,6 +131,12 @@ pub enum DiagnosticCode {
     /// `enum`, tuples, scalars) have no identity to ask about — compare them with `==`. A `dyn`
     /// operand defers (it may hold a class at runtime).
     InvalidIdentityCompare,
+    /// A **private** field is accessed from outside its declaring type (object-model slice 2d):
+    /// read `x.f`, write `x.f = v`, or set in a literal `T { f: v }`. A reference `class`'s fields
+    /// default private (visible only inside the class's own methods); expose one with `pub`, or go
+    /// through a method/constructor. (A value `struct`'s fields are always public, so this never
+    /// fires for a struct.)
+    PrivateField,
 }
 
 impl DiagnosticCode {
@@ -171,6 +177,7 @@ impl DiagnosticCode {
         DiagnosticCode::NestingTooDeep,
         DiagnosticCode::ImmutableField,
         DiagnosticCode::InvalidIdentityCompare,
+        DiagnosticCode::PrivateField,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -211,6 +218,7 @@ impl DiagnosticCode {
             DiagnosticCode::NestingTooDeep => "E0032",
             DiagnosticCode::ImmutableField => "E0033",
             DiagnosticCode::InvalidIdentityCompare => "E0034",
+            DiagnosticCode::PrivateField => "E0035",
         }
     }
 

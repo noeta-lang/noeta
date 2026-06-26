@@ -21,7 +21,7 @@ inv = Inventory.new([100, 200, 300]);
 echo inv[1];
 
 class Config {
-    currency: string
+    pub currency: string
 
     impl Index {
         fn get(key: string): string {

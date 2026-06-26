@@ -4346,7 +4346,11 @@ mod tests {
         );
         assert_eq!(r.stdout, "linked\ndrop 2\ndrop 1\n");
         assert_eq!(r.exit_code, 0);
-        assert_eq!(lang_value::live_count(), before, "cycle must leave no residency");
+        assert_eq!(
+            lang_value::live_count(),
+            before,
+            "cycle must leave no residency"
+        );
     }
 
     #[test]

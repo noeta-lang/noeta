@@ -12,7 +12,7 @@
 // expect: stdout "done"
 // expect: exit 0
 class Resource {
-    name: string
+    pub name: string
 
     fn new(name: string): Resource {
         return Resource { name: name };

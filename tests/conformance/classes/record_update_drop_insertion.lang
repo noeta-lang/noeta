@@ -6,8 +6,8 @@
 // expect: stdout "10 acc"
 // expect: exit 0
 class Bag {
-    total: int
-    label: string
+    pub total: int
+    pub label: string
 
     fn show(): string {
         return "${total} ${label}";

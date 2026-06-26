@@ -340,6 +340,16 @@ struct Checker {
     /// check (Phase 5.2): only a `mut` field may be assigned in place (else E0033). Records never
     /// have `mut` fields, so they never appear here.
     mut_fields: HashMap<String, HashSet<String>>,
+    /// Type name → the set of its **private** fields (object-model slice 2d). A value `struct`'s
+    /// fields are always public (it never appears here); a reference `class`'s fields default
+    /// private, so this holds every field *not* declared `pub`. A private field is visible only
+    /// inside the declaring type's own methods ([`Checker::current_type`]); read/write/construction
+    /// elsewhere is E0035.
+    private_fields: HashMap<String, HashSet<String>>,
+    /// While checking a type's own methods/destructor, the name of that type — so a private-field
+    /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
+    /// at top level and inside free functions.
+    current_type: Option<String>,
     /// Declared type → its kind (`Enum`/`Struct`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
@@ -698,6 +708,18 @@ impl Checker {
                         .collect();
                     if !muts.is_empty() {
                         self.mut_fields.insert(c.name.clone(), muts);
+                    }
+                    // Class fields default **private**; only those declared `pub` are public
+                    // (object-model slice 2d). Struct fields are always public, so structs never
+                    // register here.
+                    let private: HashSet<String> = c
+                        .fields
+                        .iter()
+                        .filter(|f| !f.is_public)
+                        .map(|f| f.name.clone())
+                        .collect();
+                    if !private.is_empty() {
+                        self.private_fields.insert(c.name.clone(), private);
                     }
                     self.types.insert(c.name.clone());
                     self.type_kinds
@@ -1237,12 +1259,16 @@ impl Checker {
         // checked exactly as a class's — coherence over its impls, then each method body.
         self.check_coherence(&r.derives, &r.impls, &standalone);
         self.check_attrs(&r.attrs, TargetKind::Struct);
+        // Inside the type's own body, its (always-public) fields are accessible; the marker is
+        // uniform with classes (a struct simply has no private fields to gate).
+        let saved_type = self.current_type.replace(r.name.clone());
         for block in &r.impls {
             self.check_impl(block);
         }
         for method in &r.methods {
             self.check_fn(method, env, &fields, TargetKind::Method);
         }
+        self.current_type = saved_type;
         self.type_params = saved;
     }
 
@@ -1267,6 +1293,9 @@ impl Checker {
         let standalone = self.standalone_for(&c.name);
         self.check_coherence(&c.derives, &c.impls, &standalone);
         self.check_attrs(&c.attrs, TargetKind::Class);
+        // Inside the class's own methods/destructor its private fields are accessible — on `self`
+        // and on any same-type value (the type-scoped privacy rule, object-model slice 2d).
+        let saved_type = self.current_type.replace(c.name.clone());
         for block in &c.impls {
             self.check_impl(block);
         }
@@ -1283,6 +1312,7 @@ impl Checker {
             }
             env.pop();
         }
+        self.current_type = saved_type;
         self.type_params = saved;
     }
 
@@ -2171,7 +2201,12 @@ impl Checker {
                 }
                 Type::Map(Box::new(key_ty), Box::new(val_ty))
             }
-            Expr::Member { receiver, name, .. } => self.synth_member(receiver, name, env),
+            Expr::Member {
+                receiver,
+                name,
+                name_span,
+                ..
+            } => self.synth_member(receiver, name, *name_span, env),
             Expr::Index {
                 receiver,
                 index,
@@ -2224,6 +2259,12 @@ impl Checker {
                 let mut subst: HashMap<String, Type> = HashMap::new();
                 for f in &lit.fields {
                     let vty = self.synth(&f.value, env);
+                    // A literal that sets a private field is only valid inside the declaring type's
+                    // own methods (slice 2d) — a `class` with private fields is built externally
+                    // through an associated `fn`/constructor, not a bare literal.
+                    if !self.field_visible(&lit.type_name, &f.name) {
+                        self.report_private_field(&lit.type_name, &f.name, "set", f.name_span);
+                    }
                     if !pset.is_empty()
                         && let Some((_, declared)) = decls.iter().find(|(n, _)| n == &f.name)
                     {
@@ -2413,6 +2454,10 @@ impl Checker {
             );
             return recv;
         };
+        // A private field is assignable only inside its declaring type's own methods (slice 2d).
+        if !self.field_visible(&name, field) {
+            self.report_private_field(&name, field, "assign", field_span);
+        }
         // Asymmetric `mut` rule (object-model slice 2b′): a value `struct` field-set is desugared to
         // a rebind of the receiver (`x = T { ...x, f: v }`), so the receiver binding must be `mut`
         // (E0006); a reference `class` field-set mutates the shared instance in place, needing no
@@ -3142,7 +3187,40 @@ impl Checker {
         Type::Unknown
     }
 
-    fn synth_member(&mut self, receiver: &Expr, name: &str, env: &mut Env) -> Type {
+    /// Whether field `field` of type `type_name` is accessible at the current checking context
+    /// (object-model slice 2d): a public field always is; a private one (a `class` field not
+    /// declared `pub`) only inside the declaring type's own methods/destructor ([`Self::current_type`]).
+    fn field_visible(&self, type_name: &str, field: &str) -> bool {
+        let private = self
+            .private_fields
+            .get(type_name)
+            .is_some_and(|fs| fs.contains(field));
+        !private || self.current_type.as_deref() == Some(type_name)
+    }
+
+    /// Report an access to a private field from outside its type (E0035). `verb` is the action
+    /// (`"read"`, `"assign"`, `"set"`) for the message.
+    fn report_private_field(&mut self, type_name: &str, field: &str, verb: &str, span: Span) {
+        self.diags.push(
+            Diagnostic::error(
+                DiagnosticCode::PrivateField,
+                span,
+                format!("cannot {verb} private field `{field}` of `{type_name}` from outside it"),
+            )
+            .with_help(format!(
+                "fields of a `class` are private by default; declare it `pub {field}: ...` to expose \
+                 it, or go through a method"
+            )),
+        );
+    }
+
+    fn synth_member(
+        &mut self,
+        receiver: &Expr,
+        name: &str,
+        name_span: Span,
+        env: &mut Env,
+    ) -> Type {
         // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type.
         if let Expr::Ident { name: tn, .. } = receiver
             && self.is_enum_variant(tn, name)
@@ -3151,15 +3229,19 @@ impl Checker {
         }
         let recv = self.synth(receiver, env);
         if let Type::Named(n, recv_args) = &recv
-            && let Some((_, ty)) = self
+            && let Some(ty) = self
                 .records
                 .get(n)
                 .and_then(|fields| fields.iter().find(|(fname, _)| fname == name))
+                .map(|(_, ty)| ty.clone())
         {
+            // A private field is readable only inside its declaring type's own methods (slice 2d).
+            if !self.field_visible(n, name) {
+                self.report_private_field(n, name, "read", name_span);
+            }
             // Substitute the class's type parameters from the receiver's type arguments, so a field
             // of a `Box<int>` reads as `int`. An unresolved parameter (the receiver's arguments are
             // unknown, e.g. from a literal) erases to `dyn` rather than leaking the parameter name.
-            let ty = ty.clone();
             let params = self.generic_types.get(n).cloned().unwrap_or_default();
             let subst: HashMap<String, Type> = params
                 .iter()

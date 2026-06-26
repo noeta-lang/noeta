@@ -3,8 +3,8 @@
 namespace App.Models;
 
 pub class User {
-    name: string
-    id: int
+    pub name: string
+    pub id: int
 
     fn new(name: string, id: int): User {
         return User { name: name, id: id };

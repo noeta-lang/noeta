@@ -3,7 +3,7 @@
 // expect: error E0009 at 9:5
 // expect: exit 1
 class Point {
-    x: int
+    pub x: int
     y: int
 }
 p = Point { x: 1 };
