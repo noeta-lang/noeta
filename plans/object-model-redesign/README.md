@@ -431,9 +431,16 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    Dedicated `Payload::Tuple`/`Value::Tuple` (value-semantic, owns one ref per element like a list,
    no shape); ops `MakeTuple`/`TupleIndex`; IR `Rvalue::Tuple`/`TupleIndex`; `as<(…)>`/`is (…)` narrow
    head-constructor only ("is a tuple"); `type_of` erases a tuple to `dyn`. No new diag code.
-   Conformance 279 / differential agrees / leak 0 both backends / miri clean. **4b (NEXT) = tuple
-   destructuring: binding `(a, b) = expr` (currently a clean parse error), `for (a, b) in …`, and
-   tuple patterns in `match`.**
+   Conformance 279 / differential agrees / leak 0 both backends / miri clean. **4b DONE
+   (`fbe2978` + `f6c3dd8`) — tuple destructuring.** 4b.1 (`fbe2978`) = irrefutable: binding
+   `(a, b) = expr` (new `Stmt::Destructure`) + `for (a, b, …) in …` (`ForPattern::Pair`→N-ary
+   `ForPattern::Tuple`), both **desugared in IR lowering** to a temp/hidden-var + `.N` projections
+   (reusing 4a's `TupleIndex`, so no new IR/VM construct); `.enumerate()` now yields `(int, T)`
+   **tuples** (unified — the corpus only consumed it via `for (i,x)`); the list-based
+   `DestructurePair` op retired. 4b.2 (`f6c3dd8`) = refutable: `match t { (p, q, …) => … }` via new
+   `Op::MatchTuple` + 4a's `TupleIndex` extraction (mirrors variant patterns; nested patterns
+   compose). No new diag code. **Slice 4 (tuples) is COMPLETE.** Conformance 283 / differential 275
+   matched / leak 0 both backends.
 5. **Field defaults** (opt-in per field). Independent.
 6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + DCE gate + manifest) with
    **`test` first**, then `bench`/`doc`. (The dev-tier section above predates the settled spelling and
