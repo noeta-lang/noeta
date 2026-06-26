@@ -30,6 +30,9 @@ pub enum Value {
     Str(String),
     /// An immutable list. `Rc` keeps copies cheap (map/filter produce new lists).
     List(Rc<Vec<Value>>),
+    /// A tuple: a fixed-arity, heterogeneous, value-semantic positional aggregate (object-model
+    /// slice 4). `Rc` keeps copies cheap; equality is structural (element-wise).
+    Tuple(Rc<Vec<Value>>),
     /// An immutable set, held in canonical (sorted, de-duplicated) order so iteration,
     /// display, and equality are deterministic and identical to the VM's `Payload::Set`.
     Set(Rc<Vec<Value>>),
@@ -70,6 +73,11 @@ impl Value {
             Value::List(items) => {
                 let parts: Vec<String> = items.iter().map(Value::repr).collect();
                 format!("[{}]", parts.join(", "))
+            }
+            // A tuple renders parenthesized with `repr` elements (`(1, "a")`) — the VM matches.
+            Value::Tuple(items) => {
+                let parts: Vec<String> = items.iter().map(Value::repr).collect();
+                format!("({})", parts.join(", "))
             }
             // Braces with no key colons (`{1, 2, 3}`) distinguish a set from a non-empty map;
             // an empty set is `{}`, like an empty map.
@@ -114,6 +122,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::Str(_) => "string",
             Value::List(_) => "list",
+            Value::Tuple(_) => "tuple",
             Value::Set(_) => "set",
             Value::Map(_) => "map",
             Value::Function(_) | Value::Builtin(_) => "function",
@@ -136,6 +145,7 @@ impl fmt::Debug for Value {
             Value::Float(x) => write!(f, "Float({x})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
             Value::List(items) => write!(f, "List({items:?})"),
+            Value::Tuple(items) => write!(f, "Tuple({items:?})"),
             Value::Set(items) => write!(f, "Set({items:?})"),
             Value::Map(entries) => write!(f, "Map({entries:?})"),
             Value::Function(_) => write!(f, "Function(<fn>)"),
@@ -159,6 +169,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a == b,
+            (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Set(a), Value::Set(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
             (Value::Enum(a), Value::Enum(b)) => a == b,

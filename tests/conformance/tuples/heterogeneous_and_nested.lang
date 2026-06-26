@@ -1,0 +1,23 @@
+// Object-model slice 4 — tuples are heterogeneous and nest. Nested projection `x.0.1` works (the
+// lexer takes the `.0.1` tail as one float literal, which the parser splits back into a projection
+// chain). Tuples carry any value type, including lists and structs. Both backends agree.
+// expect: stdout "(1, 2)"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "deep"
+// expect: stdout "[10, 20]"
+// expect: stdout "30"
+// expect: exit 0
+struct Point { x: int y: int }
+
+nested = ((1, 2), (3, 4));
+echo nested.0;       // (1, 2)
+echo nested.0.0;     // 1
+echo nested.0.1;     // 2
+
+deep = ((1, ("a", "deep")), (2, ("b", "shallow")));
+echo deep.0.1.1;     // "deep"
+
+mixed = ([10, 20], Point { x: 30, y: 40 });
+echo mixed.0;        // [10, 20]
+echo mixed.1.x;      // 30

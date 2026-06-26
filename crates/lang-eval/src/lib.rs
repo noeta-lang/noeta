@@ -1140,7 +1140,9 @@ impl Interpreter {
         match value {
             Value::Object(obj) => self.destroy_object(obj),
             Value::Enum(e) => self.destroy_enum(e),
-            Value::List(items) | Value::Set(items) => self.destroy_sequence(items),
+            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+                self.destroy_sequence(items)
+            }
             Value::Map(entries) => self.destroy_map(entries),
             // Scalars/functions/types/handles bear no destructor (a function's *captured* values
             // are Phase-6 territory); their `Rc`/value drops here, reclaiming memory.
@@ -2176,6 +2178,21 @@ impl Interpreter {
                     values.push(self.eval_expr(item)?);
                 }
                 Ok(Value::List(Rc::new(values)))
+            }
+            Expr::Tuple { items, .. } => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.eval_expr(item)?);
+                }
+                Ok(Value::Tuple(Rc::new(values)))
+            }
+            Expr::TupleIndex {
+                receiver,
+                index,
+                span,
+            } => {
+                let recv = self.eval_expr(receiver)?;
+                self.tuple_index(recv, *index, *span)
             }
             Expr::Range {
                 start,
@@ -3462,6 +3479,33 @@ impl Interpreter {
         Ok(value.display())
     }
 
+    /// Positional tuple projection `receiver.N` (object-model slice 4), shared by both eval
+    /// backends. The index is in range by construction (the checker verified it against the tuple's
+    /// arity); a non-tuple receiver or an out-of-range index is a runtime error for robustness.
+    fn tuple_index(&mut self, receiver: Value, index: u32, span: Span) -> Eval<Value> {
+        match &receiver {
+            Value::Tuple(items) => match items.get(index as usize) {
+                Some(value) => Ok(value.clone()),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "tuple index `{index}` is out of range for a {}-tuple",
+                        items.len()
+                    ),
+                )),
+            },
+            other => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "cannot apply tuple index `.{index}` to {}",
+                    other.type_name()
+                ),
+            )),
+        }
+    }
+
     /// Evaluate `receiver[index]`. A user object dispatches through its `Index` trait
     /// (`receiver.get(index)`); a built-in list addresses an element by integer position
     /// (bounds-checked). Any other receiver is not indexable.
@@ -4081,6 +4125,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         Value::Str(_) => TypeRepr::Str,
         Value::Unit => TypeRepr::Unit,
         Value::List(_) => TypeRepr::List(dyn_()),
+        // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
+        Value::Tuple(_) => TypeRepr::Dyn,
         Value::Set(_) => TypeRepr::Set(dyn_()),
         Value::Map(_) => TypeRepr::Map(dyn_(), dyn_()),
         Value::Function(_) | Value::Builtin(_) => TypeRepr::Fn(Vec::new(), dyn_()),
@@ -4234,6 +4280,9 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         TypeRef::Optional { .. } => {
             matches!(value, Value::Enum(e) if e.enum_name == "Option")
         }
+        // A tuple target matches any tuple value — head-constructor only, arity/elements erased
+        // (object-model slice 4), exactly like `List` ignoring its element type.
+        TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),
         TypeRef::Named { name, .. } => match name.as_str() {
             "int" => matches!(value, Value::Int(_)),
             "float" => matches!(value, Value::Float(_)),

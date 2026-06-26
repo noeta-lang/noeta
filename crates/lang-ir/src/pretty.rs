@@ -251,6 +251,10 @@ impl Printer<'_> {
                 receiver, index, ..
             } => format!("{}[{}]", atom(receiver), atom(index)),
             Rvalue::List { items, .. } => format!("[{}]", atoms(items)),
+            Rvalue::Tuple { items, .. } => format!("({})", atoms(items)),
+            Rvalue::TupleIndex {
+                receiver, index, ..
+            } => format!("{}.{index}", atom(receiver)),
             Rvalue::Map { entries, .. } => {
                 let parts: Vec<String> = entries
                     .iter()
@@ -388,6 +392,12 @@ fn type_ref(ty: &TypeRef) -> String {
         TypeRef::Optional { inner, .. } => format!("?{}", type_ref(inner)),
         TypeRef::Union { members, .. } => {
             members.iter().map(type_ref).collect::<Vec<_>>().join(" | ")
+        }
+        TypeRef::Tuple { elements, .. } => {
+            format!(
+                "({})",
+                elements.iter().map(type_ref).collect::<Vec<_>>().join(", ")
+            )
         }
     }
 }

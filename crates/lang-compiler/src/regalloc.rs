@@ -150,9 +150,13 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::UpvalueGet { dst, .. } => f.def = Some(*dst),
         Op::UpvalueSet { src, .. } => f.uses.push(*src),
         Op::LoadNativeFn { dst, .. } => f.def = Some(*dst),
-        Op::MakeList { dst, items } => {
+        Op::MakeList { dst, items } | Op::MakeTuple { dst, items } => {
             f.def = Some(*dst);
             f.uses.extend(items.iter().copied());
+        }
+        Op::TupleIndex { dst, receiver, .. } => {
+            f.def = Some(*dst);
+            f.uses.push(*receiver);
         }
         Op::MakeRange {
             dst, start, end, ..
@@ -541,11 +545,15 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::UpvalueGet { dst, .. } => m(dst),
         Op::UpvalueSet { src, .. } => m(src),
         Op::LoadNativeFn { dst, .. } => m(dst),
-        Op::MakeList { dst, items } => {
+        Op::MakeList { dst, items } | Op::MakeTuple { dst, items } => {
             m(dst);
             for r in items.iter_mut() {
                 m(r);
             }
+        }
+        Op::TupleIndex { dst, receiver, .. } => {
+            m(dst);
+            m(receiver);
         }
         Op::MakeRange {
             dst, start, end, ..

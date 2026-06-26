@@ -462,7 +462,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(receiver);
             f(index);
         }
-        Rvalue::List { items, .. } => items.iter().for_each(&mut *f),
+        Rvalue::List { items, .. } | Rvalue::Tuple { items, .. } => items.iter().for_each(&mut *f),
+        Rvalue::TupleIndex { receiver, .. } => f(receiver),
         Rvalue::Map { entries, .. } => {
             for (k, v) in entries {
                 f(k);

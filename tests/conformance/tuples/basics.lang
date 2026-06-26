@@ -1,0 +1,35 @@
+// Object-model slice 4 — tuples: the anonymous, positional, value-semantic aggregate. A literal
+// `(a, b, …)` (2+ elements; `(x)` is just a parenthesized expression), positional access `.0`/`.1`,
+// a tuple type annotation `(int, int)` for multiple return, and structural equality. Both backends
+// agree.
+// expect: stdout "(1, \"two\", 3.0)"
+// expect: stdout "1"
+// expect: stdout "two"
+// expect: stdout "3.0"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "(3, 2)"
+// expect: stdout "3"
+// expect: stdout "2"
+// expect: stdout "4"
+// expect: exit 0
+p = (1, "two", 3.0);
+echo p;
+echo p.0;
+echo p.1;
+echo p.2;
+
+q = (1, "two", 3.0);
+echo p == q;                 // structural equality
+echo p == (1, "two", 4.0);   // differs in the last position
+
+fn divmod(a: int, b: int): (int, int) {
+    return (a / b, a - (a / b) * b);
+}
+r = divmod(17, 5);
+echo r;                      // (3, 2)
+echo r.0;
+echo r.1;
+
+// `(x)` is a parenthesized expression, not a 1-tuple.
+echo (2 + 2);

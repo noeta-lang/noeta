@@ -1943,6 +1943,36 @@ impl<'m> FnCompiler<'m> {
                 self.release_consumed(&consumed);
                 Ok(())
             }
+            // A tuple literal builds exactly like a list (object-model slice 4) — each element
+            // consumed into the aggregate, which takes one reference to each.
+            Rvalue::Tuple { items, .. } => {
+                let mut consumed = Vec::new();
+                let mut regs = Vec::with_capacity(items.len());
+                for item in items {
+                    regs.push(self.consume_operand(item, &mut consumed)?);
+                }
+                self.code.push(Op::MakeTuple {
+                    dst,
+                    items: regs.into_boxed_slice(),
+                });
+                self.release_consumed(&consumed);
+                Ok(())
+            }
+            Rvalue::TupleIndex {
+                receiver,
+                index,
+                span,
+            } => {
+                let recv = self.atom_reg(receiver)?;
+                self.code.push(Op::TupleIndex {
+                    dst,
+                    receiver: recv,
+                    index: *index,
+                    span: *span,
+                });
+                self.drop_temp_receiver(receiver, recv);
+                Ok(())
+            }
             Rvalue::Map { entries, span } => {
                 // Evaluate each key, check it is a string (matching M0's per-entry error timing),
                 // then the value — then assemble the map.
@@ -3018,6 +3048,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             NarrowTarget::AnyOf(members.iter().map(narrow_target).collect())
         }
         TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
+        TypeRef::Tuple { .. } => NarrowTarget::Tuple,
         TypeRef::Named { name, .. } => match name.as_str() {
             "int" => NarrowTarget::Int,
             "float" => NarrowTarget::Float,
@@ -3028,6 +3059,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             "List" | "list" => NarrowTarget::List,
             "Map" | "map" => NarrowTarget::Map,
             "Set" | "set" => NarrowTarget::Set,
+            "tuple" => NarrowTarget::Tuple,
             "Enum" => NarrowTarget::AnyEnum,
             "Struct" => NarrowTarget::AnyStruct,
             "Class" => NarrowTarget::AnyClass,

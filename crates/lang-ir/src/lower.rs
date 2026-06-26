@@ -402,6 +402,36 @@ impl Lowerer {
                     *span,
                 ))
             }
+            Expr::Tuple { items, span } => {
+                let mut atoms = Vec::with_capacity(items.len());
+                for item in items {
+                    atoms.push(self.lower_expr(item, out)?);
+                }
+                Ok(self.emit(
+                    out,
+                    Rvalue::Tuple {
+                        items: atoms,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::TupleIndex {
+                receiver,
+                index,
+                span,
+            } => {
+                let receiver = self.lower_expr(receiver, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::TupleIndex {
+                        receiver,
+                        index: *index,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Range {
                 start,
                 end,

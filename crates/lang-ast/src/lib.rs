@@ -493,6 +493,10 @@ pub enum TypeRef {
     /// type parses as that type, not a one-member union). M1 desugars it through the normalizing
     /// `Type::union`.
     Union { members: Vec<TypeRef>, span: Span },
+    /// A tuple type `(A, B, …)` — a fixed-arity, heterogeneous, positional value type (object-model
+    /// slice 4). Always ≥2 elements at the surface (`(T)` is just a parenthesized type, `()` is
+    /// `unit`).
+    Tuple { elements: Vec<TypeRef>, span: Span },
 }
 
 impl TypeRef {
@@ -500,7 +504,8 @@ impl TypeRef {
         match self {
             TypeRef::Named { span, .. }
             | TypeRef::Optional { span, .. }
-            | TypeRef::Union { span, .. } => *span,
+            | TypeRef::Union { span, .. }
+            | TypeRef::Tuple { span, .. } => *span,
         }
     }
 }
@@ -553,6 +558,17 @@ pub enum Expr {
     },
     /// A list literal: `[a, b, c]`.
     List { items: Vec<Expr>, span: Span },
+    /// A tuple literal: `(a, b, c)` — a fixed-arity, heterogeneous, value-semantic positional
+    /// aggregate (object-model slice 4). Always ≥2 items (`(x)` is a parenthesized expression, `()`
+    /// is `unit`).
+    Tuple { items: Vec<Expr>, span: Span },
+    /// Tuple projection: `receiver.0` / `receiver.1` — positional access by a constant index. A
+    /// numeric `.N` is distinct from a named `.field` member access (object-model slice 4).
+    TupleIndex {
+        receiver: Box<Expr>,
+        index: u32,
+        span: Span,
+    },
     /// An integer range: `start..end` (exclusive) or `start..=end` (inclusive). Eagerly
     /// materializes to a `List<int>` — `0..3` is `[0, 1, 2]`, `0..=3` is `[0, 1, 2, 3]`.
     Range {
@@ -764,6 +780,8 @@ impl Expr {
             | Expr::Closure { span, .. }
             | Expr::Pipeline { span, .. }
             | Expr::List { span, .. }
+            | Expr::Tuple { span, .. }
+            | Expr::TupleIndex { span, .. }
             | Expr::Range { span, .. }
             | Expr::Map { span, .. }
             | Expr::Member { span, .. }
@@ -830,7 +848,8 @@ impl Expr {
                         .iter()
                         .any(|p| p.default.as_ref().is_some_and(|d| d.mentions(name)))
             }
-            Expr::List { items, .. } => any(items),
+            Expr::List { items, .. } | Expr::Tuple { items, .. } => any(items),
+            Expr::TupleIndex { receiver, .. } => receiver.mentions(name),
             Expr::Map { entries, .. } => entries
                 .iter()
                 .any(|(k, v)| k.mentions(name) || v.mentions(name)),

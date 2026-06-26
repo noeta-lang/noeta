@@ -164,6 +164,12 @@ impl Value {
         heap::alloc(Payload::List(items))
     }
 
+    /// A heap tuple (refcount 1) — a fixed-arity, value-semantic positional aggregate (object-model
+    /// slice 4). Ownership of one reference to each element transfers in, exactly like [`Value::list`].
+    pub fn tuple(items: Vec<Value>) -> Value {
+        heap::alloc(Payload::Tuple(items))
+    }
+
     /// A heap set (refcount 1). `items` must already be in canonical form — sorted and
     /// de-duplicated — since the set type relies on that for deterministic iteration, display,
     /// and equality. Ownership of one reference to each element transfers in, like [`Value::list`].
@@ -310,6 +316,36 @@ impl Value {
     /// Whether this is a heap list.
     pub fn is_list(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::List(_)))
+    }
+
+    /// Whether this is a heap tuple.
+    pub fn is_tuple(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Tuple(_)))
+    }
+
+    /// The element at positional index `i`, if this is a tuple and `i` is in bounds. Returns a copy
+    /// of the `Value` (a NaN-boxed word); the caller retains it if it keeps it.
+    pub fn tuple_field(self, i: usize) -> Option<Value> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Tuple(items) => items.get(i).copied(),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A clone of this tuple's elements, if it is a tuple.
+    pub fn tuple_items(self) -> Option<Vec<Value>> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Tuple(items) => Some(items.clone()),
+                _ => None,
+            })
+        } else {
+            None
+        }
     }
 
     /// Whether this is a heap map.
@@ -722,6 +758,12 @@ impl Value {
                     let parts: Vec<String> = items.iter().map(|v| v.repr()).collect();
                     format!("[{}]", parts.join(", "))
                 }
+                // A tuple renders parenthesized with `repr` elements (`(1, "a")`), the positional
+                // counterpart of a list's brackets.
+                Payload::Tuple(items) => {
+                    let parts: Vec<String> = items.iter().map(|v| v.repr()).collect();
+                    format!("({})", parts.join(", "))
+                }
                 // A set renders with braces and no key colons (`{1, 2, 3}`), distinguishing it
                 // from a non-empty map; an empty set is `{}`, like an empty map.
                 Payload::Set(items) => {
@@ -795,6 +837,11 @@ impl Value {
                     let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
                     format!("[{}]", parts.join(","))
                 }
+                // A tuple serializes as a JSON array (JSON has no tuple type), like a list.
+                Payload::Tuple(items) => {
+                    let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
+                    format!("[{}]", parts.join(","))
+                }
                 // A set serializes as a JSON array (JSON has no set type).
                 Payload::Set(items) => {
                     let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
@@ -855,6 +902,8 @@ impl Value {
                 "function"
             } else if self.is_list() {
                 "list"
+            } else if self.is_tuple() {
+                "tuple"
             } else if self.is_set() {
                 "set"
             } else if self.is_map() {
@@ -1096,6 +1145,23 @@ mod tests {
         assert_eq!(Value::int(42).as_int(), Some(42));
         assert_eq!(Value::int(-42).as_int(), Some(-42));
         assert_eq!(Value::float(2.5).as_float(), Some(2.5));
+    }
+
+    #[test]
+    fn tuple_display_type_name_and_projection() {
+        // Object-model slice 4: a heap tuple renders parenthesized with `repr` elements, names its
+        // type, and projects by position. Freed at the end so miri sees no leak (it owns one
+        // reference per element).
+        let t = Value::tuple(vec![Value::int(1), Value::string("two"), Value::float(3.0)]);
+        assert_eq!(t.display(), "(1, \"two\", 3.0)");
+        assert_eq!(t.type_name(), "tuple");
+        assert!(t.is_tuple());
+        assert_eq!(t.tuple_field(0).unwrap().as_int(), Some(1));
+        assert_eq!(t.tuple_field(1).unwrap().as_string().unwrap(), "two");
+        assert!(t.tuple_field(3).is_none());
+        // Release the sole reference: frees the tuple and its owned elements (the boxed string),
+        // so miri sees no leak.
+        t.release();
     }
 
     #[test]

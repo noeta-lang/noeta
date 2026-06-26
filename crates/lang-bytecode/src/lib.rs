@@ -99,6 +99,9 @@ pub enum NarrowTarget {
     List,
     Map,
     Set,
+    /// A tuple target (`x.as<(int, string)>()`): matches any tuple value — head-constructor only,
+    /// arity and element types erased, like `List` ignoring its element type (object-model slice 4).
+    Tuple,
     Fn,
     Dyn,
     Named(String),
@@ -243,6 +246,20 @@ pub enum Op {
     MakeList {
         dst: Reg,
         items: Box<[Reg]>,
+    },
+    /// `dst = (items...)` — build a heap tuple (object-model slice 4), retaining each element into
+    /// it exactly like `MakeList`.
+    MakeTuple {
+        dst: Reg,
+        items: Box<[Reg]>,
+    },
+    /// `dst = receiver.N` — positional tuple projection by a constant index (object-model slice 4).
+    /// The index is in range by construction (the checker verifies it against the tuple's arity).
+    TupleIndex {
+        dst: Reg,
+        receiver: Reg,
+        index: u32,
+        span: Span,
     },
     /// `dst = start..end` (exclusive) or `start..=end` (inclusive) — eagerly build a `List<int>`
     /// from two integer registers, raising E0007 at `span` if either bound is not an int. Mirrors
@@ -877,6 +894,16 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
             format!("MakeList    r{dst} <- [{}]", items.join(", "))
         }
+        Op::MakeTuple { dst, items } => {
+            let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
+            format!("MakeTuple   r{dst} <- ({})", items.join(", "))
+        }
+        Op::TupleIndex {
+            dst,
+            receiver,
+            index,
+            ..
+        } => format!("TupleIndex  r{dst} <- r{receiver}.{index}"),
         Op::MakeRange {
             dst,
             start,

@@ -700,6 +700,20 @@ where
                 span: ctx.to_span(e.span()),
             })
             .boxed();
+        // A tuple type `(A, B, …)` — at least 2 comma-separated element types in parentheses
+        // (object-model slice 4). `()` and `(T)` are not tuple types (`unit`; a 1-tuple is
+        // unrepresentable), so the `at_least(2)` keeps this unambiguous against any future
+        // parenthesized-type form.
+        let tuple_type = type_
+            .clone()
+            .separated_by(just(T::Comma))
+            .at_least(2)
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::LParen), just(T::RParen))
+            .map_with(move |elements, e| TypeRef::Tuple {
+                elements,
+                span: ctx.to_span(e.span()),
+            });
         // A "base" type binds `?` tighter than `|`, so `?A | B` is `(?A) | B`. The inner recursion
         // lets `?` nest (`??A`); generic arguments still use the full `type_`, so a union can appear
         // inside them (`List<A | B>`).
@@ -710,7 +724,7 @@ where
                     inner: Box::new(inner),
                     span: ctx.to_span(e.span()),
                 });
-            choice((optional, named.clone())).boxed()
+            choice((optional, tuple_type.clone(), named.clone())).boxed()
         });
         // A union is the loosest type combinator: `base (| base)*`. A lone base is returned bare,
         // so any non-union annotation parses byte-identically to before.
@@ -1042,7 +1056,26 @@ where
                 }
             });
 
-        let paren = expr.clone().delimited_by(just(T::LParen), just(T::RParen));
+        // A parenthesized expression `(e)` or a tuple literal `(a, b, …)` — disambiguated by arity:
+        // exactly one element is the parenthesized expression (returned bare), two or more is an
+        // `Expr::Tuple` (object-model slice 4). `()` is not produced here (handled as `unit`
+        // elsewhere); a 1-tuple is unrepresentable by design.
+        let paren = expr
+            .clone()
+            .separated_by(just(T::Comma))
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::LParen), just(T::RParen))
+            .map_with(move |mut items, e| {
+                if items.len() == 1 {
+                    items.pop().unwrap()
+                } else {
+                    Expr::Tuple {
+                        items,
+                        span: ctx.to_span(e.span()),
+                    }
+                }
+            });
 
         // `if cond then a else b` — a conditional *expression*. The `then` keyword forks it from
         // the statement `if cond { … }` (which uses a brace). It desugars to a `match`: a
@@ -1181,6 +1214,39 @@ where
                     expr: Box::new(operand),
                     ty,
                     span: ctx.to_span(e.span()),
+                },
+            ),
+            // Tuple projection `receiver.0` / `receiver.1` (object-model slice 4): a `.` followed by
+            // an integer index. A *nested* projection `x.0.1` lexes its tail `0.1` as one float
+            // literal (the digit-before-dot float rule), so a float token after the dot is accepted
+            // and split on `.` into a chain (`x.0.1` ⟶ index 0 then index 1). Placed before the
+            // member-access postfix so `.0` never tries to bind as an identifier member.
+            postfix(
+                10,
+                just(T::Dot).ignore_then(
+                    choice((just(T::IntLit), just(T::FloatLit)))
+                        .map_with(move |_, e| ctx.to_span(e.span())),
+                ),
+                move |receiver, idx_span, e| {
+                    let text = ctx.source.slice(idx_span);
+                    let span = ctx.to_span(e.span());
+                    let mut expr = receiver;
+                    for part in text.split('.') {
+                        let index = part.parse::<u32>().unwrap_or_else(|_| {
+                            ctx.diags.borrow_mut().push(Diagnostic::error(
+                                DiagnosticCode::UnexpectedToken,
+                                span,
+                                format!("`{part}` is not a valid tuple index"),
+                            ));
+                            0
+                        });
+                        expr = Expr::TupleIndex {
+                            receiver: Box::new(expr),
+                            index,
+                            span,
+                        };
+                    }
+                    expr
                 },
             ),
             postfix(

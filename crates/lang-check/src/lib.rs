@@ -188,7 +188,10 @@ fn type_to_repr(
         Type::Fn { params, ret } => {
             TypeRepr::Fn(params.iter().map(rec).collect(), Box::new(rec(ret)))
         }
-        Type::Union(_) | Type::Dyn | Type::Unknown | Type::Kind(_) => TypeRepr::Dyn,
+        // A tuple has no reflection descriptor today (like a union); it erases to `dyn` in `type_of`.
+        Type::Tuple(_) | Type::Union(_) | Type::Dyn | Type::Unknown | Type::Kind(_) => {
+            TypeRepr::Dyn
+        }
     }
 }
 
@@ -1456,6 +1459,11 @@ impl Checker {
                     self.check_type_ref(m);
                 }
             }
+            TypeRef::Tuple { elements, .. } => {
+                for e in elements {
+                    self.check_type_ref(e);
+                }
+            }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name)
@@ -2217,6 +2225,45 @@ impl Checker {
                     elem = Type::Dyn; // recover as a mixed list
                 }
                 Type::List(Box::new(elem))
+            }
+            // A tuple literal `(a, b, …)` synthesizes a `Type::Tuple` of its elements' types,
+            // positionally — heterogeneity is the point (no unification, unlike a list).
+            Expr::Tuple { items, .. } => {
+                Type::Tuple(items.iter().map(|item| self.synth(item, env)).collect())
+            }
+            // Tuple projection `receiver.N`: the Nth element type of a tuple receiver. An out-of-range
+            // index is `E0007`; a `.N` on a non-tuple concrete type is rejected; a `dyn`/hole defers.
+            Expr::TupleIndex {
+                receiver,
+                index,
+                span,
+            } => {
+                let recv = self.synth(receiver, env);
+                match &recv {
+                    Type::Tuple(elements) => match elements.get(*index as usize) {
+                        Some(t) => t.clone(),
+                        None => {
+                            self.diags.push(Diagnostic::error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "tuple index `{index}` is out of range for `{recv}` ({} element(s))",
+                                    elements.len()
+                                ),
+                            ));
+                            Type::Unknown
+                        }
+                    },
+                    _ if recv.defers_to_runtime() => Type::Unknown,
+                    _ => {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("cannot apply tuple index `.{index}` to non-tuple `{recv}`"),
+                        ));
+                        Type::Unknown
+                    }
+                }
             }
             Expr::Range {
                 start, end, span, ..
@@ -3774,6 +3821,8 @@ fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         Type::Map(k, v) => type_relevant(k, reachable) || type_relevant(v, reachable),
         Type::Result(t, e) => type_relevant(t, reachable) || type_relevant(e, reachable),
         Type::Union(members) => members.iter().any(|m| type_relevant(m, reachable)),
+        // A tuple is relevant exactly when one of its elements is (like a list).
+        Type::Tuple(elements) => elements.iter().any(|e| type_relevant(e, reachable)),
         // A declared type: relevant if it (transitively) reaches a destructor, or any type argument
         // does (covers generic containers like `Box<Resource>`).
         Type::Named(name, args) => {

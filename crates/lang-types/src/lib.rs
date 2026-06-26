@@ -114,6 +114,10 @@ pub enum Type {
     /// that the vector holds **≥2 distinct, non-`dyn`, non-`Union` members** (flattened, deduped;
     /// a `dyn` member absorbs the whole thing; a singleton collapses to the bare member).
     Union(Vec<Type>),
+    /// A **tuple** `(A, B, …)` — a fixed-arity, heterogeneous, positional value type (object-model
+    /// slice 4). Always ≥2 elements (a 1-tuple is unrepresentable in the surface — `(T)` is a
+    /// parenthesized type — and `()` is `unit`). Subtyping is element-wise covariant.
+    Tuple(Vec<Type>),
 }
 
 impl Type {
@@ -178,6 +182,11 @@ impl Type {
             (_, Union(members)) => members.iter().any(|m| Type::subtype(sub, m)),
             (List(a), List(b)) => Type::subtype(a, b),
             (Set(a), Set(b)) => Type::subtype(a, b),
+            // A tuple is element-wise covariant — same arity, each position a subtype (`(int, A) <:
+            // (int, dyn)`). Sound: tuples are value-semantic and immutable.
+            (Tuple(a), Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| Type::subtype(x, y))
+            }
             (Map(ak, av), Map(bk, bv)) => Type::subtype(ak, bk) && Type::subtype(av, bv),
             (Option(a), Option(b)) => Type::subtype(a, b),
             (Result(at, ae), Result(bt, be)) => Type::subtype(at, bt) && Type::subtype(ae, be),
@@ -292,6 +301,9 @@ impl Type {
     pub fn from_ref(ty: &TypeRef) -> Type {
         match ty {
             TypeRef::Union { members, .. } => Type::union(members.iter().map(Type::from_ref)),
+            TypeRef::Tuple { elements, .. } => {
+                Type::Tuple(elements.iter().map(Type::from_ref).collect())
+            }
             TypeRef::Optional { inner, .. } => Type::Option(Box::new(Type::from_ref(inner))),
             TypeRef::Named { name, args, .. } => {
                 let arg = |i: usize| args.get(i).map(Type::from_ref).unwrap_or(Type::Unknown);
@@ -369,6 +381,16 @@ impl std::fmt::Display for Type {
                     write!(f, "{m}")?;
                 }
                 Ok(())
+            }
+            Type::Tuple(elements) => {
+                f.write_str("(")?;
+                for (i, e) in elements.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    write!(f, "{e}")?;
+                }
+                f.write_str(")")
             }
         }
     }

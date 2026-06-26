@@ -244,6 +244,7 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::List => "list",
         NarrowTarget::Map => "map",
         NarrowTarget::Set => "set",
+        NarrowTarget::Tuple => "tuple",
         NarrowTarget::Fn => "function",
         NarrowTarget::Dyn => return true,
         NarrowTarget::Named(name) => return v.shape().is_some_and(|s| &s.name == name),
@@ -1630,6 +1631,41 @@ impl<'m> Vm<'m> {
                         elements.push(v);
                     }
                     set_reg(&mut frames[top].regs, *dst, Value::list(elements));
+                    frames[top].pc += 1;
+                }
+                // A tuple builds exactly like a list (object-model slice 4): retain each element into
+                // the aggregate, which owns one reference to each.
+                Op::MakeTuple { dst, items } => {
+                    let mut elements = Vec::with_capacity(items.len());
+                    for &r in items.iter() {
+                        let v = frames[top].regs[r as usize];
+                        retain(v);
+                        elements.push(v);
+                    }
+                    set_reg(&mut frames[top].regs, *dst, Value::tuple(elements));
+                    frames[top].pc += 1;
+                }
+                // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
+                // into `dst`. The index is in range by construction (the checker verified it).
+                Op::TupleIndex {
+                    dst,
+                    receiver,
+                    index,
+                    span,
+                } => {
+                    let v = frames[top].regs[*receiver as usize];
+                    let Some(element) = v.tuple_field(*index as usize) else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "tuple index `{index}` is out of range for {}",
+                                v.type_name()
+                            ),
+                        ));
+                    };
+                    retain(element);
+                    set_reg(&mut frames[top].regs, *dst, element);
                     frames[top].pc += 1;
                 }
                 Op::MakeRange {
@@ -4907,6 +4943,18 @@ mod tests {
             "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#${n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is ${p}\";\n",
         );
         assert_eq!(r.stdout, "P#7\nit is P#7\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn tuple_construct_project_and_equality() {
+        // Object-model slice 4: build a tuple (`MakeTuple`), project positions (`TupleIndex`,
+        // including a nested `.0.1`), and compare structurally. Mirrors the tree-walker (the
+        // differential oracle guards the agreement).
+        let r = run(
+            "p = (1, \"two\", 3.0);\necho p;\necho p.1;\nn = ((1, 2), (3, 4));\necho n.1.0;\necho p == (1, \"two\", 3.0);\necho p == (1, \"two\", 4.0);\n",
+        );
+        assert_eq!(r.stdout, "(1, \"two\", 3.0)\ntwo\n3\ntrue\nfalse\n");
         assert_eq!(r.exit_code, 0);
     }
 

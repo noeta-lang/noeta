@@ -226,6 +226,11 @@ fn values_equal(left: Value, right: Value) -> bool {
             && sa.variant == sb.variant
             && slices_equal(&left.enum_data().unwrap(), &right.enum_data().unwrap());
     }
+    // Tuples compare structurally element-wise (same arity, equal positions) — value semantics
+    // (object-model slice 4), matching the tree-walker's `Value::Tuple` equality.
+    if left.is_tuple() && right.is_tuple() {
+        return slices_equal(&left.tuple_items().unwrap(), &right.tuple_items().unwrap());
+    }
     // Sets compare structurally by their canonical (sorted, de-duplicated) elements, matching
     // the tree-walker's `Value::Set` equality.
     if left.is_set() && right.is_set() {

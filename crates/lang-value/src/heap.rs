@@ -181,6 +181,11 @@ pub(crate) enum Payload {
     /// by [`children`]), so the defining frame and every capturing closure see one live binding.
     Cell(Value),
     List(Vec<Value>),
+    /// A tuple: a fixed-arity, heterogeneous, value-semantic positional aggregate (object-model
+    /// slice 4). Stored as its element vector, owning one reference to each element exactly like a
+    /// list — equality is structural and there is no shape (arity/positions are static, checked at
+    /// compile time, so no per-value metadata is needed).
+    Tuple(Vec<Value>),
     /// A set, stored as its canonical (sorted, de-duplicated) element vector — so iteration,
     /// display, and equality are deterministic and identical to the tree-walker. It owns one
     /// reference to each element, freed like a list's.
@@ -327,6 +332,7 @@ pub(crate) fn free(value: Value) {
     live_dec();
     match &boxed.payload {
         Payload::List(items)
+        | Payload::Tuple(items)
         | Payload::Set(items)
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => {
@@ -404,6 +410,7 @@ fn can_be_cyclic(value: Value) -> bool {
     matches!(
         obj.payload,
         Payload::List(_)
+            | Payload::Tuple(_)
             | Payload::Set(_)
             | Payload::Map(_)
             | Payload::Object { .. }
@@ -487,6 +494,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
     };
     match &obj.payload {
         Payload::List(items)
+        | Payload::Tuple(items)
         | Payload::Set(items)
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),

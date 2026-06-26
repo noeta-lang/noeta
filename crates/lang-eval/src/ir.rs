@@ -676,6 +676,25 @@ impl Interpreter {
                 }
                 Ok(Value::List(Rc::new(values)))
             }
+            lang_ir::Rvalue::Tuple { items, .. } => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.eval_ir_atom(item, frame)?);
+                }
+                Ok(Value::Tuple(Rc::new(values)))
+            }
+            lang_ir::Rvalue::TupleIndex {
+                receiver,
+                index,
+                span,
+            } => {
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let result = self.tuple_index(recv.clone(), *index, *span);
+                if is_temp(receiver) {
+                    self.destroy_value(recv);
+                }
+                result
+            }
             lang_ir::Rvalue::Range {
                 start,
                 end,

@@ -120,6 +120,9 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::List(a), Value::List(b)) => a == b,
+        // Tuples compare structurally element-wise (value semantics, object-model slice 4) —
+        // matching the VM's `values_equal`.
+        (Value::Tuple(a), Value::Tuple(b)) => a == b,
         // Sets are canonical (sorted, de-duplicated), so structural vector equality is set
         // equality — matching the VM's `values_equal`.
         (Value::Set(a), Value::Set(b)) => a == b,

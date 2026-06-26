@@ -221,6 +221,15 @@ pub enum Rvalue {
     },
     /// A list literal `[a, b, c]`.
     List { items: Vec<Atom>, span: Span },
+    /// A tuple literal `(a, b, c)` — a fixed-arity, value-semantic positional aggregate
+    /// (object-model slice 4).
+    Tuple { items: Vec<Atom>, span: Span },
+    /// Tuple projection `receiver.N` — positional access by a constant index.
+    TupleIndex {
+        receiver: Atom,
+        index: u32,
+        span: Span,
+    },
     /// A map literal `{k: v, ...}`.
     Map {
         entries: Vec<(Atom, Atom)>,

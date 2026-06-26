@@ -465,6 +465,23 @@ impl Pretty for Expr {
                 }
                 out.push(')');
             }
+            Expr::Tuple { items, span: s } => {
+                out.push_str(&format!("(tuple {}", span(*s)));
+                for item in items {
+                    out.push('\n');
+                    item.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
+            Expr::TupleIndex {
+                receiver,
+                index,
+                span: s,
+            } => {
+                out.push_str(&format!("(tuple-index {index} {}\n", span(*s)));
+                receiver.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::Range {
                 start,
                 end,
@@ -634,5 +651,9 @@ fn type_ref_str(ty: &TypeRef) -> String {
             .map(type_ref_str)
             .collect::<Vec<_>>()
             .join(" | "),
+        TypeRef::Tuple { elements, .. } => {
+            let elements: Vec<String> = elements.iter().map(type_ref_str).collect();
+            format!("({})", elements.join(", "))
+        }
     }
 }
