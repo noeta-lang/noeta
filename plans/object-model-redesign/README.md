@@ -248,6 +248,52 @@ struct Foo` declaring an attribute and `#[Foo]` using it).
 So: open-ended, LSP-native, conflict-free tiers — built-in and extension identical — all
 `@<tier> { … }`, no bare-keyword exception.
 
+### Annotation form too — `@<tier> fn` (code tiers)
+
+The block is grouping sugar; the *base* form is the directive in its normal annotation position on a
+single declaration — so a user doing true per-function co-location need not wrap each one:
+
+```
+@test fn adds() { assert(add(1, 2) == 3); }     // one test, no wrapping
+@test { fn subs() { … } fn muls() { … } }       // block = "apply @test to every fn inside"
+```
+
+Both fall out of the one directive grammar (`@name` → a declaration is an annotation, a `{` is a
+block); this is exactly Rust's `#[test] fn` + `mod tests`. The annotation form is for **code-content**
+tiers (`@test`/`@bench`/`@fuzz` mark a `fn`); **text tiers (`@doc`) stay block-only** — you can't
+annotate a function *with* prose (attached docs are doc-comments; `@doc { … }` is for standalone doc
+sections).
+
+## Discovery & opt-in via the package manifest (forward-looking)
+
+`@dev` is the *compiler-level* primitive (defines a tier's name + content-kind so blocks parse and
+typecheck). On top of it, the **package manifest** is the *distribution + activation* layer — the
+backbone for the (yet-to-be-built) package registry:
+
+- A **provider package declares the directives it provides** in its manifest (the stdlib provides
+  `test`/`doc`; a bench package provides `bench`).
+- A **consumer opts in via a *map*** in its own manifest — `local_name → providing_package` — uniformly
+  for built-in (stdlib-provided) and third-party tiers. The map does triple duty:
+  - **opt-in** (an entry activates `@<local_name>`; no entry ⇒ inactive),
+  - **conflict resolution** — if two dependencies both provide `@bench`, the entry
+    `bench = "criterion-lang"` picks one; *without* a disambiguating entry the compiler errors
+    ("ambiguous `@bench`, provided by X and Y — choose in your manifest"), never a silent last-wins,
+  - **aliasing** — to use *both* providers, map them to distinct local names
+    (`bench = "criterion-lang"`, `microbench = "other-pkg"`), like import aliasing.
+  The compiler/LSP resolve `@<name>` through the map to the bound package's `@dev` declaration; the
+  version comes from the dependency pin, so the map is just `name → package`.
+- **`lang init` pre-fills the common built-ins** (`test`, `doc`) so they work out of the box, **and
+  they're removable** — nothing is forced. A minimalist project opts into nothing and has zero dev
+  directives.
+- The compiler/LSP **validate `@<tier>` against the opted-in set**: an unrecognized tier is a clear
+  "not enabled — add it to your manifest" error, not a silent no-op. The manifest is the discovery
+  registry tooling reads, and ties each directive to the package + version that provides it
+  (provenance — you know what code processes your source).
+
+This couples to the package system, so it's the **intended end-state, not a blocker**: the `@dev`
+primitive (with the built-in tiers active by default) can ship pre-manifest; the
+declare-and-opt-in activation lands with the registry.
+
 ## Block ergonomics
 
 - **Multiple blocks per file** — drop a `@test { }` right under each function it exercises; the runner
