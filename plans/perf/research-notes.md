@@ -91,6 +91,15 @@ mattering in a real workload (for the backup trace). The near-term concrete step
 needs none of this: it's the same uniqueness check on the VM heap list that the eval side already
 does, closing the eval-O(n)/VM-O(n²) asymmetry.
 
+> **SHIPPED (2026-06, the memory-management migration — `plans/memory-management/`).** Both reframed
+> directions were not just evaluated but built. The migration adopted a **shared lowered Core IR** and
+> moved precise non-atomic RC, **Perceus-style generalized reuse**, and last-use drop insertion onto
+> it as passes (Phases 3–5), and built the **LXR-principled RC + backup mark-sweep trace** alongside a
+> wired trial-deletion collector (Phase 6), benchmarked head-to-head with the data picking the trace
+> as default (`phase-6-benchmarks.md`). VM-side COW landed earlier in the perf sweep (P-COW). So this
+> note's "future work" is now history; `gc-arena`/MMTk stay untaken (the per-isolate small heaps don't
+> motivate them — README §7). See `plans/memory-management/phase-7-finalize.md`.
+
 > Confidence: venues/years above are recalled to the best of knowledge (cutoff early 2026); the
 > Perceus/Beans/FP²/LXR/Immix/Biased-RC/MMTk citations are high-confidence on substance and venue,
 > Vale and ASAP are flagged as less formally published. Verify exact citations before quoting.

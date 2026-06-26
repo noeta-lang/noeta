@@ -1,7 +1,20 @@
 # P-GC — `gc-arena` tracing path for `__destruct`-free classes (+ VM-side COW)
 
-Status: **planned** (sweep item #3). Source: deferred backlog "`gc-arena` tracing path for
-`__destruct`-free classes (refcount is the only path today)" (M1.6).
+> **SUPERSEDED (2026-06) — kept as a record, do not implement as written.** This slice's premise was
+> rejected and its goals delivered a different way:
+> - The **`gc-arena` tracing path** was dropped in the P-GC reframe (`research-notes.md`): we do not
+>   migrate to `gc-arena`. Cycles are instead collected by the memory-management migration's
+>   **LXR-principled backup mark-sweep trace** + wired trial-deletion collector (Phase 6), which
+>   collects `__destruct`-free *and* destructor-bearing cycles while keeping deterministic
+>   finalization on the RC backbone — no per-shape allocation split.
+> - **VM-side COW** shipped earlier in the perf sweep (P-COW), closing the eval-O(n)/VM-O(n²)
+>   asymmetry it describes.
+>
+> See `plans/memory-management/` (esp. Phase 6 + the Phase 7 finalize) for what actually shipped. The
+> original plan text follows, unedited, for context.
+
+Status: ~~**planned** (sweep item #3)~~ — **superseded, see banner above.** Source: deferred backlog
+"`gc-arena` tracing path for `__destruct`-free classes (refcount is the only path today)" (M1.6).
 
 ## The cost
 

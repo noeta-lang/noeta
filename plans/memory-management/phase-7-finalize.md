@@ -3,6 +3,38 @@
 Cleanup, the oracle decision, the cumulative "vs what we have now" benchmark the mandate names, and the
 durable documentation.
 
+## Status
+
+**7.1 cleanup + oracle decision — DONE.**
+- The targeted P-REUSE detection (`record_self_update`, `linear_record_accumulators`, `drop_receivers`)
+  was already deleted when the general IR reuse pass (`lang_ir_passes::reuse::thread_reuse`) landed in
+  Phase 2 — verified absent; the in-place ops it emits (`Op::MakeRecordInPlace`, `Op::Drop`) and the
+  P-REUSE conformance tests remain and pass via the general path.
+- Stale caveats removed: the eval `Scope` "leaks until process exit in M0 / M1" doc (now: Phase-6
+  reaper → residency 0) and the `corpus.rs` `KNOWN_LEAKS` "built but dormant (never wired)" present-tense
+  narration (now: empty allowlist, Phase 6 closed the debt). `lang-gc`'s module doc was already
+  accurate (its "dormant `CycleCollector`" refers to the retained prototype *struct*, not the wired
+  `collect_trace`/`collect_trial_deletion` functions). The perf-sweep docs were reconciled with what
+  shipped: `p-gc-tracing.md` got a **superseded** banner (gc-arena dropped; cycles via the Phase-6
+  backup trace + trial-deletion; VM-COW via P-COW), `p-reuse-analysis.md`'s "milestone-scale" notes now
+  point at the MM track that delivered general drop insertion + reuse, and `research-notes.md`'s P-GC
+  reframe got a **SHIPPED** note.
+- **AST-walker reference oracle — RETIRED (decision recorded).** It fired destructors only at global
+  teardown, so once last-use destruction became observable it could not reproduce the reference
+  semantics. We **retire it as an oracle** rather than promote a semantics-updated third oracle:
+  maintaining a second destruction model is pure cost and would re-introduce the "two hand-written
+  interpretations coinciding" fragility the shared IR removed. The independence that matters (memory
+  *mechanism* — Rust `Rc` vs manual RC) is still cross-checked between the IR-interpreter and the VM,
+  and the role is covered by the differential (0 skipped) + leak oracle (both backends) +
+  static-≤-dynamic property test + miri. Concretely: the dead `reference_run` AST-walk fallback was
+  removed (the lowering is total — gate `ir_lowering_is_total_over_the_corpus` — so the reference lowers
+  unconditionally), and the now-dead AST-walk `TreeWalkBackend` wrappers (`run_with_sites`,
+  `run_with_host`, `run_with_host_sites`) were deleted. The `Interpreter` machinery survives as the
+  shared destructor/leaf executor the IR interpreter reuses and as the perf/property AST-walk baseline
+  (`Backend::run`) — neither an oracle.
+
+**7.2 full benchmark — see `phase-7-benchmarks.md`.** **7.3 docs — `docs/resources/05-memory-management.md`.**
+
 ## 7.1 Retire superseded machinery & decide the oracle
 
 - Delete the targeted P-REUSE detection now subsumed by the IR reuse pass (`record_self_update`,

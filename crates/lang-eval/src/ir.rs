@@ -87,10 +87,10 @@ impl TreeWalkBackend {
     }
 
     /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`lang_stdlib::Host`]
-    /// (the real host) instead of the deterministic sandbox — the IR analogue of
-    /// [`TreeWalkBackend::run_with_host_sites`]. `lang run` uses this so its user-facing
-    /// execution goes through the same Core-IR reference (with last-use destruction) the
-    /// conformance oracle pins, rather than the superseded AST-walk path.
+    /// (the real host) instead of the deterministic sandbox. `lang run` uses this so its
+    /// user-facing execution goes through the same Core-IR reference (with last-use destruction)
+    /// the conformance oracle pins, rather than the superseded AST-walk path (Phase 7 retired the
+    /// AST-walk host entry points; this is the sole host-mode runner).
     pub fn run_ir_with_host(
         &self,
         ast: &Program,

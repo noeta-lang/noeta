@@ -63,7 +63,10 @@ temporaries at last use — which is the actual core of the Perceus pass. The tr
 free: Rust drops the read's temporary promptly, so **eval reuses even read-updates** that the VM
 cannot. The prototype thus quantifies what is achievable *without* drop insertion and identifies drop
 insertion as the gating prerequisite for going further. That is a milestone-scale pass; not in scope
-here (flagged, not silently dropped — see `confirm-before-deferring-scope`).
+here (flagged, not silently dropped — see `confirm-before-deferring-scope`). **Update:** that pass
+shipped — the memory-management migration (`plans/memory-management/`, Phase 3) delivered general
+precise-RC drop insertion as a Core-IR pass over *both* backends, so the VM now reuses read-updates
+too. This perf-sweep prototype is the proof-of-concept it generalized.
 
 ## Benchmarks (validate the gains)
 
@@ -143,9 +146,12 @@ noise, no regression); `dispatch_fib` (no field reads) unchanged.
 
 **Takeaway.** Targeted drop insertion — not general CFG liveness — was enough to unlock the cases that
 matter, because the reuse-blocking temporaries are compiler-generated and provably single-use. The
-remaining gap (a fully general last-use pass for arbitrary user code) stays milestone-scale and
+remaining gap (a fully general last-use pass for arbitrary user code) was milestone-scale and
 unmotivated by these numbers: the targeted version already captures the accumulator-reuse win. Axis 2
 (static check elision) remains negligible — read-updates ride the runtime path and reuse just as well.
+**Superseded:** the memory-management migration (`plans/memory-management/`) later rebuilt reuse and
+drop insertion as general Core-IR passes shared by both backends (Phase 3 drops, Phase 5 generalized
+reuse), subsuming this targeted compiler-side detection — see Phase 7's finalize notes.
 
 ## Files
 

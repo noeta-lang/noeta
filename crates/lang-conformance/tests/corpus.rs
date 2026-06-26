@@ -47,31 +47,21 @@ fn conformance_corpus_passes() {
     );
 }
 
-/// The leak oracle's **known debt**: `(backend, program)` pairs that leak at clean exit today
-/// because of reference cycles no live collector reaps yet (architecture §0/Phase 6). Every entry
-/// is a nested-function capture cycle:
+/// The leak oracle's **known debt**: `(backend, program)` pairs tolerated as leaking at clean exit
+/// because of reference cycles no collector reaps. **This list is now empty** — the
+/// memory-management migration closed the last cyclic debt in Phase 6, so residency is **0 on both
+/// backends for every program** and any leak at all fails the gate. The list and the gate around it
+/// stay so the guarantee is enforced, not merely achieved once: the oracle asserts the leak set
+/// equals *exactly* this list, so a brand-new leak fails the gate AND any future debt entry can only
+/// be removed by an actual fix.
 ///
-/// - the tree-walker leaks a closure ↔ its child call-scope (the global drain only breaks the
-///   *global* scope's cycle, not one rooted in a nested scope);
-/// - the VM leaks the same cycle because its Bacon–Rajan trial-deletion collector is built but
-///   **dormant** (never wired).
-///
-/// Phase 6 fixes both (structural `Weak` parent for eval, wiring the collector for the VM) and
-/// removes the matching entries here. The oracle asserts the leak set equals *exactly* this list,
-/// so a brand-new leak fails the gate AND a fixed leak forces the allowlist to shrink.
-///
-/// The eval residency is measured on the **Core-IR interpreter** (the migration's Phase-4
-/// reference): its precise last-use drops reclaim a binding promptly rather than at scope
-/// teardown, which breaks `counter_nested_fn`'s capture cycle early — so that program, a known
-/// eval leak under the superseded AST walker, no longer leaks here. `capture_immutable_error`
-/// **aborts** (an immutable reassignment), and the Phase-4.2c-ii panic/abort teardown now fires its
-/// frame's reclamation as the abort unwinds, so it too no longer leaks.
-///
-/// **Phase 6 closed the last cyclic debt:** the **VM** reaps closure↔cell cycles with the backup
-/// mark-sweep trace at clean exit (rooted at the live globals), and the **eval** tree-walker reaps
-/// its `Rc<Scope>` ↔ `Rc<Closure>` capture cycles by clearing the bindings of any captured scope
-/// still live after global teardown. So residency is now **0 on both backends for every program** —
-/// this allowlist is empty, and any leak at all fails the gate.
+/// How residency reaches 0 (for the record): the only cycles under value semantics are
+/// closure/scope self-captures. The **VM** reaps its closure↔cell cycles with the backup mark-sweep
+/// trace at clean exit (rooted at the live globals — Phase 6); the **eval** Core-IR interpreter
+/// reaps its `Rc<Scope>` ↔ `Rc<Closure>` capture cycles by clearing the bindings of any captured
+/// scope still live after global teardown, and its precise last-use drops also reclaim ordinary
+/// captured bindings promptly (so e.g. `counter_nested_fn` never accumulates a cycle in the first
+/// place).
 const KNOWN_LEAKS: &[(&str, &str)] = &[];
 
 #[test]

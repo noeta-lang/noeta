@@ -52,38 +52,12 @@ impl TreeWalkBackend {
         TreeWalkBackend { seed }
     }
 
-    /// Run against a caller-provided [`lang_stdlib::Host`] (M2.3) instead of the deterministic
-    /// sandbox. The CLI uses this to give `lang run` the real host (real `env`/`args`, real disk);
-    /// the [`Backend::run`] path keeps the sandbox so the conformance differential stays
-    /// deterministic.
-    pub fn run_with_host(&self, program: &Program, host: Box<dyn lang_stdlib::Host>) -> RunResult {
-        Interpreter::with_host(self.seed, host).run(program)
-    }
-
-    /// Run against the deterministic sandbox using a **precomputed** `type_of` site map instead
-    /// of re-deriving it. An orchestrator that already type-checked the program (holding a
-    /// [`lang_check::Checked`]) threads its `type_of_sites` here so the checker is not re-run for
-    /// the eval backend. Behavior-identical to [`Backend::run`] — the map is a pure function of
-    /// the program.
-    pub fn run_with_sites(
-        &self,
-        program: &Program,
-        type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
-    ) -> RunResult {
-        Interpreter::new(self.seed).run_with_sites(program, type_of_sites)
-    }
-
-    /// As [`TreeWalkBackend::run_with_host`], but with a **precomputed** `type_of` site map (see
-    /// [`TreeWalkBackend::run_with_sites`]). The CLI uses this to give `lang run` the real host
-    /// while threading the map from its single type-check gate.
-    pub fn run_with_host_sites(
-        &self,
-        program: &Program,
-        host: Box<dyn lang_stdlib::Host>,
-        type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
-    ) -> RunResult {
-        Interpreter::with_host(self.seed, host).run_with_sites(program, type_of_sites)
-    }
+    // The AST-walk entry points (`run_with_host`, `run_with_sites`, `run_with_host_sites`) were
+    // retired in migration Phase 7: `lang run` executes on the Core IR via
+    // [`TreeWalkBackend::run_ir_with_host`], and the reference oracle lowers unconditionally, so
+    // nothing drove the AST-walk host/sites wrappers any longer. The plain [`Backend::run`] path
+    // remains for the perf benches and property tests (an AST-walk baseline, not an oracle), and
+    // `Interpreter::run_with_sites` stays as the shared executor the IR interpreter reuses.
 }
 
 impl Default for TreeWalkBackend {
@@ -640,8 +614,10 @@ struct Binding {
 
 /// A lexical scope: its own bindings plus a link to the enclosing scope. Reference-
 /// counted with non-atomic `Rc` (shared-nothing per isolate, per the design). Cyclic
-/// captures (a global function holding the global scope) leak until process exit in
-/// M0; the planned cycle collector reclaims these in M1.
+/// captures (a function holding the scope that captures it) form an `Rc` cycle that
+/// refcounting alone cannot break; the migration's Phase-6 exit-time reaper reclaims
+/// them by clearing the bindings of any captured scope still live after global teardown,
+/// so heap residency reaches 0 on this backend (the leak oracle's gate).
 struct Scope {
     vars: RefCell<HashMap<String, Binding>>,
     /// Binding names in declaration order, so the runtime can destroy them in reverse
