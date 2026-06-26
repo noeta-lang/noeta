@@ -160,6 +160,7 @@ fn compile_inner(
         shapes: Vec::new(),
         methods: Vec::new(),
         destructors: Vec::new(),
+        field_defaults: Vec::new(),
         comparable_derives: Vec::new(),
         tojson_derives: Vec::new(),
         structural_eq_types: HashSet::new(),
@@ -188,6 +189,7 @@ fn compile_inner(
         shapes: module.shapes,
         methods: module.methods,
         destructors: module.destructors,
+        field_defaults: module.field_defaults,
         comparable_derives: module.comparable_derives,
         tojson_derives: module.tojson_derives,
         destruct_reachable,
@@ -233,6 +235,9 @@ struct ModuleCompiler {
     shapes: Vec<Shape>,
     methods: Vec<MethodEntry>,
     destructors: Vec<(String, u32)>,
+    /// `(type_name, field_name, proto)` for each field with a default (object-model slice 5), the
+    /// thunk compiled in global scope (see [`Module::field_defaults`]).
+    field_defaults: Vec<(String, String, u32)>,
     comparable_derives: Vec<String>,
     tojson_derives: Vec<String>,
     /// Type names whose `==` is **structural** (baked into each instance's `Shape::structural_eq`):
@@ -457,6 +462,7 @@ impl ModuleCompiler {
                     )?;
                     self.protos[proto as usize] = chunk;
                 }
+                self.compile_field_defaults(&name, &strukt.field_defaults)?;
                 continue;
             }
             // An enum method (object-model slice 3) compiles like a struct/class method but with an
@@ -520,6 +526,25 @@ impl ModuleCompiler {
                 )?;
                 self.protos[proto as usize] = chunk;
             }
+            self.compile_field_defaults(&name, &class.field_defaults)?;
+        }
+        Ok(())
+    }
+
+    /// Compile each field-default thunk (object-model slice 5) into a fresh parameterless prototype
+    /// and record `(type, field) → proto` in [`Self::field_defaults`]. The thunk is compiled in
+    /// **global scope** (empty upvalues + no enclosing locals — a type is top-level, so its default
+    /// resolves globals only, never `self`/sibling fields/the construction site). `MakeStruct` runs
+    /// it for an omitted field, matching the tree-walker's definition-scope fill.
+    fn compile_field_defaults(
+        &mut self,
+        type_name: &str,
+        defaults: &[(String, lang_ir::Thunk)],
+    ) -> Result<(), Unsupported> {
+        for (field, thunk) in defaults {
+            let proto = self.add_thunk(thunk, Vec::new(), Vec::new())?;
+            self.field_defaults
+                .push((type_name.to_string(), field.clone(), proto));
         }
         Ok(())
     }

@@ -526,6 +526,12 @@ pub enum Decl {
 pub struct ClassDef {
     pub decl: Rc<lang_ast::ClassDecl>,
     pub methods: Vec<(String, Rc<Func>)>,
+    /// Each field declared with a default (`x: T = expr`), lowered to a parameterless value
+    /// [`Thunk`] (object-model slice 5). A construction that omits the field fills it by running
+    /// this thunk in the type's **definition scope** (globals — empty upvalues, exactly the
+    /// parameter-default protocol), so a default never sees `self` or sibling fields. Keyed by field
+    /// name; only defaulted fields appear (a mandatory field is absent). Empty for the common case.
+    pub field_defaults: Vec<(String, Thunk)>,
     /// The `destruct { ... }` block lowered to a parameterless [`Func`] (fields in scope via the
     /// receiver), or `None` for a class without one. The VM compiles this to a bytecode prototype
     /// it runs when an instance's last reference drops. The IR *interpreter* ignores it and runs
@@ -542,6 +548,10 @@ pub struct ClassDef {
 pub struct StructDef {
     pub decl: Rc<lang_ast::StructDecl>,
     pub methods: Vec<(String, Rc<Func>)>,
+    /// Each field declared with a default (`x: T = expr`), lowered to a parameterless value
+    /// [`Thunk`] run in the type's definition scope when a literal omits the field (object-model
+    /// slice 5). See [`ClassDef::field_defaults`].
+    pub field_defaults: Vec<(String, Thunk)>,
     pub span: Span,
 }
 

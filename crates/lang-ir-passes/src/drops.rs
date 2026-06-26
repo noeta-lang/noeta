@@ -449,6 +449,9 @@ fn rewrite_decl(decl: &Decl, cx: &Cx) -> Decl {
                 .iter()
                 .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, cx))))
                 .collect(),
+            // Field-default thunks run in the type's definition scope; like parameter defaults they
+            // are left conservative (no drop insertion).
+            field_defaults: class.field_defaults.clone(),
             destructor: class
                 .destructor
                 .as_ref()
@@ -465,6 +468,7 @@ fn rewrite_decl(decl: &Decl, cx: &Cx) -> Decl {
                 .iter()
                 .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, cx))))
                 .collect(),
+            field_defaults: strukt.field_defaults.clone(),
             span: strukt.span,
         }),
         Decl::Enum(en) => Decl::Enum(EnumDef {

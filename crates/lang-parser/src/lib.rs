@@ -1735,10 +1735,11 @@ where
                     span: ctx.to_span(e.span()),
                 },
             );
-        // A field in a `struct` or `class` body: `#[...]? pub? mut? name: type` (newline-separated,
-        // no terminator). `pub` (parsed in slice 1, *enforced* in slice 2) and `mut` are both opt-in;
-        // a field may carry leading `#[...]` attributes (P2.4b). Disambiguated from a method by the
-        // token after any leading `#[...]` (`fn` opens a method; `pub`/`mut`/a name opens a field).
+        // A field in a `struct` or `class` body: `#[...]? pub? mut? name: type (= default)?`
+        // (newline-separated, no terminator). `pub` and `mut` are both opt-in; a field may carry
+        // leading `#[...]` attributes (P2.4b). A trailing `= expr` is a per-field default (slice 5),
+        // making the field optional in a literal. Disambiguated from a method by the token after any
+        // leading `#[...]` (`fn` opens a method; `pub`/`mut`/a name opens a field).
         let object_field = attr_decl
             .clone()
             .repeated()
@@ -1748,15 +1749,19 @@ where
             .then(id.clone())
             .then_ignore(just(T::Colon))
             .then(type_parser(ctx))
+            .then(just(T::Eq).ignore_then(expr.clone()).or_not())
             .map_with(
-                move |((((attrs, pub_kw), mut_kw), (name, name_span)), ty), e| FieldDecl {
-                    name,
-                    name_span,
-                    mut_field: mut_kw.is_some(),
-                    is_public: pub_kw.is_some(),
-                    ty: Some(ty),
-                    attrs,
-                    span: ctx.to_span(e.span()),
+                move |(((((attrs, pub_kw), mut_kw), (name, name_span)), ty), default), e| {
+                    FieldDecl {
+                        name,
+                        name_span,
+                        mut_field: mut_kw.is_some(),
+                        is_public: pub_kw.is_some(),
+                        ty: Some(ty),
+                        default,
+                        attrs,
+                        span: ctx.to_span(e.span()),
+                    }
                 },
             );
         let class_field = object_field.clone().map(ClassMember::Field);
@@ -2885,6 +2890,16 @@ mod tests {
     fn struct_and_class_and_object_literal() {
         insta::assert_snapshot!(pretty(
             "struct Item { price: float qty: int } class Box { id: int mut tag: string fn new(id: int): Box { return Box { id: id, tag: \"x\" }; } } b = Box { id: 1, ...base };"
+        ));
+    }
+
+    #[test]
+    fn field_defaults_parse() {
+        // A field may carry a trailing `= expr` default (object-model slice 5), on both `struct`
+        // and `class` fields, mixing with `pub`/`mut`. The pretty-printer surfaces a default's
+        // presence with a trailing `=` marker (the expression itself is not inlined).
+        insta::assert_snapshot!(pretty(
+            "struct Cfg { name: string retries: int = 3 tags: List<int> = [] } class Counter { pub mut n: int = base() pub label: string = \"x\" }"
         ));
     }
 

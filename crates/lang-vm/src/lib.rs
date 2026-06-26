@@ -176,6 +176,10 @@ struct Vm<'m> {
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
     destructors: HashMap<String, u32>,
+    /// `(type_name, field_name)` to the field's default-value thunk prototype (object-model
+    /// slice 5). `MakeStruct` runs the thunk (in global scope, empty upvalues) to fill a field the
+    /// literal omits — mirroring the tree-walker's `TypeDef` field-default fill.
+    field_defaults: HashMap<(String, String), u32>,
     /// Type names whose value, when destroyed, can run *some* `destruct` block — its own or a
     /// transitively-owned field / variant-payload / collection element (the checker's
     /// destruct-reachability fixpoint, threaded through the module). The container-before-contained
@@ -285,6 +289,11 @@ fn execute_with_collector(
         .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
         .collect();
     let destructors = module.destructors.iter().cloned().collect();
+    let field_defaults = module
+        .field_defaults
+        .iter()
+        .map(|(t, f, proto)| ((t.clone(), f.clone()), *proto))
+        .collect();
     let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
     let comparable_derives = module.comparable_derives.iter().cloned().collect();
     let tojson_derives = module.tojson_derives.iter().cloned().collect();
@@ -293,6 +302,7 @@ fn execute_with_collector(
         shapes: module.shapes.iter().cloned().map(Rc::new).collect(),
         methods,
         destructors,
+        field_defaults,
         destruct_reachable,
         comparable_derives,
         tojson_derives,
@@ -2420,13 +2430,33 @@ impl<'m> Vm<'m> {
                             release(old);
                         }
                     }
-                    let missing: Vec<&str> = shape
-                        .fields
-                        .iter()
-                        .zip(&slots)
-                        .filter(|(_, slot)| slot.is_none())
-                        .map(|(name, _)| name.as_str())
-                        .collect();
+                    // A slot still unset after spread + named is filled from its field default
+                    // (slice 5), run in global scope (empty upvalues — a default resolves globals
+                    // only). A slot with neither a value nor a default violates the
+                    // full-initialization guarantee (E0009).
+                    let mut missing: Vec<String> = Vec::new();
+                    for i in 0..shape.fields.len() {
+                        if slots[i].is_some() {
+                            continue;
+                        }
+                        let field = shape.fields[i].clone();
+                        if let Some(&proto) = self
+                            .field_defaults
+                            .get(&(shape.name.clone(), field.clone()))
+                        {
+                            match self.run_thunk(proto, &[]) {
+                                Ok(value) => slots[i] = Some(value),
+                                Err(abort) => {
+                                    for slot in slots.into_iter().flatten() {
+                                        release(slot);
+                                    }
+                                    return Err(abort);
+                                }
+                            }
+                        } else {
+                            missing.push(field);
+                        }
+                    }
                     if !missing.is_empty() {
                         for slot in slots.into_iter().flatten() {
                             release(slot);

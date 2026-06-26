@@ -367,6 +367,14 @@ pub struct FieldDecl {
     /// per-field `pub` opt-in — so this bit is the explicit `pub` marker, read by slice-2 enforcement.
     pub is_public: bool,
     pub ty: Option<TypeRef>,
+    /// A per-field default value (`x: int = expr`), object-model slice 5. A field *with* a default
+    /// is optional in a literal: the construction fills it from this expression when omitted, so the
+    /// full-initialization guarantee still holds (a default is an explicit declared value, not a
+    /// silent zero). Evaluated in the **type's definition scope** (globals — types are top-level),
+    /// reusing the parameter-default thunk machinery; it never sees `self` or sibling fields. `None`
+    /// for a mandatory field (the common case). Allowed on `struct` and `class` fields, never on
+    /// enum-variant fields.
+    pub default: Option<Expr>,
     /// Leading `#[...]` data attributes on the field/property (attribute-system pass 2, P2.4b).
     /// Captured in the reflection manifest like a type's or method's attributes; `@derive` is not
     /// permitted here. Empty for the common unannotated field.

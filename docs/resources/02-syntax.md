@@ -232,6 +232,17 @@ c = Order.parse(input)?;
 - The literal is **private by default** for types that enforce invariants (outsiders must go through constructors like `parse`); it can be made **public** for plain data records where direct construction is fine.
 - **Constructors are inferred, not marked:** an associated function (no `self` receiver) returning the enclosing type — optionally wrapped in `Result`/`Option` — is a constructor. The LSP labels and groups them with no annotation. A function returning `Self` but taking a `self` receiver (e.g. `fn with_status(self, s: Status): Order`) is a *transformation*, not a constructor.
 
+**Per-field defaults.** A field may carry a default value — `retries: int = 3` — which makes it **optional in the literal**: a construction that omits the field fills it from the default, while the full-initialization guarantee still holds (a default is an explicit declared value, not a silent zero). Defaults are allowed on both `struct` and `class` fields. They are **opt-in per field** — a field with no default stays mandatory, preserving the discipline that adding a field forces every call site to reconsider; a default is a deliberate "this field is genuinely optional" signal. A default is evaluated in the **type's definition scope** (it resolves globals only — never `self`, a sibling field, or the construction site), so it composes with structural update and spreads predictably: a `...spread` that supplies a field wins over that field's default. (A type whose fields are *all* defaulted still needs at least one explicit field or a spread today; the bare `T {}` form lands with optional-semicolon disambiguation.)
+
+```
+struct Cfg {
+    name: string                    // mandatory
+    retries: int = 3                // optional — defaults to 3
+    tags: List<int> = []            // optional — fresh each construction
+}
+cfg = Cfg { name: "svc" }           // → Cfg { name: "svc", retries: 3, tags: [] }
+```
+
 **Structural update (clone-with-changes).** Because objects are immutable by default, "the same value with one field changed" is a constant need. The literal extends with a `..` spread:
 
 ```

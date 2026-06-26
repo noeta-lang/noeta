@@ -761,6 +761,12 @@ pub struct Module {
     /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs
     /// it when the last reference to an instance of that type drops.
     pub destructors: Vec<(String, u32)>,
+    /// `(type_name, field_name, proto)` for each field declared with a default (`x: T = expr`,
+    /// object-model slice 5). Each `proto` is a parameterless value thunk compiled in global scope
+    /// (empty upvalues — types are top-level, so a default resolves globals only). `MakeStruct` runs
+    /// it to fill the field when a literal omits it, mirroring the tree-walker's `TypeDef`
+    /// field-default thunks so both backends construct an identical instance.
+    pub field_defaults: Vec<(String, String, u32)>,
     /// Type names that `@derive(Comparable)` without a hand-written `compare` method — the VM
     /// gives their instances structural field-wise ordering for `< <= > >=`.
     pub comparable_derives: Vec<String>,

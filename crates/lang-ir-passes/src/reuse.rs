@@ -574,6 +574,8 @@ fn rewrite_decl(decl: &Decl, od: &HashSet<String>) -> Decl {
                 .iter()
                 .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, od))))
                 .collect(),
+            // Field-default thunks are left as-is (no reuse rewriting), like parameter defaults.
+            field_defaults: class.field_defaults.clone(),
             destructor: class
                 .destructor
                 .as_ref()
@@ -590,6 +592,7 @@ fn rewrite_decl(decl: &Decl, od: &HashSet<String>) -> Decl {
                 .iter()
                 .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, od))))
                 .collect(),
+            field_defaults: strukt.field_defaults.clone(),
             span: strukt.span,
         }),
         Decl::Enum(en) => Decl::Enum(EnumDef {

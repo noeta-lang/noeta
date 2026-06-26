@@ -300,9 +300,11 @@ impl Lowerer {
                     )?)),
                     None => None,
                 };
+                let field_defaults = self.lower_field_defaults(&decl.fields)?;
                 out.push(Stmt::Decl(Decl::Class(ClassDef {
                     decl: Rc::new(decl.clone()),
                     methods,
+                    field_defaults,
                     destructor,
                     span: decl.span,
                 })));
@@ -333,9 +335,11 @@ impl Lowerer {
                     let func = self.lower_func(&m.params, BodyKind::Block(&m.body), m.span)?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
+                let field_defaults = self.lower_field_defaults(&decl.fields)?;
                 out.push(Stmt::Decl(Decl::Struct(StructDef {
                     decl: Rc::new(decl.clone()),
                     methods,
+                    field_defaults,
                     span: decl.span,
                 })));
                 Ok(())
@@ -390,6 +394,23 @@ impl Lowerer {
             temp_count,
             span,
         })
+    }
+
+    /// Lower each field carrying a default (`x: T = expr`) to a parameterless value [`Thunk`]
+    /// (object-model slice 5), keyed by field name. A defaulted field's thunk is run in the type's
+    /// definition scope at construction when a literal omits it — the same self-contained-thunk
+    /// machinery as a defaulted parameter. A mandatory field contributes nothing.
+    fn lower_field_defaults(
+        &mut self,
+        fields: &[lang_ast::FieldDecl],
+    ) -> Result<Vec<(String, Thunk)>, Unsupported> {
+        let mut defaults = Vec::new();
+        for f in fields {
+            if let Some(expr) = &f.default {
+                defaults.push((f.name.clone(), self.lower_thunk(expr)?));
+            }
+        }
+        Ok(defaults)
     }
 
     /// Lower a defaulted-parameter expression into a self-contained value-producing [`Thunk`]

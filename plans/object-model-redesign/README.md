@@ -441,7 +441,22 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    `Op::MatchTuple` + 4a's `TupleIndex` extraction (mirrors variant patterns; nested patterns
    compose). No new diag code. **Slice 4 (tuples) is COMPLETE.** Conformance 283 / differential 275
    matched / leak 0 both backends.
-5. **Field defaults** (opt-in per field). Independent.
+5. **Field defaults** (opt-in per field). Independent. **✅ DONE.** Per-field defaults `x: T = expr`
+   on `struct`/`class` fields, reusing the parameter-default thunk machinery: a field with a default
+   is optional in a literal, filled at construction when omitted (full-init guarantee preserved). A
+   default is evaluated in the **type's definition (global) scope** — resolves globals only, never
+   `self`/sibling fields/the construction site (a sibling reference is `E0005`; a closed,
+   self-contained choice mirroring parameter defaults). **No trailing-only rule** (literal fields are
+   named, so a default makes its field optional regardless of position). Both backends fill from a
+   shared `(type, field) → default-thunk` table (eval: `TypeDef.field_defaults` run via
+   `run_field_default`; VM: `Module.field_defaults` protos run by `MakeStruct` via `run_thunk`,
+   empty upvalues = global scope), so a missing field is filled identically — differential agrees,
+   leak residency 0. Checker validates the default's type against the field type (`E0007`). No new
+   diag code (next free still **E0036**). Conformance 284 / differential 276 matched, 0-skipped /
+   miri clean. **DEFERRED (confirmed with user): the bare empty literal `T {}`** (a fully-defaulted
+   type with no explicit field) — it re-collides with the `if cond {}` empty-block disambiguation,
+   which the **slice-7** restricted-control-flow-head expression resolves; lands there. Until then a
+   literal needs ≥1 explicit field or a spread.
 6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + DCE gate + manifest) with
    **`test` first**, then `bench`/`doc`. (The dev-tier section above predates the settled spelling and
    still says `@dev`; the directive is **`@tier`** — see settled open-question 4.)

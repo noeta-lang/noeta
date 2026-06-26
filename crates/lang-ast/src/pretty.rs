@@ -266,10 +266,13 @@ impl Pretty for EnumDecl {
 }
 
 fn field_decl_str(field: &FieldDecl) -> String {
+    // A trailing `=` marks a field carrying a default (slice 5) — the expression itself is not
+    // inlined (it can be multi-line), only its presence is surfaced in the snapshot.
+    let default = if field.default.is_some() { " =" } else { "" };
     if field.mut_field {
-        format!("mut {}", field.name)
+        format!("mut {}{default}", field.name)
     } else {
-        field.name.clone()
+        format!("{}{default}", field.name)
     }
 }
 

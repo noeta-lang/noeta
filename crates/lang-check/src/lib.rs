@@ -66,9 +66,9 @@
 use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
-    AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FnDecl, ForPattern,
-    ImplBlock, ImplDecl, MatchArm, Param, Pattern, Program, Stmt, StrPart, StructDecl, TypeParam,
-    TypeRef, UnaryOp,
+    AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FnDecl,
+    ForPattern, ImplBlock, ImplDecl, MatchArm, Param, Pattern, Program, Stmt, StrPart, StructDecl,
+    TypeParam, TypeRef, UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -1304,6 +1304,35 @@ impl Checker {
         }
     }
 
+    /// Validate each field's default value (`x: T = expr`), object-model slice 5. A default is
+    /// checked in the type's **definition scope** — the `env` here carries globals only (fields are
+    /// not yet bound), so a default that references `self` or a sibling field is an `E0007` unknown
+    /// name, matching its globals-only runtime scope. Its inferred type must be assignable to the
+    /// field's declared type (`E0007` mismatch). Unlike parameter defaults there is **no
+    /// trailing-only rule**: literal fields are named, so a default makes its field optional
+    /// regardless of position. Call before binding fields into `env`.
+    fn validate_field_defaults(&mut self, fields: &[FieldDecl], env: &mut Env) {
+        let tps: HashSet<String> = self.type_params.keys().cloned().collect();
+        for f in fields {
+            let Some(default) = &f.default else { continue };
+            let actual = self.synth(default, env);
+            // Skip the type check when the field has no annotation (every field requires one, so an
+            // un-annotated field is already reported) or its type erases to `dyn` (accepts any).
+            if f.ty.is_some() {
+                let expected = erase_type_params(field_type(&f.ty), &tps);
+                if !self.arg_assignable(&actual, &expected) {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::TypeMismatch,
+                        default.span(),
+                        format!(
+                            "default value of type `{actual}` is not assignable to field type `{expected}`"
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
     /// Inferred-static requires a full signature on every **named** function or method: a type on
     /// each parameter and a return type. (Closures and local bindings stay inferred — inference
     /// reconstructs them.) Each missing piece is its own `E0022`.
@@ -1346,6 +1375,7 @@ impl Checker {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
+        self.validate_field_defaults(&r.fields, env);
         self.check_derives(&r.derives);
         let standalone = self.standalone_for(&r.name);
         // A struct carries in-body `impl Trait { }` blocks and inherent methods (the unified body),
@@ -1382,6 +1412,7 @@ impl Checker {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
         }
+        self.validate_field_defaults(&c.fields, env);
         self.check_derives(&c.derives);
         let standalone = self.standalone_for(&c.name);
         self.check_coherence(&c.derives, &c.impls, &standalone);

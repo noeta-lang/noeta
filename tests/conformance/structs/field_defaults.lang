@@ -1,0 +1,49 @@
+// Per-field defaults (object-model slice 5): a field declared `name: T = expr` is optional in a
+// literal — construction fills it from the default when omitted, so the full-initialization
+// guarantee still holds. Defaults are allowed on both `struct` and `class` fields, evaluated in the
+// type's definition (global) scope — they resolve globals only, never `self`/sibling fields/the
+// construction site. Both backends fill identically (a `(type, field)` default-thunk table).
+// expect: stdout "5 0"
+// expect: stdout "1 2"
+// expect: stdout "100 untitled"
+// expect: stdout "5 five"
+// expect: stdout "3 2"
+// expect: stdout "9 2"
+// expect: exit 0
+fn base(): int { return 100; }
+
+struct Point {
+    x: int
+    y: int = 0
+}
+
+// Omitted defaulted field is filled; an explicit value overrides it.
+p = Point { x: 5 };
+echo "${p.x} ${p.y}";
+q = Point { x: 1, y: 2 };
+echo "${q.x} ${q.y}";
+
+// A `class` default may call a global function — evaluated in definition (global) scope.
+class Counter {
+    pub mut n: int = base()
+    pub label: string = "untitled"
+}
+c = Counter { n: 100 };
+echo "${c.n} ${c.label}";
+d = Counter { n: 5, label: "five" };
+echo "${d.n} ${d.label}";
+
+// A heap-valued default (list) is rebuilt each construction; the leak oracle proves it is reclaimed.
+struct Cfg {
+    name: string
+    retries: int = 3
+    tags: List<int> = [1, 2]
+}
+cfg = Cfg { name: "svc" };
+echo "${cfg.retries} ${cfg.tags.count()}";
+
+// A spread supplies every field, so a defaulted field takes the base's value, not its default;
+// a named override still wins.
+base_cfg = Cfg { name: "svc", retries: 9 };
+derived = Cfg { ...base_cfg };
+echo "${derived.retries} ${derived.tags.count()}";

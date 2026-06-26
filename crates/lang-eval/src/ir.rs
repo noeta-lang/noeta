@@ -410,6 +410,7 @@ impl Interpreter {
             derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
                 && !decl.methods.iter().any(|m| m.name == "to_json"),
             opaque: false,
+            field_defaults: strukt.field_defaults.clone(),
         };
         self.scope
             .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
@@ -480,6 +481,7 @@ impl Interpreter {
             derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
                 && !decl.methods.iter().any(|m| m.name == "to_json"),
             opaque: false,
+            field_defaults: class.field_defaults.clone(),
         };
         self.scope
             .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);

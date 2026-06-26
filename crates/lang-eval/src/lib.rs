@@ -432,6 +432,12 @@ pub struct TypeDef {
     /// module loading lands (M1), so its all-fields literal accepts whatever fields are
     /// given (no unknown-field or full-init checks) and `..` spread copies the whole base.
     opaque: bool,
+    /// Each field carrying a default (`x: T = expr`), as a parameterless [`lang_ir::Thunk`] run in
+    /// the type's **definition (global) scope** when a literal omits the field (object-model
+    /// slice 5). Keyed by field name; only defaulted fields appear. Empty for an all-mandatory type
+    /// and for opaque imports. Mirrors the VM's `(type, field) → default thunk` table, so a missing
+    /// field is filled identically in both backends.
+    field_defaults: Vec<(String, lang_ir::Thunk)>,
 }
 
 impl TypeDef {
@@ -901,6 +907,10 @@ struct Interpreter {
     diagnostics: Vec<Diagnostic>,
     ids: IdGen,
     scope: Rc<Scope>,
+    /// The root (global) scope, held so a field-default thunk can be run in the type's **definition
+    /// scope** (object-model slice 5) — types are top-level, so their defaults resolve globals only,
+    /// never the construction site's locals. A clone of the scope `scope` is initialized to.
+    globals: Rc<Scope>,
     /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
     /// [`lang_stdlib::Host`] seam. Conformance constructs a deterministic
     /// [`lang_stdlib::SandboxHost`] so file IO, PRNG, and clock stay isolated and identical to
@@ -958,6 +968,7 @@ impl Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
             ids: IdGen::new(seed),
+            globals: Rc::clone(&global),
             scope: global,
             host,
             reflection: lang_ast::reflect::ReflectionInfo::default(),
@@ -1260,6 +1271,7 @@ impl Interpreter {
                     derives_comparable: false,
                     derives_tojson: false,
                     opaque: true,
+                    field_defaults: Vec::new(),
                 }))
             };
             self.scope.declare(imported.name.clone(), value, false);
@@ -1416,14 +1428,22 @@ impl Interpreter {
             fields.insert(name, value);
         }
 
-        // The full-initialization guarantee applies only to types with a known field set;
-        // an opaque import has none to be missing.
-        let missing: Vec<&str> = def
-            .fields
-            .iter()
-            .filter(|spec| !fields.contains_key(&spec.name))
-            .map(|spec| spec.name.as_str())
-            .collect();
+        // A field still unset after spread + named is filled from its per-field default (slice 5),
+        // run in the type's definition (global) scope; a field with neither a value nor a default
+        // violates the full-initialization guarantee (E0009). This applies only to types with a
+        // known field set — an opaque import has none to be missing.
+        let mut missing: Vec<String> = Vec::new();
+        for spec in &def.fields {
+            if fields.contains_key(&spec.name) {
+                continue;
+            }
+            if let Some((_, thunk)) = def.field_defaults.iter().find(|(n, _)| n == &spec.name) {
+                let value = self.run_field_default(thunk)?;
+                fields.insert(spec.name.clone(), value);
+            } else {
+                missing.push(spec.name.clone());
+            }
+        }
         if !missing.is_empty() {
             let list = missing
                 .iter()
@@ -2793,6 +2813,19 @@ impl Interpreter {
         result
     }
 
+    /// Run a field's default-value thunk (object-model slice 5) to its value, in the type's
+    /// **definition scope** — a fresh child of the global scope, so the default resolves globals
+    /// only and never sees the construction site's locals, `self`, or sibling fields. Mirrors
+    /// [`Self::eval_default`] for parameters, but rooted at `globals` (types are always top-level)
+    /// rather than a closure's captured scope.
+    fn run_field_default(&mut self, thunk: &lang_ir::Thunk) -> Eval<Value> {
+        let scope = Scope::child(&self.globals);
+        let saved = std::mem::replace(&mut self.scope, scope);
+        let result = self.exec_ir_thunk(thunk);
+        self.scope = saved;
+        result
+    }
+
     fn call_builtin(&mut self, builtin: Builtin, args: Vec<Value>, span: Span) -> Eval<Value> {
         match builtin {
             Builtin::NextId => {
@@ -3216,6 +3249,7 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
         derives_comparable: false,
         derives_tojson: false,
         opaque: false,
+        field_defaults: Vec::new(),
     }
 }
 
