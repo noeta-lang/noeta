@@ -194,9 +194,10 @@ Consistent with `@attribute` (marks a record usable as an attribute) and `@seman
 role-eligible): **`@dev` declares a tier** — its name, content-kind, production-excluded,
 manifest-surfaced. Consequences:
 
-- **Built-ins aren't special-cased.** `test`/`bench`/`doc` are `@dev`-declared tiers *in the prelude*,
-  with keyword sugar (`test { … }` is sugar for a `test`-tier block). A library/tool declares a custom
-  tier (`fuzz`, `snapshot`, `property`) with its own `@dev`.
+- **Built-ins aren't special-cased.** `test`/`bench`/`doc` are `@dev`-declared tiers *in the prelude*;
+  a library/tool declares a custom tier (`fuzz`, `snapshot`, `property`) with its own `@dev`. **All
+  tiers — built-in and third-party — are used identically as `@<tier> { … }` directive blocks** (see
+  "Block syntax" below); there is no special bare-keyword form.
 - **Validation** — a block against an undeclared tier is a compile error (a typo'd `tset {}` doesn't
   silently vanish).
 - **Uniformity** — built-in and third-party tiers are the same construct; "expose to consumers" is just
@@ -219,28 +220,40 @@ just *a library with a `@dev bench` declaration + a manifest-reading runner*. Th
 type-checks its blocks, the LSP makes them feel native, the runner finds them via the same manifest as
 `attributes_of`. That's the "feels first-party" experience without bespoke integration.
 
-**One deliberate limit — keyword sugar is a *language* privilege, not an extension capability.**
-`test { }` works because the language *reserves* `test`. Letting an extension reserve a new bare keyword
-(`bench { }`) would either break code using `bench` as an identifier or require contextual keywords whose
-meaning flips on imports (parser-ambiguity risk). So:
+## Block syntax — `@<tier> { … }` directive blocks (uniform, conflict-free)
 
-- **Built-in / universal tiers** (`test`, `doc`, and `bench` if the language ships a runner) get the bare
-  keyword sugar (`test { … }`).
-- **Extension tiers** use the **general tagged form** — a *fixed* marker plus the tier *identifier*
-  (`dev bench { … }` / `@bench { … }`, spelling TBD), which reserves no new word and is safe to add by
-  declaration. The LSP can still render and complete it as nicely as a built-in.
-- If an extension tier proves universal, the *language* may promote it to keyword sugar (ship the
-  declaration in the prelude) — a language decision, not something an extension does.
+Blocks use the **`@`-directive syntax** — `@test { … }`, `@bench { … }`, `@doc { … }` — *not* a bare
+keyword (`test { … }`). This is the cleaner design for three reasons:
 
-So: open-ended, LSP-native tiers via `@dev` library declarations; bare-keyword sugar reserved for the
-language's blessed handful.
+1. **No identifier conflict, so no two-tier system.** `@bench` lives in the *directive* namespace, not
+   the identifier namespace, so it can never clash with a variable named `bench`. That removes the
+   reserved-keyword problem entirely — an **extension tier (`@bench`) is registered and used exactly
+   like a built-in (`@test`)**, no bare-keyword privilege, no "general tagged form" fallback. One
+   uniform syntax for every tier.
+2. **Honest signaling.** The `@` says "this is a *compile-time directive* the build treats specially"
+   (tree-shaken, tool-routed) — distinguishing a `@test { }` block from an ordinary statement block at a
+   glance, the same way `@derive`/`@attribute` already flag compiler directives.
+3. **It fits the existing family + Rust precedent.** `@derive`, `@attribute`, `@role`, `@semantic` are
+   already `@`-directives; `@test`/`@bench` join them. (Rust likewise marks tests with an attribute,
+   `#[test]`, not a bare keyword.)
+
+**The one cost: directives must be extended to a *block* form.** Today a directive *annotates a
+declaration* (`@derive(Comparable) struct X`). A tier block is a *standalone* directive carrying a body
+(`@test { fns }`). The parser distinguishes by lookahead after `@name` (and optional `@name(args)`): a
+`{` opens a block; a declaration keyword is an annotation. Bonus: the argument form gives **per-block
+configuration for free** — `@bench(samples: 100) { … }`, `@test(skip) { … }` — which a bare keyword
+couldn't carry. So `@dev test` *declares* the tier; `@test { … }` *uses* it (parallel to `@attribute
+struct Foo` declaring an attribute and `#[Foo]` using it).
+
+So: open-ended, LSP-native, conflict-free tiers — built-in and extension identical — all
+`@<tier> { … }`, no bare-keyword exception.
 
 ## Block ergonomics
 
-- **Multiple blocks per file** — drop a `test { }` right under each function it exercises; the runner
+- **Multiple blocks per file** — drop a `@test { }` right under each function it exercises; the runner
   flattens every block into one set (test-fn names unique per file, which the checker already enforces).
   Optional labeled block (`test "arithmetic" { … }`) purely for runner output grouping.
-- **Unit vs integration** — in-source `test {}` (private access) vs a separate test-tier file
+- **Unit vs integration** — in-source `@test {}` (private access) vs a separate test-tier file
   (`pub`-only). One construct, two locations.
 
 ## Sequencing
@@ -277,8 +290,8 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    the reference). For a reference class, `x.f = v` needs no `mut` binding (it mutates the shared
    instance, not the binding); for a value struct it's a reassignment (needs `mut`). Spell this out — it
    diverges from Phase 5.2's struct rule.
-4. **Exact spellings** — `@dev` vs `@tier`; the general block form (`dev <tier> { }` vs `@<tier> { }`);
-   tuple access (`.0` vs a method).
+4. **Exact spellings** — `@dev` vs `@tier` for the *declaration* directive (usage is settled as
+   `@<tier> { }`); tuple access (`.0` vs a method); and the parser rule for block-form directives.
 5. **Enum-body** — land with the redesign, or as an independent follow-on (it's self-contained).
 
 ## Suggested slicing
