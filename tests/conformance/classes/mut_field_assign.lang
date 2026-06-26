@@ -1,11 +1,11 @@
-// `mut` field assignment (`x.f = v`, Phase 5.2): a `mut` field of a class instance can be assigned
-// in place, including compound forms (`+=`). Mutation has **value semantics** — a uniquely-owned
-// instance is updated in place, but an aliased snapshot (`snap = p`) keeps its own value (the shared
-// instance is copied first). A function-local accumulator mutates its field each iteration (the reuse
-// path). Both backends agree.
+// `mut` field assignment (`x.f = v`, object-model slice 2b): a `mut` field of a reference `class`
+// instance is assigned **in place**, including compound forms (`+=`). Mutation has **reference
+// semantics** — an aliased snapshot (`snap = p`) shares the same instance, so it observes the
+// mutation (`snap.count` becomes 99). A function-local accumulator mutates its field each iteration.
+// Both backends agree.
 // expect: stdout "16"
 // expect: stdout "a"
-// expect: stdout "0"
+// expect: stdout "99"
 // expect: stdout "99"
 // expect: stdout "10"
 // expect: exit 0

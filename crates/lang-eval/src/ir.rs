@@ -796,8 +796,8 @@ impl Interpreter {
                 let recv = self.eval_ir_atom(receiver, frame)?;
                 let result = match &recv {
                     Value::EnumType(def) => self.make_variant(def, name, vec![], *span),
-                    Value::Object(object) => match object.fields.get(name) {
-                        Some(value) => Ok(value.clone()),
+                    Value::Object(object) => match object.field(name) {
+                        Some(value) => Ok(value),
                         None => Err(self.runtime_error(
                             DiagnosticCode::UnknownName,
                             *span,
@@ -1127,23 +1127,24 @@ impl Interpreter {
         }
         // Move the accumulator out of its (mutable, being-reassigned) binding.
         match self.scope.take_mut(base_name) {
-            Some(Value::Object(mut rc)) if rc.def.name() == type_name && !rc.def.opaque => {
+            Some(Value::Object(rc)) if rc.def.name() == type_name && !rc.def.opaque => {
                 let def = Rc::clone(&rc.def);
-                // We hold the sole scope reference now; unique iff no other live alias.
-                if Rc::strong_count(&rc) == 1
-                    && let Some(obj) = Rc::get_mut(&mut rc)
-                {
+                // A functional update `x = T { ...x, f: v }` is a **rebind** for both kinds (a new
+                // value bound to `x`); reuse is a pure optimization gated on unique ownership — when
+                // `x` has no other alias, mutating its allocation in place is unobservable. (Distinct
+                // from the in-place `x.f = v` class mutation in `set_field_in_place`.)
+                if Rc::strong_count(&rc) == 1 {
                     for (name, value) in overrides {
-                        if let Some(old) = obj.fields.insert(name, value) {
+                        if let Some(old) = rc.set_field_value(name, value) {
                             self.destroy_value(old);
                         }
                     }
                     return Ok(Value::Object(rc));
                 }
-                // Aliased (or a `get_mut` miss): copy, preserving the alias's view. The displaced
-                // fields live in `rc`, whose `Rc` drops at the end of this statement (releasing the
-                // scope's old reference); the alias keeps the original object.
-                let mut new_fields = rc.fields.clone();
+                // Aliased: copy, preserving the alias's view. The displaced fields live in `rc`,
+                // whose `Rc` drops at the end of this statement (releasing the scope's old
+                // reference); the alias keeps the original object.
+                let mut new_fields = rc.fields_snapshot();
                 for (name, value) in overrides {
                     new_fields.insert(name, value);
                 }
@@ -1165,11 +1166,12 @@ impl Interpreter {
         }
     }
 
-    /// Set field `field` of an object to `new_value` with **value semantics** (`x.f = v`, Phase 5.2):
-    /// a uniquely-owned instance is mutated in place (the displaced old value fires its destructor now,
-    /// matching the copy baseline which would release it when the old object dies); an aliased instance
-    /// is copied with the field updated, so the other owner keeps its view. The IR-interpreter analogue
-    /// of the VM's `Op::SetField`; gated on the runtime refcount exactly as the VM is, so they agree.
+    /// Set field `field` of an object to `new_value` (`x.f = v`, object-model slice 2b). Semantics
+    /// are **kind-dependent**: a reference `class` mutates the shared instance **in place** — through
+    /// the `RefCell`, regardless of refcount — so the change is visible through every alias; a value
+    /// `struct` keeps copy-on-write — it mutates in place only when uniquely owned, else copies so
+    /// the other owner keeps its view. Either way the displaced old value fires its destructor now.
+    /// The IR-interpreter analogue of the VM's `Op::SetField`, agreeing with it by construction.
     fn set_field_in_place(
         &mut self,
         recv: Value,
@@ -1178,23 +1180,24 @@ impl Interpreter {
         span: Span,
     ) -> Eval<Value> {
         match recv {
-            Value::Object(mut rc) => {
-                if !rc.fields.contains_key(field) {
+            Value::Object(rc) => {
+                if !rc.has_field_value(field) {
                     return Err(self.runtime_error(
                         DiagnosticCode::UnknownName,
                         span,
                         format!("type `{}` has no field `{field}`", rc.def.name()),
                     ));
                 }
-                if Rc::strong_count(&rc) == 1
-                    && let Some(obj) = Rc::get_mut(&mut rc)
-                {
-                    if let Some(old) = obj.fields.insert(field.to_string(), new_value) {
+                // A class always mutates in place (reference semantics); a uniquely-owned struct may
+                // too (no alias can observe it). Both go through the shared `RefCell`.
+                if !rc.def.is_struct || Rc::strong_count(&rc) == 1 {
+                    if let Some(old) = rc.set_field_value(field.to_string(), new_value) {
                         self.destroy_value(old);
                     }
                     return Ok(Value::Object(rc));
                 }
-                let mut new_fields = rc.fields.clone();
+                // Aliased struct: copy with the field updated, preserving the other owner's view.
+                let mut new_fields = rc.fields_snapshot();
                 new_fields.insert(field.to_string(), new_value);
                 Ok(Value::Object(Rc::new(crate::ObjectValue::new(
                     Rc::clone(&rc.def),

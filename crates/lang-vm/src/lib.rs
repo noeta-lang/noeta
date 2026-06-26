@@ -2646,7 +2646,25 @@ impl<'m> Vm<'m> {
                             },
                         ));
                     };
-                    if *reuse {
+                    // A reference `class` mutates the shared instance **in place**, regardless of
+                    // refcount or the reuse flag — the change must be visible through every alias
+                    // (object-model slice 2b). A value `struct` keeps copy-on-write below.
+                    let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
+                    if is_class {
+                        let old = v.replace_slot(slot, val);
+                        self.release_value(old);
+                        if *reuse {
+                            // The receiver's reference moves into `dst` (its register cleared, as in
+                            // the struct path); the instance is unchanged-but-mutated.
+                            frames[top].regs[*obj as usize] = Value::unit();
+                            set_reg(&mut frames[top].regs, *dst, v);
+                        } else {
+                            // The receiver register is untouched (a temp is dropped later by the
+                            // compiler-emitted `Drop`); `dst` takes its own counted reference.
+                            retain(v);
+                            set_reg(&mut frames[top].regs, *dst, v);
+                        }
+                    } else if *reuse {
                         // The receiver's sole reference moves into this op (its register cleared, like
                         // the map/struct in-place paths), so the `refcount == 1` check below sees the
                         // accumulator's reference and a `dst == obj` store is safe.
@@ -4273,16 +4291,30 @@ mod tests {
 
     #[test]
     fn mut_field_set_reuse_paths() {
-        // VM-side in-place `mut` field assignment (`x.f = v`, Phase 5.2). Covers the in-place hit — a
-        // function-local accumulator overwrites its `mut` fields each iteration (its displaced HEAP
-        // field, a string, released each step) — and the copy fallback — an aliased snapshot
-        // (`snap = p`) keeps its value because the shared instance is copied before the write. The
-        // string field exercises the slot retain/release accounting; run under miri (no UAF / double
-        // free).
+        // VM-side in-place `mut` field assignment on a value `struct` (`x.f = v`, copy-on-write).
+        // Covers the in-place hit — a function-local accumulator overwrites its `mut` fields each
+        // iteration (its displaced HEAP field, a string, released each step) — and the copy fallback
+        // — an aliased snapshot (`snap = p`) keeps its value because the shared struct is copied
+        // before the write. The string field exercises the slot retain/release accounting; run under
+        // miri (no UAF / double free).
+        let r = run(
+            "struct Box {\n  mut tag: string\n  mut n: int\n  fn new(): Box { return Box { tag: \"init\", n: 0 }; }\n}\nfn build(): string {\n  mut b = Box.new();\n  for i in 0..3 { b.n = b.n + i; b.tag = \"t${i}\"; }\n  return \"${b.tag} ${b.n}\";\n}\necho build();\nmut p = Box.new();\nsnap = p;\np.tag = \"changed\";\necho p.tag;\necho snap.tag;\n",
+        );
+        assert_eq!(r.stdout, "t2 3\nchanged\ninit\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn class_field_set_is_reference_semantic() {
+        // VM-side in-place `mut` field assignment on a reference `class` (object-model slice 2b):
+        // the instance is mutated in place even when **aliased**, so a snapshot taken beforehand
+        // (`snap = p`) observes the change (`snap.tag` → "changed", unlike the struct copy fallback).
+        // The displaced HEAP string is released on each overwrite; run under miri (no UAF / double
+        // free) to validate the in-place-while-shared retain/release accounting.
         let r = run(
             "class Box {\n  mut tag: string\n  mut n: int\n  fn new(): Box { return Box { tag: \"init\", n: 0 }; }\n}\nfn build(): string {\n  mut b = Box.new();\n  for i in 0..3 { b.n = b.n + i; b.tag = \"t${i}\"; }\n  return \"${b.tag} ${b.n}\";\n}\necho build();\nmut p = Box.new();\nsnap = p;\np.tag = \"changed\";\necho p.tag;\necho snap.tag;\n",
         );
-        assert_eq!(r.stdout, "t2 3\nchanged\ninit\n");
+        assert_eq!(r.stdout, "t2 3\nchanged\nchanged\n");
         assert_eq!(r.exit_code, 0);
     }
 

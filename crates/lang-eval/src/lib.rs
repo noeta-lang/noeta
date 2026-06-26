@@ -472,11 +472,16 @@ struct FieldSpec {
     mutable: bool,
 }
 
-/// A struct or class instance: its type and the values of its fields. Immutable in M0
-/// (`..` structural update produces a new object rather than mutating one).
+/// A struct or class instance: its type and the values of its fields. A value `struct` is
+/// effectively immutable (a `..` structural update or `x.f = v` produces a new object via the
+/// copy-on-write path); a reference `class` mutates **in place** through the `RefCell`, so the
+/// change is visible through every alias sharing the `Rc` (object-model slice 2b). The `RefCell`
+/// is what lets a *shared* (`strong_count > 1`) class instance be mutated at all — a bare
+/// `Rc<BTreeMap>` cannot. Borrows are always released promptly (snapshot-then-release) so a method
+/// or destructor that re-enters and mutates the same instance never hits a borrow conflict.
 pub struct ObjectValue {
     def: Rc<TypeDef>,
-    fields: BTreeMap<String, Value>,
+    fields: RefCell<BTreeMap<String, Value>>,
 }
 
 impl ObjectValue {
@@ -484,16 +489,42 @@ impl ObjectValue {
     /// `ObjectValue` construction goes through here so the live count is exact.
     fn new(def: Rc<TypeDef>, fields: BTreeMap<String, Value>) -> ObjectValue {
         leak::inc();
-        ObjectValue { def, fields }
+        ObjectValue {
+            def,
+            fields: RefCell::new(fields),
+        }
+    }
+
+    /// The field's current value (cloned — a refcount bump for heap values), or `None` if absent.
+    /// Releases the borrow before returning, so the caller may freely re-enter the instance.
+    fn field(&self, name: &str) -> Option<Value> {
+        self.fields.borrow().get(name).cloned()
+    }
+
+    /// Whether the instance currently has `name` among its fields.
+    fn has_field_value(&self, name: &str) -> bool {
+        self.fields.borrow().contains_key(name)
+    }
+
+    /// A cloned snapshot of the field bag (each value's refcount bumped) — used by the copy-on-write
+    /// (`struct`) update path and by traversals that must not hold a borrow across re-entry.
+    fn fields_snapshot(&self) -> BTreeMap<String, Value> {
+        self.fields.borrow().clone()
+    }
+
+    /// Insert/overwrite a field **in place** (reference-`class` mutation), returning the displaced
+    /// value if any so the caller can destroy it. Mutates through the shared `Rc`.
+    fn set_field_value(&self, name: String, value: Value) -> Option<Value> {
+        self.fields.borrow_mut().insert(name, value)
     }
 
     /// `Type { field: value, ... }`. Fields are shown in declared order for records and
     /// classes; for an opaque imported stub (no declared fields) the actual bag is shown
     /// in key order.
     pub fn display(&self) -> String {
+        let bag = self.fields.borrow();
         let parts: Vec<String> = if self.def.opaque {
-            self.fields
-                .iter()
+            bag.iter()
                 .map(|(name, value)| format!("{name}: {}", value.repr()))
                 .collect()
         } else {
@@ -501,11 +532,7 @@ impl ObjectValue {
                 .fields
                 .iter()
                 .map(|f| {
-                    let value = self
-                        .fields
-                        .get(&f.name)
-                        .map(Value::repr)
-                        .unwrap_or_default();
+                    let value = bag.get(&f.name).map(Value::repr).unwrap_or_default();
                     format!("{}: {value}", f.name)
                 })
                 .collect()
@@ -528,8 +555,9 @@ impl std::fmt::Debug for ObjectValue {
 
 impl PartialEq for ObjectValue {
     fn eq(&self, other: &ObjectValue) -> bool {
-        // Structural equality: same type name and equal fields (M0 structs and classes).
-        self.def.name == other.def.name && self.fields == other.fields
+        // Structural equality: same type name and equal fields (the value-kind comparison; a
+        // reference class's identity `==` is decided in `ops::values_equal` before reaching here).
+        self.def.name == other.def.name && *self.fields.borrow() == *other.fields.borrow()
     }
 }
 
@@ -1011,8 +1039,13 @@ impl Interpreter {
         //    part of any expression's value, so they are swallowed at this boundary.
         if let Some(body) = obj.def.destructor.clone() {
             let scope = Scope::child(&self.scope);
-            for (name, field) in &obj.fields {
-                scope.declare(name.clone(), field.clone(), false);
+            {
+                // Bind the fields into the destructor scope, then release the borrow before running
+                // the body (which may re-enter and read/mutate the same instance via `self`).
+                let bag = obj.fields.borrow();
+                for (name, field) in bag.iter() {
+                    scope.declare(name.clone(), field.clone(), false);
+                }
             }
             scope.declare("self".to_string(), Value::Object(obj.clone()), false);
             let saved = std::mem::replace(&mut self.scope, scope);
@@ -1024,7 +1057,7 @@ impl Interpreter {
         //    destructor resurrected `self`, in which case the fields are not force-destroyed.
         if let Ok(mut object) = Rc::try_unwrap(obj) {
             let order: Vec<String> = object.def.fields.iter().map(|f| f.name.clone()).collect();
-            let mut fields = std::mem::take(&mut object.fields);
+            let mut fields = std::mem::take(&mut object.fields).into_inner();
             drop(object); // the emptied `ObjectValue` drops here (its `leak::dec` balances `new`).
             // Declared field order for records/classes; any remainder (an opaque import has no
             // declared `def.fields`) drains in the bag's sorted-key order — matching the VM's
@@ -1638,13 +1671,13 @@ impl Interpreter {
             }
         }
 
-        let Some(Value::Object(mut rc)) = self.scope.take_mut(name) else {
+        let Some(Value::Object(rc)) = self.scope.take_mut(name) else {
             // The binding is immutable (or vanished): rebuild the value from a fresh peek and let
             // `bind` report the assignment error, exactly as the ordinary path would after building.
             let Ok(Value::Object(base)) = self.eval_expr(spread) else {
                 return None;
             };
-            let mut fields = base.fields.clone();
+            let mut fields = base.fields_snapshot();
             for (k, v) in overrides {
                 fields.insert(k, v);
             }
@@ -1656,28 +1689,16 @@ impl Interpreter {
         };
 
         let new_value = if unique {
-            // Sole owner: mutate the field map in place — only the overridden keys change; every
-            // other field keeps its existing reference. `get_mut` succeeds because we proved unique
-            // and then took the scope's reference out (so this is now the only `Rc`).
-            match Rc::get_mut(&mut rc) {
-                Some(obj) => {
-                    for (k, v) in overrides {
-                        obj.fields.insert(k, v);
-                    }
-                    Value::Object(rc)
-                }
-                None => {
-                    let mut fields = rc.fields.clone();
-                    for (k, v) in overrides {
-                        fields.insert(k, v);
-                    }
-                    Value::Object(Rc::new(ObjectValue::new(def, fields)))
-                }
+            // Sole owner: mutate the field map in place through the shared `RefCell` — only the
+            // overridden keys change; every other field keeps its existing reference.
+            for (k, v) in overrides {
+                rc.set_field_value(k, v);
             }
+            Value::Object(rc)
         } else {
             // Aliased: copy, preserving the other owner's view. Dropping `rc` at the end of the
             // statement releases the scope's old reference; the alias keeps the original object.
-            let mut fields = rc.fields.clone();
+            let mut fields = rc.fields_snapshot();
             for (k, v) in overrides {
                 fields.insert(k, v);
             }
@@ -1751,13 +1772,14 @@ impl Interpreter {
         if let Some((base, spread_span)) = spread {
             match base {
                 Value::Object(base) if def.opaque => {
-                    for (name, value) in &base.fields {
+                    for (name, value) in base.fields.borrow().iter() {
                         fields.insert(name.clone(), value.clone());
                     }
                 }
                 Value::Object(base) => {
+                    let bag = base.fields.borrow();
                     for spec in &def.fields {
-                        if let Some(value) = base.fields.get(&spec.name) {
+                        if let Some(value) = bag.get(&spec.name) {
                             fields.insert(spec.name.clone(), value.clone());
                         }
                     }
@@ -2040,8 +2062,8 @@ impl Interpreter {
                     // `Status.Pending` — construct a no-data variant.
                     Value::EnumType(def) => self.make_variant(&def, name, vec![], *span),
                     // `order.id` — field access on an instance.
-                    Value::Object(object) => match object.fields.get(name) {
-                        Some(value) => Ok(value.clone()),
+                    Value::Object(object) => match object.field(name) {
+                        Some(value) => Ok(value),
                         None => Err(self.runtime_error(
                             DiagnosticCode::UnknownName,
                             *span,
@@ -2075,23 +2097,31 @@ impl Interpreter {
                 let new_value = self.eval_expr(value)?;
                 match recv {
                     Value::Object(object) => {
-                        if !object.fields.contains_key(field) {
+                        if !object.has_field_value(field) {
                             return Err(self.runtime_error(
                                 DiagnosticCode::UnknownName,
                                 *span,
                                 format!("type `{}` has no field `{field}`", object.def.name()),
                             ));
                         }
-                        // Value semantics: build a new instance with the field updated, leaving the
-                        // old object (held by any alias) unchanged. The AST walker is the reference
-                        // executor, so it always copies — observationally identical to the
-                        // in-place-when-unique backends (the IR interpreter and the VM).
-                        let mut fields = object.fields.clone();
-                        fields.insert(field.clone(), new_value);
-                        Ok(Value::Object(Rc::new(ObjectValue::new(
-                            object.def.clone(),
-                            fields,
-                        ))))
+                        if !object.def.is_struct {
+                            // Reference `class`: mutate the shared instance in place, so every alias
+                            // sees the change (object-model slice 2b). The displaced value is
+                            // destroyed now, matching the IR interpreter.
+                            if let Some(old) = object.set_field_value(field.clone(), new_value) {
+                                self.destroy_value(old);
+                            }
+                            Ok(Value::Object(object))
+                        } else {
+                            // Value `struct`: build a new instance with the field updated, leaving
+                            // the old object (held by any alias) unchanged.
+                            let mut fields = object.fields_snapshot();
+                            fields.insert(field.clone(), new_value);
+                            Ok(Value::Object(Rc::new(ObjectValue::new(
+                                object.def.clone(),
+                                fields,
+                            ))))
+                        }
                     }
                     other => Err(self.runtime_error(
                         DiagnosticCode::UnknownName,
@@ -3365,8 +3395,13 @@ impl Interpreter {
         }
         let supplied = args.len();
         let call_scope = Scope::child(&method.captured);
-        for (name, value) in &object.fields {
-            call_scope.declare(name.clone(), value.clone(), false);
+        {
+            // Snapshot the fields into the call scope, releasing the borrow before the body runs (a
+            // method may re-enter and mutate `self` through the same shared `RefCell`).
+            let bag = object.fields.borrow();
+            for (name, value) in bag.iter() {
+                call_scope.declare(name.clone(), value.clone(), false);
+            }
         }
         call_scope.declare("self".to_string(), Value::Object(Rc::clone(object)), false);
         for (param, arg) in method.params.iter().zip(args) {
@@ -3999,9 +4034,11 @@ fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::c
     if left.def.name != rb.def.name {
         return None;
     }
+    let la = left.fields.borrow();
+    let lb = rb.fields.borrow();
     for f in &left.def.fields {
-        let a = left.fields.get(&f.name)?;
-        let b = rb.fields.get(&f.name)?;
+        let a = la.get(&f.name)?;
+        let b = lb.get(&f.name)?;
         match compare_field(a, b)? {
             std::cmp::Ordering::Equal => continue,
             other => return Some(other),
@@ -4042,10 +4079,10 @@ fn value_to_json(value: &Value) -> String {
         }
         Value::Object(object) => {
             // Declared field order for records/classes; an opaque imported stub uses key order.
+            // (Recursion is on field *values* — distinct objects — so holding this borrow is safe.)
+            let bag = object.fields.borrow();
             let parts: Vec<String> = if object.def.opaque {
-                object
-                    .fields
-                    .iter()
+                bag.iter()
                     .map(|(name, v)| format!("{}:{}", json_string(name), value_to_json(v)))
                     .collect()
             } else {
@@ -4054,7 +4091,7 @@ fn value_to_json(value: &Value) -> String {
                     .fields
                     .iter()
                     .map(|f| {
-                        let v = object.fields.get(&f.name).cloned().unwrap_or(Value::Unit);
+                        let v = bag.get(&f.name).cloned().unwrap_or(Value::Unit);
                         format!("{}:{}", json_string(&f.name), value_to_json(&v))
                     })
                     .collect()
