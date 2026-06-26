@@ -64,8 +64,8 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         "first" | "last" => opt(elem.clone()),
         "to_set" => set(elem.clone()),
         "count" => Type::Int,
-        // `enumerate` yields `[index, item]` pairs; with no tuple type, a list of `dyn` pairs.
-        "enumerate" => list(list(Type::Dyn)),
+        // `enumerate` yields a list of `(index, item)` tuples (object-model slice 4b).
+        "enumerate" => list(Type::Tuple(vec![Type::Int, elem.clone()])),
         _ => return None,
     })
 }

@@ -1510,20 +1510,18 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `for (a, b, …) in …` — a tuple destructure (≥2 names), or a single `for x in …`
+        // (object-model slice 4b). The names bind positionally from each iterated tuple element.
         let for_pattern = choice((
-            just(T::LParen)
-                .ignore_then(id.clone())
-                .then_ignore(just(T::Comma))
-                .then(id.clone())
-                .then_ignore(just(T::RParen))
-                .map(
-                    |((first, first_span), (second, second_span))| ForPattern::Pair {
-                        first,
-                        first_span,
-                        second,
-                        second_span,
-                    },
-                ),
+            id.clone()
+                .separated_by(just(T::Comma))
+                .at_least(2)
+                .collect::<Vec<_>>()
+                .delimited_by(just(T::LParen), just(T::RParen))
+                .map_with(move |names, e| ForPattern::Tuple {
+                    names,
+                    span: ctx.to_span(e.span()),
+                }),
             id.clone()
                 .map(|(name, name_span)| ForPattern::Single { name, name_span }),
         ));
@@ -2172,6 +2170,31 @@ where
                                 name_span,
                                 ty,
                                 value,
+                                span,
+                            }
+                        }
+                        // `(a, b, …) = expr` — a tuple-destructuring binding (object-model slice 4b).
+                        // Plain `=` only, no type annotation; every target must be a bare name.
+                        // Evaluates `expr` once and binds each name to the corresponding tuple
+                        // position (lowered to a temp + `.N` projections).
+                        Expr::Tuple { items, .. }
+                            if matches!(op, AssignKind::Plain) && ty.is_none() =>
+                        {
+                            let mut targets = Vec::with_capacity(items.len());
+                            for item in items {
+                                match item {
+                                    Expr::Ident { name, span } => targets.push((name, span)),
+                                    other => ctx.diags.borrow_mut().push(Diagnostic::error(
+                                        DiagnosticCode::UnexpectedToken,
+                                        other.span(),
+                                        "a destructuring target must be a bare name",
+                                    )),
+                                }
+                            }
+                            Stmt::Destructure {
+                                mut_decl: false,
+                                targets,
+                                value: rhs,
                                 span,
                             }
                         }

@@ -1,0 +1,32 @@
+// Object-model slice 4b — irrefutable tuple destructuring. A binding `(a, b) = expr` unpacks a
+// tuple positionally; `for (a, b, …) in …` destructures each iterated tuple element (and
+// `.enumerate()` now yields `(index, value)` tuples). Both backends agree.
+// expect: stdout "3 rem 2"
+// expect: stdout "5 9 4"
+// expect: stdout "0:a"
+// expect: stdout "1:b"
+// expect: stdout "2:c"
+// expect: stdout "1=one"
+// expect: stdout "2=two"
+// expect: exit 0
+fn divmod(a: int, b: int): (int, int) {
+    return (a / b, a - (a / b) * b);
+}
+
+(q, r) = divmod(17, 5);
+echo "${q} rem ${r}";
+
+// Nested destructuring value + 3-arity.
+(a, b, c) = (5, 9, 4);
+echo "${a} ${b} ${c}";
+
+// `enumerate` yields `(index, value)` tuples, destructured in the for-pattern.
+for (i, x) in ["a", "b", "c"].enumerate() {
+    echo "${i}:${x}";
+}
+
+// A plain list of tuples destructures the same way.
+pairs = [(1, "one"), (2, "two")];
+for (n, name) in pairs {
+    echo "${n}=${name}";
+}

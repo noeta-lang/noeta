@@ -160,9 +160,12 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
                 ForPattern::Single { name, .. } => {
                     local.insert(name.clone());
                 }
-                ForPattern::Pair { first, second, .. } => {
-                    local.insert(first.clone());
-                    local.insert(second.clone());
+                // Desugared to a `Single` hidden var in lowering, so unreachable in the IR; kept for
+                // totality.
+                ForPattern::Tuple { names, .. } => {
+                    for (name, _) in names {
+                        local.insert(name.clone());
+                    }
                 }
             }
             collect_bindings_block(body, outer, local);
@@ -201,6 +204,11 @@ fn pattern_names(pattern: &Pattern, out: &mut HashSet<String>) {
         }
         Pattern::Variant { bindings, .. } => {
             for sub in bindings {
+                pattern_names(sub, out);
+            }
+        }
+        Pattern::Tuple { elements, .. } => {
+            for sub in elements {
                 pattern_names(sub, out);
             }
         }

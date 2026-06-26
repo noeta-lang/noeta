@@ -306,14 +306,6 @@ pub enum Op {
         list: Reg,
         index: Reg,
     },
-    /// Destructure a 2-element list `src` into `first`/`second` (each retained), else raise
-    /// E0007 ("destructuring `(a, b)` expects a 2-element list, found <type>") at `span`.
-    DestructurePair {
-        first: Reg,
-        second: Reg,
-        src: Reg,
-        span: Span,
-    },
     /// `dst = builtin(args...)` — a prelude collection builtin (`len`/`map`/`filter`/`sum`).
     /// `map`/`filter` re-enter the VM to call their closure argument per element.
     CallBuiltin {
@@ -922,9 +914,6 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::IterSnapshot { dst, src, .. } => format!("IterSnapshot r{dst} <- r{src}"),
         Op::ListLen { dst, src, .. } => format!("ListLen     r{dst} <- len r{src}"),
         Op::ListGet { dst, list, index } => format!("ListGet     r{dst} <- r{list}[r{index}]"),
-        Op::DestructurePair {
-            first, second, src, ..
-        } => format!("DestructurePair (r{first}, r{second}) <- r{src}"),
         Op::CallBuiltin {
             dst, builtin, args, ..
         } => {

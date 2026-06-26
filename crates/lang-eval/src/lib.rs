@@ -1235,6 +1235,34 @@ impl Interpreter {
                 self.stdout.push('\n');
                 Ok(Flow::Normal)
             }
+            // `(a, b, …) = expr` — tuple-destructuring binding (object-model slice 4b): evaluate the
+            // value once and bind each target to its tuple position. (Canonically this runs through
+            // the IR backend, which lowers it to `.N` projections; the tree-walker binds directly.)
+            Stmt::Destructure {
+                mut_decl,
+                targets,
+                value,
+                span,
+            } => {
+                let v = self.eval_expr(value)?;
+                match &v {
+                    Value::Tuple(items) if items.len() == targets.len() => {
+                        for ((name, _), item) in targets.iter().zip(items.iter()) {
+                            self.scope.declare(name.clone(), item.clone(), *mut_decl);
+                        }
+                        Ok(Flow::Normal)
+                    }
+                    other => Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!(
+                            "cannot destructure {} — expected a {}-tuple",
+                            other.type_name(),
+                            targets.len()
+                        ),
+                    )),
+                }
+            }
             Stmt::Binding {
                 mut_decl,
                 name,
@@ -1485,17 +1513,26 @@ impl Interpreter {
                 scope.declare(name.clone(), element, false);
                 Ok(())
             }
-            ForPattern::Pair { first, second, .. } => match element {
-                Value::List(items) if items.len() == 2 => {
-                    scope.declare(first.clone(), items[0].clone(), false);
-                    scope.declare(second.clone(), items[1].clone(), false);
+            // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
+            // (object-model slice 4b). An element of the wrong kind/arity is a runtime error.
+            ForPattern::Tuple { names, .. } => match &element {
+                Value::Tuple(items) if items.len() == names.len() => {
+                    for ((name, _), item) in names.iter().zip(items.iter()) {
+                        scope.declare(name.clone(), item.clone(), false);
+                    }
                     Ok(())
                 }
                 other => Err(self.runtime_error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!(
-                        "destructuring `(a, b)` expects a 2-element list, found {}",
+                        "destructuring `({})` expects a {}-tuple, found {}",
+                        names
+                            .iter()
+                            .map(|(n, _)| n.as_str())
+                            .collect::<Vec<_>>()
+                            .join(", "),
+                        names.len(),
                         other.type_name()
                     ),
                 )),
@@ -2699,11 +2736,13 @@ impl Interpreter {
             ("count", Value::Set(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
             ("count", Value::Map(entries)) if arity_ok => Some(Value::Int(entries.len() as i64)),
             ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
+            // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
+            // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
                 let pairs = items
                     .iter()
                     .enumerate()
-                    .map(|(i, v)| Value::List(Rc::new(vec![Value::Int(i as i64), v.clone()])))
+                    .map(|(i, v)| Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()])))
                     .collect();
                 Some(Value::List(Rc::new(pairs)))
             }
@@ -4612,6 +4651,21 @@ fn match_pattern(pattern: &Pattern, value: &Value) -> Option<Vec<(String, Value)
         // `is T` matches on the head constructor (same erased test as `x.as<T>()`), binding
         // nothing — the narrowed value is referred to by the scrutinee's own name.
         Pattern::IsType { ty, .. } => runtime_matches(value, ty).then(Vec::new),
+        // A tuple pattern `(p, q, …)` matches a tuple of the same arity, destructuring each position
+        // against its sub-pattern (object-model slice 4b); refutable on kind, arity, and elements.
+        Pattern::Tuple { elements, .. } => {
+            let Value::Tuple(items) = value else {
+                return None;
+            };
+            if items.len() != elements.len() {
+                return None;
+            }
+            let mut all = Vec::new();
+            for (sub, item) in elements.iter().zip(items.iter()) {
+                all.extend(match_pattern(sub, item)?);
+            }
+            Some(all)
+        }
     }
 }
 
@@ -4952,6 +5006,15 @@ mod tests {
         assert_eq!(
             run("for (i, x) in [\"a\", \"b\"].enumerate() { echo i ~ \":\" ~ x; }").stdout,
             "0:a\n1:b\n"
+        );
+    }
+
+    #[test]
+    fn tuple_destructuring_binding() {
+        // Object-model slice 4b: `(a, b, …) = expr` unpacks a tuple positionally on the tree-walker.
+        assert_eq!(
+            run("(a, b) = (1, \"two\");\n(x, y, z) = (3, 4, 5);\necho a ~ \" \" ~ b;\necho x ~ \" \" ~ y ~ \" \" ~ z;").stdout,
+            "1 two\n3 4 5\n"
         );
     }
 

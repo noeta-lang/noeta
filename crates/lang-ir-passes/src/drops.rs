@@ -858,9 +858,12 @@ fn for_pattern_names(pattern: &lang_ir::ForPattern, out: &mut VarSet) {
         lang_ir::ForPattern::Single { name, .. } => {
             out.insert(name.clone());
         }
-        lang_ir::ForPattern::Pair { first, second, .. } => {
-            out.insert(first.clone());
-            out.insert(second.clone());
+        // Lowering desugars a tuple for-pattern to a `Single` hidden var, so this is unreachable in
+        // the IR; kept for totality.
+        lang_ir::ForPattern::Tuple { names, .. } => {
+            for (name, _) in names {
+                out.insert(name.clone());
+            }
         }
     }
 }
@@ -873,6 +876,11 @@ fn pattern_names(pattern: &lang_ir::Pattern, out: &mut VarSet) {
         }
         lang_ir::Pattern::Variant { bindings, .. } => {
             for sub in bindings {
+                pattern_names(sub, out);
+            }
+        }
+        lang_ir::Pattern::Tuple { elements, .. } => {
+            for sub in elements {
                 pattern_names(sub, out);
             }
         }

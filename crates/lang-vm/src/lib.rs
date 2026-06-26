@@ -1820,34 +1820,6 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, element);
                     frames[top].pc += 1;
                 }
-                Op::DestructurePair {
-                    first,
-                    second,
-                    src,
-                    span,
-                } => {
-                    let v = frames[top].regs[*src as usize];
-                    match v.list_items() {
-                        Some(items) if items.len() == 2 => {
-                            let (a, b) = (items[0], items[1]);
-                            retain(a);
-                            retain(b);
-                            set_reg(&mut frames[top].regs, *first, a);
-                            set_reg(&mut frames[top].regs, *second, b);
-                            frames[top].pc += 1;
-                        }
-                        _ => {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "destructuring `(a, b)` expects a 2-element list, found {}",
-                                    v.type_name()
-                                ),
-                            ));
-                        }
-                    }
-                }
                 Op::CallBuiltin {
                     dst,
                     builtin,
@@ -2260,13 +2232,15 @@ impl<'m> Vm<'m> {
                             .or_else(|| v.as_string().map(|s| s.chars().count()))
                             .map(|n| Value::int(n as i64))
                     } else if method == "enumerate" {
+                        // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
+                        // tree-walker's `Value::Tuple` pairs.
                         v.list_items().map(|items| {
                             let pairs = items
                                 .iter()
                                 .enumerate()
                                 .map(|(i, &element)| {
                                     retain(element);
-                                    Value::list(vec![Value::int(i as i64), element])
+                                    Value::tuple(vec![Value::int(i as i64), element])
                                 })
                                 .collect();
                             Value::list(pairs)

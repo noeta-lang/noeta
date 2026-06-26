@@ -346,7 +346,12 @@ fn atom(atom: &Atom) -> String {
 fn for_pattern(pattern: &crate::ForPattern) -> String {
     match pattern {
         crate::ForPattern::Single { name, .. } => name.clone(),
-        crate::ForPattern::Pair { first, second, .. } => format!("({first}, {second})"),
+        // Lowering desugars a tuple for-pattern to a `Single` hidden var, so this is unreachable in
+        // practice; kept for totality.
+        crate::ForPattern::Tuple { names, .. } => {
+            let names: Vec<&str> = names.iter().map(|(n, _)| n.as_str()).collect();
+            format!("({})", names.join(", "))
+        }
     }
 }
 
@@ -376,6 +381,10 @@ fn pattern_str(pattern: &crate::Pattern) -> String {
             }
         }
         Pattern::IsType { ty, .. } => format!("is {}", type_ref(ty)),
+        Pattern::Tuple { elements, .. } => {
+            let subs: Vec<String> = elements.iter().map(pattern_str).collect();
+            format!("({})", subs.join(", "))
+        }
     }
 }
 

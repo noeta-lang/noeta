@@ -566,7 +566,9 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
 fn for_pattern_names(pattern: &ForPattern) -> Vec<String> {
     match pattern {
         ForPattern::Single { name, .. } => vec![name.clone()],
-        ForPattern::Pair { first, second, .. } => vec![first.clone(), second.clone()],
+        // Lowering desugars a tuple for-pattern to a `Single` hidden var, so this is unreachable in
+        // the IR; kept for totality.
+        ForPattern::Tuple { names, .. } => names.iter().map(|(n, _)| n.clone()).collect(),
     }
 }
 
@@ -583,6 +585,11 @@ fn collect_pattern_names(pattern: &Pattern, out: &mut VarSet) {
         }
         Pattern::Variant { bindings, .. } => {
             for sub in bindings {
+                collect_pattern_names(sub, out);
+            }
+        }
+        Pattern::Tuple { elements, .. } => {
+            for sub in elements {
                 collect_pattern_names(sub, out);
             }
         }

@@ -1324,17 +1324,10 @@ impl<'m> FnCompiler<'m> {
                 ForPattern::Single { name, .. } => {
                     self.bind_loop_var(name, element);
                 }
-                ForPattern::Pair { first, second, .. } => {
-                    let first_reg = self.alloc_reg();
-                    let second_reg = self.alloc_reg();
-                    self.code.push(Op::DestructurePair {
-                        first: first_reg,
-                        second: second_reg,
-                        src: element,
-                        span,
-                    });
-                    self.bind_loop_var(first, first_reg);
-                    self.bind_loop_var(second, second_reg);
+                // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
+                // lowering (object-model slice 4b), so it never reaches the compiler.
+                ForPattern::Tuple { .. } => {
+                    unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
                 }
             }
             for stmt in &body.stmts {
@@ -2928,6 +2921,11 @@ impl<'m> FnCompiler<'m> {
                     reg: test,
                     target: 0,
                 });
+            }
+            // Tuple patterns in `match` are slice 4b.2 — the parser does not yet produce them, so
+            // this is unreachable in 4b.1.
+            Pattern::Tuple { .. } => {
+                unreachable!("match tuple patterns are object-model slice 4b.2")
             }
         }
     }

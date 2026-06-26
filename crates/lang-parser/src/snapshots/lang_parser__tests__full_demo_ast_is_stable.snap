@@ -1,5 +1,6 @@
 ---
 source: crates/lang-parser/src/lib.rs
+assertion_line: 2978
 expression: pretty(src)
 ---
 (program @0..2685
@@ -74,7 +75,7 @@ expression: pretty(src)
             (ident Err @1629..1632)
             (member Empty @1633..1649
               (ident OrderError @1633..1643))))))
-    (for [i item] @1662..1802
+    (for [(i, item)] @1662..1802
       (call @1679..1696
         (member enumerate @1679..1694
           (ident items @1679..1684)))

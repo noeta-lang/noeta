@@ -45,6 +45,15 @@ pub enum Stmt {
         value: Expr,
         span: Span,
     },
+    /// A **tuple-destructuring** binding: `(a, b, …) = expr;` — evaluates `expr` once and binds each
+    /// name to the corresponding tuple position (object-model slice 4b). ≥2 targets (a single
+    /// `(x) = …` is just `x = …`). Lowered to a temp + per-position `.N` projections.
+    Destructure {
+        mut_decl: bool,
+        targets: Vec<(String, Span)>,
+        value: Expr,
+        span: Span,
+    },
     /// A named function declaration: `fn name(params): Ret { body }`.
     Fn(FnDecl),
     /// An enum declaration (plain, backed, or algebraic).
@@ -104,6 +113,7 @@ impl Stmt {
         match self {
             Stmt::Echo { span, .. }
             | Stmt::Binding { span, .. }
+            | Stmt::Destructure { span, .. }
             | Stmt::Namespace { span, .. }
             | Stmt::Use { span, .. }
             | Stmt::Return { span, .. }
@@ -415,19 +425,19 @@ pub struct VariantDecl {
     pub span: Span,
 }
 
-/// The binding form of a `for` loop: either one variable, or a `(index, value)` pair
-/// (as produced by `.enumerate()`).
+/// The binding form of a `for` loop: either one variable, or a **tuple destructure** `(a, b, …)`
+/// that unpacks each iterated **tuple** element positionally (object-model slice 4b — `.enumerate()`
+/// now yields `(index, value)` tuples, and any `List<(…)>` destructures the same way).
 #[derive(Debug, Clone, PartialEq)]
 pub enum ForPattern {
     Single {
         name: String,
         name_span: Span,
     },
-    Pair {
-        first: String,
-        first_span: Span,
-        second: String,
-        second_span: Span,
+    /// `for (a, b, …) in …` — ≥2 names, bound positionally from each iterated tuple element.
+    Tuple {
+        names: Vec<(String, Span)>,
+        span: Span,
     },
 }
 
@@ -741,6 +751,13 @@ pub enum Pattern {
         ty: TypeRef,
         span: Span,
     },
+    /// `(p, q, …)` — a tuple pattern (object-model slice 4b): matches a tuple of the same arity,
+    /// destructuring each position against the corresponding sub-pattern (which binds recursively).
+    /// ≥2 elements (a `(p)` is just `p`).
+    Tuple {
+        elements: Vec<Pattern>,
+        span: Span,
+    },
 }
 
 impl Pattern {
@@ -752,7 +769,8 @@ impl Pattern {
             | Pattern::Str { span, .. }
             | Pattern::Bool { span, .. }
             | Pattern::Variant { span, .. }
-            | Pattern::IsType { span, .. } => *span,
+            | Pattern::IsType { span, .. }
+            | Pattern::Tuple { span, .. } => *span,
         }
     }
 }

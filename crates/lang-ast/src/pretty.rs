@@ -74,6 +74,23 @@ impl Pretty for Stmt {
                 value.pretty(out, level + 1);
                 out.push(')');
             }
+            Stmt::Destructure {
+                mut_decl,
+                targets,
+                value,
+                span: s,
+            } => {
+                indent(out, level);
+                let kw = if *mut_decl {
+                    "destructure-mut"
+                } else {
+                    "destructure"
+                };
+                let names: Vec<&str> = targets.iter().map(|(n, _)| n.as_str()).collect();
+                out.push_str(&format!("({kw} [{}] {}\n", names.join(" "), span(*s)));
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
             Stmt::Fn(decl) => decl.pretty(out, level),
             Stmt::Enum(decl) => decl.pretty(out, level),
             Stmt::Struct(decl) => decl.pretty(out, level),
@@ -146,7 +163,10 @@ impl Pretty for Stmt {
                 indent(out, level);
                 let pat = match pattern {
                     ForPattern::Single { name, .. } => name.clone(),
-                    ForPattern::Pair { first, second, .. } => format!("{first} {second}"),
+                    ForPattern::Tuple { names, .. } => {
+                        let names: Vec<&str> = names.iter().map(|(n, _)| n.as_str()).collect();
+                        format!("({})", names.join(", "))
+                    }
                 };
                 out.push_str(&format!("(for [{pat}] {}\n", span(*s)));
                 iterable.pretty(out, level + 1);
@@ -381,6 +401,10 @@ fn pattern_str(pattern: &Pattern) -> String {
             }
         }
         Pattern::IsType { ty, .. } => format!("is {}", type_ref_str(ty)),
+        Pattern::Tuple { elements, .. } => {
+            let inner: Vec<String> = elements.iter().map(pattern_str).collect();
+            format!("({})", inner.join(", "))
+        }
     }
 }
 

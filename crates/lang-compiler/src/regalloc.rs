@@ -186,12 +186,6 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*list);
             f.uses.push(*index);
         }
-        Op::DestructurePair { first, src, .. } => {
-            // Writes two registers; `first` is the primary def, `second` the extra def (see
-            // `extra_defs`), and the two always interfere (`build_interference`).
-            f.def = Some(*first);
-            f.uses.push(*src);
-        }
         Op::CallBuiltin { dst, args, .. } => {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
@@ -381,13 +375,11 @@ fn op_facts(op: &Op) -> OpFacts {
     f
 }
 
-/// Registers an op writes *in addition* to its primary `def` — only `DestructurePair`, which fills
-/// two registers. Kept separate so the common single-def path stays simple.
-fn extra_defs(op: &Op) -> Option<Reg> {
-    match op {
-        Op::DestructurePair { second, .. } => Some(*second),
-        _ => None,
-    }
+/// Registers an op writes *in addition* to its primary `def`. No current op is multi-def (the only
+/// one, `DestructurePair`, was retired with the tuple-destructure migration — object-model slice 4b),
+/// but the mechanism is kept so a future multi-def op needs no liveness rework.
+fn extra_defs(_op: &Op) -> Option<Reg> {
+    None
 }
 
 /// Per-instruction live-register sets, as fixed-width bitsets (one `u64` word per 64 registers).
@@ -582,13 +574,6 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(list);
             m(index);
-        }
-        Op::DestructurePair {
-            first, second, src, ..
-        } => {
-            m(first);
-            m(second);
-            m(src);
         }
         Op::CallBuiltin { dst, args, .. } => {
             m(dst);
@@ -915,29 +900,5 @@ mod tests {
         let mut c = chunk(code, 0, 2);
         coalesce(&mut c);
         assert_eq!(c.num_registers, 2, "loop-carried value must not be fused");
-    }
-
-    #[test]
-    fn destructure_pair_keeps_both_targets_distinct() {
-        // `first` and `second` are written by one op and both read afterwards — they must never fuse.
-        let code = vec![
-            load(0),
-            Op::DestructurePair {
-                first: 1,
-                second: 2,
-                src: 0,
-                span: Span::new(0, 0),
-            },
-            Op::Echo { reg: 1 },
-            Op::Echo { reg: 2 },
-            Op::Halt,
-        ];
-        assert_sound(&code, 0, 3);
-        let liveness = Liveness::analyze(&code, 3);
-        let interfere = build_interference(&code, &liveness, 3);
-        assert!(
-            interfere[1].iter().any(|r| r == 2),
-            "the two destructure targets must interfere"
-        );
     }
 }

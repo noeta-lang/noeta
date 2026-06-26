@@ -22,7 +22,10 @@
 
 use std::rc::Rc;
 
-use lang_ast::{BinaryOp, Expr, Param, Program as AstProgram, Stmt as AstStmt, StrPart};
+use lang_ast::{
+    BinaryOp, Expr, ForPattern as AstForPattern, Param, Program as AstProgram, Stmt as AstStmt,
+    StrPart,
+};
 use lang_span::Span;
 
 use crate::{
@@ -187,13 +190,81 @@ impl Lowerer {
                 span,
             } => {
                 let iterable = self.lower_expr(iterable, out)?;
-                let body = self.lower_body(body)?;
-                out.push(Stmt::For {
-                    pattern: pattern.clone(),
-                    iterable,
-                    body,
+                match pattern {
+                    AstForPattern::Single { .. } => {
+                        let body = self.lower_body(body)?;
+                        out.push(Stmt::For {
+                            pattern: pattern.clone(),
+                            iterable,
+                            body,
+                            span: *span,
+                        });
+                    }
+                    // A tuple destructure `for (a, b, …) in …` (object-model slice 4b) desugars to a
+                    // single hidden element var plus per-position `.N` projections at the top of the
+                    // body — so the IR for-loop only ever carries a `Single` pattern and reuses the
+                    // existing `TupleIndex` machinery (no new runtime op).
+                    AstForPattern::Tuple { names, .. } => {
+                        let elem = format!("$for{}", self.fresh().0);
+                        let mut body_stmts = Vec::new();
+                        self.destructure_into(&elem, names, &mut body_stmts);
+                        for s in body {
+                            self.lower_stmt(s, &mut body_stmts)?;
+                        }
+                        out.push(Stmt::For {
+                            pattern: AstForPattern::Single {
+                                name: elem,
+                                name_span: *span,
+                            },
+                            iterable,
+                            body: Block::stmts(body_stmts),
+                            span: *span,
+                        });
+                    }
+                }
+                Ok(())
+            }
+            AstStmt::Destructure {
+                mut_decl,
+                targets,
+                value,
+                span,
+            } => {
+                // Evaluate the value once, bind it to a hidden holder var (so its lifetime spans all
+                // projections — a bare temp would be consumed by the first read), then bind each
+                // target to its tuple position. Object-model slice 4b.
+                let value_atom = self.lower_expr(value, out)?;
+                let holder = format!("$destr{}", self.fresh().0);
+                out.push(Stmt::Bind {
+                    mut_decl: false,
+                    name: holder.clone(),
+                    name_span: *span,
+                    value: value_atom,
+                    field_assign: false,
                     span: *span,
                 });
+                for (i, (name, name_span)) in targets.iter().enumerate() {
+                    let proj = self.emit(
+                        out,
+                        Rvalue::TupleIndex {
+                            receiver: Atom::Var {
+                                name: holder.clone(),
+                                span: *name_span,
+                            },
+                            index: i as u32,
+                            span: *name_span,
+                        },
+                        *name_span,
+                    );
+                    out.push(Stmt::Bind {
+                        mut_decl: *mut_decl,
+                        name: name.clone(),
+                        name_span: *name_span,
+                        value: proj,
+                        field_assign: false,
+                        span: *name_span,
+                    });
+                }
                 Ok(())
             }
             AstStmt::Break { span } => {
@@ -883,5 +954,34 @@ impl Lowerer {
         let dst = self.fresh();
         out.push(Stmt::Let { dst, rvalue, span });
         Atom::Temp(dst)
+    }
+
+    /// Emit, into `out`, the per-position `.N` projections that destructure a tuple held by the
+    /// variable `holder` into `names` — `name_i = holder.i` (object-model slice 4b). Shared by the
+    /// for-loop tuple pattern's body prologue (the binding-statement destructure inlines its own,
+    /// since it carries a `mut` flag).
+    fn destructure_into(&mut self, holder: &str, names: &[(String, Span)], out: &mut Vec<Stmt>) {
+        for (i, (name, name_span)) in names.iter().enumerate() {
+            let proj = self.emit(
+                out,
+                Rvalue::TupleIndex {
+                    receiver: Atom::Var {
+                        name: holder.to_string(),
+                        span: *name_span,
+                    },
+                    index: i as u32,
+                    span: *name_span,
+                },
+                *name_span,
+            );
+            out.push(Stmt::Bind {
+                mut_decl: false,
+                name: name.clone(),
+                name_span: *name_span,
+                value: proj,
+                field_assign: false,
+                span: *name_span,
+            });
+        }
     }
 }

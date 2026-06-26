@@ -1061,6 +1061,52 @@ impl Checker {
                     }
                 }
             }
+            // `(a, b, …) = expr` — a tuple-destructuring binding (object-model slice 4b). The value
+            // must be a tuple of matching arity; each target binds to its element type (a `dyn`/hole
+            // value defers, binding every target `dyn`).
+            Stmt::Destructure {
+                targets,
+                value,
+                span,
+                ..
+            } => {
+                let vty = self.check(value, &Type::Unknown, env);
+                let elem_types: Vec<Type> = match &vty {
+                    Type::Tuple(els) => {
+                        if els.len() != targets.len() {
+                            self.diags.push(Diagnostic::error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "cannot destructure a {}-tuple into {} names",
+                                    els.len(),
+                                    targets.len()
+                                ),
+                            ));
+                        }
+                        targets
+                            .iter()
+                            .enumerate()
+                            .map(|(i, _)| els.get(i).cloned().unwrap_or(Type::Unknown))
+                            .collect()
+                    }
+                    _ if vty.defers_to_runtime() => vec![Type::Unknown; targets.len()],
+                    _ => {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            value.span(),
+                            format!("cannot destructure `{vty}` — expected a tuple"),
+                        ));
+                        vec![Type::Unknown; targets.len()]
+                    }
+                };
+                for ((name, name_span), t) in targets.iter().zip(elem_types) {
+                    if self.type_relevant(&t) {
+                        self.relevance.locals.insert(*name_span);
+                    }
+                    bind(env, name, t);
+                }
+            }
             Stmt::Expr { expr, .. } => {
                 self.check(expr, &Type::Unknown, env);
             }
@@ -3489,9 +3535,17 @@ impl Checker {
         };
         match pattern {
             ForPattern::Single { name, .. } => bind(env, name, elem),
-            ForPattern::Pair { first, second, .. } => {
-                bind(env, first, Type::Int);
-                bind(env, second, elem);
+            // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
+            // (object-model slice 4b — `.enumerate()` yields `(int, T)` tuples). Each name binds to
+            // its element type when the element is a known tuple, else `dyn`.
+            ForPattern::Tuple { names, .. } => {
+                for (i, (name, _)) in names.iter().enumerate() {
+                    let t = match &elem {
+                        Type::Tuple(els) => els.get(i).cloned().unwrap_or(Type::Unknown),
+                        _ => Type::Unknown,
+                    };
+                    bind(env, name, t);
+                }
             }
         }
     }
@@ -3510,6 +3564,17 @@ impl Checker {
             } => {
                 let payloads = self.payload_types(ty, variant, bindings.len());
                 for (sub, pty) in bindings.iter().zip(payloads) {
+                    self.bind_pattern(sub, &pty, env);
+                }
+            }
+            // A tuple pattern `(p, q, …)` binds each sub-pattern against the corresponding tuple
+            // element type (object-model slice 4b); a non-tuple/gradual scrutinee binds `dyn`.
+            Pattern::Tuple { elements, .. } => {
+                for (i, sub) in elements.iter().enumerate() {
+                    let pty = match ty {
+                        Type::Tuple(els) => els.get(i).cloned().unwrap_or(Type::Unknown),
+                        _ => Type::Unknown,
+                    };
                     self.bind_pattern(sub, &pty, env);
                 }
             }
