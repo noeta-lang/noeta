@@ -16,6 +16,8 @@
 //! so no program can tie a knot), so there is no cyclic garbage to buffer. It activates once
 //! field mutation lands and `release` begins buffering candidate roots.
 
+use std::collections::HashSet;
+
 use lang_value::{Color, Value};
 
 /// Add an owning reference to `value` (no-op for immediates).
@@ -24,13 +26,13 @@ pub fn retain(value: Value) {
     value.inc_ref();
 }
 
-/// Drop an owning reference to `value`, freeing it (and, later, running `__destruct`) when
-/// the last reference goes away. No-op for immediates.
+/// Drop an owning reference to `value`, reclaiming it through the **active cycle collector**
+/// (Phase 6.4): a prompt refcount free in `Trace` mode, or the Bacon–Rajan `Decrement` (buffer a
+/// surviving cycle root, defer a buffered object's dealloc) in `TrialDeletion` mode. No-op for
+/// immediates. (`__destruct` is the VM's job — see [`crate`] docs.)
 #[inline]
 pub fn release(value: Value) {
-    if value.dec_ref() {
-        value.free();
-    }
+    value.release();
 }
 
 /// **Backup mark-sweep trace** (Phase 6, the LXR-principled backup collector): a stop-the-world
@@ -64,6 +66,61 @@ pub fn collect_trace(roots: &[Value]) {
     }
     for v in garbage {
         v.gc_free_shallow();
+    }
+}
+
+/// **Trial-deletion collection** (Bacon–Rajan synchronous, Phase 6.4): reclaim the unreachable
+/// cycles among the buffered candidate roots — the objects whose refcount was decremented without
+/// reaching zero since the last collection. Unlike [`collect_trace`] it never scans the whole heap;
+/// it examines only the candidate subgraph, the trade-off the 6.4 benchmark weighs against the
+/// trace's per-allocation registry cost.
+///
+/// `MarkRoots` trial-decrements each purple candidate's subgraph (so edges *internal* to it stop
+/// counting) and disposes of any candidate that is no longer purple — a deferred-dealloc object
+/// (black, refcount 0, its children already released when it hit zero) is freed here. `ScanRoots`
+/// restores any subgraph still externally referenced; `CollectRoots` frees what stays white (the
+/// genuine cycles). Reuses the same `mark_gray`/`scan`/`gather_white` primitives as the dormant
+/// [`CycleCollector`].
+pub fn collect_trial_deletion() {
+    let roots = lang_value::take_candidates();
+    let mut gray_roots = Vec::new();
+    let mut deferred = Vec::new();
+    for &s in &roots {
+        // Each candidate is consumed by this collection — unbuffer it up front so the deferral guard
+        // in `free_shallow` won't fire while we reclaim it below.
+        s.gc_set_buffered(false);
+        match s.gc_color() {
+            // A live possible root: trial-decrement its subgraph.
+            Color::Purple => {
+                mark_gray(s);
+                gray_roots.push(s);
+            }
+            // A **deferred-dealloc** object: it hit its last reference while buffered (children already
+            // released, only its box held back so the buffer never dangled). Reclaimed in the final
+            // pass — but `mark_gray` above may recolor it gray if it sits inside a candidate's
+            // subgraph, in which case the cycle collection frees it and the dedup set skips it here.
+            _ => deferred.push(s),
+        }
+    }
+    for &s in &gray_roots {
+        scan(s);
+    }
+    let mut garbage = Vec::new();
+    for &s in &gray_roots {
+        gather_white(s, &mut garbage);
+    }
+    // All traversal is done; reclaim. `freed` dedups by address so nothing is freed — or even
+    // dereferenced — twice (a deferred object pulled into a cycle is reclaimed here and skipped below).
+    let mut freed: HashSet<u64> = HashSet::with_capacity(garbage.len() + deferred.len());
+    for v in garbage {
+        if freed.insert(v.bits()) {
+            v.gc_free_shallow();
+        }
+    }
+    for v in deferred {
+        if freed.insert(v.bits()) {
+            v.gc_free_shallow();
+        }
     }
 }
 

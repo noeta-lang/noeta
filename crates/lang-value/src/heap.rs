@@ -107,6 +107,38 @@ pub enum Color {
     Purple,
 }
 
+/// Which cycle collector the release path feeds (Phase 6.4 — the two are benchmarked head to head).
+/// `Trace` (the default) keeps the live-object [`REGISTRY`] up to date for the backup mark-sweep and
+/// frees promptly on every reclamation. `TrialDeletion` instead **buffers candidate roots** on a
+/// surviving decrement and **defers the deallocation** of a buffered object that reaches refcount 0
+/// (Bacon–Rajan), so the candidate buffer never dangles; it pays nothing per allocation.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CollectorMode {
+    Trace,
+    TrialDeletion,
+}
+
+thread_local! {
+    /// The active collector for this isolate's release path. `Trace` by default (the proven Phase-6
+    /// path); a benchmark / opt-in flips it to `TrialDeletion`.
+    static MODE: Cell<CollectorMode> = const { Cell::new(CollectorMode::Trace) };
+    /// The Bacon–Rajan candidate-root buffer (used only in `TrialDeletion` mode): objects whose
+    /// refcount was decremented without reaching zero, hence possible cycle roots. Drained by
+    /// `lang_gc`'s trial-deletion collector.
+    static CANDIDATES: RefCell<Vec<Value>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Select the cycle collector the release path feeds. Set once before a run (the VM does this from
+/// its configured mode); switching mid-run is not supported (the two keep different invariants).
+pub fn set_collector_mode(mode: CollectorMode) {
+    MODE.with(|m| m.set(mode));
+}
+
+/// The active collector mode.
+pub fn collector_mode() -> CollectorMode {
+    MODE.with(|m| m.get())
+}
+
 /// The heap payloads. Strings are the heap string type; `Int` boxes an `i64` that does
 /// not fit the 48-bit immediate small-int range, so full i64 wrapping semantics are kept
 /// (the differential oracle checks `i64::MAX + 1`). `Closure` holds a function-prototype
@@ -182,14 +214,21 @@ pub(crate) fn alloc(payload: Payload) -> Value {
         "heap address does not fit the 48-bit NaN-box payload"
     );
     let value = Value(Value::SIGN_BIT | Value::QNAN | (addr as u64 & Value::PTR_MASK));
-    REGISTRY.with(|r| r.borrow_mut().insert(value.0));
+    // The registry is the backup mark-sweep's sweep set; trial-deletion works from buffered
+    // candidates instead, so it pays no per-allocation registry cost (the Phase-6.4 trade-off).
+    if MODE.with(|m| m.get()) == CollectorMode::Trace {
+        REGISTRY.with(|r| r.borrow_mut().insert(value.0));
+    }
     value
 }
 
 /// Drop `value` from the live-object registry — called by every free path so the registry tracks
-/// exactly the live heap. Separate from the `live_dec` counter so both stay in lock-step.
+/// exactly the live heap. Separate from the `live_dec` counter so both stay in lock-step. A no-op
+/// outside `Trace` mode (the registry is only maintained there).
 fn registry_remove(value: Value) {
-    REGISTRY.with(|r| r.borrow_mut().remove(&value.0));
+    if MODE.with(|m| m.get()) == CollectorMode::Trace {
+        REGISTRY.with(|r| r.borrow_mut().remove(&value.0));
+    }
 }
 
 /// A snapshot of every live heap object, for the backup mark-sweep collector. Reconstructs a
@@ -291,12 +330,81 @@ pub(crate) fn free(value: Value) {
     drop(boxed);
 }
 
-/// Drop one owned reference to a value a freed container held, freeing it at zero. The
-/// child is a distinct object from the container being freed, so there is no aliasing.
+/// Drop one owned reference to a value a freed container held, reclaiming it at zero. The child is a
+/// distinct object from the container being freed, so there is no aliasing. Routes through the
+/// mode-aware [`release`] so a freed container's children feed the active collector (buffering cycle
+/// roots in `TrialDeletion` mode just as the top-level release does).
 fn release_child(value: Value) {
-    if value.dec_ref() {
-        value.free();
+    release(value);
+}
+
+/// Drop one owning reference to `value`, reclaiming it through the **active collector** (Phase 6.4).
+/// In `Trace` mode this is the prompt refcount free; in `TrialDeletion` mode it is the Bacon–Rajan
+/// `Decrement` — a surviving decrement buffers a possible cycle root, and an object reaching zero
+/// releases its children immediately but **defers its own deallocation if it is buffered** (so the
+/// candidate buffer never holds a freed pointer). A no-op for immediates.
+pub(crate) fn release(value: Value) {
+    if !value.is_pointer() {
+        return;
     }
+    match MODE.with(|m| m.get()) {
+        CollectorMode::Trace => {
+            if dec_ref(value) {
+                free(value);
+            }
+        }
+        CollectorMode::TrialDeletion => {
+            if dec_ref(value) {
+                // Bacon–Rajan `Release`: release children now (their own decrements may buffer them
+                // as roots), then reclaim this object's allocation. `free_shallow` defers it if it is
+                // buffered, so the buffer's reference stays valid until the collector frees it.
+                for child in children(value) {
+                    release(child);
+                }
+                free_shallow(value);
+            } else if can_be_cyclic(value) {
+                possible_root(value);
+            }
+        }
+    }
+}
+
+/// Whether a value's type can participate in a cycle — i.e. it can hold references to other heap
+/// objects. Only these are buffered as candidate roots; a leaf (string, boxed int, native handle)
+/// can never close a cycle, so buffering it would be wasted work.
+fn can_be_cyclic(value: Value) -> bool {
+    if !value.is_pointer() {
+        return false;
+    }
+    let obj = unsafe { &*obj_ptr(value) };
+    matches!(
+        obj.payload,
+        Payload::List(_)
+            | Payload::Set(_)
+            | Payload::Map(_)
+            | Payload::Object { .. }
+            | Payload::Enum { .. }
+            | Payload::Closure { .. }
+            | Payload::Cell(_)
+    )
+}
+
+/// Buffer `value` as a Bacon–Rajan possible cycle root (`PossibleRoot`): paint it purple and, if it
+/// is not already buffered, record it for the next trial-deletion collection.
+fn possible_root(value: Value) {
+    if color(value) != Color::Purple {
+        set_color(value, Color::Purple);
+        if !buffered(value) {
+            set_buffered(value, true);
+            CANDIDATES.with(|c| c.borrow_mut().push(value));
+        }
+    }
+}
+
+/// Take the buffered candidate roots for a trial-deletion collection (drained, so the next round
+/// starts empty). The borrow is released before the collector touches the objects.
+pub fn take_candidates() -> Vec<Value> {
+    CANDIDATES.with(|c| std::mem::take(&mut *c.borrow_mut()))
 }
 
 // --- Cycle-collector primitives (used by `lang-gc`'s trial-deletion collector) ---
@@ -372,7 +480,18 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
 
 /// Free an object's own allocation **without** releasing its children — the cycle collector
 /// frees every white object in a cycle itself, so each child is reclaimed on its own pass.
+///
+/// In `TrialDeletion` mode this is also the universal **deferral point**: a *buffered* object (one
+/// the candidate buffer still references) is never freed here — it is painted black and left
+/// allocated for the trial-deletion collector, which unbuffers it before reclaiming it. This makes
+/// the deferral hold for *every* caller (the mode-aware release, and the VM's destructor-aware
+/// `release_value`, which frees its last reference shallowly after running `__destruct`), so the
+/// candidate buffer can never hold a dangling pointer regardless of which path reaches refcount 0.
 pub(crate) fn free_shallow(value: Value) {
+    if MODE.with(|m| m.get()) == CollectorMode::TrialDeletion && buffered(value) {
+        set_color(value, Color::Black);
+        return;
+    }
     // SAFETY: the collector proved `value` is unreachable garbage and frees it exactly once;
     // children are freed by their own `free_shallow`, so they are not released here.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };

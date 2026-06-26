@@ -259,6 +259,22 @@ fn mm_alloc_churn_src(n: usize) -> String {
     )
 }
 
+/// **Cyclic garbage** (Phase 6.4): each `make_cycle` call ties a closure↔cell reference cycle (a
+/// self-recursive nested `fn`) that is unreachable once the call returns — `n` cycles built and
+/// abandoned, the workload that *only* the cycle collector reclaims. Stresses collection: the trace
+/// must walk the whole live heap, while trial-deletion examines only the buffered candidates.
+fn mm_cyclic_garbage_src(n: usize) -> String {
+    format!(
+        "fn make_cycle(): int {{\n    \
+            fn rec(k: int): int {{ if k <= 0 {{ return 0; }} return rec(k - 1); }}\n    \
+            return rec(1);\n\
+         }}\n\
+         mut total = 0;\n\
+         for i in 0..{n} {{\n    total = total + make_cycle();\n}}\n\
+         echo total;\n"
+    )
+}
+
 /// **Destructor-heavy:** a `mut` global holding a `destruct`-bearing instance, reassigned every
 /// iteration. The reassignment destroys the displaced instance immediately (spec §5), so the
 /// destructor fires `n` times — the deterministic-destruction path Phase 4 generalizes to all scopes.
@@ -416,6 +432,33 @@ fn vm_hot_paths(c: &mut Criterion) {
         b.iter(|| black_box(VmBackend::new().run_module(black_box(&deep))))
     });
     mm.finish();
+
+    // Phase 6.4 head-to-head: the two cycle collectors on a cycle-heavy workload (collection time)
+    // and on acyclic allocation churn (the per-allocation / per-release overhead each imposes on code
+    // that forms no cycles). The lower-overhead one is the default; this is the data behind that call.
+    use lang_value::CollectorMode::{Trace, TrialDeletion};
+    let mut col = c.benchmark_group("vm_collector");
+    for &n in LOOP_SIZES {
+        let cyclic = compile(&mm_cyclic_garbage_src(n));
+        let churn = compile(&mm_alloc_churn_src(n));
+        for (mode, tag) in [(Trace, "trace"), (TrialDeletion, "trial")] {
+            col.bench_with_input(
+                BenchmarkId::new(format!("cyclic_{tag}"), n),
+                &cyclic,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_with_collector(module, mode)))
+                },
+            );
+            col.bench_with_input(
+                BenchmarkId::new(format!("churn_{tag}"), n),
+                &churn,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_with_collector(module, mode)))
+                },
+            );
+        }
+    }
+    col.finish();
 }
 
 criterion_group!(benches, vm_hot_paths);

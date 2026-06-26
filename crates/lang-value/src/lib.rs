@@ -23,7 +23,10 @@
 mod heap;
 mod ops;
 
-pub use heap::{Color, live_count, live_objects, live_peak, reset_peak};
+pub use heap::{
+    CollectorMode, Color, collector_mode, live_count, live_objects, live_peak, reset_peak,
+    set_collector_mode, take_candidates,
+};
 pub use ops::{OpError, apply_binary, apply_unary, compare_primitive, structural_compare};
 
 use std::collections::BTreeMap;
@@ -908,6 +911,22 @@ impl Value {
         if self.is_pointer() {
             heap::free(self);
         }
+    }
+
+    /// The raw NaN-boxed word — a stable identity key for a value (two `Value`s are the same object
+    /// iff their bits match). Used by the cycle collector to dedup frees by address without
+    /// dereferencing (so a value already freed this collection is skipped, not read).
+    pub fn bits(self) -> u64 {
+        self.0
+    }
+
+    /// Drop one owning reference, reclaiming through the **active cycle collector** (Phase 6.4):
+    /// a prompt refcount free in `Trace` mode, or the Bacon–Rajan `Decrement` (buffer a surviving
+    /// cycle-capable root, defer a buffered object's dealloc) in `TrialDeletion` mode. This is the
+    /// release the runtime should use; `dec_ref` + `free` is the lower-level pair the collector and
+    /// the `Trace` path build on.
+    pub fn release(self) {
+        heap::release(self);
     }
 
     // --- Cycle-collector primitives (the trial-deletion collector lives in `lang-gc`) ---

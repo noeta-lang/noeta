@@ -78,6 +78,16 @@ impl VmBackend {
     ) -> RunResult {
         execute(module, host)
     }
+
+    /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths
+    /// use the default [`CollectorMode::Trace`]; the head-to-head benchmark drives both.
+    pub fn run_module_with_collector(
+        &self,
+        module: &Module,
+        mode: lang_value::CollectorMode,
+    ) -> RunResult {
+        execute_with_collector(module, Box::new(lang_stdlib::SandboxHost::new()), mode)
+    }
 }
 
 impl Backend for VmBackend {
@@ -254,6 +264,20 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.
 fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
+    execute_with_collector(module, host, lang_value::CollectorMode::Trace)
+}
+
+/// Execute a module under an explicit cycle-collector mode (Phase 6.4). The default path uses the
+/// backup mark-sweep [`CollectorMode::Trace`]; the benchmark drives [`CollectorMode::TrialDeletion`]
+/// to compare the two. The mode is set on this isolate's release path before the first allocation
+/// and the matching collector runs at clean exit (the trace marks from the live globals *before*
+/// teardown; trial-deletion reaps its buffered candidates *after*, once every release has fed them).
+fn execute_with_collector(
+    module: &Module,
+    host: Box<dyn lang_stdlib::Host>,
+    mode: lang_value::CollectorMode,
+) -> RunResult {
+    lang_value::set_collector_mode(mode);
     let methods = module
         .methods
         .iter()
@@ -291,20 +315,25 @@ fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
     if let Ok(v) = vm.run(vec![top]) {
         release(v);
     }
-    // Reap reference cycles before tearing down the globals (Phase 6): the program may have tied a
-    // knot through `mut` fields / cells / closures that refcounting alone cannot reclaim (e.g. a
-    // self-recursive nested `fn`). A stop-the-world mark-sweep rooted at the live globals frees
-    // everything unreachable from them — the leaked cycle — while every global subgraph is marked and
-    // survives for the ordinary destructor teardown below. At this point the frame stack is unwound
-    // (top frame returned, or every register released on abort), so the globals are the whole root set.
-    let roots: Vec<Value> = vm.globals.values().copied().collect();
-    collect_trace(&roots);
+    // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
+    // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
+    // different points: the **trace** marks from the live globals *before* teardown (the frame stack
+    // is unwound, so the globals are the whole root set) and sweeps everything unreachable; the
+    // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
+    // and global release has had a chance to buffer the cycle's roots.
+    if mode == lang_value::CollectorMode::Trace {
+        let roots: Vec<Value> = vm.globals.values().copied().collect();
+        collect_trace(&roots);
+    }
     // Destroy the globals at program end in reverse declaration order, running each
     // destructor on its last reference — the deterministic destruction the spec requires.
     for name in vm.global_order.clone().into_iter().rev() {
         if let Some(v) = vm.globals.get(&name).copied() {
             vm.release_value(v);
         }
+    }
+    if mode == lang_value::CollectorMode::TrialDeletion {
+        lang_gc::collect_trial_deletion();
     }
 
     let exit_code = if vm.diagnostics.is_empty() { 0 } else { 1 };
@@ -3933,6 +3962,42 @@ mod tests {
             before,
             "the closure↔cell cycle must be reclaimed by the backup trace"
         );
+    }
+
+    fn run_with_collector(src: &str, mode: lang_value::CollectorMode) -> RunResult {
+        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("program should be in the M1.0 subset");
+        VmBackend::new().run_module_with_collector(&module, mode)
+    }
+
+    #[test]
+    fn trial_deletion_reclaims_cycles_and_acyclic_garbage() {
+        // The Phase-6.4 trial-deletion collector, exercised on its release path: a self-recursive
+        // nested `fn` (the closure↔cell cycle, buffered as a candidate when the frame unwinds) plus
+        // ordinary acyclic, heap-bearing programs (strings, objects, lists — none should be wrongly
+        // buffered/freed). Each must finish with residency back at its pre-run baseline. Run under
+        // miri to validate the deferred-dealloc release path + candidate buffering (no UAF / double
+        // free / leak).
+        let cyclic = "fn compute(): int {\n  fn fact(n: int): int {\n    if n <= 1 { return 1; }\n    return n * fact(n - 1);\n  }\n  return fact(5);\n}\necho compute();\n";
+        let acyclic = "class P { mut x: int  tag: string\n  fn new(): P { return P { x: 0, tag: \"t\" }; } }\nmut p = P.new();\nfor i in 0..3 { p.x = p.x + i; }\nmut xs = [\"a\", \"b\"];\nxs[0] = \"z\";\necho \"${p.x} ${xs.join(\",\")}\";\n";
+        // A reassigned destructor-bearing object exercises the VM's `release_value` last-reference
+        // free — the path that must defer a *buffered* object rather than free it shallowly (the bug
+        // that segfaulted before `free_shallow` became the universal deferral point).
+        let destructed = "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { x = id + 1; }\n}\nmut r = Res.new(0);\nfor i in 0..3 { r = Res.new(i); }\necho r.id;\n";
+        for src in [cyclic, acyclic, destructed] {
+            let before = lang_value::live_count();
+            let r = run_with_collector(src, lang_value::CollectorMode::TrialDeletion);
+            assert_eq!(r.exit_code, 0, "program aborted: {:?}", r.diagnostics);
+            assert_eq!(
+                lang_value::live_count(),
+                before,
+                "trial-deletion must reclaim all heap (cycles + acyclic) by clean exit"
+            );
+        }
+        // Reset the thread-local mode so later tests on this thread see the default again.
+        lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
     }
 
     #[test]
