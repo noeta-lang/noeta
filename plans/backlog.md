@@ -61,7 +61,8 @@ README). When Tier B graduates into slices, strike this entry and point to them.
 ## Object-model redesign — `struct`/`class`/`enum`/tuple + dev-tier blocks
 
 **Status:** design, not scheduled. Full doc at **`plans/object-model-redesign/README.md`**. From a
-2026-06 design discussion. **Supersedes the `resource`-kind entry below.** Makes the kind keyword the
+2026-06 design discussion (it replaced an earlier `resource`-kind proposal — a resource is just a class
+with a `destruct`). Makes the kind keyword the
 value/reference distinction: **value `struct`** (rename of `record`; COW; packed when all-primitive)
 vs **reference `class`** (identity, sharing, `!Send`, and `destruct` — so a "resource" is just a class
 with a destructor; file handles/connections are classes). Methods + bodies on all three kinds (enums
@@ -72,33 +73,3 @@ co-located, tree-shaken (via the existing DCE), manifest-discovered `test`/`benc
 on one `@dev`-declared-tier primitive (content-kind = code|text), `test` implemented first — the clean
 co-located-TDD experience PHP can't strip. Re-scopes Phase 5.2 (class-as-value → struct), breaking
 surface migration (`record`/`type X={}` → `struct X{}`).
-
-## The `resource` kind — a first-class reference type (and why not general pointers) — SUPERSEDED
-
-**SUPERSEDED by the object-model redesign above** (a `resource` kind is unnecessary — a resource is a
-class with a `destruct`). Retained for rationale. **Status:** design backlog, not scheduled. Full doc
-at **`plans/resource-types/README.md`** (carries a superseded banner).
-Provenance: arose from the Phase-5.2b decision (file handles are reference types) + a user question
-(2026-06-26) on whether reference semantics / pointers belong in a value-semantic (COW) language.
-
-**The gap.** After 5.2 every *user-declarable* kind is a value type (record/class/enum). Reference
-semantics exists only as a privileged built-in (`FileHandle`); a user cannot declare their own
-stateful resource. A **`resource` kind** names that — reference semantics + must-close (`destruct`) +
-`!Send`-across-isolates — completing the taxonomy (value kinds carry data; one `resource` kind
-quarantines shared mutation / identity / IO / non-sendability). `FileHandle` is its prototype.
-
-**Why a dedicated kind, not linear types:** build on existing traits + `destruct` + refcount
-destruction (camp-2, à la C#/Java `IDisposable` / Swift's struct-vs-class split); defer full linear
-"use-exactly-once" to a later hardening.
-
-**Pointers/references question, settled in the doc:** **no general-purpose pointers.** COW already
-removes the performance motivation (passing is a refcount bump); identity + shared-mutable-state are
-exactly what `resource` provides, named and quarantined; "mutate through a function" is value-return
-(`x = f(x)`, O(1) under COW) with optional `inout` *sugar* later (value-semantic, not a pointer);
-graphs/cycles use arena indices or resources. General references would reintroduce the aliasing the
-language eliminates. So `resource` *is* the answer to the pointer question; pointers stay an internal
-compiler/runtime concept only.
-
-**Triggers (when to build):** (1) a second built-in resource lands (socket/DB/timer/channel), or
-(2) the isolate/concurrency milestone begins (it forces a sendable-vs-resource distinction). Neither
-is on the Phase-5/6 path.

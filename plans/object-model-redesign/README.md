@@ -1,8 +1,8 @@
 # Object-model redesign — `struct`/`class`/`enum`/tuple on one axis, + dev-tier blocks
 
 **Status: design, NOT scheduled.** A consolidated proposal from a design discussion (2026-06). It
-**supersedes `plans/resource-types/README.md`** (the `resource` kind dissolves into "a class with a
-`destruct`"). It re-scopes parts of the completed memory-management **Phase 5.2** (which made classes
+**replaces an earlier `resource`-kind proposal** (removed) — the `resource` kind dissolves into "a class
+with a `destruct`". It re-scopes parts of the completed memory-management **Phase 5.2** (which made classes
 value-semantic) and is independent of the **inferred-static type-system** track (that's about the
 *checker*; this is about the *object/value model* and surface). Pre-implementation: this captures the
 decisions, rationale, open questions, migration impact, and a sane slice order — not committed work.
@@ -141,6 +141,13 @@ optional" signal. More useful for structs (public literal: `Point { x: 5 }`) tha
 - **Nested namespaces NOT added.** One `namespace App.Orders;` per file (C#/PHP model), dotted
   hierarchy, `use` imports. The motivation people reach to nested modules for — co-located tests — is
   handled by dev-tier blocks below, *without* opening "multiple namespaces per file."
+- **No general-purpose pointers/references** (carried over from the dropped `resource` proposal, still
+  the conclusion). COW removes the performance motivation (passing is a refcount bump); identity and
+  shared-mutable-state are exactly what `class` provides, named; "mutate through a function" is
+  value-return (`x = f(x)`, O(1) under COW) with an optional `inout` *sugar* later (value-semantic, not a
+  pointer); graphs/cycles use arena indices or reference classes. General references would reintroduce
+  the aliasing the language eliminates — `class` *is* the controlled re-introduction. Pointers stay an
+  internal compiler/runtime concept only.
 
 ---
 
@@ -195,6 +202,39 @@ manifest-surfaced. Consequences:
 - **Uniformity** — built-in and third-party tiers are the same construct; "expose to consumers" is just
   "a tier is a declarable, manifest-surfaced thing."
 
+## Extension-registered tiers feel first-party *for free*
+
+The payoff of declaring tiers in-language (rather than via a separate plugin protocol): a third-party
+tool registers a tier by **shipping a library that contains its `@dev` declaration** (+ a runner). A
+project that depends on that library has the tier — and it integrates with the toolchain *automatically*,
+because of an architecture commitment already in place:
+
+> **The LSP is the same memoized query graph as the compiler** (architecture §9.6 — "the same query
+> graph that powers a responsive LSP"). So an `@dev` tier declaration, being ordinary in-language code
+> the *compiler* understands, is understood by the *LSP* with no extra work: completion, highlighting,
+> diagnostics ("unknown tier", "this block's `fn` doesn't typecheck") all fall out. No LSP plugin API.
+
+So the full extension story needs **no new mechanism**: a `bench` (or `snapshot`, `property`, …) tool is
+just *a library with a `@dev bench` declaration + a manifest-reading runner*. The compiler validates and
+type-checks its blocks, the LSP makes them feel native, the runner finds them via the same manifest as
+`attributes_of`. That's the "feels first-party" experience without bespoke integration.
+
+**One deliberate limit — keyword sugar is a *language* privilege, not an extension capability.**
+`test { }` works because the language *reserves* `test`. Letting an extension reserve a new bare keyword
+(`bench { }`) would either break code using `bench` as an identifier or require contextual keywords whose
+meaning flips on imports (parser-ambiguity risk). So:
+
+- **Built-in / universal tiers** (`test`, `doc`, and `bench` if the language ships a runner) get the bare
+  keyword sugar (`test { … }`).
+- **Extension tiers** use the **general tagged form** — a *fixed* marker plus the tier *identifier*
+  (`dev bench { … }` / `@bench { … }`, spelling TBD), which reserves no new word and is safe to add by
+  declaration. The LSP can still render and complete it as nicely as a built-in.
+- If an extension tier proves universal, the *language* may promote it to keyword sugar (ship the
+  declaration in the prelude) — a language decision, not something an extension does.
+
+So: open-ended, LSP-native tiers via `@dev` library declarations; bare-keyword sugar reserved for the
+language's blessed handful.
+
 ## Block ergonomics
 
 - **Multiple blocks per file** — drop a `test { }` right under each function it exercises; the runner
@@ -214,8 +254,8 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
 
 ## Migration & impact
 
-- **Supersedes `plans/resource-types/README.md`** — `resource` becomes "a class with a `destruct`"; its
-  still-relevant bits (`!Send`/isolate, must-close) are folded into the class section above.
+- **Replaces the earlier `resource`-kind proposal** (removed) — `resource` becomes "a class with a
+  `destruct`"; its still-relevant bits (`!Send`/isolate, must-close) are folded into the class section.
 - **Re-scopes memory-management Phase 5.2.** Class-as-value (5.2a) moves to **`struct`** (the value kind
   keeps the `SetField`/COW mutate-when-unique machinery — *not wasted, relocated*); **classes become
   reference** with simpler always-in-place mutation. The 5.2b FileHandle decision ("reference") becomes
