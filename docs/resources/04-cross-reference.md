@@ -20,7 +20,7 @@
 | Object model: shapes + inline caches | §4 | — | M1 | Internal. |
 | Object creation (no privileged constructor) | §4.1 | §6 | M1 | Records + `new` as ordinary fn. |
 | Structural update (`..` spread) | §4.2 | §6 | M1 | Clone-with-changes. |
-| Memory management (refcount + cycle GC) | §5 | — | M1 | Internal; `__destruct`/`destruct` surfaces in Syntax §9.6 traits note. |
+| Memory management (refcount + cycle GC) | §5 (intent); `05-memory-management.md` (as-built) | — | M1 | Internal; `__destruct`/`destruct` surfaces in Syntax §9.6 traits note. As-built: shared Core IR + precise-RC passes + backup trace. |
 | Execution (tiered VM, specializing) | §6 | — | M1 (Tier 0) / M2 (Tier 1) | Internal. Incremental-compilation (salsa) note lives here. |
 | Variables & mutability (`mut`) | §9.1 (immutable-default) | §2 | M1 | Immutable by default. |
 | Type system (generics, inference) | §9.1 | §5 | M1 | Name-first types; generics via shapes. |
