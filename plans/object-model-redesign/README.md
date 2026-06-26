@@ -405,7 +405,24 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
      no isolate boundary / value-transfer point exists in the codebase, so any check would be
      untested dead code. Revisit at the concurrency milestone (the slice that adds `spawn`/channels),
      which is where the boundary to reject a `!Send` class at will live.
-3. **Enum bodies** (methods + in-body impls). Self-contained.
+3. **Enum bodies** (methods + in-body impls). Self-contained. **✅ DONE (`536680e`).** Enums gain the
+   unified body, making all three kinds `keyword Name { members; fn; impl Trait { } }`. Parser:
+   `enum` body = `choice(impl, method, variant)`, impl methods flattened into the dispatch table +
+   block retained for the checker (as class/struct); `EnumDecl` gains `methods`/`impls`. An enum
+   method takes the whole value as `self` (no implicit field scope — variants differ; the body
+   `match`es on `self`, exhaustiveness-checked because the checker binds `self` to the enum type).
+   Instance `v.m(...)` + associated `E.f(...)` resolve through the shared `(type, method)` table
+   (variant construction still wins for a variant name); compiler reserves a proto per method (empty
+   field scope), the VM dispatches an enum value through the same table as an object, the tree-walker
+   resolves the `EnumDef` from scope. **Operator/protocol parity — UNIFORM, no per-kind limit
+   (decided with user):** an enum's in-body `impl`s light up operators exactly as a class's, no
+   allowlist / no new diagnostic — `Equatable`→`==`, `Comparable`→`< >`, `Display`→`${}`, even
+   `Add`→`+`; both backends key on the value's shape name (one-line `is_object() || is_enum()`
+   extensions). The checker records an enum's impl trait names so an operator trait is accepted on an
+   enum operand. **Mem:** enum (and the symmetric, previously-missed *struct*) method bodies now go
+   through the reuse + drop-insertion IR passes — a method-local allocation is otherwise unreclaimed
+   on the IR backend. Conformance 277 / differential agrees / leak residency 0 both backends / miri
+   clean. **No new diag code (next free still E0036).**
 4. **Tuples** (value, positional, destructuring, patterns).
 5. **Field defaults** (opt-in per field). Independent.
 6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + DCE gate + manifest) with
