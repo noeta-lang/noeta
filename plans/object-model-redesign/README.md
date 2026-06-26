@@ -364,3 +364,14 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
 6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + DCE gate + manifest) with
    **`test` first**, then `bench`/`doc`. (The dev-tier section above predates the settled spelling and
    still says `@dev`; the directive is **`@tier`** — see settled open-question 4.)
+7. **Optional line-end semicolons** — a `;` at the end of a statement becomes optional; a **newline
+   terminates a statement** (Go/Swift/Kotlin-style), with `;` kept valid (for multiple statements on one
+   line) and inside `for (…;…;…)`-like positions. Pure surface, no semantics change. **Load-bearing
+   decision to settle first: the line-continuation rule** — a newline must *not* terminate when the
+   statement is syntactically incomplete: an open `(`/`[`/`{`, a trailing binary/assignment operator, a
+   trailing `|>`/`??`/`.`/`,`, or a leading continuation on the next line. Pick the mechanism: (a) the
+   **lexer** emits newline tokens and suppresses them after a continuation token / inside brackets
+   (Go's approach — newline → synthetic `;`), or (b) the **parser** treats newline as a soft terminator.
+   The unified struct/class/enum **body grammar already has no field terminator**, so bodies are
+   unaffected; this targets statement sequences (`echo`/binding/`return`/`use`/expr-stmt). Last slice
+   because it touches every statement production and wants the rest of the surface settled first.
