@@ -449,3 +449,12 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    The unified struct/class/enum **body grammar already has no field terminator**, so bodies are
    unaffected; this targets statement sequences (`echo`/binding/`return`/`use`/expr-stmt). Last slice
    because it touches every statement production and wants the rest of the surface settled first.
+   **⚠ Interaction with field-init shorthand (`b18f376`):** the struct/map literal punning
+   (`Type { x }` ≡ `Type { x: x }`, `{ k }` ≡ `{ "k": k }`) made an object-literal body parse from a
+   bare name. Today that is collision-free because a single-bare-name control-flow body
+   (`if cond { x }`, no terminator) is *already* a parse error (statements require a terminator). Once
+   a newline can terminate a statement, `if cond { x }` becomes a valid block and re-collides with
+   `cond { x: x }` — so this slice's disambiguation **must** handle it: either a restricted
+   control-flow-head expression (no top-level struct literal without parens, Rust-style — the
+   recommended fix) or keep relying on the comma/colon disambiguator (which only covers multi-field /
+   explicit-colon literals, not single-field shorthand).
