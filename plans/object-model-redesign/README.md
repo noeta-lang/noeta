@@ -357,7 +357,34 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    agrees (0-skipped), leak residency 0 both backends, clippy/fmt clean, miri clean.
 2. **class = reference** (the semantic core): identity, `===`, `!Send`, in-place shared mutation; move
    the value-mutation machinery to `struct`; enforce field visibility (private-default classes). The
-   load-bearing slice.
+   load-bearing slice. **Sub-sliced for delivery (each a green commit):**
+   - **2a — equality model. ✅ DONE (`55950d4`).** `===`/`!==` identity operators (never overload);
+     class `==` defaults to identity unless `Equatable` (derived or hand-`impl`'d), carried by a
+     per-type `structural_eq` bit on `Shape` (VM) + `TypeDef` (tree-walker), computed identically so
+     both backends agree even on nested class fields. New **E0034** (`===` on a value operand). Next
+     free **E0035**.
+   - **2b — reference in-place mutation.** Class `x.f = v` mutates the shared instance (visible
+     through every alias), no COW fork; struct keeps COW. Eval needs `RefCell` interior mutability on
+     `ObjectValue.fields` (a plain `Rc<…>` can't mutate a shared instance); the VM already writes
+     slots through a raw pointer, so it just skips the COW-copy branch for a class. `mut x` still
+     required at this step.
+   - **2b′ — asymmetric `mut` relaxation.** Class `x.f = v` needs only the field `mut`, **not** a
+     `mut x` binding (it is in-place, not a rebind). Implemented at the reassignment site (the parser
+     wraps `x.f=v` as a reassignment of `x`): skip the immutable-reassignment check (E0006) when the
+     new value is a **class instance identical (same allocation) to the binding's current value** —
+     which precisely captures in-place class mutation and excludes struct field-sets (value kind,
+     even when uniquely-owned-COW reuses the allocation) and class *rebinds* to a different instance.
+   - **2c — eval object-cycle collection.** Reference classes can finally form cycles
+     (`a.next=b; b.next=a`); the VM's heap collector already reclaims them, but the tree-walker only
+     had a *closure-capture* cycle reaper (object cycles were impossible under value semantics). Add
+     object-cycle reclamation to the eval backend so the leak oracle stays residency-0 on a cyclic
+     class graph, on both backends.
+   - **2d — field-visibility enforcement.** `struct` fields default public, `class` fields default
+     private with per-field `pub`; enforce on field read + literal construction (parsed in slice 1).
+   - **DEFERRED (confirmed with user, 2026-06-26): `!Send` across isolates.** Unenforceable today —
+     no isolate boundary / value-transfer point exists in the codebase, so any check would be
+     untested dead code. Revisit at the concurrency milestone (the slice that adds `spawn`/channels),
+     which is where the boundary to reject a `!Send` class at will live.
 3. **Enum bodies** (methods + in-body impls). Self-contained.
 4. **Tuples** (value, positional, destructuring, patterns).
 5. **Field defaults** (opt-in per field). Independent.
