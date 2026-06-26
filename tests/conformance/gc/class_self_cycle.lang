@@ -1,0 +1,16 @@
+// Object-model slice 2c — a one-node self-cycle: a `class` whose `mut` field points at itself
+// (`n.next = some(n)`). Its refcount never reaches zero through normal release, so the exit-time
+// backup collector reclaims it and runs its `destruct` exactly once. Both backends agree.
+// expect: stdout "self-linked"
+// expect: stdout "drop 7"
+// expect: exit 0
+class Node {
+    mut next: ?Node
+    id: int
+    fn new(id: int): Node { return Node { next: none, id: id }; }
+    destruct { echo "drop ${id}"; }
+}
+
+n = Node.new(7);
+n.next = some(n);
+echo "self-linked";

@@ -377,11 +377,18 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
      value is an `Expr::FieldSet`) routes the tree-walker through `assign_force` and tells the VM
      compiler not to emit the E0006 raise. So a class field can be assigned through an immutable
      binding or a **function parameter** (reference passing), while a struct still requires `mut`.
-   - **2c — eval object-cycle collection.** Reference classes can finally form cycles
-     (`a.next=b; b.next=a`); the VM's heap collector already reclaims them, but the tree-walker only
-     had a *closure-capture* cycle reaper (object cycles were impossible under value semantics). Add
-     object-cycle reclamation to the eval backend so the leak oracle stays residency-0 on a cyclic
-     class graph, on both backends.
+   - **2c — object-cycle collection. ✅ DONE.** Reference classes can finally form cycles
+     (`a.next=b; b.next=a`), which precise refcounting cannot reclaim. Both backends needed exit-time
+     work: the **VM** added a post-teardown backup `collect_trace(&[])` (its pre-teardown trace marks
+     from the still-live globals, so a globals-rooted cycle was missed); the **tree-walker** had only
+     a *closure-capture* reaper, so it gained a `MUTATED_OBJECTS` weak registry (a class cycle can
+     only be *closed* by an in-place field assignment) + a two-pass `reap_object_cycles` (destruct
+     all members with fields intact, then drain to break the cycle). **Cycle-finalization order is
+     deterministic reverse-creation** (newest-first), chosen with the user as most consistent with
+     the language's reverse-declaration teardown — both backends sort by a per-object creation `seq`
+     (`ObjHeader::seq` / `ObjectValue::seq`) so cyclic `destruct` order agrees (the VM's live-object
+     registry is a `HashSet`, otherwise arbitrary). Leak residency 0 on cyclic graphs, both backends;
+     differential agrees on cyclic `destruct` output.
    - **2d — field-visibility enforcement.** `struct` fields default public, `class` fields default
      private with per-field `pub`; enforce on field read + literal construction (parsed in slice 1).
    - **DEFERRED (confirmed with user, 2026-06-26): `!Send` across isolates.** Unenforceable today —

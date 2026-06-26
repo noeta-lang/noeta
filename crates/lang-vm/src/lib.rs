@@ -333,6 +333,16 @@ fn execute_with_collector(
             vm.release_value(v);
         }
     }
+    // Backup collection (object-model slice 2c): a reference `class` cycle rooted in the globals
+    // (`a.next = b; b.next = a`) survives the teardown above — each member still holds the other, so
+    // refcounting never reaches zero. With the globals now gone there are **no roots left**, so every
+    // still-live object is unreachable garbage; trace-collect from an empty root set to reclaim it,
+    // running each member's `destruct` exactly once. (The pre-teardown trace above only catches
+    // cycles already unreachable mid-run.)
+    if mode == lang_value::CollectorMode::Trace {
+        let garbage = collect_trace(&[]);
+        vm.reclaim_cycle_garbage(garbage);
+    }
     if mode == lang_value::CollectorMode::TrialDeletion {
         let garbage = lang_gc::collect_trial_deletion();
         vm.reclaim_cycle_garbage(garbage);
@@ -1293,7 +1303,12 @@ impl<'m> Vm<'m> {
         for &g in fresh.iter().chain(&already_destructed) {
             retain(g);
         }
-        for &g in &fresh {
+        // Finalize cycle members in **reverse-creation order** (newest-first, object-model slice 2c)
+        // so cyclic `destruct` order is deterministic and agrees with the tree-walker — the live
+        // registry is a `HashSet`, so `fresh`'s own order is otherwise arbitrary.
+        let mut to_destruct = fresh.clone();
+        to_destruct.sort_by_key(|g| std::cmp::Reverse(g.gc_seq()));
+        for &g in &to_destruct {
             if let Some(proto) = g
                 .shape()
                 .and_then(|s| self.destructors.get(&s.name).copied())
@@ -4316,6 +4331,22 @@ mod tests {
         );
         assert_eq!(r.stdout, "t2 3\nchanged\nchanged\n");
         assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn reference_cycle_is_collected_at_exit() {
+        // VM-side reference-`class` cycle (object-model slice 2c): `a.next = b; b.next = a` ties a
+        // cycle precise refcounting cannot reclaim. The exit-time backup `collect_trace(&[])` reclaims
+        // both members and runs each `destruct` in reverse-creation order (newest-first). Run under
+        // miri to validate the cycle's `gc_free_shallow` reclamation (no UAF / double free) and the
+        // leak oracle to confirm residency 0.
+        let before = lang_value::live_count();
+        let r = run(
+            "class Node {\n  mut next: ?Node\n  id: int\n  fn new(id: int): Node { return Node { next: none, id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\na = Node.new(1);\nb = Node.new(2);\na.next = some(b);\nb.next = some(a);\necho \"linked\";\n",
+        );
+        assert_eq!(r.stdout, "linked\ndrop 2\ndrop 1\n");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(lang_value::live_count(), before, "cycle must leave no residency");
     }
 
     #[test]

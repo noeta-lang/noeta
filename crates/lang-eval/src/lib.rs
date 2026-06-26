@@ -482,6 +482,15 @@ struct FieldSpec {
 pub struct ObjectValue {
     def: Rc<TypeDef>,
     fields: RefCell<BTreeMap<String, Value>>,
+    /// A monotonic per-run **creation sequence** (object-model slice 2c): the instance's allocation
+    /// age. The cycle reaper finalizes reclaimed members in reverse-creation order (newest-first) by
+    /// this key, matching the VM's `ObjHeader::seq` so cyclic `destruct` order agrees across backends.
+    seq: u64,
+}
+
+thread_local! {
+    /// Monotonic object-creation counter for [`ObjectValue::seq`] (object-model slice 2c).
+    static OBJECT_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 impl ObjectValue {
@@ -489,9 +498,15 @@ impl ObjectValue {
     /// `ObjectValue` construction goes through here so the live count is exact.
     fn new(def: Rc<TypeDef>, fields: BTreeMap<String, Value>) -> ObjectValue {
         leak::inc();
+        let seq = OBJECT_SEQ.with(|c| {
+            let s = c.get();
+            c.set(s.wrapping_add(1));
+            s
+        });
         ObjectValue {
             def,
             fields: RefCell::new(fields),
+            seq,
         }
     }
 
@@ -621,6 +636,30 @@ fn register_captured_scope(scope: &Rc<Scope>) {
             reg.retain(|w| w.strong_count() > 0);
         }
         reg.push(Rc::downgrade(scope));
+    });
+}
+
+thread_local! {
+    /// Every reference-`class` instance whose `mut` field has been **assigned in place** this run,
+    /// held weakly (object-model slice 2c). A class cycle (`a.next = b; b.next = a`) can only be
+    /// *closed* by such an in-place field assignment — construction cannot reference a
+    /// not-yet-created object — so the cycle members are a subset of these. The exit reaper
+    /// ([`Interpreter::reap_object_cycles`]) walks it after global teardown: any survivor is reachable
+    /// only through a reference cycle `Rc` cannot reclaim, so draining its fields lets the rest
+    /// cascade-free. (The VM analogue is the heap-registry mark-sweep in `lang-gc`.)
+    static MUTATED_OBJECTS: RefCell<Vec<Weak<ObjectValue>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Record a class instance whose field was just mutated as a candidate cycle member (a weak
+/// reference — no ownership). Self-pruned at power-of-two lengths past 64, exactly as
+/// [`register_captured_scope`].
+fn register_mutated_object(obj: &Rc<ObjectValue>) {
+    MUTATED_OBJECTS.with(|r| {
+        let mut reg = r.borrow_mut();
+        if reg.len() >= 64 && reg.len().is_power_of_two() {
+            reg.retain(|w| w.strong_count() > 0);
+        }
+        reg.push(Rc::downgrade(obj));
     });
 }
 
@@ -964,8 +1003,10 @@ impl Interpreter {
         // Destroy the top-level bindings at program end, in reverse declaration order, running
         // each destructor on its last reference — the deterministic destruction the spec wants.
         self.destroy_globals();
-        // Reap any closure-capture cycle left after teardown (Phase 6.3), so residency reaches 0.
+        // Reap cycles left after teardown so residency reaches 0: closure-capture cycles (Phase 6.3)
+        // and reference-`class` field cycles (object-model slice 2c).
         self.reap_captured_scope_cycles();
+        self.reap_object_cycles();
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
             stdout: self.stdout,
@@ -1009,6 +1050,60 @@ impl Interpreter {
                 }
             }
         }
+    }
+
+    /// Reap reference-`class` cycles the program tied through `mut` fields (object-model slice 2c —
+    /// `a.next = b; b.next = a`), which refcounting alone cannot reclaim. Run once at clean exit,
+    /// **after** global teardown and the scope reaper: any object in [`MUTATED_OBJECTS`] still live is
+    /// reachable only through such a cycle. Done in two passes so it is robust to objects sharing a
+    /// cycle: first **drain every survivor's fields** (breaking every cycle at once, leaving acyclic
+    /// chains), then **destroy the drained values** — now plain `Rc` cascade-frees, firing each
+    /// member's `destruct` at its true last reference. The tree-walker analogue of the VM's
+    /// post-teardown `collect_trace`.
+    fn reap_object_cycles(&mut self) {
+        let candidates = MUTATED_OBJECTS.with(|r| std::mem::take(&mut *r.borrow_mut()));
+        // The live, de-duplicated survivors (an object may have been registered on several field
+        // assignments). After teardown these are exactly the reachable cycle members.
+        let mut survivors: Vec<Rc<ObjectValue>> = Vec::new();
+        for weak in &candidates {
+            if let Some(obj) = weak.upgrade()
+                && !survivors.iter().any(|s| Rc::ptr_eq(s, &obj))
+            {
+                survivors.push(obj);
+            }
+        }
+        // Reverse-creation order (newest-first) so cyclic `destruct` order is deterministic and
+        // matches the VM (which sorts its trace garbage by the same `seq`).
+        survivors.sort_by_key(|o| std::cmp::Reverse(o.seq));
+        // Pass 1 — run each member's `destruct` once, with its fields (still intact) and `self` in
+        // scope, exactly as `destroy_object` would. (Both backends destruct every cycle member
+        // before freeing any.)
+        for obj in &survivors {
+            if let Some(body) = obj.def.destructor.clone() {
+                let scope = Scope::child(&self.scope);
+                {
+                    let bag = obj.fields.borrow();
+                    for (name, field) in bag.iter() {
+                        scope.declare(name.clone(), field.clone(), false);
+                    }
+                }
+                scope.declare("self".to_string(), Value::Object(obj.clone()), false);
+                let saved = std::mem::replace(&mut self.scope, scope);
+                let _ = self.exec_stmts(&body);
+                self.scope = saved;
+            }
+        }
+        // Pass 2 — break every cycle by draining all survivors' fields, then release the drained
+        // values. Destructors already ran in pass 1, so the drained field values are dropped
+        // directly (a plain `Rc` release that fires no further `destruct`); with every back-edge
+        // gone the members' refcounts reach zero and their allocations free (`leak::dec`).
+        let mut drained: Vec<Value> = Vec::new();
+        for obj in &survivors {
+            let fields = std::mem::take(&mut *obj.fields.borrow_mut());
+            drained.extend(fields.into_values());
+        }
+        drop(survivors);
+        drop(drained);
     }
 
     /// Fire the destructors of the current scope's live values as a **panic/abort unwinds through
@@ -2159,6 +2254,8 @@ impl Interpreter {
                             if let Some(old) = object.set_field_value(field.clone(), new_value) {
                                 self.destroy_value(old);
                             }
+                            // May close a reference cycle; register for the exit reaper (slice 2c).
+                            register_mutated_object(&object);
                             Ok(Value::Object(object))
                         } else {
                             // Value `struct`: build a new instance with the field updated, leaving

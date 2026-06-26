@@ -123,8 +123,10 @@ impl Interpreter {
             Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => {}
         }
         self.destroy_globals();
-        // Reap any closure-capture cycle left after teardown (Phase 6.3), so residency reaches 0.
+        // Reap cycles left after teardown so residency reaches 0: closure-capture cycles (Phase 6.3)
+        // and reference-`class` field cycles (object-model slice 2c).
         self.reap_captured_scope_cycles();
+        self.reap_object_cycles();
         let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
         RunResult {
             stdout: self.stdout,
@@ -1198,6 +1200,11 @@ impl Interpreter {
                 if !rc.def.is_struct || Rc::strong_count(&rc) == 1 {
                     if let Some(old) = rc.set_field_value(field.to_string(), new_value) {
                         self.destroy_value(old);
+                    }
+                    // A class field-set can close a reference cycle (`a.next = b; b.next = a`);
+                    // register the receiver so the exit reaper can reclaim it (slice 2c).
+                    if !rc.def.is_struct {
+                        crate::register_mutated_object(&rc);
                     }
                     return Ok(Value::Object(rc));
                 }

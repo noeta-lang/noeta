@@ -986,6 +986,17 @@ impl Value {
         }
     }
 
+    /// The object's creation sequence — its allocation age (object-model slice 2c), used by the
+    /// cycle collector to finalize reclaimed members in a deterministic reverse-creation order. `0`
+    /// for non-pointer values (they are never collected).
+    pub fn gc_seq(self) -> u32 {
+        if self.is_pointer() {
+            heap::seq(self)
+        } else {
+            0
+        }
+    }
+
     /// Free this object's own allocation without releasing its children (the collector frees
     /// each cycle member itself). Must only be called by the collector on proven garbage.
     pub fn gc_free_shallow(self) {

@@ -41,6 +41,9 @@ thread_local! {
     /// refcounting but never the registry, so a trace from the live roots can find and reclaim it.
     /// (Always-on, like [`LIVE`]; an intrusive object-list is the perf option Phase 6.4 weighs.)
     static REGISTRY: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+    /// Monotonic object-creation counter (object-model slice 2c) — stamps each allocation's
+    /// `ObjHeader::seq` so the cycle collector can finalize in a deterministic age order.
+    static NEXT_SEQ: Cell<u32> = const { Cell::new(0) };
 }
 
 /// The number of live heap objects on this isolate's thread. Zero at a clean program exit; the
@@ -89,6 +92,13 @@ pub(crate) struct Obj {
 struct ObjHeader {
     /// Non-atomic: per-isolate single-threaded ownership (architecture §5, §7).
     refcount: u32,
+    /// A monotonic per-isolate **creation sequence** (object-model slice 2c): assigned at
+    /// allocation, it gives every object a stable, deterministic age. The cycle collector finalizes
+    /// reclaimed members in reverse-creation order (newest-first), matching the language's
+    /// reverse-declaration teardown — so cyclic `destruct` order is deterministic and agrees with the
+    /// tree-walker (the live-object registry is a `HashSet`, whose iteration order is otherwise
+    /// arbitrary).
+    seq: u32,
     /// The trial-deletion cycle collector's per-object color (architecture §5). `Black` in
     /// normal use; the other colors are transient bookkeeping during a `collect`.
     color: Color,
@@ -200,9 +210,15 @@ pub(crate) enum Payload {
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
 pub(crate) fn alloc(payload: Payload) -> Value {
     live_inc();
+    let seq = NEXT_SEQ.with(|c| {
+        let s = c.get();
+        c.set(s.wrapping_add(1));
+        s
+    });
     let raw = Box::into_raw(Box::new(Obj {
         header: ObjHeader {
             refcount: 1,
+            seq,
             color: Color::Black,
             buffered: false,
         },
@@ -273,6 +289,14 @@ pub(crate) fn refcount(value: Value) -> u32 {
     // SAFETY: live object allocated by this module; single-threaded read.
     let obj = unsafe { &*obj_ptr(value) };
     obj.header.refcount
+}
+
+/// The object's creation sequence (object-model slice 2c) — its allocation age, for the cycle
+/// collector's deterministic reverse-creation finalization order.
+pub(crate) fn seq(value: Value) -> u32 {
+    // SAFETY: live object allocated by this module; single-threaded read.
+    let obj = unsafe { &*obj_ptr(value) };
+    obj.header.seq
 }
 
 /// Increment the refcount of a pointer value. No-op enforced by the caller for immediates.

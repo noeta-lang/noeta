@@ -1,0 +1,21 @@
+// Object-model slice 2c — reference cycles. A `class` can tie a reference cycle through a `mut`
+// field (`a.next = b; b.next = a`); the mutual references mean precise refcounting alone never
+// reclaims it. At clean exit a backup cycle collector reclaims every member (the leak oracle
+// confirms residency 0) and runs each `destruct` — in deterministic **reverse-creation order**
+// (newest-first, matching the language's reverse-declaration teardown), so both backends agree.
+// expect: stdout "linked"
+// expect: stdout "drop 2"
+// expect: stdout "drop 1"
+// expect: exit 0
+class Node {
+    mut next: ?Node
+    id: int
+    fn new(id: int): Node { return Node { next: none, id: id }; }
+    destruct { echo "drop ${id}"; }
+}
+
+a = Node.new(1);
+b = Node.new(2);
+a.next = some(b);
+b.next = some(a);   // closes the cycle
+echo "linked";
