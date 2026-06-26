@@ -23,7 +23,7 @@
 mod heap;
 mod ops;
 
-pub use heap::{Color, live_count, live_peak, reset_peak};
+pub use heap::{Color, live_count, live_objects, live_peak, reset_peak};
 pub use ops::{OpError, apply_binary, apply_unary, compare_primitive, structural_compare};
 
 use std::collections::BTreeMap;

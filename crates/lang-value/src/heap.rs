@@ -9,8 +9,8 @@
 //! `lib.rs`, and freed by reconstructing the `Box`. Refcounts are non-atomic — the runtime
 //! is shared-nothing per isolate, so no value crosses a thread boundary.
 
-use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashSet};
 use std::ptr;
 use std::rc::Rc;
 
@@ -35,6 +35,12 @@ thread_local! {
     /// (architecture §0.3). Doubles the leak counter as a memory-footprint gauge: prompt last-use
     /// reclamation (Phase 3) should cut this materially vs the reclaim-at-teardown baseline.
     static PEAK: Cell<usize> = const { Cell::new(0) };
+    /// The set of every live heap object on this thread, keyed by its NaN-boxed word — the
+    /// **object registry** the Phase-6 backup mark-sweep collector ([`lang_gc`]) sweeps. Updated on
+    /// every [`alloc`] (insert) and every free ([`free`]/[`free_shallow`], remove). A cycle escapes
+    /// refcounting but never the registry, so a trace from the live roots can find and reclaim it.
+    /// (Always-on, like [`LIVE`]; an intrusive object-list is the perf option Phase 6.4 weighs.)
+    static REGISTRY: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
 }
 
 /// The number of live heap objects on this isolate's thread. Zero at a clean program exit; the
@@ -175,7 +181,23 @@ pub(crate) fn alloc(payload: Payload) -> Value {
         addr & !Value::PTR_MASK as usize == 0,
         "heap address does not fit the 48-bit NaN-box payload"
     );
-    Value(Value::SIGN_BIT | Value::QNAN | (addr as u64 & Value::PTR_MASK))
+    let value = Value(Value::SIGN_BIT | Value::QNAN | (addr as u64 & Value::PTR_MASK));
+    REGISTRY.with(|r| r.borrow_mut().insert(value.0));
+    value
+}
+
+/// Drop `value` from the live-object registry — called by every free path so the registry tracks
+/// exactly the live heap. Separate from the `live_dec` counter so both stay in lock-step.
+fn registry_remove(value: Value) {
+    REGISTRY.with(|r| r.borrow_mut().remove(&value.0));
+}
+
+/// A snapshot of every live heap object, for the backup mark-sweep collector. Reconstructs a
+/// [`Value`] from each registered word (a pure bit-reinterpret; the provenance was exposed at
+/// [`alloc`], so recovering the pointer later is sound). The borrow is released before the caller
+/// sweeps, so freeing (which mutates the registry) cannot alias it.
+pub fn live_objects() -> Vec<Value> {
+    REGISTRY.with(|r| r.borrow().iter().map(|&w| Value(w)).collect())
 }
 
 /// Recover the typed pointer from a NaN-boxed pointer value. The caller must have checked
@@ -238,6 +260,7 @@ pub(crate) fn free(value: Value) {
     // SAFETY: `value` is a pointer this module allocated, its refcount is zero (so no other
     // owner exists), and it is freed exactly once.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
+    registry_remove(value);
     live_dec();
     match &boxed.payload {
         Payload::List(items)
@@ -353,6 +376,7 @@ pub(crate) fn free_shallow(value: Value) {
     // SAFETY: the collector proved `value` is unreachable garbage and frees it exactly once;
     // children are freed by their own `free_shallow`, so they are not released here.
     let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
+    registry_remove(value);
     live_dec();
     // Replace each child slot with an immediate so the `Vec`/`BTreeMap` drop does not touch
     // the (already independently freed) child objects — though dropping a `Value` is a no-op

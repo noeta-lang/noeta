@@ -33,6 +33,52 @@ pub fn release(value: Value) {
     }
 }
 
+/// **Backup mark-sweep trace** (Phase 6, the LXR-principled backup collector): a stop-the-world
+/// trace over the live-object registry that reclaims everything unreachable from `roots` —
+/// reference cycles and floating garbage alike, the cases refcounting alone cannot. Run at a
+/// safepoint (the root set must be fully walkable): the interpreter enumerates its roots (globals,
+/// live frame registers, open upvalue cells) and hands them here. Marks reachable objects, then
+/// frees the unmarked via `gc_free_shallow` in a flat pass over a registry snapshot (so the graph is
+/// intact during marking and no object is touched after it is freed).
+///
+/// Colors: `alloc` paints every object `Black`; this trace paints reachable objects `Gray` and
+/// resets survivors to `Black`, so `Black`-after-mark == unreachable garbage. (`gc_free_shallow`
+/// does not run `__destruct` — destructor-bearing cycles are a documented follow-up; the closure/
+/// scope cycles this phase targets carry none.)
+pub fn collect_trace(roots: &[Value]) {
+    for &root in roots {
+        mark(root);
+    }
+    let live = lang_value::live_objects();
+    // Garbage is everything the mark did not reach; identify it *before* resetting survivors (which
+    // also become `Black`), so the two are distinguishable.
+    let garbage: Vec<Value> = live
+        .iter()
+        .copied()
+        .filter(|v| v.gc_color() != Color::Gray)
+        .collect();
+    for &v in &live {
+        if v.gc_color() == Color::Gray {
+            v.gc_set_color(Color::Black);
+        }
+    }
+    for v in garbage {
+        v.gc_free_shallow();
+    }
+}
+
+/// Paint `s` and everything reachable from it `Gray` (reachable/live). Idempotent via the color
+/// check, so shared substructure and cycles terminate.
+fn mark(s: Value) {
+    if !s.is_pointer() || s.gc_color() == Color::Gray {
+        return;
+    }
+    s.gc_set_color(Color::Gray);
+    for child in s.gc_children() {
+        mark(child);
+    }
+}
+
 /// A trial-deletion cycle collector (Bacon–Rajan synchronous collection, architecture §5).
 ///
 /// When a reference is dropped without the count reaching zero, the object is a *possible*

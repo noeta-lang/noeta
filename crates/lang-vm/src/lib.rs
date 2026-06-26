@@ -39,7 +39,7 @@ use lang_backend::{Backend, RunResult};
 use lang_bytecode::{BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, ReuseCheck};
 use lang_compiler::{Unsupported, compile};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
-use lang_gc::{release, retain};
+use lang_gc::{collect_trace, release, retain};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
 use lang_value::{Value, apply_binary, apply_unary, compare_primitive, structural_compare};
@@ -291,6 +291,14 @@ fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
     if let Ok(v) = vm.run(vec![top]) {
         release(v);
     }
+    // Reap reference cycles before tearing down the globals (Phase 6): the program may have tied a
+    // knot through `mut` fields / cells / closures that refcounting alone cannot reclaim (e.g. a
+    // self-recursive nested `fn`). A stop-the-world mark-sweep rooted at the live globals frees
+    // everything unreachable from them — the leaked cycle — while every global subgraph is marked and
+    // survives for the ordinary destructor teardown below. At this point the frame stack is unwound
+    // (top frame returned, or every register released on abort), so the globals are the whole root set.
+    let roots: Vec<Value> = vm.globals.values().copied().collect();
+    collect_trace(&roots);
     // Destroy the globals at program end in reverse declaration order, running each
     // destructor on its last reference — the deterministic destruction the spec requires.
     for name in vm.global_order.clone().into_iter().rev() {
@@ -3905,6 +3913,26 @@ mod tests {
         lang_value::reset_peak();
         let _ = run(src);
         lang_value::live_peak()
+    }
+
+    #[test]
+    fn cycle_is_reclaimed_by_backup_trace() {
+        // A self-recursive nested `fn` ties a closure↔cell cycle that outlives the enclosing call;
+        // refcounting alone cannot reclaim it (each member is kept alive by the other), so without
+        // the Phase-6 backup mark-sweep it would leak. After the run, live residency must return to
+        // its pre-run baseline — the collector reaped the cycle. Run under miri to validate the
+        // collector + live-object registry (no use-after-free / double-free / leak).
+        let before = lang_value::live_count();
+        let r = run(
+            "fn compute(): int {\n  fn fact(n: int): int {\n    if n <= 1 { return 1; }\n    return n * fact(n - 1);\n  }\n  return fact(5);\n}\necho compute();\n",
+        );
+        assert_eq!(r.stdout, "120\n");
+        assert_eq!(r.exit_code, 0);
+        assert_eq!(
+            lang_value::live_count(),
+            before,
+            "the closure↔cell cycle must be reclaimed by the backup trace"
+        );
     }
 
     #[test]

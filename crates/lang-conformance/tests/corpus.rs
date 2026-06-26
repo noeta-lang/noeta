@@ -65,13 +65,13 @@ fn conformance_corpus_passes() {
 /// teardown, which breaks `counter_nested_fn`'s capture cycle early — so that program, a known
 /// eval leak under the superseded AST walker, no longer leaks here. `capture_immutable_error`
 /// **aborts** (an immutable reassignment), and the Phase-4.2c-ii panic/abort teardown now fires its
-/// frame's reclamation as the abort unwinds, so it too no longer leaks. The remaining cycle
-/// (`recursive_nested_fn`) is rooted in references no single-assignment local drop reaches, so it
-/// still awaits Phase 6.
-const KNOWN_LEAKS: &[(&str, &str)] = &[
-    ("eval", "closures/recursive_nested_fn.lang"),
-    ("vm", "closures/recursive_nested_fn.lang"),
-];
+/// frame's reclamation as the abort unwinds, so it too no longer leaks.
+///
+/// **Phase 6 (in progress):** the **VM** now reaps the `recursive_nested_fn` closure↔cell cycle with
+/// the backup mark-sweep trace at clean exit, so that residual is gone. The matching **eval** cycle
+/// (an `Rc<Scope>` ↔ `Rc<Closure>` knot) still leaks — the tree-walker has no collector over its
+/// Rust-`Rc` value graph yet (Phase 6.3) — so it is the one remaining tolerated residual.
+const KNOWN_LEAKS: &[(&str, &str)] = &[("eval", "closures/recursive_nested_fn.lang")];
 
 #[test]
 fn leak_oracle_residency_is_zero_except_known_cycles() {
