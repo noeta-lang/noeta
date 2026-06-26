@@ -218,10 +218,14 @@ support for a raw-text span — the one genuinely new lexing concern).
 
 ## Sub-slicing (each a green gated commit)
 
-- **6a — `@tier` decl + `@test` block parsing + the tier filter + active-set interface.** End-to-end
-  minimum: a `@test { }` block is *stripped* from `lang run` and *included* under the test command;
-  prove via both backends (lowered identically) + leak oracle. (Runner can stub: "compiled, N test
-  fns discovered".)
+- **6a — `@test` block parsing + the strip mechanism. ✅ DONE (`5fc419a`).** `Stmt::TierBlock`; the
+  directive grammar's standalone block form (tried before the `@derive` decorator path — backtracks
+  cleanly, locked by a snapshot); an inactive block lowers to nothing so both backends strip
+  identically (no DCE pass needed — inactive content never reaches the IR); the checker validates the
+  tier name against built-ins `{test,bench,doc,debug}` → **E0036 UnknownTier**. The active-set +
+  inlining of *active* blocks is deferred to 6b (for 6a every block is inactive). Conformance 286 /
+  differential agrees / leak 0. **(Prereq landed first: `f8e6d87` split the conformance harness into
+  the dev-only `lang-conformance` binary, freeing the `lang test` verb.)**
 - **6b — the test runner.** Discover + run `@test` fns, assertions, pass/fail report; the assertion
   primitive.
 - **6c — annotation form `@test fn`.** Grouping-sugar equivalence with the block.
