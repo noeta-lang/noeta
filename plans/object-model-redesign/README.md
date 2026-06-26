@@ -423,7 +423,17 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    through the reuse + drop-insertion IR passes — a method-local allocation is otherwise unreclaimed
    on the IR backend. Conformance 277 / differential agrees / leak residency 0 both backends / miri
    clean. **No new diag code (next free still E0036).**
-4. **Tuples** (value, positional, destructuring, patterns).
+4. **Tuples** (value, positional, destructuring, patterns). **Sub-sliced: 4a DONE (`c43ba28`), 4b
+   next.** 4a = the tuple value end-to-end — literal `(a, b, …)` (2+ elements; `(x)` is a
+   parenthesized expr, `()` is `unit`, no 1-tuples), type `(int, string)` (element-wise-covariant
+   `Type::Tuple`, multiple-return), positional projection `.N` (nested `x.0.1` works — the lexer
+   takes `.0.1` as one float, the parser splits it into a chain), structural equality, display.
+   Dedicated `Payload::Tuple`/`Value::Tuple` (value-semantic, owns one ref per element like a list,
+   no shape); ops `MakeTuple`/`TupleIndex`; IR `Rvalue::Tuple`/`TupleIndex`; `as<(…)>`/`is (…)` narrow
+   head-constructor only ("is a tuple"); `type_of` erases a tuple to `dyn`. No new diag code.
+   Conformance 279 / differential agrees / leak 0 both backends / miri clean. **4b (NEXT) = tuple
+   destructuring: binding `(a, b) = expr` (currently a clean parse error), `for (a, b) in …`, and
+   tuple patterns in `match`.**
 5. **Field defaults** (opt-in per field). Independent.
 6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + DCE gate + manifest) with
    **`test` first**, then `bench`/`doc`. (The dev-tier section above predates the settled spelling and
