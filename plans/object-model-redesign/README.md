@@ -457,9 +457,19 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    type with no explicit field) — it re-collides with the `if cond {}` empty-block disambiguation,
    which the **slice-7** restricted-control-flow-head expression resolves; lands there. Until then a
    literal needs ≥1 explicit field or a spread.
-6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + DCE gate + manifest) with
-   **`test` first**, then `bench`/`doc`. (The dev-tier section above predates the settled spelling and
-   still says `@dev`; the directive is **`@tier`** — see settled open-question 4.)
+6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + manifest) with **`test`
+   first**, then `bench`/`doc`. **PLAN: `slice-6-dev-tiers.md`** (the full design, settled
+   2026-06-26). The dev-tier prose *below in this README* predates two design sessions and is
+   **superseded by that plan** where they disagree, on three points: (a) the directive is **`@tier`**,
+   not `@dev`; (b) **tiers vs profiles are two axes** — a tier is `(name, content-kind)` (a source
+   property), a **profile** (the build configuration, renamed from "target" to free that word for the
+   platform triple) owns *inclusion*; (c) inclusion is a **provider-map** `tier → package` (not a
+   list, not a separate opt-in map), doing activation + provenance + conflict-resolution-by-
+   construction + aliasing in one place, and **text tiers (`doc`) go through it too** (not "always
+   on"). Stripping is a **front-end filter before lowering** (no DCE pass exists / is needed). The
+   profiles/TOML surface lands with the package manifest; slice 6 ships the in-language primitive
+   against a resolved active-tier-set the CLI supplies. Env/compile-time-constants in profiles
+   **deferred entirely**.
 7. **Optional line-end semicolons** — a `;` at the end of a statement becomes optional; a **newline
    terminates a statement** (Go/Swift/Kotlin-style), with `;` kept valid (for multiple statements on one
    line) and inside `for (…;…;…)`-like positions. Pure surface, no semantics change. **Load-bearing
