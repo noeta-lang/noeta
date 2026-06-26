@@ -1,0 +1,20 @@
+// Field-init shorthand (punning): a bare field name `User { name }` ≡ `User { name: name }`,
+// pulling in the in-scope variable of the same name. Mixes freely with explicit `field: value`
+// fields and `...spread`. Pure parser desugar, so both backends agree.
+// expect: stdout "Ada Lovelace"
+// expect: stdout "ada@example.com"
+// expect: stdout "Ada Lovelace"
+// expect: stdout "new@example.com"
+// expect: exit 0
+struct User { name: string email: string }
+
+name = "Ada Lovelace";
+email = "ada@example.com";
+
+u = User { name, email };          // both shorthand
+echo u.name;
+echo u.email;
+
+v = User { name, email: "new@example.com" };   // shorthand + explicit
+echo v.name;
+echo v.email;

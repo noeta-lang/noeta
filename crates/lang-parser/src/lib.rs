@@ -922,11 +922,20 @@ where
         // `for x in xs { ... }`, and `match x { ... }` keep their block/arm braces — an
         // empty `{}` is never an object literal, and a `{` whose contents are statements
         // (not `name: value`) fails the field parse and falls back to a bare ident.
+        // `name: value`, or **shorthand `name`** ≡ `name: name` — field-init punning, where a bare
+        // field name pulls in the in-scope variable of the same name (`User { name, email }`). The
+        // mandatory-`:` form is unchanged; the colon is now optional, and an omitted value desugars
+        // to a reference to the field's own name. (Safe against the `if cond { x }` block ambiguity:
+        // a statement requires a terminator today, so a single bare-name brace body is already a
+        // parse error — see the slice-7 note about optional semicolons.)
         let obj_field = id
             .clone()
-            .then_ignore(just(T::Colon))
-            .then(expr.clone())
+            .then(just(T::Colon).ignore_then(expr.clone()).or_not())
             .map_with(move |((name, name_span), value), e| {
+                let value = value.unwrap_or_else(|| Expr::Ident {
+                    name: name.clone(),
+                    span: name_span,
+                });
                 ObjItem::Field(FieldInit {
                     name,
                     name_span,
@@ -1018,15 +1027,45 @@ where
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBracket), just(T::RBracket))
             .map_with(move |elems, e| desugar_list_literal(elems, ctx.to_span(e.span())));
-        let entry = expr.clone().then_ignore(just(T::Colon)).then(expr.clone());
+        // A map entry is `key: value`, or **shorthand `name`** ≡ `"name": name` — punning a bare
+        // identifier to the string key of the same name with the in-scope variable as its value
+        // (`{ host, port }`). The colon form is unchanged; an omitted value is the shorthand, valid
+        // only when the key is a bare identifier (anything else without a value is a parse error,
+        // reported when the entries are assembled).
+        let entry = expr
+            .clone()
+            .then(just(T::Colon).ignore_then(expr.clone()).or_not());
         let map = entry
             .separated_by(just(T::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBrace), just(T::RBrace))
-            .map_with(move |entries, e| Expr::Map {
-                entries,
-                span: ctx.to_span(e.span()),
+            .map_with(move |entries, e| {
+                let entries = entries
+                    .into_iter()
+                    .map(|(key, value)| match value {
+                        Some(value) => (key, value),
+                        // Shorthand `{ name }`: the key must be a bare identifier; desugar it to its
+                        // string key plus a reference to the same-named variable.
+                        None => match key {
+                            Expr::Ident { name, span } => {
+                                (Expr::Str { value: name.clone(), span }, Expr::Ident { name, span })
+                            }
+                            other => {
+                                ctx.diags.borrow_mut().push(Diagnostic::error(
+                                    DiagnosticCode::UnexpectedToken,
+                                    other.span(),
+                                    "a map entry without `: value` must be a bare field name (shorthand)",
+                                ));
+                                (other.clone(), other)
+                            }
+                        },
+                    })
+                    .collect();
+                Expr::Map {
+                    entries,
+                    span: ctx.to_span(e.span()),
+                }
             });
         // A set literal `#{a, b, c}` is pure sugar for `[a, b, c].to_set()` — it lowers to the
         // same AST, so it reuses the existing `to_set` machinery and is differential-safe with no

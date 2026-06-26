@@ -1,0 +1,15 @@
+// Map-entry shorthand (punning): a bare name `{ host }` ≡ `{ "host": host }` — the identifier
+// becomes the string key and the in-scope variable its value. Mixes with explicit `"key": value`
+// entries (a non-shorthand key is still a full expression, so a literal key is quoted). Pure parser
+// desugar, so both backends agree.
+// expect: stdout "localhost"
+// expect: stdout "https"
+// expect: stdout "primary"
+// expect: exit 0
+host = "localhost";
+scheme = "https";
+
+m = { host, scheme, "kind": "primary" };
+echo m["host"];
+echo m["scheme"];
+echo m["kind"];
