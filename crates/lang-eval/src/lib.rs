@@ -361,6 +361,11 @@ enum DefaultThunk {
 pub struct EnumDef {
     name: String,
     variants: Vec<VariantInfo>,
+    /// Inherent + `impl`-block methods (the unified body, object-model slice 3), compiled to
+    /// closures capturing the definition (global) scope — exactly like a struct/class's `methods`.
+    /// An instance call `value.m(...)` and an associated call `Enum.f(...)` both resolve here; the
+    /// distinction (a value receiver vs. a bare type-name receiver) is made at the call site.
+    methods: HashMap<String, Rc<Closure>>,
 }
 
 impl EnumDef {
@@ -370,6 +375,10 @@ impl EnumDef {
 
     fn variant(&self, name: &str) -> Option<&VariantInfo> {
         self.variants.iter().find(|v| v.name == name)
+    }
+
+    fn method(&self, name: &str) -> Option<&Rc<Closure>> {
+        self.methods.get(name)
     }
 }
 
@@ -962,6 +971,7 @@ impl Interpreter {
                         field_names: Vec::new(),
                     })
                     .collect(),
+                methods: HashMap::new(),
             })),
             false,
         );
@@ -1516,9 +1526,28 @@ impl Interpreter {
                 field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
             })
             .collect();
+        // An enum carries inherent + `impl`-block methods (the unified body, object-model slice 3),
+        // compiled to closures capturing the current (global) scope exactly like a struct's.
+        let methods = decl
+            .methods
+            .iter()
+            .map(|m| {
+                let closure = Closure::new(
+                    m.params.iter().map(|p| p.name.clone()).collect(),
+                    m.params
+                        .iter()
+                        .map(|p| p.default.clone().map(DefaultThunk::Ast))
+                        .collect(),
+                    FnBody::Block(m.body.clone()),
+                    Rc::clone(&self.scope),
+                );
+                (m.name.clone(), Rc::new(closure))
+            })
+            .collect();
         let def = EnumDef {
             name: decl.name.clone(),
             variants,
+            methods,
         };
         self.scope
             .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
@@ -2518,6 +2547,14 @@ impl Interpreter {
             if name == "try_from" || name == "from" {
                 return self.enum_from_string(&Rc::clone(def), name, args, span);
             }
+            // An associated function `Enum.f(...)` (the unified body, object-model slice 3): resolved
+            // when the name is a method rather than a variant. Variant construction still wins for a
+            // variant name (uppercase by convention, so the two never collide).
+            if def.variant(name).is_none()
+                && let Some(method) = def.method(name)
+            {
+                return self.call_closure(&Rc::clone(method), args, span);
+            }
             return self.make_variant(&Rc::clone(def), name, args, span);
         }
         // `json.parse(...)` — a Ring 2 native module function call.
@@ -2552,6 +2589,16 @@ impl Interpreter {
                     format!("type `{}` has no method `{name}`", object.def.name()),
                 )),
             };
+        }
+        // `status.label()` — an enum instance method (the unified body, object-model slice 3). The
+        // enum value carries no method table of its own (a bare name/variant/data triple), so the
+        // `EnumDef` is resolved from the definition (global) scope by the enum's name. An unknown
+        // method falls through to the built-in paths below (e.g. the primitive `compare`).
+        if let Value::Enum(e) = &receiver
+            && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+            && let Some(method) = def.method(name)
+        {
+            return self.call_enum_method(receiver.clone(), &Rc::clone(method), args, span);
         }
         // `x.compare(y)` — the `Ordering` of two primitives. This is the value a `Comparable`
         // impl returns (typically by delegating to a field's `compare`); it lights up nothing on
@@ -3403,6 +3450,15 @@ impl Interpreter {
             let rendered = self.call_method(value.clone(), "to_string", Vec::new(), span)?;
             return Ok(rendered.display());
         }
+        // An enum value with an `impl Display { to_string }` renders through it too (object-model
+        // slice 3) — resolved through the `EnumDef` in scope, since the value carries no table.
+        if let Value::Enum(e) = value
+            && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+            && def.method("to_string").is_some()
+        {
+            let rendered = self.call_method(value.clone(), "to_string", Vec::new(), span)?;
+            return Ok(rendered.display());
+        }
         Ok(value.display())
     }
 
@@ -3554,6 +3610,45 @@ impl Interpreter {
         }
         // Omitted trailing parameters take their defaults, evaluated in the method's captured
         // (definition/global) scope — not against the receiver's fields, `self`, or other arguments.
+        for i in supplied..method.params.len() {
+            let value = self.eval_default(method, i)?;
+            call_scope.declare(method.params[i].clone(), value, false);
+        }
+        let saved = std::mem::replace(&mut self.scope, call_scope);
+        let result = match &method.body {
+            FnBody::Arrow(expr) => self.eval_expr(expr),
+            FnBody::Block(stmts) => self.exec_fn_body(stmts),
+            FnBody::Ir(func) => self.exec_ir_fn_body(func),
+        };
+        self.scope = saved;
+        catch_return(result)
+    }
+
+    /// Call an enum instance method (object-model slice 3): `self` binds to the whole enum value
+    /// (there is no implicit per-field scope — an enum's variants carry different data, so a method
+    /// reaches its payload by `match`ing on `self`). Otherwise identical to [`Self::call_method_on`]:
+    /// parameters bind after `self`, omitted trailing ones take their defaults in the captured scope.
+    fn call_enum_method(
+        &mut self,
+        receiver: Value,
+        method: &Rc<Closure>,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Eval<Value> {
+        let required = required_count(&method.defaults);
+        if args.len() < required || args.len() > method.params.len() {
+            return Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                arity_message("method", required, method.params.len(), args.len()),
+            ));
+        }
+        let supplied = args.len();
+        let call_scope = Scope::child(&method.captured);
+        call_scope.declare("self".to_string(), receiver, false);
+        for (param, arg) in method.params.iter().zip(args) {
+            call_scope.declare(param.clone(), arg, false);
+        }
         for i in supplied..method.params.len() {
             let value = self.eval_default(method, i)?;
             call_scope.declare(method.params[i].clone(), value, false);
@@ -3837,6 +3932,43 @@ impl Interpreter {
                         ),
                     )),
                 };
+            }
+        }
+        // Operator-trait dispatch on an enum value (object-model slice 3): identical to the object
+        // path, but the method table is reached through the `EnumDef` resolved from the definition
+        // (global) scope by the enum's name (the value itself carries no table). An enum's in-body
+        // `impl` blocks are uniform with a class's — no per-kind restriction — so `impl Add`,
+        // `impl Equatable`, `impl Comparable`, … all light up their operator here. A case without a
+        // hand-written method falls through to the built-in structural behaviour below.
+        if let Value::Enum(e) = &left
+            && let Some(Value::EnumType(def)) = self.scope.lookup(&e.enum_name)
+        {
+            if let Some(method_name) = op.overload_method()
+                && let Some(method) = def.method(method_name)
+            {
+                return self.call_enum_method(left.clone(), &Rc::clone(method), vec![right], span);
+            }
+            if let Some(negate) = op.equatable_negation()
+                && let Some(method) = def.method("eq")
+            {
+                let result =
+                    self.call_enum_method(left.clone(), &Rc::clone(method), vec![right], span)?;
+                return Ok(match result {
+                    Value::Bool(b) if negate => Value::Bool(!b),
+                    other => other,
+                });
+            }
+            if let Some(method_name) = op.comparable_method()
+                && let Some(method) = def.method(method_name)
+            {
+                let result =
+                    self.call_enum_method(left.clone(), &Rc::clone(method), vec![right], span)?;
+                return Ok(match &result {
+                    Value::Enum(o) if o.enum_name == "Ordering" => {
+                        Value::Bool(op.ordering_satisfies(&o.variant))
+                    }
+                    _ => result,
+                });
             }
         }
         match ops::apply_binary(op, &left, &right) {
@@ -4560,6 +4692,19 @@ mod tests {
             "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
         );
         assert_eq!(out.stdout, "true\nfalse\ntrue\nfalse\n");
+        assert_eq!(out.exit_code, 0);
+    }
+
+    #[test]
+    fn enum_body_methods_and_impls_dispatch() {
+        // Object-model slice 3: an enum's unified body on the tree-walker. An instance method takes
+        // the whole value as `self`; an associated function is called on the bare type name; `${}`
+        // routes to `impl Display`; `==` routes to `impl Equatable`. The VM reproduces this (see
+        // lang-vm), guarded by the differential oracle.
+        let out = run(
+            "enum Color {\n  Red;\n  Green;\n  fn label(): string { return match self { Color.Red => \"r\", Color.Green => \"g\" }; }\n  fn first(): Color { return Color.Red; }\n  impl Display { fn to_string(): string { return \"<${self.label()}>\"; } }\n  impl Equatable { fn eq(other: Color): bool { return true; } }\n}\necho Color.Green.label();\necho Color.first();\necho Color.Red == Color.Green;\necho Color.Red != Color.Green;\n",
+        );
+        assert_eq!(out.stdout, "g\n<r>\ntrue\nfalse\n");
         assert_eq!(out.exit_code, 0);
     }
 

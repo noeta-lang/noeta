@@ -26,8 +26,8 @@ use lang_ast::{BinaryOp, Expr, Param, Program as AstProgram, Stmt as AstStmt, St
 use lang_span::Span;
 
 use crate::{
-    Atom, Block, ClassDef, Const, Decl, Func, InterpPart, Program, Rvalue, Stmt, StructDef, Temp,
-    Thunk,
+    Atom, Block, ClassDef, Const, Decl, EnumDef, Func, InterpPart, Program, Rvalue, Stmt,
+    StructDef, Temp, Thunk,
 };
 
 /// A construct the lowering does not yet handle. Carried back so the caller can skip the
@@ -238,7 +238,19 @@ impl Lowerer {
                 Ok(())
             }
             AstStmt::Enum(decl) => {
-                out.push(Stmt::Decl(Decl::Enum(Rc::new(decl.clone()))));
+                // An enum carries inherent methods and `impl`-block methods (the unified body,
+                // object-model slice 3), lowered to IR funcs exactly like a struct's. Variant/derive
+                // data stays on the surface `decl`.
+                let mut methods = Vec::with_capacity(decl.methods.len());
+                for m in &decl.methods {
+                    let func = self.lower_func(&m.params, BodyKind::Block(&m.body), m.span)?;
+                    methods.push((m.name.clone(), Rc::new(func)));
+                }
+                out.push(Stmt::Decl(Decl::Enum(EnumDef {
+                    decl: Rc::new(decl.clone()),
+                    methods,
+                    span: decl.span,
+                })));
                 Ok(())
             }
             AstStmt::Struct(decl) => {

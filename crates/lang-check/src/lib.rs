@@ -819,11 +819,55 @@ impl Checker {
                     if e.semantic.is_some() {
                         self.semantic_enums.insert(e.name.clone());
                     }
-                    self.record_trait_impls(&e.name, e.derives.iter().map(|d| d.name.as_str()));
+                    // An enum satisfies a trait it `@derive`s or `impl`s (its in-body blocks are
+                    // uniform with a class's — object-model slice 3); record both so an operator
+                    // trait (`impl Add`, `impl Comparable`, …) is accepted on an enum operand.
+                    self.record_trait_impls(
+                        &e.name,
+                        e.derives
+                            .iter()
+                            .map(|d| d.name.as_str())
+                            .chain(e.impls.iter().map(|b| b.trait_name.as_str())),
+                    );
                     self.generic_types.insert(
                         e.name.clone(),
                         e.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // Record each enum method's signature (inherent + impl-block, the unified body —
+                    // object-model slice 3) under `(Enum, method)`, exactly like a class's, so an
+                    // instance call `status.label()` and an associated call `Status.parse(s)` resolve
+                    // to a concrete type. The enum's generic parameters are erased to `dyn`.
+                    let tps: HashSet<String> =
+                        e.type_params.iter().map(|p| p.name.clone()).collect();
+                    let enum_generics: Vec<(String, Vec<String>)> = e
+                        .type_params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.bounds.clone()))
+                        .collect();
+                    for m in &e.methods {
+                        let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
+                        let raw_ret = m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                        let params = raw_params
+                            .iter()
+                            .cloned()
+                            .map(|t| erase_type_params(t, &tps))
+                            .collect();
+                        let ret = erase_type_params(raw_ret.clone(), &tps);
+                        let generic = (!enum_generics.is_empty()).then(|| GenericInfo {
+                            params: enum_generics.clone(),
+                            raw_params,
+                            raw_ret,
+                        });
+                        self.methods.insert(
+                            (e.name.clone(), m.name.clone()),
+                            FnSig {
+                                params,
+                                ret,
+                                required: required_params(&m.params),
+                                generic,
+                            },
+                        );
+                    }
                 }
                 Stmt::Fn(f) => {
                     // The registered signature is **erased** (generic parameters → `dyn`): the
@@ -1092,7 +1136,7 @@ impl Checker {
             Stmt::Fn(decl) => self.check_fn(decl, env, &[], TargetKind::Function),
             Stmt::Struct(r) => self.check_struct(r, env),
             Stmt::Class(c) => self.check_class(c, env),
-            Stmt::Enum(e) => self.check_enum(e),
+            Stmt::Enum(e) => self.check_enum(e, env),
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
         }
@@ -1316,7 +1360,7 @@ impl Checker {
         self.type_params = saved;
     }
 
-    fn check_enum(&mut self, e: &EnumDecl) {
+    fn check_enum(&mut self, e: &EnumDecl, env: &mut Env) {
         let saved = self.enter_type_params(&e.type_params);
         self.check_type_opt(&e.backing);
         for variant in &e.variants {
@@ -1327,8 +1371,29 @@ impl Checker {
         }
         self.check_derives(&e.derives);
         let standalone = self.standalone_for(&e.name);
-        self.check_coherence(&e.derives, &[], &standalone);
+        // An enum carries in-body `impl Trait { }` blocks and inherent methods (the unified body,
+        // object-model slice 3), checked exactly as a class's — coherence over its impls, then each
+        // method body.
+        self.check_coherence(&e.derives, &e.impls, &standalone);
         self.check_attrs(&e.attrs, TargetKind::Enum);
+        // Inside an enum's own methods, `self` is the whole enum value (the variants differ, so —
+        // unlike a struct/class — there is no implicit per-field scope; a method `match`es on
+        // `self`). Bind `self` to the enum type so that `match self` is exhaustiveness-checked, and
+        // set `current_type` for the same type-scoped resolution a class uses.
+        let self_ty = Type::Named(e.name.clone(), Vec::new());
+        let saved_type = self.current_type.replace(e.name.clone());
+        for block in &e.impls {
+            self.check_impl(block);
+        }
+        for method in &e.methods {
+            self.check_fn(
+                method,
+                env,
+                std::slice::from_ref(&("self".to_string(), self_ty.clone())),
+                TargetKind::Method,
+            );
+        }
+        self.current_type = saved_type;
         self.type_params = saved;
     }
 

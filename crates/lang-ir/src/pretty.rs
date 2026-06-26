@@ -150,7 +150,17 @@ impl Printer<'_> {
         match decl {
             Decl::Fn { name, func, .. } => self.func(&format!("fn {name}"), func, indent),
             Decl::Class(class) => self.class(class, indent),
-            Decl::Enum(d) => self.line(indent, &format!("enum {}", d.name)),
+            Decl::Enum(en) => {
+                if en.methods.is_empty() {
+                    self.line(indent, &format!("enum {}", en.decl.name));
+                } else {
+                    self.line(indent, &format!("enum {} {{", en.decl.name));
+                    for (name, func) in &en.methods {
+                        self.func(&format!("method {name}"), func, indent + 1);
+                    }
+                    self.line(indent, "}");
+                }
+            }
             Decl::Struct(d) => self.line(indent, &format!("struct {}", d.decl.name)),
             Decl::Use { path, names, .. } => {
                 let names: Vec<&str> = names.iter().map(|n| n.name.as_str()).collect();

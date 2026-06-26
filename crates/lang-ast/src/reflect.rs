@@ -181,6 +181,12 @@ pub fn build(program: &Program) -> ReflectionInfo {
                     let target = format!("{}.{}", decl.name, variant.name);
                     push_attrs(&mut manifest, &target, &variant.attrs);
                 }
+                // An enum method's attributes are keyed by its qualified `Enum.method` name, the same
+                // convention class/struct methods use (object-model slice 3).
+                for method in &decl.methods {
+                    let target = format!("{}.{}", decl.name, method.name);
+                    push_attrs(&mut manifest, &target, &method.attrs);
+                }
                 types.push(TypeInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Enum,

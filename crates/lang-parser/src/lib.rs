@@ -82,6 +82,15 @@ enum ClassMember {
     Destructor(Vec<Stmt>),
 }
 
+/// One member of an `enum` body: a variant, an inherent method, or an `impl Trait { ... }` block
+/// (object-model slice 3 — enums gained the unified body). Partitioned into [`EnumDecl`]'s
+/// `variants`/`methods`/`impls` after the body is parsed.
+enum EnumMember {
+    Variant(VariantDecl),
+    Method(FnDecl),
+    Impl(ImplBlock),
+}
+
 /// A leading decorator on a type declaration: either a `@derive(...)` codegen directive or a
 /// `#[...]` data attribute. Collected as a sequence and partitioned in [`attach_decorators`].
 enum Decorator {
@@ -1599,31 +1608,6 @@ where
                     span: ctx.to_span(e.span()),
                 },
             );
-        let enum_decl = just(T::EnumKw)
-            .ignore_then(id.clone())
-            .then(type_params.clone())
-            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
-            .then(
-                variant
-                    .repeated()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(T::LBrace), just(T::RBrace)),
-            )
-            .map_with(move |(((name_pair, type_params), backing), variants), e| {
-                Stmt::Enum(EnumDecl {
-                    name: name_pair.0,
-                    name_span: name_pair.1,
-                    is_public: false,
-                    type_params,
-                    backing,
-                    variants,
-                    derives: Vec::new(),
-                    attrs: Vec::new(),
-                    semantic: None,
-                    span: ctx.to_span(e.span()),
-                })
-            });
-
         // A field in a `struct` or `class` body: `#[...]? pub? mut? name: type` (newline-separated,
         // no terminator). `pub` (parsed in slice 1, *enforced* in slice 2) and `mut` are both opt-in;
         // a field may carry leading `#[...]` attributes (P2.4b). Disambiguated from a method by the
@@ -1694,6 +1678,61 @@ where
                     span: ctx.to_span(e.span()),
                 })
             });
+        // An `enum` body (object-model slice 3): variants plus the unified body's methods and
+        // `impl Trait { ... }` blocks. `impl`/`fn` open a method or impl; anything else is a variant
+        // (which begins with `#[...]?` then an uppercase name). The `choice` tries the keyword-led
+        // forms first so an attributed `fn`/`impl` is never mis-read as a variant.
+        let enum_member = choice((
+            class_impl.clone().map(|m| match m {
+                ClassMember::Impl(block) => EnumMember::Impl(block),
+                _ => unreachable!("class_impl yields only ClassMember::Impl"),
+            }),
+            method.clone().map(EnumMember::Method),
+            variant.map(EnumMember::Variant),
+        ));
+        let enum_decl = just(T::EnumKw)
+            .ignore_then(id.clone())
+            .then(type_params.clone())
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
+            .then(
+                enum_member
+                    .repeated()
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+            )
+            .map_with(move |(((name_pair, type_params), backing), members), e| {
+                let mut variants = Vec::new();
+                let mut methods = Vec::new();
+                let mut impls = Vec::new();
+                for member in members {
+                    match member {
+                        EnumMember::Variant(v) => variants.push(v),
+                        EnumMember::Method(m) => methods.push(m),
+                        // An `impl` block's methods are flattened into the method table (so the
+                        // existing `(type, method)` dispatch resolves them) and the block is retained
+                        // for the checker to validate against the trait it names — exactly as a class.
+                        EnumMember::Impl(block) => {
+                            methods.extend(block.methods.iter().cloned());
+                            impls.push(block);
+                        }
+                    }
+                }
+                Stmt::Enum(EnumDecl {
+                    name: name_pair.0,
+                    name_span: name_pair.1,
+                    is_public: false,
+                    type_params,
+                    backing,
+                    variants,
+                    methods,
+                    impls,
+                    derives: Vec::new(),
+                    attrs: Vec::new(),
+                    semantic: None,
+                    span: ctx.to_span(e.span()),
+                })
+            });
+
         // `destruct { ... }` — the runtime-invoked destructor block. Not a method (no name,
         // no params, no receiver syntax); the GC calls it when the last reference drops.
         let class_destructor = just(T::DestructKw)

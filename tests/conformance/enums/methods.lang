@@ -1,0 +1,59 @@
+// Object-model slice 3 — enum bodies. An enum gains the unified body: inherent methods and
+// `impl Trait { }` blocks alongside its variants. An instance method takes the whole enum value as
+// `self` and reaches its payload by `match`ing on it; an associated function is called on the bare
+// type name. Both backends agree.
+// expect: stdout "Order #7 awaiting payment"
+// expect: stdout "Order #7 paid: Ada"
+// expect: stdout "item 2 is negative"
+// expect: stdout "next of Pending is Paid"
+// expect: exit 0
+enum Status {
+    Pending;
+    Paid;
+    Refunded;
+
+    // An instance method: `self` is the whole enum value, matched to its case.
+    fn label(id: int, who: string): string {
+        return match self {
+            Status.Pending  => "Order #${id} awaiting payment",
+            Status.Paid     => "Order #${id} paid: ${who}",
+            Status.Refunded => "Order #${id} refunded",
+        };
+    }
+
+    // An instance method that returns another case of the same enum.
+    fn next(): Status {
+        return match self {
+            Status.Pending  => Status.Paid,
+            Status.Paid     => Status.Refunded,
+            Status.Refunded => Status.Refunded,
+        };
+    }
+
+    // An associated function (no receiver) — called on the bare type name.
+    fn describe_case(s: Status): string {
+        return match s {
+            Status.Pending  => "Pending",
+            Status.Paid     => "Paid",
+            Status.Refunded => "Refunded",
+        };
+    }
+}
+
+enum OrderError {
+    Empty;
+    NegativePrice(index: int);
+
+    fn message(): string {
+        return match self {
+            OrderError.Empty            => "empty order",
+            OrderError.NegativePrice(i) => "item ${i} is negative",
+        };
+    }
+}
+
+s = Status.Pending;
+echo s.label(7, "Ada");
+echo Status.Paid.label(7, "Ada");
+echo OrderError.NegativePrice(2).message();
+echo "next of ${Status.describe_case(s)} is ${Status.describe_case(s.next())}";

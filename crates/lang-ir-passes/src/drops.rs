@@ -36,7 +36,7 @@
 use std::collections::HashMap;
 use std::rc::Rc;
 
-use lang_ir::{Arm, Block, ClassDef, Decl, Func, Program, Rvalue, Stmt};
+use lang_ir::{Arm, Block, ClassDef, Decl, EnumDef, Func, Program, Rvalue, Stmt, StructDef};
 use lang_span::Span;
 
 use crate::liveness::{self, BlockLiveness, StmtLiveness, VarSet};
@@ -455,7 +455,28 @@ fn rewrite_decl(decl: &Decl, cx: &Cx) -> Decl {
                 .map(|f| Rc::new(rewrite_func(f, cx))),
             span: class.span,
         }),
-        Decl::Enum(_) | Decl::Struct(_) | Decl::Use { .. } => decl.clone(),
+        // Struct and enum method bodies need last-use drop insertion exactly like a class's, or a
+        // method-local allocation is never reclaimed on the IR backend (its temp slot is not
+        // auto-released at frame return).
+        Decl::Struct(strukt) => Decl::Struct(StructDef {
+            decl: strukt.decl.clone(),
+            methods: strukt
+                .methods
+                .iter()
+                .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, cx))))
+                .collect(),
+            span: strukt.span,
+        }),
+        Decl::Enum(en) => Decl::Enum(EnumDef {
+            decl: en.decl.clone(),
+            methods: en
+                .methods
+                .iter()
+                .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, cx))))
+                .collect(),
+            span: en.span,
+        }),
+        Decl::Use { .. } => decl.clone(),
     }
 }
 

@@ -215,9 +215,12 @@ enum TypeInfo {
         fields: Vec<String>,
         fns: HashMap<String, u32>,
     },
-    /// An enum: each variant's positional data-field names.
+    /// An enum: each variant's positional data-field names, plus each `fn`'s reserved prototype
+    /// index (an enum `fn` is callable as an associated function `E.f(...)` and as an instance
+    /// method `value.f(...)`, exactly like a class method — the unified body, object-model slice 3).
     Enum {
         variants: HashMap<String, Vec<String>>,
+        fns: HashMap<String, u32>,
     },
     /// A `use`-imported stub whose real field set is unknown until a literal supplies it.
     Opaque,
@@ -304,6 +307,7 @@ impl ModuleCompiler {
                     .into_iter()
                     .map(|v| (v.to_string(), Vec::new()))
                     .collect(),
+                fns: HashMap::new(),
             },
         );
         for stmt in &program.stmts {
@@ -395,8 +399,21 @@ impl ModuleCompiler {
                             )
                         })
                         .collect();
+                    // Reserve a prototype per method, shared by associated-fn and instance-method
+                    // dispatch (the unified body, object-model slice 3).
+                    let mut fns = HashMap::new();
+                    for method in &decl.methods {
+                        let proto = self.protos.len() as u32;
+                        self.protos.push(Chunk::placeholder());
+                        fns.insert(method.name.clone(), proto);
+                        self.methods.push(MethodEntry {
+                            type_name: decl.name.clone(),
+                            method: method.name.clone(),
+                            proto,
+                        });
+                    }
                     self.types
-                        .insert(decl.name.clone(), TypeInfo::Enum { variants });
+                        .insert(decl.name.clone(), TypeInfo::Enum { variants, fns });
                 }
                 lang_ast::Stmt::Use { path, names, .. } => {
                     for imported in names {
@@ -434,6 +451,28 @@ impl ModuleCompiler {
                         func,
                         Some(MethodCtx {
                             fields: field_set.clone(),
+                        }),
+                        Vec::new(),
+                        Vec::new(),
+                    )?;
+                    self.protos[proto as usize] = chunk;
+                }
+                continue;
+            }
+            // An enum method (object-model slice 3) compiles like a struct/class method but with an
+            // **empty** field scope: an enum's variants carry different data, so there are no implicit
+            // fields to resolve — a method reaches its payload by `match`ing on the receiver (`self`).
+            if let Stmt::Decl(Decl::Enum(en)) = stmt {
+                let name = en.decl.name.clone();
+                for (method, func) in &en.methods {
+                    let TypeInfo::Enum { fns, .. } = &self.types[&name] else {
+                        unreachable!("an enum registered as non-enum");
+                    };
+                    let proto = fns[method];
+                    let chunk = self.compile_func(
+                        func,
+                        Some(MethodCtx {
+                            fields: HashSet::new(),
                         }),
                         Vec::new(),
                         Vec::new(),
@@ -2157,11 +2196,17 @@ impl<'m> FnCompiler<'m> {
             name: type_name, ..
         } = receiver
         {
-            if let Some(TypeInfo::Enum { .. }) = self.module.types.get(type_name) {
+            if let Some(TypeInfo::Enum { fns, .. }) = self.module.types.get(type_name) {
                 // `Enum.try_from(s)` / `Enum.from(s)` — string→case conversion (intercepted before
                 // variant construction, mirroring the checker and the tree-walker).
                 if name == "try_from" || name == "from" {
                     return self.lower_enum_from_str(type_name, name == "from", args, dst, span);
+                }
+                // An associated function `Enum.f(...)` (the unified body, object-model slice 3):
+                // resolved at compile time when the name is a method, not a variant. Variant
+                // construction still wins for a variant name (uppercase by convention, so no clash).
+                if let Some(&proto) = fns.get(name) {
+                    return self.call_associated(proto, args, dst, span);
                 }
                 return self.make_enum(type_name, name, args, dst);
             }
@@ -2289,7 +2334,7 @@ impl<'m> FnCompiler<'m> {
                 FieldAccess,
             }
             let kind = match self.module.types.get(type_name) {
-                Some(TypeInfo::Enum { variants }) => match variants.get(name) {
+                Some(TypeInfo::Enum { variants, .. }) => match variants.get(name) {
                     Some(fields) if fields.is_empty() => Member::EmptyVariant,
                     Some(_) => Member::Unsupported("data-carrying variant used without arguments"),
                     None => Member::Unsupported("unknown enum variant"),
@@ -2522,7 +2567,7 @@ impl<'m> FnCompiler<'m> {
         dst: Reg,
     ) -> Result<(), Unsupported> {
         let fields = match self.module.types.get(type_name) {
-            Some(TypeInfo::Enum { variants }) => match variants.get(variant) {
+            Some(TypeInfo::Enum { variants, .. }) => match variants.get(variant) {
                 Some(fields) => fields.clone(),
                 None => return unsupported("unknown enum variant"),
             },
@@ -2561,7 +2606,7 @@ impl<'m> FnCompiler<'m> {
         span: Span,
     ) -> Result<(), Unsupported> {
         let variants = match self.module.types.get(type_name) {
-            Some(TypeInfo::Enum { variants }) => variants.clone(),
+            Some(TypeInfo::Enum { variants, .. }) => variants.clone(),
             _ => unreachable!("lower_enum_from_str is only reached for enum types"),
         };
         let mut cases: Vec<(String, u32)> = variants

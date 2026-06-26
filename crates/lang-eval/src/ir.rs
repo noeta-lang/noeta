@@ -31,8 +31,8 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
 use crate::{
-    Closure, DefaultThunk, Eval, FieldSpec, Flow, FnBody, Interpreter, RunResult, TreeWalkBackend,
-    TypeDef, Unwind, Value, compare_primitive,
+    Closure, DefaultThunk, EnumDef, Eval, FieldSpec, Flow, FnBody, Interpreter, RunResult,
+    TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo, compare_primitive,
 };
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
@@ -363,7 +363,7 @@ impl Interpreter {
                     .declare(name.clone(), Value::Function(Rc::new(closure)), false);
             }
             lang_ir::Decl::Class(class) => self.declare_ir_class(class),
-            lang_ir::Decl::Enum(decl) => self.declare_enum(decl),
+            lang_ir::Decl::Enum(en) => self.declare_ir_enum(en),
             lang_ir::Decl::Struct(s) => self.declare_ir_struct(s),
             lang_ir::Decl::Use { path, names, .. } => self.declare_use(path, names),
         }
@@ -418,6 +418,33 @@ impl Interpreter {
         };
         self.scope
             .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
+    }
+
+    /// Register an enum whose methods are IR-bodied closures (object-model slice 3). Mirrors
+    /// [`Self::declare_ir_struct`]: variants/derives come from the carried surface declaration; the
+    /// methods are the lowered IR funcs. The AST-walker counterpart is `declare_enum`.
+    fn declare_ir_enum(&mut self, en: &lang_ir::EnumDef) {
+        let decl = &en.decl;
+        let variants = decl
+            .variants
+            .iter()
+            .map(|v| VariantInfo {
+                name: v.name.clone(),
+                field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
+            })
+            .collect();
+        let methods = en
+            .methods
+            .iter()
+            .map(|(name, func)| (name.clone(), Rc::new(self.make_ir_closure(func))))
+            .collect();
+        let def = EnumDef {
+            name: decl.name.clone(),
+            variants,
+            methods,
+        };
+        self.scope
+            .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
     }
 
     /// Register a class whose methods are IR-bodied closures. Mirrors `declare_class`: fields,

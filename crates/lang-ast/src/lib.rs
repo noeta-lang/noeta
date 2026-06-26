@@ -380,6 +380,14 @@ pub struct EnumDecl {
     /// The backing primitive type for a backed enum (`: string`), if any.
     pub backing: Option<TypeRef>,
     pub variants: Vec<VariantDecl>,
+    /// All callable methods, including the ones flattened out of `impl` blocks — so the existing
+    /// `(type, method)` dispatch machinery resolves an instance method or an operator's trait method
+    /// with no change. An enum method receives the whole enum value as `self` (no implicit field
+    /// scope — variants differ), so its body typically `match`es on `self`.
+    pub methods: Vec<FnDecl>,
+    /// The `impl Trait { ... }` blocks declared in the body. Their methods also appear in `methods`;
+    /// these entries let the checker validate each trait and its required signatures.
+    pub impls: Vec<ImplBlock>,
     /// Leading `@derive(...)` codegen directives on the enum, flattened across all directive lines.
     pub derives: Vec<DeriveSpec>,
     /// Leading `#[...]` data attributes on the enum.

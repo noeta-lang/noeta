@@ -496,8 +496,9 @@ pub enum Decl {
     /// destructor body stays surface AST and is run by the shared end-of-program
     /// destruction path, unchanged in this phase.)
     Class(ClassDef),
-    /// An enum type declaration (no executable body).
-    Enum(Rc<lang_ast::EnumDecl>),
+    /// `enum Name { variants; methods; impl Trait { … } }`. Variants/derives are read from the
+    /// surface `decl`; methods are lowered to IR (object-model slice 3).
+    Enum(EnumDef),
     /// `struct Name { fields; methods }` — the value kind. Like [`Decl::Class`] but with no
     /// `destruct`; fields/derives are read from the surface `decl`, methods are lowered to IR.
     Struct(StructDef),
@@ -531,6 +532,17 @@ pub struct ClassDef {
 #[derive(Debug, Clone)]
 pub struct StructDef {
     pub decl: Rc<lang_ast::StructDecl>,
+    pub methods: Vec<(String, Rc<Func>)>,
+    pub span: Span,
+}
+
+/// A lowered enum: the surface declaration (for variants, derives, and name) paired with its
+/// methods lowered to IR funcs (object-model slice 3). Mirrors [`StructDef`] — an enum has no
+/// `destruct` block. An enum method takes the whole enum value as `self` and has no implicit field
+/// scope (variants differ), so its body typically `match`es on `self`.
+#[derive(Debug, Clone)]
+pub struct EnumDef {
+    pub decl: Rc<lang_ast::EnumDecl>,
     pub methods: Vec<(String, Rc<Func>)>,
     pub span: Span,
 }

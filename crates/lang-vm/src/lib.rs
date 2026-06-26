@@ -2034,6 +2034,52 @@ impl<'m> Vm<'m> {
                         });
                         continue;
                     }
+                    // An enum value dispatches to a user method (the unified body, object-model
+                    // slice 3) through the same `(type, method)` table as an object. Enums carry no
+                    // inline-cache shape pointer, so this is a direct table lookup. An unknown method
+                    // falls through to the built-in paths below.
+                    if v.is_enum() {
+                        let type_name = v.shape().unwrap().name.clone();
+                        if let Some(&proto) = self.methods.get(&(type_name, method.clone())) {
+                            let chunk = &module.protos[proto as usize];
+                            let total = chunk.num_params as usize - 1;
+                            let required = total - chunk.defaults.len();
+                            if args.len() < required || args.len() > total {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    arity_message("method", required, total, args.len()),
+                                ));
+                            }
+                            let num_registers = chunk.num_registers as usize;
+                            let defaults = chunk.defaults.clone();
+                            let mut new_regs = vec![Value::unit(); num_registers];
+                            retain(v);
+                            new_regs[0] = v;
+                            for (i, &arg_reg) in args.iter().enumerate() {
+                                let a = frames[top].regs[arg_reg as usize];
+                                retain(a);
+                                new_regs[i + 1] = a;
+                            }
+                            let filled = args.len() + 1;
+                            for (reg, proto) in &defaults {
+                                if *reg as usize >= filled {
+                                    let value = self.run_thunk(*proto, &[])?;
+                                    new_regs[*reg as usize] = value;
+                                }
+                            }
+                            frames[top].pc += 1;
+                            frames.push(Frame {
+                                proto,
+                                regs: new_regs,
+                                pc: 0,
+                                ret_dst: *dst,
+                                ret_transform: RetTransform::None,
+                                upvalues: Vec::new(),
+                            });
+                            continue;
+                        }
+                    }
                     // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
                     // impl returns). One argument, on any non-object receiver.
                     if method == "compare" {
@@ -3062,12 +3108,14 @@ impl<'m> Vm<'m> {
                 } => {
                     let left = frames[top].regs[*a as usize];
                     let right = frames[top].regs[*b as usize];
-                    // Operator-trait dispatch on a user object: an arithmetic/concat operator
-                    // routes to its trait method and uses the result directly; `==`/`!=` route to
-                    // `Equatable::eq` (`!=` negating the bool via the frame's return transform).
-                    // Built-in semantics apply otherwise. The checker guarantees a dispatched
-                    // method's arity (receiver + 1); a mismatch falls through to the built-in path.
-                    let dispatch = if left.is_object() {
+                    // Operator-trait dispatch on a user object or enum value (the unified body's
+                    // in-body `impl` blocks are uniform across kinds — object-model slice 3): an
+                    // arithmetic/concat operator routes to its trait method and uses the result
+                    // directly; `==`/`!=` route to `Equatable::eq` (`!=` negating via the frame's
+                    // return transform); `< <= > >=` route to `Comparable::compare`. The method table
+                    // is keyed by the value's shape name, identical for objects and enums. Built-in
+                    // semantics apply otherwise; the checker guarantees a dispatched method's arity.
+                    let dispatch = if left.is_object() || left.is_enum() {
                         let type_name = left.shape().unwrap().name.clone();
                         if let Some(method_name) = op.overload_method() {
                             self.methods
@@ -3210,10 +3258,11 @@ impl<'m> Vm<'m> {
                 }
                 Op::Stringify { dst, src, span } => {
                     let v = frames[top].regs[*src as usize];
-                    // A user object lights up the `Display` trait: render it via its `to_string`
-                    // method (which runs bytecode, so it is pushed as a call frame). Matches the
-                    // tree-walker's `display_value`.
-                    if v.is_object() {
+                    // A user object or enum value lights up the `Display` trait: render it via its
+                    // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
+                    // method table is keyed by the value's shape name, identical for both kinds
+                    // (object-model slice 3). Matches the tree-walker's `display_value`.
+                    if v.is_object() || v.is_enum() {
                         let type_name = v.shape().unwrap().name.clone();
                         if let Some(&proto) = self
                             .methods
@@ -4858,6 +4907,18 @@ mod tests {
             "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#${n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is ${p}\";\n",
         );
         assert_eq!(r.stdout, "P#7\nit is P#7\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn enum_method_and_impl_dispatch() {
+        // Object-model slice 3: an enum's unified body. An instance method (`label`) takes the whole
+        // value as `self`; `echo`/`${}` route to an `impl Display { to_string }`; and `==` routes to
+        // an `impl Equatable { eq }` — all through the same `(type, method)` table an object uses.
+        let r = run(
+            "enum Color {\n  Red;\n  Green;\n  fn label(): string { return match self { Color.Red => \"r\", Color.Green => \"g\" }; }\n  impl Display { fn to_string(): string { return \"<${self.label()}>\"; } }\n  impl Equatable { fn eq(other: Color): bool { return true; } }\n}\necho Color.Red.label();\necho Color.Red;\necho Color.Red == Color.Green;\n",
+        );
+        assert_eq!(r.stdout, "r\n<r>\ntrue\n");
         assert_eq!(r.exit_code, 0);
     }
 

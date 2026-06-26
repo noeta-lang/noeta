@@ -53,7 +53,10 @@
 use std::collections::HashSet;
 use std::rc::Rc;
 
-use lang_ir::{Arm, Atom, BinaryOp, Block, ClassDef, Decl, Func, Program, Rvalue, Stmt, Temp};
+use lang_ir::{
+    Arm, Atom, BinaryOp, Block, ClassDef, Decl, EnumDef, Func, Program, Rvalue, Stmt, StructDef,
+    Temp,
+};
 
 /// Thread reuse tokens through a program, returning the annotated IR. Pure function of the input
 /// (the only derived state is the set of own-destructor type names, computed from the program's
@@ -577,6 +580,27 @@ fn rewrite_decl(decl: &Decl, od: &HashSet<String>) -> Decl {
                 .map(|f| Rc::new(rewrite_func(f, od))),
             span: class.span,
         }),
-        Decl::Enum(_) | Decl::Struct(_) | Decl::Use { .. } => decl.clone(),
+        // Struct and enum method bodies are rewritten exactly like a class's — they are ordinary
+        // functions whose intermediates need reuse tokens (and, in `drops`, last-use destruction);
+        // skipping them would leave method-local allocations unreclaimed on the IR backend.
+        Decl::Struct(strukt) => Decl::Struct(StructDef {
+            decl: strukt.decl.clone(),
+            methods: strukt
+                .methods
+                .iter()
+                .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, od))))
+                .collect(),
+            span: strukt.span,
+        }),
+        Decl::Enum(en) => Decl::Enum(EnumDef {
+            decl: en.decl.clone(),
+            methods: en
+                .methods
+                .iter()
+                .map(|(n, f)| (n.clone(), Rc::new(rewrite_func(f, od))))
+                .collect(),
+            span: en.span,
+        }),
+        Decl::Use { .. } => decl.clone(),
     }
 }

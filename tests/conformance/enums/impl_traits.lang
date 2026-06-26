@@ -1,0 +1,67 @@
+// Object-model slice 3 — an enum's in-body `impl Trait { }` blocks are uniform with a class's: no
+// per-kind restriction, so every operator/protocol trait lights up on an enum value exactly as on
+// an object. `impl Display` drives `${x}`/`echo`; `impl Equatable` drives `==`/`!=`; `impl
+// Comparable` drives `< <= > >=`; and even `impl Add` drives `+` (the language does not moralize
+// about which traits "make sense" — the user's call). Both backends agree.
+// expect: stdout "level low"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "level high"
+// expect: exit 0
+enum Level {
+    Low;
+    Mid;
+    High;
+
+    fn rank(): int {
+        return match self {
+            Level.Low  => 0,
+            Level.Mid  => 1,
+            Level.High => 2,
+        };
+    }
+
+    impl Display {
+        fn to_string(): string {
+            return match self {
+                Level.Low  => "level low",
+                Level.Mid  => "level mid",
+                Level.High => "level high",
+            };
+        }
+    }
+
+    impl Equatable {
+        // Two levels are "equal" when they share a rank parity — a deliberately non-structural rule
+        // to prove `==` dispatches to this `eq`, not to default variant equality.
+        fn eq(other: Level): bool {
+            return self.rank() % 2 == other.rank() % 2;
+        }
+    }
+
+    impl Comparable {
+        fn compare(other: Level): Ordering {
+            return self.rank().compare(other.rank());
+        }
+    }
+
+    // No restriction: an enum may implement `Add` even though it is unusual — `+` returns the
+    // higher-ranked level.
+    impl Add {
+        fn add(other: Level): Level {
+            return match self.rank() >= other.rank() {
+                true  => self,
+                false => other,
+            };
+        }
+    }
+}
+
+echo "${Level.Low}";                  // Display -> "level low"
+echo Level.Low == Level.High;         // eq: 0%2 == 2%2 -> true
+echo Level.Low == Level.Mid;          // eq: 0%2 == 1%2 -> false
+echo Level.Low != Level.Mid;          // !eq -> true
+echo Level.High < Level.Mid;          // compare: 2 < 1 -> false
+echo "${Level.Mid + Level.High}";     // add -> High -> Display -> "level high"

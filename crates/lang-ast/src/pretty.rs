@@ -227,13 +227,21 @@ impl Pretty for EnumDecl {
             })
             .collect();
         out.push_str(&format!(
-            "({kind} {}{}{} [{}] {})",
+            "({kind} {}{}{} [{}] {}",
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
             variants.join(" "),
             span(self.span)
         ));
+        // An enum body may carry methods (the unified body, object-model slice 3); print them like a
+        // class's so a method-bearing enum is visible in the AST snapshot. A variant-only enum prints
+        // exactly as before (no trailing methods).
+        for method in &self.methods {
+            out.push('\n');
+            method.pretty(out, level + 1);
+        }
+        out.push(')');
     }
 }
 
