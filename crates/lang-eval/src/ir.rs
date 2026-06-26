@@ -1,17 +1,16 @@
-//! The **Core-IR tree-interpreter** — a second evaluation path that walks the lowered
-//! [`lang_ir`] instead of the AST, while reusing the AST walker's exact value model, scope
-//! model, and leaf semantics.
+//! The **Core-IR tree-interpreter** — the reference evaluation backend. It walks the lowered
+//! [`lang_ir`] (not the surface AST: the original AST walker was retired once it was neither a
+//! production path nor the differential oracle — the oracle is this interpreter vs. the bytecode
+//! VM), and is the path `lang run` and the conformance reference both execute.
 //!
-//! # Why it shares the tree-walker's machinery
+//! # The shared machinery
 //!
-//! This interpreter is the faithfulness reference for the IR: it must produce byte-identical
-//! [`RunResult`]s to [`super::Interpreter::run_with_sites`] on every program. The cheapest
-//! way to *guarantee* that is to reuse the same code for everything below the orchestration
-//! layer — operator semantics (`apply_binary_op`, `eval_unary`), indexing (`eval_index`),
-//! display (`display_value`), method dispatch, object/enum construction, the leak-counted
-//! [`Value`] model, the lexical [`Scope`], and end-of-program destruction
-//! (`destroy_globals`). Only the *orchestration* differs: where the AST walker recursively
-//! evaluates nested expressions, this interpreter reads pre-computed **atoms** and walks the
+//! Everything below the orchestration layer lives on the [`Interpreter`](super::Interpreter) struct
+//! and is shared with the bytecode VM's semantics by construction — operator semantics
+//! (`apply_binary_op`, `eval_unary`), indexing (`eval_index`), display (`display_value`), method
+//! dispatch, object/enum construction, the leak-counted [`Value`] model, the lexical [`Scope`], and
+//! end-of-program destruction (`destroy_globals`, which fires lowered IR `destruct` blocks). This
+//! interpreter contributes only the *orchestration*: it reads pre-computed **atoms** and walks the
 //! `let`-sequenced [`lang_ir::Stmt`]s.
 //!
 //! # Two storage classes
@@ -31,8 +30,8 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
 use crate::{
-    Closure, DefaultThunk, EnumDef, Eval, FieldSpec, Flow, FnBody, Interpreter, RunResult,
-    TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo, compare_primitive,
+    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, RunResult, TreeWalkBackend, TypeDef,
+    Unwind, Value, VariantInfo, compare_primitive,
 };
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
@@ -103,9 +102,9 @@ impl TreeWalkBackend {
 }
 
 impl Interpreter {
-    /// Execute a lowered program, mirroring [`Interpreter::run_with_sites`]: build the
-    /// reflection manifest, run the top-level statements in the global scope, then destroy
-    /// the global bindings in reverse declaration order.
+    /// Execute a lowered program — the whole-program entry point: build the reflection manifest,
+    /// run the top-level statements in the global scope, then destroy the global bindings in reverse
+    /// declaration order.
     fn run_ir(
         mut self,
         ast: &Program,
@@ -115,8 +114,7 @@ impl Interpreter {
         self.reflection = lang_ast::reflect::build(ast);
         self.type_of_sites = type_of_sites;
         let mut frame = Frame::new(ir.temp_count);
-        // The top-level statements run directly in the global scope (no child), exactly as
-        // `run_with_sites` runs `program.stmts` in `self.scope`.
+        // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
             Ok(Flow::Normal) | Ok(Flow::Break) | Ok(Flow::Continue) => {}
             // A top-level `return`, a `?` short-circuit, or a runtime error stops the program.
@@ -374,11 +372,8 @@ impl Interpreter {
     fn make_ir_closure(&self, func: &Rc<lang_ir::Func>) -> Closure {
         Closure::new(
             func.params.clone(),
-            func.defaults
-                .iter()
-                .map(|d| d.clone().map(DefaultThunk::Ir))
-                .collect(),
-            FnBody::Ir(Rc::clone(func)),
+            func.defaults.clone(),
+            Rc::clone(func),
             Rc::clone(&self.scope),
         )
     }
@@ -469,7 +464,10 @@ impl Interpreter {
             name: decl.name.clone(),
             fields,
             methods,
-            destructor: decl.destructor.clone().map(Rc::new),
+            // The lowered `destruct` block (a parameterless IR `Func`), run via `exec_ir_fn_body`
+            // with fields + `self` in scope — the same IR the VM compiles, so destructor execution
+            // no longer routes through the retired AST walker.
+            destructor: class.destructor.clone(),
             is_struct: false,
             // A reference `class`: `==` is identity unless the class is `Equatable` (derives it or
             // hand-`impl`s `eq`) — the same rule `declare_class` applies.

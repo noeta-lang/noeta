@@ -12,10 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
 
-use lang_ast::{
-    BinaryOp, ClassDecl, EnumDecl, Expr, FnDecl, ForPattern, MatchArm, ObjectLit, Pattern, Program,
-    Stmt, StrPart, StructDecl, TypeRef, UnaryOp,
-};
+use lang_ast::{BinaryOp, ForPattern, Pattern, Program, Stmt, TypeRef, UnaryOp};
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -66,18 +63,16 @@ impl Default for TreeWalkBackend {
     }
 }
 
-/// Run with the record-update reuse fast path **disabled** — the copying baseline the perf bench
-/// measures against (behavior-identical, since reuse is invisible to a value-semantics program).
-#[doc(hidden)]
-pub fn run_without_record_reuse(seed: u64, program: &Program) -> RunResult {
-    let mut interp = Interpreter::new(seed);
-    interp.record_reuse = false;
-    interp.run(program)
-}
-
 impl Backend for TreeWalkBackend {
+    /// Execute a program through the canonical **Core-IR interpreter** — the same path `lang run`
+    /// and the conformance reference take. (The AST tree-walker this crate began as was retired:
+    /// it was neither a production path nor the differential oracle — the oracle is VM-vs-IR — so it
+    /// was pure duplication. Lowering is total over the parsed language, so this never fails.)
     fn run(&self, program: &Program) -> RunResult {
-        Interpreter::new(self.seed).run(program)
+        let ir =
+            lang_ir::lower(program).expect("Core-IR lowering is total over the parsed language");
+        let sites = lang_check::resolve_type_of_sites(program);
+        self.run_ir(program, &ir, sites)
     }
 }
 
@@ -342,20 +337,6 @@ impl Builtin {
 /// builds the third. Routing all three through the one `Closure` type is what lets the IR
 /// interpreter reuse the tree-walker's call machinery (`call_closure`/`call_method_on`)
 /// unchanged — one value model, one dispatch path.
-enum FnBody {
-    Arrow(Expr),
-    Block(Vec<Stmt>),
-    Ir(Rc<lang_ir::Func>),
-}
-
-/// A defaulted parameter's value expression. Parallel to [`FnBody`]: the AST walker stores
-/// the surface [`Expr`]; the Core-IR interpreter stores a lowered IR [`lang_ir::Thunk`].
-/// Either is evaluated in the closure's captured scope when its argument is omitted.
-enum DefaultThunk {
-    Ast(Expr),
-    Ir(lang_ir::Thunk),
-}
-
 /// The definition of an enum type, registered as an `EnumType` value.
 #[derive(Debug)]
 pub struct EnumDef {
@@ -428,9 +409,11 @@ pub struct TypeDef {
     name: String,
     fields: Vec<FieldSpec>,
     methods: HashMap<String, Rc<Closure>>,
-    /// The class's `destruct` block, if any — run by the runtime when the last reference to an
-    /// instance drops (not directly callable). Shared so an `ObjectValue` can reach it.
-    destructor: Option<Rc<Vec<Stmt>>>,
+    /// The class's `destruct` block lowered to a parameterless Core-IR [`lang_ir::Func`], if any —
+    /// run by the runtime when the last reference to an instance drops (not directly callable),
+    /// with the instance's fields and `self` bound into its scope. Shared so an `ObjectValue` can
+    /// reach it.
+    destructor: Option<Rc<lang_ir::Func>>,
     /// Whether this came from a `struct X {...}` struct (vs. a `class`). Cosmetic in M0.
     is_struct: bool,
     /// Whether `==` on this type is **structural** (field-wise) rather than **reference identity**
@@ -593,8 +576,8 @@ pub struct Closure {
     /// parameter). A call that omits a trailing argument evaluates the matching default in the
     /// closure's `captured` (definition/global) scope — never seeing other parameters or fields,
     /// matching the VM's globals-only default thunks.
-    defaults: Vec<Option<DefaultThunk>>,
-    body: FnBody,
+    defaults: Vec<Option<lang_ir::Thunk>>,
+    body: Rc<lang_ir::Func>,
     captured: Rc<Scope>,
 }
 
@@ -606,8 +589,8 @@ impl Closure {
     /// recorded as a cycle-collection candidate (Phase 6.3, [`register_captured_scope`]).
     fn new(
         params: Vec<String>,
-        defaults: Vec<Option<DefaultThunk>>,
-        body: FnBody,
+        defaults: Vec<Option<lang_ir::Thunk>>,
+        body: Rc<lang_ir::Func>,
         captured: Rc<Scope>,
     ) -> Closure {
         leak::inc();
@@ -932,10 +915,6 @@ struct Interpreter {
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
     /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
-    /// Whether the record-update reuse fast path (`try_record_reuse`) is enabled. Always `true` in
-    /// production; the perf bench flips it off to measure the gain on identical input (the
-    /// tree-walker has no `MakeStruct` op to toggle, so the knob lives here instead).
-    record_reuse: bool,
 }
 
 impl Interpreter {
@@ -983,45 +962,6 @@ impl Interpreter {
             host,
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
-            record_reuse: true,
-        }
-    }
-
-    fn run(self, program: &Program) -> RunResult {
-        let type_of_sites = lang_check::resolve_type_of_sites(program);
-        self.run_with_sites(program, type_of_sites)
-    }
-
-    fn run_with_sites(
-        mut self,
-        program: &Program,
-        type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
-    ) -> RunResult {
-        self.reflection = lang_ast::reflect::build(program);
-        self.type_of_sites = type_of_sites;
-        for stmt in &program.stmts {
-            match self.exec_stmt(stmt) {
-                Ok(Flow::Normal) => {}
-                // `break`/`continue` cannot occur at the top level (the checker rejects them
-                // outside a loop); treat as a no-op for exhaustiveness.
-                Ok(Flow::Break) | Ok(Flow::Continue) => {}
-                // A top-level `return`, a `?` short-circuit, or a runtime error all stop
-                // the program. A `?`-induced return records no diagnostic, so exit stays 0.
-                Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => break,
-            }
-        }
-        // Destroy the top-level bindings at program end, in reverse declaration order, running
-        // each destructor on its last reference — the deterministic destruction the spec wants.
-        self.destroy_globals();
-        // Reap cycles left after teardown so residency reaches 0: closure-capture cycles (Phase 6.3)
-        // and reference-`class` field cycles (object-model slice 2c).
-        self.reap_captured_scope_cycles();
-        self.reap_object_cycles();
-        let exit_code = if self.diagnostics.is_empty() { 0 } else { 1 };
-        RunResult {
-            stdout: self.stdout,
-            exit_code,
-            diagnostics: self.diagnostics,
         }
     }
 
@@ -1099,7 +1039,7 @@ impl Interpreter {
                 }
                 scope.declare("self".to_string(), Value::Object(obj.clone()), false);
                 let saved = std::mem::replace(&mut self.scope, scope);
-                let _ = self.exec_stmts(&body);
+                let _ = self.exec_ir_fn_body(&body);
                 self.scope = saved;
             }
         }
@@ -1172,7 +1112,7 @@ impl Interpreter {
             }
             scope.declare("self".to_string(), Value::Object(obj.clone()), false);
             let saved = std::mem::replace(&mut self.scope, scope);
-            let _ = self.exec_stmts(&body);
+            let _ = self.exec_ir_fn_body(&body);
             self.scope = saved;
         }
         // 2. Then release each field, container-before-contained. We hold the last reference, so
@@ -1222,251 +1162,6 @@ impl Interpreter {
         if let Ok(entries) = Rc::try_unwrap(entries) {
             for (_, value) in entries {
                 self.destroy_value(value);
-            }
-        }
-    }
-
-    fn exec_stmt(&mut self, stmt: &Stmt) -> Eval<Flow> {
-        match stmt {
-            Stmt::Echo { value, span } => {
-                let v = self.eval_expr(value)?;
-                let text = self.display_value(&v, *span)?;
-                self.stdout.push_str(&text);
-                self.stdout.push('\n');
-                Ok(Flow::Normal)
-            }
-            // `(a, b, …) = expr` — tuple-destructuring binding (object-model slice 4b): evaluate the
-            // value once and bind each target to its tuple position. (Canonically this runs through
-            // the IR backend, which lowers it to `.N` projections; the tree-walker binds directly.)
-            Stmt::Destructure {
-                mut_decl,
-                targets,
-                value,
-                span,
-            } => {
-                let v = self.eval_expr(value)?;
-                match &v {
-                    Value::Tuple(items) if items.len() == targets.len() => {
-                        for ((name, _), item) in targets.iter().zip(items.iter()) {
-                            self.scope.declare(name.clone(), item.clone(), *mut_decl);
-                        }
-                        Ok(Flow::Normal)
-                    }
-                    other => Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!(
-                            "cannot destructure {} — expected a {}-tuple",
-                            other.type_name(),
-                            targets.len()
-                        ),
-                    )),
-                }
-            }
-            Stmt::Binding {
-                mut_decl,
-                name,
-                name_span,
-                value,
-                ..
-            } => {
-                // Copy-on-write fast path for the self-append accumulator `acc ~= [x]` (which the
-                // parser desugars to the reassignment `acc = acc ~ [x]`). The naive path copies the
-                // whole left list every step — O(n²). Here we take the old value out of its scope
-                // slot *before* evaluating the right-hand side, so (absent other aliases) we hold
-                // the only reference and can append in place. Guarded so it only fires when it is
-                // provably equivalent: a reassignment (`!mut_decl`) of a name that the RHS does not
-                // itself mention (else `acc = acc ~ acc` would read the vacated slot), and a live
-                // mutable binding. Aliasing stays correct by construction — a second reference
-                // (`b = acc`) keeps the refcount > 1, so `cow_concat` copies, preserving immutable
-                // semantics. Any case the guard rejects falls through to the ordinary path.
-                if !*mut_decl
-                    && let Expr::Binary {
-                        op: BinaryOp::Concat,
-                        lhs,
-                        rhs,
-                        ..
-                    } = value
-                    && let Expr::Ident { name: lhs_name, .. } = lhs.as_ref()
-                    && lhs_name == name
-                    && !rhs.mentions(name)
-                    && let Some(old) = self.scope.take_mut(name)
-                {
-                    let right = match self.eval_expr(rhs) {
-                        Ok(right) => right,
-                        // Restore the binding before unwinding so the vacated slot is never observed.
-                        Err(unwind) => {
-                            self.scope.assign(name, old);
-                            return Err(unwind);
-                        }
-                    };
-                    self.scope.assign(name, cow_concat(old, right));
-                    return Ok(Flow::Normal);
-                }
-                // Record-update reuse: `acc = Type { ...acc, … }` (the generalization of the COW
-                // append to struct construction). Returns `None` — having done nothing observable —
-                // when the fast path does not apply, so we fall through to the ordinary path.
-                if let Some(result) = self.try_record_reuse(*mut_decl, name, *name_span, value) {
-                    return result;
-                }
-                // A field-set `x.f = v` is parsed as this reassignment of `x` with an
-                // `Expr::FieldSet` value; skip the immutable-binding check (object-model slice 2b′ —
-                // the checker enforces the `struct` case statically; a `class` mutates in place).
-                let is_field_assign = matches!(value, Expr::FieldSet { .. });
-                let value = self.eval_expr(value)?;
-                if is_field_assign {
-                    self.bind_field_assign(name, *name_span, value)?;
-                } else {
-                    self.bind(*mut_decl, name, *name_span, value)?;
-                }
-                Ok(Flow::Normal)
-            }
-            Stmt::Fn(decl) => {
-                self.declare_fn(decl);
-                Ok(Flow::Normal)
-            }
-            Stmt::Enum(decl) => {
-                self.declare_enum(decl);
-                Ok(Flow::Normal)
-            }
-            Stmt::Struct(decl) => {
-                self.declare_struct(decl);
-                Ok(Flow::Normal)
-            }
-            Stmt::Class(decl) => {
-                self.declare_class(decl);
-                Ok(Flow::Normal)
-            }
-            // A standalone `impl Trait for T {}` is a compile-time capability declaration
-            // (validated by the checker); a marker/capability impl has no runtime effect.
-            Stmt::Impl(_) => Ok(Flow::Normal),
-            // `namespace` is a no-op in M0 (no module scoping yet); `use` registers each
-            // imported name as an opaque stub so references resolve.
-            Stmt::Namespace { .. } => Ok(Flow::Normal),
-            Stmt::Use { path, names, .. } => {
-                self.declare_use(path, names);
-                Ok(Flow::Normal)
-            }
-            Stmt::Return { value, .. } => {
-                let value = match value {
-                    Some(expr) => self.eval_expr(expr)?,
-                    None => Value::Unit,
-                };
-                Ok(Flow::Return(value))
-            }
-            Stmt::If {
-                cond,
-                then_body,
-                else_body,
-                span,
-            } => {
-                let taken = match self.eval_expr(cond)? {
-                    Value::Bool(b) => b,
-                    other => {
-                        return Err(self.runtime_error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("`if` condition must be a bool, found {}", other.type_name()),
-                        ));
-                    }
-                };
-                if taken {
-                    self.exec_block(then_body)
-                } else if let Some(else_body) = else_body {
-                    self.exec_block(else_body)
-                } else {
-                    Ok(Flow::Normal)
-                }
-            }
-            Stmt::For {
-                pattern,
-                iterable,
-                body,
-                span,
-            } => self.exec_for(pattern, iterable, body, *span),
-            Stmt::While { cond, body, span } => self.exec_while(cond, body, *span),
-            Stmt::Break { .. } => Ok(Flow::Break),
-            Stmt::Continue { .. } => Ok(Flow::Continue),
-            Stmt::Expr { expr, .. } => {
-                self.eval_expr(expr)?;
-                Ok(Flow::Normal)
-            }
-        }
-    }
-
-    /// Run a block of statements in a fresh child scope, propagating any `return`.
-    fn exec_block(&mut self, stmts: &[Stmt]) -> Eval<Flow> {
-        let child = Scope::child(&self.scope);
-        let saved = std::mem::replace(&mut self.scope, child);
-        let result = self.exec_stmts(stmts);
-        self.scope = saved;
-        result
-    }
-
-    /// Execute statements in the current scope, stopping at the first non-local flow (`return`,
-    /// `break`, `continue`) and propagating it to the enclosing function or loop.
-    fn exec_stmts(&mut self, stmts: &[Stmt]) -> Eval<Flow> {
-        for stmt in stmts {
-            let flow = self.exec_stmt(stmt)?;
-            if !matches!(flow, Flow::Normal) {
-                return Ok(flow);
-            }
-        }
-        Ok(Flow::Normal)
-    }
-
-    fn exec_for(
-        &mut self,
-        pattern: &ForPattern,
-        iterable: &Expr,
-        body: &[Stmt],
-        span: Span,
-    ) -> Eval<Flow> {
-        let iterable_value = self.eval_expr(iterable)?;
-        let elements = self.iter_elements(iterable_value, span)?;
-
-        for element in elements {
-            let child = Scope::child(&self.scope);
-            self.bind_for_pattern(&child, pattern, element, span)?;
-            let saved = std::mem::replace(&mut self.scope, child);
-            let flow = self.exec_stmts(body);
-            self.scope = saved;
-            match flow? {
-                Flow::Return(value) => return Ok(Flow::Return(value)),
-                Flow::Break => break,
-                // `continue` ends this iteration; `Normal` falls through to the same place.
-                Flow::Continue | Flow::Normal => {}
-            }
-        }
-        Ok(Flow::Normal)
-    }
-
-    /// `while <cond> { body }` — re-evaluate the condition (which must be a bool) before each
-    /// iteration, running the body in a fresh child scope. A bare reassignment in the body (e.g.
-    /// a loop counter `i += 1`) updates the enclosing binding through the scope chain, so the
-    /// condition can make progress.
-    fn exec_while(&mut self, cond: &Expr, body: &[Stmt], span: Span) -> Eval<Flow> {
-        loop {
-            let taken = match self.eval_expr(cond)? {
-                Value::Bool(b) => b,
-                other => {
-                    return Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`while` condition must be a bool, found {}",
-                            other.type_name()
-                        ),
-                    ));
-                }
-            };
-            if !taken {
-                return Ok(Flow::Normal);
-            }
-            match self.exec_block(body)? {
-                Flow::Return(value) => return Ok(Flow::Return(value)),
-                Flow::Break => return Ok(Flow::Normal),
-                Flow::Continue | Flow::Normal => {}
             }
         }
     }
@@ -1540,106 +1235,6 @@ impl Interpreter {
         }
     }
 
-    fn declare_fn(&mut self, decl: &FnDecl) {
-        let closure = Closure::new(
-            decl.params.iter().map(|p| p.name.clone()).collect(),
-            decl.params
-                .iter()
-                .map(|p| p.default.clone().map(DefaultThunk::Ast))
-                .collect(),
-            FnBody::Block(decl.body.clone()),
-            Rc::clone(&self.scope),
-        );
-        self.scope
-            .declare(decl.name.clone(), Value::Function(Rc::new(closure)), false);
-    }
-
-    /// Register an enum type as an `EnumType` value. Backed values (`= "pending"`) are
-    /// parsed but not stored in M0 — backed enums match by variant like plain ones.
-    fn declare_enum(&mut self, decl: &EnumDecl) {
-        let variants = decl
-            .variants
-            .iter()
-            .map(|v| VariantInfo {
-                name: v.name.clone(),
-                field_names: v.fields.iter().map(|f| f.name.clone()).collect(),
-            })
-            .collect();
-        // An enum carries inherent + `impl`-block methods (the unified body, object-model slice 3),
-        // compiled to closures capturing the current (global) scope exactly like a struct's.
-        let methods = decl
-            .methods
-            .iter()
-            .map(|m| {
-                let closure = Closure::new(
-                    m.params.iter().map(|p| p.name.clone()).collect(),
-                    m.params
-                        .iter()
-                        .map(|p| p.default.clone().map(DefaultThunk::Ast))
-                        .collect(),
-                    FnBody::Block(m.body.clone()),
-                    Rc::clone(&self.scope),
-                );
-                (m.name.clone(), Rc::new(closure))
-            })
-            .collect();
-        let def = EnumDef {
-            name: decl.name.clone(),
-            variants,
-            methods,
-        };
-        self.scope
-            .declare(decl.name.clone(), Value::EnumType(Rc::new(def)), false);
-    }
-
-    /// Register a structural struct type. Structs have fields but no methods; they are
-    /// constructed via the all-fields literal and compared structurally.
-    fn declare_struct(&mut self, decl: &StructDecl) {
-        let fields = decl
-            .fields
-            .iter()
-            .map(|f| FieldSpec {
-                name: f.name.clone(),
-                mutable: f.mut_field,
-            })
-            .collect();
-        // A struct carries inherent + `impl`-block methods (the unified body), compiled to
-        // closures capturing the current (global) scope exactly like a class's methods.
-        let methods = decl
-            .methods
-            .iter()
-            .map(|m| {
-                let closure = Closure::new(
-                    m.params.iter().map(|p| p.name.clone()).collect(),
-                    m.params
-                        .iter()
-                        .map(|p| p.default.clone().map(DefaultThunk::Ast))
-                        .collect(),
-                    FnBody::Block(m.body.clone()),
-                    Rc::clone(&self.scope),
-                );
-                (m.name.clone(), Rc::new(closure))
-            })
-            .collect();
-        let def = TypeDef {
-            name: decl.name.clone(),
-            fields,
-            methods,
-            destructor: None,
-            is_struct: true,
-            // A value kind: `==` is always structural.
-            structural_eq: true,
-            // A hand-written `compare`/`to_json` takes precedence over derivation.
-            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
-                && !decl.methods.iter().any(|m| m.name == "compare"),
-            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
-                && !decl.methods.iter().any(|m| m.name == "to_json"),
-            opaque: false,
-        };
-        self.scope
-            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
-    }
-
     /// Register the names imported by a `use` declaration. Real module loading is M1; in
     /// M0 each imported name resolves to an *opaque stub type* so references and all-fields
     /// literals (`User { name: ... }`) work even though the type's real shape is unknown.
@@ -1669,56 +1264,6 @@ impl Interpreter {
             };
             self.scope.declare(imported.name.clone(), value, false);
         }
-    }
-
-    /// Register a class type. Methods are compiled to closures capturing the current
-    /// (global) scope, exactly like top-level `fn`s, so they can see the class itself
-    /// (for `Type { ... }` literals) and other globals.
-    fn declare_class(&mut self, decl: &ClassDecl) {
-        let fields = decl
-            .fields
-            .iter()
-            .map(|f| FieldSpec {
-                name: f.name.clone(),
-                mutable: f.mut_field,
-            })
-            .collect();
-        let methods = decl
-            .methods
-            .iter()
-            .map(|m| {
-                let closure = Closure::new(
-                    m.params.iter().map(|p| p.name.clone()).collect(),
-                    m.params
-                        .iter()
-                        .map(|p| p.default.clone().map(DefaultThunk::Ast))
-                        .collect(),
-                    FnBody::Block(m.body.clone()),
-                    Rc::clone(&self.scope),
-                );
-                (m.name.clone(), Rc::new(closure))
-            })
-            .collect();
-        let def = TypeDef {
-            name: decl.name.clone(),
-            fields,
-            methods,
-            destructor: decl.destructor.clone().map(Rc::new),
-            is_struct: false,
-            // A reference `class`: `==` is identity unless the class is `Equatable` (derives it or
-            // hand-`impl`s `eq`), which opts back into structural comparison.
-            structural_eq: lang_ast::derives_trait(&decl.derives, "Equatable")
-                || decl.methods.iter().any(|m| m.name == "eq"),
-            // A hand-written `compare` (via `impl Comparable`) takes precedence over derivation.
-            derives_comparable: lang_ast::derives_trait(&decl.derives, "Comparable")
-                && !decl.methods.iter().any(|m| m.name == "compare"),
-            // A hand-written `to_json` takes precedence over the derived serializer.
-            derives_tojson: lang_ast::derives_trait(&decl.derives, "Serialize")
-                && !decl.methods.iter().any(|m| m.name == "to_json"),
-            opaque: false,
-        };
-        self.scope
-            .declare(decl.name.clone(), Value::Type(Rc::new(def)), false);
     }
 
     /// Construct a struct/class instance from an all-fields object literal. This is the
@@ -1792,128 +1337,6 @@ impl Interpreter {
             })
             .collect();
         Value::List(Rc::new(items))
-    }
-
-    /// Tree-walker record-update reuse for a self-update `acc = Type { ...acc, … }`: the
-    /// generalization of the COW list append to struct construction. Returns `None` — having done
-    /// nothing observable — when the fast path does not apply (not a self-update, an opaque/foreign
-    /// base, or a non-object value), so the caller runs the ordinary `eval_object`. When the
-    /// accumulator is the **sole owner** of a same-type object its backing field map is mutated in
-    /// place (avoiding a full `BTreeMap` + per-field clone); an **aliased** accumulator copies,
-    /// preserving the alias — the same shared ⇒ copy / unique ⇒ mutate invariant as the list COW.
-    ///
-    /// Field initializers are evaluated in source order while `acc` is still bound (so `acc.field`
-    /// reads work), with the same unknown-field check as `eval_object`, then `acc` is taken out and
-    /// reused. The base is peeked via a side-effect-free ident read, so bailing out is invisible.
-    fn try_record_reuse(
-        &mut self,
-        mut_decl: bool,
-        name: &str,
-        name_span: Span,
-        value: &Expr,
-    ) -> Option<Eval<Flow>> {
-        if !self.record_reuse || mut_decl {
-            return None;
-        }
-        let Expr::Object(lit) = value else {
-            return None;
-        };
-        let spread = lit.spread.as_ref()?;
-        let Expr::Ident { name: base, .. } = spread.as_ref() else {
-            return None;
-        };
-        if base != name {
-            return None;
-        }
-        // Peek the accumulator (a pure ident read) to learn its def and whether it is uniquely
-        // owned. The clone is dropped at the end of this block, restoring the refcount.
-        let (def, unique) = {
-            let peek = match self.eval_expr(spread) {
-                Ok(v) => v,
-                Err(u) => return Some(Err(u)),
-            };
-            let Value::Object(rc) = &peek else {
-                return None;
-            };
-            if rc.def.name() != lit.type_name || rc.def.opaque {
-                return None;
-            }
-            // The scope holds one reference and `peek` is the second; any more means an alias.
-            (Rc::clone(&rc.def), Rc::strong_count(rc) == 2)
-        };
-
-        // Evaluate the overrides in source order, matching `eval_object`'s unknown-field timing.
-        let mut overrides: Vec<(String, Value)> = Vec::with_capacity(lit.fields.len());
-        for init in &lit.fields {
-            if !def.has_field(&init.name) {
-                return Some(Err(self.runtime_error(
-                    DiagnosticCode::UnknownName,
-                    init.name_span,
-                    format!("type `{}` has no field `{}`", def.name(), init.name),
-                )));
-            }
-            match self.eval_expr(&init.value) {
-                Ok(v) => overrides.push((init.name.clone(), v)),
-                Err(u) => return Some(Err(u)),
-            }
-        }
-
-        let Some(Value::Object(rc)) = self.scope.take_mut(name) else {
-            // The binding is immutable (or vanished): rebuild the value from a fresh peek and let
-            // `bind` report the assignment error, exactly as the ordinary path would after building.
-            let Ok(Value::Object(base)) = self.eval_expr(spread) else {
-                return None;
-            };
-            let mut fields = base.fields_snapshot();
-            for (k, v) in overrides {
-                fields.insert(k, v);
-            }
-            let obj = Value::Object(Rc::new(ObjectValue::new(def, fields)));
-            return Some(
-                self.bind(false, name, name_span, obj)
-                    .map(|()| Flow::Normal),
-            );
-        };
-
-        let new_value = if unique {
-            // Sole owner: mutate the field map in place through the shared `RefCell` — only the
-            // overridden keys change; every other field keeps its existing reference.
-            for (k, v) in overrides {
-                rc.set_field_value(k, v);
-            }
-            Value::Object(rc)
-        } else {
-            // Aliased: copy, preserving the other owner's view. Dropping `rc` at the end of the
-            // statement releases the scope's old reference; the alias keeps the original object.
-            let mut fields = rc.fields_snapshot();
-            for (k, v) in overrides {
-                fields.insert(k, v);
-            }
-            Value::Object(Rc::new(ObjectValue::new(def, fields)))
-        };
-        self.scope.assign(name, new_value);
-        Some(Ok(Flow::Normal))
-    }
-
-    fn eval_object(&mut self, lit: &ObjectLit) -> Eval<Value> {
-        // Evaluation order (preserved by the lowering's `let`-sequencing): the `..` spread
-        // first, then the named initializers left-to-right.
-        let spread = match &lit.spread {
-            Some(spread) => Some((self.eval_expr(spread)?, spread.span())),
-            None => None,
-        };
-        let mut field_values = Vec::with_capacity(lit.fields.len());
-        for init in &lit.fields {
-            let value = self.eval_expr(&init.value)?;
-            field_values.push((init.name.clone(), init.name_span, value));
-        }
-        self.construct_object(
-            &lit.type_name,
-            lit.type_name_span,
-            field_values,
-            spread,
-            lit.span,
-        )
     }
 
     /// Build a struct/class instance from already-evaluated field values and an optional
@@ -2171,368 +1594,6 @@ impl Interpreter {
         }
     }
 
-    fn eval_expr(&mut self, expr: &Expr) -> Eval<Value> {
-        match expr {
-            Expr::Str { value, .. } => Ok(Value::Str(value.clone())),
-            Expr::Int { value, .. } => Ok(Value::Int(*value)),
-            Expr::Float { value, .. } => Ok(Value::Float(*value)),
-            Expr::Bool { value, .. } => Ok(Value::Bool(*value)),
-            Expr::Ident { name, span } => match self.scope.lookup(name) {
-                Some(value) => Ok(value),
-                None => {
-                    self.diagnostics.push(Diagnostic::error(
-                        DiagnosticCode::UnknownName,
-                        *span,
-                        format!("cannot find `{name}` in this scope"),
-                    ));
-                    Err(Unwind::Abort)
-                }
-            },
-            Expr::Unary { op, operand, span } => {
-                let value = self.eval_expr(operand)?;
-                self.eval_unary(*op, value, *span)
-            }
-            Expr::Binary { op, lhs, rhs, span } => self.eval_binary(*op, lhs, rhs, *span),
-            Expr::Closure { params, body, .. } => Ok(Value::Function(Rc::new(Closure::new(
-                params.iter().map(|p| p.name.clone()).collect(),
-                // Closure parameters cannot declare defaults (the parser forbids it), so these are
-                // all `None`; kept parallel to `params` for a uniform call path.
-                params
-                    .iter()
-                    .map(|p| p.default.clone().map(DefaultThunk::Ast))
-                    .collect(),
-                FnBody::Arrow((**body).clone()),
-                Rc::clone(&self.scope),
-            )))),
-            Expr::Call { callee, args, span } => self.eval_call(callee, args, None, *span),
-            Expr::Pipeline { left, right, span } => {
-                let left = self.eval_expr(left)?;
-                self.eval_pipeline(left, right, *span)
-            }
-            Expr::List { items, .. } => {
-                let mut values = Vec::with_capacity(items.len());
-                for item in items {
-                    values.push(self.eval_expr(item)?);
-                }
-                Ok(Value::List(Rc::new(values)))
-            }
-            Expr::Tuple { items, .. } => {
-                let mut values = Vec::with_capacity(items.len());
-                for item in items {
-                    values.push(self.eval_expr(item)?);
-                }
-                Ok(Value::Tuple(Rc::new(values)))
-            }
-            Expr::TupleIndex {
-                receiver,
-                index,
-                span,
-            } => {
-                let recv = self.eval_expr(receiver)?;
-                self.tuple_index(recv, *index, *span)
-            }
-            Expr::Range {
-                start,
-                end,
-                inclusive,
-                span,
-            } => {
-                let lo = self.eval_expr(start)?;
-                let hi = self.eval_expr(end)?;
-                match (lo, hi) {
-                    (Value::Int(a), Value::Int(b)) => {
-                        // `..=` is exclusive with `upper = b + 1`; `saturating_add` keeps the
-                        // (unmaterializable) `i64::MAX` edge from panicking. An empty range yields
-                        // an empty list.
-                        let upper = if *inclusive { b.saturating_add(1) } else { b };
-                        let items: Vec<Value> = (a..upper).map(Value::Int).collect();
-                        Ok(Value::List(Rc::new(items)))
-                    }
-                    (a, b) => Err(self.runtime_error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!(
-                            "range bounds must be ints, found {} and {}",
-                            a.type_name(),
-                            b.type_name()
-                        ),
-                    )),
-                }
-            }
-            Expr::Map { entries, span } => {
-                let mut map = BTreeMap::new();
-                for (key_expr, value_expr) in entries {
-                    let key = match self.eval_expr(key_expr)? {
-                        Value::Str(s) => s,
-                        other => {
-                            return Err(self.runtime_error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("map keys must be strings, found {}", other.type_name()),
-                            ));
-                        }
-                    };
-                    let value = self.eval_expr(value_expr)?;
-                    map.insert(key, value);
-                }
-                Ok(Value::Map(Rc::new(map)))
-            }
-            Expr::Member {
-                receiver,
-                name,
-                span,
-                ..
-            } => {
-                let receiver = self.eval_expr(receiver)?;
-                match receiver {
-                    // `Status.Pending` — construct a no-data variant.
-                    Value::EnumType(def) => self.make_variant(&def, name, vec![], *span),
-                    // `order.id` — field access on an instance.
-                    Value::Object(object) => match object.field(name) {
-                        Some(value) => Ok(value),
-                        None => Err(self.runtime_error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!("type `{}` has no field `{name}`", object.def.name()),
-                        )),
-                    },
-                    // `Order.new` (without a call) — the associated function as a value.
-                    Value::Type(def) => match def.methods.get(name) {
-                        Some(method) => Ok(Value::Function(Rc::clone(method))),
-                        None => Err(self.runtime_error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!("type `{}` has no associated function `{name}`", def.name()),
-                        )),
-                    },
-                    other => Err(self.runtime_error(
-                        DiagnosticCode::UnknownName,
-                        *span,
-                        format!("no field `{name}` on {}", other.type_name()),
-                    )),
-                }
-            }
-            Expr::FieldSet {
-                receiver,
-                field,
-                value,
-                span,
-                ..
-            } => {
-                let recv = self.eval_expr(receiver)?;
-                let new_value = self.eval_expr(value)?;
-                match recv {
-                    Value::Object(object) => {
-                        if !object.has_field_value(field) {
-                            return Err(self.runtime_error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!("type `{}` has no field `{field}`", object.def.name()),
-                            ));
-                        }
-                        if !object.def.is_struct {
-                            // Reference `class`: mutate the shared instance in place, so every alias
-                            // sees the change (object-model slice 2b). The displaced value is
-                            // destroyed now, matching the IR interpreter.
-                            if let Some(old) = object.set_field_value(field.clone(), new_value) {
-                                self.destroy_value(old);
-                            }
-                            // May close a reference cycle; register for the exit reaper (slice 2c).
-                            register_mutated_object(&object);
-                            Ok(Value::Object(object))
-                        } else {
-                            // Value `struct`: build a new instance with the field updated, leaving
-                            // the old object (held by any alias) unchanged.
-                            let mut fields = object.fields_snapshot();
-                            fields.insert(field.clone(), new_value);
-                            Ok(Value::Object(Rc::new(ObjectValue::new(
-                                object.def.clone(),
-                                fields,
-                            ))))
-                        }
-                    }
-                    other => Err(self.runtime_error(
-                        DiagnosticCode::UnknownName,
-                        *span,
-                        format!("cannot assign field `{field}` on {}", other.type_name()),
-                    )),
-                }
-            }
-            Expr::Index {
-                receiver,
-                index,
-                span,
-            } => {
-                let receiver = self.eval_expr(receiver)?;
-                let index = self.eval_expr(index)?;
-                self.eval_index(receiver, index, *span)
-            }
-            Expr::Match {
-                scrutinee,
-                arms,
-                span,
-            } => {
-                let value = self.eval_expr(scrutinee)?;
-                self.eval_match(value, arms, *span)
-            }
-            Expr::Object(lit) => self.eval_object(lit),
-            Expr::Try { expr, span } => {
-                let value = self.eval_expr(expr)?;
-                self.eval_try(value, *span)
-            }
-            Expr::Coalesce {
-                value,
-                fallback,
-                span,
-            } => {
-                let value = self.eval_expr(value)?;
-                self.eval_coalesce(value, fallback, *span)
-            }
-            // `expr.as<T>()` — checked narrowing: `some(value)` if the runtime value is a `T`,
-            // `none` otherwise. Generics are erased, so the match tests the head constructor only
-            // (`List<int>` checks "is a list"); the element type is trusted from the annotation.
-            Expr::As { expr, ty, .. } => {
-                let value = self.eval_expr(expr)?;
-                if runtime_matches(&value, ty) {
-                    Ok(builtin_enum("Option", "some", vec![value]))
-                } else {
-                    Ok(builtin_enum("Option", "none", vec![]))
-                }
-            }
-            Expr::TypeTest { expr, ty, .. } => {
-                let value = self.eval_expr(expr)?;
-                Ok(Value::Bool(runtime_matches(&value, ty)))
-            }
-            Expr::AttributesOf { ty, .. } => {
-                let type_name = match ty {
-                    TypeRef::Named { name, .. } => name.as_str(),
-                    _ => "",
-                };
-                Ok(self.materialize_attributes(type_name))
-            }
-            Expr::RolesOf { .. } => Ok(self.materialize_roles()),
-            Expr::TypeOf { value, span } => {
-                // Evaluate the operand for its side effects in both fidelities. A concrete static
-                // type resolved by the checker builds the precise `Type` constant (fidelity A);
-                // otherwise classify the runtime value's head constructor (fidelity B).
-                let v = self.eval_expr(value)?;
-                match self.type_of_sites.get(span) {
-                    Some(repr) => Ok(build_type_value(repr)),
-                    None => Ok(build_type_value(&eval_type_repr(&v))),
-                }
-            }
-            Expr::Invoke {
-                recv,
-                name,
-                args,
-                span,
-            } => {
-                let receiver = self.eval_expr(recv)?;
-                let name_val = self.eval_expr(name)?;
-                let args_val = self.eval_expr(args)?;
-                self.invoke_dynamic(receiver, name_val, args_val, *span)
-            }
-            Expr::Interp { parts, .. } => {
-                let mut out = String::new();
-                for part in parts {
-                    match part {
-                        StrPart::Literal(text) => out.push_str(text),
-                        StrPart::Hole(expr) => {
-                            let v = self.eval_expr(expr)?;
-                            out.push_str(&self.display_value(&v, expr.span())?);
-                        }
-                    }
-                }
-                Ok(Value::Str(out))
-            }
-        }
-    }
-
-    /// Evaluate a call expression. If `callee` is a member access it is a method call;
-    /// otherwise it is an ordinary call. `prepend` supplies a leading argument (used by
-    /// the pipeline operator to thread the piped value as the first argument).
-    fn eval_call(
-        &mut self,
-        callee: &Expr,
-        args: &[Expr],
-        prepend: Option<Value>,
-        span: Span,
-    ) -> Eval<Value> {
-        if let Expr::Member { receiver, name, .. } = callee {
-            let receiver = self.eval_expr(receiver)?;
-            let mut values = Vec::with_capacity(args.len() + 1);
-            values.extend(prepend);
-            for arg in args {
-                values.push(self.eval_expr(arg)?);
-            }
-            return self.call_method(receiver, name, values, span);
-        }
-        let callee = self.eval_expr(callee)?;
-        let mut values = Vec::with_capacity(args.len() + 1);
-        values.extend(prepend);
-        for arg in args {
-            values.push(self.eval_expr(arg)?);
-        }
-        self.call(callee, values, span)
-    }
-
-    /// `x |> f(a)` evaluates `f`, prepends `x` to its arguments, and calls it.
-    /// `x |> f` (no call) is `f(x)`; `x |> obj.m()` is `obj.m(x)`.
-    fn eval_pipeline(&mut self, left: Value, right: &Expr, span: Span) -> Eval<Value> {
-        match right {
-            Expr::Call { callee, args, .. } => self.eval_call(callee, args, Some(left), span),
-            Expr::Member { receiver, name, .. } => {
-                let receiver = self.eval_expr(receiver)?;
-                self.call_method(receiver, name, vec![left], span)
-            }
-            _ => {
-                let callee = self.eval_expr(right)?;
-                self.call(callee, vec![left], span)
-            }
-        }
-    }
-
-    /// Evaluate a `match`: try each arm's pattern in order, bind on the first match, and
-    /// evaluate that arm's body in a child scope. M0 match is non-exhaustive (a checker
-    /// concern, M1), so a value matching no arm is a runtime error.
-    fn eval_match(&mut self, value: Value, arms: &[MatchArm], span: Span) -> Eval<Value> {
-        for arm in arms {
-            if let Some(bindings) = match_pattern(&arm.pattern, &value) {
-                let child = Scope::child(&self.scope);
-                for (name, bound) in bindings {
-                    child.declare(name, bound, false);
-                }
-                let saved = std::mem::replace(&mut self.scope, child);
-                let result = self.eval_expr(&arm.body);
-                self.scope = saved;
-                return result;
-            }
-        }
-        Err(self.runtime_error(
-            DiagnosticCode::TypeMismatch,
-            span,
-            format!("no match arm matched the value {}", value.display()),
-        ))
-    }
-
-    /// The `?` operator. On `Ok(x)`/`some(x)` it yields `x`; on `Err(e)`/`none` it
-    /// short-circuits via [`Unwind::Return`], propagating that value out of the enclosing
-    /// function (caught at the call boundary in [`Interpreter::call_closure`]).
-    fn eval_try(&mut self, value: Value, span: Span) -> Eval<Value> {
-        match try_branch(&value) {
-            Some(TryBranch::Success(inner)) => Ok(inner),
-            Some(TryBranch::Empty) => Err(Unwind::Return(value)),
-            None => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!(
-                    "`?` expects a `Result` or `Option`, found {}",
-                    value.type_name()
-                ),
-            )),
-        }
-    }
-
     /// `?` for the Core-IR interpreter: like [`eval_try`](Self::eval_try), but on the **error** path
     /// it first runs `on_error` — the drop pass's statically-computed reclamation of the frame locals
     /// this early return abandons (Phase 4.2c) — so a `?` propagation destroys them exactly as an
@@ -2562,23 +1623,6 @@ impl Interpreter {
                 span,
                 format!(
                     "`?` expects a `Result` or `Option`, found {}",
-                    value.type_name()
-                ),
-            )),
-        }
-    }
-
-    /// The `??` operator. On `Ok(x)`/`some(x)` it yields `x`; on `Err(_)`/`none` it
-    /// evaluates and yields the `fallback` expression.
-    fn eval_coalesce(&mut self, value: Value, fallback: &Expr, span: Span) -> Eval<Value> {
-        match try_branch(&value) {
-            Some(TryBranch::Success(inner)) => Ok(inner),
-            Some(TryBranch::Empty) => self.eval_expr(fallback),
-            None => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!(
-                    "`??` expects a `Result` or `Option` on the left, found {}",
                     value.type_name()
                 ),
             )),
@@ -3649,11 +2693,7 @@ impl Interpreter {
             call_scope.declare(closure.params[i].clone(), value, false);
         }
         let saved = std::mem::replace(&mut self.scope, call_scope);
-        let result = match &closure.body {
-            FnBody::Arrow(expr) => self.eval_expr(expr),
-            FnBody::Block(stmts) => self.exec_fn_body(stmts),
-            FnBody::Ir(func) => self.exec_ir_fn_body(func),
-        };
+        let result = self.exec_ir_fn_body(&closure.body);
         self.scope = saved;
         catch_return(result)
     }
@@ -3698,11 +2738,7 @@ impl Interpreter {
             call_scope.declare(method.params[i].clone(), value, false);
         }
         let saved = std::mem::replace(&mut self.scope, call_scope);
-        let result = match &method.body {
-            FnBody::Arrow(expr) => self.eval_expr(expr),
-            FnBody::Block(stmts) => self.exec_fn_body(stmts),
-            FnBody::Ir(func) => self.exec_ir_fn_body(func),
-        };
+        let result = self.exec_ir_fn_body(&method.body);
         self.scope = saved;
         catch_return(result)
     }
@@ -3737,11 +2773,7 @@ impl Interpreter {
             call_scope.declare(method.params[i].clone(), value, false);
         }
         let saved = std::mem::replace(&mut self.scope, call_scope);
-        let result = match &method.body {
-            FnBody::Arrow(expr) => self.eval_expr(expr),
-            FnBody::Block(stmts) => self.exec_fn_body(stmts),
-            FnBody::Ir(func) => self.exec_ir_fn_body(func),
-        };
+        let result = self.exec_ir_fn_body(&method.body);
         self.scope = saved;
         catch_return(result)
     }
@@ -3756,21 +2788,9 @@ impl Interpreter {
             .expect("an omitted argument must correspond to a defaulted parameter");
         let scope = Scope::child(&closure.captured);
         let saved = std::mem::replace(&mut self.scope, scope);
-        let result = match default {
-            DefaultThunk::Ast(expr) => self.eval_expr(expr),
-            DefaultThunk::Ir(thunk) => self.exec_ir_thunk(thunk),
-        };
+        let result = self.exec_ir_thunk(default);
         self.scope = saved;
         result
-    }
-
-    fn exec_fn_body(&mut self, stmts: &[Stmt]) -> Eval<Value> {
-        match self.exec_stmts(stmts)? {
-            Flow::Return(value) => Ok(value),
-            // A bare `break`/`continue` cannot escape to a function boundary (the checker rejects
-            // one outside a loop, and a loop intercepts its own); fall through like `Normal`.
-            Flow::Normal | Flow::Break | Flow::Continue => Ok(Value::Unit),
-        }
     }
 
     fn call_builtin(&mut self, builtin: Builtin, args: Vec<Value>, span: Span) -> Eval<Value> {
@@ -3936,17 +2956,6 @@ impl Interpreter {
         }
     }
 
-    fn eval_binary(&mut self, op: BinaryOp, lhs: &Expr, rhs: &Expr, span: Span) -> Eval<Value> {
-        // Logical operators short-circuit, so the right side is evaluated lazily.
-        if matches!(op, BinaryOp::And | BinaryOp::Or) {
-            let left = self.eval_expr(lhs)?;
-            return self.eval_logical(op, left, rhs, span);
-        }
-        let left = self.eval_expr(lhs)?;
-        let right = self.eval_expr(rhs)?;
-        self.apply_binary_op(op, left, right, span)
-    }
-
     /// Apply a **non-short-circuiting** binary operator to already-evaluated operands,
     /// including operator-trait dispatch on user objects. Extracted from [`Self::eval_binary`]
     /// so the Core-IR interpreter (whose operands are pre-evaluated atoms) shares the exact
@@ -4057,41 +3066,6 @@ impl Interpreter {
         match ops::apply_binary(op, &left, &right) {
             Ok(value) => Ok(value),
             Err(error) => Err(self.runtime_error(error.code, span, error.text)),
-        }
-    }
-
-    fn eval_logical(&mut self, op: BinaryOp, left: Value, rhs: &Expr, span: Span) -> Eval<Value> {
-        let Value::Bool(left) = left else {
-            return Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!(
-                    "`{}` expects a bool on the left, found {}",
-                    op.symbol(),
-                    left.type_name()
-                ),
-            ));
-        };
-        let short_circuit = match op {
-            BinaryOp::And => !left,
-            BinaryOp::Or => left,
-            _ => unreachable!("eval_logical only handles && and ||"),
-        };
-        if short_circuit {
-            return Ok(Value::Bool(left));
-        }
-        let right = self.eval_expr(rhs)?;
-        match right {
-            Value::Bool(b) => Ok(Value::Bool(b)),
-            other => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!(
-                    "`{}` expects a bool on the right, found {}",
-                    op.symbol(),
-                    other.type_name()
-                ),
-            )),
         }
     }
 
@@ -4559,7 +3533,7 @@ fn catch_return(result: Eval<Value>) -> Eval<Value> {
 
 /// The number of required (non-defaulted) parameters: the leading run with no default value.
 /// `defaults` is parallel to a closure's parameter list, so this is the lowest legal argument count.
-fn required_count(defaults: &[Option<DefaultThunk>]) -> usize {
+fn required_count(defaults: &[Option<lang_ir::Thunk>]) -> usize {
     defaults
         .iter()
         .position(Option::is_some)
