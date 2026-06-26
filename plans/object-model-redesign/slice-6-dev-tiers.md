@@ -245,11 +245,14 @@ support for a raw-text span — the one genuinely new lexing concern).
 
 ## Open questions to settle before/during implementation
 
-1. **The user-program test-runner command.** `lang test` is taken by the *conformance corpus*
-   runner (an internal dev tool). The user-facing `@test`-block runner needs a command — reuse
-   `lang test <FILE>` (and move conformance behind an internal flag/path), or a distinct verb
-   (`lang check`? `lang spec`?). **Recommend:** `lang test <FILE>` for programs, conformance moves to
-   an internal `--corpus`/dev-only path.
+1. **The user-program test-runner command — SETTLED (2026-06-27).** `lang test`/`--differential`/
+   `--check-leaks` today drive the *conformance corpus* (an internal tool that tests **the
+   implementation** — two backends agree, no leaks). That has no place in the shipped runtime CLI, so
+   it **moves out of `lang-cli` into a dev-only binary** (the conformance *logic* already lives in the
+   `lang-conformance` crate as a lib; only the subcommand wiring is in `lang-cli/src/main.rs` — give
+   `lang-conformance` its own `[[bin]]` / drive via `cargo test` / an xtask). That frees the verbs:
+   **`lang test <FILE>` / `lang bench` become the user-facing tier runners**, `lang doc` the text
+   extractor. (Independent cleanup; can land before or with 6a.)
 2. **`@tier` declaration syntax.** `@tier name : code` vs `@tier(code) name` vs a prelude-only
    built-in form for slice 6 (defer the user-facing `@tier` decl to the package milestone, since a
    third-party tier can't be *activated* without the manifest anyway). **Recommend:** built-in tiers

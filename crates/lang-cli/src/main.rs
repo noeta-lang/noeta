@@ -1,16 +1,16 @@
-//! `lang` — the toolchain binary.
+//! `lang` — the user-facing toolchain binary.
 //!
-//! M0 exposes three subcommands: `run` (execute a file), `repl` (interactive), and
-//! `test` (run the conformance corpus). All three drive the same pipeline crates, so
-//! the binary is thin glue. The binary is named `lang` (placeholder pending the real
-//! language name).
+//! Exposes `run` (execute a file) and `repl` (interactive); both drive the same pipeline crates, so
+//! the binary is thin glue. The binary is named `lang` (placeholder pending the real language name).
+//! The conformance corpus / differential / leak harness that tests the *implementation* is a
+//! separate dev binary (`lang-conformance`), not a subcommand here — keeping the `lang test` verb
+//! free for a user program's own `@test {}` blocks (object-model slice 6).
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use lang_conformance::{Stage, run_corpus, run_differential, run_leak_check};
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::{TokenKind, lex};
@@ -34,53 +34,12 @@ enum Command {
     },
     /// Start an interactive REPL.
     Repl,
-    /// Run the conformance corpus.
-    Test {
-        /// Emit machine-readable JSON instead of human text.
-        #[arg(long)]
-        json: bool,
-        /// Only run cases whose path ends with this (e.g. `orders/empty.lang`).
-        #[arg(long, value_name = "PATH")]
-        file: Option<PathBuf>,
-        /// Run only through this pipeline stage: `lexer`, `parser`, or `eval`.
-        #[arg(long, value_name = "STAGE")]
-        stage: Option<String>,
-        /// Cross-check the M1 bytecode VM against the M0 tree-walker (the differential
-        /// oracle) instead of running expectations. Programs the VM cannot compile yet are
-        /// skipped; any divergence on a compiled program fails.
-        #[arg(long)]
-        differential: bool,
-        /// Run the leak oracle: execute every corpus program on both backends and report any
-        /// heap still live after it returns (residency 0 is the goal). Exits non-zero if any
-        /// program leaks — including the known nested-closure cycles Phase 6 will reap.
-        #[arg(long)]
-        check_leaks: bool,
-        /// The corpus root directory.
-        #[arg(long, default_value = "tests/conformance")]
-        dir: PathBuf,
-    },
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Run { file } => cmd_run(&file),
         Command::Repl => cmd_repl(),
-        Command::Test {
-            json,
-            file,
-            stage,
-            differential,
-            check_leaks,
-            dir,
-        } => {
-            if check_leaks {
-                cmd_leaks(file.as_deref(), &dir)
-            } else if differential {
-                cmd_differential(file.as_deref(), &dir)
-            } else {
-                cmd_test(json, file.as_deref(), stage.as_deref(), &dir)
-            }
-        }
     }
 }
 
@@ -408,65 +367,6 @@ fn emit_session(source: &Source, out: SessionOutput) {
     }
     let _ = io::stdout().flush();
     emit_diagnostics(source, out.diagnostics.iter());
-}
-
-fn cmd_test(
-    json: bool,
-    file: Option<&std::path::Path>,
-    stage: Option<&str>,
-    dir: &std::path::Path,
-) -> ExitCode {
-    let stage = match stage {
-        Some(name) => match Stage::parse(name) {
-            Some(stage) => stage,
-            None => {
-                eprintln!("lang: unknown stage `{name}` (expected lexer, parser, or eval)");
-                return ExitCode::from(2);
-            }
-        },
-        None => Stage::default(),
-    };
-
-    let report = run_corpus(dir, file, stage);
-
-    if json {
-        println!("{}", report.to_json());
-    } else {
-        print!("{}", report.to_human());
-    }
-
-    if report.all_passed() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
-}
-
-/// Run the differential oracle over the corpus: the M1 VM cross-checked against the M0
-/// tree-walker. Exits non-zero only on a genuine divergence (skipped/unsupported programs
-/// do not fail).
-fn cmd_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
-    let report = run_differential(dir, file);
-    print!("{}", report.to_human());
-    if report.ok() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
-}
-
-/// Run the leak oracle over the corpus: every program executes on both backends and any heap
-/// still live after it returns is reported (architecture §0). Exits non-zero if any program
-/// leaks — the authoritative regression gate (with its known-debt allowlist) is the conformance
-/// corpus test; this is the developer-facing inspection view.
-fn cmd_leaks(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
-    let report = run_leak_check(dir, file);
-    print!("{}", report.to_human());
-    if report.ok() {
-        ExitCode::SUCCESS
-    } else {
-        ExitCode::FAILURE
-    }
 }
 
 fn exit_code(code: i32) -> ExitCode {

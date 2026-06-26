@@ -22,11 +22,15 @@ lang-compiler = { workspace = true }
 lang-vm = { workspace = true }
 lang-db = { workspace = true }
 lang-loader = { workspace = true }
+clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
 [dev-dependencies]
 insta = { workspace = true }
+assert_cmd = { workspace = true }
+predicates = { workspace = true }
+serde_json = { workspace = true }
 
 [lints]
 workspace = true

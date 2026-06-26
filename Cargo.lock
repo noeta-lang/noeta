@@ -635,7 +635,6 @@ dependencies = [
  "assert_cmd",
  "clap",
  "lang-check",
- "lang-conformance",
  "lang-diagnostics",
  "lang-eval",
  "lang-ir",
@@ -646,7 +645,6 @@ dependencies = [
  "lang-runtime",
  "lang-span",
  "predicates",
- "serde_json",
 ]
 
 [[package]]
@@ -671,6 +669,8 @@ dependencies = [
 name = "lang-conformance"
 version = "0.0.0"
 dependencies = [
+ "assert_cmd",
+ "clap",
  "insta",
  "lang-ast",
  "lang-backend",
@@ -687,6 +687,7 @@ dependencies = [
  "lang-span",
  "lang-value",
  "lang-vm",
+ "predicates",
  "serde",
  "serde_json",
 ]

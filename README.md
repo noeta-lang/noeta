@@ -28,6 +28,6 @@ Requires a recent stable Rust toolchain.
 cargo build                              # build the workspace
 cargo test                               # unit + snapshot + conformance + property tests
 cargo run -p lang-cli -- run <file>.lang # run a program
-cargo run -p lang-cli -- test            # run the language conformance suite
 cargo run -p lang-cli -- repl            # interactive REPL
+cargo run -p lang-conformance            # run the language conformance suite (dev harness)
 ```

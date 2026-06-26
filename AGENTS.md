@@ -23,7 +23,7 @@ source ─► lang-lexer ─► tokens ─► lang-parser ─► AST (lang-ast) 
   rejected before either backend runs, so both stay observably identical.
 ```
 
-Both backends implement `lang-backend::Backend`. The conformance harness runs a program through both and asserts identical `RunResult`s — the **differential oracle** (`lang test --differential`). The tree-walker is frozen as the reference; the VM must reproduce it. While the VM compiles only a growing subset, programs it can't lower yet are *skipped* (a climbing coverage %), never failed.
+Both backends implement `lang-backend::Backend`. The conformance harness runs a program through both and asserts identical `RunResult`s — the **differential oracle** (`cargo run -p lang-conformance -- --differential`, the dev binary). The tree-walker is frozen as the reference; the VM must reproduce it. While the VM compiles only a growing subset, programs it can't lower yet are *skipped* (a climbing coverage %), never failed.
 
 Each stage is its own crate with explicit input/output types and no hidden shared mutable state, so a change is local to one crate and verifiable by that crate's tests.
 

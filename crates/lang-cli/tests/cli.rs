@@ -1,14 +1,14 @@
-//! End-to-end tests for the `lang` binary itself: the `run`, `repl`, and `test`
-//! subcommands, driven through a real process so the CLI glue, exit codes, stdout/stderr
-//! split, and the REPL's interactive behaviour are all exercised (none of which the
-//! library-level tests can reach).
+//! End-to-end tests for the `lang` binary itself: the `run` and `repl` subcommands, driven through
+//! a real process so the CLI glue, exit codes, stdout/stderr split, and the REPL's interactive
+//! behaviour are all exercised (none of which the library-level tests can reach). The conformance
+//! corpus runner moved to its own dev binary (`lang-conformance`), with its CLI tests alongside it.
 
 use std::path::PathBuf;
 
 use assert_cmd::Command;
 use predicates::prelude::*;
 
-/// The workspace root, so `run`/`test` see `examples/` and `tests/conformance/`.
+/// The workspace root, so `run` sees `examples/`.
 fn workspace() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
 }
@@ -169,56 +169,4 @@ fn repl_recovers_from_a_bad_entry() {
         .success()
         .stdout(predicate::str::contains("ok"))
         .stderr(predicate::str::contains("E0003"));
-}
-
-// --- `test` -----------------------------------------------------------------------
-
-#[test]
-fn test_subcommand_runs_the_corpus_green() {
-    lang()
-        .current_dir(workspace())
-        .arg("test")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("passed").and(predicate::str::contains("0 failed")));
-}
-
-#[test]
-fn test_json_output_is_valid_and_reports_passes() {
-    let output = lang()
-        .current_dir(workspace())
-        .args(["test", "--json"])
-        .assert()
-        .success();
-    let stdout = String::from_utf8(output.get_output().stdout.clone()).expect("utf-8");
-    let json: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON report");
-    assert!(json.get("cases").and_then(|c| c.as_array()).is_some());
-    assert!(
-        json["cases"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|c| c["status"] == "pass")
-    );
-}
-
-#[test]
-fn test_stage_and_file_filters_work() {
-    lang()
-        .current_dir(workspace())
-        .args(["test", "--stage", "parser", "--file", "hello.lang"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("1 passed"));
-}
-
-#[test]
-fn test_unknown_stage_exits_2() {
-    lang()
-        .current_dir(workspace())
-        .args(["test", "--stage", "nonsense"])
-        .assert()
-        .failure()
-        .code(2)
-        .stderr(predicate::str::contains("unknown stage"));
 }
