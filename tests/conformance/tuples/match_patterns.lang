@@ -1,0 +1,33 @@
+// Object-model slice 4b.2 — refutable tuple patterns in `match`. A pattern `(p, q, …)` matches a
+// tuple of the same arity, destructuring each position against its sub-pattern (literals, bindings,
+// wildcards, and nested tuple patterns all compose). Both backends agree.
+// expect: stdout "origin"
+// expect: stdout "y-axis at 5"
+// expect: stdout "x-axis at 3"
+// expect: stdout "at 3,4"
+// expect: stdout "n=1 s=a flag=true"
+// expect: stdout "first is one"
+// expect: exit 0
+fn classify(p: (int, int)): string {
+    return match p {
+        (0, 0) => "origin",
+        (0, y) => "y-axis at ${y}",
+        (x, 0) => "x-axis at ${x}",
+        (x, y) => "at ${x},${y}",
+    };
+}
+echo classify((0, 0));
+echo classify((0, 5));
+echo classify((3, 0));
+echo classify((3, 4));
+
+// Nested tuple patterns destructure recursively.
+echo match (1, ("a", true)) {
+    (n, (s, flag)) => "n=${n} s=${s} flag=${flag}",
+};
+
+// Wildcards in tuple positions.
+echo match (1, "one", 9.9) {
+    (1, label, _) => "first is ${label}",
+    (_, _, _)     => "other",
+};

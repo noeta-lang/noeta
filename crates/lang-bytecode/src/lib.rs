@@ -569,6 +569,14 @@ pub enum Op {
         arity: u16,
         fail: u32,
     },
+    /// A `match` **tuple** test (object-model slice 4b.2): if `src` is a tuple of exactly `arity`
+    /// elements, continue; else jump to `fail`. Elements are then read with `TupleIndex` for the
+    /// sub-patterns.
+    MatchTuple {
+        src: Reg,
+        arity: u16,
+        fail: u32,
+    },
     /// `dst = src.data[index]` (retained) — extract an enum variant's positional field for a
     /// sub-pattern, after a `MatchVariant` has confirmed the shape.
     ExtractField {
@@ -1089,6 +1097,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
                 None => String::new(),
             };
             format!("MatchVariant r{src} is {qualifier}{variant}/{arity} else -> {fail}")
+        }
+        Op::MatchTuple { src, arity, fail } => {
+            format!("MatchTuple  r{src} is tuple/{arity} else -> {fail}")
         }
         Op::ExtractField { dst, src, index } => format!("ExtractField r{dst} <- r{src}.{index}"),
         Op::MatchFail { src, .. } => format!("MatchFail   r{src}"),

@@ -820,6 +820,7 @@ where
 
         // `(sub, sub)` binding list of a variant pattern.
         let bindings = pat
+            .clone()
             .separated_by(just(T::Comma))
             .collect::<Vec<_>>()
             .delimited_by(just(T::LParen), just(T::RParen));
@@ -856,6 +857,19 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // A tuple pattern `(p, q, …)` — ≥2 sub-patterns in parens (object-model slice 4b.2). Starts
+        // with `(`, distinct from a variant pattern's `id(subs)`, so the two never collide.
+        let tuple = pat
+            .clone()
+            .separated_by(just(T::Comma))
+            .at_least(2)
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::LParen), just(T::RParen))
+            .map_with(move |elements, e| Pattern::Tuple {
+                elements,
+                span: ctx.to_span(e.span()),
+            });
+
         // A bare lowercase name binds; `_` matches anything.
         let plain = id.map(|(name, span)| {
             if name == "_" {
@@ -865,7 +879,17 @@ where
             }
         });
 
-        choice((int, str_, bool_, is_type, qualified, unqualified, plain)).boxed()
+        choice((
+            int,
+            str_,
+            bool_,
+            is_type,
+            qualified,
+            unqualified,
+            tuple,
+            plain,
+        ))
+        .boxed()
     })
 }
 

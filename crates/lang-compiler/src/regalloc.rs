@@ -322,6 +322,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*src);
             f.targets.push(*fail);
         }
+        Op::MatchTuple { src, fail, .. } => {
+            f.uses.push(*src);
+            f.targets.push(*fail);
+        }
         Op::ExtractField { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
@@ -696,6 +700,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::MatchStr { src, .. } => m(src),
         Op::MatchBool { src, .. } => m(src),
         Op::MatchVariant { src, .. } => m(src),
+        Op::MatchTuple { src, .. } => m(src),
         Op::ExtractField { dst, src, .. } => {
             m(dst);
             m(src);

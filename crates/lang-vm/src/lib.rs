@@ -3080,6 +3080,19 @@ impl<'m> Vm<'m> {
                         frames[top].pc = *fail as usize;
                     }
                 }
+                // A tuple pattern test (object-model slice 4b.2): `src` must be a tuple of exactly
+                // `arity` elements. The elements are then read with `TupleIndex` for sub-patterns.
+                Op::MatchTuple { src, arity, fail } => {
+                    let v = frames[top].regs[*src as usize];
+                    let matches = v
+                        .tuple_items()
+                        .is_some_and(|items| items.len() == *arity as usize);
+                    if matches {
+                        frames[top].pc += 1;
+                    } else {
+                        frames[top].pc = *fail as usize;
+                    }
+                }
                 Op::ExtractField { dst, src, index } => {
                     let element =
                         frames[top].regs[*src as usize].enum_data().unwrap()[*index as usize];
@@ -4929,6 +4942,17 @@ mod tests {
             "p = (1, \"two\", 3.0);\necho p;\necho p.1;\nn = ((1, 2), (3, 4));\necho n.1.0;\necho p == (1, \"two\", 3.0);\necho p == (1, \"two\", 4.0);\n",
         );
         assert_eq!(r.stdout, "(1, \"two\", 3.0)\ntwo\n3\ntrue\nfalse\n");
+        assert_eq!(r.exit_code, 0);
+    }
+
+    #[test]
+    fn match_tuple_patterns() {
+        // Object-model slice 4b.2: refutable tuple patterns in `match` — literal, binding, wildcard,
+        // and nested tuple positions all compose (the `MatchTuple` test + `TupleIndex` extraction).
+        let r = run(
+            "fn f(p: (int, int)): string { return match p { (0, 0) => \"o\", (0, y) => \"y${y}\", (x, _) => \"x${x}\" }; }\necho f((0, 0));\necho f((0, 7));\necho f((3, 9));\necho match (1, (\"a\", true)) { (n, (s, b)) => \"${n}/${s}/${b}\" };\n",
+        );
+        assert_eq!(r.stdout, "o\ny7\nx3\n1/a/true\n");
         assert_eq!(r.exit_code, 0);
     }
 

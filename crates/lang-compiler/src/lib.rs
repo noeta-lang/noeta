@@ -1449,7 +1449,8 @@ impl<'m> FnCompiler<'m> {
             | Op::MatchInt { fail: t, .. }
             | Op::MatchStr { fail: t, .. }
             | Op::MatchBool { fail: t, .. }
-            | Op::MatchVariant { fail: t, .. } => *t = target,
+            | Op::MatchVariant { fail: t, .. }
+            | Op::MatchTuple { fail: t, .. } => *t = target,
             _ => unreachable!("patching a jump we just emitted"),
         }
     }
@@ -2922,10 +2923,26 @@ impl<'m> FnCompiler<'m> {
                     target: 0,
                 });
             }
-            // Tuple patterns in `match` are slice 4b.2 — the parser does not yet produce them, so
-            // this is unreachable in 4b.1.
-            Pattern::Tuple { .. } => {
-                unreachable!("match tuple patterns are object-model slice 4b.2")
+            // A tuple pattern `(p, q, …)` (object-model slice 4b.2): test the value is a tuple of
+            // the right arity (fail-jump otherwise), then project each element with `TupleIndex` and
+            // recurse — the structural mirror of the variant case's `MatchVariant` + `ExtractField`.
+            Pattern::Tuple { elements, span } => {
+                fail_jumps.push(self.code.len());
+                self.code.push(Op::MatchTuple {
+                    src: reg,
+                    arity: elements.len() as u16,
+                    fail: 0,
+                });
+                for (i, sub) in elements.iter().enumerate() {
+                    let dr = self.alloc_reg();
+                    self.code.push(Op::TupleIndex {
+                        dst: dr,
+                        receiver: reg,
+                        index: i as u32,
+                        span: *span,
+                    });
+                    self.emit_pattern(sub, dr, fail_jumps);
+                }
             }
         }
     }
