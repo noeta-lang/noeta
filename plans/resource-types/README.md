@@ -1,5 +1,13 @@
 # The `resource` kind — a first-class reference type for stateful resources
 
+> **SUPERSEDED (2026-06) by [`plans/object-model-redesign/README.md`](../object-model-redesign/README.md).**
+> A later design discussion concluded that a dedicated `resource` *kind* is unnecessary: making
+> **`class` the reference kind** (value `struct` vs reference `class`, the Swift/C#/Java split) makes a
+> "resource" simply **a class with a `destruct`** — file handles, connections, locks are reference
+> classes. The reference-semantics, `!Send`-across-isolates, and must-close concerns below are folded
+> into the class section of the redesign doc. This file is retained for its rationale; the live design
+> is the redesign. Do not implement from this document.
+
 **Status: design backlog, NOT scheduled.** This is a sequencing/shape document, not a slice plan
 and not gated work. It captures the design and the trigger conditions so the insight isn't lost; it
 is picked up when one of the triggers below fires.

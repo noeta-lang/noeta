@@ -58,9 +58,26 @@ stdlib type (chunk-presence `u64` summary + SIMD newline scan) proving every pri
 **Next free diagnostic code at time of writing:** E0034 (E0033 went to Phase-5.2 mut-fields; provisional allocations E0034–E0039 in the
 README). When Tier B graduates into slices, strike this entry and point to them.
 
-## The `resource` kind — a first-class reference type (and why not general pointers)
+## Object-model redesign — `struct`/`class`/`enum`/tuple + dev-tier blocks
 
-**Status:** design backlog, not scheduled. Full doc at **`plans/resource-types/README.md`**.
+**Status:** design, not scheduled. Full doc at **`plans/object-model-redesign/README.md`**. From a
+2026-06 design discussion. **Supersedes the `resource`-kind entry below.** Makes the kind keyword the
+value/reference distinction: **value `struct`** (rename of `record`; COW; packed when all-primitive)
+vs **reference `class`** (identity, sharing, `!Send`, and `destruct` — so a "resource" is just a class
+with a destructor; file handles/connections are classes). Methods + bodies on all three kinds (enums
+gain a body); `==` structural for struct/enum, identity-default + `Equatable` for class with `===`
+always identity; opt-in per-field defaults; **tuples** for throwaway heterogeneous grouping (no
+anonymous structs); standalone `impl` becomes uniformly optional. Plus a **dev-tier blocks** slice:
+co-located, tree-shaken (via the existing DCE), manifest-discovered `test`/`bench`/`doc` blocks built
+on one `@dev`-declared-tier primitive (content-kind = code|text), `test` implemented first — the clean
+co-located-TDD experience PHP can't strip. Re-scopes Phase 5.2 (class-as-value → struct), breaking
+surface migration (`record`/`type X={}` → `struct X{}`).
+
+## The `resource` kind — a first-class reference type (and why not general pointers) — SUPERSEDED
+
+**SUPERSEDED by the object-model redesign above** (a `resource` kind is unnecessary — a resource is a
+class with a `destruct`). Retained for rationale. **Status:** design backlog, not scheduled. Full doc
+at **`plans/resource-types/README.md`** (carries a superseded banner).
 Provenance: arose from the Phase-5.2b decision (file handles are reference types) + a user question
 (2026-06-26) on whether reference semantics / pointers belong in a value-semantic (COW) language.
 
