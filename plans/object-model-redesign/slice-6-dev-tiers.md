@@ -253,13 +253,17 @@ support for a raw-text span — the one genuinely new lexing concern).
   (`@test {` → block, `@test fn` → annotation, `@derive(...) struct` → backtracks to the decorator
   path). Wraps a top-level `fn`; test-only *types* use the block form. Snapshot + conformance strip
   test + CLI integration test. Conformance 289.
-- **6d — same-namespace private access** (in-source vs separate-file visibility). **Finding:**
-  module-private **fns** already work for in-source tests by construction (`activate_tiers` inlines a
-  `@test` block into the *same* module, so a test fn is ordinary same-module code). Private **fields**
-  (E0035, type-scoped) are NOT accessible — a test fn is in the module but outside the type. Open
-  decision: white-box field access for in-source tests (Rust `#[cfg(test)]` model) vs. tests exercise
-  the public/method surface only. The "separate test-tier *file* sees only `pub`" half depends on the
-  package/test-file system (deferred to the package milestone).
+- **6d — same-namespace private access. ✅ DONE (`a65bde2`).** Module-private **fns** already worked
+  for in-source tests by construction (`activate_tiers` inlines a `@test` block into the *same*
+  module). This slice added **white-box private-*field* access** (the Rust `#[cfg(test)]` model,
+  chosen with the user over public-surface-only): inside a test fn the type-scoped E0035 gate is
+  relaxed, so a test reads/writes/constructs private `class` fields to assert on internal state.
+  Provenance carried through inlining via `FnDecl.is_dev_tier` (parser `false`; `activate_tiers`
+  `true` on every lifted fn) → checker `in_dev_tier` (set in `check_fn`, sticky for nested fns) →
+  `field_visible` allows when set (one chokepoint shared by read/assign/construct). **Scoped:**
+  ordinary same-module code reading a private field is still E0035. The "separate test-tier *file*
+  sees only `pub`" half depends on the package/test-file system (deferred to the package milestone) —
+  today every tier block is in-source, so program-wide access = same-module access.
 - **Later:** `@debug` statement form; `bench`; `doc` (text content-kind + verbatim capture +
   extraction); the profiles/TOML provider-map + manifest; third-party tiers.
 
