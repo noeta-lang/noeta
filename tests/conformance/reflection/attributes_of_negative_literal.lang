@@ -1,0 +1,17 @@
+// A negative numeric attribute argument (`-5`, `-1.5`) is a literal: the surface has no negative
+// number token, so `-5` parses as unary minus over `5` and is folded to the constant `-5` at
+// manifest-build time. It round-trips through `attributes_of` into a correctly-built instance, and
+// both backends materialize the same value, so the differential agrees.
+// expect: stdout "-5"
+// expect: stdout "-1.5"
+// expect: exit 0
+@attribute
+struct Threshold { low: int rate: float }
+
+#[Threshold(low: -5, rate: -1.5)]
+struct Sensor { id: int }
+
+for t in attributes_of::<Threshold>() {
+    echo t.value.low
+    echo t.value.rate
+}

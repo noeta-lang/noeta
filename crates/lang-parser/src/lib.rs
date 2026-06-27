@@ -142,6 +142,17 @@ fn expr_to_attr_value(expr: &Expr) -> Result<AttrValue, (String, Span)> {
         Expr::Int { value, .. } => Ok(AttrValue::Int(*value)),
         Expr::Float { value, .. } => Ok(AttrValue::Float(*value)),
         Expr::Bool { value, .. } => Ok(AttrValue::Bool(*value)),
+        // A negated numeric literal: `-5` / `-4.2` parse as unary minus over a literal, so fold it
+        // here (the surface has no negative-number token) — `#[Data([-5])]`, `#[Cache(ttl: -1)]`.
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+            ..
+        } => match expr_to_attr_value(operand)? {
+            AttrValue::Int(n) => Ok(AttrValue::Int(-n)),
+            AttrValue::Float(f) => Ok(AttrValue::Float(-f)),
+            _ => Err(not_literal()),
+        },
         Expr::List { items, .. } => Ok(AttrValue::List(
             items
                 .iter()
@@ -3173,6 +3184,21 @@ mod tests {
         assert_eq!(attr_names, ["Skip", "Group"]);
         // The trailing `#[Route(...)] struct` still parses via the decorator path.
         assert!(matches!(&parsed.program.stmts[1], Stmt::Struct(_)));
+    }
+
+    #[test]
+    fn negative_attribute_literals_fold_to_constants() {
+        // `-1` / `-2.5` in attribute-argument position parse as unary minus over a literal and fold
+        // to a negative constant (object-model slice 6i) — the surface has no negative-number token.
+        let parsed = parse_str("#[Cache(ttl: -1, rate: -2.5)]\nstruct X { id: int }\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Struct(s) = &parsed.program.stmts[0] else {
+            panic!("expected struct");
+        };
+        let attr = &s.attrs[0];
+        assert_eq!(attr.name, "Cache");
+        assert!(matches!(attr.args[0].value, AttrValue::Int(-1)));
+        assert!(matches!(attr.args[1].value, AttrValue::Float(f) if (f + 2.5).abs() < 1e-9));
     }
 
     #[test]
