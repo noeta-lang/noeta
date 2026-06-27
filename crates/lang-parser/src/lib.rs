@@ -1079,14 +1079,18 @@ where
             },
         );
 
-        // Anonymous function: `fn(params) => expr`. A closure parameter may carry a default; it is
-        // evaluated in the closure's captured (definition) scope, like the closure body.
+        // Anonymous function: `fn(params) => expr`, with an optional return-type annotation
+        // `fn(params): Ret => expr` (mirroring a named `fn`'s `): Ret`; optional because a closure is
+        // interior and normally inferred). A closure parameter may carry a default; it is evaluated
+        // in the closure's captured (definition) scope, like the closure body.
         let closure = just(T::FnKw)
             .ignore_then(params_parser(ctx, sub.clone(), true))
+            .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then_ignore(just(T::FatArrow))
             .then(sub.clone())
-            .map_with(move |(params, body), e| Expr::Closure {
+            .map_with(move |((params, ret), body), e| Expr::Closure {
                 params,
+                ret,
                 body: Box::new(body),
                 span: ctx.to_span(e.span()),
             });

@@ -1350,10 +1350,12 @@ mod tests {
         let first = list.packed_get(0);
         assert_eq!(first.display(), "V {x: 3, y: 1}");
         let constructed = Value::object(Rc::clone(&shape), vec![Value::int(3), Value::int(1)]);
-        assert!(apply_binary(lang_ast::BinaryOp::Eq, first, constructed)
-            .unwrap()
-            .as_bool()
-            .unwrap());
+        assert!(
+            apply_binary(lang_ast::BinaryOp::Eq, first, constructed)
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
         first.release();
         constructed.release();
 
@@ -1363,10 +1365,12 @@ mod tests {
             Value::object(Rc::clone(&shape), vec![Value::int(3), Value::int(1)]),
             Value::object(Rc::clone(&shape), vec![Value::int(1), Value::int(2)]),
         ]);
-        assert!(apply_binary(lang_ast::BinaryOp::Eq, list, boxed)
-            .unwrap()
-            .as_bool()
-            .unwrap());
+        assert!(
+            apply_binary(lang_ast::BinaryOp::Eq, list, boxed)
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
         boxed.release();
 
         // Release the packed list (a leaf — frees the buffer, no child release), so miri sees no leak.

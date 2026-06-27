@@ -801,7 +801,11 @@ impl Lowerer {
                     *span,
                 ))
             }
-            Expr::Closure { params, body, span } => {
+            // The return annotation is runtime-erased (the checker has already used it); lowering
+            // ignores it, exactly as it ignores parameter type annotations.
+            Expr::Closure {
+                params, body, span, ..
+            } => {
                 let func = self.lower_func(params, BodyKind::Arrow(body), *span)?;
                 Ok(self.emit(
                     out,

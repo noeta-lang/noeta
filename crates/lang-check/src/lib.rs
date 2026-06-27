@@ -2218,7 +2218,12 @@ impl Checker {
             // A closure absorbs an expected function type: an explicit parameter annotation wins,
             // otherwise the parameter adopts the expected type; the body is checked against the
             // expected return.
-            Expr::Closure { params, body, .. } if matches!(expected, Type::Fn { .. }) => {
+            Expr::Closure {
+                params,
+                ret: ann,
+                body,
+                ..
+            } if matches!(expected, Type::Fn { .. }) => {
                 let Type::Fn {
                     params: expected_params,
                     ret,
@@ -2236,11 +2241,18 @@ impl Checker {
                     });
                     bind(env, &p.name, pty);
                 }
-                let body_ty = self.check(body, ret, env);
+                // An explicit return annotation is the body's expected type and the closure's return
+                // type; it must also satisfy the context's expected return. Without one the expected
+                // return drives the body, as before.
+                let declared = ann.as_ref().map(Type::from_ref);
+                let body_ty = self.check(body, declared.as_ref().unwrap_or(ret), env);
                 env.pop();
+                if let Some(declared) = &declared {
+                    self.subsume(declared, ret, body.span());
+                }
                 Type::Fn {
                     params: params.iter().map(param_type).collect(),
-                    ret: Box::new(body_ty),
+                    ret: Box::new(declared.unwrap_or(body_ty)),
                 }
             }
             // Default: synthesize the actual type, then require it to be a subtype of the
@@ -2367,13 +2379,27 @@ impl Checker {
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
                 self.synth_call(callee, &arg_types, env)
             }
-            Expr::Closure { params, body, .. } => {
+            Expr::Closure {
+                params,
+                ret: ann,
+                body,
+                ..
+            } => {
                 self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
                 for p in params {
                     bind(env, &p.name, param_type(p));
                 }
-                let ret = self.synth(body, env);
+                // With an explicit return annotation, check the body against it (and adopt it as the
+                // closure's return type); otherwise synthesize the return from the body.
+                let ret = match ann {
+                    Some(ann) => {
+                        let declared = Type::from_ref(ann);
+                        self.check(body, &declared, env);
+                        declared
+                    }
+                    None => self.synth(body, env),
+                };
                 env.pop();
                 Type::Fn {
                     params: params.iter().map(param_type).collect(),

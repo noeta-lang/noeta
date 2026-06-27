@@ -533,6 +533,7 @@ impl Pretty for Expr {
             }
             Expr::Closure {
                 params,
+                ret: _,
                 body,
                 span: s,
             } => {

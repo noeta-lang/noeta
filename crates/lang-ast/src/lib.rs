@@ -608,9 +608,13 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
-    /// An anonymous function (arrow closure): `fn(params) => body`.
+    /// An anonymous function (arrow closure): `fn(params) => body`, with an optional return-type
+    /// annotation `fn(params): Ret => body`. The annotation is optional (a closure is interior, so
+    /// its type is normally inferred); when present the checker checks the body against it. It is
+    /// runtime-erased, like a parameter's type.
     Closure {
         params: Vec<Param>,
+        ret: Option<TypeRef>,
         body: Box<Expr>,
         span: Span,
     },
