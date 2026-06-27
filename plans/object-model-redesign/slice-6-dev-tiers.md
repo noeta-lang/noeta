@@ -264,8 +264,16 @@ support for a raw-text span — the one genuinely new lexing concern).
   ordinary same-module code reading a private field is still E0035. The "separate test-tier *file*
   sees only `pub`" half depends on the package/test-file system (deferred to the package milestone) —
   today every tier block is in-source, so program-wide access = same-module access.
-- **Later:** `@debug` statement form; `bench`; `doc` (text content-kind + verbatim capture +
-  extraction); the profiles/TOML provider-map + manifest; third-party tiers.
+- **`@debug` inline-code activation. ✅ DONE (`ec6f6e7`).** The `@debug { … }` code-tier-in-
+  statement-position form. It already parsed + stripped; this landed *activation*. `activate_tiers`
+  is now **fully recursive** (the single tier-resolution source of truth for every statement
+  position — control-flow branches, loop/fn/method/destructor bodies, `impl` methods — not just
+  top-level), so a nested `@debug` resolves like a top-level `@test`. `lang run --tier <name>`
+  (repeatable) supplies the active set (the interim "active-set via CLI" interface until profiles);
+  default `lang run` is untouched (strip-at-lowering). Unknown `--tier` block → E0036. Test discovery
+  stays top-level; lifted fns stay `is_dev_tier` (white-box) at any depth.
+- **Later:** `bench`; `doc` (text content-kind + verbatim capture + extraction); the profiles/TOML
+  provider-map + manifest; third-party tiers.
 
 ---
 
