@@ -1,6 +1,13 @@
 # Object-model redesign — `struct`/`class`/`enum`/tuple on one axis, + dev-tier blocks
 
-**Status: design, NOT scheduled.** A consolidated proposal from a design discussion (2026-06). It
+**Status: ✅ COMPLETE (slices 1–7, branch `object-model-redesign`).** All seven slices landed:
+1 `struct` + unified body; 2 `class` = reference (identity/`==`/`mut`/visibility); 3 enum bodies;
+4 tuples; 5 per-field defaults; 6 dev-tier blocks (`@test` runner + `@debug` activation, sub-slices
+6a–6d + the `@debug` tail); 7 optional line-end semicolons (7a) + restricted control-flow head &
+empty `T {}` literal (7b). Generics reification remains its own later milestone (unchanged). The
+historical design text below is preserved as the rationale record.
+
+**Original status: design, NOT scheduled.** A consolidated proposal from a design discussion (2026-06). It
 **replaces an earlier `resource`-kind proposal** (removed) — the `resource` kind dissolves into "a class
 with a `destruct`". It re-scopes parts of the completed memory-management **Phase 5.2** (which made classes
 value-semantic) and is independent of the **inferred-static type-system** track (that's about the
@@ -453,10 +460,9 @@ sugar, the test runner, private access, tree-shaking). Then `bench`, `doc`, and 
    empty upvalues = global scope), so a missing field is filled identically — differential agrees,
    leak residency 0. Checker validates the default's type against the field type (`E0007`). No new
    diag code (next free still **E0036**). Conformance 284 / differential 276 matched, 0-skipped /
-   miri clean. **DEFERRED (confirmed with user): the bare empty literal `T {}`** (a fully-defaulted
-   type with no explicit field) — it re-collides with the `if cond {}` empty-block disambiguation,
-   which the **slice-7** restricted-control-flow-head expression resolves; lands there. Until then a
-   literal needs ≥1 explicit field or a spread.
+   miri clean. **The bare empty literal `T {}`** (a fully-defaulted type with no explicit field) was
+   deferred from here (it re-collided with the `if cond {}` empty-block disambiguation) and **✅
+   landed in slice 7b** once the restricted-control-flow-head expression removed the collision.
 6. **Dev-tier blocks** — the primitive (**`@tier`** tiers + content-kind + manifest) with **`test`
    first**, then `bench`/`doc`. **PLAN: `slice-6-dev-tiers.md`** (the full design, settled
    2026-06-26). The dev-tier prose *below in this README* predates two design sessions and is
