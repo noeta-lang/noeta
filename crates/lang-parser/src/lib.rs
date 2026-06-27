@@ -2444,7 +2444,23 @@ where
                             "role" => role
                                 .get_or_insert_with(Vec::new)
                                 .extend(args.into_iter().map(directive_role_tag)),
-                            "semantic" => semantic = Some(name_span),
+                            "semantic" => {
+                                // `@semantic` takes no arguments — reject them rather than dropping
+                                // them silently (uniform directive-argument validation, E0037).
+                                if let Some(arg) = args.first() {
+                                    ctx.diags.borrow_mut().push(
+                                        Diagnostic::error(
+                                            DiagnosticCode::InvalidDirectiveArgument,
+                                            arg.0.1,
+                                            "`@semantic` takes no arguments".to_string(),
+                                        )
+                                        .with_help(
+                                            "`@semantic` marks an enum's variants usable as `@role(Enum.Variant)`",
+                                        ),
+                                    );
+                                }
+                                semantic = Some(name_span);
+                            }
                             _ => ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
                                 name_span,
@@ -3190,6 +3206,23 @@ mod tests {
         assert_eq!(attr_names, ["Skip", "Group"]);
         // The trailing `#[Route(...)] struct` still parses via the decorator path.
         assert!(matches!(&parsed.program.stmts[1], Stmt::Struct(_)));
+    }
+
+    #[test]
+    fn semantic_directive_rejects_arguments() {
+        // `@semantic` takes no arguments; passing some is an E0037 (not silently dropped). A bare
+        // `@semantic` still parses cleanly.
+        let parsed = parse_str("@semantic(oops)\nenum Role { A }\n");
+        assert!(
+            parsed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::InvalidDirectiveArgument),
+            "{:?}",
+            parsed.diagnostics
+        );
+        let clean = parse_str("@semantic\nenum Role { A }\n");
+        assert!(clean.diagnostics.is_empty(), "{:?}", clean.diagnostics);
     }
 
     #[test]

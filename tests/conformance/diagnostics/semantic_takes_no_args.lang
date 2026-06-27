@@ -1,0 +1,8 @@
+// `@semantic` marks an enum's variants usable as roles; it takes no arguments. Passing some is an
+// InvalidDirectiveArgument (E0037) rather than being silently dropped — every directive validates
+// its arguments.
+// expect: error E0037 at 6:11
+// expect: exit 1
+@semantic(oops)
+enum Role { Controller }
+echo "unreached"
