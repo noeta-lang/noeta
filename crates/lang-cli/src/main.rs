@@ -190,6 +190,7 @@ fn execute_real_host(
         &ir,
         Box::new(host),
         checked.type_of_sites.clone(),
+        checked.packed_list_sites.clone(),
     ))
 }
 
@@ -922,6 +923,7 @@ fn bench_execute(
         &ir,
         Box::new(host),
         checked.type_of_sites.clone(),
+        checked.packed_list_sites.clone(),
     );
     Ok((result, start.elapsed()))
 }

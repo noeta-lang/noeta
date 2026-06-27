@@ -100,6 +100,10 @@ pub struct Ast(pub Parsed);
 pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     pub type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// The `List<packed>` construction-site layout map (P-PACK 2.1), carried here for the same
+    /// reason as `type_of_sites`: the eval reference reads it to lay flat lists out identically to
+    /// the VM, computed once per check.
+    pub packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// Per-binding destructor-relevance (Phase 3.2b), threaded into the compiler so the drop pass
     /// annotates each `DropVar` — carried here for the same reason as `type_of_sites` (compute the
     /// checker's result once, reuse it without a second run).
@@ -179,6 +183,7 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     Checked {
         diagnostics: out.diagnostics,
         type_of_sites: out.type_of_sites,
+        packed_list_sites: out.packed_list_sites,
         destructor_relevance: out.destructor_relevance,
     }
 }
@@ -293,12 +298,14 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             Checked {
                 diagnostics: out.diagnostics,
                 type_of_sites: out.type_of_sites,
+                packed_list_sites: out.packed_list_sites,
                 destructor_relevance: out.destructor_relevance,
             }
         }
         Err(diags) => Checked {
             diagnostics: diags.clone(),
             type_of_sites: std::collections::HashMap::new(),
+            packed_list_sites: std::collections::HashMap::new(),
             destructor_relevance: lang_check::DestructorRelevance::default(),
         },
     }

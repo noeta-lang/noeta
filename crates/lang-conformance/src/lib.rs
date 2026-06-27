@@ -91,11 +91,13 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // One `check_all` yields both the gate diagnostics and the `type_of` site map the eval
         // backend needs, so the checker runs once per case instead of again inside the backend.
         let mut type_of_sites = std::collections::HashMap::new();
+        let mut packed_list_sites = std::collections::HashMap::new();
         let mut destructor_relevance = lang_check::DestructorRelevance::default();
         if stage == Stage::Eval && diagnostics.is_empty() {
             let checked = lang_check::check_all(&parsed.program);
             diagnostics.extend(checked.diagnostics);
             type_of_sites = checked.type_of_sites;
+            packed_list_sites = checked.packed_list_sites;
             destructor_relevance = checked.destructor_relevance;
         }
 
@@ -103,8 +105,12 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         // Core-IR interpreter (the migration's Phase-4 reference semantics), so conformance pins the
         // same last-use destruction the VM produces.
         if stage == Stage::Eval && diagnostics.is_empty() {
-            let result =
-                reference::reference_run(&parsed.program, type_of_sites, &destructor_relevance);
+            let result = reference::reference_run(
+                &parsed.program,
+                type_of_sites,
+                packed_list_sites,
+                &destructor_relevance,
+            );
             stdout = result.stdout;
             diagnostics.extend(result.diagnostics);
             exit_code = result.exit_code;
@@ -272,6 +278,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
     let result = reference::reference_run(
         &linked.program,
         checked.type_of_sites,
+        checked.packed_list_sites,
         &checked.destructor_relevance,
     );
     Outcome {

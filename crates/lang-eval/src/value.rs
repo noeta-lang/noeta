@@ -65,14 +65,17 @@ pub enum Value {
 
 /// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,
 /// holding the same `Rc<Vec<Value>>` lists have always used — so every existing boxed-list code path
-/// (copy-on-write reuse, refcount checks, `try_unwrap`) operates on the inner `Rc` unchanged. A
-/// later slice adds `Packed`, a flat raw-primitive buffer for a `List<packed>`; an operation not yet
-/// specialized for it calls [`ListRepr::to_rc_vec`] to materialize the boxed elements and runs the
-/// existing path, so the flat form stays invisible to `RunResult`.
-#[derive(Clone, Debug)]
+/// (copy-on-write reuse, refcount checks, `try_unwrap`) operates on the inner `Rc` unchanged.
+/// `Packed` is the flat raw-primitive buffer for a `List<packed>` (2.3): one contiguous `Vec<u64>`
+/// of primitive bits, interpreted through a [`PackedSchema`]. An operation not yet specialized for
+/// it calls [`ListRepr::to_rc_vec`] (or [`ListRepr::get`]) to materialize boxed `Value::Object`s on
+/// demand and runs the existing path, so the flat form stays invisible to `RunResult`.
+#[derive(Clone)]
 pub enum ListRepr {
     /// The general boxed list: elements are full `Value`s in an `Rc`-shared vector.
     Boxed(Rc<Vec<Value>>),
+    /// A flat `List<packed>`: elements packed as raw primitive words, materialized on access.
+    Packed(PackedList),
 }
 
 impl ListRepr {
@@ -80,32 +83,187 @@ impl ListRepr {
     pub(crate) fn len(&self) -> usize {
         match self {
             ListRepr::Boxed(items) => items.len(),
+            ListRepr::Packed(packed) => packed.len(),
         }
     }
 
-    /// The elements as a boxed `Rc<Vec<Value>>`, materializing a packed buffer on demand. For an
-    /// already-boxed list this is a cheap `Rc::clone` (no element copy) — so routing a read-only op
-    /// through it never regresses the boxed path.
+    /// The elements as a boxed `Rc<Vec<Value>>`. For an already-boxed list this is a cheap
+    /// `Rc::clone` (no element copy) — so routing a read-only op through it never regresses the boxed
+    /// path; a packed buffer materializes every element into a fresh boxed vector.
     pub(crate) fn to_rc_vec(&self) -> Rc<Vec<Value>> {
         match self {
             ListRepr::Boxed(items) => Rc::clone(items),
+            ListRepr::Packed(packed) => Rc::new(packed.materialize()),
         }
     }
 
     /// The element at `index`, cloned (a refcount bump for a heap value), or `None` if out of range.
+    /// A packed buffer materializes just the one element — no full-list materialization.
     pub(crate) fn get(&self, index: usize) -> Option<Value> {
         match self {
             ListRepr::Boxed(items) => items.get(index).cloned(),
+            ListRepr::Packed(packed) => packed.get(index),
         }
     }
 
     /// Element-wise equality, independent of representation (two lists are equal iff their elements
-    /// are equal in order).
+    /// are equal in order). A packed operand is materialized so equality is decided on `Value`s —
+    /// never on raw words (which would, e.g., treat distinct float `NaN` bit-patterns as equal).
     pub(crate) fn elements_eq(&self, other: &ListRepr) -> bool {
         match (self, other) {
             (ListRepr::Boxed(a), ListRepr::Boxed(b)) => a == b,
+            _ => *self.to_rc_vec() == *other.to_rc_vec(),
         }
     }
+}
+
+impl fmt::Debug for ListRepr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // A packed list debugs identically to the boxed list it represents, so `Debug` never
+        // exposes the layout (and the existing `List({repr:?})` shape is preserved).
+        match self {
+            ListRepr::Boxed(items) => write!(f, "{items:?}"),
+            ListRepr::Packed(packed) => write!(f, "{:?}", packed.materialize()),
+        }
+    }
+}
+
+/// A `List<packed>` stored as one contiguous raw-primitive buffer (P-PACK Phase 2.3). The `schema`
+/// describes how to pack a `Value::Object` element into, and materialize it back from, `word_count`
+/// consecutive words; `words` holds `len` elements end-to-end. `Rc` keeps clones cheap, exactly as
+/// the boxed list's `Rc<Vec<Value>>` does. The representation is invisible to `RunResult`: every
+/// element observed (index, iterate, display, compare, JSON) is materialized through `schema` to the
+/// same `Value::Object` the boxed list would hold.
+#[derive(Clone)]
+pub struct PackedList {
+    schema: Rc<PackedSchema>,
+    words: Rc<Vec<u64>>,
+}
+
+impl fmt::Debug for PackedList {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Debug as the boxed list it represents, never exposing the flat layout.
+        write!(f, "{:?}", self.materialize())
+    }
+}
+
+/// The resolved layout of one packed element: the type to materialize, its fields in slot order
+/// (parallel to `def.fields`), and the element's total word width. Built once at the construction
+/// site (it needs the interpreter's scope to resolve nested struct types) and shared by every
+/// element of the list.
+pub(crate) struct PackedSchema {
+    /// The element type, used to build a materialized [`Value::Object`].
+    pub(crate) def: Rc<TypeDef>,
+    /// One entry per field, in `def.fields` (slot) order.
+    pub(crate) fields: Vec<PackedSlot>,
+    /// Words per element — the sum of each field's width.
+    pub(crate) word_count: usize,
+}
+
+/// One field of a [`PackedSchema`].
+pub(crate) struct PackedSlot {
+    pub(crate) kind: SlotKind,
+}
+
+/// A packed field's storage: a primitive occupying one word, or a nested packed struct flattened
+/// inline (its own sub-schema describing how its fields are laid out contiguously).
+pub(crate) enum SlotKind {
+    Int,
+    Float,
+    Bool,
+    Struct(Rc<PackedSchema>),
+}
+
+impl PackedList {
+    /// Build a packed list from a resolved `schema` and already-evaluated element values. Returns
+    /// `None` if any element fails to pack (a non-object, or a field whose runtime kind disagrees
+    /// with the schema) — the caller then falls back to a boxed list, so a packed layout is only
+    /// ever used when it is exactly correct.
+    pub(crate) fn build(schema: Rc<PackedSchema>, elements: &[Value]) -> Option<PackedList> {
+        let mut words = Vec::with_capacity(elements.len() * schema.word_count);
+        for element in elements {
+            pack_object(element, &schema, &mut words)?;
+        }
+        Some(PackedList {
+            schema,
+            words: Rc::new(words),
+        })
+    }
+
+    /// The number of elements.
+    fn len(&self) -> usize {
+        self.words.len() / self.schema.word_count
+    }
+
+    /// Materialize the element at `index` into a boxed `Value::Object`, or `None` if out of range.
+    fn get(&self, index: usize) -> Option<Value> {
+        if index >= self.len() {
+            return None;
+        }
+        let offset = index * self.schema.word_count;
+        let (value, _) = unpack_object(&self.schema, &self.words, offset);
+        Some(value)
+    }
+
+    /// Materialize every element into a boxed vector — the fallback for any op not specialized for
+    /// the flat representation.
+    fn materialize(&self) -> Vec<Value> {
+        (0..self.len())
+            .map(|i| self.get(i).expect("index in range"))
+            .collect()
+    }
+}
+
+/// Pack one element `value` (a `Value::Object` of `schema`'s type) onto the end of `out`, one word
+/// per primitive field, recursing into nested packed structs. Returns `None` on any shape mismatch.
+fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u64>) -> Option<()> {
+    let Value::Object(object) = value else {
+        return None;
+    };
+    let slots = object.slots.borrow();
+    if slots.len() != schema.fields.len() {
+        return None;
+    }
+    for (slot, field) in schema.fields.iter().zip(slots.iter()) {
+        match (&slot.kind, field) {
+            (SlotKind::Int, Value::Int(i)) => out.push(*i as u64),
+            (SlotKind::Float, Value::Float(x)) => out.push(x.to_bits()),
+            (SlotKind::Bool, Value::Bool(b)) => out.push(u64::from(*b)),
+            (SlotKind::Struct(inner), nested) => pack_object(nested, inner, out)?,
+            _ => return None,
+        }
+    }
+    Some(())
+}
+
+/// Materialize one element from `words` starting at `offset`, returning the value and the offset
+/// just past it (so nested structs and the caller advance in lock-step with [`pack_object`]).
+fn unpack_object(schema: &PackedSchema, words: &[u64], offset: usize) -> (Value, usize) {
+    let mut slots = Vec::with_capacity(schema.fields.len());
+    let mut at = offset;
+    for slot in &schema.fields {
+        match &slot.kind {
+            SlotKind::Int => {
+                slots.push(Value::Int(words[at] as i64));
+                at += 1;
+            }
+            SlotKind::Float => {
+                slots.push(Value::Float(f64::from_bits(words[at])));
+                at += 1;
+            }
+            SlotKind::Bool => {
+                slots.push(Value::Bool(words[at] != 0));
+                at += 1;
+            }
+            SlotKind::Struct(inner) => {
+                let (nested, next) = unpack_object(inner, words, at);
+                slots.push(nested);
+                at = next;
+            }
+        }
+    }
+    let object = ObjectValue::new(Rc::clone(&schema.def), slots);
+    (Value::Object(Rc::new(object)), at)
 }
 
 impl Value {

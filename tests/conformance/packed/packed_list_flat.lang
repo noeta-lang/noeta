@@ -1,0 +1,52 @@
+// P-PACK Phase 2.3: a `List<packed>` literal is stored as a flat raw-primitive buffer in the eval
+// reference (and a boxed list in the VM, until 2.4) — but the layout is invisible to RunResult, so
+// indexing, projection, iteration, `count`, display, equality, nesting, and concat (a boxed-fallback
+// op) all observe exactly the boxed elements. The differential pins eval-flat against VM-boxed.
+// expect: stdout "[Vec3 {x: 1.0, y: 2.0, z: 3.0}, Vec3 {x: 4.0, y: 5.0, z: 6.0}, Vec3 {x: 7.0, y: 8.0, z: 9.0}]"
+// expect: stdout "3"
+// expect: stdout "Vec3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: stdout "8.0"
+// expect: stdout "45.0"
+// expect: stdout "[Pixel {r: 255, g: 0, b: 128, opaque: true}, Pixel {r: 1, g: 2, b: 3, opaque: false}]"
+// expect: stdout "false"
+// expect: stdout "[Segment {start: Vec3 {x: 0.0, y: 0.0, z: 0.0}, end: Vec3 {x: 1.0, y: 1.0, z: 1.0}}]"
+// expect: stdout "1.0"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "4"
+// expect: stdout "Vec3 {x: 0.0, y: 0.0, z: 0.0}"
+// expect: exit 0
+@packed struct Vec3 { x: float; y: float; z: float }
+@packed struct Pixel { r: int; g: int; b: int; opaque: bool }
+@packed struct Segment { start: Vec3; end: Vec3 }
+
+ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }, Vec3 { x: 4.0, y: 5.0, z: 6.0 }, Vec3 { x: 7.0, y: 8.0, z: 9.0 }]
+echo ps
+echo ps.count()
+echo ps[0]
+echo ps[2].y
+
+mut total = 0.0
+for v in ps {
+  total = total + v.x + v.y + v.z
+}
+echo total
+
+// Mixed primitive kinds (int + bool) in one packed element.
+px = [Pixel { r: 255, g: 0, b: 128, opaque: true }, Pixel { r: 1, g: 2, b: 3, opaque: false }]
+echo px
+echo px[1].opaque
+
+// A nested packed struct flattened inline in the buffer.
+segs = [Segment { start: Vec3 { x: 0.0, y: 0.0, z: 0.0 }, end: Vec3 { x: 1.0, y: 1.0, z: 1.0 } }]
+echo segs
+echo segs[0].end.z
+
+// Structural equality between two packed lists.
+echo [Vec3 { x: 1.0, y: 2.0, z: 3.0 }] == [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]
+echo [Vec3 { x: 1.0, y: 2.0, z: 3.0 }] == [Vec3 { x: 9.0, y: 2.0, z: 3.0 }]
+
+// `~` has no flat specialization yet, so it materializes to a boxed list — still correct.
+more = ps ~ [Vec3 { x: 0.0, y: 0.0, z: 0.0 }]
+echo more.count()
+echo more[3]

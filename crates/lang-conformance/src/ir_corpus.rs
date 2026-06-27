@@ -150,6 +150,7 @@ fn run(program: &lang_ast::Program, checked: &lang_db::Checked, report: &mut IrC
             let _ = reference_run(
                 program,
                 checked.type_of_sites.clone(),
+                checked.packed_list_sites.clone(),
                 &checked.destructor_relevance,
             );
             report.ran += 1;

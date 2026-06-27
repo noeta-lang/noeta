@@ -24,6 +24,7 @@ mod ops;
 mod value;
 pub use leak::live_count;
 pub use value::{ListRepr, Value};
+use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 
 // The `Backend`/`RunResult` seam moved into its own crate in M1 so the tree-walker and the
 // bytecode VM are siblings (neither depends on the other). Re-exported here so existing
@@ -80,7 +81,12 @@ impl Backend for TreeWalkBackend {
         let ir =
             lang_ir_passes::insert_drops(&ir, Some(&relevance_of(&checked.destructor_relevance)));
         let ir = lang_ir_passes::thread_reuse(&ir);
-        self.run_ir(program, &ir, checked.type_of_sites)
+        self.run_ir(
+            program,
+            &ir,
+            checked.type_of_sites,
+            checked.packed_list_sites,
+        )
     }
 }
 
@@ -969,6 +975,12 @@ struct Interpreter {
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
     /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
+    /// The packed layout the checker resolved for each `List<packed>` construction site (keyed by the
+    /// `Expr::List` span), harvested via `lang_check::resolve_packed_list_sites` from the *same*
+    /// program the VM harvests (P-PACK 2.1). A list literal whose span is here is built as a flat
+    /// [`ListRepr::Packed`] buffer rather than a boxed vector; the layout is invisible to `RunResult`,
+    /// so a site absent here (or one whose elements fail to pack) is simply a boxed list.
+    packed_list_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::PackedLayout>,
 }
 
 impl Interpreter {
@@ -1017,6 +1029,7 @@ impl Interpreter {
             host,
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
+            packed_list_sites: std::collections::HashMap::new(),
         }
     }
 
@@ -1136,11 +1149,12 @@ impl Interpreter {
             Value::Object(obj) => self.destroy_object(obj),
             Value::Enum(e) => self.destroy_enum(e),
             // A boxed list / set / tuple releases its elements through the shared `Rc<Vec<Value>>`.
-            // (A packed list, P-PACK 2.3, holds only primitives — no destructors — and adds its own
-            // arm; the compiler flags the missing case when `ListRepr::Packed` lands.)
             Value::List(ListRepr::Boxed(items)) | Value::Set(items) | Value::Tuple(items) => {
                 self.destroy_sequence(items)
             }
+            // A packed list (P-PACK 2.3) holds only primitive words — no heap elements, no
+            // destructors — so its `Rc<Vec<u64>>` simply drops here, reclaiming the buffer.
+            Value::List(ListRepr::Packed(_)) => {}
             Value::Map(entries) => self.destroy_map(entries),
             // Scalars/functions/types/handles bear no destructor (a function's *captured* values
             // are Phase-6 territory); their `Rc`/value drops here, reclaiming memory.
@@ -1518,6 +1532,62 @@ impl Interpreter {
             Rc::clone(&def),
             slots,
         ))))
+    }
+
+    /// Build a flat [`ListRepr::Packed`] from a `List<packed>` literal's resolved `layout` and its
+    /// already-evaluated `elements`, or `None` to fall back to a boxed list. `None` arises when the
+    /// element type cannot be resolved to a packed schema (e.g. the type is not in scope, or has a
+    /// zero-word degenerate layout) or when an element fails to pack — keeping the flat form an exact
+    /// optimization, never a behaviour change.
+    fn build_packed_list(
+        &self,
+        layout: &lang_ast::reflect::PackedLayout,
+        elements: &[Value],
+    ) -> Option<Value> {
+        let schema = self.resolve_packed_schema(layout)?;
+        let packed = PackedList::build(schema, elements)?;
+        Some(Value::List(ListRepr::Packed(packed)))
+    }
+
+    /// Resolve a checker [`PackedLayout`](lang_ast::reflect::PackedLayout) to the eval-side
+    /// [`PackedSchema`] — binding each field to the concrete [`TypeDef`] it materializes to (so a
+    /// packed element unpacks into the same `Value::Object` the boxed path would build), recursing
+    /// into nested packed structs. The schema's field order follows `def.fields` (the slot/
+    /// materialization order); each field's kind is read from the layout by name. Returns `None` if a
+    /// (nested) type name is not a struct in scope, the field sets disagree, or the layout is empty.
+    fn resolve_packed_schema(
+        &self,
+        layout: &lang_ast::reflect::PackedLayout,
+    ) -> Option<Rc<PackedSchema>> {
+        use lang_ast::reflect::PackedKind;
+
+        let def = match self.scope.lookup(&layout.type_name) {
+            Some(Value::Type(def)) => def,
+            _ => return None,
+        };
+        if def.fields.len() != layout.fields.len() {
+            return None;
+        }
+        let mut fields = Vec::with_capacity(def.fields.len());
+        for spec in &def.fields {
+            let layout_field = layout.fields.iter().find(|f| f.name == spec.name)?;
+            let kind = match &layout_field.kind {
+                PackedKind::Int => SlotKind::Int,
+                PackedKind::Float => SlotKind::Float,
+                PackedKind::Bool => SlotKind::Bool,
+                PackedKind::Struct(inner) => SlotKind::Struct(self.resolve_packed_schema(inner)?),
+            };
+            fields.push(PackedSlot { kind });
+        }
+        let word_count = layout.word_count();
+        if word_count == 0 {
+            return None; // a zero-field packed struct has no recoverable element count — stay boxed.
+        }
+        Some(Rc::new(PackedSchema {
+            def,
+            fields,
+            word_count,
+        }))
     }
 
     /// Build an enum value from a type, a variant name, and its argument values.
@@ -3215,9 +3285,14 @@ impl Interpreter {
 fn cow_concat(left: Value, right: Value) -> Value {
     match (left, right) {
         (Value::List(a), Value::List(b)) => {
-            // The in-place fast path is boxed-only; a packed list (P-PACK 2.3) adds a `Packed` arm
-            // here (this irrefutable `let` then becomes a compile error — the tripwire that forces it).
-            let ListRepr::Boxed(mut a) = a;
+            // The in-place fast path consumes the left list's unique `Rc`. A boxed list hands its
+            // `Rc` straight through (preserving the O(1)-amortized extend when uniquely owned); a
+            // packed list (P-PACK 2.3) has no specialized concat yet, so it materializes to a fresh,
+            // uniquely-owned boxed vector — correct, just not flat. Either way the result is boxed.
+            let mut a = match a {
+                ListRepr::Boxed(rc) => rc,
+                ListRepr::Packed(_) => a.to_rc_vec(),
+            };
             let b = b.to_rc_vec();
             if let Some(items) = Rc::get_mut(&mut a) {
                 items.extend(b.iter().cloned());

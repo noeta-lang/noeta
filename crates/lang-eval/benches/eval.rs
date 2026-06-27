@@ -67,9 +67,39 @@ fn struct_fields_src(n: usize) -> String {
     )
 }
 
+/// A `List<packed>` workload: build an `n`-element list literal of a `Vec3`, then index every
+/// element and sum its three fields. When the element type is `@packed` the list is stored as one
+/// flat raw-primitive buffer (P-PACK 2.3) and each `data[i]` materializes a single element on
+/// demand; the plain-`struct` variant stores `n` boxed objects and `data[i]` clones a pointer. The
+/// two variants are run side-by-side so the cost of the pack-at-build / materialize-on-read layer is
+/// directly visible against the boxed baseline (the memory win lands in a later peak-residency
+/// benchmark — this one measures scalar-access time).
+fn packed_list_src(n: usize, packed: bool) -> String {
+    let kw = if packed { "@packed struct" } else { "struct" };
+    let mut elems = String::with_capacity(n * 32);
+    for i in 0..n {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str("Vec3 { x: 1.0, y: 2.0, z: 3.0 }");
+    }
+    format!(
+        "{kw} Vec3 {{ x: float; y: float; z: float }}\n\
+         data = [{elems}]\n\
+         mut sum = 0.0\n\
+         for i in 0..{n} {{\n    \
+            sum = sum + data[i].x + data[i].y + data[i].z\n\
+         }}\n\
+         echo sum\n"
+    )
+}
+
 /// Sizes for the parameterized accumulator. Each doubles the previous, so the per-step time ratio
 /// reveals the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
 const ACC_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
+
+/// Sizes for the packed-list workload — a couple of points to confirm the per-element cost is flat.
+const PACKED_SIZES: &[usize] = &[1000, 4000];
 
 /// Sizes for the struct-field loop. A constant-factor change, so a single mid-size point suffices;
 /// a couple of sizes confirm the per-iteration cost is flat in `n`.
@@ -100,6 +130,19 @@ fn eval_hot_paths(c: &mut Criterion) {
         });
     }
     sf.finish();
+
+    let mut pl = c.benchmark_group("eval_packed_list");
+    for &n in PACKED_SIZES {
+        let packed = program(&packed_list_src(n, true));
+        pl.bench_with_input(BenchmarkId::new("packed", n), &packed, |b, prog| {
+            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+        });
+        let boxed = program(&packed_list_src(n, false));
+        pl.bench_with_input(BenchmarkId::new("boxed", n), &boxed, |b, prog| {
+            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+        });
+    }
+    pl.finish();
 }
 
 criterion_group!(benches, eval_hot_paths);

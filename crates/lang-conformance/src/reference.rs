@@ -21,7 +21,7 @@
 use std::collections::HashMap;
 
 use lang_ast::Program;
-use lang_ast::reflect::TypeRepr;
+use lang_ast::reflect::{PackedLayout, TypeRepr};
 use lang_backend::RunResult;
 use lang_eval::TreeWalkBackend;
 use lang_span::Span;
@@ -33,6 +33,7 @@ use lang_span::Span;
 pub fn reference_run(
     program: &Program,
     sites: HashMap<Span, TypeRepr>,
+    packed_list_sites: HashMap<Span, PackedLayout>,
     relevance: &lang_check::DestructorRelevance,
 ) -> RunResult {
     let ir = lang_ir::lower(program).expect(
@@ -43,7 +44,7 @@ pub fn reference_run(
     // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM consume
     // the same annotated IR (Phase 5).
     let ir = lang_ir_passes::thread_reuse(&ir);
-    TreeWalkBackend::new().run_ir(program, &ir, sites)
+    TreeWalkBackend::new().run_ir(program, &ir, sites, packed_list_sites)
 }
 
 /// The drop pass's relevance form, copied from the checker's (identical sets). Mirrors the

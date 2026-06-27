@@ -75,14 +75,16 @@ impl TreeWalkBackend {
     /// Run a program through the Core-IR interpreter. `ast` supplies the reflection manifest
     /// (built identically to the AST walker, so attributes/roles/type facts match);
     /// `ir` is the lowered program to execute; `type_of_sites` is the checker's `type_of`
-    /// map, threaded exactly as for the AST path.
+    /// map and `packed_list_sites` its `List<packed>` layout map, both threaded exactly as for the
+    /// AST path so eval and the VM lay values out identically.
     pub fn run_ir(
         &self,
         ast: &Program,
         ir: &lang_ir::Program,
         type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+        packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
     ) -> RunResult {
-        Interpreter::new(self.seed).run_ir(ast, ir, type_of_sites)
+        Interpreter::new(self.seed).run_ir(ast, ir, type_of_sites, packed_list_sites)
     }
 
     /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`lang_stdlib::Host`]
@@ -96,8 +98,9 @@ impl TreeWalkBackend {
         ir: &lang_ir::Program,
         host: Box<dyn lang_stdlib::Host>,
         type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+        packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
     ) -> RunResult {
-        Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites)
+        Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites, packed_list_sites)
     }
 }
 
@@ -110,9 +113,11 @@ impl Interpreter {
         ast: &Program,
         ir: &lang_ir::Program,
         type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+        packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
     ) -> RunResult {
         self.reflection = lang_ast::reflect::build(ast);
         self.type_of_sites = type_of_sites;
+        self.packed_list_sites = packed_list_sites;
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -669,10 +674,19 @@ impl Interpreter {
                 let right = self.eval_ir_atom(rhs, frame)?;
                 self.apply_binary_op(*op, left, right, *span)
             }
-            lang_ir::Rvalue::List { items, .. } => {
+            lang_ir::Rvalue::List { items, span } => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     values.push(self.eval_ir_atom(item, frame)?);
+                }
+                // A `List<packed>` literal (its span recorded by the checker, P-PACK 2.1) builds a
+                // flat raw-primitive buffer; the elements just evaluated are consumed into words and
+                // their boxed `Value::Object`s drop here. Any other list — or a packed literal whose
+                // elements fail to pack — stays the boxed representation.
+                if let Some(layout) = self.packed_list_sites.get(span).cloned()
+                    && let Some(packed) = self.build_packed_list(&layout, &values)
+                {
+                    return Ok(packed);
                 }
                 Ok(Value::list(values))
             }
@@ -998,9 +1012,14 @@ impl Interpreter {
         let Value::List(repr) = recv else {
             unreachable!("caller checked the receiver is a list")
         };
-        // The in-place reuse path is boxed-only; a packed list (P-PACK 2.3) will add a `Packed` arm
-        // here (this irrefutable `let` then becomes a compile error — the tripwire that forces it).
-        let ListRepr::Boxed(mut rc) = repr;
+        // The in-place reuse path operates on a boxed `Rc<Vec<Value>>`. A boxed list passes its `Rc`
+        // straight through (so a uniquely-owned list still mutates in place); a packed list (P-PACK
+        // 2.3) has no specialized `set` yet, so it materializes to a fresh boxed vector — correct,
+        // just not flat. The result is a boxed list either way.
+        let mut rc = match repr {
+            ListRepr::Boxed(rc) => rc,
+            ListRepr::Packed(_) => repr.to_rc_vec(),
+        };
         let new_value = values.pop().expect("set takes two args");
         let index_value = values.pop().expect("set takes two args");
         let Value::Int(i) = index_value else {

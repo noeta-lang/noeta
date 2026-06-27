@@ -166,7 +166,13 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     // the differential cross-checks two independent executors of one IR.
     let checked = lang_db::checked(&db, src);
     let sites = checked.type_of_sites.clone();
-    let tree = reference_run(&parsed.0.program, sites, &checked.destructor_relevance);
+    let packed = checked.packed_list_sites.clone();
+    let tree = reference_run(
+        &parsed.0.program,
+        sites,
+        packed,
+        &checked.destructor_relevance,
+    );
     match &lang_db::bytecode(&db, src).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {
@@ -210,7 +216,8 @@ fn compare_backends_workspace(
     }
     let checked = lang_db::linked_checked(&db, ws);
     let sites = checked.type_of_sites.clone();
-    let tree = reference_run(program, sites, &checked.destructor_relevance);
+    let packed = checked.packed_list_sites.clone();
+    let tree = reference_run(program, sites, packed, &checked.destructor_relevance);
     match &lang_db::linked_bytecode(&db, ws).0 {
         Err(_) => report.skipped += 1,
         Ok(module) => {
