@@ -305,9 +305,26 @@ support for a raw-text span — the one genuinely new lexing concern).
   resolution waits on the package system. `lang run --profile P` activates P's live tiers (∪
   `--tier`); `lang test|bench|doc --profile P` runs only when its tier is live in P (else a no-op
   note). Manifest is CLI-only (compiler crates untouched); bare runs are byte-identical (opt-in).
+- **6h — test-metadata attributes. ✅ DONE (`7c07328`→`bca0f60`).** Per-test metadata is
+  **attributes** (typed, validated, reflectable, extensible — the JUnit/xUnit/pytest model), not a
+  tier-arg bag; tier args stay for run-loop knobs (`iterations`). **6h.1 (`7c07328`):** a `#[...]`
+  cluster may lead a `@test`/`@bench fn`, one per line (`attributed_tier_annotation`, tried before
+  the type-decorator path and backtracking cleanly; `@test #[...] fn` and the block form already
+  worked); `TierFn` carries the fn's `attrs`. **6h.2 (`32094d2`):** built-in prelude `@attribute`
+  structs `Skip`/`Name`/`Group`/`Data` (checker-registered like `Attributed` — a few table inserts +
+  `record_attribute`; **no backend change**, attributes materialize generically from the manifest);
+  the runner honours `#[Skip]` (reported skipped, not run, doesn't fail the suite), `#[Name("…")]`
+  (display name), `#[Group("…")]` (`lang test --group <g>` filter). Names shared via
+  `lang_ast::reflect::TEST_ATTR_*`. **6h.3 (`bca0f60`):** `#[Data([…])]` parameterized tests — a
+  one-param test runs once per row (`name[row]`, isolated; row literal → call arg via
+  `attr_value_to_expr`; a type-mismatched/unconvertible row fails just that case). Composes with
+  Name/Group/Skip. Known gap (pre-existing): negative attribute literals (`#[Data([-5])]`) are
+  rejected (unary-minus isn't an attribute literal). Deferred (flagged to the user): `#[Skip("reason")]`
+  needs attribute **field defaults** (the construction gate requires all fields) — a small follow-up.
 - **Still later (needs the package system):** third-party `@tier` declarations + their manifest-
   reading runners; `[dependencies]` + cross-package provider resolution; profile-level codegen knobs
-  / compile-time constants; env (deferred entirely).
+  / compile-time constants; env (deferred entirely). Plus: attribute field defaults (enabling
+  `#[Skip("reason")]` and optional-field attributes generally); negative attribute literals.
 
 ---
 
