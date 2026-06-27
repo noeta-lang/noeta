@@ -226,8 +226,25 @@ support for a raw-text span — the one genuinely new lexing concern).
   inlining of *active* blocks is deferred to 6b (for 6a every block is inactive). Conformance 286 /
   differential agrees / leak 0. **(Prereq landed first: `f8e6d87` split the conformance harness into
   the dev-only `lang-conformance` binary, freeing the `lang test` verb.)**
-- **6b — the test runner.** Discover + run `@test` fns, assertions, pass/fail report; the assertion
-  primitive.
+- **6b — the test runner. ✅ DONE.** Two commits:
+  - **6b.1 (`f5d747c`) — the `assert` primitive.** `assert(cond)` / `assert(cond, msg)` aborts with
+    the same `Panic` diagnostic (E0010) `panic` raises when `cond` is false, yields unit when it
+    holds. Wired as an ordinary prelude builtin in **both** backends (`Builtin::Assert` in lang-eval
+    + lang-bytecode, matching VM `call_builtin`, `PRELUDE_NAMES`, typed `Unit` in the checker) so the
+    differential covers it; failure text uses `display()` like `Op::Panic`, so it is byte-identical
+    across backends. Two differential-covered conformance tests.
+  - **6b.2 (`56ab8c1`) — the runner.** `lang_check::activate_tiers(program, active)` inlines an
+    active code-tier block's items as ordinary top-level decls, drops inactive blocks, validates tier
+    names (E0036, shared `unknown_tier_diagnostic`), and collects `@test` fns. The default path
+    (`lang run`, the differential) runs with an empty active set and never calls it — strip-at-lowering
+    stays, differential untouched. `lang test <FILE>` activates the `test` tier, checks once, then runs
+    each test in a fresh **real-host** isolate (synthesized: shared setup — decls/globals, main effects
+    removed — + a call to the one fn). A false `assert`/`panic`/any runtime error = fail. Tests run
+    **concurrently** (worker pool, default = machine parallelism); by default **all** run, `--fail-fast`
+    stops at the first; results gathered by index → deterministic declaration-order report. Exit 0 only
+    when every test ran and passed. `execute_real_host` factored out of `run_linked` so `lang run` and
+    the runner execute identically. **Test fns are ordinary named fns → carry `: void` like any
+    boundary** (the inferred-static rule is not special-cased). Unit + CLI integration tests.
 - **6c — annotation form `@test fn`.** Grouping-sugar equivalence with the block.
 - **6d — same-namespace private access** (in-source vs separate-file visibility).
 - **Later:** `@debug` statement form; `bench`; `doc` (text content-kind + verbatim capture +
