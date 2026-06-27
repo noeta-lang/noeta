@@ -484,6 +484,33 @@ impl Checker {
             .insert("Attributed".to_string(), lang_types::TypeKind::Struct);
         self.register_type_enum();
         self.register_semantic_prelude();
+        self.register_test_attributes();
+    }
+
+    /// Register the built-in **test-metadata attributes** (object-model slice 6h) as prelude
+    /// `@attribute` structs, so `#[Skip]` / `#[Name("…")]` / `#[Group("…")]` / `#[Data([…])]` on a
+    /// `@test`/`@bench` fn type-check without the program defining them. Each is an ordinary struct
+    /// (fields validated by the construction gate) marked `@attribute` (so the capability gate E0029
+    /// passes); the runner reads them off the fn's `attrs`. Registered like any prelude type, so a
+    /// user declaration of the same name shadows it. `Skip` is field-less (a bare marker); `Name`/
+    /// `Group` carry one string; `Data` carries a `dyn` payload (the row list — heterogeneous, so the
+    /// element type is left open).
+    fn register_test_attributes(&mut self) {
+        use lang_ast::reflect::{TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP};
+        let attrs: [(&str, Vec<(String, Type)>); 4] = [
+            (TEST_ATTR_SKIP, Vec::new()),
+            (TEST_ATTR_NAME, vec![("value".to_string(), Type::String)]),
+            (TEST_ATTR_GROUP, vec![("value".to_string(), Type::String)]),
+            (TEST_ATTR_DATA, vec![("rows".to_string(), Type::Dyn)]),
+        ];
+        for (name, fields) in attrs {
+            self.types.insert(name.to_string());
+            self.records.insert(name.to_string(), fields);
+            self.type_kinds
+                .insert(name.to_string(), lang_types::TypeKind::Struct);
+            // Mark `@attribute` (bare — attachable anywhere) so the E0029 capability gate passes.
+            self.record_attribute(name, Some(&[]));
+        }
     }
 
     /// Register the prelude `Semantic` enum and `RoleBinding` struct. `Semantic` is the language's

@@ -1,0 +1,20 @@
+// Object-model slice 6h: the built-in test-metadata attributes (`#[Skip]`, `#[Name("…")]`,
+// `#[Group("…")]`) lead a `@test` annotation and attach to its fn. On a normal run the whole
+// annotated fn is stripped before lowering (like any inactive code tier), so neither the attributes
+// nor the fn reach either backend's IR — the program's own output is unchanged and the differential
+// agrees by construction. The attributes are prelude `@attribute` structs (no user definition), so
+// this also proves their registration does not perturb an ordinary run.
+// expect: stdout "7"
+// expect: stdout "done"
+// expect: exit 0
+fn add(a: int, b: int): int { return a + b }
+
+#[Skip]
+@test fn not_ready(): void { assert(false) }
+
+#[Name("adds to seven")]
+#[Group("fast")]
+@test fn adds(): void { assert(add(3, 4) == 7) }
+
+echo add(3, 4)
+echo "done"

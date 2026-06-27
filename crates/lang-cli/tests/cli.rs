@@ -323,6 +323,65 @@ fn test_unknown_tier_is_e0036() {
         .stderr(predicate::str::contains("E0036"));
 }
 
+// --- test metadata attributes (object-model slice 6h) ------------------------------
+
+/// A program exercising `#[Skip]` / `#[Name(...)]` / `#[Group(...)]` on `@test` fns (built-in
+/// prelude attributes, no user definition). The attributes lead the annotation, one per line.
+const ATTR_TESTS: &str = "fn add(a: int, b: int): int { return a + b }\n\
+     #[Skip]\n\
+     @test fn not_ready(): void { assert(false) }\n\
+     #[Name(\"adds two numbers\")]\n\
+     @test fn add_test(): void { assert(add(1, 1) == 2) }\n\
+     #[Group(\"fast\")]\n\
+     @test fn fast_one(): void { assert(add(2, 2) == 4) }\n\
+     #[Group(\"slow\")]\n\
+     @test fn slow_one(): void { assert(add(3, 3) == 6) }\n";
+
+#[test]
+fn test_skip_is_reported_not_run_and_does_not_fail() {
+    // `#[Skip]` test is listed `skip`, never run (its false `assert` would fail), and the suite
+    // still passes. `#[Name("…")]` renames a test in the report.
+    let file = temp_program("test_attrs", ATTR_TESTS);
+    lang().arg("test").arg(&file).assert().success().stdout(
+        predicate::str::contains("skip  not_ready")
+            .and(predicate::str::contains("ok    adds two numbers")) // the #[Name] display name
+            .and(predicate::str::contains(
+                "3 passed, 0 failed, 1 skipped, 4 total",
+            ))
+            .and(predicate::str::contains("FAIL").not()),
+    );
+}
+
+#[test]
+fn test_group_filter_runs_only_that_group() {
+    let file = temp_program("test_group", ATTR_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .arg("--group")
+        .arg("fast")
+        .assert()
+        .success()
+        .stdout(
+            predicate::str::contains("ok    fast_one")
+                .and(predicate::str::contains("slow_one").not())
+                .and(predicate::str::contains("1 passed, 0 failed, 1 total")),
+        );
+}
+
+#[test]
+fn test_group_with_no_match_reports_empty() {
+    let file = temp_program("test_group_none", ATTR_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .arg("--group")
+        .arg("nonexistent")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tests in group `nonexistent`"));
+}
+
 // --- `bench` (object-model slice 6: the `@bench` runner) ---------------------------
 
 #[test]

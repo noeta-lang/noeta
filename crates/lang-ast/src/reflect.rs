@@ -338,6 +338,16 @@ pub const SEMANTIC_ENUM: &str = "Semantic";
 /// may be any `@semantic` enum (the built-in `Semantic` or a user one), not a single fixed type.
 pub const ROLE_BINDING: &str = "RoleBinding";
 
+/// The built-in **test-metadata attributes** (object-model slice 6h) — prelude `@attribute` structs
+/// the test runner reads off a `@test`/`@bench` fn: `#[Skip]` (zero fields, mark as skipped),
+/// `#[Name("…")]` (display name), `#[Group("…")]` (category for `--group` filtering), `#[Data([…])]`
+/// (parameterized rows). The single source of truth shared by the checker's prelude registration and
+/// the runner that interprets them.
+pub const TEST_ATTR_SKIP: &str = "Skip";
+pub const TEST_ATTR_NAME: &str = "Name";
+pub const TEST_ATTR_GROUP: &str = "Group";
+pub const TEST_ATTR_DATA: &str = "Data";
+
 /// The built-in `Semantic.*` variants, in declaration order. The single source of truth for the
 /// language's own role vocabulary, shared by the prelude-enum registration and both backends'
 /// materialization. All are payload-free (a richer parameterized form, e.g. `Layer(name)`, would

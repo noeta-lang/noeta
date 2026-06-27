@@ -59,6 +59,9 @@ enum Command {
         /// Number of tests to run concurrently (default: the machine's parallelism).
         #[arg(long, short)]
         jobs: Option<usize>,
+        /// Run only tests tagged `#[Group("<name>")]` with this group.
+        #[arg(long)]
+        group: Option<String>,
         /// Only run when the `test` tier is live in this `lang.toml` build profile; otherwise the
         /// runner does nothing.
         #[arg(long)]
@@ -101,8 +104,9 @@ fn main() -> ExitCode {
             file,
             fail_fast,
             jobs,
+            group,
             profile,
-        } => cmd_test(&file, fail_fast, jobs, &profile),
+        } => cmd_test(&file, fail_fast, jobs, &group, &profile),
         Command::Bench {
             file,
             iterations,
@@ -301,6 +305,7 @@ fn cmd_test(
     file: &std::path::Path,
     fail_fast: bool,
     jobs: Option<usize>,
+    group: &Option<String>,
     profile: &Option<String>,
 ) -> ExitCode {
     if let Some(code) = profile_gate(file, profile, "test") {
@@ -354,25 +359,74 @@ fn cmd_test(
         .cloned()
         .collect();
 
-    let total = activated.tests.len();
+    // The `--group` filter (object-model slice 6h): keep only tests tagged `#[Group("<g>")]`.
+    let selected: Vec<&TierFn> = match group {
+        Some(g) => activated
+            .tests
+            .iter()
+            .filter(|t| test_group(t).as_deref() == Some(g.as_str()))
+            .collect(),
+        None => activated.tests.iter().collect(),
+    };
+    if selected.is_empty() {
+        match group {
+            Some(g) => println!("no tests in group `{g}`"),
+            None => println!("no tests found"),
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    // Partition into skipped (`#[Skip]`) and runnable. A skipped test is reported but never run, and
+    // never fails the suite.
+    let total = selected.len();
+    let (skipped_refs, runnable): (Vec<&TierFn>, Vec<&TierFn>) =
+        selected.into_iter().partition(|t| test_is_skipped(t));
+    let skipped: Vec<String> = skipped_refs.iter().map(|t| test_display_name(t)).collect();
+
+    let run_count = runnable.len();
     let jobs = jobs
         .filter(|n| *n > 0)
         .unwrap_or_else(default_jobs)
-        .min(total);
+        .min(run_count.max(1));
+    let skipped_note = if skipped.is_empty() {
+        String::new()
+    } else {
+        format!(", {} skipped", skipped.len())
+    };
     println!(
-        "running {total} test{} on {jobs} thread{}",
-        plural(total),
+        "running {run_count} test{} on {jobs} thread{}{skipped_note}",
+        plural(run_count),
         plural(jobs),
     );
 
-    let outcomes = run_tests(
-        &setup,
-        &activated.tests,
-        activated.program.span,
-        jobs,
-        fail_fast,
-    );
-    report(&outcomes, total)
+    let outcomes = run_tests(&setup, &runnable, activated.program.span, jobs, fail_fast);
+    report(&outcomes, &skipped, total)
+}
+
+/// Whether a test fn is marked `#[Skip]` — the runner reports it skipped and does not run it.
+fn test_is_skipped(test: &TierFn) -> bool {
+    test.attrs
+        .iter()
+        .any(|a| a.name == lang_ast::reflect::TEST_ATTR_SKIP)
+}
+
+/// A test's display name — the string in `#[Name("…")]` if present, else the fn's own name.
+fn test_display_name(test: &TierFn) -> String {
+    string_attr(test, lang_ast::reflect::TEST_ATTR_NAME).unwrap_or_else(|| test.name.clone())
+}
+
+/// A test's group — the string in `#[Group("…")]` if present, for `--group` filtering.
+fn test_group(test: &TierFn) -> Option<String> {
+    string_attr(test, lang_ast::reflect::TEST_ATTR_GROUP)
+}
+
+/// The first string-valued argument of the attribute named `name` on `test`, if any.
+fn string_attr(test: &TierFn, name: &str) -> Option<String> {
+    let attr = test.attrs.iter().find(|a| a.name == name)?;
+    attr.args.iter().find_map(|arg| match &arg.value {
+        AttrValue::Str(s) => Some(s.clone()),
+        _ => None,
+    })
 }
 
 /// Whether a top-level statement is tier-runner *setup* — a declaration or a global binding the
@@ -424,7 +478,7 @@ fn plural(n: usize) -> &'static str {
 /// order, so the report is deterministic regardless of completion order.
 fn run_tests(
     setup: &[Stmt],
-    tests: &[TierFn],
+    tests: &[&TierFn],
     span: Span,
     jobs: usize,
     fail_fast: bool,
@@ -444,7 +498,7 @@ fn run_tests(
                     if idx >= tests.len() {
                         break;
                     }
-                    let outcome = run_one_test(setup, &tests[idx], span);
+                    let outcome = run_one_test(setup, tests[idx], span);
                     let failed = !outcome.passed;
                     results.lock().unwrap().push((idx, outcome));
                     if fail_fast && failed {
@@ -467,6 +521,9 @@ fn run_tests(
 /// activated program plus a call to one of its fns, so it cannot introduce new type errors; if one
 /// somehow appears it is surfaced as a failure rather than panicking the worker.
 fn run_one_test(setup: &[Stmt], test: &TierFn, span: Span) -> TestOutcome {
+    // The report shows the `#[Name("…")]` display name (falling back to the fn name); the fn name is
+    // still what is invoked.
+    let display = test_display_name(test);
     let mut stmts = setup.to_vec();
     stmts.push(call_stmt(&test.name, test.span));
     let program = Program { stmts, span };
@@ -474,7 +531,7 @@ fn run_one_test(setup: &[Stmt], test: &TierFn, span: Span) -> TestOutcome {
     let checked = lang_check::check_all(&program);
     if !checked.diagnostics.is_empty() {
         return TestOutcome {
-            name: test.name.clone(),
+            name: display,
             passed: false,
             message: Some(checked.diagnostics[0].message.clone()),
             stdout: String::new(),
@@ -492,14 +549,14 @@ fn run_one_test(setup: &[Stmt], test: &TierFn, span: Span) -> TestOutcome {
                     .unwrap_or_else(|| format!("exited with code {}", result.exit_code))
             });
             TestOutcome {
-                name: test.name.clone(),
+                name: display,
                 passed,
                 message,
                 stdout: result.stdout,
             }
         }
         Err(err) => TestOutcome {
-            name: test.name.clone(),
+            name: display,
             passed: false,
             message: Some(err),
             stdout: String::new(),
@@ -508,8 +565,10 @@ fn run_one_test(setup: &[Stmt], test: &TierFn, span: Span) -> TestOutcome {
 }
 
 /// Print the per-test report and the summary, returning the process exit code (success only when
-/// every test ran and passed). Failing tests show their message and any captured stdout.
-fn report(outcomes: &[TestOutcome], total: usize) -> ExitCode {
+/// every selected test ran and passed — a `#[Skip]`ped test does not fail the suite). Failing tests
+/// show their message and any captured stdout; skipped tests are listed after. `total` counts every
+/// selected test (run + skipped); `outcomes` are the runnable ones (fewer than run on `--fail-fast`).
+fn report(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> ExitCode {
     let mut passed = 0usize;
     for outcome in outcomes {
         if outcome.passed {
@@ -525,17 +584,22 @@ fn report(outcomes: &[TestOutcome], total: usize) -> ExitCode {
             }
         }
     }
+    for name in skipped {
+        println!("  skip  {name}");
+    }
 
     let failed = outcomes.len() - passed;
-    let not_run = total - outcomes.len();
+    let not_run = total - skipped.len() - outcomes.len();
     println!();
-    if not_run > 0 {
-        println!(
-            "{passed} passed, {failed} failed, {not_run} not run (stopped early), {total} total"
-        );
-    } else {
-        println!("{passed} passed, {failed} failed, {total} total");
+    let mut parts = vec![format!("{passed} passed"), format!("{failed} failed")];
+    if !skipped.is_empty() {
+        parts.push(format!("{} skipped", skipped.len()));
     }
+    if not_run > 0 {
+        parts.push(format!("{not_run} not run (stopped early)"));
+    }
+    parts.push(format!("{total} total"));
+    println!("{}", parts.join(", "));
     let _ = io::stdout().flush();
 
     if failed == 0 && not_run == 0 {
