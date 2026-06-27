@@ -300,6 +300,9 @@ pub enum Builtin {
     MakeSome,
     /// `panic(msg)` — abort with an unrecoverable runtime diagnostic and nonzero exit.
     Panic,
+    /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
+    /// The assertion primitive `@test` blocks rest on (object-model slice 6).
+    Assert,
 }
 
 impl Builtin {
@@ -314,6 +317,7 @@ impl Builtin {
             Builtin::MakeErr => "Err",
             Builtin::MakeSome => "some",
             Builtin::Panic => "panic",
+            Builtin::Assert => "assert",
         }
     }
 
@@ -329,6 +333,7 @@ impl Builtin {
         Builtin::MakeErr,
         Builtin::MakeSome,
         Builtin::Panic,
+        Builtin::Assert,
     ];
 }
 
@@ -2922,6 +2927,39 @@ impl Interpreter {
                 self.expect_arity(builtin, &args, 1, span)?;
                 let message = args[0].display();
                 Err(self.runtime_error(DiagnosticCode::Panic, span, format!("panic: {message}")))
+            }
+            // `assert(cond)` / `assert(cond, msg)` — the test runner's failure signal. A false
+            // condition aborts with the same `Panic` diagnostic `panic` raises (the runner reads a
+            // nonzero exit as a failed test); a true condition yields unit and falls through. The
+            // condition must be `bool` (no general truthiness), so a non-bool is a `TypeMismatch` —
+            // both checked identically here and in the VM so the differential agrees.
+            Builtin::Assert => {
+                if args.len() != 1 && args.len() != 2 {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`assert` expects 1 or 2 arguments, found {}", args.len()),
+                    ));
+                }
+                let cond = match &args[0] {
+                    Value::Bool(b) => *b,
+                    other => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("`assert` expects a bool, found {}", other.display()),
+                        ));
+                    }
+                };
+                if cond {
+                    Ok(Value::Unit)
+                } else {
+                    let message = match args.get(1) {
+                        Some(msg) => format!("assertion failed: {}", msg.display()),
+                        None => "assertion failed".to_string(),
+                    };
+                    Err(self.runtime_error(DiagnosticCode::Panic, span, message))
+                }
             }
         }
     }

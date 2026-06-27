@@ -46,6 +46,9 @@ pub enum Builtin {
     Map,
     Filter,
     Sum,
+    /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
+    /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
+    Assert,
 }
 
 impl Builtin {
@@ -56,6 +59,7 @@ impl Builtin {
             Builtin::Map => "map",
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
+            Builtin::Assert => "assert",
         }
     }
 
@@ -66,6 +70,7 @@ impl Builtin {
             "map" => Some(Builtin::Map),
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
+            "assert" => Some(Builtin::Assert),
             _ => None,
         }
     }

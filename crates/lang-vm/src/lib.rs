@@ -3770,6 +3770,36 @@ impl<'m> Vm<'m> {
                     Value::int(int_total)
                 })
             }
+            // `assert(cond)` / `assert(cond, msg)` — mirrors the tree-walker (`Builtin::Assert`): a
+            // false condition aborts with the same `Panic` diagnostic `panic` raises, a true one
+            // yields unit. The condition must be `bool`; a non-bool is a `TypeMismatch`. Messages use
+            // `display()` (as `Op::Panic` does), so the failure text is byte-identical across the
+            // differential.
+            Builtin::Assert => {
+                if args.len() != 1 && args.len() != 2 {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`assert` expects 1 or 2 arguments, found {}", args.len()),
+                    ));
+                }
+                let Some(cond) = args[0].as_bool() else {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`assert` expects a bool, found {}", args[0].display()),
+                    ));
+                };
+                if cond {
+                    Ok(Value::unit())
+                } else {
+                    let message = match args.get(1) {
+                        Some(msg) => format!("assertion failed: {}", msg.display()),
+                        None => "assertion failed".to_string(),
+                    };
+                    Err(self.error(DiagnosticCode::Panic, span, message))
+                }
+            }
         }
     }
 

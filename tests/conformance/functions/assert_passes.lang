@@ -1,0 +1,12 @@
+// `assert(cond)` / `assert(cond, msg)` is the prelude assertion primitive the `@test` runner rests
+// on (object-model slice 6). A *true* condition yields unit and falls through, so a program whose
+// assertions all hold runs to completion normally — its own output is unaffected. Both the 1-arg and
+// the 2-arg (message) forms are exercised here; the message is only materialized on failure.
+// expect: stdout "checks pass"
+// expect: exit 0
+fn add(a: int, b: int): int { return a + b; }
+
+assert(add(2, 3) == 5);
+assert(add(2, 3) == 5, "addition is broken");
+assert(true);
+echo "checks pass";

@@ -1,0 +1,10 @@
+// A *false* `assert` is the test runner's failure signal: it aborts with the same unrecoverable
+// `Panic` diagnostic (E0010) `panic` raises and stops the program with a nonzero exit — output
+// written before it is kept, nothing after runs. With a message argument the failure text is
+// `assertion failed: <msg>`; without one it is just `assertion failed`. The failing call is line 9.
+// expect: stdout "before"
+// expect: error E0010 at 9:1
+// expect: exit 1
+echo "before";
+assert(1 == 2, "one is not two");
+echo "after";

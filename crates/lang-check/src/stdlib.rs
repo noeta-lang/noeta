@@ -229,6 +229,8 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         "some" => opt(args.first().cloned().unwrap_or(Type::Unknown)),
         // `panic` diverges (raises `E0010`); no value flows out of it.
         "panic" => Type::Unknown,
+        // `assert(cond)` / `assert(cond, msg)` — checked for effect, yields nothing.
+        "assert" => Type::Unit,
         _ => return None,
     })
 }

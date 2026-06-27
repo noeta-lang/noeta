@@ -42,6 +42,7 @@ impl Default for IdGen {
 /// by the LSP to mark prelude identifiers. Grows as value-returning builtins land.
 pub const PRELUDE_NAMES: &[&str] = &[
     "echo", "next_id", "len", "map", "filter", "sum", "Ok", "Err", "some", "none", "panic",
+    "assert",
 ];
 
 #[cfg(test)]
