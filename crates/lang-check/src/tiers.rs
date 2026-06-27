@@ -19,7 +19,7 @@
 //! activates a tier, so the differential is untouched by construction. The two E0036 sources (this
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
-use lang_ast::{AttrArg, Program, Stmt};
+use lang_ast::{AttrArg, Attribute, Program, Stmt};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
@@ -59,6 +59,9 @@ pub struct TierFn {
     /// The runner reads the ones it understands (the bench runner reads `iterations`); a bare block
     /// carries none.
     pub args: Vec<AttrArg>,
+    /// The `#[...]` data attributes on the fn itself — test metadata the runner reads (`#[Skip]`,
+    /// `#[Name("…")]`, `#[Group("…")]`, `#[Data([…])]`). Empty for an unannotated fn.
+    pub attrs: Vec<Attribute>,
 }
 
 /// A `@doc { … }` text-tier block's verbatim body, surfaced for extraction by `lang doc` (slice
@@ -193,6 +196,7 @@ fn resolve_block(
                             name: decl.name.clone(),
                             span: decl.name_span,
                             args: args.clone(),
+                            attrs: decl.attrs.clone(),
                         });
                     }
                 }

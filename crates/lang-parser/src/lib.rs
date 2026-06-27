@@ -2524,6 +2524,39 @@ where
                 },
             );
 
+        // A tier annotation carrying **leading `#[...]` data attributes** (object-model slice 6h):
+        // `#[Skip] #[Group("fast")] @test fn … `. The attributes lead the declaration (one per line,
+        // like any decorated `fn`); they attach to the wrapped `fn`, where the checker validates them
+        // and the runner reads them as test metadata. Requires ≥1 leading `#[...]` (the no-attribute
+        // case is `tier_annotation`); only data attributes lead a tier fn (`@derive` is type codegen).
+        // Tried before `attributed_type_decl`: a `#[...]` followed by `@test fn` matches here, while a
+        // `#[...]` leading a *type* finds no `@<tier> fn` and backtracks to the decorator path.
+        let attributed_tier_annotation = attr_decl
+            .clone()
+            .repeated()
+            .at_least(1)
+            .collect::<Vec<_>>()
+            .then(just(T::At).ignore_then(id.clone()))
+            .then(tier_args.clone())
+            .then(fn_decl.clone())
+            .map_with(move |(((attrs, (tier, tier_span)), args), item), e| {
+                let mut item = item;
+                if let Stmt::Fn(decl) = &mut item {
+                    // Prepend the leading attributes ahead of any the `fn` carries itself.
+                    let mut merged = attrs;
+                    merged.append(&mut decl.attrs);
+                    decl.attrs = merged;
+                }
+                Stmt::TierBlock {
+                    tier,
+                    tier_span,
+                    args,
+                    items: vec![item],
+                    doc_text: None,
+                    span: ctx.to_span(e.span()),
+                }
+            });
+
         choice((
             echo,
             mut_binding,
@@ -2537,6 +2570,7 @@ where
             standalone_impl,
             tier_block,
             tier_annotation,
+            attributed_tier_annotation,
             attributed_type_decl,
             namespace_decl,
             use_decl,
@@ -3116,6 +3150,29 @@ mod tests {
         insta::assert_snapshot!(pretty(
             "@doc {\n  # Heading\n  Some *markdown* with `code`.\n}\necho 1"
         ));
+    }
+
+    #[test]
+    fn attributes_lead_a_tier_annotation() {
+        // Object-model slice 6h: `#[...]` data attributes lead a `@test`/`@bench` annotation, one per
+        // line, and attach to the wrapped `fn` (in source order). A `#[...]` leading a *type* still
+        // backtracks to the decorator path, so the two forms coexist.
+        let parsed = parse_str(
+            "#[Skip]\n#[Group(\"fast\")]\n@test fn slow(): void { return; }\n#[Route(\"/x\")] struct R { id: int }\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // The tier annotation wraps a `fn` carrying both leading attributes, in order.
+        let Stmt::TierBlock { tier, items, .. } = &parsed.program.stmts[0] else {
+            panic!("expected a tier block, got {:?}", parsed.program.stmts[0]);
+        };
+        assert_eq!(tier, "test");
+        let Stmt::Fn(decl) = &items[0] else {
+            panic!("expected the wrapped fn");
+        };
+        let attr_names: Vec<&str> = decl.attrs.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(attr_names, ["Skip", "Group"]);
+        // The trailing `#[Route(...)] struct` still parses via the decorator path.
+        assert!(matches!(&parsed.program.stmts[1], Stmt::Struct(_)));
     }
 
     #[test]
