@@ -1188,7 +1188,7 @@ impl Interpreter {
                 // from the in-place `x.f = v` class mutation in `set_field_in_place`.)
                 if Rc::strong_count(&rc) == 1 {
                     for (name, value) in overrides {
-                        if let Some(old) = rc.set_field_value(name, value) {
+                        if let Some(old) = rc.set_field_value(&name, value) {
                             self.destroy_value(old);
                         }
                     }
@@ -1197,12 +1197,14 @@ impl Interpreter {
                 // Aliased: copy, preserving the alias's view. The displaced fields live in `rc`,
                 // whose `Rc` drops at the end of this statement (releasing the scope's old
                 // reference); the alias keeps the original object.
-                let mut new_fields = rc.fields_snapshot();
+                let mut new_slots = rc.fields_snapshot();
                 for (name, value) in overrides {
-                    new_fields.insert(name, value);
+                    if let Some(i) = rc.slot_of(&name) {
+                        new_slots[i] = value;
+                    }
                 }
                 Ok(Value::Object(Rc::new(crate::ObjectValue::new(
-                    def, new_fields,
+                    def, new_slots,
                 ))))
             }
             // Defensive: the taken value is not a matching object (cannot happen for a check-clean
@@ -1244,7 +1246,7 @@ impl Interpreter {
                 // A class always mutates in place (reference semantics); a uniquely-owned struct may
                 // too (no alias can observe it). Both go through the shared `RefCell`.
                 if !rc.def.is_struct || Rc::strong_count(&rc) == 1 {
-                    if let Some(old) = rc.set_field_value(field.to_string(), new_value) {
+                    if let Some(old) = rc.set_field_value(field, new_value) {
                         self.destroy_value(old);
                     }
                     // A class field-set can close a reference cycle (`a.next = b; b.next = a`);
@@ -1255,11 +1257,13 @@ impl Interpreter {
                     return Ok(Value::Object(rc));
                 }
                 // Aliased struct: copy with the field updated, preserving the other owner's view.
-                let mut new_fields = rc.fields_snapshot();
-                new_fields.insert(field.to_string(), new_value);
+                let mut new_slots = rc.fields_snapshot();
+                if let Some(i) = rc.slot_of(field) {
+                    new_slots[i] = new_value;
+                }
                 Ok(Value::Object(Rc::new(crate::ObjectValue::new(
                     Rc::clone(&rc.def),
-                    new_fields,
+                    new_slots,
                 ))))
             }
             other => Err(self.runtime_error(

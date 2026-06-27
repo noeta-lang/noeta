@@ -449,10 +449,6 @@ impl TypeDef {
     pub fn name(&self) -> &str {
         &self.name
     }
-
-    fn has_field(&self, name: &str) -> bool {
-        self.fields.iter().any(|f| f.name == name)
-    }
 }
 
 impl std::fmt::Debug for TypeDef {
@@ -484,7 +480,14 @@ struct FieldSpec {
 /// or destructor that re-enters and mutates the same instance never hits a borrow conflict.
 pub struct ObjectValue {
     def: Rc<TypeDef>,
-    fields: RefCell<BTreeMap<String, Value>>,
+    /// The field values in **slot order**, parallel to `def.fields` (`slots[i]` is the value of
+    /// `def.fields[i]`). This mirrors the VM's `Payload::Object { shape, slots }` — the layout
+    /// groundwork P-PACK Phase 1 needs — replacing the former name-keyed `BTreeMap`: a `Vec` index
+    /// is a cache-friendly array slot, not a tree node, and the slot↔name map lives once on the
+    /// shared `def`, not per instance. An opaque `use`-import is constructed with a per-literal `def`
+    /// whose fields are the literal's keys in sorted order (matching the VM's opaque shape), so even
+    /// dynamic-field imports fit the uniform slot model.
+    slots: RefCell<Vec<Value>>,
     /// A monotonic per-run **creation sequence** (object-model slice 2c): the instance's allocation
     /// age. The cycle reaper finalizes reclaimed members in reverse-creation order (newest-first) by
     /// this key, matching the VM's `ObjHeader::seq` so cyclic `destruct` order agrees across backends.
@@ -497,9 +500,15 @@ thread_local! {
 }
 
 impl ObjectValue {
-    /// Build an instance, routing through the leak-oracle counter (paired with [`Drop`]). All
-    /// `ObjectValue` construction goes through here so the live count is exact.
-    fn new(def: Rc<TypeDef>, fields: BTreeMap<String, Value>) -> ObjectValue {
+    /// Build an instance from its **slot-ordered** field values (parallel to `def.fields`), routing
+    /// through the leak-oracle counter (paired with [`Drop`]). All `ObjectValue` construction goes
+    /// through here so the live count is exact. The caller guarantees `slots.len() == def.fields.len()`.
+    fn new(def: Rc<TypeDef>, slots: Vec<Value>) -> ObjectValue {
+        debug_assert_eq!(
+            slots.len(),
+            def.fields.len(),
+            "slot count must match the shape"
+        );
         leak::inc();
         let seq = OBJECT_SEQ.with(|c| {
             let s = c.get();
@@ -508,53 +517,55 @@ impl ObjectValue {
         });
         ObjectValue {
             def,
-            fields: RefCell::new(fields),
+            slots: RefCell::new(slots),
             seq,
         }
+    }
+
+    /// The slot index of `name` in this object's shape, or `None` if it has no such field. A linear
+    /// scan of the (small) declared field list — the tree-walker analogue of `Shape::slot_of`.
+    fn slot_of(&self, name: &str) -> Option<usize> {
+        self.def.fields.iter().position(|f| f.name == name)
     }
 
     /// The field's current value (cloned — a refcount bump for heap values), or `None` if absent.
     /// Releases the borrow before returning, so the caller may freely re-enter the instance.
     fn field(&self, name: &str) -> Option<Value> {
-        self.fields.borrow().get(name).cloned()
+        self.slot_of(name).map(|i| self.slots.borrow()[i].clone())
     }
 
     /// Whether the instance currently has `name` among its fields.
     fn has_field_value(&self, name: &str) -> bool {
-        self.fields.borrow().contains_key(name)
+        self.slot_of(name).is_some()
     }
 
-    /// A cloned snapshot of the field bag (each value's refcount bumped) — used by the copy-on-write
-    /// (`struct`) update path and by traversals that must not hold a borrow across re-entry.
-    fn fields_snapshot(&self) -> BTreeMap<String, Value> {
-        self.fields.borrow().clone()
+    /// A cloned snapshot of the slot vector (each value's refcount bumped) — used by the
+    /// copy-on-write (`struct`) update path and by traversals that must not hold a borrow across
+    /// re-entry. Slot-ordered, parallel to `def.fields`.
+    fn fields_snapshot(&self) -> Vec<Value> {
+        self.slots.borrow().clone()
     }
 
-    /// Insert/overwrite a field **in place** (reference-`class` mutation), returning the displaced
-    /// value if any so the caller can destroy it. Mutates through the shared `Rc`.
-    fn set_field_value(&self, name: String, value: Value) -> Option<Value> {
-        self.fields.borrow_mut().insert(name, value)
+    /// Overwrite the slot named `name` **in place** (reference-`class` mutation, or a uniquely-owned
+    /// `struct` update), returning the displaced value so the caller can destroy it. The field must
+    /// exist (callers validate first); a non-field name is a no-op returning `None`.
+    fn set_field_value(&self, name: &str, value: Value) -> Option<Value> {
+        match self.slot_of(name) {
+            Some(i) => Some(std::mem::replace(&mut self.slots.borrow_mut()[i], value)),
+            None => None,
+        }
     }
 
-    /// `Type { field: value, ... }`. Fields are shown in declared order for records and
-    /// classes; for an opaque imported stub (no declared fields) the actual bag is shown
-    /// in key order.
+    /// `Type { field: value, ... }`, fields in slot (declared, or sorted for an opaque import) order.
     pub fn display(&self) -> String {
-        let bag = self.fields.borrow();
-        let parts: Vec<String> = if self.def.opaque {
-            bag.iter()
-                .map(|(name, value)| format!("{name}: {}", value.repr()))
-                .collect()
-        } else {
-            self.def
-                .fields
-                .iter()
-                .map(|f| {
-                    let value = bag.get(&f.name).map(Value::repr).unwrap_or_default();
-                    format!("{}: {value}", f.name)
-                })
-                .collect()
-        };
+        let slots = self.slots.borrow();
+        let parts: Vec<String> = self
+            .def
+            .fields
+            .iter()
+            .zip(slots.iter())
+            .map(|(f, value)| format!("{}: {}", f.name, value.repr()))
+            .collect();
         format!("{} {{{}}}", self.def.name, parts.join(", "))
     }
 }
@@ -573,9 +584,19 @@ impl std::fmt::Debug for ObjectValue {
 
 impl PartialEq for ObjectValue {
     fn eq(&self, other: &ObjectValue) -> bool {
-        // Structural equality: same type name and equal fields (the value-kind comparison; a
-        // reference class's identity `==` is decided in `ops::values_equal` before reaching here).
-        self.def.name == other.def.name && *self.fields.borrow() == *other.fields.borrow()
+        // Structural equality: same type name, same field layout, and slot-wise equal values (the
+        // value-kind comparison; a reference class's identity `==` is decided in `ops::values_equal`
+        // before reaching here). The field-name check guards the opaque case, where two imports can
+        // share a name but carry different field sets.
+        self.def.name == other.def.name
+            && self.def.fields.len() == other.def.fields.len()
+            && self
+                .def
+                .fields
+                .iter()
+                .zip(&other.def.fields)
+                .all(|(a, b)| a.name == b.name)
+            && *self.slots.borrow() == *other.slots.borrow()
     }
 }
 
@@ -1048,9 +1069,9 @@ impl Interpreter {
             if let Some(body) = obj.def.destructor.clone() {
                 let scope = Scope::child(&self.scope);
                 {
-                    let bag = obj.fields.borrow();
-                    for (name, field) in bag.iter() {
-                        scope.declare(name.clone(), field.clone(), false);
+                    let slots = obj.slots.borrow();
+                    for (spec, field) in obj.def.fields.iter().zip(slots.iter()) {
+                        scope.declare(spec.name.clone(), field.clone(), false);
                     }
                 }
                 scope.declare("self".to_string(), Value::Object(obj.clone()), false);
@@ -1065,8 +1086,8 @@ impl Interpreter {
         // gone the members' refcounts reach zero and their allocations free (`leak::dec`).
         let mut drained: Vec<Value> = Vec::new();
         for obj in &survivors {
-            let fields = std::mem::take(&mut *obj.fields.borrow_mut());
-            drained.extend(fields.into_values());
+            let slots = std::mem::take(&mut *obj.slots.borrow_mut());
+            drained.extend(slots);
         }
         drop(survivors);
         drop(drained);
@@ -1121,9 +1142,9 @@ impl Interpreter {
             {
                 // Bind the fields into the destructor scope, then release the borrow before running
                 // the body (which may re-enter and read/mutate the same instance via `self`).
-                let bag = obj.fields.borrow();
-                for (name, field) in bag.iter() {
-                    scope.declare(name.clone(), field.clone(), false);
+                let slots = obj.slots.borrow();
+                for (spec, field) in obj.def.fields.iter().zip(slots.iter()) {
+                    scope.declare(spec.name.clone(), field.clone(), false);
                 }
             }
             scope.declare("self".to_string(), Value::Object(obj.clone()), false);
@@ -1135,18 +1156,11 @@ impl Interpreter {
         //    take ownership of the box to move its fields out; `try_unwrap` fails iff the
         //    destructor resurrected `self`, in which case the fields are not force-destroyed.
         if let Ok(mut object) = Rc::try_unwrap(obj) {
-            let order: Vec<String> = object.def.fields.iter().map(|f| f.name.clone()).collect();
-            let mut fields = std::mem::take(&mut object.fields).into_inner();
+            // Slot order is declared order (records/classes) or sorted-key order (opaque imports) —
+            // either way the slots already iterate in the spec's §4 release order.
+            let slots = std::mem::take(&mut object.slots).into_inner();
             drop(object); // the emptied `ObjectValue` drops here (its `leak::dec` balances `new`).
-            // Declared field order for records/classes; any remainder (an opaque import has no
-            // declared `def.fields`) drains in the bag's sorted-key order — matching the VM's
-            // opaque shape, whose slots are the literal's fields in sorted-key order.
-            for name in order {
-                if let Some(field) = fields.remove(&name) {
-                    self.destroy_value(field);
-                }
-            }
-            for (_, field) in std::mem::take(&mut fields) {
+            for field in slots {
                 self.destroy_value(field);
             }
         }
@@ -1306,20 +1320,15 @@ impl Interpreter {
             .filter(|a| a.name == type_name)
             .map(|a| {
                 let values = lang_ast::reflect::materialize_args(a, &fields, &shape.defaults);
-                let t_fields: BTreeMap<String, Value> = fields
+                // `attr_def.fields` is `fields` (same order), so the materialized values are already
+                // in slot order; `attributed_def` is `{ target, value }` in that order.
+                let t_slots: Vec<Value> = values
                     .iter()
-                    .cloned()
-                    .zip(
-                        values
-                            .iter()
-                            .map(|v| attr_value_to_eval(v, &self.reflection)),
-                    )
+                    .map(|v| attr_value_to_eval(v, &self.reflection))
                     .collect();
-                let t_value = Value::Object(Rc::new(ObjectValue::new(attr_def.clone(), t_fields)));
-                let mut a_fields = BTreeMap::new();
-                a_fields.insert("target".to_string(), Value::Str(a.target.clone()));
-                a_fields.insert("value".to_string(), t_value);
-                Value::Object(Rc::new(ObjectValue::new(attributed_def.clone(), a_fields)))
+                let t_value = Value::Object(Rc::new(ObjectValue::new(attr_def.clone(), t_slots)));
+                let a_slots = vec![Value::Str(a.target.clone()), t_value];
+                Value::Object(Rc::new(ObjectValue::new(attributed_def.clone(), a_slots)))
             })
             .collect();
         Value::List(Rc::new(items))
@@ -1340,13 +1349,12 @@ impl Interpreter {
             .roles
             .iter()
             .map(|r| {
-                let mut fields = BTreeMap::new();
-                fields.insert("target".to_string(), Value::Str(r.target.clone()));
-                fields.insert(
-                    "role".to_string(),
+                // `binding_def` is `{ target, role }` — build the slots in that order.
+                let slots = vec![
+                    Value::Str(r.target.clone()),
                     builtin_enum(&r.enum_name, &r.variant, Vec::new()),
-                );
-                Value::Object(Rc::new(ObjectValue::new(binding_def.clone(), fields)))
+                ];
+                Value::Object(Rc::new(ObjectValue::new(binding_def.clone(), slots)))
             })
             .collect();
         Value::List(Rc::new(items))
@@ -1388,22 +1396,51 @@ impl Interpreter {
             }
         };
 
-        let mut fields: BTreeMap<String, Value> = BTreeMap::new();
-
-        // `...base` fills the unnamed fields first (named initializers override below). For
-        // an opaque imported stub the field set is unknown, so the whole base is copied.
-        if let Some((base, spread_span)) = spread {
-            match base {
-                Value::Object(base) if def.opaque => {
-                    for (name, value) in base.fields.borrow().iter() {
-                        fields.insert(name.clone(), value.clone());
+        // An opaque `use`-import has no statically-known field set, so it cannot use the shared
+        // `def`'s slot layout: collect its fields name-keyed (spread base + named overrides), then
+        // build a fresh per-literal `def` whose slots are those names in sorted-key order — exactly
+        // the VM's per-literal opaque shape, so both backends lay the object out identically.
+        if def.opaque {
+            let mut fields: BTreeMap<String, Value> = BTreeMap::new();
+            if let Some((base, spread_span)) = spread {
+                match base {
+                    Value::Object(base) => {
+                        let slots = base.slots.borrow();
+                        for (spec, value) in base.def.fields.iter().zip(slots.iter()) {
+                            fields.insert(spec.name.clone(), value.clone());
+                        }
+                    }
+                    other => {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            spread_span,
+                            format!("spread `..` expects an object, found {}", other.type_name()),
+                        ));
                     }
                 }
+            }
+            for (name, _name_span, value) in field_values {
+                fields.insert(name, value);
+            }
+            let names: Vec<String> = fields.keys().cloned().collect();
+            let lit_def = Rc::new(fresh_opaque_def(def.name(), &names));
+            let slots: Vec<Value> = fields.into_values().collect();
+            return Ok(Value::Object(Rc::new(ObjectValue::new(lit_def, slots))));
+        }
+
+        // Declared struct/class: build the slot vector directly in `def.fields` order. `..base`
+        // fills unnamed slots first; named initializers override; any slot still empty is filled
+        // from its per-field default (slice 5), and a slot with neither is the full-initialization
+        // violation (E0009). The unknown-field and missing-field checks mirror the type checker.
+        let mut slots: Vec<Option<Value>> = vec![None; def.fields.len()];
+
+        if let Some((base, spread_span)) = spread {
+            match base {
                 Value::Object(base) => {
-                    let bag = base.fields.borrow();
-                    for spec in &def.fields {
-                        if let Some(value) = bag.get(&spec.name) {
-                            fields.insert(spec.name.clone(), value.clone());
+                    let base_slots = base.slots.borrow();
+                    for (i, spec) in def.fields.iter().enumerate() {
+                        if let Some(j) = base.slot_of(&spec.name) {
+                            slots[i] = Some(base_slots[j].clone());
                         }
                     }
                 }
@@ -1418,29 +1455,23 @@ impl Interpreter {
         }
 
         for (name, name_span, value) in field_values {
-            // An opaque stub accepts any field (its real shape is unknown until M1).
-            if !def.opaque && !def.has_field(&name) {
+            let Some(i) = def.fields.iter().position(|f| f.name == name) else {
                 return Err(self.runtime_error(
                     DiagnosticCode::UnknownName,
                     name_span,
                     format!("type `{}` has no field `{}`", def.name(), name),
                 ));
-            }
-            fields.insert(name, value);
+            };
+            slots[i] = Some(value);
         }
 
-        // A field still unset after spread + named is filled from its per-field default (slice 5),
-        // run in the type's definition (global) scope; a field with neither a value nor a default
-        // violates the full-initialization guarantee (E0009). This applies only to types with a
-        // known field set — an opaque import has none to be missing.
         let mut missing: Vec<String> = Vec::new();
-        for spec in &def.fields {
-            if fields.contains_key(&spec.name) {
+        for (i, spec) in def.fields.iter().enumerate() {
+            if slots[i].is_some() {
                 continue;
             }
             if let Some((_, thunk)) = def.field_defaults.iter().find(|(n, _)| n == &spec.name) {
-                let value = self.run_field_default(thunk)?;
-                fields.insert(spec.name.clone(), value);
+                slots[i] = Some(self.run_field_default(thunk)?);
             } else {
                 missing.push(spec.name.clone());
             }
@@ -1461,9 +1492,10 @@ impl Interpreter {
             ));
         }
 
+        let slots: Vec<Value> = slots.into_iter().map(Option::unwrap).collect();
         Ok(Value::Object(Rc::new(ObjectValue::new(
             Rc::clone(&def),
-            fields,
+            slots,
         ))))
     }
 
@@ -2743,9 +2775,9 @@ impl Interpreter {
         {
             // Snapshot the fields into the call scope, releasing the borrow before the body runs (a
             // method may re-enter and mutate `self` through the same shared `RefCell`).
-            let bag = object.fields.borrow();
-            for (name, value) in bag.iter() {
-                call_scope.declare(name.clone(), value.clone(), false);
+            let slots = object.slots.borrow();
+            for (spec, value) in object.def.fields.iter().zip(slots.iter()) {
+                call_scope.declare(spec.name.clone(), value.clone(), false);
             }
         }
         call_scope.declare("self".to_string(), Value::Object(Rc::clone(object)), false);
@@ -3287,6 +3319,17 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
     }
 }
 
+/// A per-literal `TypeDef` for an opaque `use`-import instance: its `fields` are the literal's keys
+/// in the caller-supplied (sorted) order, so the object lays out on the uniform slot model. `==` is
+/// structural (matching the VM's `ShapeKind::Opaque`); it carries no methods, derives, or destructor.
+fn fresh_opaque_def(name: &str, fields: &[String]) -> TypeDef {
+    TypeDef {
+        opaque: true,
+        structural_eq: true,
+        ..fresh_type_def(name, fields, false)
+    }
+}
+
 /// If `value` is a reflection `Type` value naming a nominal type (`Type.Named`/`Struct`/`Class`/
 /// `Enum`, whose first payload is the type's name), return that name — so a stored type reference
 /// can be used as an `invoke` receiver. Mirrors the VM's `reflection_type_name`.
@@ -3341,9 +3384,9 @@ fn attr_value_to_eval(
         A::Struct { type_name, fields } => {
             let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
             let def = Rc::new(fresh_type_def(type_name, &names, true));
-            let f: BTreeMap<String, Value> =
-                fields.iter().map(|(n, v)| (n.clone(), recur(v))).collect();
-            Value::Object(Rc::new(ObjectValue::new(def, f)))
+            // `def.fields` is `names` (same order), so the recursed values are already slot-ordered.
+            let slots: Vec<Value> = fields.iter().map(|(_, v)| recur(v)).collect();
+            Value::Object(Rc::new(ObjectValue::new(def, slots)))
         }
         A::TypeRef(name) => build_type_value(&reflection.type_ref_repr(name)),
     }
@@ -3441,11 +3484,11 @@ fn object_structural_compare(left: &ObjectValue, right: &Value) -> Option<std::c
     if left.def.name != rb.def.name {
         return None;
     }
-    let la = left.fields.borrow();
-    let lb = rb.fields.borrow();
-    for f in &left.def.fields {
-        let a = la.get(&f.name)?;
-        let b = lb.get(&f.name)?;
+    let la = left.slots.borrow();
+    let lb = rb.slots.borrow();
+    for (i, f) in left.def.fields.iter().enumerate() {
+        let a = &la[i];
+        let b = &lb[rb.slot_of(&f.name)?];
         match compare_field(a, b)? {
             std::cmp::Ordering::Equal => continue,
             other => return Some(other),
@@ -3485,24 +3528,16 @@ fn value_to_json(value: &Value) -> String {
             format!("{{{}}}", parts.join(","))
         }
         Value::Object(object) => {
-            // Declared field order for records/classes; an opaque imported stub uses key order.
+            // Slot order is declared order (records/classes) or sorted-key order (opaque imports).
             // (Recursion is on field *values* — distinct objects — so holding this borrow is safe.)
-            let bag = object.fields.borrow();
-            let parts: Vec<String> = if object.def.opaque {
-                bag.iter()
-                    .map(|(name, v)| format!("{}:{}", json_string(name), value_to_json(v)))
-                    .collect()
-            } else {
-                object
-                    .def
-                    .fields
-                    .iter()
-                    .map(|f| {
-                        let v = bag.get(&f.name).cloned().unwrap_or(Value::Unit);
-                        format!("{}:{}", json_string(&f.name), value_to_json(&v))
-                    })
-                    .collect()
-            };
+            let slots = object.slots.borrow();
+            let parts: Vec<String> = object
+                .def
+                .fields
+                .iter()
+                .zip(slots.iter())
+                .map(|(f, v)| format!("{}:{}", json_string(&f.name), value_to_json(v)))
+                .collect();
             format!("{{{}}}", parts.join(","))
         }
         Value::Enum(e) => json_string(&e.variant),

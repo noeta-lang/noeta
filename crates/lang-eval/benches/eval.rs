@@ -50,9 +50,30 @@ fn accumulate_src(n: usize) -> String {
     )
 }
 
+/// A struct-heavy loop: construct a 4-field struct, read every field, and functionally update it
+/// each iteration. This is the field-storage stressor — every iteration does a slot fill (struct
+/// construction), four field reads, and a copy-on-write update. It is the benchmark for the
+/// representation change from a name-keyed `BTreeMap` to a slot-ordered `Vec` (Phase 1 of P-PACK).
+fn struct_fields_src(n: usize) -> String {
+    format!(
+        "struct Point {{ x: int; y: int; z: int; w: int }}\n\
+         mut p = Point {{ x: 0, y: 0, z: 0, w: 0 }}\n\
+         mut sum = 0\n\
+         for i in 0..{n} {{\n    \
+            p = Point {{ ...p, x: p.x + 1, y: p.y + i }}\n    \
+            sum = sum + p.x + p.y + p.z + p.w\n\
+         }}\n\
+         echo sum\n"
+    )
+}
+
 /// Sizes for the parameterized accumulator. Each doubles the previous, so the per-step time ratio
 /// reveals the complexity class (≈4× per doubling ⇒ O(n²); ≈2× ⇒ O(n)).
 const ACC_SIZES: &[usize] = &[1000, 2000, 4000, 8000];
+
+/// Sizes for the struct-field loop. A constant-factor change, so a single mid-size point suffices;
+/// a couple of sizes confirm the per-iteration cost is flat in `n`.
+const STRUCT_SIZES: &[usize] = &[2000, 8000];
 
 fn eval_hot_paths(c: &mut Criterion) {
     let mut group = c.benchmark_group("eval");
@@ -70,6 +91,15 @@ fn eval_hot_paths(c: &mut Criterion) {
         });
     }
     acc.finish();
+
+    let mut sf = c.benchmark_group("eval_struct_fields");
+    for &n in STRUCT_SIZES {
+        let prog = program(&struct_fields_src(n));
+        sf.bench_with_input(BenchmarkId::from_parameter(n), &prog, |b, prog| {
+            b.iter(|| black_box(TreeWalkBackend::new().run(black_box(prog))));
+        });
+    }
+    sf.finish();
 }
 
 criterion_group!(benches, eval_hot_paths);
