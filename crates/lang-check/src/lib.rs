@@ -75,12 +75,11 @@ use lang_span::Span;
 use lang_types::{BuiltinTrait, Type};
 
 mod stdlib;
+pub mod tiers;
 
-/// The built-in dev-tier names recognized in slice 6 (object-model). A `@<tier> { … }` block
-/// against any other name is an `E0036` (a typo must not silently vanish). These are hardcoded for
-/// now; once `@tier` declarations + the package manifest land, the active set becomes dynamic (a
-/// build profile's resolved provider-map) and this constant gives way to that set.
-const BUILTIN_TIERS: &[&str] = &["test", "bench", "doc", "debug"];
+pub use tiers::{Activated, TestFn, activate_tiers};
+
+use tiers::BUILTIN_TIERS;
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
 /// backends need. The two were once harvested by separate public entry points ([`check`] and
@@ -1203,21 +1202,8 @@ impl Checker {
                 tier, tier_span, ..
             } => {
                 if !BUILTIN_TIERS.contains(&tier.as_str()) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::UnknownTier,
-                            *tier_span,
-                            format!("unknown dev-tier `@{tier}`"),
-                        )
-                        .with_help(format!(
-                            "the built-in tiers are {}",
-                            BUILTIN_TIERS
-                                .iter()
-                                .map(|t| format!("`@{t}`"))
-                                .collect::<Vec<_>>()
-                                .join(", ")
-                        )),
-                    );
+                    self.diags
+                        .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
                 }
             }
         }

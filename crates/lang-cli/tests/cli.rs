@@ -136,6 +136,99 @@ fn run_orders_example_produces_the_headline_output() {
         );
 }
 
+// --- `test` (object-model slice 6: the `@test` runner) -----------------------------
+
+/// A program whose `@test` block holds a mix of passing and failing tests. The top-level `echo`
+/// must NOT run (the runner runs the tests, not the program's `main`).
+const MIXED_TESTS: &str = "fn add(a: int, b: int): int { return a + b; }\n\
+     echo \"main effect must not run\";\n\
+     @test {\n\
+         fn adds(): void { assert(add(2, 3) == 5); }\n\
+         fn fails(): void { assert(add(1, 1) == 3, \"math is hard\"); }\n\
+         fn panics(): void { panic(\"boom\"); }\n\
+     }\n";
+
+#[test]
+fn test_runs_all_tests_and_reports_failures() {
+    // Default: every test runs even after a failure; exit 1 because some failed. The passing
+    // tests are reported `ok`, the failing ones `FAIL` with their message, and the program's own
+    // top-level `echo` never runs.
+    let file = temp_program("test_mixed", MIXED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("ok    adds")
+                .and(predicate::str::contains("FAIL  fails"))
+                .and(predicate::str::contains("assertion failed: math is hard"))
+                .and(predicate::str::contains("FAIL  panics"))
+                .and(predicate::str::contains("panic: boom"))
+                .and(predicate::str::contains("1 passed, 2 failed, 3 total"))
+                .and(predicate::str::contains("main effect must not run").not()),
+        );
+}
+
+#[test]
+fn test_all_passing_exits_0() {
+    let file = temp_program(
+        "test_pass",
+        "fn add(a: int, b: int): int { return a + b; }\n\
+         @test {\n\
+             fn adds(): void { assert(add(2, 3) == 5); }\n\
+             fn truthy(): void { assert(true); }\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2 passed, 0 failed, 2 total"));
+}
+
+#[test]
+fn test_fail_fast_stops_early() {
+    // `--fail-fast --jobs 1` makes the stop deterministic: the first failure halts the run and the
+    // remaining tests are reported as not run.
+    let file = temp_program("test_failfast", MIXED_TESTS);
+    lang()
+        .arg("test")
+        .arg(&file)
+        .arg("--fail-fast")
+        .arg("--jobs")
+        .arg("1")
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(predicate::str::contains("not run (stopped early)"));
+}
+
+#[test]
+fn test_no_tests_is_success() {
+    let file = temp_program("test_none", "echo \"hi\";\n");
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no tests found"));
+}
+
+#[test]
+fn test_unknown_tier_is_e0036() {
+    let file = temp_program("test_badtier", "@tset { fn x(): void { assert(true); } }\n");
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0036"));
+}
+
 // --- `repl` -----------------------------------------------------------------------
 
 #[test]

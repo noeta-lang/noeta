@@ -12,6 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 lang-span = { workspace = true }
+lang-ast = { workspace = true }
+lang-backend = { workspace = true }
 lang-diagnostics = { workspace = true }
 lang-lexer = { workspace = true }
 lang-parser = { workspace = true }

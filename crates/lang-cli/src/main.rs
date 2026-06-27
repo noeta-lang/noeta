@@ -1,22 +1,28 @@
 //! `lang` — the user-facing toolchain binary.
 //!
-//! Exposes `run` (execute a file) and `repl` (interactive); both drive the same pipeline crates, so
-//! the binary is thin glue. The binary is named `lang` (placeholder pending the real language name).
-//! The conformance corpus / differential / leak harness that tests the *implementation* is a
-//! separate dev binary (`lang-conformance`), not a subcommand here — keeping the `lang test` verb
-//! free for a user program's own `@test {}` blocks (object-model slice 6).
+//! Exposes `run` (execute a file), `test` (run a program's `@test` blocks), and `repl`
+//! (interactive); all drive the same pipeline crates, so the binary is thin glue. The binary is
+//! named `lang` (placeholder pending the real language name). The conformance corpus / differential
+//! / leak harness that tests the *implementation* is a separate dev binary (`lang-conformance`), not
+//! a subcommand here — which is what keeps the `lang test` verb free for a user program's own
+//! `@test {}` blocks (object-model slice 6).
 
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::thread;
 
 use clap::{Parser, Subcommand};
+use lang_ast::{Expr, Program, Stmt};
+use lang_check::TestFn;
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::{TokenKind, lex};
 use lang_loader::Linked;
 use lang_parser::parse;
-use lang_span::{Source, SourceId, SourceMap};
+use lang_span::{Source, SourceId, SourceMap, Span};
 
 #[derive(Parser)]
 #[command(name = "lang", version, about = "The lang toolchain (working title)")]
@@ -32,6 +38,17 @@ enum Command {
         /// Path to a `.lang` file.
         file: PathBuf,
     },
+    /// Discover and run a program's `@test` blocks (object-model slice 6).
+    Test {
+        /// Path to a `.lang` file.
+        file: PathBuf,
+        /// Stop after the first failing test instead of running them all.
+        #[arg(long)]
+        fail_fast: bool,
+        /// Number of tests to run concurrently (default: the machine's parallelism).
+        #[arg(long, short)]
+        jobs: Option<usize>,
+    },
     /// Start an interactive REPL.
     Repl,
 }
@@ -39,6 +56,11 @@ enum Command {
 fn main() -> ExitCode {
     match Cli::parse().command {
         Command::Run { file } => cmd_run(&file),
+        Command::Test {
+            file,
+            fail_fast,
+            jobs,
+        } => cmd_test(&file, fail_fast, jobs),
         Command::Repl => cmd_repl(),
     }
 }
@@ -56,41 +78,50 @@ fn run_linked(linked: &Linked) -> i32 {
         return 1;
     }
 
-    // `lang run` executes against the real host (real `env`/`args`, real-disk IO) on a per-isolate
-    // tokio runtime (M2.3). It runs the **Core-IR** path — the same drop-annotated IR the
-    // conformance reference and the VM execute — so a user's program gets the migration's last-use
-    // destruction semantics, not the superseded AST-walk timing. The conformance differential keeps
-    // the deterministic sandbox, so this real-host path is never compared backend-to-backend.
-    let host = match lang_runtime::RealHost::new() {
-        Ok(host) => host,
-        Err(err) => {
-            eprintln!("lang: cannot start the runtime: {err}");
-            return 1;
+    match execute_real_host(&linked.program, &checked) {
+        Ok(result) => {
+            print!("{}", result.stdout);
+            let _ = io::stdout().flush();
+            emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
+            result.exit_code
         }
-    };
+        Err(err) => {
+            eprintln!("lang: {err}");
+            1
+        }
+    }
+}
+
+/// Execute an already-checked program against the **real host** (real `env`/`args`, real-disk IO)
+/// on a per-isolate tokio runtime (M2.3), returning its [`RunResult`]. It runs the **Core-IR** path
+/// — the same drop-annotated IR the conformance reference and the VM execute — so a user's program
+/// gets the migration's last-use destruction semantics, not the superseded AST-walk timing. The
+/// conformance differential keeps the deterministic sandbox, so this real-host path is never
+/// compared backend-to-backend. Shared by `lang run` and the `@test` runner so both execute a
+/// program identically. Lowering is total over the parsed language (never `Unsupported`) and purely
+/// syntactic, so every loaded program lowers; an `Err` here is only a failure to start the runtime.
+fn execute_real_host(
+    program: &lang_ast::Program,
+    checked: &lang_check::Checked,
+) -> Result<lang_backend::RunResult, String> {
+    let host =
+        lang_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
     // Lower + insert the precise-RC drops exactly as the bytecode pipeline does (with the same
-    // destructor-relevance annotation), so `lang run` matches the reference, then thread reuse
-    // tokens (Phase 5). There is no AST-walker fallback: lowering is total over the parsed language
-    // (it never produces `Unsupported`) and is purely syntactic, so every loaded program lowers —
-    // and a fallback would be a second, divergent destruction semantics.
+    // destructor-relevance annotation), so this matches the reference, then thread reuse tokens
+    // (Phase 5).
     let relevance = lang_ir_passes::Relevance {
         locals: checked.destructor_relevance.locals.clone(),
         params: checked.destructor_relevance.params.clone(),
     };
-    let ir = lang_ir::lower(&linked.program)
-        .expect("Core-IR lowering is total over the parsed language");
+    let ir = lang_ir::lower(program).expect("Core-IR lowering is total over the parsed language");
     let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = lang_ir_passes::thread_reuse(&ir);
-    let result = TreeWalkBackend::new().run_ir_with_host(
-        &linked.program,
+    Ok(TreeWalkBackend::new().run_ir_with_host(
+        program,
         &ir,
         Box::new(host),
-        checked.type_of_sites,
-    );
-    print!("{}", result.stdout);
-    let _ = io::stdout().flush();
-    emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
-    result.exit_code
+        checked.type_of_sites.clone(),
+    ))
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {
@@ -130,6 +161,259 @@ fn cmd_run(file: &std::path::Path) -> ExitCode {
             }
             ExitCode::from(1)
         }
+    }
+}
+
+/// The outcome of running one `@test` fn: whether it passed, the failure message (the first
+/// diagnostic, typically the assertion/panic), and anything it wrote to stdout (shown on failure).
+struct TestOutcome {
+    name: String,
+    passed: bool,
+    message: Option<String>,
+    stdout: String,
+}
+
+/// `lang test <FILE>` — discover the program's `@test` blocks (object-model slice 6) and run each
+/// as an isolated test. Tests run concurrently (one fresh isolate per test) and, by default, **all**
+/// of them run even after a failure; `--fail-fast` stops at the first failure. A test fails when its
+/// fn aborts — a false `assert`/`panic` (or any runtime error) — and passes when it returns normally.
+/// The program's own top-level "main" effects are not run: `lang test` runs the tests, not the file.
+fn cmd_test(file: &std::path::Path, fail_fast: bool, jobs: Option<usize>) -> ExitCode {
+    let linked = match lang_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+        Ok(Ok(linked)) => linked,
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    // Activate the `test` tier: inline its `@test` blocks as ordinary top-level declarations and
+    // collect the test fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
+    let activated = lang_check::activate_tiers(&linked.program, &["test"]);
+    if !activated.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+        return ExitCode::from(1);
+    }
+
+    // Type-check the activated program once, so a broken test is a compile error reported a single
+    // time here rather than redundantly inside every per-test run.
+    let checked = lang_check::check_all(&activated.program);
+    if !checked.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        return ExitCode::from(1);
+    }
+
+    if activated.tests.is_empty() {
+        println!("no tests found");
+        return ExitCode::SUCCESS;
+    }
+
+    // The setup every test shares: the program's declarations (and top-level bindings/globals),
+    // with its own "main" effect statements removed. Each test then runs as `setup + <call the test
+    // fn>` in a fresh isolate, so the program's `echo`s don't run and one test cannot observe
+    // another's state.
+    let setup: Vec<Stmt> = activated
+        .program
+        .stmts
+        .iter()
+        .filter(|s| is_test_setup(s))
+        .cloned()
+        .collect();
+
+    let total = activated.tests.len();
+    let jobs = jobs
+        .filter(|n| *n > 0)
+        .unwrap_or_else(default_jobs)
+        .min(total);
+    println!(
+        "running {total} test{} on {jobs} thread{}",
+        plural(total),
+        plural(jobs),
+    );
+
+    let outcomes = run_tests(
+        &setup,
+        &activated.tests,
+        activated.program.span,
+        jobs,
+        fail_fast,
+    );
+    report(&outcomes, total)
+}
+
+/// Whether a top-level statement is test *setup* — a declaration or a global binding the tests may
+/// depend on — as opposed to the program's own "main" effects (which `lang test` does not run).
+fn is_test_setup(stmt: &Stmt) -> bool {
+    !matches!(
+        stmt,
+        Stmt::Echo { .. }
+            | Stmt::Return { .. }
+            | Stmt::If { .. }
+            | Stmt::For { .. }
+            | Stmt::While { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::Expr { .. }
+    )
+}
+
+/// A statement that calls the zero-arg test fn `name`: `name();`.
+fn call_stmt(name: &str, span: Span) -> Stmt {
+    Stmt::Expr {
+        expr: Expr::Call {
+            callee: Box::new(Expr::Ident {
+                name: name.to_string(),
+                span,
+            }),
+            args: Vec::new(),
+            span,
+        },
+        span,
+    }
+}
+
+/// The default test concurrency — the machine's available parallelism (1 if it cannot be queried).
+fn default_jobs() -> usize {
+    thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+}
+
+fn plural(n: usize) -> &'static str {
+    if n == 1 { "" } else { "s" }
+}
+
+/// Run `tests` concurrently across `jobs` worker threads, each grabbing the next test by an atomic
+/// index. By default every test runs; with `fail_fast` a failure sets a shared stop flag and the
+/// workers drain out. Results are gathered with their original index and returned in declaration
+/// order, so the report is deterministic regardless of completion order.
+fn run_tests(
+    setup: &[Stmt],
+    tests: &[TestFn],
+    span: Span,
+    jobs: usize,
+    fail_fast: bool,
+) -> Vec<TestOutcome> {
+    let next = AtomicUsize::new(0);
+    let stop = AtomicBool::new(false);
+    let results: Mutex<Vec<(usize, TestOutcome)>> = Mutex::new(Vec::with_capacity(tests.len()));
+
+    thread::scope(|scope| {
+        for _ in 0..jobs {
+            scope.spawn(|| {
+                loop {
+                    if fail_fast && stop.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let idx = next.fetch_add(1, Ordering::Relaxed);
+                    if idx >= tests.len() {
+                        break;
+                    }
+                    let outcome = run_one_test(setup, &tests[idx], span);
+                    let failed = !outcome.passed;
+                    results.lock().unwrap().push((idx, outcome));
+                    if fail_fast && failed {
+                        stop.store(true, Ordering::Relaxed);
+                        break;
+                    }
+                }
+            });
+        }
+    });
+
+    let mut collected = results.into_inner().unwrap();
+    collected.sort_by_key(|(idx, _)| *idx);
+    collected.into_iter().map(|(_, outcome)| outcome).collect()
+}
+
+/// Run a single test: synthesize `setup + <call the test fn>`, run it in a fresh real-host isolate,
+/// and read a nonzero exit / any diagnostic as a failure (the first diagnostic — the assertion or
+/// panic — is the reported message). The synthesized program is a subset of the already-checked
+/// activated program plus a call to one of its fns, so it cannot introduce new type errors; if one
+/// somehow appears it is surfaced as a failure rather than panicking the worker.
+fn run_one_test(setup: &[Stmt], test: &TestFn, span: Span) -> TestOutcome {
+    let mut stmts = setup.to_vec();
+    stmts.push(call_stmt(&test.name, test.span));
+    let program = Program { stmts, span };
+
+    let checked = lang_check::check_all(&program);
+    if !checked.diagnostics.is_empty() {
+        return TestOutcome {
+            name: test.name.clone(),
+            passed: false,
+            message: Some(checked.diagnostics[0].message.clone()),
+            stdout: String::new(),
+        };
+    }
+
+    match execute_real_host(&program, &checked) {
+        Ok(result) => {
+            let passed = result.exit_code == 0 && result.diagnostics.is_empty();
+            let message = (!passed).then(|| {
+                result
+                    .diagnostics
+                    .first()
+                    .map(|d| d.message.clone())
+                    .unwrap_or_else(|| format!("exited with code {}", result.exit_code))
+            });
+            TestOutcome {
+                name: test.name.clone(),
+                passed,
+                message,
+                stdout: result.stdout,
+            }
+        }
+        Err(err) => TestOutcome {
+            name: test.name.clone(),
+            passed: false,
+            message: Some(err),
+            stdout: String::new(),
+        },
+    }
+}
+
+/// Print the per-test report and the summary, returning the process exit code (success only when
+/// every test ran and passed). Failing tests show their message and any captured stdout.
+fn report(outcomes: &[TestOutcome], total: usize) -> ExitCode {
+    let mut passed = 0usize;
+    for outcome in outcomes {
+        if outcome.passed {
+            passed += 1;
+            println!("  ok    {}", outcome.name);
+        } else {
+            println!("  FAIL  {}", outcome.name);
+            if let Some(message) = &outcome.message {
+                println!("        {message}");
+            }
+            for line in outcome.stdout.lines() {
+                println!("        | {line}");
+            }
+        }
+    }
+
+    let failed = outcomes.len() - passed;
+    let not_run = total - outcomes.len();
+    println!();
+    if not_run > 0 {
+        println!(
+            "{passed} passed, {failed} failed, {not_run} not run (stopped early), {total} total"
+        );
+    } else {
+        println!("{passed} passed, {failed} failed, {total} total");
+    }
+    let _ = io::stdout().flush();
+
+    if failed == 0 && not_run == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
     }
 }
 

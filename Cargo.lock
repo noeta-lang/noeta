@@ -634,6 +634,8 @@ version = "0.0.0"
 dependencies = [
  "assert_cmd",
  "clap",
+ "lang-ast",
+ "lang-backend",
  "lang-check",
  "lang-diagnostics",
  "lang-eval",
