@@ -318,13 +318,20 @@ support for a raw-text span — the one genuinely new lexing concern).
   `lang_ast::reflect::TEST_ATTR_*`. **6h.3 (`bca0f60`):** `#[Data([…])]` parameterized tests — a
   one-param test runs once per row (`name[row]`, isolated; row literal → call arg via
   `attr_value_to_expr`; a type-mismatched/unconvertible row fails just that case). Composes with
-  Name/Group/Skip. Known gap (pre-existing): negative attribute literals (`#[Data([-5])]`) are
-  rejected (unary-minus isn't an attribute literal). Deferred (flagged to the user): `#[Skip("reason")]`
-  needs attribute **field defaults** (the construction gate requires all fields) — a small follow-up.
+  Name/Group/Skip.
+- **6i — attribute-system gaps (the two 6h follow-ups). ✅ DONE (`8fed97c`, `1887e42`).** **6i.1
+  (`8fed97c`):** negative attribute literals — `expr_to_attr_value` folds `UnaryOp::Neg` over a
+  numeric literal, so `#[Data([-5])]` / `#[Cache(ttl: -1)]` work. **6i.2 (`1887e42`):** attribute
+  **field defaults** — an `@attribute` field with a default (`ttl: int = 60`) is optional in a
+  `#[...]` construction, and the built-in `Skip` gains a defaulted `reason` so `#[Skip]` and
+  `#[Skip("flaky")]` both work (runner shows the reason). Two consistent halves: the checker gate
+  (`attribute_optional_fields`) omits the missing-field error for a defaulted field; materialization
+  (`TypeInfo.field_defaults` + `fold_const_expr` + shared `reflect::attribute_shape`/
+  `builtin_attribute_shape`) fills an omitted field from its default, so `attributes_of` reports the
+  default — both backends agree, no checker-vs-runtime divergence.
 - **Still later (needs the package system):** third-party `@tier` declarations + their manifest-
   reading runners; `[dependencies]` + cross-package provider resolution; profile-level codegen knobs
-  / compile-time constants; env (deferred entirely). Plus: attribute field defaults (enabling
-  `#[Skip("reason")]` and optional-field attributes generally); negative attribute literals.
+  / compile-time constants; env (deferred entirely).
 
 ---
 
