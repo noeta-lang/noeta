@@ -1704,6 +1704,7 @@ where
                         params,
                         ret,
                         attrs,
+                        is_dev_tier: false,
                         body,
                         span: ctx.to_span(e.span()),
                     })
@@ -1786,6 +1787,10 @@ where
                     params,
                     ret,
                     attrs,
+                    // A method body is checked with `current_type` set, so it already sees its own
+                    // type's privates; the dev-tier white-box relaxation is only for lifted top-level
+                    // fns.
+                    is_dev_tier: false,
                     body,
                     span: ctx.to_span(e.span()),
                 },

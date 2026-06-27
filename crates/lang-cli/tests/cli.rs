@@ -238,6 +238,31 @@ fn test_annotation_form_is_discovered() {
 }
 
 #[test]
+fn test_white_box_private_field_access() {
+    // Slice 6d: an in-source `@test` block gets white-box access to its module's private fields —
+    // it reads/writes/constructs `Account.balance` (private) directly and passes. (Ordinary code
+    // doing the same would be E0035, exercised in the checker's unit tests.)
+    let file = temp_program(
+        "test_whitebox",
+        "class Account {\n\
+             mut balance: int\n\
+             fn new(b: int): Account { return Account { balance: b }; }\n\
+         }\n\
+         @test fn touches_internals(): void {\n\
+             mut a = Account { balance: 0 };\n\
+             a.balance = 50;\n\
+             assert(a.balance == 50);\n\
+         }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("1 passed, 0 failed, 1 total"));
+}
+
+#[test]
 fn test_unknown_tier_is_e0036() {
     let file = temp_program("test_badtier", "@tset { fn x(): void { assert(true); } }\n");
     lang()

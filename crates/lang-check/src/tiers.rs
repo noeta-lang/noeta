@@ -97,17 +97,20 @@ pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
         }
 
         // Active code tier: inline its items as ordinary top-level declarations, recording the
-        // `@test` fns so the runner can invoke them.
+        // `@test` fns so the runner can invoke them. A lifted fn is marked `is_dev_tier` so the
+        // checker grants it white-box access to its module's private fields (slice 6d).
         for item in items {
-            if tier == "test"
-                && let Stmt::Fn(decl) = item
-            {
-                tests.push(TestFn {
-                    name: decl.name.clone(),
-                    span: decl.name_span,
-                });
+            let mut item = item.clone();
+            if let Stmt::Fn(decl) = &mut item {
+                decl.is_dev_tier = true;
+                if tier == "test" {
+                    tests.push(TestFn {
+                        name: decl.name.clone(),
+                        span: decl.name_span,
+                    });
+                }
             }
-            stmts.push(item.clone());
+            stmts.push(item);
         }
     }
 
@@ -181,6 +184,40 @@ mod tests {
         assert!(out.diagnostics.is_empty());
         assert!(out.tests.is_empty());
         assert_eq!(out.program.stmts.len(), 1);
+    }
+
+    /// White-box (slice 6d): a private `class` field is visible inside an active dev-tier (`@test`)
+    /// fn body — read, write, and construct — so a white-box test type-checks with no E0035. With
+    /// the tier inactive the block is stripped, so the bare program checks clean too.
+    #[test]
+    fn dev_tier_fn_gets_white_box_field_access() {
+        let program = parse_program(
+            "class Account { mut balance: int  fn new(b: int): Account { return Account { balance: b }; } }\n\
+             @test fn touches(): void { mut a = Account { balance: 0 }; a.balance = 5; assert(a.balance == 5); }\n",
+        );
+        let active = crate::check_all(&activate_tiers(&program, &["test"]).program);
+        assert!(
+            active.diagnostics.is_empty(),
+            "white-box dev-tier fn must not raise E0035: {:?}",
+            active.diagnostics
+        );
+        let inactive = crate::check_all(&activate_tiers(&program, &[]).program);
+        assert!(inactive.diagnostics.is_empty());
+    }
+
+    /// The white-box relaxation is **scoped**: ordinary same-module code (not a dev-tier fn) still
+    /// cannot read a private field — it is an E0035, exactly as before slice 6d.
+    #[test]
+    fn ordinary_fn_cannot_read_private_field() {
+        let program = parse_program(
+            "class Account { balance: int  fn new(b: int): Account { return Account { balance: b }; } }\n\
+             fn reads(): int { a = Account.new(1); return a.balance; }\n",
+        );
+        let diags = crate::check_all(&program).diagnostics;
+        assert!(
+            diags.iter().any(|d| d.code == DiagnosticCode::PrivateField),
+            "ordinary code reading a private field must still be E0035: {diags:?}"
+        );
     }
 
     /// An unknown tier is an `E0036` whether or not it would be active, and its block is dropped.

@@ -491,6 +491,14 @@ pub struct FnDecl {
     /// Captured in the reflection manifest like a type's attributes; `@derive` is *not* permitted
     /// here (it is codegen for types only). Empty for the common unannotated function.
     pub attrs: Vec<Attribute>,
+    /// Whether this fn was lifted from a **dev-tier block** (`@test`/`@bench`/…, object-model slice
+    /// 6d). Set by `activate_tiers` when it inlines a tier block's items; `false` for an ordinary fn
+    /// or a method. A dev-tier fn is co-located developer-tooling code, so it gets **white-box access
+    /// to its module's private fields** (the Rust `#[cfg(test)]` model) — the checker relaxes the
+    /// type-scoped field-privacy gate (E0035) inside its body. (The same-module *restriction* — a
+    /// separate test-tier file seeing only `pub` — lands with the package/test-file system; today
+    /// every tier block is in-source, so program-wide access is same-module access.)
+    pub is_dev_tier: bool,
     pub body: Vec<Stmt>,
     pub span: Span,
 }

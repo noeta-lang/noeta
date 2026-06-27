@@ -358,6 +358,11 @@ struct Checker {
     /// access on `self` *or* any same-type value is permitted (the type-scoped privacy rule). `None`
     /// at top level and inside free functions.
     current_type: Option<String>,
+    /// While checking the body of a fn lifted from a **dev-tier block** (`@test`/…, slice 6d), the
+    /// type-scoped field-privacy gate is relaxed to white-box access: co-located developer tooling
+    /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
+    /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
+    in_dev_tier: bool,
     /// Declared type → its kind (`Enum`/`Struct`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
@@ -1256,6 +1261,10 @@ impl Checker {
         // A function body is a fresh control-flow context: `break`/`continue` inside it cannot
         // target a loop the *enclosing* code is in, so reset the depth (restored after).
         let saved_loop_depth = std::mem::replace(&mut self.loop_depth, 0);
+        // White-box field privacy inside a dev-tier fn (slice 6d). Sticky: a nested fn declared in a
+        // dev-tier body stays white-box too (co-located tooling). Restored after the body.
+        let saved_dev_tier = self.in_dev_tier;
+        self.in_dev_tier = decl.is_dev_tier || saved_dev_tier;
         env.push(HashMap::new());
         for (name, ty) in extra {
             bind(env, name, ty.clone());
@@ -1267,6 +1276,7 @@ impl Checker {
             self.check_stmt(stmt, env);
         }
         env.pop();
+        self.in_dev_tier = saved_dev_tier;
         self.current_ret = saved_ret;
         self.loop_depth = saved_loop_depth;
         self.type_params = saved_type_params;
@@ -3402,7 +3412,9 @@ impl Checker {
             .private_fields
             .get(type_name)
             .is_some_and(|fs| fs.contains(field));
-        !private || self.current_type.as_deref() == Some(type_name)
+        // White-box for dev-tier (`@test`/…) fn bodies: co-located tooling sees its module's
+        // privates (slice 6d), so a private field is visible there regardless of `current_type`.
+        !private || self.in_dev_tier || self.current_type.as_deref() == Some(type_name)
     }
 
     /// Report an access to a private field from outside its type (E0035). `verb` is the action
