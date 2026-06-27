@@ -219,6 +219,32 @@ impl Value {
         })
     }
 
+    /// Pack `element` (a value-struct instance) onto the end of this packed list's buffer **in
+    /// place** (P-PACK 2.5 streaming construction). The caller must guarantee a uniquely-owned packed
+    /// list (`refcount == 1`) — true for the streaming accumulator, which is never aliased. The
+    /// element's primitives are *copied* into the buffer (not retained), so the caller still owns the
+    /// element value and must release it. Returns `false` without modifying the buffer if `element`
+    /// fails to pack (staged into a scratch vector first), so the caller can demote to a boxed list.
+    #[must_use]
+    pub fn packed_push(self, element: Value) -> bool {
+        debug_assert!(
+            self.is_packed_list() && heap::refcount(self) == 1,
+            "packed_push requires a uniquely-owned packed list"
+        );
+        heap::with_payload_mut(self, |p| match p {
+            Payload::PackedList { schema, words } => {
+                let mut staged = Vec::with_capacity(schema.word_count);
+                if element.pack_element(schema, &mut staged) {
+                    words.extend(staged);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        })
+    }
+
     /// Demote a list to an **owned** boxed list the caller must release: a packed list materializes
     /// into a fresh `Payload::List` of owned objects (refcount 1 each, owned by the list); an
     /// already-boxed list is returned with one extra reference. Either way the result is a boxed
@@ -626,6 +652,22 @@ impl Value {
                 }
             });
         }
+    }
+
+    /// Push one `element` onto this boxed list's backing buffer **in place**, taking ownership of the
+    /// caller's reference (no retain — the caller hands over one reference). The caller must guarantee
+    /// a uniquely-owned list (`refcount == 1`). Used by the packed-list streaming demote fall-back
+    /// (P-PACK 2.5). No-op if this is not a boxed list.
+    pub fn list_push(self, element: Value) {
+        debug_assert!(
+            self.is_list() && heap::refcount(self) == 1,
+            "list_push requires a uniquely-owned list (the COW invariant)"
+        );
+        heap::with_payload_mut(self, |p| {
+            if let Payload::List(items) = p {
+                items.push(element);
+            }
+        });
     }
 
     /// Overwrite list slot `index` **in place** with `value`, returning the displaced value (whose
@@ -1375,6 +1417,47 @@ mod tests {
 
         // Release the packed list (a leaf — frees the buffer, no child release), so miri sees no leak.
         list.release();
+    }
+
+    #[test]
+    fn packed_push_streams_in_place_and_frees() {
+        // P-PACK 2.5: streaming construction — start from an empty packed list and `packed_push` each
+        // element in place (the in-place path the VM uses). `packed_push` reads the element through
+        // the heap while mutating the list through the heap (two distinct objects), so this exercises
+        // that nested `with_payload_mut`/`with_payload` access for use-after-free under miri, and
+        // confirms the element object is freed by the caller after its primitives are copied.
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "V",
+            vec!["x".into(), "y".into()],
+        ));
+        let schema = Rc::new(PackedSchema {
+            shape: Rc::clone(&shape),
+            fields: vec![PackedKind::Int, PackedKind::Int],
+            word_count: 2,
+        });
+
+        let list = Value::packed_list(Rc::clone(&schema), Vec::new());
+        assert_eq!(list.list_len(), Some(0));
+        for (x, y) in [(3_i64, 1_i64), (1, 2), (7, 9)] {
+            let obj = Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
+            assert!(list.packed_push(obj)); // primitives copied into the buffer (no retain)
+            obj.release(); // the caller still owns the element — free it (its data is now in `words`)
+        }
+        assert_eq!(list.list_len(), Some(3));
+        assert_eq!(
+            list.display(),
+            "[V {x: 3, y: 1}, V {x: 1, y: 2}, V {x: 7, y: 9}]"
+        );
+        list.release();
+
+        // The demote fall-back: push onto a boxed list in place (the caller hands over one reference).
+        let boxed = Value::list(Vec::new());
+        let elem = Value::object(Rc::clone(&shape), vec![Value::int(5), Value::int(6)]);
+        boxed.list_push(elem); // boxed now owns the reference handed over
+        assert_eq!(boxed.list_len(), Some(1));
+        assert_eq!(boxed.display(), "[V {x: 5, y: 6}]");
+        boxed.release(); // frees the list and its owned element, so miri sees no leak
     }
 
     #[test]

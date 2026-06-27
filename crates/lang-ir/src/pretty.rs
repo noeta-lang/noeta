@@ -251,6 +251,12 @@ impl Printer<'_> {
                 receiver, index, ..
             } => format!("{}[{}]", atom(receiver), atom(index)),
             Rvalue::List { items, .. } => format!("[{}]", atoms(items)),
+            Rvalue::PackedListNew { layout, .. } => {
+                format!("packed-list-new<{}>", layout.type_name)
+            }
+            Rvalue::PackedListPush { list, value, .. } => {
+                format!("packed-list-push({}, {})", atom(list), atom(value))
+            }
             Rvalue::Tuple { items, .. } => format!("({})", atoms(items)),
             Rvalue::TupleIndex {
                 receiver, index, ..

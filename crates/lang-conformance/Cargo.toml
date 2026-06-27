@@ -31,6 +31,8 @@ insta = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 serde_json = { workspace = true }
+lang-bytecode = { workspace = true }
+lang-alloc-probe = { workspace = true }
 
 [lints]
 workspace = true

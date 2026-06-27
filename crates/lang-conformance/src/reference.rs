@@ -36,7 +36,9 @@ pub fn reference_run(
     packed_list_sites: HashMap<Span, PackedLayout>,
     relevance: &lang_check::DestructorRelevance,
 ) -> RunResult {
-    let ir = lang_ir::lower(program).expect(
+    // Lower with the checker's `List<packed>` map so packed-list literals stream into a flat buffer
+    // (P-PACK 2.5); the layout rides on the IR, so `run_ir` needs no map (the VM compiles the same).
+    let ir = lang_ir::lower_with_packed(program, &packed_list_sites).expect(
         "Core-IR lowering is total over the parsed language \
          (gate: ir_lowering_is_total_over_the_corpus)",
     );
@@ -44,7 +46,7 @@ pub fn reference_run(
     // Thread reuse tokens identically to the bytecode pipeline so the reference and the VM consume
     // the same annotated IR (Phase 5).
     let ir = lang_ir_passes::thread_reuse(&ir);
-    TreeWalkBackend::new().run_ir(program, &ir, sites, packed_list_sites)
+    TreeWalkBackend::new().run_ir(program, &ir, sites)
 }
 
 /// The drop pass's relevance form, copied from the checker's (identical sets). Mirrors the

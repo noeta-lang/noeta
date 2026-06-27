@@ -20,6 +20,7 @@
 //! expose today; wiring that in is that phase's prerequisite, deliberately out of scope here
 //! so the Phase 1 IR stays a faithful, RC-neutral mirror of the AST.
 
+use std::collections::HashMap;
 use std::rc::Rc;
 
 use lang_ast::{
@@ -62,9 +63,27 @@ enum BodyKind<'a> {
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
-/// currently-supported subset.
+/// currently-supported subset. List literals lower to the boxed [`Rvalue::List`]; see
+/// [`lower_with_packed`] to additionally stream `List<packed>` literals into a flat buffer.
 pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
-    let mut lowerer = Lowerer::default();
+    lower_with_packed(program, &HashMap::new())
+}
+
+/// As [`lower`], but a list literal whose span appears in `packed_list_sites` (the checker's
+/// `List<@packed struct>` map, [`lang_ast::reflect::PackedLayout`]) lowers to a **streaming** flat
+/// build — [`Rvalue::PackedListNew`] then one [`Rvalue::PackedListPush`] per element, each element
+/// built immediately before its push — instead of a boxed [`Rvalue::List`]. The packed layout is
+/// invisible to observable behaviour, so this is a pure optimization: the production execution paths
+/// (`lang run`, the conformance reference, the bytecode compiler) pass the map; the REPL and IR
+/// corpus pass an empty one and stay boxed.
+pub fn lower_with_packed(
+    program: &AstProgram,
+    packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
+) -> Result<Program, Unsupported> {
+    let mut lowerer = Lowerer {
+        temps: 0,
+        packed_list_sites,
+    };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
         top,
@@ -76,13 +95,15 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
 /// Carries the temporary counter for the function frame currently being lowered. One
 /// `Lowerer` field is reused across nested frames by save/restore (see `lower_func`), so the
 /// counter always reflects the innermost activation.
-#[derive(Default)]
-struct Lowerer {
+struct Lowerer<'a> {
     /// The next free temporary index in the current frame; also the running frame size.
     temps: u32,
+    /// The checker's `List<packed>` construction-site map (keyed by list-literal span). Empty on
+    /// the boxed-only paths; non-empty enables streaming flat-buffer construction in `Expr::List`.
+    packed_list_sites: &'a HashMap<Span, lang_ast::reflect::PackedLayout>,
 }
 
-impl Lowerer {
+impl Lowerer<'_> {
     /// Allocate a fresh frame-local temporary.
     fn fresh(&mut self) -> Temp {
         let t = Temp(self.temps);
@@ -486,6 +507,34 @@ impl Lowerer {
                 ))
             }
             Expr::List { items, span } => {
+                // A `List<@packed struct>` literal (its span recorded by the checker) streams into a
+                // flat buffer: allocate, then build-and-push each element in turn so only one element
+                // object is ever live (P-PACK 2.5). Any other list builds the boxed `Rvalue::List`,
+                // materializing all element atoms first.
+                if let Some(layout) = self.packed_list_sites.get(span) {
+                    let mut acc = self.emit(
+                        out,
+                        Rvalue::PackedListNew {
+                            layout: layout.clone(),
+                            span: *span,
+                        },
+                        *span,
+                    );
+                    for item in items {
+                        let item_span = item.span();
+                        let value = self.lower_expr(item, out)?;
+                        acc = self.emit(
+                            out,
+                            Rvalue::PackedListPush {
+                                list: acc,
+                                value,
+                                span: item_span,
+                            },
+                            item_span,
+                        );
+                    }
+                    return Ok(acc);
+                }
                 let mut atoms = Vec::with_capacity(items.len());
                 for item in items {
                     atoms.push(self.lower_expr(item, out)?);

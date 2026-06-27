@@ -72,8 +72,9 @@ fn struct_fields_src(n: usize) -> String {
 /// flat raw-primitive buffer (P-PACK 2.3) and each `data[i]` materializes a single element on
 /// demand; the plain-`struct` variant stores `n` boxed objects and `data[i]` clones a pointer. The
 /// two variants are run side-by-side so the cost of the pack-at-build / materialize-on-read layer is
-/// directly visible against the boxed baseline (the memory win lands in a later peak-residency
-/// benchmark — this one measures scalar-access time).
+/// directly visible against the boxed baseline. This measures scalar-access *time*; the memory win
+/// (and that 2.5 streaming construction no longer spikes to the boxed peak) is measured by the
+/// `peak_memory` residency test in `lang-conformance`.
 fn packed_list_src(n: usize, packed: bool) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };
     let mut elems = String::with_capacity(n * 32);

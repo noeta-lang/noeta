@@ -1712,28 +1712,46 @@ impl<'m> Vm<'m> {
                 // `MakeList`'s consumed operands. If any element fails to pack (a shape the schema
                 // does not expect — not reachable for a well-typed marked site), fall back to a boxed
                 // list that retains each element, staying consistent with those drops.
-                Op::MakePackedList { dst, items, schema } => {
+                Op::PackedListNew { dst, schema } => {
+                    // Allocate the empty flat buffer the following `PackedListPush` chain fills
+                    // (P-PACK 2.5 streaming construction).
                     let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
-                    let mut words = Vec::with_capacity(items.len() * schema.word_count);
-                    let mut packed = true;
-                    for &r in items.iter() {
-                        if !frames[top].regs[r as usize].pack_element(&schema, &mut words) {
-                            packed = false;
-                            break;
-                        }
-                    }
-                    let list = if packed {
-                        Value::packed_list(schema, words)
-                    } else {
-                        let mut elements = Vec::with_capacity(items.len());
-                        for &r in items.iter() {
-                            let v = frames[top].regs[r as usize];
-                            retain(v);
-                            elements.push(v);
-                        }
-                        Value::list(elements)
-                    };
+                    let list = Value::packed_list(schema, Vec::new());
                     set_reg(&mut frames[top].regs, *dst, list);
+                    frames[top].pc += 1;
+                }
+                Op::PackedListPush {
+                    dst, list, value, ..
+                } => {
+                    let acc = frames[top].regs[*list as usize];
+                    let element = frames[top].regs[*value as usize];
+                    // `list` is the streaming accumulator — a uniquely-owned temp. Clear its register
+                    // to `unit` *without* releasing (a direct overwrite, like `ConcatInPlace`), so the
+                    // single owning reference transfers into `result` and a `dst == list` store is
+                    // safe. `value` is left in its register for the compiler-emitted `Drop` to free.
+                    frames[top].regs[*list as usize] = Value::unit();
+                    let result = if acc.is_packed_list() {
+                        if acc.packed_push(element) {
+                            // Element primitives copied into the buffer (not retained) — the buffer
+                            // extended in place; the `Drop` of `value` frees the element object.
+                            acc
+                        } else {
+                            // Defensive demote (a checked `@packed` type never mismatches): materialize
+                            // the packed buffer to an owned boxed list, release the packed accumulator,
+                            // then push the (retained) element so the boxed list owns one reference.
+                            let boxed = acc.realize_list();
+                            release(acc);
+                            retain(element);
+                            boxed.list_push(element);
+                            boxed
+                        }
+                    } else {
+                        // Already boxed (a prior demote): push the retained element in place.
+                        retain(element);
+                        acc.list_push(element);
+                        acc
+                    };
+                    set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
                 // A tuple builds exactly like a list (object-model slice 4): retain each element into

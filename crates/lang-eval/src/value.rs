@@ -175,19 +175,34 @@ pub(crate) enum SlotKind {
 }
 
 impl PackedList {
-    /// Build a packed list from a resolved `schema` and already-evaluated element values. Returns
-    /// `None` if any element fails to pack (a non-object, or a field whose runtime kind disagrees
-    /// with the schema) — the caller then falls back to a boxed list, so a packed layout is only
-    /// ever used when it is exactly correct.
-    pub(crate) fn build(schema: Rc<PackedSchema>, elements: &[Value]) -> Option<PackedList> {
-        let mut words = Vec::with_capacity(elements.len() * schema.word_count);
-        for element in elements {
-            pack_object(element, &schema, &mut words)?;
-        }
-        Some(PackedList {
+    /// An empty packed list with the given `schema` — the start of a streaming flat build
+    /// (P-PACK 2.5). Elements are appended one at a time by [`PackedList::push`].
+    pub(crate) fn empty(schema: Rc<PackedSchema>) -> PackedList {
+        PackedList {
             schema,
-            words: Rc::new(words),
-        })
+            words: Rc::new(Vec::new()),
+        }
+    }
+
+    /// Pack one `element` onto the end of the buffer, extending it **in place** when uniquely owned
+    /// (which it always is along the streaming-construction chain — the accumulator is an ANF temp).
+    /// Returns `false` without modifying the buffer if the element fails to pack (a non-object, or a
+    /// field whose runtime kind disagrees with the schema) so the caller can demote to a boxed list;
+    /// the partial pack is staged in a scratch vector first so a failure leaves the buffer intact.
+    #[must_use]
+    pub(crate) fn push(&mut self, element: &Value) -> bool {
+        let mut staged = Vec::with_capacity(self.schema.word_count);
+        if pack_object(element, &self.schema, &mut staged).is_none() {
+            return false;
+        }
+        Rc::make_mut(&mut self.words).extend(staged);
+        true
+    }
+
+    /// Materialize every element into a boxed vector — used when a packed build must demote (an
+    /// element failed to pack) so construction can continue on the boxed path.
+    pub(crate) fn to_boxed(&self) -> Vec<Value> {
+        self.materialize()
     }
 
     /// The number of elements.

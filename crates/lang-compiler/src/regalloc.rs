@@ -150,11 +150,17 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::UpvalueGet { dst, .. } => f.def = Some(*dst),
         Op::UpvalueSet { src, .. } => f.uses.push(*src),
         Op::LoadNativeFn { dst, .. } => f.def = Some(*dst),
-        Op::MakeList { dst, items }
-        | Op::MakePackedList { dst, items, .. }
-        | Op::MakeTuple { dst, items } => {
+        Op::MakeList { dst, items } | Op::MakeTuple { dst, items } => {
             f.def = Some(*dst);
             f.uses.extend(items.iter().copied());
+        }
+        Op::PackedListNew { dst, .. } => f.def = Some(*dst),
+        Op::PackedListPush {
+            dst, list, value, ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*list);
+            f.uses.push(*value);
         }
         Op::TupleIndex { dst, receiver, .. } => {
             f.def = Some(*dst);
@@ -543,13 +549,19 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::UpvalueGet { dst, .. } => m(dst),
         Op::UpvalueSet { src, .. } => m(src),
         Op::LoadNativeFn { dst, .. } => m(dst),
-        Op::MakeList { dst, items }
-        | Op::MakePackedList { dst, items, .. }
-        | Op::MakeTuple { dst, items } => {
+        Op::MakeList { dst, items } | Op::MakeTuple { dst, items } => {
             m(dst);
             for r in items.iter_mut() {
                 m(r);
             }
+        }
+        Op::PackedListNew { dst, .. } => m(dst),
+        Op::PackedListPush {
+            dst, list, value, ..
+        } => {
+            m(dst);
+            m(list);
+            m(value);
         }
         Op::TupleIndex { dst, receiver, .. } => {
             m(dst);

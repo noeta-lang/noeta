@@ -28,6 +28,8 @@ lang-compiler = { path = "crates/lang-compiler" }
 lang-vm = { path = "crates/lang-vm" }
 lang-db = { path = "crates/lang-db" }
 lang-conformance = { path = "crates/lang-conformance" }
+# Test-only heap-residency probe (dev-dependency; tracking global allocator)
+lang-alloc-probe = { path = "crates/lang-alloc-probe" }
 # Core IR (memory-management migration: ANF lowering target)
 lang-ir = { path = "crates/lang-ir" }
 # Core IR passes (memory-management migration: precise-RC analyses + transforms)

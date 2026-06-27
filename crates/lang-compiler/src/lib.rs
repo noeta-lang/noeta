@@ -151,7 +151,10 @@ fn compile_inner(
     // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
     // points; they lower to plain releases (prompt reclamation, no destructor) so this is
     // behavior-neutral, reclaiming a local's value at its last use instead of at frame teardown.
-    let ir = lang_ir::lower(program).map_err(|u| Unsupported {
+    // Lower with the checker's `List<packed>` map so packed-list literals stream into a flat buffer
+    // (P-PACK 2.5); the resolved layout rides on the IR rvalue, so the bytecode compiler reads it
+    // from there (interning a schema at `PackedListNew`) and needs no separate span map of its own.
+    let ir = lang_ir::lower_with_packed(program, &packed_list_sites).map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
     })?;
     let ir = lang_ir_passes::insert_drops(&ir, relevance.as_ref());
@@ -172,7 +175,6 @@ fn compile_inner(
         types: HashMap::new(),
         module_globals: HashMap::new(),
         type_of_sites,
-        packed_list_sites,
         cache_slots: 0,
     };
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
@@ -265,11 +267,6 @@ struct ModuleCompiler {
     /// backends bake identical full-fidelity `Type` constants (`type_of` fidelity A, P2.3). A site
     /// absent here lowers to the runtime head-constructor op instead.
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
-    /// The packed layout the checker resolved for each `List<packed>` construction site (keyed by the
-    /// `Expr::List` span, P-PACK 2.1), harvested from the *same* program the tree-walker harvests so
-    /// both backends lay flat lists out identically. A list literal whose span is here compiles to
-    /// `Op::MakePackedList`; one absent compiles to the boxed `Op::MakeList`.
-    packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// Running count of inline-cache slots assigned so far. Each `LoadField`/`CallMethod` emission
     /// takes the next id (module-global across all chunks); the total becomes [`Module::cache_slots`],
     /// sizing the VM's per-run cache array. See [`ModuleCompiler::next_cache_slot`].
@@ -2003,33 +2000,47 @@ impl<'m> FnCompiler<'m> {
                 self.drop_temp_receiver(receiver, recv);
                 Ok(())
             }
-            Rvalue::List { items, span } => {
-                // A `List<packed>` literal (its span recorded by the checker, P-PACK 2.1) interns a
-                // packed schema and emits `MakePackedList`, building a flat raw-primitive buffer; any
-                // other list emits the boxed `MakeList`. Either way the elements are consumed (packed
-                // into words, or retained into the list) and the temporaries released.
-                let packed_schema = self
-                    .module
-                    .packed_list_sites
-                    .get(span)
-                    .cloned()
-                    .map(|layout| self.module.intern_packed_schema(&layout));
+            Rvalue::List { items, .. } => {
+                // A boxed list: each element is consumed (retained into the list) and the temporary
+                // released. A `List<packed>` literal never reaches here — lowering streams it into
+                // `PackedListNew` + `PackedListPush` instead (P-PACK 2.5).
                 let mut consumed = Vec::new();
                 let mut regs = Vec::with_capacity(items.len());
                 for item in items {
                     regs.push(self.consume_operand(item, &mut consumed)?);
                 }
-                match packed_schema {
-                    Some(schema) => self.code.push(Op::MakePackedList {
-                        dst,
-                        items: regs.into_boxed_slice(),
-                        schema,
-                    }),
-                    None => self.code.push(Op::MakeList {
-                        dst,
-                        items: regs.into_boxed_slice(),
-                    }),
-                }
+                self.code.push(Op::MakeList {
+                    dst,
+                    items: regs.into_boxed_slice(),
+                });
+                self.release_consumed(&consumed);
+                Ok(())
+            }
+            Rvalue::PackedListNew { layout, .. } => {
+                // Allocate the empty flat buffer that the following `PackedListPush` chain fills
+                // (P-PACK 2.5 streaming construction); intern the element schema from the layout the
+                // IR carries (so it dedups to the same shape `MakeStruct` uses for the element type).
+                let schema = self.module.intern_packed_schema(layout);
+                self.code.push(Op::PackedListNew { dst, schema });
+                Ok(())
+            }
+            Rvalue::PackedListPush {
+                list, value, span, ..
+            } => {
+                // Pack one element onto the streaming accumulator. The accumulator (`list`) is an ANF
+                // temp — uniquely owned — so the buffer extends in place; the element (`value`) is an
+                // owned temp the op consumes (its primitives copied into the buffer), so its now-dead
+                // register reference is released right after, freeing the element object at peak of
+                // one. A borrowed (non-temp) value is left to its binding's own drop.
+                let list_reg = self.atom_reg(list)?;
+                let mut consumed = Vec::new();
+                let value_reg = self.consume_operand(value, &mut consumed)?;
+                self.code.push(Op::PackedListPush {
+                    dst,
+                    list: list_reg,
+                    value: value_reg,
+                    span: *span,
+                });
                 self.release_consumed(&consumed);
                 Ok(())
             }

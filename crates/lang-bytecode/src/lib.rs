@@ -252,15 +252,25 @@ pub enum Op {
         dst: Reg,
         items: Box<[Reg]>,
     },
-    /// `dst = [items...]` for a `List<packed>` (P-PACK 2.4) — build a flat raw-primitive buffer
-    /// from the element registers (each a value-struct instance) using `schema` (an index into
-    /// [`Module::packed_schemas`]), instead of a boxed list of N objects. The elements are consumed
-    /// into the buffer; the layout is invisible to `RunResult` (every observation materializes the
-    /// same object the boxed `MakeList` would hold).
-    MakePackedList {
+    /// `dst = <empty List<packed>>` (P-PACK 2.5) — allocate an empty flat raw-primitive buffer for a
+    /// `List<@packed struct>` literal, using `schema` (an index into [`Module::packed_schemas`]). It
+    /// is filled element-by-element by [`Op::PackedListPush`]; building this way (rather than from all
+    /// N element registers at once) keeps only one element object live at a time.
+    PackedListNew {
         dst: Reg,
-        items: Box<[Reg]>,
         schema: u32,
+    },
+    /// `dst = packed-push(list, value)` (P-PACK 2.5) — pack the value-struct in `value` onto the flat
+    /// `List<packed>` in `list` and place the (in-place-extended) list in `dst`. `list` is the
+    /// streaming accumulator — an ANF temp, uniquely owned — so the buffer extends in place; `value`
+    /// is consumed (its primitive fields copied into the buffer, the element object then dropped by
+    /// the compiler-emitted release). If `value` cannot be packed (a shape mismatch — never for a
+    /// checked `@packed` type) the list demotes to boxed, keeping the layout invisible to `RunResult`.
+    PackedListPush {
+        dst: Reg,
+        list: Reg,
+        value: Reg,
+        span: Span,
     },
     /// `dst = (items...)` — build a heap tuple (object-model slice 4), retaining each element into
     /// it exactly like `MakeList`.
@@ -763,7 +773,7 @@ pub struct MethodEntry {
 }
 
 /// The compiled layout of one `List<packed>` element type (P-PACK 2.4) — the pure-data form of a
-/// `lang_object::PackedSchema`, referenced by index from [`Op::MakePackedList`]. Shapes and nested
+/// `lang_object::PackedSchema`, referenced by index from [`Op::PackedListNew`]. Shapes and nested
 /// schemas are held by **index** (into [`Module::shapes`] / [`Module::packed_schemas`]) so the
 /// module stays plain data; the VM resolves these to `Rc`-handles once at load.
 #[derive(Debug, Clone, PartialEq)]
@@ -797,7 +807,7 @@ pub struct Module {
     pub protos: Vec<Chunk>,
     pub shapes: Vec<Shape>,
     /// The packed-list element layouts (P-PACK 2.4), referenced by index from
-    /// [`Op::MakePackedList`]. Empty for a program with no `List<packed>` literal.
+    /// [`Op::PackedListNew`]. Empty for a program with no `List<packed>` literal.
     pub packed_schemas: Vec<PackedSchemaDef>,
     pub methods: Vec<MethodEntry>,
     /// `(type_name, proto)` for each class with a `destruct` block — the runtime-invoked
@@ -965,13 +975,12 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
             format!("MakeList    r{dst} <- [{}]", items.join(", "))
         }
-        Op::MakePackedList { dst, items, schema } => {
-            let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
-            format!(
-                "MakePackedList r{dst} <- [{}] packed{schema}",
-                items.join(", ")
-            )
+        Op::PackedListNew { dst, schema } => {
+            format!("PackedListNew r{dst} <- [] packed{schema}")
         }
+        Op::PackedListPush {
+            dst, list, value, ..
+        } => format!("PackedListPush r{dst} <- push(r{list}, r{value})"),
         Op::MakeTuple { dst, items } => {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
             format!("MakeTuple   r{dst} <- ({})", items.join(", "))

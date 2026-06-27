@@ -520,6 +520,11 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(index);
         }
         Rvalue::List { items, .. } | Rvalue::Tuple { items, .. } => items.iter().for_each(&mut *f),
+        Rvalue::PackedListNew { .. } => {}
+        Rvalue::PackedListPush { list, value, .. } => {
+            f(list);
+            f(value);
+        }
         Rvalue::TupleIndex { receiver, .. } => f(receiver),
         Rvalue::Map { entries, .. } => {
             for (k, v) in entries {

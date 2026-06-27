@@ -1,0 +1,19 @@
+[package]
+name = "lang-alloc-probe"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+# A test-only heap-residency probe: a pass-through global allocator that tracks the live-bytes
+# high-water mark. It needs `unsafe` to implement `GlobalAlloc`, so — like `lang-value` and the VM
+# crates — it opts out of the workspace-wide `unsafe_code = "forbid"` quarantine. It depends on
+# nothing and is pulled in only as a `dev-dependency` of crates that measure memory in tests.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[dependencies]

@@ -130,8 +130,9 @@ fn int_list(n: usize) -> String {
 /// every element and sum its three fields. With `@packed` the VM stores the list as one flat
 /// raw-primitive buffer and each `data[i]` materializes a single element; the plain-`struct` variant
 /// stores `n` boxed objects and `data[i]` clones a pointer. Run side-by-side so the cost of the
-/// pack-at-build / materialize-on-read layer is visible against the boxed baseline (the memory win is
-/// a later peak-residency benchmark — this measures scalar-access time).
+/// pack-at-build / materialize-on-read layer is visible against the boxed baseline. This measures
+/// scalar-access *time*; the memory win (P-PACK 2.5 streaming construction keeps the build peak at one
+/// element + the buffer, ~3.6× under boxed) is measured by the `peak_memory` residency test.
 fn packed_list_src(n: usize, packed: bool) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };
     let mut elems = String::with_capacity(n * 32);

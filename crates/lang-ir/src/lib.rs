@@ -48,7 +48,7 @@ pub use lang_ast::{BinaryOp, ForPattern, Pattern, TypeRef, UnaryOp};
 
 mod lower;
 mod pretty;
-pub use lower::{Unsupported, lower};
+pub use lower::{Unsupported, lower, lower_with_packed};
 pub use pretty::dump;
 
 /// A whole lowered program: the top-level statement stream plus the size of its temporary
@@ -221,6 +221,24 @@ pub enum Rvalue {
     },
     /// A list literal `[a, b, c]`.
     List { items: Vec<Atom>, span: Span },
+    /// Allocate an empty flat `List<packed>` buffer for a `List<@packed struct>` literal, filled
+    /// element-by-element by [`Rvalue::PackedListPush`] (P-PACK 2.5 streaming construction). The
+    /// `layout` is carried inline so the backends need no side channel — both build their packed
+    /// schema from it identically. Produced only by lowering a list literal whose span the checker
+    /// marked `List<packed>`; an unmarked literal stays a boxed [`Rvalue::List`].
+    PackedListNew {
+        layout: lang_ast::reflect::PackedLayout,
+        span: Span,
+    },
+    /// Pack one element onto a flat `List<packed>` and yield the (in-place-extended) list. `list` is
+    /// the accumulator from [`Rvalue::PackedListNew`] or a prior push — an ANF temp, so it is
+    /// uniquely owned and extended in place; `value` is the freshly-built element, **consumed** (its
+    /// primitive fields copied into the buffer, then the element object freed). Lowering builds each
+    /// element immediately before its push, so only one element object is live at a time — peak
+    /// residency is one element + the buffer, not N elements. If `value` cannot be packed (a shape
+    /// mismatch — never for a checker-validated `@packed` type) the list demotes to boxed and the
+    /// value is pushed as-is, so the flat form is only ever an exact optimization.
+    PackedListPush { list: Atom, value: Atom, span: Span },
     /// A tuple literal `(a, b, c)` — a fixed-arity, value-semantic positional aggregate
     /// (object-model slice 4).
     Tuple { items: Vec<Atom>, span: Span },

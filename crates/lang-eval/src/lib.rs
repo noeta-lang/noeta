@@ -76,17 +76,14 @@ impl Backend for TreeWalkBackend {
         // accumulator each step — O(n²) instead of the O(n) in-place path the real run takes. A single
         // `check_all` yields both the `type_of` sites and the relevance, so the checker runs once.
         let checked = lang_check::check_all(program);
-        let ir =
-            lang_ir::lower(program).expect("Core-IR lowering is total over the parsed language");
+        // Lower with the checker's `List<packed>` map so packed-list literals stream into a flat
+        // buffer (P-PACK 2.5); the layout is carried inline on the IR, so `run_ir` needs no map.
+        let ir = lang_ir::lower_with_packed(program, &checked.packed_list_sites)
+            .expect("Core-IR lowering is total over the parsed language");
         let ir =
             lang_ir_passes::insert_drops(&ir, Some(&relevance_of(&checked.destructor_relevance)));
         let ir = lang_ir_passes::thread_reuse(&ir);
-        self.run_ir(
-            program,
-            &ir,
-            checked.type_of_sites,
-            checked.packed_list_sites,
-        )
+        self.run_ir(program, &ir, checked.type_of_sites)
     }
 }
 
@@ -975,12 +972,6 @@ struct Interpreter {
     /// program the VM harvests — so both backends bake identical full-fidelity `Type` constants
     /// (`type_of` fidelity A, P2.3). A site absent here uses the runtime head-constructor path.
     type_of_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::TypeRepr>,
-    /// The packed layout the checker resolved for each `List<packed>` construction site (keyed by the
-    /// `Expr::List` span), harvested via `lang_check::resolve_packed_list_sites` from the *same*
-    /// program the VM harvests (P-PACK 2.1). A list literal whose span is here is built as a flat
-    /// [`ListRepr::Packed`] buffer rather than a boxed vector; the layout is invisible to `RunResult`,
-    /// so a site absent here (or one whose elements fail to pack) is simply a boxed list.
-    packed_list_sites: std::collections::HashMap<lang_span::Span, lang_ast::reflect::PackedLayout>,
 }
 
 impl Interpreter {
@@ -1029,7 +1020,6 @@ impl Interpreter {
             host,
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
-            packed_list_sites: std::collections::HashMap::new(),
         }
     }
 
@@ -1532,21 +1522,6 @@ impl Interpreter {
             Rc::clone(&def),
             slots,
         ))))
-    }
-
-    /// Build a flat [`ListRepr::Packed`] from a `List<packed>` literal's resolved `layout` and its
-    /// already-evaluated `elements`, or `None` to fall back to a boxed list. `None` arises when the
-    /// element type cannot be resolved to a packed schema (e.g. the type is not in scope, or has a
-    /// zero-word degenerate layout) or when an element fails to pack — keeping the flat form an exact
-    /// optimization, never a behaviour change.
-    fn build_packed_list(
-        &self,
-        layout: &lang_ast::reflect::PackedLayout,
-        elements: &[Value],
-    ) -> Option<Value> {
-        let schema = self.resolve_packed_schema(layout)?;
-        let packed = PackedList::build(schema, elements)?;
-        Some(Value::List(ListRepr::Packed(packed)))
     }
 
     /// Resolve a checker [`PackedLayout`](lang_ast::reflect::PackedLayout) to the eval-side

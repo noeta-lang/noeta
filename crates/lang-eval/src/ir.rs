@@ -30,8 +30,8 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
 use crate::{
-    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, ListRepr, RunResult, TreeWalkBackend,
-    TypeDef, Unwind, Value, VariantInfo, compare_primitive,
+    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, ListRepr, PackedList, RunResult,
+    TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo, compare_primitive,
 };
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
@@ -74,17 +74,16 @@ impl Frame {
 impl TreeWalkBackend {
     /// Run a program through the Core-IR interpreter. `ast` supplies the reflection manifest
     /// (built identically to the AST walker, so attributes/roles/type facts match);
-    /// `ir` is the lowered program to execute; `type_of_sites` is the checker's `type_of`
-    /// map and `packed_list_sites` its `List<packed>` layout map, both threaded exactly as for the
-    /// AST path so eval and the VM lay values out identically.
+    /// `ir` is the lowered program to execute; `type_of_sites` is the checker's `type_of` map.
+    /// (`List<packed>` layout is carried inline on the IR by `lower_with_packed`, so it needs no
+    /// separate channel here.)
     pub fn run_ir(
         &self,
         ast: &Program,
         ir: &lang_ir::Program,
         type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
-        packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
     ) -> RunResult {
-        Interpreter::new(self.seed).run_ir(ast, ir, type_of_sites, packed_list_sites)
+        Interpreter::new(self.seed).run_ir(ast, ir, type_of_sites)
     }
 
     /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`lang_stdlib::Host`]
@@ -98,9 +97,8 @@ impl TreeWalkBackend {
         ir: &lang_ir::Program,
         host: Box<dyn lang_stdlib::Host>,
         type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
-        packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
     ) -> RunResult {
-        Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites, packed_list_sites)
+        Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites)
     }
 }
 
@@ -113,11 +111,9 @@ impl Interpreter {
         ast: &Program,
         ir: &lang_ir::Program,
         type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
-        packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
     ) -> RunResult {
         self.reflection = lang_ast::reflect::build(ast);
         self.type_of_sites = type_of_sites;
-        self.packed_list_sites = packed_list_sites;
         let mut frame = Frame::new(ir.temp_count);
         // The top-level statements run directly in the global scope (no child).
         match self.exec_ir_stmts(&ir.top.stmts, &mut frame) {
@@ -674,21 +670,58 @@ impl Interpreter {
                 let right = self.eval_ir_atom(rhs, frame)?;
                 self.apply_binary_op(*op, left, right, *span)
             }
-            lang_ir::Rvalue::List { items, span } => {
+            lang_ir::Rvalue::List { items, .. } => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     values.push(self.eval_ir_atom(item, frame)?);
                 }
-                // A `List<packed>` literal (its span recorded by the checker, P-PACK 2.1) builds a
-                // flat raw-primitive buffer; the elements just evaluated are consumed into words and
-                // their boxed `Value::Object`s drop here. Any other list — or a packed literal whose
-                // elements fail to pack — stays the boxed representation.
-                if let Some(layout) = self.packed_list_sites.get(span).cloned()
-                    && let Some(packed) = self.build_packed_list(&layout, &values)
-                {
-                    return Ok(packed);
-                }
                 Ok(Value::list(values))
+            }
+            lang_ir::Rvalue::PackedListNew { layout, .. } => {
+                // Start a streaming flat build (P-PACK 2.5): an empty `List<packed>` buffer, or an
+                // empty boxed list if the element type can't resolve to a packed schema (a defensive
+                // fall-back — the layout comes from the checker, so this is never hit for a valid
+                // `@packed` type). Subsequent pushes extend whichever representation this produced.
+                match self.resolve_packed_schema(layout) {
+                    Some(schema) => Ok(Value::List(ListRepr::Packed(PackedList::empty(schema)))),
+                    None => Ok(Value::list(Vec::new())),
+                }
+            }
+            lang_ir::Rvalue::PackedListPush { list, value, span } => {
+                // Append the freshly-built `value` to the accumulator `list` and yield it. The
+                // accumulator is an ANF temp (uniquely owned), so a packed buffer extends in place.
+                // On a pack failure the packed list demotes to boxed and the value is pushed there,
+                // keeping the flat form an exact optimization; the element object is consumed either
+                // way (packed: copied to words and dropped; boxed: moved into the list).
+                let list = self.eval_ir_atom(list, frame)?;
+                let element = self.eval_ir_atom(value, frame)?;
+                match list {
+                    Value::List(ListRepr::Packed(mut packed)) => {
+                        if packed.push(&element) {
+                            self.destroy_value(element);
+                            Ok(Value::List(ListRepr::Packed(packed)))
+                        } else {
+                            let mut boxed = packed.to_boxed();
+                            boxed.push(element);
+                            Ok(Value::list(boxed))
+                        }
+                    }
+                    Value::List(ListRepr::Boxed(rc)) => {
+                        // The accumulator is a moved temp, so it is uniquely owned — take the vector
+                        // without copying (the clone is only a defensive fall-back).
+                        let mut boxed = Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone());
+                        boxed.push(element);
+                        Ok(Value::list(boxed))
+                    }
+                    other => Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!(
+                            "packed-list push onto a non-list value `{}`",
+                            other.display()
+                        ),
+                    )),
+                }
             }
             lang_ir::Rvalue::Tuple { items, .. } => {
                 let mut values = Vec::with_capacity(items.len());
