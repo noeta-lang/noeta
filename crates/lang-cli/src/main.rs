@@ -20,7 +20,6 @@ use lang_check::TestFn;
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::{TokenKind, lex};
-use lang_loader::Linked;
 use lang_parser::parse;
 use lang_span::{Source, SourceId, SourceMap, Span};
 
@@ -37,6 +36,11 @@ enum Command {
     Run {
         /// Path to a `.lang` file.
         file: PathBuf,
+        /// Activate a dev-tier for this run, e.g. `--tier debug` to compile in `@debug { … }`
+        /// blocks (object-model slice 6). Repeatable. Without it, every tier block is stripped.
+        /// (The interim active-set interface until build profiles land.)
+        #[arg(long)]
+        tier: Vec<String>,
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
@@ -55,7 +59,7 @@ enum Command {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Run { file } => cmd_run(&file),
+        Command::Run { file, tier } => cmd_run(&file, &tier),
         Command::Test {
             file,
             fail_fast,
@@ -65,24 +69,24 @@ fn main() -> ExitCode {
     }
 }
 
-/// Type-check and run an already-loaded, linked program, writing stdout to the real stdout and
-/// rendering any diagnostics to stderr — each against the source its span belongs to (via the
-/// linked program's `SourceMap`). Returns the process exit code.
-fn run_linked(linked: &Linked) -> i32 {
+/// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
+/// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
+/// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
+fn run_program(program: &lang_ast::Program, sources: &SourceMap) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
     // needs, so the checker runs exactly once (it previously ran again inside the backend).
-    let checked = lang_check::check_all(&linked.program);
+    let checked = lang_check::check_all(program);
     if !checked.diagnostics.is_empty() {
-        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        emit_diagnostics_mapped(sources, checked.diagnostics.iter());
         return 1;
     }
 
-    match execute_real_host(&linked.program, &checked) {
+    match execute_real_host(program, &checked) {
         Ok(result) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
-            emit_diagnostics_mapped(&linked.sources, result.diagnostics.iter());
+            emit_diagnostics_mapped(sources, result.diagnostics.iter());
             result.exit_code
         }
         Err(err) => {
@@ -145,7 +149,7 @@ fn emit_diagnostics_mapped<'a>(
     }
 }
 
-fn cmd_run(file: &std::path::Path) -> ExitCode {
+fn cmd_run(file: &std::path::Path, tiers: &[String]) -> ExitCode {
     // Load + link the program: sibling `.lang` modules the entry `use`s are resolved and merged
     // (M1.9); a lone file with no sibling modules links to exactly itself.
     match lang_loader::load(file) {
@@ -153,7 +157,22 @@ fn cmd_run(file: &std::path::Path) -> ExitCode {
             eprintln!("lang: cannot read {}: {err}", file.display());
             ExitCode::from(2)
         }
-        Ok(Ok(linked)) => exit_code(run_linked(&linked)),
+        Ok(Ok(linked)) => {
+            // With `--tier`, activate those dev-tiers: inline their `@<tier> { … }` blocks (e.g.
+            // `@debug`) wherever they appear before checking/running. Without it, the program is run
+            // as-is and every tier block is stripped at lowering (the default). Activation borrows
+            // nothing from the run, so an owned activated program is produced only when needed.
+            if tiers.is_empty() {
+                return exit_code(run_program(&linked.program, &linked.sources));
+            }
+            let active: Vec<&str> = tiers.iter().map(String::as_str).collect();
+            let activated = lang_check::activate_tiers(&linked.program, &active);
+            if !activated.diagnostics.is_empty() {
+                emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+                return ExitCode::from(1);
+            }
+            exit_code(run_program(&activated.program, &linked.sources))
+        }
         Ok(Err(load_diagnostics)) => {
             let mut stderr = io::stderr();
             for ld in &load_diagnostics {

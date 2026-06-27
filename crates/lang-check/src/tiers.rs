@@ -68,15 +68,41 @@ pub struct Activated {
     pub diagnostics: Vec<Diagnostic>,
 }
 
-/// Resolve `program`'s top-level `@<tier> { … }` blocks against `active` (the set of live tier
-/// names). Active blocks are inlined into the statement stream; inactive blocks are dropped; every
-/// block's name is validated. The `@test` fns among the activated blocks are collected as roots.
+/// Resolve `program`'s `@<tier> { … }` blocks against `active` (the set of live tier names),
+/// **everywhere they appear** — top-level (a `@test` block of declarations) and nested in statement
+/// position (a `@debug { … }` block inside a fn/method body or a control-flow branch). Active blocks
+/// are inlined in place; inactive blocks are dropped; every block's name is validated. The `@test`
+/// fns among the activated *top-level* blocks are collected as roots the runner invokes.
 pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
-    let mut stmts = Vec::with_capacity(program.stmts.len());
     let mut tests = Vec::new();
     let mut diagnostics = Vec::new();
+    // The top-level statement list collects tests (a `@test` block's fns are runnable roots only
+    // here — a tier block nested in a fn body holds inline code, not roots).
+    let stmts = resolve_block(&program.stmts, active, &mut diagnostics, &mut tests, true);
+    Activated {
+        program: Program {
+            stmts,
+            span: program.span,
+        },
+        tests,
+        diagnostics,
+    }
+}
 
-    for stmt in &program.stmts {
+/// Resolve the tier blocks in one statement list. A `@<tier> { … }` is validated, then inlined (its
+/// items spliced in place, each recursively resolved) when its tier is active or dropped when not;
+/// every other statement is left in place with its *own* nested statement lists resolved
+/// ([`resolve_children`]). `collect_tests` is true only for the program's top-level list, so only a
+/// top-level `@test` block's fns become runnable roots.
+fn resolve_block(
+    stmts: &[Stmt],
+    active: &[&str],
+    diagnostics: &mut Vec<Diagnostic>,
+    tests: &mut Vec<TestFn>,
+    collect_tests: bool,
+) -> Vec<Stmt> {
+    let mut out = Vec::with_capacity(stmts.len());
+    for stmt in stmts {
         let Stmt::TierBlock {
             tier,
             tier_span,
@@ -84,7 +110,7 @@ pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
             ..
         } = stmt
         else {
-            stmts.push(stmt.clone());
+            out.push(resolve_children(stmt, active, diagnostics));
             continue;
         };
 
@@ -96,32 +122,95 @@ pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
             continue;
         }
 
-        // Active code tier: inline its items as ordinary top-level declarations, recording the
-        // `@test` fns so the runner can invoke them. A lifted fn is marked `is_dev_tier` so the
-        // checker grants it white-box access to its module's private fields (slice 6d).
-        for item in items {
-            let mut item = item.clone();
+        // Active tier: resolve the items (so a tier block nested among them, and each item's own
+        // body, are handled), then splice them in place. The items are spliced at *this* level, so
+        // `collect_tests` carries through unchanged. Each lifted `fn` is marked `is_dev_tier` so the
+        // checker grants it white-box access to the module's private fields (slice 6d); a top-level
+        // `@test` block's fns are also recorded as roots.
+        let resolved = resolve_block(items, active, diagnostics, tests, collect_tests);
+        for mut item in resolved {
             if let Stmt::Fn(decl) = &mut item {
                 decl.is_dev_tier = true;
-                if tier == "test" {
+                if collect_tests && tier == "test" {
                     tests.push(TestFn {
                         name: decl.name.clone(),
                         span: decl.name_span,
                     });
                 }
             }
-            stmts.push(item);
+            out.push(item);
         }
     }
+    out
+}
 
-    Activated {
-        program: Program {
-            stmts,
-            span: program.span,
-        },
-        tests,
-        diagnostics,
+/// Rewrite a non-tier statement's own nested statement lists (control-flow branches, loop and
+/// fn/method bodies, a class destructor), resolving any tier blocks within. Nested lists never
+/// collect tests (`collect_tests = false`). Statements with no nested statements are returned
+/// unchanged. Tier blocks live only in statement position, so there is no need to descend into
+/// expressions (closures and `match`/`if` *expressions* are expression-bodied).
+fn resolve_children(stmt: &Stmt, active: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Stmt {
+    let mut stmt = stmt.clone();
+    let block = |stmts: &[Stmt], diags: &mut Vec<Diagnostic>| -> Vec<Stmt> {
+        let mut sink = Vec::new();
+        resolve_block(stmts, active, diags, &mut sink, false)
+    };
+    match &mut stmt {
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            *then_body = block(then_body, diagnostics);
+            if let Some(eb) = else_body {
+                *eb = block(eb, diagnostics);
+            }
+        }
+        Stmt::For { body, .. } | Stmt::While { body, .. } => {
+            *body = block(body, diagnostics);
+        }
+        Stmt::Fn(decl) => decl.body = block(&decl.body, diagnostics),
+        Stmt::Class(c) => {
+            for m in &mut c.methods {
+                m.body = block(&m.body, diagnostics);
+            }
+            for im in &mut c.impls {
+                for m in &mut im.methods {
+                    m.body = block(&m.body, diagnostics);
+                }
+            }
+            if let Some(d) = &mut c.destructor {
+                *d = block(d, diagnostics);
+            }
+        }
+        Stmt::Struct(s) => {
+            for m in &mut s.methods {
+                m.body = block(&m.body, diagnostics);
+            }
+            for im in &mut s.impls {
+                for m in &mut im.methods {
+                    m.body = block(&m.body, diagnostics);
+                }
+            }
+        }
+        Stmt::Enum(en) => {
+            for m in &mut en.methods {
+                m.body = block(&m.body, diagnostics);
+            }
+            for im in &mut en.impls {
+                for m in &mut im.methods {
+                    m.body = block(&m.body, diagnostics);
+                }
+            }
+        }
+        Stmt::Impl(im) => {
+            for m in &mut im.methods {
+                m.body = block(&m.body, diagnostics);
+            }
+        }
+        _ => {}
     }
+    stmt
 }
 
 #[cfg(test)]
@@ -229,5 +318,45 @@ mod tests {
         assert_eq!(out.diagnostics[0].code, DiagnosticCode::UnknownTier);
         assert!(out.tests.is_empty());
         assert!(out.program.stmts.is_empty());
+    }
+
+    /// The number of `echo` statements anywhere inside a fn body (recursively) — a proxy for how
+    /// much of a `@debug` block survived activation.
+    fn echoes_in_fn(stmt: &Stmt) -> usize {
+        fn count(stmts: &[Stmt]) -> usize {
+            stmts
+                .iter()
+                .map(|s| match s {
+                    Stmt::Echo { .. } => 1,
+                    Stmt::For { body, .. } | Stmt::While { body, .. } => count(body),
+                    _ => 0,
+                })
+                .sum()
+        }
+        match stmt {
+            Stmt::Fn(decl) => count(&decl.body),
+            _ => 0,
+        }
+    }
+
+    /// A `@debug { … }` block *nested in a fn body* (statement position) is resolved recursively:
+    /// inlined in place when `debug` is active, stripped when not. (The top-level `@test` resolution
+    /// is not the only one — activation reaches inside bodies.)
+    #[test]
+    fn nested_debug_block_is_resolved_in_place() {
+        let program = parse_program(
+            "fn f(x: int): void {\n\
+                 @debug { echo \"dbg ${x}\"; }\n\
+                 echo \"always\";\n\
+             }\n",
+        );
+        // Inactive: only the unconditional `echo` survives in the body.
+        let stripped = activate_tiers(&program, &[]);
+        assert_eq!(echoes_in_fn(&stripped.program.stmts[0]), 1);
+        // Active: the `@debug` echo is inlined too — two echoes in the body.
+        let active = activate_tiers(&program, &["debug"]);
+        assert_eq!(echoes_in_fn(&active.program.stmts[0]), 2);
+        // An active nested `@debug` block does not produce test roots.
+        assert!(active.tests.is_empty());
     }
 }

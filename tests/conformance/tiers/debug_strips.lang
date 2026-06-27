@@ -1,0 +1,20 @@
+// A `@debug { … }` block (object-model slice 6) is a code tier in *statement* position — inline
+// conditional code, nested inside a fn body or a loop rather than declaring top-level items. Like
+// every tier, it is stripped before lowering when its tier is inactive (a normal run / the
+// conformance harness never activates `debug`): its statements never run, so its side effects are
+// absent and the program's own output is unchanged. Both backends strip it identically (they lower
+// the same program), so the differential agrees. (Activation is a CLI concern — `lang run --tier
+// debug` — exercised in the CLI integration tests, not here.)
+// expect: stdout "result: 10"
+// expect: stdout "loops done"
+// expect: exit 0
+fn f(x: int): void {
+    @debug { echo "debug: x is ${x}"; }
+    echo "result: ${x * 2}";
+}
+
+f(5);
+for i in 0..2 {
+    @debug { echo "iter ${i}"; }
+}
+echo "loops done";

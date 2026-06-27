@@ -136,6 +136,55 @@ fn run_orders_example_produces_the_headline_output() {
         );
 }
 
+// --- `run --tier` (object-model slice 6: `@debug` inline-code activation) -----------
+
+const DEBUG_PROGRAM: &str = "fn f(x: int): void {\n\
+         @debug { echo \"debug: x is ${x}\"; }\n\
+         echo \"result: ${x * 2}\";\n\
+     }\n\
+     f(5);\n";
+
+#[test]
+fn run_strips_debug_blocks_by_default() {
+    // Without `--tier`, a `@debug { … }` block is stripped before lowering: its `echo` never runs.
+    let file = temp_program("run_debug_off", DEBUG_PROGRAM);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("result: 10\n");
+}
+
+#[test]
+fn run_tier_debug_activates_debug_blocks() {
+    // `--tier debug` compiles the `@debug` block in, in place — the debug `echo` runs before the
+    // unconditional one, proving inline (not appended) activation in statement position.
+    let file = temp_program("run_debug_on", DEBUG_PROGRAM);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--tier")
+        .arg("debug")
+        .assert()
+        .success()
+        .stdout("debug: x is 5\nresult: 10\n");
+}
+
+#[test]
+fn run_tier_unknown_is_e0036() {
+    let file = temp_program("run_tier_bad", "@tsetup { echo \"x\"; }\necho \"hi\";\n");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .arg("--tier")
+        .arg("tsetup")
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0036"));
+}
+
 // --- `test` (object-model slice 6: the `@test` runner) -----------------------------
 
 /// A program whose `@test` block holds a mix of passing and failing tests. The top-level `echo`
