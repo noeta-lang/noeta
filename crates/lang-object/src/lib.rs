@@ -130,6 +130,32 @@ impl Shape {
     }
 }
 
+/// The runtime layout of a `List<packed>` element (P-PACK Phase 2.4) — how to pack a value-struct
+/// instance into, and materialize it back from, a contiguous run of raw primitive words. Built once
+/// per packed list type (the VM resolves it at module load from the compiled
+/// `PackedSchemaDef`/shape table; the tree-walker has its own equivalent over `TypeDef`). Holds the
+/// element's `Rc<Shape>` so a materialized element shares shape identity with a directly-constructed
+/// one, plus each field's kind in slot (declared) order and the total word width.
+#[derive(Debug, Clone)]
+pub struct PackedSchema {
+    /// The element type's shape — materialized elements use this exact handle.
+    pub shape: std::rc::Rc<Shape>,
+    /// One entry per field, in `shape.fields` (slot) order.
+    pub fields: Vec<PackedKind>,
+    /// Words per element — the sum of each field's width.
+    pub word_count: usize,
+}
+
+/// A packed field's storage: a primitive occupying one word, or a nested packed struct flattened
+/// inline (its own sub-schema laid out contiguously in the parent's buffer).
+#[derive(Debug, Clone)]
+pub enum PackedKind {
+    Int,
+    Float,
+    Bool,
+    Struct(std::rc::Rc<PackedSchema>),
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

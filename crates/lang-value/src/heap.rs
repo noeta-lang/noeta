@@ -15,7 +15,7 @@ use std::ptr;
 use std::rc::Rc;
 
 use lang_bytecode::Builtin;
-use lang_object::Shape;
+use lang_object::{PackedSchema, Shape};
 use lang_stdlib::FileHandle;
 
 use crate::Value;
@@ -191,6 +191,15 @@ pub(crate) enum Payload {
     /// reference to each element, freed like a list's.
     Set(Vec<Value>),
     Map(BTreeMap<String, Value>),
+    /// A flat `List<packed>` (P-PACK 2.4): the elements packed as raw primitive bits, one
+    /// contiguous `Vec<u64>` of `schema.word_count` words per element, interpreted through the
+    /// shared `schema`. A GC **leaf** — it owns no child `Value`s (only primitive words), so freeing
+    /// it just drops the buffer. Elements are materialized to/from `Payload::Object` on demand
+    /// ([`Value::packed_get`]/[`Value::realize_list`]), so the layout is invisible to `RunResult`.
+    PackedList {
+        schema: Rc<PackedSchema>,
+        words: Vec<u64>,
+    },
     Object {
         shape: Rc<Shape>,
         slots: Vec<Value>,
@@ -351,10 +360,13 @@ pub(crate) fn free(value: Value) {
             }
         }
         Payload::Cell(inner) => release_child(*inner),
+        // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
+        // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::PackedList { .. }
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -501,10 +513,12 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),
         Payload::Closure { upvalues, .. } => upvalues.iter().copied().for_each(&mut push),
         Payload::Cell(inner) => push(*inner),
+        // A packed list holds only primitive words (no child references) — a GC leaf.
         Payload::Str(_)
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::PackedList { .. }
         | Payload::FileHandle(_) => {}
     }
     out

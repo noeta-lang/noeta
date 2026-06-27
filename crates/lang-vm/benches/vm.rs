@@ -126,6 +126,35 @@ fn int_list(n: usize) -> String {
     s
 }
 
+/// A `List<packed>` workload (P-PACK 2.4): build an `n`-element list literal of a `Vec3`, then index
+/// every element and sum its three fields. With `@packed` the VM stores the list as one flat
+/// raw-primitive buffer and each `data[i]` materializes a single element; the plain-`struct` variant
+/// stores `n` boxed objects and `data[i]` clones a pointer. Run side-by-side so the cost of the
+/// pack-at-build / materialize-on-read layer is visible against the boxed baseline (the memory win is
+/// a later peak-residency benchmark — this measures scalar-access time).
+fn packed_list_src(n: usize, packed: bool) -> String {
+    let kw = if packed { "@packed struct" } else { "struct" };
+    let mut elems = String::with_capacity(n * 32);
+    for i in 0..n {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str("Vec3 { x: 1.0, y: 2.0, z: 3.0 }");
+    }
+    format!(
+        "{kw} Vec3 {{ x: float; y: float; z: float }}\n\
+         data = [{elems}]\n\
+         mut sum = 0.0\n\
+         for i in 0..{n} {{\n    \
+            sum = sum + data[i].x + data[i].y + data[i].z\n\
+         }}\n\
+         echo sum\n"
+    )
+}
+
+/// Sizes for the packed-list workload — a couple of points to confirm the per-element cost is flat.
+const PACKED_SIZES: &[usize] = &[1000, 4000];
+
 /// Number of loop iterations for the property/allocation benches. Large enough
 /// that the hot path dominates per-run VM startup, small enough to keep CI fast.
 const ITERS: usize = 5_000;
@@ -375,6 +404,19 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     fieldset.finish();
+
+    let mut pl = c.benchmark_group("vm_packed_list");
+    for &n in PACKED_SIZES {
+        let packed = compile(&packed_list_src(n, true));
+        pl.bench_with_input(BenchmarkId::new("packed", n), &packed, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let boxed = compile(&packed_list_src(n, false));
+        pl.bench_with_input(BenchmarkId::new("boxed", n), &boxed, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    pl.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

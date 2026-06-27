@@ -33,7 +33,7 @@ use std::collections::BTreeMap;
 use std::rc::Rc;
 
 use lang_bytecode::Builtin;
-use lang_object::Shape;
+use lang_object::{PackedKind, PackedSchema, Shape};
 use lang_stdlib::FileHandle;
 
 use heap::Payload;
@@ -177,6 +177,97 @@ impl Value {
         heap::alloc(Payload::Set(items))
     }
 
+    /// A flat `List<packed>` value (refcount 1, P-PACK 2.4): `words` holds the elements packed as
+    /// raw primitive bits (`schema.word_count` words each), interpreted through `schema`. A leaf —
+    /// it owns no child `Value`s (only primitive words), so freeing it just drops the buffer. The
+    /// elements are materialized on demand (index, iterate, demote), so the layout is invisible to
+    /// `RunResult`.
+    pub fn packed_list(schema: Rc<PackedSchema>, words: Vec<u64>) -> Value {
+        heap::alloc(Payload::PackedList { schema, words })
+    }
+
+    /// Whether this is a flat packed list (the `List<packed>` representation, P-PACK 2.4).
+    pub fn is_packed_list(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::PackedList { .. }))
+    }
+
+    /// Pack this value (a value-struct instance) onto the end of `out` per `schema`, one word per
+    /// primitive field, recursing into nested packed structs. Returns `false` on any shape mismatch
+    /// (a non-object, wrong field count, or a field whose runtime kind disagrees) so the caller can
+    /// fall back to a boxed list — the flat form is only ever used when exactly correct.
+    pub fn pack_element(self, schema: &PackedSchema, out: &mut Vec<u64>) -> bool {
+        heap::with_payload(self, |p| match p {
+            Payload::Object { slots, .. } if slots.len() == schema.fields.len() => {
+                for (kind, &slot) in schema.fields.iter().zip(slots.iter()) {
+                    let ok = match kind {
+                        PackedKind::Int => slot.as_int().map(|i| out.push(i as u64)).is_some(),
+                        PackedKind::Float => {
+                            slot.as_float().map(|f| out.push(f.to_bits())).is_some()
+                        }
+                        PackedKind::Bool => {
+                            slot.as_bool().map(|b| out.push(u64::from(b))).is_some()
+                        }
+                        PackedKind::Struct(inner) => slot.pack_element(inner, out),
+                    };
+                    if !ok {
+                        return false;
+                    }
+                }
+                true
+            }
+            _ => false,
+        })
+    }
+
+    /// Demote a list to an **owned** boxed list the caller must release: a packed list materializes
+    /// into a fresh `Payload::List` of owned objects (refcount 1 each, owned by the list); an
+    /// already-boxed list is returned with one extra reference. Either way the result is a boxed
+    /// list value with an independent reference — so a generic list op can reuse the boxed code path
+    /// on a packed list and then `release` the result, with no double-counting. The caller must have
+    /// checked [`Value::is_list`].
+    pub fn realize_list(self) -> Value {
+        if self.is_packed_list() {
+            Value::list(self.packed_items())
+        } else {
+            self.inc_ref();
+            self
+        }
+    }
+
+    /// Materialize the packed element at `index` into an owned `Value::Object` (refcount 1) — a
+    /// single-element read with no full-list materialization. The caller owns the returned value.
+    /// `index` must be in bounds (callers check via [`Value::list_len`]).
+    pub fn packed_get(self, index: usize) -> Value {
+        let (schema, words) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, words } => {
+                let wc = schema.word_count;
+                let offset = index * wc;
+                (Rc::clone(schema), words[offset..offset + wc].to_vec())
+            }
+            _ => unreachable!("packed_get on a non-packed list"),
+        });
+        unpack_element(&schema, &words, 0).0
+    }
+
+    /// Materialize every packed element into an owned vector (each refcount 1). Used by
+    /// [`Value::realize_list`]; the words are copied out before allocating so no heap borrow is held
+    /// across element construction.
+    fn packed_items(self) -> Vec<Value> {
+        let (schema, words) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+            _ => unreachable!("packed_items on a non-packed list"),
+        });
+        let count = words.len() / schema.word_count;
+        let mut out = Vec::with_capacity(count);
+        let mut at = 0;
+        for _ in 0..count {
+            let (value, next) = unpack_element(&schema, &words, at);
+            out.push(value);
+            at = next;
+        }
+        out
+    }
+
     /// An `fs.open` file handle value (refcount 1). The handle owns only `String`s, so unlike a
     /// collection it takes no child-value references.
     pub fn file_handle(handle: FileHandle) -> Value {
@@ -313,9 +404,14 @@ impl Value {
         }
     }
 
-    /// Whether this is a heap list.
+    /// Whether this is a heap list — boxed (`Payload::List`) or flat-packed (`Payload::PackedList`,
+    /// P-PACK 2.4). Both are observably lists; a packed one materializes through
+    /// [`Value::realize_list`] / [`Value::packed_get`] for any op not specialized for the flat form.
     pub fn is_list(self) -> bool {
-        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::List(_)))
+        self.is_pointer()
+            && heap::with_payload(self, |p| {
+                matches!(p, Payload::List(_) | Payload::PackedList { .. })
+            })
     }
 
     /// Whether this is a heap tuple.
@@ -459,6 +555,9 @@ impl Value {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::List(items) => Some(items.len()),
+                // A packed list's length is its word count divided by the per-element stride — O(1),
+                // no materialization.
+                Payload::PackedList { schema, words } => Some(words.len() / schema.word_count),
                 _ => None,
             })
         } else {
@@ -737,6 +836,14 @@ impl Value {
 
     /// The display form used by `echo` and `~` concatenation.
     pub fn display(self) -> String {
+        // A packed list (P-PACK 2.4) has no specialized display: materialize a temporary boxed list,
+        // render it (identically to the boxed equivalent), and release the temporary.
+        if self.is_packed_list() {
+            let boxed = self.realize_list();
+            let out = boxed.display();
+            boxed.release();
+            return out;
+        }
         if let Some(b) = self.as_bool() {
             b.to_string()
         } else if self.is_small_int() {
@@ -810,6 +917,8 @@ impl Value {
                 Payload::NativeModule(name) => format!("<module {name}>"),
                 // `<file "path" (mode)>`, rendered by the shared handle so both backends match.
                 Payload::FileHandle(handle) => handle.display(),
+                // Handled by the early return at the top of `display`.
+                Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
         } else {
             // The unit value (and any other singleton) displays as empty, as in M0.
@@ -823,6 +932,14 @@ impl Value {
     /// objects (objects in declared slot order). The unit value is `null`; a value with no JSON
     /// analog (closure/enum) falls back to its quoted display form.
     pub fn to_json(self) -> String {
+        // A packed list (P-PACK 2.4) serializes via a temporary boxed materialization, identical to
+        // the boxed equivalent.
+        if self.is_packed_list() {
+            let boxed = self.realize_list();
+            let out = boxed.to_json();
+            boxed.release();
+            return out;
+        }
         if let Some(b) = self.as_bool() {
             b.to_string()
         } else if self.is_small_int() {
@@ -871,6 +988,8 @@ impl Value {
                 Payload::NativeModule(name) => json_string(&format!("<module {name}>")),
                 // A handle has no JSON analog; fall back to its quoted display form, like a closure.
                 Payload::FileHandle(handle) => json_string(&handle.display()),
+                // Handled by the early return at the top of `to_json`.
+                Payload::PackedList { .. } => unreachable!("packed list demoted before to_json"),
             })
         } else {
             "null".to_string()
@@ -1110,6 +1229,38 @@ fn format_float(f: f64) -> String {
     }
 }
 
+/// Materialize one packed element from `words` starting at `offset`, returning the owned
+/// `Value::Object` (refcount 1) and the offset just past it — so nested structs and the caller
+/// advance in lock-step with [`Value::pack_element`]. Each primitive becomes an immediate (or a
+/// boxed int for a large magnitude); each nested struct recurses, the parent object owning its
+/// reference. The object reuses `schema.shape`, so it is shape-identical to a constructed instance.
+fn unpack_element(schema: &PackedSchema, words: &[u64], offset: usize) -> (Value, usize) {
+    let mut slots = Vec::with_capacity(schema.fields.len());
+    let mut at = offset;
+    for kind in &schema.fields {
+        match kind {
+            PackedKind::Int => {
+                slots.push(Value::int(words[at] as i64));
+                at += 1;
+            }
+            PackedKind::Float => {
+                slots.push(Value::float(f64::from_bits(words[at])));
+                at += 1;
+            }
+            PackedKind::Bool => {
+                slots.push(Value::bool(words[at] != 0));
+                at += 1;
+            }
+            PackedKind::Struct(inner) => {
+                let (nested, next) = unpack_element(inner, words, at);
+                slots.push(nested);
+                at = next;
+            }
+        }
+    }
+    (Value::object(Rc::clone(&schema.shape), slots), at)
+}
+
 /// Encode a string as a JSON string literal: surrounding quotes plus the mandatory escapes.
 /// The tree-walker carries a byte-identical copy, so `@derive(ToJson)` produces the same output
 /// under both backends.
@@ -1162,6 +1313,64 @@ mod tests {
         // Release the sole reference: frees the tuple and its owned elements (the boxed string),
         // so miri sees no leak.
         t.release();
+    }
+
+    #[test]
+    fn packed_list_round_trips_and_frees() {
+        // P-PACK 2.4: a flat `List<packed>` packs elements into raw words and materializes them on
+        // demand. Exercise construct → len → packed_get → realize → equality → display → free so
+        // miri checks the materialize/free paths for use-after-free or double-free.
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "V",
+            vec!["x".into(), "y".into()],
+        ));
+        let schema = Rc::new(PackedSchema {
+            shape: Rc::clone(&shape),
+            fields: vec![PackedKind::Int, PackedKind::Int],
+            word_count: 2,
+        });
+
+        // Pack two `V { x, y }` instances into one flat buffer (the source objects are freed after).
+        let mut words = Vec::new();
+        for (x, y) in [(3_i64, 1_i64), (1, 2)] {
+            let obj = Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
+            assert!(obj.pack_element(&schema, &mut words));
+            obj.release();
+        }
+        assert_eq!(words.len(), 4);
+
+        let list = Value::packed_list(Rc::clone(&schema), words);
+        assert!(list.is_packed_list());
+        assert!(list.is_list());
+        assert_eq!(list.list_len(), Some(2));
+        assert_eq!(list.type_name(), "list");
+
+        // A single element materializes to an owned object, shape-identical to a constructed one.
+        let first = list.packed_get(0);
+        assert_eq!(first.display(), "V {x: 3, y: 1}");
+        let constructed = Value::object(Rc::clone(&shape), vec![Value::int(3), Value::int(1)]);
+        assert!(apply_binary(lang_ast::BinaryOp::Eq, first, constructed)
+            .unwrap()
+            .as_bool()
+            .unwrap());
+        first.release();
+        constructed.release();
+
+        // The whole list displays and compares as the boxed equivalent.
+        assert_eq!(list.display(), "[V {x: 3, y: 1}, V {x: 1, y: 2}]");
+        let boxed = Value::list(vec![
+            Value::object(Rc::clone(&shape), vec![Value::int(3), Value::int(1)]),
+            Value::object(Rc::clone(&shape), vec![Value::int(1), Value::int(2)]),
+        ]);
+        assert!(apply_binary(lang_ast::BinaryOp::Eq, list, boxed)
+            .unwrap()
+            .as_bool()
+            .unwrap());
+        boxed.release();
+
+        // Release the packed list (a leaf — frees the buffer, no child release), so miri sees no leak.
+        list.release();
     }
 
     #[test]

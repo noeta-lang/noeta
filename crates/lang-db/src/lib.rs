@@ -198,9 +198,11 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let parsed = ast(db, src);
     let checked = checked(db, src);
     let sites = checked.type_of_sites.clone();
+    let packed = checked.packed_list_sites.clone();
     Bytecode(lang_compiler::compile_with_sites(
         &parsed.0.program,
         sites,
+        packed,
         &checked.destructor_relevance,
     ))
 }
@@ -321,9 +323,11 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
         Ok(program) => {
             let checked = linked_checked(db, ws);
             let sites = checked.type_of_sites.clone();
+            let packed = checked.packed_list_sites.clone();
             Bytecode(lang_compiler::compile_with_sites(
                 program,
                 sites,
+                packed,
                 &checked.destructor_relevance,
             ))
         }

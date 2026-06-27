@@ -172,6 +172,10 @@ struct Vm<'m> {
     /// One shared `Rc<Shape>` per shape-table entry — cloned into every value of that shape,
     /// so equal-built aggregates point at one shape (identity is a pointer comparison).
     shapes: Vec<Rc<Shape>>,
+    /// One shared `Rc<PackedSchema>` per compiled packed-list layout (P-PACK 2.4), resolved at load
+    /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
+    /// elements that share shape identity with directly-constructed instances.
+    packed_schemas: Vec<Rc<lang_object::PackedSchema>>,
     /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
@@ -297,9 +301,35 @@ fn execute_with_collector(
     let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
     let comparable_derives = module.comparable_derives.iter().cloned().collect();
     let tojson_derives = module.tojson_derives.iter().cloned().collect();
+    // One shared `Rc<Shape>` per shape-table entry, then resolve each packed-list layout against it.
+    // Schemas are interned inner-before-outer, so a nested struct's schema (a lower index) is always
+    // built before the parent that references it.
+    let shapes: Vec<Rc<Shape>> = module.shapes.iter().cloned().map(Rc::new).collect();
+    let mut packed_schemas: Vec<Rc<lang_object::PackedSchema>> =
+        Vec::with_capacity(module.packed_schemas.len());
+    for def in &module.packed_schemas {
+        let fields = def
+            .fields
+            .iter()
+            .map(|f| match f {
+                lang_bytecode::PackedFieldDef::Int => lang_object::PackedKind::Int,
+                lang_bytecode::PackedFieldDef::Float => lang_object::PackedKind::Float,
+                lang_bytecode::PackedFieldDef::Bool => lang_object::PackedKind::Bool,
+                lang_bytecode::PackedFieldDef::Struct(idx) => {
+                    lang_object::PackedKind::Struct(Rc::clone(&packed_schemas[*idx as usize]))
+                }
+            })
+            .collect();
+        packed_schemas.push(Rc::new(lang_object::PackedSchema {
+            shape: Rc::clone(&shapes[def.shape as usize]),
+            fields,
+            word_count: def.word_count as usize,
+        }));
+    }
     let mut vm = Vm {
         module,
-        shapes: module.shapes.iter().cloned().map(Rc::new).collect(),
+        shapes,
+        packed_schemas,
         methods,
         destructors,
         field_defaults,
@@ -447,7 +477,30 @@ impl<'m> Vm<'m> {
     /// `call_list_method`; the result is a freshly-owned value (refcount 1). The receiver's
     /// elements shared from `list_items` are not retained, so any element placed into a *new*
     /// list must be retained first (the list then owns that reference).
+    /// Dispatch a Ring 1 list method. A packed list (P-PACK 2.4) has no specialized list methods
+    /// yet, so it is materialized to a temporary boxed list, dispatched, and released — the result
+    /// is observably identical to the boxed equivalent. A boxed list dispatches directly.
     fn call_list_method(
+        &mut self,
+        list: Value,
+        method: lang_stdlib::ListMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if list.is_packed_list() {
+            let boxed = list.realize_list();
+            let result = self.call_list_method_boxed(boxed, method, name, args, span);
+            boxed.release();
+            result
+        } else {
+            self.call_list_method_boxed(list, method, name, args, span)
+        }
+    }
+
+    /// As [`Self::call_list_method`], but `list` is guaranteed to be a boxed list (the caller has
+    /// materialized any packed receiver).
+    fn call_list_method_boxed(
         &mut self,
         list: Value,
         method: lang_stdlib::ListMethod,
@@ -1136,14 +1189,16 @@ impl<'m> Vm<'m> {
                 format!("index {i} out of bounds for list of length {len}"),
             ));
         }
-        if list.refcount() == 1 {
+        // The in-place slot overwrite is a boxed-list fast path; a packed list (P-PACK 2.4) has no
+        // flat `set`, so it takes the copy path (which materializes via `call_list_method`).
+        if !list.is_packed_list() && list.refcount() == 1 {
             let value = args[1];
             retain(value);
             let old = list.list_replace_slot(i as usize, value);
             self.release_value(old);
             Ok(list)
         } else {
-            // Aliased: copy via the ordinary method, then drop the consumed reference.
+            // Aliased (or packed): copy via the ordinary method, then drop the consumed reference.
             let new =
                 self.call_list_method(list, lang_stdlib::ListMethod::Set, "set", args, span)?;
             release(list);
@@ -1555,19 +1610,25 @@ impl<'m> Vm<'m> {
                     // `dst == lhs` store safe (the old occupant is now `unit`, not the live list).
                     frames[top].regs[*lhs as usize] = Value::unit();
                     let result = if l.is_list() && r.is_list() {
-                        if l.refcount() == 1 {
-                            // Sole owner: extend the backing buffer in place (O(1) amortized). The
-                            // single reference moves from `lhs` into the result.
+                        if !l.is_packed_list() && !r.is_packed_list() && l.refcount() == 1 {
+                            // Sole owner, both boxed: extend the backing buffer in place (O(1)
+                            // amortized). The single reference moves from `lhs` into the result.
                             l.list_extend(r);
                             l
                         } else {
-                            // Aliased (refcount > 1): copy, preserving immutable semantics. Retain
-                            // each element into the new list, then drop the accumulator's reference.
-                            let mut items = l.list_items().unwrap();
-                            items.extend(r.list_items().unwrap());
+                            // Aliased, or a packed operand (P-PACK 2.4, no flat concat): copy,
+                            // preserving immutable semantics. Demote each operand to an owned boxed
+                            // list, retain each element into the new list, release the demotions, then
+                            // drop the accumulator's consumed reference.
+                            let lb = l.realize_list();
+                            let rb = r.realize_list();
+                            let mut items = lb.list_items().unwrap();
+                            items.extend(rb.list_items().unwrap());
                             for &item in &items {
                                 item.inc_ref();
                             }
+                            lb.release();
+                            rb.release();
                             release(l);
                             Value::list(items)
                         }
@@ -1643,6 +1704,36 @@ impl<'m> Vm<'m> {
                         elements.push(v);
                     }
                     set_reg(&mut frames[top].regs, *dst, Value::list(elements));
+                    frames[top].pc += 1;
+                }
+                // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
+                // buffer (no boxed objects, no retains — the words are copied), then the element
+                // temporaries are released by the following compiler-emitted drops, exactly as for
+                // `MakeList`'s consumed operands. If any element fails to pack (a shape the schema
+                // does not expect — not reachable for a well-typed marked site), fall back to a boxed
+                // list that retains each element, staying consistent with those drops.
+                Op::MakePackedList { dst, items, schema } => {
+                    let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
+                    let mut words = Vec::with_capacity(items.len() * schema.word_count);
+                    let mut packed = true;
+                    for &r in items.iter() {
+                        if !frames[top].regs[r as usize].pack_element(&schema, &mut words) {
+                            packed = false;
+                            break;
+                        }
+                    }
+                    let list = if packed {
+                        Value::packed_list(schema, words)
+                    } else {
+                        let mut elements = Vec::with_capacity(items.len());
+                        for &r in items.iter() {
+                            let v = frames[top].regs[r as usize];
+                            retain(v);
+                            elements.push(v);
+                        }
+                        Value::list(elements)
+                    };
+                    set_reg(&mut frames[top].regs, *dst, list);
                     frames[top].pc += 1;
                 }
                 // A tuple builds exactly like a list (object-model slice 4): retain each element into
@@ -1776,6 +1867,15 @@ impl<'m> Vm<'m> {
                             });
                             continue;
                         }
+                    }
+                    // A packed list (P-PACK 2.4) materializes directly into an owned boxed snapshot
+                    // (a fresh list owning each element) — the loop then indexes that boxed snapshot,
+                    // so `ListLen`/`ListGet` never see the flat form.
+                    if v.is_packed_list() {
+                        let snapshot = v.realize_list();
+                        set_reg(&mut frames[top].regs, *dst, snapshot);
+                        frames[top].pc += 1;
+                        continue;
                     }
                     // Snapshot the elements to iterate (a list's elements, a set's canonical
                     // elements, or a map's values in sorted-key order), each retained so the loop
@@ -2243,20 +2343,22 @@ impl<'m> Vm<'m> {
                             .or_else(|| v.map_len())
                             .or_else(|| v.as_string().map(|s| s.chars().count()))
                             .map(|n| Value::int(n as i64))
-                    } else if method == "enumerate" {
+                    } else if method == "enumerate" && v.is_list() {
                         // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
-                        // tree-walker's `Value::Tuple` pairs.
-                        v.list_items().map(|items| {
-                            let pairs = items
-                                .iter()
-                                .enumerate()
-                                .map(|(i, &element)| {
-                                    retain(element);
-                                    Value::tuple(vec![Value::int(i as i64), element])
-                                })
-                                .collect();
-                            Value::list(pairs)
-                        })
+                        // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
+                        // temporary boxed list first (then released).
+                        let boxed = v.realize_list();
+                        let items = boxed.list_items().expect("list receiver");
+                        let pairs = items
+                            .iter()
+                            .enumerate()
+                            .map(|(i, &element)| {
+                                retain(element);
+                                Value::tuple(vec![Value::int(i as i64), element])
+                            })
+                            .collect();
+                        boxed.release();
+                        Some(Value::list(pairs))
                     } else {
                         None
                     };
@@ -2349,8 +2451,16 @@ impl<'m> Vm<'m> {
                                 format!("index {i} out of bounds for list of length {len}"),
                             ));
                         }
-                        let element = v.list_get(i as usize).expect("bounds checked above");
-                        retain(element);
+                        // A packed list (P-PACK 2.4) materializes the one indexed element (owned,
+                        // refcount 1) — no full-list materialization, no extra retain. A boxed list
+                        // borrows the element and retains it into `dst`.
+                        let element = if v.is_packed_list() {
+                            v.packed_get(i as usize)
+                        } else {
+                            let element = v.list_get(i as usize).expect("bounds checked above");
+                            retain(element);
+                            element
+                        };
                         set_reg(&mut frames[top].regs, *dst, element);
                         frames[top].pc += 1;
                         continue;
@@ -2968,6 +3078,10 @@ impl<'m> Vm<'m> {
                     let recv_val = frames[top].regs[*recv as usize];
                     let name_val = frames[top].regs[*name as usize];
                     let args_val = frames[top].regs[*args as usize];
+                    // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
+                    // the duration of the dispatch, then released after the call frame is built (its
+                    // elements retained into it). `arg_items` below borrows from this temporary.
+                    let mut args_to_release: Option<Value> = None;
                     // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
                     // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
                     // non-list args, non-invokable receiver, unknown name, arity mismatch — is a
@@ -2979,12 +3093,15 @@ impl<'m> Vm<'m> {
                                 name_val.type_name()
                             ));
                         };
-                        let Some(arg_items) = args_val.list_items() else {
+                        if !args_val.is_list() {
                             break 'resolve Err(format!(
                                 "invoke args must be a list, found {}",
                                 args_val.type_name()
                             ));
-                        };
+                        }
+                        let args_list = args_val.realize_list();
+                        args_to_release = Some(args_list);
+                        let arg_items = args_list.list_items().expect("checked is_list");
                         // A type handle dispatches an associated function (no receiver); an object
                         // dispatches an instance method (receiver in register 0). A reflection `Type`
                         // value (a stored type-ref) names the type for an associated call too.
@@ -3069,6 +3186,11 @@ impl<'m> Vm<'m> {
                                 upvalues: Vec::new(),
                             });
                         }
+                    }
+                    // Release the temporary boxed args list (if the args were materialized from a
+                    // packed list); its elements were retained into the call frame above.
+                    if let Some(list) = args_to_release {
+                        list.release();
                     }
                 }
                 Op::MatchInt { src, value, fail } => {
@@ -3667,49 +3789,62 @@ impl<'m> Vm<'m> {
             }
             Builtin::Map => {
                 self.check_arity(builtin, args, 2, span)?;
-                let Some(items) = args[0].list_items() else {
+                if !args[0].is_list() {
                     return Err(self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!("`map` expects a list, found {}", args[0].type_name()),
                     ));
-                };
+                }
+                // Demote a packed list to a temporary boxed one (P-PACK 2.4); its elements are
+                // borrowed for the per-element calls and the temporary is released afterward.
+                let list = args[0].realize_list();
+                let items = list.list_items().expect("list receiver");
                 let func = args[1];
                 let mut result = Vec::with_capacity(items.len());
+                let mut failed = None;
                 for element in items {
                     retain(element); // transferred into the call
                     match self.call_value(func, vec![element], span) {
                         Ok(v) => result.push(v),
                         Err(abort) => {
-                            for r in &result {
-                                release(*r);
-                            }
-                            return Err(abort);
+                            failed = Some(abort);
+                            break;
                         }
                     }
+                }
+                list.release();
+                if let Some(abort) = failed {
+                    for r in &result {
+                        release(*r);
+                    }
+                    return Err(abort);
                 }
                 Ok(Value::list(result))
             }
             Builtin::Filter => {
                 self.check_arity(builtin, args, 2, span)?;
-                let Some(items) = args[0].list_items() else {
+                if !args[0].is_list() {
                     return Err(self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!("`filter` expects a list, found {}", args[0].type_name()),
                     ));
-                };
+                }
+                // Demote a packed list (P-PACK 2.4); elements are borrowed from the temporary, which
+                // is released after the loop (a kept element is retained into the result first).
+                let list = args[0].realize_list();
+                let items = list.list_items().expect("list receiver");
                 let func = args[1];
                 let mut result = Vec::new();
+                let mut failed = None;
                 for element in items {
                     retain(element); // transferred into the call
                     let verdict = match self.call_value(func, vec![element], span) {
                         Ok(v) => v,
                         Err(abort) => {
-                            for r in &result {
-                                release(*r);
-                            }
-                            return Err(abort);
+                            failed = Some(abort);
+                            break;
                         }
                     };
                     match verdict.as_bool() {
@@ -3721,33 +3856,44 @@ impl<'m> Vm<'m> {
                         None => {
                             let type_name = verdict.type_name();
                             release(verdict);
-                            for r in &result {
-                                release(*r);
-                            }
-                            return Err(self.error(
+                            failed = Some(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 span,
                                 format!("`filter` predicate must return a bool, found {type_name}"),
                             ));
+                            break;
                         }
                     }
                     release(verdict); // the bool verdict (an immediate) is no longer needed
+                }
+                list.release();
+                if let Some(abort) = failed {
+                    for r in &result {
+                        release(*r);
+                    }
+                    return Err(abort);
                 }
                 Ok(Value::list(result))
             }
             Builtin::Sum => {
                 self.check_arity(builtin, args, 1, span)?;
-                let Some(items) = args[0].list_items() else {
+                if !args[0].is_list() {
                     return Err(self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!("`sum` expects a list, found {}", args[0].type_name()),
                     ));
-                };
+                }
+                // Demote a packed list (P-PACK 2.4) to a temporary boxed one, sum its (numeric)
+                // elements, then release the temporary. (A `List<packed struct>` would not type-check
+                // for `sum`, but the materialize keeps the path uniform.)
+                let list = args[0].realize_list();
+                let items = list.list_items().expect("list receiver");
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;
-                for element in items {
+                let mut bad: Option<&'static str> = None;
+                for element in &items {
                     // Floats take the float path; every other numeric is an int (matching the
                     // M0 tree-walker, which distinguishes `3` from `3.0`).
                     if let Some(f) = element.as_float() {
@@ -3756,15 +3902,17 @@ impl<'m> Vm<'m> {
                     } else if let Some(i) = element.as_int() {
                         int_total = int_total.wrapping_add(i);
                     } else {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            span,
-                            format!(
-                                "`sum` expects numeric elements, found {}",
-                                element.type_name()
-                            ),
-                        ));
+                        bad = Some(element.type_name());
+                        break;
                     }
+                }
+                list.release();
+                if let Some(type_name) = bad {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`sum` expects numeric elements, found {type_name}"),
+                    ));
                 }
                 Ok(if any_float {
                     Value::float(float_total + int_total as f64)

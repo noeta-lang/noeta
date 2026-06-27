@@ -252,6 +252,16 @@ pub enum Op {
         dst: Reg,
         items: Box<[Reg]>,
     },
+    /// `dst = [items...]` for a `List<packed>` (P-PACK 2.4) — build a flat raw-primitive buffer
+    /// from the element registers (each a value-struct instance) using `schema` (an index into
+    /// [`Module::packed_schemas`]), instead of a boxed list of N objects. The elements are consumed
+    /// into the buffer; the layout is invisible to `RunResult` (every observation materializes the
+    /// same object the boxed `MakeList` would hold).
+    MakePackedList {
+        dst: Reg,
+        items: Box<[Reg]>,
+        schema: u32,
+    },
     /// `dst = (items...)` — build a heap tuple (object-model slice 4), retaining each element into
     /// it exactly like `MakeList`.
     MakeTuple {
@@ -752,6 +762,31 @@ pub struct MethodEntry {
     pub proto: u32,
 }
 
+/// The compiled layout of one `List<packed>` element type (P-PACK 2.4) — the pure-data form of a
+/// `lang_object::PackedSchema`, referenced by index from [`Op::MakePackedList`]. Shapes and nested
+/// schemas are held by **index** (into [`Module::shapes`] / [`Module::packed_schemas`]) so the
+/// module stays plain data; the VM resolves these to `Rc`-handles once at load.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedSchemaDef {
+    /// The element type's shape, an index into [`Module::shapes`] — the same entry `MakeStruct`
+    /// uses for that type, so a materialized element shares shape identity with a constructed one.
+    pub shape: u32,
+    /// One entry per field, in slot (declared) order.
+    pub fields: Vec<PackedFieldDef>,
+    /// Words per element (the per-element stride into the flat buffer).
+    pub word_count: u32,
+}
+
+/// A compiled packed field's kind — the pure-data form of a `lang_object::PackedKind`. A nested
+/// packed struct refers to its own schema by index into [`Module::packed_schemas`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum PackedFieldDef {
+    Int,
+    Float,
+    Bool,
+    Struct(u32),
+}
+
 /// A compiled module: the prototype table plus the object-model side tables. `protos[0]` is
 /// the top-level program; the rest are functions, closures, and methods, referenced by
 /// `MakeClosure`/`Call`/the method table via their index. `shapes` is the layout table
@@ -761,6 +796,9 @@ pub struct MethodEntry {
 pub struct Module {
     pub protos: Vec<Chunk>,
     pub shapes: Vec<Shape>,
+    /// The packed-list element layouts (P-PACK 2.4), referenced by index from
+    /// [`Op::MakePackedList`]. Empty for a program with no `List<packed>` literal.
+    pub packed_schemas: Vec<PackedSchemaDef>,
     pub methods: Vec<MethodEntry>,
     /// `(type_name, proto)` for each class with a `destruct` block — the runtime-invoked
     /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs
@@ -840,6 +878,28 @@ impl Module {
                 };
             }
         }
+        if !self.packed_schemas.is_empty() {
+            out.push_str("packed schemas:\n");
+            for (i, schema) in self.packed_schemas.iter().enumerate() {
+                let fields: Vec<String> = schema
+                    .fields
+                    .iter()
+                    .map(|f| match f {
+                        PackedFieldDef::Int => "int".to_string(),
+                        PackedFieldDef::Float => "float".to_string(),
+                        PackedFieldDef::Bool => "bool".to_string(),
+                        PackedFieldDef::Struct(idx) => format!("packed{idx}"),
+                    })
+                    .collect();
+                let _ = writeln!(
+                    out,
+                    "  packed{i} = s{} [{}] ({} words)",
+                    schema.shape,
+                    fields.join(", "),
+                    schema.word_count
+                );
+            }
+        }
         if !self.methods.is_empty() {
             out.push_str("methods:\n");
             for m in &self.methods {
@@ -904,6 +964,13 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::MakeList { dst, items } => {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
             format!("MakeList    r{dst} <- [{}]", items.join(", "))
+        }
+        Op::MakePackedList { dst, items, schema } => {
+            let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "MakePackedList r{dst} <- [{}] packed{schema}",
+                items.join(", ")
+            )
         }
         Op::MakeTuple { dst, items } => {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();

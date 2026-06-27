@@ -26,17 +26,25 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
         // display-based concatenation (each side stringified), so `1 ~ true` stays `"1true"`.
         BinaryOp::Concat => {
             if left.is_list() && right.is_list() {
-                let mut items = left.list_items().unwrap();
-                items.extend(right.list_items().unwrap());
+                // Demote each operand to an owned boxed list (a packed list materializes; a boxed one
+                // gains a reference) so the borrow-then-retain logic below is uniform; the temporary
+                // demotions are released afterward, leaving only the result's references.
+                let left_boxed = left.realize_list();
+                let right_boxed = right.realize_list();
+                let mut items = left_boxed.list_items().unwrap();
+                items.extend(right_boxed.list_items().unwrap());
                 // The new list owns one reference to each element, but `list_items` only *borrowed*
-                // them from the operands (no retain). Retain each now, or the new list and the
-                // operands would both claim ownership of the same heap elements and double-free them
-                // at teardown (a UAF — latent because immediate elements like ints are no-ops here,
-                // and no heap-element list concat was exercised under miri).
+                // them from the demoted operands (no retain). Retain each now, or the new list and
+                // the demotions would both claim ownership of the same heap elements and double-free
+                // them at teardown (a UAF — latent because immediate elements like ints are no-ops
+                // here, and no heap-element list concat was exercised under miri).
                 for &item in &items {
                     item.inc_ref();
                 }
-                Ok(Value::list(items))
+                let out = Value::list(items);
+                left_boxed.release();
+                right_boxed.release();
+                Ok(out)
             } else {
                 Ok(Value::string(&format!(
                     "{}{}",
@@ -231,7 +239,18 @@ fn values_equal(left: Value, right: Value) -> bool {
     // `false` — a latent bug the P-PACK 2.3 differential surfaced, since no prior corpus case
     // compared two equal list literals.)
     if left.is_list() && right.is_list() {
-        return slices_equal(&left.list_items().unwrap(), &right.list_items().unwrap());
+        // Demote each side to an owned boxed list (a packed list materializes to objects), compare
+        // structurally on the materialized elements — never on raw words, which would mis-compare
+        // float `NaN` bit-patterns — then release the temporaries.
+        let left_boxed = left.realize_list();
+        let right_boxed = right.realize_list();
+        let equal = slices_equal(
+            &left_boxed.list_items().unwrap(),
+            &right_boxed.list_items().unwrap(),
+        );
+        left_boxed.release();
+        right_boxed.release();
+        return equal;
     }
     // Tuples compare structurally element-wise (same arity, equal positions) — value semantics
     // (object-model slice 4), matching the tree-walker's `Value::Tuple` equality.

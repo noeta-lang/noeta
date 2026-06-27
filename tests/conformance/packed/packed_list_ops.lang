@@ -1,0 +1,31 @@
+// P-PACK 2.4: the full breadth of list operations over a flat `List<packed>` — each materializes
+// elements on demand (or demotes to a temporary boxed list), so the VM's flat representation and the
+// tree-walker agree, and the refcount-heavy paths (map/filter/enumerate/set/reverse/slice) all
+// reclaim fully (the leak oracle pins residency 0 on both backends).
+// expect: stdout "[3, 1, 2]"
+// expect: stdout "2"
+// expect: stdout "some(V {x: 3, y: 1})"
+// expect: stdout "some(V {x: 2, y: 3})"
+// expect: stdout "[V {x: 3, y: 1}, V {x: 1, y: 2}]"
+// expect: stdout "[3, 2, 4]"
+// expect: stdout "[V {x: 9, y: 9}, V {x: 1, y: 2}, V {x: 2, y: 3}]"
+// expect: stdout "[V {x: 2, y: 3}, V {x: 1, y: 2}, V {x: 3, y: 1}]"
+// expect: stdout "6"
+// expect: stdout "3"
+// expect: exit 0
+@packed struct V { x: int; y: int }
+ps = [V { x: 3, y: 1 }, V { x: 1, y: 2 }, V { x: 2, y: 3 }]
+echo map(ps, fn(v) => v.x)
+echo filter(ps, fn(v) => v.x > 1).count()
+echo ps.first()
+echo ps.last()
+echo ps.slice(0, 2)
+mut acc = []
+for (i, v) in ps.enumerate() {
+  acc = acc ~ [v.x + i]
+}
+echo acc
+echo ps.set(0, V { x: 9, y: 9 })
+echo ps.reverse()
+echo sum(map(ps, fn(v) => v.x))
+echo len(ps)

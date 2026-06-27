@@ -101,6 +101,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
     compile_with_sites(
         program,
         checked.type_of_sites,
+        checked.packed_list_sites,
         &checked.destructor_relevance,
     )
 }
@@ -124,11 +125,13 @@ fn passes_relevance(r: &lang_check::DestructorRelevance) -> lang_ir_passes::Rele
 pub fn compile_with_sites(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
     compile_inner(
         program,
         type_of_sites,
+        packed_list_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
     )
@@ -137,6 +140,7 @@ pub fn compile_with_sites(
 fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     relevance: Option<lang_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -158,6 +162,7 @@ fn compile_inner(
     let mut module = ModuleCompiler {
         protos: vec![Chunk::placeholder()],
         shapes: Vec::new(),
+        packed_schemas: Vec::new(),
         methods: Vec::new(),
         destructors: Vec::new(),
         field_defaults: Vec::new(),
@@ -167,6 +172,7 @@ fn compile_inner(
         types: HashMap::new(),
         module_globals: HashMap::new(),
         type_of_sites,
+        packed_list_sites,
         cache_slots: 0,
     };
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
@@ -187,6 +193,7 @@ fn compile_inner(
     Ok(Module {
         protos: module.protos,
         shapes: module.shapes,
+        packed_schemas: module.packed_schemas,
         methods: module.methods,
         destructors: module.destructors,
         field_defaults: module.field_defaults,
@@ -233,6 +240,9 @@ enum TypeInfo {
 struct ModuleCompiler {
     protos: Vec<Chunk>,
     shapes: Vec<Shape>,
+    /// The packed-list element layouts (P-PACK 2.4), interned by [`Self::intern_packed_schema`] and
+    /// referenced by index from [`Op::MakePackedList`].
+    packed_schemas: Vec<lang_bytecode::PackedSchemaDef>,
     methods: Vec<MethodEntry>,
     destructors: Vec<(String, u32)>,
     /// `(type_name, field_name, proto)` for each field with a default (object-model slice 5), the
@@ -255,6 +265,11 @@ struct ModuleCompiler {
     /// backends bake identical full-fidelity `Type` constants (`type_of` fidelity A, P2.3). A site
     /// absent here lowers to the runtime head-constructor op instead.
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// The packed layout the checker resolved for each `List<packed>` construction site (keyed by the
+    /// `Expr::List` span, P-PACK 2.1), harvested from the *same* program the tree-walker harvests so
+    /// both backends lay flat lists out identically. A list literal whose span is here compiles to
+    /// `Op::MakePackedList`; one absent compiles to the boxed `Op::MakeList`.
+    packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// Running count of inline-cache slots assigned so far. Each `LoadField`/`CallMethod` emission
     /// takes the next id (module-global across all chunks); the total becomes [`Module::cache_slots`],
     /// sizing the VM's per-run cache array. See [`ModuleCompiler::next_cache_slot`].
@@ -705,6 +720,45 @@ impl ModuleCompiler {
         }
         let idx = self.shapes.len() as u32;
         self.shapes.push(shape);
+        idx
+    }
+
+    /// Intern a packed-list element layout from the checker's [`PackedLayout`], returning its index
+    /// in [`Self::packed_schemas`]. The layout is self-describing (P-PACK 2.1), so the element's
+    /// `Shape` is built straight from it — and `intern_shape` dedups it to the *same* entry
+    /// `MakeStruct` uses for that type, so a materialized element is shape-identical to a constructed
+    /// one. Nested packed structs are interned first (a lower index than their parent), giving the VM
+    /// an inner-before-outer build order.
+    fn intern_packed_schema(&mut self, layout: &lang_ast::reflect::PackedLayout) -> u32 {
+        use lang_ast::reflect::PackedKind;
+
+        let shape = self.intern_shape(Shape::object(
+            lang_object::ShapeKind::Struct,
+            layout.type_name.clone(),
+            layout.fields.iter().map(|f| f.name.clone()).collect(),
+        ));
+        let fields = layout
+            .fields
+            .iter()
+            .map(|f| match &f.kind {
+                PackedKind::Int => lang_bytecode::PackedFieldDef::Int,
+                PackedKind::Float => lang_bytecode::PackedFieldDef::Float,
+                PackedKind::Bool => lang_bytecode::PackedFieldDef::Bool,
+                PackedKind::Struct(inner) => {
+                    lang_bytecode::PackedFieldDef::Struct(self.intern_packed_schema(inner))
+                }
+            })
+            .collect();
+        let def = lang_bytecode::PackedSchemaDef {
+            shape,
+            fields,
+            word_count: layout.word_count() as u32,
+        };
+        if let Some(i) = self.packed_schemas.iter().position(|s| *s == def) {
+            return i as u32;
+        }
+        let idx = self.packed_schemas.len() as u32;
+        self.packed_schemas.push(def);
         idx
     }
 
@@ -1949,16 +2003,33 @@ impl<'m> FnCompiler<'m> {
                 self.drop_temp_receiver(receiver, recv);
                 Ok(())
             }
-            Rvalue::List { items, .. } => {
+            Rvalue::List { items, span } => {
+                // A `List<packed>` literal (its span recorded by the checker, P-PACK 2.1) interns a
+                // packed schema and emits `MakePackedList`, building a flat raw-primitive buffer; any
+                // other list emits the boxed `MakeList`. Either way the elements are consumed (packed
+                // into words, or retained into the list) and the temporaries released.
+                let packed_schema = self
+                    .module
+                    .packed_list_sites
+                    .get(span)
+                    .cloned()
+                    .map(|layout| self.module.intern_packed_schema(&layout));
                 let mut consumed = Vec::new();
                 let mut regs = Vec::with_capacity(items.len());
                 for item in items {
                     regs.push(self.consume_operand(item, &mut consumed)?);
                 }
-                self.code.push(Op::MakeList {
-                    dst,
-                    items: regs.into_boxed_slice(),
-                });
+                match packed_schema {
+                    Some(schema) => self.code.push(Op::MakePackedList {
+                        dst,
+                        items: regs.into_boxed_slice(),
+                        schema,
+                    }),
+                    None => self.code.push(Op::MakeList {
+                        dst,
+                        items: regs.into_boxed_slice(),
+                    }),
+                }
                 self.release_consumed(&consumed);
                 Ok(())
             }
