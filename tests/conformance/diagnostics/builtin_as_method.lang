@@ -1,0 +1,7 @@
+// `map`/`filter`/`sum` are free functions, not list methods — calling one as a method (`xs.map(f)`)
+// is an unknown method, reported `UnknownName` (E0005) identically on both backends. (Previously the
+// tree-walker misreported this as `TypeMismatch` "takes no arguments"; the differential surfaced it.)
+// expect: error E0005 at 7:6
+// expect: exit 1
+xs = [1, 2, 3]
+echo xs.map(fn(v) => v)

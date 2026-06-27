@@ -1940,11 +1940,17 @@ impl Interpreter {
         };
         match result {
             Some(value) => Ok(value),
-            None if !arity_ok => Err(self.runtime_error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!("method `{name}` takes no arguments"),
-            )),
+            // The "takes no arguments" error applies only to the *known* zero-arg methods
+            // (`count`/`enumerate`) called with arguments — not to an unknown method name, which is
+            // always `UnknownName` regardless of arity. (Without this guard, `xs.map(f)` — `map` is a
+            // free function, not a method — reported `TypeMismatch` here while the VM reported
+            // `UnknownName`; the guard makes both backends agree.)
+            None if !arity_ok && (name == "count" || name == "enumerate") => Err(self
+                .runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("method `{name}` takes no arguments"),
+                )),
             None => Err(self.runtime_error(
                 DiagnosticCode::UnknownName,
                 span,
