@@ -16,5 +16,8 @@ fn add(a: int, b: int): int { return a + b }
 #[Group("fast")]
 @test fn adds(): void { assert(add(3, 4) == 7) }
 
+#[Data([1, 2, 3])]
+@test fn positive(n: int): void { assert(n > 0) }
+
 echo add(3, 4)
 echo "done"

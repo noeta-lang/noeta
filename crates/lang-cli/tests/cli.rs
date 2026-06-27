@@ -382,6 +382,57 @@ fn test_group_with_no_match_reports_empty() {
         .stdout(predicate::str::contains("no tests in group `nonexistent`"));
 }
 
+#[test]
+fn test_data_runs_once_per_row() {
+    // `#[Data([…])]` expands a one-param test to one case per row, reported `name[row]` and run in
+    // isolation. A failing row is reported individually while the others pass; `#[Name]` renames the
+    // base. The `total` counts cases (4 rows + 1 row = 5), not annotations.
+    let file = temp_program(
+        "test_data",
+        "fn ok(n: int): bool { return n > 0 }\n\
+         #[Data([1, 2, 0])]\n\
+         @test fn positive(n: int): void { assert(ok(n)) }\n\
+         #[Name(\"lengths\")]\n\
+         #[Data([\"a\", \"bb\"])]\n\
+         @test fn nonempty(s: string): void { assert(s != \"\") }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("ok    positive[1]")
+                .and(predicate::str::contains("ok    positive[2]"))
+                .and(predicate::str::contains("FAIL  positive[0]"))
+                .and(predicate::str::contains("ok    lengths[\"a\"]"))
+                .and(predicate::str::contains("ok    lengths[\"bb\"]"))
+                .and(predicate::str::contains("4 passed, 1 failed, 5 total")),
+        );
+}
+
+#[test]
+fn test_data_type_mismatched_row_fails_that_case() {
+    // A row whose literal does not match the parameter type fails just that case (a type error),
+    // not the whole run.
+    let file = temp_program(
+        "test_data_mismatch",
+        "#[Data([1, \"two\"])]\n@test fn t(n: int): void { assert(n > 0) }\n",
+    );
+    lang()
+        .arg("test")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("ok    t[1]")
+                .and(predicate::str::contains("FAIL  t[\"two\"]"))
+                .and(predicate::str::contains("1 passed, 1 failed, 2 total")),
+        );
+}
+
 // --- `bench` (object-model slice 6: the `@bench` runner) ---------------------------
 
 #[test]

@@ -377,13 +377,16 @@ fn cmd_test(
     }
 
     // Partition into skipped (`#[Skip]`) and runnable. A skipped test is reported but never run, and
-    // never fails the suite.
-    let total = selected.len();
+    // never fails the suite (a skipped `#[Data]` test counts as one skip, not one per row).
     let (skipped_refs, runnable): (Vec<&TierFn>, Vec<&TierFn>) =
         selected.into_iter().partition(|t| test_is_skipped(t));
     let skipped: Vec<String> = skipped_refs.iter().map(|t| test_display_name(t)).collect();
 
-    let run_count = runnable.len();
+    // Expand each runnable test into its case(s): a `#[Data([…])]` test runs once per row (reported
+    // `name[row]`); an ordinary test is a single zero-arg case.
+    let cases: Vec<TestCase> = runnable.iter().flat_map(|t| test_cases(t)).collect();
+    let total = cases.len() + skipped.len();
+    let run_count = cases.len();
     let jobs = jobs
         .filter(|n| *n > 0)
         .unwrap_or_else(default_jobs)
@@ -399,8 +402,116 @@ fn cmd_test(
         plural(jobs),
     );
 
-    let outcomes = run_tests(&setup, &runnable, activated.program.span, jobs, fail_fast);
+    let outcomes = run_tests(&setup, &cases, activated.program.span, jobs, fail_fast);
     report(&outcomes, &skipped, total)
+}
+
+/// One runnable test invocation: which fn to call, the report label, and an optional argument (a
+/// `#[Data]` row — `None` for an ordinary zero-arg test). A `#[Data([a, b])]` test expands to one
+/// `TestCase` per row.
+struct TestCase {
+    /// The fn to invoke.
+    fn_name: String,
+    /// The report label (`#[Name]`/fn name, suffixed `[row]` for a data case).
+    display: String,
+    /// The argument to pass.
+    arg: CaseArg,
+    /// Where the fn is declared (for the synthesized call's span).
+    span: Span,
+}
+
+/// A test case's argument: none (an ordinary zero-arg test), a `#[Data]` row value, or an invalid
+/// row whose literal cannot become a runtime value (the case fails with this message).
+enum CaseArg {
+    None,
+    Value(Expr),
+    Invalid(String),
+}
+
+/// Expand a runnable test into its cases: one zero-arg case normally, or one per row when the test
+/// carries `#[Data([…])]`. A row literal that cannot be a runtime value (e.g. a bare type name)
+/// becomes a case that fails with a clear message rather than being silently dropped.
+fn test_cases(test: &TierFn) -> Vec<TestCase> {
+    let base = test_display_name(test);
+    let Some(rows) = data_rows(test) else {
+        return vec![TestCase {
+            fn_name: test.name.clone(),
+            display: base,
+            arg: CaseArg::None,
+            span: test.span,
+        }];
+    };
+    rows.iter()
+        .map(|row| {
+            let arg = match attr_value_to_expr(row, test.span) {
+                Some(expr) => CaseArg::Value(expr),
+                None => CaseArg::Invalid(format!(
+                    "`#[Data]` row `{}` is not a runtime value",
+                    attr_value_label(row)
+                )),
+            };
+            TestCase {
+                fn_name: test.name.clone(),
+                display: format!("{base}[{}]", attr_value_label(row)),
+                arg,
+                span: test.span,
+            }
+        })
+        .collect()
+}
+
+/// Convert a `#[Data]` row literal to an expression to pass as the test argument. Scalars and lists
+/// (recursively) are supported; other literal forms (map/set/enum/struct/type-ref) return `None` and
+/// surface as a failing case.
+fn attr_value_to_expr(value: &AttrValue, span: Span) -> Option<Expr> {
+    Some(match value {
+        AttrValue::Str(s) => Expr::Str {
+            value: s.clone(),
+            span,
+        },
+        AttrValue::Int(n) => Expr::Int { value: *n, span },
+        AttrValue::Float(f) => Expr::Float { value: *f, span },
+        AttrValue::Bool(b) => Expr::Bool { value: *b, span },
+        AttrValue::List(items) => Expr::List {
+            items: items
+                .iter()
+                .map(|item| attr_value_to_expr(item, span))
+                .collect::<Option<Vec<_>>>()?,
+            span,
+        },
+        _ => return None,
+    })
+}
+
+/// A short label for a `#[Data]` row, used in the `name[row]` case display.
+fn attr_value_label(value: &AttrValue) -> String {
+    match value {
+        AttrValue::Str(s) => format!("{s:?}"),
+        AttrValue::Int(n) => n.to_string(),
+        AttrValue::Float(f) => f.to_string(),
+        AttrValue::Bool(b) => b.to_string(),
+        AttrValue::List(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(attr_value_label)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        _ => "?".to_string(),
+    }
+}
+
+/// The rows of a `#[Data([…])]` attribute on `test`, if present — the elements of its list argument.
+fn data_rows(test: &TierFn) -> Option<Vec<AttrValue>> {
+    let attr = test
+        .attrs
+        .iter()
+        .find(|a| a.name == lang_ast::reflect::TEST_ATTR_DATA)?;
+    attr.args.iter().find_map(|arg| match &arg.value {
+        AttrValue::List(items) => Some(items.clone()),
+        _ => None,
+    })
 }
 
 /// Whether a test fn is marked `#[Skip]` — the runner reports it skipped and does not run it.
@@ -446,15 +557,16 @@ fn is_tier_setup(stmt: &Stmt) -> bool {
     )
 }
 
-/// A statement that calls the zero-arg test fn `name`: `name();`.
-fn call_stmt(name: &str, span: Span) -> Stmt {
+/// A statement that calls fn `name` with `args`: `name(args…);`. Zero `args` is the ordinary
+/// test/bench call; a single arg is a `#[Data]` row.
+fn call_stmt(name: &str, args: Vec<Expr>, span: Span) -> Stmt {
     Stmt::Expr {
         expr: Expr::Call {
             callee: Box::new(Expr::Ident {
                 name: name.to_string(),
                 span,
             }),
-            args: Vec::new(),
+            args,
             span,
         },
         span,
@@ -472,20 +584,20 @@ fn plural(n: usize) -> &'static str {
     if n == 1 { "" } else { "s" }
 }
 
-/// Run `tests` concurrently across `jobs` worker threads, each grabbing the next test by an atomic
-/// index. By default every test runs; with `fail_fast` a failure sets a shared stop flag and the
+/// Run `cases` concurrently across `jobs` worker threads, each grabbing the next case by an atomic
+/// index. By default every case runs; with `fail_fast` a failure sets a shared stop flag and the
 /// workers drain out. Results are gathered with their original index and returned in declaration
 /// order, so the report is deterministic regardless of completion order.
 fn run_tests(
     setup: &[Stmt],
-    tests: &[&TierFn],
+    cases: &[TestCase],
     span: Span,
     jobs: usize,
     fail_fast: bool,
 ) -> Vec<TestOutcome> {
     let next = AtomicUsize::new(0);
     let stop = AtomicBool::new(false);
-    let results: Mutex<Vec<(usize, TestOutcome)>> = Mutex::new(Vec::with_capacity(tests.len()));
+    let results: Mutex<Vec<(usize, TestOutcome)>> = Mutex::new(Vec::with_capacity(cases.len()));
 
     thread::scope(|scope| {
         for _ in 0..jobs {
@@ -495,10 +607,10 @@ fn run_tests(
                         break;
                     }
                     let idx = next.fetch_add(1, Ordering::Relaxed);
-                    if idx >= tests.len() {
+                    if idx >= cases.len() {
                         break;
                     }
-                    let outcome = run_one_test(setup, tests[idx], span);
+                    let outcome = run_one_test(setup, &cases[idx], span);
                     let failed = !outcome.passed;
                     results.lock().unwrap().push((idx, outcome));
                     if fail_fast && failed {
@@ -515,17 +627,28 @@ fn run_tests(
     collected.into_iter().map(|(_, outcome)| outcome).collect()
 }
 
-/// Run a single test: synthesize `setup + <call the test fn>`, run it in a fresh real-host isolate,
-/// and read a nonzero exit / any diagnostic as a failure (the first diagnostic — the assertion or
-/// panic — is the reported message). The synthesized program is a subset of the already-checked
-/// activated program plus a call to one of its fns, so it cannot introduce new type errors; if one
-/// somehow appears it is surfaced as a failure rather than panicking the worker.
-fn run_one_test(setup: &[Stmt], test: &TierFn, span: Span) -> TestOutcome {
-    // The report shows the `#[Name("…")]` display name (falling back to the fn name); the fn name is
-    // still what is invoked.
-    let display = test_display_name(test);
+/// Run a single test case: synthesize `setup + <call the fn (with its data arg, if any)>`, run it in
+/// a fresh real-host isolate, and read a nonzero exit / any diagnostic as a failure (the first
+/// diagnostic — the assertion or panic — is the reported message). An invalid `#[Data]` row fails
+/// without running. The synthesized program is a subset of the already-checked activated program
+/// plus one call, so it cannot introduce new type errors; one is surfaced as a failure rather than
+/// panicking the worker.
+fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
+    let args = match &case.arg {
+        CaseArg::None => Vec::new(),
+        CaseArg::Value(expr) => vec![expr.clone()],
+        CaseArg::Invalid(message) => {
+            return TestOutcome {
+                name: case.display.clone(),
+                passed: false,
+                message: Some(message.clone()),
+                stdout: String::new(),
+            };
+        }
+    };
+    let display = case.display.clone();
     let mut stmts = setup.to_vec();
-    stmts.push(call_stmt(&test.name, test.span));
+    stmts.push(call_stmt(&case.fn_name, args, case.span));
     let program = Program { stmts, span };
 
     let checked = lang_check::check_all(&program);
@@ -730,7 +853,7 @@ fn measure_iterations(
     n: u64,
 ) -> Result<std::time::Duration, String> {
     let mut stmts = setup.to_vec();
-    let call = call_stmt(&bench.name, bench.span);
+    let call = call_stmt(&bench.name, Vec::new(), bench.span);
     stmts.reserve(n as usize);
     for _ in 0..n {
         stmts.push(call.clone());
