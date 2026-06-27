@@ -23,7 +23,7 @@ mod leak;
 mod ops;
 mod value;
 pub use leak::live_count;
-pub use value::Value;
+pub use value::{ListRepr, Value};
 
 // The `Backend`/`RunResult` seam moved into its own crate in M1 so the tree-walker and the
 // bytecode VM are siblings (neither depends on the other). Re-exported here so existing
@@ -1117,7 +1117,10 @@ impl Interpreter {
         match value {
             Value::Object(obj) => self.destroy_object(obj),
             Value::Enum(e) => self.destroy_enum(e),
-            Value::List(items) | Value::Set(items) | Value::Tuple(items) => {
+            // A boxed list / set / tuple releases its elements through the shared `Rc<Vec<Value>>`.
+            // (A packed list, P-PACK 2.3, holds only primitives — no destructors — and adds its own
+            // arm; the compiler flags the missing case when `ListRepr::Packed` lands.)
+            Value::List(ListRepr::Boxed(items)) | Value::Set(items) | Value::Tuple(items) => {
                 self.destroy_sequence(items)
             }
             Value::Map(entries) => self.destroy_map(entries),
@@ -1201,7 +1204,7 @@ impl Interpreter {
     /// AST walker's `exec_for` and the Core-IR interpreter so both agree by construction.
     fn iter_elements(&mut self, iterable: Value, span: Span) -> Eval<Vec<Value>> {
         match &iterable {
-            Value::List(items) => Ok((**items).clone()),
+            Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
             // A set iterates in its canonical (sorted) order — deterministic, like the VM.
             Value::Set(items) => Ok((**items).clone()),
             // Iterating a map yields its values, in deterministic key order.
@@ -1210,7 +1213,7 @@ impl Interpreter {
             // `iter` method returns.
             Value::Object(object) if object.def.methods.contains_key("iter") => {
                 match self.call_method(iterable.clone(), "iter", Vec::new(), span)? {
-                    Value::List(items) => Ok((*items).clone()),
+                    Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
                     other => Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
                         span,
@@ -1331,7 +1334,7 @@ impl Interpreter {
                 Value::Object(Rc::new(ObjectValue::new(attributed_def.clone(), a_slots)))
             })
             .collect();
-        Value::List(Rc::new(items))
+        Value::list(items)
     }
 
     /// Materialize the `(declaration, Role)` index from the reflection info into a
@@ -1357,7 +1360,7 @@ impl Interpreter {
                 Value::Object(Rc::new(ObjectValue::new(binding_def.clone(), slots)))
             })
             .collect();
-        Value::List(Rc::new(items))
+        Value::list(items)
     }
 
     /// Build a struct/class instance from already-evaluated field values and an optional
@@ -1802,10 +1805,11 @@ impl Interpreter {
         // Ring 1 list methods (reverse/contains/join) — Value-specific, so implemented per
         // backend, but the method set is the shared `ListMethod` enum: a non-exhaustive `match`
         // here would not compile, so the VM cannot omit a method this backend offers.
-        if let Value::List(items) = &receiver
+        if let Value::List(repr) = &receiver
             && let Some(method) = lang_stdlib::ListMethod::from_name(name)
         {
-            return self.call_list_method(method, items, name, &args, span);
+            let items = repr.to_rc_vec();
+            return self.call_list_method(method, &items, name, &args, span);
         }
         // Ring 1 set methods (contains/union/intersection).
         if let Value::Set(items) = &receiver
@@ -1837,11 +1841,12 @@ impl Interpreter {
             // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
                 let pairs = items
+                    .to_rc_vec()
                     .iter()
                     .enumerate()
                     .map(|(i, v)| Value::Tuple(Rc::new(vec![Value::Int(i as i64), v.clone()])))
                     .collect();
-                Some(Value::List(Rc::new(pairs)))
+                Some(Value::list(pairs))
             }
             _ => None,
         };
@@ -1884,7 +1889,7 @@ impl Interpreter {
                 args_val.type_name()
             )));
         };
-        let args: Vec<Value> = items.as_ref().clone();
+        let args: Vec<Value> = (*items.to_rc_vec()).clone();
         // A reflection `Type` value (e.g. a stored attribute type-ref) dispatches like the type
         // handle it names: resolve it to the type and fall through to the `Value::Type` arm.
         let receiver = match reflection_type_name(&receiver) {
@@ -1965,7 +1970,7 @@ impl Interpreter {
                 self.expect_std_arity(name, args, 0, span)?;
                 let mut reversed = items.to_vec();
                 reversed.reverse();
-                Ok(Value::List(Rc::new(reversed)))
+                Ok(Value::list(reversed))
             }
             lang_stdlib::ListMethod::Contains => {
                 self.expect_std_arity(name, args, 1, span)?;
@@ -1999,7 +2004,7 @@ impl Interpreter {
                 }
                 let mut sorted = items.to_vec();
                 sorted.sort_by(|a, b| compare_primitive(a, b).unwrap_or(std::cmp::Ordering::Equal));
-                Ok(Value::List(Rc::new(sorted)))
+                Ok(Value::list(sorted))
             }
             lang_stdlib::ListMethod::Slice => {
                 self.expect_std_arity(name, args, 2, span)?;
@@ -2015,7 +2020,7 @@ impl Interpreter {
                     ));
                 }
                 let slice = items[start as usize..end as usize].to_vec();
-                Ok(Value::List(Rc::new(slice)))
+                Ok(Value::list(slice))
             }
             lang_stdlib::ListMethod::First => {
                 self.expect_std_arity(name, args, 0, span)?;
@@ -2053,7 +2058,7 @@ impl Interpreter {
                 }
                 let mut new = items.to_vec();
                 new[i as usize] = args[1].clone();
-                Ok(Value::List(Rc::new(new)))
+                Ok(Value::list(new))
             }
         }
     }
@@ -2188,7 +2193,7 @@ impl Interpreter {
                 match self.host.fs_read(path) {
                     Ok(content) => {
                         let lines = content.lines().map(|l| Value::Str(l.to_string())).collect();
-                        Ok(Value::List(Rc::new(lines)))
+                        Ok(Value::list(lines))
                     }
                     Err(error) => {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -2240,7 +2245,7 @@ impl Interpreter {
                 match result {
                     Ok(paths) => {
                         let paths = paths.into_iter().map(Value::Str).collect();
-                        Ok(Value::List(Rc::new(paths)))
+                        Ok(Value::list(paths))
                     }
                     Err(error) => {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -2410,7 +2415,7 @@ impl Interpreter {
             "keys" => {
                 self.expect_std_arity(func, args, 0, span)?;
                 let keys = self.host.env_keys().into_iter().map(Value::Str).collect();
-                Ok(Value::List(Rc::new(keys)))
+                Ok(Value::list(keys))
             }
             _ => {
                 let error = lang_stdlib::no_function_error("env", func);
@@ -2426,7 +2431,7 @@ impl Interpreter {
             "all" => {
                 self.expect_std_arity(func, args, 0, span)?;
                 let all = self.host.args().into_iter().map(Value::Str).collect();
-                Ok(Value::List(Rc::new(all)))
+                Ok(Value::list(all))
             }
             _ => {
                 let error = lang_stdlib::no_function_error("args", func);
@@ -2526,11 +2531,11 @@ impl Interpreter {
             lang_stdlib::MapMethod::Keys => {
                 self.expect_std_arity(name, args, 0, span)?;
                 let keys = entries.keys().map(|k| Value::Str(k.clone())).collect();
-                Ok(Value::List(Rc::new(keys)))
+                Ok(Value::list(keys))
             }
             lang_stdlib::MapMethod::Values => {
                 self.expect_std_arity(name, args, 0, span)?;
-                Ok(Value::List(Rc::new(entries.values().cloned().collect())))
+                Ok(Value::list(entries.values().cloned().collect()))
             }
             lang_stdlib::MapMethod::Has => {
                 self.expect_std_arity(name, args, 1, span)?;
@@ -2665,7 +2670,7 @@ impl Interpreter {
                         format!("index {i} out of bounds for list of length {}", items.len()),
                     ));
                 }
-                Ok(items[i as usize].clone())
+                Ok(items.get(i as usize).expect("bounds checked above"))
             }
             // `m[k]` on a map looks the value up by its string key; a missing key is `E0018`.
             Value::Map(entries) => {
@@ -2896,7 +2901,7 @@ impl Interpreter {
                 for item in items.iter() {
                     result.push(self.call(function.clone(), vec![item.clone()], span)?);
                 }
-                Ok(Value::List(Rc::new(result)))
+                Ok(Value::list(result))
             }
             Builtin::Filter => {
                 self.expect_arity(builtin, &args, 2, span)?;
@@ -2919,7 +2924,7 @@ impl Interpreter {
                         }
                     }
                 }
-                Ok(Value::List(Rc::new(result)))
+                Ok(Value::list(result))
             }
             Builtin::Sum => {
                 self.expect_arity(builtin, &args, 1, span)?;
@@ -3016,7 +3021,7 @@ impl Interpreter {
 
     fn expect_list(&mut self, value: &Value, who: &str, span: Span) -> Eval<Rc<Vec<Value>>> {
         match value {
-            Value::List(items) => Ok(Rc::clone(items)),
+            Value::List(repr) => Ok(repr.to_rc_vec()),
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
                 span,
@@ -3191,14 +3196,18 @@ impl Interpreter {
 /// the ordinary path — only the cost differs.
 fn cow_concat(left: Value, right: Value) -> Value {
     match (left, right) {
-        (Value::List(mut a), Value::List(b)) => {
+        (Value::List(a), Value::List(b)) => {
+            // The in-place fast path is boxed-only; a packed list (P-PACK 2.3) adds a `Packed` arm
+            // here (this irrefutable `let` then becomes a compile error — the tripwire that forces it).
+            let ListRepr::Boxed(mut a) = a;
+            let b = b.to_rc_vec();
             if let Some(items) = Rc::get_mut(&mut a) {
                 items.extend(b.iter().cloned());
-                Value::List(a)
+                Value::list_rc(a)
             } else {
                 let mut items = (*a).clone();
                 items.extend(b.iter().cloned());
-                Value::List(Rc::new(items))
+                Value::list(items)
             }
         }
         (left, right) => Value::Str(format!("{}{}", left.display(), right.display())),
@@ -3263,7 +3272,7 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
 /// enum and is structurally identical to the VM's `build_type_value`.
 fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
     use lang_ast::reflect::{TYPE_ENUM, TypeRepr};
-    let list = |items: Vec<Value>| Value::List(Rc::new(items));
+    let list = |items: Vec<Value>| Value::list(items);
     let data: Vec<Value> = match repr {
         TypeRepr::Int
         | TypeRepr::Float
@@ -3364,7 +3373,7 @@ fn attr_value_to_eval(
         A::Int(n) => Value::Int(*n),
         A::Float(f) => Value::Float(*f),
         A::Bool(b) => Value::Bool(*b),
-        A::List(items) => Value::List(Rc::new(items.iter().map(recur).collect())),
+        A::List(items) => Value::list(items.iter().map(recur).collect()),
         A::Set(items) => {
             let vals: Vec<Value> = items.iter().map(recur).collect();
             Value::Set(Rc::new(canonical_set(&vals).unwrap_or(vals)))
@@ -3455,7 +3464,7 @@ fn output_to_value(output: lang_stdlib::Output) -> Value {
         lang_stdlib::Output::Int(i) => Value::Int(i),
         lang_stdlib::Output::Float(f) => Value::Float(f),
         lang_stdlib::Output::StrList(items) => {
-            Value::List(Rc::new(items.into_iter().map(Value::Str).collect()))
+            Value::list(items.into_iter().map(Value::Str).collect())
         }
     }
 }
@@ -3516,7 +3525,11 @@ fn value_to_json(value: &Value) -> String {
     match value {
         Value::Bool(_) | Value::Int(_) | Value::Float(_) => value.display(),
         Value::Str(s) => json_string(s),
-        Value::List(items) | Value::Set(items) => {
+        Value::List(repr) => {
+            let parts: Vec<String> = repr.to_rc_vec().iter().map(value_to_json).collect();
+            format!("[{}]", parts.join(","))
+        }
+        Value::Set(items) => {
             let parts: Vec<String> = items.iter().map(value_to_json).collect();
             format!("[{}]", parts.join(","))
         }
@@ -3615,7 +3628,7 @@ fn json_to_value(json: lang_stdlib::json::Json) -> Value {
         Json::Int(i) => Value::Int(i),
         Json::Float(f) => Value::Float(f),
         Json::Str(s) => Value::Str(s),
-        Json::Array(items) => Value::List(Rc::new(items.into_iter().map(json_to_value).collect())),
+        Json::Array(items) => Value::list(items.into_iter().map(json_to_value).collect()),
         Json::Object(entries) => Value::Map(Rc::new(
             entries
                 .into_iter()

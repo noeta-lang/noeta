@@ -30,8 +30,8 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
 use crate::{
-    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, RunResult, TreeWalkBackend, TypeDef,
-    Unwind, Value, VariantInfo, compare_primitive,
+    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, ListRepr, RunResult, TreeWalkBackend,
+    TypeDef, Unwind, Value, VariantInfo, compare_primitive,
 };
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
@@ -674,7 +674,7 @@ impl Interpreter {
                 for item in items {
                     values.push(self.eval_ir_atom(item, frame)?);
                 }
-                Ok(Value::List(Rc::new(values)))
+                Ok(Value::list(values))
             }
             lang_ir::Rvalue::Tuple { items, .. } => {
                 let mut values = Vec::with_capacity(items.len());
@@ -707,7 +707,7 @@ impl Interpreter {
                     (Value::Int(a), Value::Int(b)) => {
                         let upper = if *inclusive { b.saturating_add(1) } else { b };
                         let items: Vec<Value> = (a..upper).map(Value::Int).collect();
-                        Ok(Value::List(Rc::new(items)))
+                        Ok(Value::list(items))
                     }
                     (a, b) => Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
@@ -995,13 +995,21 @@ impl Interpreter {
         mut values: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        let Value::List(mut rc) = recv else {
+        let Value::List(repr) = recv else {
             unreachable!("caller checked the receiver is a list")
         };
+        // The in-place reuse path is boxed-only; a packed list (P-PACK 2.3) will add a `Packed` arm
+        // here (this irrefutable `let` then becomes a compile error — the tripwire that forces it).
+        let ListRepr::Boxed(mut rc) = repr;
         let new_value = values.pop().expect("set takes two args");
         let index_value = values.pop().expect("set takes two args");
         let Value::Int(i) = index_value else {
-            return self.call_method(Value::List(rc), "set", vec![index_value, new_value], span);
+            return self.call_method(
+                Value::list_rc(rc),
+                "set",
+                vec![index_value, new_value],
+                span,
+            );
         };
         if i < 0 || i as usize >= rc.len() {
             return Err(self.runtime_error(
@@ -1015,12 +1023,12 @@ impl Interpreter {
             Some(items) => {
                 let old = std::mem::replace(&mut items[i], new_value);
                 self.destroy_value(old);
-                Ok(Value::List(rc))
+                Ok(Value::list_rc(rc))
             }
             None => {
                 let mut new = (*rc).clone();
                 new[i] = new_value;
-                Ok(Value::List(Rc::new(new)))
+                Ok(Value::list(new))
             }
         }
     }

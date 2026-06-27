@@ -27,9 +27,9 @@ pub fn apply_binary(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, 
         // display-based concatenation (each side stringified), so `1 ~ true` stays `"1true"`.
         BinaryOp::Concat => match (left, right) {
             (Value::List(a), Value::List(b)) => {
-                let mut items = (**a).clone();
-                items.extend(b.iter().cloned());
-                Ok(Value::List(std::rc::Rc::new(items)))
+                let mut items = (*a.to_rc_vec()).clone();
+                items.extend(b.to_rc_vec().iter().cloned());
+                Ok(Value::list(items))
             }
             _ => Ok(Value::Str(format!("{}{}", left.display(), right.display()))),
         },
@@ -119,7 +119,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
-        (Value::List(a), Value::List(b)) => a == b,
+        (Value::List(a), Value::List(b)) => a.elements_eq(b),
         // Tuples compare structurally element-wise (value semantics, object-model slice 4) —
         // matching the VM's `values_equal`.
         (Value::Tuple(a), Value::Tuple(b)) => a == b,

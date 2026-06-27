@@ -28,8 +28,11 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Str(String),
-    /// An immutable list. `Rc` keeps copies cheap (map/filter produce new lists).
-    List(Rc<Vec<Value>>),
+    /// An immutable list. The backing [`ListRepr`] is either the general boxed `Rc<Vec<Value>>`
+    /// (any element type) or, for a `List<packed>`, a flat raw-primitive buffer (P-PACK Phase 2).
+    /// `Rc` keeps copies cheap (map/filter produce new lists). The representation is invisible to
+    /// `RunResult` — every operation observes the same elements either way.
+    List(ListRepr),
     /// A tuple: a fixed-arity, heterogeneous, value-semantic positional aggregate (object-model
     /// slice 4). `Rc` keeps copies cheap; equality is structural (element-wise).
     Tuple(Rc<Vec<Value>>),
@@ -60,7 +63,62 @@ pub enum Value {
     FileHandle(Rc<RefCell<FileHandle>>),
 }
 
+/// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,
+/// holding the same `Rc<Vec<Value>>` lists have always used — so every existing boxed-list code path
+/// (copy-on-write reuse, refcount checks, `try_unwrap`) operates on the inner `Rc` unchanged. A
+/// later slice adds `Packed`, a flat raw-primitive buffer for a `List<packed>`; an operation not yet
+/// specialized for it calls [`ListRepr::to_rc_vec`] to materialize the boxed elements and runs the
+/// existing path, so the flat form stays invisible to `RunResult`.
+#[derive(Clone, Debug)]
+pub enum ListRepr {
+    /// The general boxed list: elements are full `Value`s in an `Rc`-shared vector.
+    Boxed(Rc<Vec<Value>>),
+}
+
+impl ListRepr {
+    /// The number of elements.
+    pub(crate) fn len(&self) -> usize {
+        match self {
+            ListRepr::Boxed(items) => items.len(),
+        }
+    }
+
+    /// The elements as a boxed `Rc<Vec<Value>>`, materializing a packed buffer on demand. For an
+    /// already-boxed list this is a cheap `Rc::clone` (no element copy) — so routing a read-only op
+    /// through it never regresses the boxed path.
+    pub(crate) fn to_rc_vec(&self) -> Rc<Vec<Value>> {
+        match self {
+            ListRepr::Boxed(items) => Rc::clone(items),
+        }
+    }
+
+    /// The element at `index`, cloned (a refcount bump for a heap value), or `None` if out of range.
+    pub(crate) fn get(&self, index: usize) -> Option<Value> {
+        match self {
+            ListRepr::Boxed(items) => items.get(index).cloned(),
+        }
+    }
+
+    /// Element-wise equality, independent of representation (two lists are equal iff their elements
+    /// are equal in order).
+    pub(crate) fn elements_eq(&self, other: &ListRepr) -> bool {
+        match (self, other) {
+            (ListRepr::Boxed(a), ListRepr::Boxed(b)) => a == b,
+        }
+    }
+}
+
 impl Value {
+    /// Construct a boxed list value from its elements (the general representation).
+    pub(crate) fn list(items: Vec<Value>) -> Value {
+        Value::List(ListRepr::Boxed(Rc::new(items)))
+    }
+
+    /// Construct a boxed list value from an already-shared `Rc<Vec<Value>>`.
+    pub(crate) fn list_rc(items: Rc<Vec<Value>>) -> Value {
+        Value::List(ListRepr::Boxed(items))
+    }
+
     /// The display form used by `echo`, `~` concatenation, and (later) interpolation.
     /// In M1 this becomes `Display` trait dispatch; in M0 it is built in per value kind.
     pub fn display(&self) -> String {
@@ -70,8 +128,8 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Float(f) => format_float(*f),
             Value::Str(s) => s.clone(),
-            Value::List(items) => {
-                let parts: Vec<String> = items.iter().map(Value::repr).collect();
+            Value::List(repr) => {
+                let parts: Vec<String> = repr.to_rc_vec().iter().map(Value::repr).collect();
                 format!("[{}]", parts.join(", "))
             }
             // A tuple renders parenthesized with `repr` elements (`(1, "a")`) — the VM matches.
@@ -144,7 +202,7 @@ impl fmt::Debug for Value {
             Value::Int(i) => write!(f, "Int({i})"),
             Value::Float(x) => write!(f, "Float({x})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
-            Value::List(items) => write!(f, "List({items:?})"),
+            Value::List(repr) => write!(f, "List({repr:?})"),
             Value::Tuple(items) => write!(f, "Tuple({items:?})"),
             Value::Set(items) => write!(f, "Set({items:?})"),
             Value::Map(entries) => write!(f, "Map({entries:?})"),
@@ -168,7 +226,7 @@ impl PartialEq for Value {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::List(a), Value::List(b)) => a == b,
+            (Value::List(a), Value::List(b)) => a.elements_eq(b),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Set(a), Value::Set(b)) => a == b,
             (Value::Map(a), Value::Map(b)) => a == b,
@@ -198,7 +256,7 @@ mod tests {
     use super::*;
 
     fn list(items: Vec<Value>) -> Value {
-        Value::List(Rc::new(items))
+        Value::list(items)
     }
 
     fn map(pairs: &[(&str, Value)]) -> Value {
