@@ -1722,7 +1722,7 @@ where
             .clone()
             .then_ignore(just(T::Colon))
             .or_not()
-            .then(attr_value)
+            .then(attr_value.clone())
             .map_with(move |(name, value), e| lang_ast::AttrArg {
                 name: name.map(|(n, _)| n),
                 value,
@@ -1736,6 +1736,7 @@ where
             .ignore_then(id.clone())
             .then(
                 attr_arg
+                    .clone()
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -2442,20 +2443,53 @@ where
         // `attributed_type_decl` so `@test { … }` is read as a block; a `@derive(...) struct` finds
         // no `{` after the directive and backtracks to the decorator path. The body is a sequence of
         // statements (test `fn`s at the top level); the strip pass resolves active vs inactive.
+        // Optional directive arguments `( … )` after the tier name — **named** literal arguments,
+        // `@bench(iterations: 1000)`. Shared by the block and annotation forms; absent ⇒ empty.
+        //
+        // Named-only (`name: value`) is deliberate: the tier forms are tried *before* the
+        // `@derive(...)`/`#[...]` decorator path and only commit when a `{`/`fn` follows, so a
+        // `@derive(Comparable, Serialize<Json>)` must be *speculatively* parsed here and then
+        // backtracked. A bare-value argument grammar would route through the shared `attr_value`,
+        // whose error path pushes a diagnostic as a side effect (it survives backtracking) — so a
+        // `@derive` with a non-literal type argument would wrongly report an error. Requiring a
+        // leading `name:` means a bare `Comparable`/`Serialize<Json>` fails *before* reaching
+        // `attr_value`, so the tier path backtracks without polluting diagnostics. (Positional /
+        // flag tier args like `@test(skip)` are intentionally not supported yet for the same reason.)
+        let tier_arg = id
+            .clone()
+            .then_ignore(just(T::Colon))
+            .then(attr_value.clone())
+            .map_with(move |((name, _name_span), value), e| lang_ast::AttrArg {
+                name: Some(name),
+                value,
+                span: ctx.to_span(e.span()),
+            });
+        let tier_args = tier_arg
+            .separated_by(just(T::Comma))
+            .allow_trailing()
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::LParen), just(T::RParen))
+            .or_not()
+            .map(Option::unwrap_or_default);
+
         let tier_block = just(T::At)
             .ignore_then(id.clone())
+            .then(tier_args.clone())
             .then(
                 // A tier block's body is a statement list, so it uses the same recovering list as a
                 // `{ }` block — which absorbs the synthetic `;` the lexer inserts between members on
                 // separate lines (slice 7) and recovers from errors.
                 recovering_list(stmt.clone()).delimited_by(just(T::LBrace), just(T::RBrace)),
             )
-            .map_with(move |((tier, tier_span), items), e| Stmt::TierBlock {
-                tier,
-                tier_span,
-                items,
-                span: ctx.to_span(e.span()),
-            });
+            .map_with(
+                move |(((tier, tier_span), args), items), e| Stmt::TierBlock {
+                    tier,
+                    tier_span,
+                    args,
+                    items,
+                    span: ctx.to_span(e.span()),
+                },
+            );
 
         // A **dev-tier annotation** `@<tier> fn …` (object-model slice 6c): a code tier on a single
         // declaration — the base form the block is grouping sugar for. Desugared at parse time into a
@@ -2467,13 +2501,17 @@ where
         // to the decorator path.
         let tier_annotation = just(T::At)
             .ignore_then(id.clone())
+            .then(tier_args.clone())
             .then(fn_decl.clone())
-            .map_with(move |((tier, tier_span), item), e| Stmt::TierBlock {
-                tier,
-                tier_span,
-                items: vec![item],
-                span: ctx.to_span(e.span()),
-            });
+            .map_with(
+                move |(((tier, tier_span), args), item), e| Stmt::TierBlock {
+                    tier,
+                    tier_span,
+                    args,
+                    items: vec![item],
+                    span: ctx.to_span(e.span()),
+                },
+            );
 
         choice((
             echo,
@@ -3056,6 +3094,17 @@ mod tests {
         // a struct literal in a condition is parenthesized. `(empty C)` is the empty-fields object,
         // and the `if` condition is the member access on the parenthesized literal, then the block.
         insta::assert_snapshot!(pretty("c = C {}\nif (C { x: 1 }).x { echo \"y\" }"));
+    }
+
+    #[test]
+    fn tier_directive_args_parse() {
+        // A tier directive carries optional literal arguments in parentheses, the same arg grammar a
+        // `#[...]` attribute uses (object-model slice 6e). Both the block form `@bench(iterations: N)
+        // { … }` and the annotation form `@bench(iterations: N) fn …` accept them; the pretty form
+        // surfaces the args after the tier name. A bare `@test { }` carries none.
+        insta::assert_snapshot!(pretty(
+            "@bench(iterations: 1000) { fn hot(): void { return; } }\n@bench(iterations: 50) fn warm(): void { return; }"
+        ));
     }
 
     #[test]

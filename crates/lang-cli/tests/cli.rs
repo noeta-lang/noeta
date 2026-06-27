@@ -323,6 +323,79 @@ fn test_unknown_tier_is_e0036() {
         .stderr(predicate::str::contains("E0036"));
 }
 
+// --- `bench` (object-model slice 6: the `@bench` runner) ---------------------------
+
+#[test]
+fn bench_runs_and_reports_each_benchmark() {
+    // `lang bench` discovers `@bench` blocks (block + annotation form), measures each, and reports
+    // a per-iteration line. Timings are non-deterministic, so only the structure is asserted. The
+    // program's own top-level `echo` does not run (the runner runs benches, not the file). A small
+    // iteration count keeps the test fast.
+    let file = temp_program(
+        "bench_ok",
+        "fn work(n: int): int {\n\
+             mut t = 0\n\
+             for i in 0..n { t = t + i }\n\
+             return t\n\
+         }\n\
+         echo \"main must not run\"\n\
+         @bench(iterations: 5) fn small(): void { work(10) }\n\
+         @bench(iterations: 5) { fn blocked(): void { work(10) } }\n",
+    );
+    lang().arg("bench").arg(&file).assert().success().stdout(
+        predicate::str::contains("running 2 benchmarks")
+            .and(predicate::str::contains("small"))
+            .and(predicate::str::contains("blocked"))
+            .and(predicate::str::contains("/iter"))
+            .and(predicate::str::contains("2 ran, 0 failed, 2 total"))
+            .and(predicate::str::contains("main must not run").not()),
+    );
+}
+
+#[test]
+fn bench_no_benches_is_success() {
+    let file = temp_program("bench_none", "echo \"hi\"\n");
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no benchmarks found"));
+}
+
+#[test]
+fn bench_failing_body_is_reported() {
+    // A `@bench` whose body aborts (a false `assert`) is a measurement failure, not a crash: the
+    // bench is reported FAILED and the process exits non-zero.
+    let file = temp_program(
+        "bench_fail",
+        "@bench(iterations: 2) fn boom(): void { assert(false) }\n",
+    );
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stdout(
+            predicate::str::contains("boom")
+                .and(predicate::str::contains("FAILED"))
+                .and(predicate::str::contains("1 total")),
+        );
+}
+
+#[test]
+fn bench_unknown_tier_is_e0036() {
+    let file = temp_program("bench_badtier", "@bnch { fn x(): void { assert(true) } }\n");
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0036"));
+}
+
 // --- `repl` -----------------------------------------------------------------------
 
 #[test]

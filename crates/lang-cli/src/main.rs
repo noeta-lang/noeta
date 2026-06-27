@@ -13,10 +13,11 @@ use std::process::ExitCode;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
+use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use lang_ast::{Expr, Program, Stmt};
-use lang_check::TestFn;
+use lang_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
+use lang_check::TierFn;
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
 use lang_eval::{Session, SessionOutput, TreeWalkBackend};
 use lang_lexer::{TokenKind, lex};
@@ -53,6 +54,15 @@ enum Command {
         #[arg(long, short)]
         jobs: Option<usize>,
     },
+    /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
+    Bench {
+        /// Path to a `.lang` file.
+        file: PathBuf,
+        /// Override the iteration count for every benchmark, taking precedence over a per-bench
+        /// `@bench(iterations: N)` directive. Without either, a default count is used.
+        #[arg(long)]
+        iterations: Option<u64>,
+    },
     /// Start an interactive REPL.
     Repl,
 }
@@ -65,6 +75,7 @@ fn main() -> ExitCode {
             fail_fast,
             jobs,
         } => cmd_test(&file, fail_fast, jobs),
+        Command::Bench { file, iterations } => cmd_bench(&file, iterations),
         Command::Repl => cmd_repl(),
     }
 }
@@ -242,7 +253,7 @@ fn cmd_test(file: &std::path::Path, fail_fast: bool, jobs: Option<usize>) -> Exi
         .program
         .stmts
         .iter()
-        .filter(|s| is_test_setup(s))
+        .filter(|s| is_tier_setup(s))
         .cloned()
         .collect();
 
@@ -267,9 +278,10 @@ fn cmd_test(file: &std::path::Path, fail_fast: bool, jobs: Option<usize>) -> Exi
     report(&outcomes, total)
 }
 
-/// Whether a top-level statement is test *setup* — a declaration or a global binding the tests may
-/// depend on — as opposed to the program's own "main" effects (which `lang test` does not run).
-fn is_test_setup(stmt: &Stmt) -> bool {
+/// Whether a top-level statement is tier-runner *setup* — a declaration or a global binding the
+/// tests/benches may depend on — as opposed to the program's own "main" effects (which the
+/// `lang test`/`lang bench` runners do not run; they run the tier fns, not the file).
+fn is_tier_setup(stmt: &Stmt) -> bool {
     !matches!(
         stmt,
         Stmt::Echo { .. }
@@ -315,7 +327,7 @@ fn plural(n: usize) -> &'static str {
 /// order, so the report is deterministic regardless of completion order.
 fn run_tests(
     setup: &[Stmt],
-    tests: &[TestFn],
+    tests: &[TierFn],
     span: Span,
     jobs: usize,
     fail_fast: bool,
@@ -357,7 +369,7 @@ fn run_tests(
 /// panic — is the reported message). The synthesized program is a subset of the already-checked
 /// activated program plus a call to one of its fns, so it cannot introduce new type errors; if one
 /// somehow appears it is surfaced as a failure rather than panicking the worker.
-fn run_one_test(setup: &[Stmt], test: &TestFn, span: Span) -> TestOutcome {
+fn run_one_test(setup: &[Stmt], test: &TierFn, span: Span) -> TestOutcome {
     let mut stmts = setup.to_vec();
     stmts.push(call_stmt(&test.name, test.span));
     let program = Program { stmts, span };
@@ -433,6 +445,193 @@ fn report(outcomes: &[TestOutcome], total: usize) -> ExitCode {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+/// The default number of iterations a benchmark runs when neither the `--iterations` flag nor a
+/// per-bench `@bench(iterations: N)` directive sets one. Small, because the runner executes
+/// *interpreted* code and measures at both N and 2N (see [`cmd_bench`]); a heavy body lowers it.
+const DEFAULT_BENCH_ITERATIONS: u64 = 200;
+
+/// `lang bench <FILE>` — discover the program's `@bench` blocks (object-model slice 6) and measure
+/// each. Unlike `lang test`, benchmarks run **sequentially** (concurrency would corrupt timings).
+/// Each bench's per-iteration cost is estimated by a **two-point** measurement: the fn is invoked N
+/// and 2N times in fresh isolates and the per-iteration time is `(t(2N) − t(N)) / N`, which cancels
+/// the fixed per-run overhead (runtime startup, global/setup evaluation, IR lowering — all identical
+/// between the two runs). N comes from `--iterations`, else the per-bench `@bench(iterations: N)`
+/// directive, else [`DEFAULT_BENCH_ITERATIONS`].
+fn cmd_bench(file: &std::path::Path, iterations_override: Option<u64>) -> ExitCode {
+    let linked = match lang_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+        Ok(Ok(linked)) => linked,
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    // Activate the `bench` tier: inline its `@bench` blocks as ordinary top-level declarations and
+    // collect the bench fns (with their directive args). An unknown-tier block is an E0036.
+    let activated = lang_check::activate_tiers(&linked.program, &["bench"]);
+    if !activated.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+        return ExitCode::from(1);
+    }
+
+    // Type-check once, so a broken benchmark is a compile error reported here rather than inside
+    // every per-bench run.
+    let checked = lang_check::check_all(&activated.program);
+    if !checked.diagnostics.is_empty() {
+        emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+        return ExitCode::from(1);
+    }
+
+    if activated.benches.is_empty() {
+        println!("no benchmarks found");
+        return ExitCode::SUCCESS;
+    }
+
+    let setup: Vec<Stmt> = activated
+        .program
+        .stmts
+        .iter()
+        .filter(|s| is_tier_setup(s))
+        .cloned()
+        .collect();
+
+    let total = activated.benches.len();
+    println!("running {total} benchmark{}", plural(total));
+
+    let mut failed = 0usize;
+    for bench in &activated.benches {
+        let n = iterations_override
+            .or_else(|| iterations_arg(&bench.args))
+            .unwrap_or(DEFAULT_BENCH_ITERATIONS)
+            .max(1);
+        match (
+            measure_iterations(&setup, bench, n),
+            measure_iterations(&setup, bench, n.saturating_mul(2)),
+        ) {
+            (Ok(t1), Ok(t2)) => {
+                let per_ns = ((t2.as_nanos() as f64 - t1.as_nanos() as f64) / n as f64).max(0.0);
+                println!(
+                    "  {:<28} {:>11}/iter  ({n} iterations)",
+                    bench.name,
+                    fmt_per_iter(per_ns),
+                );
+            }
+            (Err(msg), _) | (_, Err(msg)) => {
+                failed += 1;
+                println!("  {:<28} FAILED: {msg}", bench.name);
+            }
+        }
+    }
+
+    println!();
+    println!("{} ran, {failed} failed, {total} total", total - failed,);
+    let _ = io::stdout().flush();
+    if failed == 0 {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// The `iterations` argument of a `@bench(...)` directive, if present and positive — the per-bench
+/// override of the default iteration count.
+fn iterations_arg(args: &[AttrArg]) -> Option<u64> {
+    args.iter().find_map(|a| match (&a.name, &a.value) {
+        (Some(name), AttrValue::Int(n)) if name == "iterations" && *n > 0 => Some(*n as u64),
+        _ => None,
+    })
+}
+
+/// Measure executing `bench` `n` times: synthesize `setup + n×<call the bench fn>`, then run it in a
+/// fresh real-host isolate, timing **only execution** (IR lowering is done untimed, before the
+/// clock starts). A discarded warm-up run plus the minimum of three measured runs damps noise. A
+/// nonzero exit / any diagnostic (a panic in the bench body) is a failure, surfaced as `Err`.
+fn measure_iterations(
+    setup: &[Stmt],
+    bench: &TierFn,
+    n: u64,
+) -> Result<std::time::Duration, String> {
+    let mut stmts = setup.to_vec();
+    let call = call_stmt(&bench.name, bench.span);
+    stmts.reserve(n as usize);
+    for _ in 0..n {
+        stmts.push(call.clone());
+    }
+    let program = Program {
+        stmts,
+        span: bench.span,
+    };
+
+    let checked = lang_check::check_all(&program);
+    if !checked.diagnostics.is_empty() {
+        return Err(checked.diagnostics[0].message.clone());
+    }
+
+    // Take the minimum of three runs: `min` is the standard robust estimator (the fastest run is
+    // the one least perturbed by scheduler/GC/OS noise) and inherently discards the cold first run,
+    // so no separate warm-up is needed.
+    let mut best: Option<std::time::Duration> = None;
+    for _ in 0..3 {
+        let (result, elapsed) = bench_execute(&program, &checked)?;
+        if result.exit_code != 0 || !result.diagnostics.is_empty() {
+            return Err(result
+                .diagnostics
+                .first()
+                .map(|d| d.message.clone())
+                .unwrap_or_else(|| format!("exited with code {}", result.exit_code)));
+        }
+        best = Some(best.map_or(elapsed, |b| b.min(elapsed)));
+    }
+    Ok(best.expect("three measured runs"))
+}
+
+/// Lower a program for the real host (untimed) and execute it, returning the result and the
+/// **execution-only** wall-clock duration (lowering excluded). Mirrors [`execute_real_host`]'s
+/// pipeline so a benchmark runs the same Core-IR path a normal `lang run` does.
+fn bench_execute(
+    program: &Program,
+    checked: &lang_check::Checked,
+) -> Result<(lang_backend::RunResult, std::time::Duration), String> {
+    let host =
+        lang_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
+    let relevance = lang_ir_passes::Relevance {
+        locals: checked.destructor_relevance.locals.clone(),
+        params: checked.destructor_relevance.params.clone(),
+    };
+    let ir = lang_ir::lower(program).expect("Core-IR lowering is total over the parsed language");
+    let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
+    let ir = lang_ir_passes::thread_reuse(&ir);
+    let start = Instant::now();
+    let result = TreeWalkBackend::new().run_ir_with_host(
+        program,
+        &ir,
+        Box::new(host),
+        checked.type_of_sites.clone(),
+    );
+    Ok((result, start.elapsed()))
+}
+
+/// Format a per-iteration duration (in nanoseconds) with an adaptive unit, so a fast op reads in
+/// `ns` and a slow one in `ms`/`s`.
+fn fmt_per_iter(ns: f64) -> String {
+    if ns < 1_000.0 {
+        format!("{ns:.0} ns")
+    } else if ns < 1_000_000.0 {
+        format!("{:.2} µs", ns / 1_000.0)
+    } else if ns < 1_000_000_000.0 {
+        format!("{:.2} ms", ns / 1_000_000.0)
+    } else {
+        format!("{:.2} s", ns / 1_000_000_000.0)
     }
 }
 

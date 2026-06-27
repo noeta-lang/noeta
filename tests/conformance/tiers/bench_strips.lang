@@ -1,0 +1,24 @@
+// A `@bench { … }` block (object-model slice 6) is a code tier just like `@test`: on a normal run
+// (no tier active) it is stripped before lowering — never compiled or run — so the program's own
+// output is unchanged and both backends strip it identically (they lower the same program), so the
+// differential agrees. The directive arguments (`@bench(iterations: 1000)`) parse and are carried
+// on the block but have no effect on a normal run; only `lang bench` reads them.
+// expect: stdout "4950"
+// expect: stdout "done"
+// expect: exit 0
+fn sum_to(n: int): int {
+    mut total = 0
+    for i in 0..n {
+        total = total + i
+    }
+    return total
+}
+
+@bench(iterations: 1000) {
+    fn sum_100(): void { assert(sum_to(100) == 4950); }
+}
+
+@bench fn sum_10(): void { assert(sum_to(10) == 45); }
+
+echo sum_to(100)
+echo "done"

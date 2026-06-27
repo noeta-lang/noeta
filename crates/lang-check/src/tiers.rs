@@ -19,7 +19,7 @@
 //! activates a tier, so the differential is untouched by construction. The two E0036 sources (this
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
-use lang_ast::{Program, Stmt};
+use lang_ast::{AttrArg, Program, Stmt};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
@@ -47,13 +47,18 @@ pub fn unknown_tier_diagnostic(tier: &str, span: Span) -> Diagnostic {
     ))
 }
 
-/// A `@test` fn surfaced by activation — a root the runner invokes by name.
+/// A code-tier `fn` surfaced by activation — a root the matching runner invokes by name (a `@test`
+/// fn for `lang test`, a `@bench` fn for `lang bench`).
 #[derive(Debug, Clone, PartialEq)]
-pub struct TestFn {
+pub struct TierFn {
     /// The fn's name, used to invoke it.
     pub name: String,
     /// Where it is declared (for the runner's report).
     pub span: Span,
+    /// The directive arguments on the block that introduced it — e.g. `@bench(iterations: 1000)`.
+    /// The runner reads the ones it understands (the bench runner reads `iterations`); a bare block
+    /// carries none.
+    pub args: Vec<AttrArg>,
 }
 
 /// The result of resolving a program's tier blocks against an active set.
@@ -62,8 +67,10 @@ pub struct Activated {
     /// The program with active tier blocks inlined and inactive ones removed — ready to check and
     /// lower as if the tier blocks had never been a distinct form.
     pub program: Program,
-    /// The `@test` fns activated by this resolution, in source order.
-    pub tests: Vec<TestFn>,
+    /// The `@test` fns activated by this resolution, in source order (roots for `lang test`).
+    pub tests: Vec<TierFn>,
+    /// The `@bench` fns activated by this resolution, in source order (roots for `lang bench`).
+    pub benches: Vec<TierFn>,
     /// `E0036` for any block naming an unknown tier (active or not).
     pub diagnostics: Vec<Diagnostic>,
 }
@@ -74,19 +81,28 @@ pub struct Activated {
 /// are inlined in place; inactive blocks are dropped; every block's name is validated. The `@test`
 /// fns among the activated *top-level* blocks are collected as roots the runner invokes.
 pub fn activate_tiers(program: &Program, active: &[&str]) -> Activated {
-    let mut tests = Vec::new();
+    let mut roots = Roots::default();
     let mut diagnostics = Vec::new();
-    // The top-level statement list collects tests (a `@test` block's fns are runnable roots only
-    // here — a tier block nested in a fn body holds inline code, not roots).
-    let stmts = resolve_block(&program.stmts, active, &mut diagnostics, &mut tests, true);
+    // The top-level statement list collects roots (a `@test`/`@bench` block's fns are runnable roots
+    // only here — a tier block nested in a fn body holds inline code, not roots).
+    let stmts = resolve_block(&program.stmts, active, &mut diagnostics, &mut roots, true);
     Activated {
         program: Program {
             stmts,
             span: program.span,
         },
-        tests,
+        tests: roots.tests,
+        benches: roots.benches,
         diagnostics,
     }
+}
+
+/// The runnable roots a top-level activation collects, partitioned by tier — `@test` fns for
+/// `lang test`, `@bench` fns for `lang bench`.
+#[derive(Default)]
+struct Roots {
+    tests: Vec<TierFn>,
+    benches: Vec<TierFn>,
 }
 
 /// Resolve the tier blocks in one statement list. A `@<tier> { … }` is validated, then inlined (its
@@ -98,14 +114,15 @@ fn resolve_block(
     stmts: &[Stmt],
     active: &[&str],
     diagnostics: &mut Vec<Diagnostic>,
-    tests: &mut Vec<TestFn>,
-    collect_tests: bool,
+    roots: &mut Roots,
+    collect_roots: bool,
 ) -> Vec<Stmt> {
     let mut out = Vec::with_capacity(stmts.len());
     for stmt in stmts {
         let Stmt::TierBlock {
             tier,
             tier_span,
+            args,
             items,
             ..
         } = stmt
@@ -124,18 +141,27 @@ fn resolve_block(
 
         // Active tier: resolve the items (so a tier block nested among them, and each item's own
         // body, are handled), then splice them in place. The items are spliced at *this* level, so
-        // `collect_tests` carries through unchanged. Each lifted `fn` is marked `is_dev_tier` so the
+        // `collect_roots` carries through unchanged. Each lifted `fn` is marked `is_dev_tier` so the
         // checker grants it white-box access to the module's private fields (slice 6d); a top-level
-        // `@test` block's fns are also recorded as roots.
-        let resolved = resolve_block(items, active, diagnostics, tests, collect_tests);
+        // `@test`/`@bench` block's fns are also recorded as roots (carrying the block's directive
+        // args, e.g. `@bench(iterations: …)`, so the runner can read them).
+        let resolved = resolve_block(items, active, diagnostics, roots, collect_roots);
         for mut item in resolved {
             if let Stmt::Fn(decl) = &mut item {
                 decl.is_dev_tier = true;
-                if collect_tests && tier == "test" {
-                    tests.push(TestFn {
-                        name: decl.name.clone(),
-                        span: decl.name_span,
-                    });
+                if collect_roots {
+                    let sink = match tier.as_str() {
+                        "test" => Some(&mut roots.tests),
+                        "bench" => Some(&mut roots.benches),
+                        _ => None,
+                    };
+                    if let Some(sink) = sink {
+                        sink.push(TierFn {
+                            name: decl.name.clone(),
+                            span: decl.name_span,
+                            args: args.clone(),
+                        });
+                    }
                 }
             }
             out.push(item);
@@ -152,7 +178,9 @@ fn resolve_block(
 fn resolve_children(stmt: &Stmt, active: &[&str], diagnostics: &mut Vec<Diagnostic>) -> Stmt {
     let mut stmt = stmt.clone();
     let block = |stmts: &[Stmt], diags: &mut Vec<Diagnostic>| -> Vec<Stmt> {
-        let mut sink = Vec::new();
+        // Nested statement lists never produce runnable roots (`collect_roots = false`); the sink is
+        // a throwaway.
+        let mut sink = Roots::default();
         resolve_block(stmts, active, diags, &mut sink, false)
     };
     match &mut stmt {

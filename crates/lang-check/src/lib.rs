@@ -77,7 +77,7 @@ use lang_types::{BuiltinTrait, Type};
 mod stdlib;
 pub mod tiers;
 
-pub use tiers::{Activated, TestFn, activate_tiers};
+pub use tiers::{Activated, TierFn, activate_tiers};
 
 use tiers::BUILTIN_TIERS;
 

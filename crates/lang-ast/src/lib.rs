@@ -117,6 +117,11 @@ pub enum Stmt {
     TierBlock {
         tier: String,
         tier_span: Span,
+        /// The directive arguments inside the parentheses, e.g. `@bench(iterations: 1000)` or
+        /// `@test(skip)`. Empty for a bare `@test { … }`. Named/positional literals, exactly like a
+        /// `#[...]` attribute's arguments — a runner reads the ones it understands (the `@bench`
+        /// runner reads `iterations`); unknown args are inert.
+        args: Vec<AttrArg>,
         items: Vec<Stmt>,
         span: Span,
     },

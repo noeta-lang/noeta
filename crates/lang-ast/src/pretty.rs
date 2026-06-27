@@ -6,8 +6,8 @@
 //! parse→print→parse property test (Slice 9) builds on.
 
 use crate::{
-    ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ImplDecl, ObjectLit, Param, Pattern,
-    Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef,
+    AttrArg, AttrValue, ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ImplDecl,
+    ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef,
 };
 use lang_span::Span;
 
@@ -206,12 +206,13 @@ impl Pretty for Stmt {
             }
             Stmt::TierBlock {
                 tier,
+                args,
                 items,
                 span: s,
                 ..
             } => {
                 indent(out, level);
-                out.push_str(&format!("(tier {tier} {}", span(*s)));
+                out.push_str(&format!("(tier {tier}{} {}", attr_args_str(args), span(*s)));
                 for item in items {
                     out.push('\n');
                     item.pretty(out, level + 1);
@@ -315,6 +316,54 @@ fn type_params_str(params: &[TypeParam]) -> String {
 /// declarations' pretty output is unchanged).
 fn pub_str(is_public: bool) -> &'static str {
     if is_public { "pub " } else { "" }
+}
+
+/// Render directive/attribute arguments as `(name: value, value)`, or the empty string when there
+/// are none (so a bare `@test { }` block's pretty output is unchanged). Used by the tier-block
+/// printer so `@bench(iterations: 1000)` surfaces in snapshots.
+fn attr_args_str(args: &[AttrArg]) -> String {
+    if args.is_empty() {
+        return String::new();
+    }
+    let parts: Vec<String> = args
+        .iter()
+        .map(|a| match &a.name {
+            Some(name) => format!("{name}: {}", attr_value_str(&a.value)),
+            None => attr_value_str(&a.value),
+        })
+        .collect();
+    format!("({})", parts.join(", "))
+}
+
+/// A compact rendering of an attribute-argument literal value, enough to make a snapshot legible.
+fn attr_value_str(value: &AttrValue) -> String {
+    match value {
+        AttrValue::Str(s) => format!("{s:?}"),
+        AttrValue::Int(n) => n.to_string(),
+        AttrValue::Float(f) => f.to_string(),
+        AttrValue::Bool(b) => b.to_string(),
+        AttrValue::List(items) | AttrValue::Set(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(attr_value_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AttrValue::Map(entries) => format!(
+            "{{{}}}",
+            entries
+                .iter()
+                .map(|(k, v)| format!("{k:?}: {}", attr_value_str(v)))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+        AttrValue::Enum {
+            enum_name, variant, ..
+        } => format!("{enum_name}.{variant}"),
+        AttrValue::Struct { type_name, .. } => format!("{type_name} {{…}}"),
+        AttrValue::TypeRef(name) => name.clone(),
+    }
 }
 
 impl Pretty for StructDecl {
