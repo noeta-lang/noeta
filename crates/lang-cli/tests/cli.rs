@@ -218,6 +218,26 @@ fn test_no_tests_is_success() {
 }
 
 #[test]
+fn test_annotation_form_is_discovered() {
+    // `@test fn …` (the annotation form, slice 6c) is grouping sugar for a one-item block: the
+    // runner discovers an annotated fn exactly as it does a fn inside `@test { … }`, and the two
+    // forms mix freely. The program's own top-level `echo` still does not run.
+    let file = temp_program(
+        "test_annotation",
+        "fn add(a: int, b: int): int { return a + b; }\n\
+         echo \"main must not run\";\n\
+         @test fn annotated(): void { assert(add(2, 3) == 5); }\n\
+         @test { fn blocked(): void { assert(add(1, 1) == 2); } }\n",
+    );
+    lang().arg("test").arg(&file).assert().success().stdout(
+        predicate::str::contains("ok    annotated")
+            .and(predicate::str::contains("ok    blocked"))
+            .and(predicate::str::contains("2 passed, 0 failed, 2 total"))
+            .and(predicate::str::contains("main must not run").not()),
+    );
+}
+
+#[test]
 fn test_unknown_tier_is_e0036() {
     let file = temp_program("test_badtier", "@tset { fn x(): void { assert(true); } }\n");
     lang()

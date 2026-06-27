@@ -2363,6 +2363,24 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // A **dev-tier annotation** `@<tier> fn …` (object-model slice 6c): a code tier on a single
+        // declaration — the base form the block is grouping sugar for. Desugared at parse time into a
+        // one-item `TierBlock`, so activation, checking, lowering, and the runner see exactly the
+        // block form (no separate machinery, full equivalence). The annotation wraps a top-level
+        // `fn` (the `@test fn` case); test-only *types* use the block form. The follow token
+        // disambiguates cleanly: `@test {` opens a block (no `fn`, so this fails over to
+        // `tier_block`), and `@derive(...) struct` finds no `fn` after the directive and backtracks
+        // to the decorator path.
+        let tier_annotation = just(T::At)
+            .ignore_then(id.clone())
+            .then(fn_decl.clone())
+            .map_with(move |((tier, tier_span), item), e| Stmt::TierBlock {
+                tier,
+                tier_span,
+                items: vec![item],
+                span: ctx.to_span(e.span()),
+            });
+
         choice((
             echo,
             mut_binding,
@@ -2375,6 +2393,7 @@ where
             fn_decl,
             standalone_impl,
             tier_block,
+            tier_annotation,
             attributed_type_decl,
             namespace_decl,
             use_decl,
@@ -2922,6 +2941,17 @@ mod tests {
         // block path when no `{` follows the directive), proving the two `@`-forms don't collide.
         insta::assert_snapshot!(pretty(
             "@test { fn adds() { return add(1, 2); } } @derive(Comparable) struct P { x: int } echo 1;"
+        ));
+    }
+
+    #[test]
+    fn tier_annotation_parses() {
+        // A `@<tier> fn …` annotation (object-model slice 6c) is grouping sugar for a one-item tier
+        // block: it desugars to the same `(tier …)` node a `@test { fn … }` block produces, so the
+        // pretty form is identical to wrapping the single fn in a block. It coexists with the block
+        // form and with `@derive(...)` decorators (which still attach to the following type).
+        insta::assert_snapshot!(pretty(
+            "@test fn adds(): void { return; } @derive(Comparable) struct P { x: int } echo 1;"
         ));
     }
 
