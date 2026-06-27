@@ -1,6 +1,9 @@
 # Object-model redesign — Slice 6: dev-tier blocks (`@tier` primitive, `test` first)
 
-**Status: design, not started.** The dev-tier-blocks slice of the object-model arc (slices 1–5 done).
+**Status: ✅ COMPLETE (6a–6g + the `@debug` tail).** The dev-tier-blocks slice of the object-model
+arc. `@test`/`@bench`/`@doc`/`@debug` ship end-to-end; `lang.toml` build profiles drive the active-
+tier set. What remains is gated on the package system (third-party tiers, cross-package providers,
+codegen knobs, env) — see the Sub-slicing tail.
 This plan supersedes the dev-tier section of `plans/object-model-redesign/README.md` where the two
 disagree — that section predates two design sessions (the `@dev`→`@tier` rename, and the
 2026-06-26 *profiles + provider-map* discussion captured here).
@@ -272,8 +275,39 @@ support for a raw-text span — the one genuinely new lexing concern).
   (repeatable) supplies the active set (the interim "active-set via CLI" interface until profiles);
   default `lang run` is untouched (strip-at-lowering). Unknown `--tier` block → E0036. Test discovery
   stays top-level; lifted fns stay `is_dev_tier` (white-box) at any depth.
-- **Later:** `bench`; `doc` (text content-kind + verbatim capture + extraction); the profiles/TOML
-  provider-map + manifest; third-party tiers.
+- **6e — tier-directive args + `@bench` runner. ✅ DONE (`54a9d63`).** Tier directives carry
+  **named** literal args (`@bench(iterations: 1000)`), stored on `Stmt::TierBlock.args` (reusing the
+  `#[...]` `AttrArg`/`AttrValue` grammar). Named-only is deliberate: the tier forms are tried before
+  the `@derive`/`#[...]` decorator path and backtracked, and a bare-value grammar would route through
+  the side-effecting `attr_value` (its error pushes a diagnostic that survives backtracking —
+  regressing `@derive(Serialize<Json>)`); requiring `name:` fails before `attr_value`. (Positional
+  flags like `@test(skip)` stay unsupported for the same reason — a deliberate boundary.)
+  `activate_tiers` now collects `@bench` roots beside `@test` (shared `Roots`; `TestFn`→`TierFn`).
+  `lang bench` measures each **sequentially** (concurrency corrupts timings) via a **two-point**
+  estimate — invoke N and 2N times, per-iter `= (t(2N)−t(N))/N` cancels fixed per-run overhead
+  (startup/setup/lowering), each point the min of three runs, **only execution timed**. N from
+  `--iterations`, else `@bench(iterations: N)`, else 200. A false `assert`/panic ⇒ FAILED.
+- **6f — `@doc` text tier + `lang doc`. ✅ DONE (`2502b78`).** The first **text** content-kind:
+  `@doc { … }` captures verbatim prose. The "new lexing concern" landed — `lex()` detects a `@doc {`
+  (the two tokens before `{` are `@` then ident `doc`) and captures the brace-delimited body as one
+  synthesized `DocText` token (matching `}` via brace-depth; unbalanced ⇒ unterminated diagnostic),
+  so markdown punctuation never lex-errors. `DocText` is never produced by `logos` (a NUL sentinel
+  `#[token]` gives the variant a rule). The parser's tier body is `DocText` (sliced to
+  `TierBlock.doc_text`, `items` empty) **or** the code statement list. A normal run strips `@doc`
+  like any inactive tier (differential untouched). `lang doc` walks the parse (no check/run — works
+  on WIP code), collects top-level `@doc` blocks via `lang_check::collect_docs`, and prints each
+  dedented under an HTML-comment `<!-- file:line -->` header.
+- **6g — `lang.toml` build profiles (`--profile`). ✅ DONE (`851f8de`).** The profiles/provider-map
+  surface, implemented against the active-tier-set interface. A `lang-cli` `manifest` module parses
+  `lang.toml` (`toml` crate, untyped `Table`), validates tier names + providers, and resolves a
+  profile's effective tiers via its `extends` chain (cycles detected). The **provider-string grammar
+  is stubbed** (bare string / `{ package = … }` table) but only `"std"` is accepted — cross-package
+  resolution waits on the package system. `lang run --profile P` activates P's live tiers (∪
+  `--tier`); `lang test|bench|doc --profile P` runs only when its tier is live in P (else a no-op
+  note). Manifest is CLI-only (compiler crates untouched); bare runs are byte-identical (opt-in).
+- **Still later (needs the package system):** third-party `@tier` declarations + their manifest-
+  reading runners; `[dependencies]` + cross-package provider resolution; profile-level codegen knobs
+  / compile-time constants; env (deferred entirely).
 
 ---
 
