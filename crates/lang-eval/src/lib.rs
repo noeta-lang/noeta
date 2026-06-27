@@ -69,10 +69,28 @@ impl Backend for TreeWalkBackend {
     /// it was neither a production path nor the differential oracle — the oracle is VM-vs-IR — so it
     /// was pure duplication. Lowering is total over the parsed language, so this never fails.)
     fn run(&self, program: &Program) -> RunResult {
+        // Apply the same IR passes the production paths do (`lang run` in `lang-cli`, the conformance
+        // reference): precise-RC drop insertion (with destructor relevance) and reuse-token threading.
+        // Without them `reuse` is never set, so e.g. a list self-append `acc ~= [i]` copies the whole
+        // accumulator each step — O(n²) instead of the O(n) in-place path the real run takes. A single
+        // `check_all` yields both the `type_of` sites and the relevance, so the checker runs once.
+        let checked = lang_check::check_all(program);
         let ir =
             lang_ir::lower(program).expect("Core-IR lowering is total over the parsed language");
-        let sites = lang_check::resolve_type_of_sites(program);
-        self.run_ir(program, &ir, sites)
+        let ir =
+            lang_ir_passes::insert_drops(&ir, Some(&relevance_of(&checked.destructor_relevance)));
+        let ir = lang_ir_passes::thread_reuse(&ir);
+        self.run_ir(program, &ir, checked.type_of_sites)
+    }
+}
+
+/// The drop pass's relevance form, copied from the checker's (identical sets) — the lang-eval
+/// counterpart to `lang-conformance`'s `to_relevance` and the compiler's `passes_relevance`, so the
+/// `Backend::run` entry point annotates drops identically to the production reference and the VM.
+fn relevance_of(r: &lang_check::DestructorRelevance) -> lang_ir_passes::Relevance {
+    lang_ir_passes::Relevance {
+        locals: r.locals.clone(),
+        params: r.params.clone(),
     }
 }
 
