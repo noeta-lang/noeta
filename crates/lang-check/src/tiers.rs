@@ -61,6 +61,39 @@ pub struct TierFn {
     pub args: Vec<AttrArg>,
 }
 
+/// A `@doc { … }` text-tier block's verbatim body, surfaced for extraction by `lang doc` (slice
+/// 6f). The text is the raw source between the braces, captured un-parsed by the lexer.
+#[derive(Debug, Clone, PartialEq)]
+pub struct DocBlock {
+    /// The verbatim body text.
+    pub text: String,
+    /// The whole `@doc { … }` span, for the extractor's source-location header.
+    pub span: Span,
+}
+
+/// Collect every top-level `@doc { … }` block's verbatim body, in source order. `@doc` is a
+/// *declaration-position* text tier, so a top-level walk is the whole story; the bodies never reach
+/// the checker or lowering (a normal run strips them like any inactive tier). `lang doc` extracts
+/// these.
+pub fn collect_docs(program: &Program) -> Vec<DocBlock> {
+    program
+        .stmts
+        .iter()
+        .filter_map(|stmt| match stmt {
+            Stmt::TierBlock {
+                tier,
+                doc_text: Some(text),
+                span,
+                ..
+            } if tier == "doc" => Some(DocBlock {
+                text: text.clone(),
+                span: *span,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
 /// The result of resolving a program's tier blocks against an active set.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Activated {

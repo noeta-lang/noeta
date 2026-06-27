@@ -238,6 +238,13 @@ pub enum TokenKind {
     /// `@`, introducing a codegen directive (`@derive(...)`).
     #[token("@")]
     At,
+    /// The **verbatim body** of a `@doc { … }` text tier (object-model slice 6f): the raw source
+    /// between the braces, captured without tokenizing it (so arbitrary prose/markdown never
+    /// produces lex errors). Never produced by `logos` — it is synthesized by [`lex`] when it sees a
+    /// `@doc {`; the literal pattern here is an unmatchable sentinel (NUL bytes never occur in
+    /// source) that only exists to give the variant a `logos` rule.
+    #[token("\0\0__doctext__\0\0")]
+    DocText,
 }
 
 impl TokenKind {
@@ -326,6 +333,7 @@ impl TokenKind {
             TokenKind::Bang => "Bang",
             TokenKind::Hash => "Hash",
             TokenKind::At => "At",
+            TokenKind::DocText => "DocText",
         }
     }
 
@@ -414,6 +422,7 @@ impl TokenKind {
             TokenKind::Bang => "`!`",
             TokenKind::Hash => "`#`",
             TokenKind::At => "`@`",
+            TokenKind::DocText => "a `@doc` text body",
         }
     }
 }
@@ -437,11 +446,45 @@ pub struct Lexed {
 pub fn lex(source: &Source) -> Lexed {
     let mut tokens = Vec::new();
     let mut diagnostics = Vec::new();
-    let mut lexer = TokenKind::lexer(source.text());
+    let text = source.text();
+    let mut lexer = TokenKind::lexer(text);
 
     while let Some(result) = lexer.next() {
         let span = Span::from(lexer.span());
         match result {
+            Ok(TokenKind::LBrace) if opens_doc_block(text, &tokens) => {
+                // A `@doc {` (object-model slice 6f): capture the brace-delimited body **verbatim**
+                // as one `DocText` token instead of tokenizing it, so arbitrary prose/markdown never
+                // produces lex errors. Emit `{`, the raw body, and `}`, then advance the lexer past
+                // the whole span. The body's braces must balance (the matching `}` closes the block).
+                let open_end = span.end;
+                match matching_brace(text, open_end) {
+                    Some(close_start) => {
+                        tokens.push(Token {
+                            kind: TokenKind::LBrace,
+                            span,
+                        });
+                        tokens.push(Token {
+                            kind: TokenKind::DocText,
+                            span: Span::new(open_end, close_start),
+                        });
+                        tokens.push(Token {
+                            kind: TokenKind::RBrace,
+                            span: Span::new(close_start, close_start + 1),
+                        });
+                        // The lexer cursor sits just after `{` (`open_end`); skip to just after the
+                        // matching `}` so tokenizing resumes there.
+                        lexer.bump((close_start + 1 - open_end) as usize);
+                    }
+                    None => {
+                        diagnostics.push(unterminated_doc_block(span));
+                        tokens.push(Token {
+                            kind: TokenKind::LBrace,
+                            span,
+                        });
+                    }
+                }
+            }
             Ok(kind) => tokens.push(Token { kind, span }),
             Err(()) => diagnostics.push(lex_error(source, span)),
         }
@@ -453,6 +496,47 @@ pub fn lex(source: &Source) -> Lexed {
         tokens,
         diagnostics,
     }
+}
+
+/// Whether the just-lexed `{` opens a `@doc { … }` text-tier body — i.e. the two preceding tokens
+/// are `@` then the identifier `doc`. (Only `@doc` is a text tier; every other `@<tier> {` is a
+/// code block tokenized normally.)
+fn opens_doc_block(text: &str, tokens: &[Token]) -> bool {
+    let [.., at, name] = tokens else { return false };
+    at.kind == TokenKind::At
+        && name.kind == TokenKind::Ident
+        && text.get(name.span.start as usize..name.span.end as usize) == Some("doc")
+}
+
+/// Find the `}` that closes a brace block whose opening `{` ends at `open_end`, returning its byte
+/// offset. Braces nest (a `{` in the body must be matched by a `}` before the block closes), so a
+/// balanced code snippet inside doc prose is fine; an unbalanced `}` is treated as the closer and an
+/// unbalanced `{` runs to end-of-input (`None` — an unterminated block).
+fn matching_brace(text: &str, open_end: u32) -> Option<u32> {
+    let mut depth: u32 = 1;
+    for (offset, byte) in text.as_bytes().iter().enumerate().skip(open_end as usize) {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(offset as u32);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The diagnostic for a `@doc {` whose body never closes (no matching `}` before end-of-input).
+fn unterminated_doc_block(open: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticCode::UnexpectedEndOfInput,
+        open,
+        "unterminated `@doc` block",
+    )
+    .with_help("add a closing `}` to end the doc block; braces inside the body must balance")
 }
 
 /// Insert synthetic statement terminators (`;`) at newlines (object-model slice 7): a line end can
@@ -785,6 +869,57 @@ mod tests {
                 TokenKind::Semicolon,
             ]
         );
+    }
+
+    #[test]
+    fn doc_block_body_is_captured_verbatim() {
+        // `@doc { … }` (object-model slice 6f): the body is captured as one `DocText` token instead
+        // of being tokenized, so arbitrary prose — `#`, `*`, `"` quotes, `$`, even a balanced code
+        // snippet `{ … }` — produces no lex errors. The tokens are `@ doc { <DocText> }`.
+        let (source, lexed) =
+            lex_str("@doc {\n  # Title with `code` and \"quotes\" {x}\n}\nx = 1\n");
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert_eq!(
+            &kinds[..5],
+            &[
+                TokenKind::At,
+                TokenKind::Ident,
+                TokenKind::LBrace,
+                TokenKind::DocText,
+                TokenKind::RBrace,
+            ]
+        );
+        // The DocText token spans the raw interior between the braces, verbatim.
+        assert_eq!(
+            source.slice(lexed.tokens[3].span),
+            "\n  # Title with `code` and \"quotes\" {x}\n"
+        );
+        // Lexing resumes after the closing `}`: the trailing `x = 1` tokenizes normally.
+        assert!(kinds.contains(&TokenKind::Eq));
+    }
+
+    #[test]
+    fn unterminated_doc_block_reports_diagnostic() {
+        // A `@doc {` whose braces never balance runs to end-of-input and is reported, not silently
+        // swallowed.
+        let (_source, lexed) = lex_str("@doc {\n  # never closed\n");
+        assert!(
+            lexed
+                .diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::UnexpectedEndOfInput)
+        );
+    }
+
+    #[test]
+    fn non_doc_tier_block_is_tokenized_normally() {
+        // Only `@doc {` triggers raw capture; a `@test {` body is ordinary code, tokenized as usual
+        // (no `DocText`).
+        let (_source, lexed) = lex_str("@test { fn t() { return 1 } }\n");
+        let kinds: Vec<_> = lexed.tokens.iter().map(|t| t.kind).collect();
+        assert!(!kinds.contains(&TokenKind::DocText));
+        assert!(kinds.contains(&TokenKind::FnKw));
     }
 
     #[test]

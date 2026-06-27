@@ -1,0 +1,19 @@
+// A `@doc { … }` text tier (object-model slice 6f) holds verbatim prose, not code: its body is
+// captured un-parsed (so markdown punctuation never lexes as tokens) and, on a normal run, the
+// block is stripped before lowering exactly like an inactive code tier — it produces no output and
+// reaches neither backend's IR, so the differential agrees by construction. Only `lang doc` reads
+// it. Here the prose deliberately contains characters that are not valid tokens on their own
+// (`#`, `*`, a stray `%`, an unmatched-looking quote inside backticks); the program still runs.
+// expect: stdout "3"
+// expect: stdout "done"
+// expect: exit 0
+@doc {
+    # Adder
+
+    `add(a, b)` returns **a + b**. 100% pure; no side effects.
+}
+
+fn add(a: int, b: int): int { return a + b }
+
+echo add(1, 2)
+echo "done"

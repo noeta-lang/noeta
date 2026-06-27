@@ -2472,21 +2472,31 @@ where
             .or_not()
             .map(Option::unwrap_or_default);
 
+        // A tier block's body is **either** the verbatim text of a `@doc` block — the lexer captured
+        // it as a single `DocText` token (slice 6f), which is sliced back out of the source here — or
+        // a statement list for a code tier (the same recovering list a `{ }` block uses, absorbing
+        // the synthetic `;` the lexer inserts between members on separate lines, slice 7). The text
+        // branch is tried first; a code body's first token is never `DocText`, so it falls through.
+        let tier_body = choice((
+            just(T::DocText).map_with(move |_, e| {
+                let span = ctx.to_span(e.span());
+                (Vec::new(), Some(ctx.source.slice(span).to_string()))
+            }),
+            recovering_list(stmt.clone()).map(|items| (items, None)),
+        ))
+        .delimited_by(just(T::LBrace), just(T::RBrace));
+
         let tier_block = just(T::At)
             .ignore_then(id.clone())
             .then(tier_args.clone())
-            .then(
-                // A tier block's body is a statement list, so it uses the same recovering list as a
-                // `{ }` block — which absorbs the synthetic `;` the lexer inserts between members on
-                // separate lines (slice 7) and recovers from errors.
-                recovering_list(stmt.clone()).delimited_by(just(T::LBrace), just(T::RBrace)),
-            )
+            .then(tier_body)
             .map_with(
-                move |(((tier, tier_span), args), items), e| Stmt::TierBlock {
+                move |(((tier, tier_span), args), (items, doc_text)), e| Stmt::TierBlock {
                     tier,
                     tier_span,
                     args,
                     items,
+                    doc_text,
                     span: ctx.to_span(e.span()),
                 },
             );
@@ -2509,6 +2519,7 @@ where
                     tier_span,
                     args,
                     items: vec![item],
+                    doc_text: None,
                     span: ctx.to_span(e.span()),
                 },
             );
@@ -3094,6 +3105,17 @@ mod tests {
         // a struct literal in a condition is parenthesized. `(empty C)` is the empty-fields object,
         // and the `if` condition is the member access on the parenthesized literal, then the block.
         insta::assert_snapshot!(pretty("c = C {}\nif (C { x: 1 }).x { echo \"y\" }"));
+    }
+
+    #[test]
+    fn doc_tier_block_parses_verbatim_body() {
+        // A `@doc { … }` text tier (object-model slice 6f) carries its body verbatim: the lexer
+        // captured it as a single `DocText` token, which the parser slices back into the block's
+        // `doc_text` (its `items` stay empty). The pretty form shows the text after `:text`. Prose
+        // that would otherwise not tokenize (`#`, `*`, quotes) is preserved untouched.
+        insta::assert_snapshot!(pretty(
+            "@doc {\n  # Heading\n  Some *markdown* with `code`.\n}\necho 1"
+        ));
     }
 
     #[test]

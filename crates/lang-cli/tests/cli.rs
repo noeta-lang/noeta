@@ -396,6 +396,50 @@ fn bench_unknown_tier_is_e0036() {
         .stderr(predicate::str::contains("E0036"));
 }
 
+// --- `doc` (object-model slice 6f: the `@doc` text-tier extractor) ------------------
+
+#[test]
+fn doc_extracts_verbatim_blocks() {
+    // `lang doc` pulls each `@doc { … }` block's verbatim body to stdout, dedented and with a
+    // source-location header. The prose contains markdown punctuation that is not valid code; it is
+    // captured untouched. The program's own code does not run (no `echo` output).
+    let file = temp_program(
+        "doc_ok",
+        "@doc {\n\
+        \x20   # Title\n\
+        \x20   A *bold* claim about `add`.\n\
+        }\n\
+        fn add(a: int, b: int): int { return a + b }\n\
+        echo \"must not run\"\n",
+    );
+    lang().arg("doc").arg(&file).assert().success().stdout(
+        predicate::str::contains("# Title")
+            .and(predicate::str::contains("A *bold* claim about `add`."))
+            .and(predicate::str::contains("<!-- "))
+            .and(predicate::str::contains("must not run").not()),
+    );
+}
+
+#[test]
+fn doc_no_blocks_is_success_with_note() {
+    let file = temp_program("doc_none", "echo \"hi\"\n");
+    lang()
+        .arg("doc")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::is_empty())
+        .stderr(predicate::str::contains("no `@doc` blocks"));
+}
+
+#[test]
+fn doc_unterminated_block_is_reported() {
+    // A `@doc {` whose braces never balance is a lex error surfaced by the loader, not a silent
+    // swallow.
+    let file = temp_program("doc_unterminated", "@doc {\n  # never closed\n");
+    lang().arg("doc").arg(&file).assert().failure().code(1);
+}
+
 // --- `repl` -----------------------------------------------------------------------
 
 #[test]

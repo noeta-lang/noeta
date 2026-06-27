@@ -208,11 +208,15 @@ impl Pretty for Stmt {
                 tier,
                 args,
                 items,
+                doc_text,
                 span: s,
                 ..
             } => {
                 indent(out, level);
                 out.push_str(&format!("(tier {tier}{} {}", attr_args_str(args), span(*s)));
+                if let Some(text) = doc_text {
+                    out.push_str(&format!(" :text {text:?}"));
+                }
                 for item in items {
                     out.push('\n');
                     item.pretty(out, level + 1);

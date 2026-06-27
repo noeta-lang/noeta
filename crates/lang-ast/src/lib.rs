@@ -123,6 +123,11 @@ pub enum Stmt {
         /// runner reads `iterations`); unknown args are inert.
         args: Vec<AttrArg>,
         items: Vec<Stmt>,
+        /// The **verbatim body** of a `@doc { … }` *text* tier (object-model slice 6f): the raw
+        /// source between the braces, captured un-parsed. `Some` only for a `@doc` block (whose
+        /// `items` are then empty); `None` for a code tier (`@test`/`@bench`/`@debug`), whose body
+        /// is the parsed `items`. `lang doc` extracts these; on a normal run the block is stripped.
+        doc_text: Option<String>,
         span: Span,
     },
 }

@@ -63,6 +63,11 @@ enum Command {
         #[arg(long)]
         iterations: Option<u64>,
     },
+    /// Extract a program's `@doc { … }` text blocks to stdout (object-model slice 6).
+    Doc {
+        /// Path to a `.lang` file.
+        file: PathBuf,
+    },
     /// Start an interactive REPL.
     Repl,
 }
@@ -76,6 +81,7 @@ fn main() -> ExitCode {
             jobs,
         } => cmd_test(&file, fail_fast, jobs),
         Command::Bench { file, iterations } => cmd_bench(&file, iterations),
+        Command::Doc { file } => cmd_doc(&file),
         Command::Repl => cmd_repl(),
     }
 }
@@ -633,6 +639,87 @@ fn fmt_per_iter(ns: f64) -> String {
     } else {
         format!("{:.2} s", ns / 1_000_000_000.0)
     }
+}
+
+/// `lang doc <FILE>` — extract the program's `@doc { … }` text blocks (object-model slice 6f) to
+/// stdout, in source order. Each block's verbatim body is dedented (the common leading indentation
+/// and the surrounding blank lines from sitting inside `@doc { … }` are stripped) and preceded by an
+/// HTML-comment header noting its source location — valid markdown that renders to nothing. The
+/// program is not type-checked or run; doc extraction works on a parse alone, so docs can be pulled
+/// from work-in-progress code.
+fn cmd_doc(file: &std::path::Path) -> ExitCode {
+    let linked = match lang_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            return ExitCode::from(2);
+        }
+        Ok(Ok(linked)) => linked,
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            return ExitCode::from(1);
+        }
+    };
+
+    let docs = lang_check::collect_docs(&linked.program);
+    if docs.is_empty() {
+        eprintln!("lang: no `@doc` blocks found");
+        return ExitCode::SUCCESS;
+    }
+
+    let mut out = String::new();
+    for (i, doc) in docs.iter().enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let source = linked.sources.source(doc.span.source);
+        let line = source.line_col(doc.span.start).line;
+        out.push_str(&format!("<!-- {}:{} -->\n", source.name(), line));
+        out.push_str(&dedent(&doc.text));
+        out.push('\n');
+    }
+    print!("{out}");
+    let _ = io::stdout().flush();
+    ExitCode::SUCCESS
+}
+
+/// Dedent a verbatim doc body for presentation: drop leading/trailing blank lines, then strip the
+/// common leading whitespace shared by all non-blank lines (so text written indented inside
+/// `@doc { … }` renders flush-left). Blank lines do not count toward the common indent and are
+/// emitted empty. The lexer captured the body exactly; this is purely the doc generator's
+/// formatting, leaving the AST's bytes untouched.
+fn dedent(text: &str) -> String {
+    let lines: Vec<&str> = text.lines().collect();
+    // Trim leading and trailing blank lines.
+    let start = lines.iter().position(|l| !l.trim().is_empty());
+    let Some(start) = start else {
+        return String::new();
+    };
+    let end = lines
+        .iter()
+        .rposition(|l| !l.trim().is_empty())
+        .unwrap_or(start);
+    let body = &lines[start..=end];
+
+    let indent = body
+        .iter()
+        .filter(|l| !l.trim().is_empty())
+        .map(|l| l.len() - l.trim_start().len())
+        .min()
+        .unwrap_or(0);
+
+    body.iter()
+        .map(|l| {
+            if l.trim().is_empty() {
+                ""
+            } else {
+                &l[indent..]
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// Whether an entry was consumed (evaluated or reported) or is still incomplete and needs
