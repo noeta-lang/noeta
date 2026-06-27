@@ -845,12 +845,16 @@ fn cmd_bench(
 }
 
 /// The `iterations` argument of a `@bench(...)` directive, if present and positive — the per-bench
-/// override of the default iteration count.
+/// override of the default iteration count. Resolved through the shared tier-arg schema, so both the
+/// positional (`@bench(1000)`) and named (`@bench(iterations: 1000)`) forms work identically.
 fn iterations_arg(args: &[AttrArg]) -> Option<u64> {
-    args.iter().find_map(|a| match (&a.name, &a.value) {
-        (Some(name), AttrValue::Int(n)) if name == "iterations" && *n > 0 => Some(*n as u64),
+    match lang_check::bind_tier_args("bench", args)
+        .values
+        .get("iterations")
+    {
+        Some(AttrValue::Int(n)) if *n > 0 => Some(*n as u64),
         _ => None,
-    })
+    }
 }
 
 /// Measure executing `bench` `n` times: synthesize `setup + n×<call the bench fn>`, then run it in a

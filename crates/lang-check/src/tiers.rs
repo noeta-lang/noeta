@@ -19,9 +19,136 @@
 //! activates a tier, so the differential is untouched by construction. The two E0036 sources (this
 //! module and the checker's in-place arm) share [`unknown_tier_diagnostic`], so they never drift.
 
-use lang_ast::{AttrArg, Attribute, Program, Stmt};
+use std::collections::HashMap;
+
+use lang_ast::{AttrArg, AttrValue, Attribute, Program, Stmt};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
+
+/// The literal type a tier-directive argument must have.
+#[derive(Clone, Copy, PartialEq)]
+enum ArgType {
+    Int,
+}
+
+impl ArgType {
+    fn name(self) -> &'static str {
+        match self {
+            ArgType::Int => "int",
+        }
+    }
+    /// Whether `value` has this type.
+    fn matches(self, value: &AttrValue) -> bool {
+        matches!((self, value), (ArgType::Int, AttrValue::Int(_)))
+    }
+}
+
+/// The parameter schema for a built-in tier's directive arguments — `(name, type)` in positional
+/// order. Every parameter is optional (a tier knob has a runner default). A tier absent here, or
+/// with no parameters, accepts no arguments. The single source of truth the validator and the
+/// runner's argument binding share.
+fn tier_params(tier: &str) -> &'static [(&'static str, ArgType)] {
+    match tier {
+        "bench" => &[("iterations", ArgType::Int)],
+        _ => &[],
+    }
+}
+
+/// The result of binding a tier directive's arguments to its parameter schema: the resolved
+/// `name → value` map (positional arguments bound by order, named by name) and any validation
+/// diagnostics (`E0037` — unknown parameter, wrong type, too many, set twice). The checker consumes
+/// the diagnostics; the runner reads the values.
+#[derive(Debug, Default)]
+pub struct TierArgBinding {
+    pub values: HashMap<String, AttrValue>,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+/// Bind `args` against `tier`'s parameter schema, validating each (object-model directive-typing).
+/// Positional arguments fill parameters left to right; named arguments bind by name. An argument
+/// that names an unknown parameter, overflows the positional list, repeats a parameter, or carries
+/// the wrong literal type is an `E0037`; every parameter is optional, so omission is fine. A tier
+/// that takes no arguments rejects any (`@test(x)` → E0037).
+pub fn bind_tier_args(tier: &str, args: &[AttrArg]) -> TierArgBinding {
+    let params = tier_params(tier);
+    let mut binding = TierArgBinding::default();
+    let mut next_positional = 0usize;
+    for arg in args {
+        let idx = match &arg.name {
+            Some(name) => match params.iter().position(|(p, _)| p == name) {
+                Some(i) => i,
+                None => {
+                    binding.diagnostics.push(invalid_arg(
+                        arg.span,
+                        format!("tier `@{tier}` has no argument `{name}`"),
+                        params,
+                    ));
+                    continue;
+                }
+            },
+            None => {
+                let i = next_positional;
+                next_positional += 1;
+                if i >= params.len() {
+                    binding.diagnostics.push(invalid_arg(
+                        arg.span,
+                        format!("tier `@{tier}` takes {} argument(s)", params.len()),
+                        params,
+                    ));
+                    continue;
+                }
+                i
+            }
+        };
+        let (pname, ptype) = params[idx];
+        if binding.values.contains_key(pname) {
+            binding.diagnostics.push(invalid_arg(
+                arg.span,
+                format!("argument `{pname}` of tier `@{tier}` is set twice"),
+                params,
+            ));
+            continue;
+        }
+        if !ptype.matches(&arg.value) {
+            binding.diagnostics.push(invalid_arg(
+                arg.span,
+                format!(
+                    "argument `{pname}` of tier `@{tier}` expects {}",
+                    ptype.name()
+                ),
+                params,
+            ));
+            continue;
+        }
+        binding.values.insert(pname.to_string(), arg.value.clone());
+    }
+    binding
+}
+
+/// Validate a tier directive's arguments, returning only the diagnostics (the binding's values are
+/// the runner's concern). Shared by the checker's in-place `TierBlock` arm (the default run path)
+/// and [`activate_tiers`] (the runner path), so both paths validate identically.
+pub fn validate_tier_args(tier: &str, args: &[AttrArg]) -> Vec<Diagnostic> {
+    bind_tier_args(tier, args).diagnostics
+}
+
+/// An `E0037` for an invalid tier-directive argument, with a help line listing the tier's accepted
+/// parameters (or noting it takes none).
+fn invalid_arg(span: Span, message: String, params: &[(&str, ArgType)]) -> Diagnostic {
+    let help = if params.is_empty() {
+        "this tier takes no arguments".to_string()
+    } else {
+        format!(
+            "accepted arguments: {}",
+            params
+                .iter()
+                .map(|(n, t)| format!("`{n}: {}`", t.name()))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Diagnostic::error(DiagnosticCode::InvalidDirectiveArgument, span, message).with_help(help)
+}
 
 /// The dev-tiers the language ships built in. A `@<tier> { … }` block against any other name is an
 /// `E0036` (a typo must not silently vanish). Hardcoded for now; once `@tier` declarations + the
@@ -169,6 +296,10 @@ fn resolve_block(
 
         if !BUILTIN_TIERS.contains(&tier.as_str()) {
             diagnostics.push(unknown_tier_diagnostic(tier, *tier_span));
+        } else {
+            // Validate the directive's arguments against the tier's schema (a known tier only; an
+            // unknown tier has no schema to check against).
+            diagnostics.extend(validate_tier_args(tier, args));
         }
         if !active.contains(&tier.as_str()) {
             // Inactive (including an unknown tier): stripped, never reaches the checker or the IR.

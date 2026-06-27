@@ -477,6 +477,39 @@ fn bench_runs_and_reports_each_benchmark() {
 }
 
 #[test]
+fn bench_positional_iterations_arg_is_read() {
+    // A positional `@bench(N)` sets the iteration count, the same as named `@bench(iterations: N)`
+    // (name-based dispatch unlocked positional tier args, bound through the shared schema).
+    let file = temp_program(
+        "bench_positional",
+        "fn work(n: int): int { return n }\n@bench(4) fn small(): void { work(1) }\n",
+    );
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("small").and(predicate::str::contains("(4 iterations)")));
+}
+
+#[test]
+fn bench_invalid_arg_is_e0037() {
+    // An argument of the wrong type for the tier's schema is an InvalidDirectiveArgument (E0037),
+    // reported up front rather than silently ignored.
+    let file = temp_program(
+        "bench_bad_arg",
+        "@bench(iterations: true) fn b(): void { return }\n",
+    );
+    lang()
+        .arg("bench")
+        .arg(&file)
+        .assert()
+        .failure()
+        .code(1)
+        .stderr(predicate::str::contains("E0037"));
+}
+
+#[test]
 fn bench_no_benches_is_success() {
     let file = temp_program("bench_none", "echo \"hi\"\n");
     lang()

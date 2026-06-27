@@ -38,6 +38,19 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
 use lang_span::{Source, SourceId, Span};
 
+/// The built-in **decorator** directives — the closed set of `@`-directives that prefix a *type*
+/// declaration (`@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`). Everything else after
+/// `@` is a **tier** directive (`@test`/`@bench`/…, an open set). The statement parser dispatches on
+/// this set by name: a tier parser rejects these names up front, so a decorator directive is never
+/// speculatively parsed as a tier (no wasted backtracking, and no need to restrict tier arguments —
+/// the side-effecting literal parser is only ever reached for a genuine tier).
+const DECORATOR_DIRECTIVES: &[&str] = &["derive", "attribute", "role", "semantic"];
+
+/// Whether `name` is a built-in decorator directive (vs. a tier directive).
+fn is_decorator_directive(name: &str) -> bool {
+    DECORATOR_DIRECTIVES.contains(&name)
+}
+
 /// The chumsky "extra" type used throughout: rich errors over [`TokenKind`](T) tokens
 /// with [`SimpleSpan`]s. Side state is threaded out-of-band via [`Ctx`], so the default
 /// (empty) parser state and context suffice here.
@@ -2454,28 +2467,21 @@ where
         // `attributed_type_decl` so `@test { … }` is read as a block; a `@derive(...) struct` finds
         // no `{` after the directive and backtracks to the decorator path. The body is a sequence of
         // statements (test `fn`s at the top level); the strip pass resolves active vs inactive.
-        // Optional directive arguments `( … )` after the tier name — **named** literal arguments,
-        // `@bench(iterations: 1000)`. Shared by the block and annotation forms; absent ⇒ empty.
-        //
-        // Named-only (`name: value`) is deliberate: the tier forms are tried *before* the
-        // `@derive(...)`/`#[...]` decorator path and only commit when a `{`/`fn` follows, so a
-        // `@derive(Comparable, Serialize<Json>)` must be *speculatively* parsed here and then
-        // backtracked. A bare-value argument grammar would route through the shared `attr_value`,
-        // whose error path pushes a diagnostic as a side effect (it survives backtracking) — so a
-        // `@derive` with a non-literal type argument would wrongly report an error. Requiring a
-        // leading `name:` means a bare `Comparable`/`Serialize<Json>` fails *before* reaching
-        // `attr_value`, so the tier path backtracks without polluting diagnostics. (Positional /
-        // flag tier args like `@test(skip)` are intentionally not supported yet for the same reason.)
-        let tier_arg = id
+        // The tier name after `@`: any identifier that is **not** a decorator directive (name-based
+        // dispatch). A decorator name (`@derive`/`@attribute`/`@role`/`@semantic`) fails this filter
+        // immediately — before any argument is parsed — so the tier forms never speculatively parse a
+        // decorator's arguments and backtrack. That decoupling is what lets tier arguments use the
+        // full (positional **and** named) literal grammar: the side-effecting `attr_value` is now only
+        // reached for a genuine tier directive, where an error in its arguments is a real error.
+        let tier_name = id
             .clone()
-            .then_ignore(just(T::Colon))
-            .then(attr_value.clone())
-            .map_with(move |((name, _name_span), value), e| lang_ast::AttrArg {
-                name: Some(name),
-                value,
-                span: ctx.to_span(e.span()),
-            });
-        let tier_args = tier_arg
+            .filter(|(name, _): &(String, Span)| !is_decorator_directive(name));
+
+        // Optional directive arguments `( … )` after the tier name — positional or named literals,
+        // `@bench(1000)` / `@bench(iterations: 1000)` — the same grammar a `#[...]` attribute uses
+        // (`attr_arg`). Shared by the block and annotation forms; absent ⇒ empty.
+        let tier_args = attr_arg
+            .clone()
             .separated_by(just(T::Comma))
             .allow_trailing()
             .collect::<Vec<_>>()
@@ -2498,7 +2504,7 @@ where
         .delimited_by(just(T::LBrace), just(T::RBrace));
 
         let tier_block = just(T::At)
-            .ignore_then(id.clone())
+            .ignore_then(tier_name.clone())
             .then(tier_args.clone())
             .then(tier_body)
             .map_with(
@@ -2521,7 +2527,7 @@ where
         // `tier_block`), and `@derive(...) struct` finds no `fn` after the directive and backtracks
         // to the decorator path.
         let tier_annotation = just(T::At)
-            .ignore_then(id.clone())
+            .ignore_then(tier_name.clone())
             .then(tier_args.clone())
             .then(fn_decl.clone())
             .map_with(
@@ -2547,7 +2553,7 @@ where
             .repeated()
             .at_least(1)
             .collect::<Vec<_>>()
-            .then(just(T::At).ignore_then(id.clone()))
+            .then(just(T::At).ignore_then(tier_name.clone()))
             .then(tier_args.clone())
             .then(fn_decl.clone())
             .map_with(move |(((attrs, (tier, tier_span)), args), item), e| {
@@ -3183,6 +3189,27 @@ mod tests {
         let attr_names: Vec<&str> = decl.attrs.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(attr_names, ["Skip", "Group"]);
         // The trailing `#[Route(...)] struct` still parses via the decorator path.
+        assert!(matches!(&parsed.program.stmts[1], Stmt::Struct(_)));
+    }
+
+    #[test]
+    fn positional_tier_args_and_name_dispatch() {
+        // Name-based dispatch decouples tiers from decorators: a tier directive accepts the full
+        // (positional + named) argument grammar, while a `@derive(...)` with a generic type argument
+        // still routes to the decorator path with no spurious diagnostic. Both parse cleanly.
+        let parsed = parse_str(
+            "@bench(1000) fn b(): void { return; }\n@derive(Comparable, Serialize<Json>)\nstruct P { x: int }\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // The tier annotation carries a single positional argument.
+        let Stmt::TierBlock { tier, args, .. } = &parsed.program.stmts[0] else {
+            panic!("expected a tier block, got {:?}", parsed.program.stmts[0]);
+        };
+        assert_eq!(tier, "bench");
+        assert_eq!(args.len(), 1);
+        assert!(args[0].name.is_none()); // positional
+        assert!(matches!(args[0].value, AttrValue::Int(1000)));
+        // The `@derive(...) struct` still parses via the decorator path.
         assert!(matches!(&parsed.program.stmts[1], Stmt::Struct(_)));
     }
 

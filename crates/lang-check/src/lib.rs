@@ -77,7 +77,10 @@ use lang_types::{BuiltinTrait, Type};
 mod stdlib;
 pub mod tiers;
 
-pub use tiers::{Activated, BUILTIN_TIERS, DocBlock, TierFn, activate_tiers, collect_docs};
+pub use tiers::{
+    Activated, BUILTIN_TIERS, DocBlock, TierArgBinding, TierFn, activate_tiers, bind_tier_args,
+    collect_docs,
+};
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
 /// backends need. The two were once harvested by separate public entry points ([`check`] and
@@ -1243,11 +1246,18 @@ impl Checker {
             // inactive ones. So we validate only the tier name — a typo must not silently vanish
             // (E0036) — and do not type-check the (stripped) items.
             Stmt::TierBlock {
-                tier, tier_span, ..
+                tier,
+                tier_span,
+                args,
+                ..
             } => {
                 if !BUILTIN_TIERS.contains(&tier.as_str()) {
                     self.diags
                         .push(tiers::unknown_tier_diagnostic(tier, *tier_span));
+                } else {
+                    // Validate the directive's arguments against the tier's schema (the default run
+                    // path — `activate_tiers` does the same for the runner path).
+                    self.diags.extend(tiers::validate_tier_args(tier, args));
                 }
             }
         }

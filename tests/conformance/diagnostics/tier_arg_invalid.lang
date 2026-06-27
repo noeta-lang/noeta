@@ -1,0 +1,8 @@
+// A tier directive's arguments are now validated against the tier's schema (every directive
+// type-checks its arguments). `@bench` takes `iterations: int`, so a boolean argument is an
+// InvalidDirectiveArgument (E0037) — surfaced, not silently ignored. (A normal run validates the
+// block in place; the block is then stripped, so the program's own output is unaffected.)
+// expect: error E0037 at 7:8
+// expect: exit 1
+@bench(true) fn slow(): void { return }
+echo "unreached"

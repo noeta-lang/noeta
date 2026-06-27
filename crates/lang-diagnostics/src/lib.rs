@@ -141,6 +141,12 @@ pub enum DiagnosticCode {
     /// slice 6): a typo (`@tset { }`) or a tier not provided by the build profile. Surfaced rather
     /// than silently ignored so a misspelled tier's content is not invisibly dropped.
     UnknownTier,
+    /// A directive argument is invalid: a tier directive's argument names an unknown parameter, is
+    /// the wrong type, is positionally out of range, or is set twice (`@bench(iteratons: 5)`,
+    /// `@bench(true)`); or a directive that takes no arguments was given some (`@semantic(foo)`).
+    /// Closes the gap where tier-directive arguments were silently ignored — every directive now
+    /// validates its arguments.
+    InvalidDirectiveArgument,
 }
 
 impl DiagnosticCode {
@@ -183,6 +189,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidIdentityCompare,
         DiagnosticCode::PrivateField,
         DiagnosticCode::UnknownTier,
+        DiagnosticCode::InvalidDirectiveArgument,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -225,6 +232,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidIdentityCompare => "E0034",
             DiagnosticCode::PrivateField => "E0035",
             DiagnosticCode::UnknownTier => "E0036",
+            DiagnosticCode::InvalidDirectiveArgument => "E0037",
         }
     }
 
