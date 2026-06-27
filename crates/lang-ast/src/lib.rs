@@ -608,14 +608,15 @@ pub enum Expr {
         args: Vec<Expr>,
         span: Span,
     },
-    /// An anonymous function (arrow closure): `fn(params) => body`, with an optional return-type
-    /// annotation `fn(params): Ret => body`. The annotation is optional (a closure is interior, so
-    /// its type is normally inferred); when present the checker checks the body against it. It is
-    /// runtime-erased, like a parameter's type.
+    /// An anonymous function: an arrow closure `fn(params) => expr` or a statement-bodied closure
+    /// `fn(params) { stmts }`, each with an optional return-type annotation `fn(params): Ret …`. The
+    /// annotation is optional (a closure is interior, so its type is normally inferred — for a block
+    /// body the return is inferred from its `return`s); when present the checker checks the body
+    /// against it. Both the annotation and parameter types are runtime-erased.
     Closure {
         params: Vec<Param>,
         ret: Option<TypeRef>,
-        body: Box<Expr>,
+        body: ClosureBody,
         span: Span,
     },
     /// The pipeline operator: `left |> right`. Kept as its own node (not desugared in
@@ -772,6 +773,15 @@ pub struct MatchArm {
     pub span: Span,
 }
 
+/// The body of an [`Expr::Closure`]: either a single arrow expression (`=> expr`, its value is the
+/// return) or a statement block (`{ stmts }`, returning via `return`, else unit) — mirroring a named
+/// `fn`'s two body forms. The block form lowers exactly like a named function body.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ClosureBody {
+    Expr(Box<Expr>),
+    Block(Vec<Stmt>),
+}
+
 /// A `match` pattern. Exhaustiveness is unchecked in M0 (it is a checker concern, M1).
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
@@ -921,7 +931,13 @@ impl Expr {
             } => lhs.mentions(name) || rhs.mentions(name),
             Expr::Call { callee, args, .. } => callee.mentions(name) || any(args),
             Expr::Closure { params, body, .. } => {
-                body.mentions(name)
+                let body_mentions = match body {
+                    ClosureBody::Expr(e) => e.mentions(name),
+                    // A block body may mention `name`; an over-approximation only skips an
+                    // optimization (per the doc above), never miscompiles, so `true` is safe.
+                    ClosureBody::Block(_) => true,
+                };
+                body_mentions
                     || params
                         .iter()
                         .any(|p| p.default.as_ref().is_some_and(|d| d.mentions(name)))

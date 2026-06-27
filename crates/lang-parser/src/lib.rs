@@ -30,9 +30,9 @@ use chumsky::input::ValueInput;
 use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
-    AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FieldInit,
-    FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program, RoleTag, Stmt,
-    StrPart, StructDecl, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr, FieldDecl,
+    FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program,
+    RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -926,13 +926,20 @@ where
 
 // --- Expressions ------------------------------------------------------------------
 
-/// The expression grammar. Self-contained (depends only on patterns/types, not on
-/// statements), so it can also be run standalone to parse interpolation holes.
-fn expr_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
+/// The expression grammar, over a lazy `stmt` handle so a block-bodied closure (`fn(p) { … }`, an
+/// *expression* containing *statements*) can reference the statement grammar without eagerly
+/// rebuilding it — the mutual expr↔stmt recursion goes through `stmt` lazily. `stmt` is the caller's
+/// `recursive` statement handle ([`statement_parser`]) or, for a standalone run (interpolation
+/// holes), a freshly-built statement parser.
+fn expr_parser<'src, I, PS>(
+    ctx: Ctx<'src>,
+    stmt: PS,
+) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    PS: Parser<'src, I, Stmt, Extra<'src>> + Clone + 'src,
 {
-    expr_with(ctx, true)
+    expr_with(ctx, stmt, true)
 }
 
 /// The **control-flow-head** expression (object-model slice 7b): the expression grammar with a bare
@@ -940,34 +947,42 @@ where
 /// condition is unambiguously the block — which is what lets the empty literal `T {}` be enabled
 /// everywhere else. Struct literals remain available inside parentheses/brackets/call-args within the
 /// head (those nest the *full* expression), so a struct literal in a condition is written `(T { … })`.
-fn head_expr_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
+fn head_expr_parser<'src, I, PS>(
+    ctx: Ctx<'src>,
+    stmt: PS,
+) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    PS: Parser<'src, I, Stmt, Extra<'src>> + Clone + 'src,
 {
-    expr_with(ctx, false)
+    expr_with(ctx, stmt, false)
 }
 
 /// The expression grammar, parameterized by whether a bare struct literal may appear at the top
-/// level (`allow_struct`). When `false` (a control-flow head) the leading `name { … }` is parsed as
-/// a plain identifier and the braces are left for the block; **nested** sub-expressions still use the
-/// full grammar (`sub`), so a parenthesized/bracketed struct literal is unaffected.
-fn expr_with<'src, I>(
+/// level (`allow_struct`) and by the lazy `stmt` handle (for block-bodied closures). When
+/// `allow_struct` is `false` (a control-flow head) the leading `name { … }` is parsed as a plain
+/// identifier and the braces are left for the block; **nested** sub-expressions still use the full
+/// grammar (`sub`), so a parenthesized/bracketed struct literal is unaffected.
+fn expr_with<'src, I, PS>(
     ctx: Ctx<'src>,
+    stmt: PS,
     allow_struct: bool,
 ) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+    PS: Parser<'src, I, Stmt, Extra<'src>> + Clone + 'src,
 {
     recursive(move |expr| {
         // Every *nested* sub-expression (a parenthesized expr, a call/index argument, a list/map/
         // literal element, a closure body, an interpolation hole) parses with the **full** grammar:
         // when `allow_struct` is already true this is just the recursive handle; when false (a head)
         // it is a fresh full parser, so the struct-literal restriction applies only at the head's top
-        // level and a `(T { … })` inside the condition still parses.
+        // level and a `(T { … })` inside the condition still parses. The fresh full parser reuses the
+        // same lazy `stmt` handle, so it does not rebuild the statement grammar.
         let sub = if allow_struct {
             expr.clone().boxed()
         } else {
-            expr_parser(ctx).boxed()
+            expr_parser(ctx, stmt.clone()).boxed()
         };
         let id = ident_parser(ctx);
 
@@ -1079,19 +1094,26 @@ where
             },
         );
 
-        // Anonymous function: `fn(params) => expr`, with an optional return-type annotation
-        // `fn(params): Ret => expr` (mirroring a named `fn`'s `): Ret`; optional because a closure is
-        // interior and normally inferred). A closure parameter may carry a default; it is evaluated
-        // in the closure's captured (definition) scope, like the closure body.
+        // Anonymous function: an arrow `fn(params) => expr` or a statement block `fn(params) { … }`,
+        // each with an optional return-type annotation `fn(params): Ret …` (mirroring a named `fn`'s
+        // `): Ret`; optional because a closure is interior and normally inferred — a block's return is
+        // inferred from its `return`s). The block reuses the full statement grammar through the lazy
+        // `stmt` handle, so it does not eagerly rebuild it. A closure parameter may carry a default,
+        // evaluated in the closure's captured (definition) scope.
+        let arrow_body = just(T::FatArrow)
+            .ignore_then(sub.clone())
+            .map(|e| ClosureBody::Expr(Box::new(e)));
+        let block_body = recovering_list(stmt.clone())
+            .delimited_by(just(T::LBrace), just(T::RBrace))
+            .map(ClosureBody::Block);
         let closure = just(T::FnKw)
             .ignore_then(params_parser(ctx, sub.clone(), true))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
-            .then_ignore(just(T::FatArrow))
-            .then(sub.clone())
+            .then(choice((arrow_body, block_body)))
             .map_with(move |((params, ret), body), e| Expr::Closure {
                 params,
                 ret,
-                body: Box::new(body),
+                body,
                 span: ctx.to_span(e.span()),
             });
 
@@ -1591,10 +1613,13 @@ where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
     recursive(move |stmt| {
-        let expr = expr_parser(ctx);
+        // Pass the lazy `stmt` handle into the expression grammar so a block-bodied closure can parse
+        // statements through it — the mutual expr↔stmt recursion (object-model: real anonymous
+        // functions) goes through this handle lazily, never rebuilding the statement grammar eagerly.
+        let expr = expr_parser(ctx, stmt.clone());
         // The condition/iterable of a control-flow head uses the **restricted** expression grammar
         // (no bare top-level struct literal), so the `{` that follows is always the block (slice 7b).
-        let head_expr = head_expr_parser(ctx);
+        let head_expr = head_expr_parser(ctx, stmt.clone());
         let id = ident_parser(ctx);
         let block = recovering_list(stmt.clone()).delimited_by(just(T::LBrace), just(T::RBrace));
 
@@ -2939,7 +2964,11 @@ fn parse_hole(ctx: Ctx<'_>, text: &str, abs_offset: u32) -> Expr {
     let end_off = abs_offset as usize + text.len();
     let eoi: SimpleSpan = (end_off..end_off).into();
     let input = toks.as_slice().map(eoi, |(t, s)| (t, s));
-    let (expr, errs) = expr_parser(ctx).parse(input).into_output_errors();
+    // An interpolation hole is a standalone expression; build it over a real statement parser so a
+    // block-bodied closure inside a hole still parses (its block uses that statement grammar).
+    let (expr, errs) = expr_parser(ctx, statement_parser(ctx))
+        .parse(input)
+        .into_output_errors();
     for err in errs {
         ctx.diags.borrow_mut().push(rich_to_diag(ctx, err));
     }

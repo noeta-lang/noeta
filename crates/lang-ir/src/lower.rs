@@ -802,11 +802,16 @@ impl Lowerer {
                 ))
             }
             // The return annotation is runtime-erased (the checker has already used it); lowering
-            // ignores it, exactly as it ignores parameter type annotations.
+            // ignores it, exactly as it ignores parameter type annotations. An arrow body lowers like
+            // a value-returning expression; a block body lowers exactly like a named function's body.
             Expr::Closure {
                 params, body, span, ..
             } => {
-                let func = self.lower_func(params, BodyKind::Arrow(body), *span)?;
+                let body_kind = match body {
+                    lang_ast::ClosureBody::Expr(e) => BodyKind::Arrow(e),
+                    lang_ast::ClosureBody::Block(stmts) => BodyKind::Block(stmts),
+                };
+                let func = self.lower_func(params, body_kind, *span)?;
                 Ok(self.emit(
                     out,
                     Rvalue::Closure {

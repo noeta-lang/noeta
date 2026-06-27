@@ -1,0 +1,45 @@
+// A closure may have a statement block body `fn(params) { … }` (real anonymous functions): local
+// bindings, loops, and `return`s — mirroring a named `fn`, and composing with arrow closures. The
+// return type is inferred from the block's `return`s (or annotated `: Ret`), runtime-erased, so both
+// backends agree. (The parser threads the statement grammar through a lazy handle to make the
+// expression↔statement mutual recursion terminate.)
+// expect: stdout "14"
+// expect: stdout "[1, 20, 3]"
+// expect: stdout "pos"
+// expect: stdout "nonpos"
+// expect: stdout "16"
+// expect: stdout "12"
+// expect: exit 0
+sumsq = fn(xs) {
+  mut total = 0
+  for x in xs {
+    total = total + x * x
+  }
+  return total
+}
+echo sumsq([1, 2, 3])
+
+// Block body as a `map` callback, with a statement `if` and multiple returns.
+echo map([1, 2, 3], fn(n) {
+  if n % 2 == 0 {
+    return n * 10
+  }
+  return n
+})
+
+// An explicit return annotation on a block closure.
+classify = fn(n): string {
+  if n > 0 {
+    return "pos"
+  }
+  return "nonpos"
+}
+echo classify(5)
+echo classify(-2)
+
+// Block and arrow closures compose.
+twice = fn(f, x) => f(f(x))
+echo twice(fn(n) { return n + 3 }, 10)
+
+// The inferred block return (int) flows downstream — `sum` accepts it.
+echo sum(map([1, 2, 3], fn(n) { return n * 2 }))

@@ -441,6 +441,12 @@ struct Checker {
     /// function with no return annotation (so the check is a no-op there). Saved and restored
     /// around each function so nested declarations do not clobber the enclosing one.
     current_ret: Type,
+    /// When `Some`, the checker is inferring a block-bodied closure's return type: each
+    /// `return <value>` records its value's type here (instead of only being checked against a
+    /// declared return). The closure joins these into its inferred return. `None` everywhere else
+    /// (a named function declares its return, so its `return`s are checked, not collected). Saved and
+    /// restored around each closure so nesting is correct.
+    collected_returns: Option<Vec<Type>>,
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
@@ -1074,6 +1080,56 @@ impl Checker {
         env.pop();
     }
 
+    /// Check a closure body (arrow or block) and return the closure's return type. `expected` is the
+    /// type the body must produce — the explicit annotation, or the context's expected return — or
+    /// `None` to infer it. The caller has already pushed the parameter frame onto `env`.
+    ///
+    /// An arrow body is the expression's type (checked against `expected` when given). A block body
+    /// runs as a fresh control-flow context (`break`/`continue` cannot target an enclosing loop, like
+    /// a named function body); with an `expected` type its `return`s are checked against it, otherwise
+    /// they are collected and joined into the inferred return (plus `void` if the block can fall
+    /// through). This inference is purely local — no cross-function propagation — so it does not
+    /// reintroduce the cost the required-boundary-signature rule avoids.
+    fn closure_body_type(
+        &mut self,
+        body: &lang_ast::ClosureBody,
+        expected: Option<&Type>,
+        env: &mut Env,
+    ) -> Type {
+        match body {
+            lang_ast::ClosureBody::Expr(e) => match expected {
+                Some(exp) => self.check(e, exp, env),
+                None => self.synth(e, env),
+            },
+            lang_ast::ClosureBody::Block(stmts) => {
+                let saved_loop = std::mem::replace(&mut self.loop_depth, 0);
+                let ret = match expected {
+                    Some(exp) => {
+                        // Check each `return` against `exp`; the closure's return type is `exp`.
+                        let saved_ret = std::mem::replace(&mut self.current_ret, exp.clone());
+                        let saved_col = self.collected_returns.take();
+                        self.check_block(stmts, env);
+                        self.collected_returns = saved_col;
+                        self.current_ret = saved_ret;
+                        exp.clone()
+                    }
+                    None => {
+                        // Infer: collect the `return` types and join them.
+                        let saved_ret = std::mem::replace(&mut self.current_ret, Type::Unknown);
+                        let saved_col = self.collected_returns.replace(Vec::new());
+                        self.check_block(stmts, env);
+                        let collected = std::mem::replace(&mut self.collected_returns, saved_col)
+                            .unwrap_or_default();
+                        self.current_ret = saved_ret;
+                        join_closure_returns(stmts, collected)
+                    }
+                };
+                self.loop_depth = saved_loop;
+                ret
+            }
+        }
+    }
+
     fn check_stmt(&mut self, stmt: &Stmt, env: &mut Env) {
         match stmt {
             // `echo` accepts any value, so it enters checking mode with a genuinely open
@@ -1193,10 +1249,19 @@ impl Checker {
                 self.check(expr, &Type::Unknown, env);
             }
             Stmt::Return { value, .. } => {
-                if let Some(value) = value {
-                    // Check the returned value against the enclosing function's declared return.
-                    let expected = self.current_ret.clone();
-                    self.check(value, &expected, env);
+                // Check the returned value against the enclosing function's declared return
+                // (`current_ret` is `Unknown` when inferring a closure, so the check is a no-op
+                // there), and — when inferring a block-bodied closure's return — record its type so
+                // the closure can join all `return`s into its inferred return.
+                let ty = match value {
+                    Some(value) => {
+                        let expected = self.current_ret.clone();
+                        self.check(value, &expected, env)
+                    }
+                    None => Type::Unit,
+                };
+                if let Some(returns) = &mut self.collected_returns {
+                    returns.push(ty);
                 }
             }
             Stmt::If {
@@ -2222,7 +2287,7 @@ impl Checker {
                 params,
                 ret: ann,
                 body,
-                ..
+                span: closure_span,
             } if matches!(expected, Type::Fn { .. }) => {
                 let Type::Fn {
                     params: expected_params,
@@ -2243,12 +2308,14 @@ impl Checker {
                 }
                 // An explicit return annotation is the body's expected type and the closure's return
                 // type; it must also satisfy the context's expected return. Without one the expected
-                // return drives the body, as before.
+                // return drives the body, as before. (Arrow or block — `closure_body_type` handles
+                // both.)
                 let declared = ann.as_ref().map(Type::from_ref);
-                let body_ty = self.check(body, declared.as_ref().unwrap_or(ret), env);
+                let body_expected = declared.clone().unwrap_or_else(|| (**ret).clone());
+                let body_ty = self.closure_body_type(body, Some(&body_expected), env);
                 env.pop();
                 if let Some(declared) = &declared {
-                    self.subsume(declared, ret, body.span());
+                    self.subsume(declared, ret, *closure_span);
                 }
                 Type::Fn {
                     params: params.iter().map(param_type).collect(),
@@ -2391,15 +2458,10 @@ impl Checker {
                     bind(env, &p.name, param_type(p));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the
-                // closure's return type); otherwise synthesize the return from the body.
-                let ret = match ann {
-                    Some(ann) => {
-                        let declared = Type::from_ref(ann);
-                        self.check(body, &declared, env);
-                        declared
-                    }
-                    None => self.synth(body, env),
-                };
+                // closure's return type); otherwise infer it from the body (the arrow expression's
+                // type, or a block's joined `return`s).
+                let declared = ann.as_ref().map(Type::from_ref);
+                let ret = self.closure_body_type(body, declared.as_ref(), env);
                 env.pop();
                 Type::Fn {
                     params: params.iter().map(param_type).collect(),
@@ -4066,6 +4128,30 @@ fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
 /// element type. Returns the unified type, or `None` if the two are concretely incompatible (a
 /// heterogeneous list). A deferred type (hole / `dyn`) is compatible with anything; two numeric
 /// types unify to `float` (the int/float promotion the runtime performs).
+/// Join a block-bodied closure's collected `return` types into its inferred return type. If the
+/// block does not definitely end in a value-`return` it can fall through to the end, which returns
+/// `void`, so `void` is added to the join. Compatible types collapse via [`unify_element`] (the same
+/// lattice join list literals use); genuinely distinct types form a closed union (e.g. a function
+/// that returns `int` on one path and `string` on another is `int | string`); an empty set is `void`.
+fn join_closure_returns(stmts: &[Stmt], mut types: Vec<Type>) -> Type {
+    let falls_through = !matches!(stmts.last(), Some(Stmt::Return { value: Some(_), .. }));
+    if falls_through {
+        types.push(Type::Unit);
+    }
+    let Some((first, rest)) = types.split_first() else {
+        return Type::Unit;
+    };
+    let mut acc = first.clone();
+    for t in rest {
+        match unify_element(&acc, t) {
+            Some(joined) => acc = joined,
+            // Incompatible return types form a closed union over all of them.
+            None => return Type::union(types.clone()),
+        }
+    }
+    acc
+}
+
 fn unify_element(acc: &Type, next: &Type) -> Option<Type> {
     if acc.defers_to_runtime() {
         return Some(next.clone());

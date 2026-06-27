@@ -6,8 +6,8 @@
 //! parse→print→parse property test (Slice 9) builds on.
 
 use crate::{
-    AttrArg, AttrValue, ClassDecl, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern, ImplDecl,
-    ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef,
+    AttrArg, AttrValue, ClassDecl, ClosureBody, EnumDecl, Expr, FieldDecl, FnDecl, ForPattern,
+    ImplDecl, ObjectLit, Param, Pattern, Program, Stmt, StrPart, StructDecl, TypeParam, TypeRef,
 };
 use lang_span::Span;
 
@@ -538,7 +538,14 @@ impl Pretty for Expr {
                 span: s,
             } => {
                 out.push_str(&format!("(closure [{}] {}\n", param_list(params), span(*s)));
-                body.pretty(out, level + 1);
+                match body {
+                    ClosureBody::Expr(e) => e.pretty(out, level + 1),
+                    ClosureBody::Block(stmts) => {
+                        for stmt in stmts {
+                            stmt.pretty(out, level + 1);
+                        }
+                    }
+                }
                 out.push(')');
             }
             Expr::Pipeline {

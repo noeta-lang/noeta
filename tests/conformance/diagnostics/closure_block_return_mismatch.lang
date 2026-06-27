@@ -1,0 +1,8 @@
+// A block-bodied closure's `return`s must satisfy its declared return annotation — a mismatch is
+// E0007, exactly as for a named `fn` (the annotation drives bidirectional checking of the body).
+// expect: error E0007 at 6:10
+// expect: exit 1
+f = fn(n): int {
+  return "not an int"
+}
+echo f(1)
