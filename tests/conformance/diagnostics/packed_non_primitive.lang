@@ -1,0 +1,6 @@
+// P-PACK: a `@packed` struct may only hold flat-layout fields — primitives or other packed structs.
+// A `string` field is heap-shaped, so it is an InvalidPackedType (E0038).
+// expect: error E0038 at 5:22
+// expect: exit 1
+@packed struct Bad { name: string }
+echo "unreached"

@@ -1,0 +1,21 @@
+// P-PACK Phase 0: a `@packed` struct of primitives (or other packed structs) is accepted and behaves
+// exactly as the value `struct` it is — construction, field access, nesting, structural equality and
+// display all unchanged. The flat unboxed layout is a later phase and is invisible to RunResult, so
+// both backends agree by construction (Phase 0 changes no runtime behaviour at all).
+// expect: stdout "1.0 2.0 3.0"
+// expect: stdout "Vec3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: stdout "6.0"
+// expect: stdout "true"
+// expect: exit 0
+@packed struct Vec3 { x: float; y: float; z: float }
+@packed struct Segment { start: Vec3; end: Vec3 }
+
+v = Vec3 { x: 1.0, y: 2.0, z: 3.0 }
+echo "${v.x} ${v.y} ${v.z}"
+echo v
+
+s = Segment { start: v, end: Vec3 { x: 4.0, y: 5.0, z: 6.0 } }
+echo s.end.z
+
+// Packed structs are value-semantic, so structural equality holds.
+echo Vec3 { x: 1.0, y: 2.0, z: 3.0 } == v

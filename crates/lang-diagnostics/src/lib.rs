@@ -147,6 +147,11 @@ pub enum DiagnosticCode {
     /// Closes the gap where tier-directive arguments were silently ignored — every directive now
     /// validates its arguments.
     InvalidDirectiveArgument,
+    /// A `@packed` directive is misapplied (P-PACK): it marks a non-`struct` (a class or enum), or a
+    /// packed struct has a field whose type is not laid-out-flat — only primitives (`int`/`float`/
+    /// `bool`) and other packed structs may be packed, never a heap value (string/list/map/class/
+    /// enum/`dyn`/unbounded generic).
+    InvalidPackedType,
 }
 
 impl DiagnosticCode {
@@ -190,6 +195,7 @@ impl DiagnosticCode {
         DiagnosticCode::PrivateField,
         DiagnosticCode::UnknownTier,
         DiagnosticCode::InvalidDirectiveArgument,
+        DiagnosticCode::InvalidPackedType,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -233,6 +239,7 @@ impl DiagnosticCode {
             DiagnosticCode::PrivateField => "E0035",
             DiagnosticCode::UnknownTier => "E0036",
             DiagnosticCode::InvalidDirectiveArgument => "E0037",
+            DiagnosticCode::InvalidPackedType => "E0038",
         }
     }
 

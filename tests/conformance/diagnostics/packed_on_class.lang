@@ -1,0 +1,5 @@
+// P-PACK: `@packed` is a value-`struct` layout marker; on a class it is a misplacement (E0038).
+// expect: error E0038 at 4:2
+// expect: exit 1
+@packed class Boxed { value: int }
+echo "unreached"

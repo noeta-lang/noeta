@@ -483,6 +483,40 @@ fn bare_attribute_record_is_usable_anywhere() {
 }
 
 #[test]
+fn packed_struct_of_primitives_is_clean() {
+    // P-PACK Phase 0: a `@packed` struct whose fields are all primitives (or other packed structs)
+    // checks clean — and a packed struct may name another packed struct (order-independent).
+    let src = "@packed struct Vec3 { x: float; y: float; z: float }\n@packed struct Segment { a: Vec3; b: Vec3 }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn packed_struct_non_primitive_field_is_e0038() {
+    // A heap-shaped field (string/list/class/…) cannot lay out flat — E0038.
+    let src = "@packed struct Bad { name: string }\n";
+    assert!(
+        codes(src).contains(&"E0038".to_string()),
+        "{:?}",
+        codes(src)
+    );
+}
+
+#[test]
+fn packed_on_a_non_struct_is_e0038() {
+    // `@packed` is a struct-only layout marker; on a class or enum it is a misplacement (E0038).
+    assert!(
+        codes("@packed class Boxed { v: int }\n").contains(&"E0038".to_string()),
+        "{:?}",
+        codes("@packed class Boxed { v: int }\n")
+    );
+    assert!(
+        codes("@packed enum E { A }\n").contains(&"E0038".to_string()),
+        "{:?}",
+        codes("@packed enum E { A }\n")
+    );
+}
+
+#[test]
 fn defaulted_attribute_field_is_optional() {
     // An `@attribute` field with a default (`ttl: int = 60`) is optional in a construction (slice
     // 6i): `#[Cache]` may omit it, and a mandatory field may still be supplied. No diagnostics.

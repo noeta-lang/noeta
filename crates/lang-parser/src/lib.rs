@@ -44,7 +44,7 @@ use lang_span::{Source, SourceId, Span};
 /// this set by name: a tier parser rejects these names up front, so a decorator directive is never
 /// speculatively parsed as a tier (no wasted backtracking, and no need to restrict tier arguments —
 /// the side-effecting literal parser is only ever reached for a genuine tier).
-const DECORATOR_DIRECTIVES: &[&str] = &["derive", "attribute", "role", "semantic"];
+const DECORATOR_DIRECTIVES: &[&str] = &["derive", "attribute", "role", "semantic", "packed"];
 
 /// Whether `name` is a built-in decorator directive (vs. a tier directive).
 fn is_decorator_directive(name: &str) -> bool {
@@ -332,12 +332,14 @@ fn attach_decorators(
     attribute: Option<Vec<(String, Span)>>,
     role: Option<Vec<RoleTag>>,
     semantic: Option<Span>,
+    packed: Option<Span>,
 ) -> Stmt {
     if derives.is_empty()
         && attrs.is_empty()
         && attribute.is_none()
         && role.is_none()
         && semantic.is_none()
+        && packed.is_none()
     {
         return stmt;
     }
@@ -345,11 +347,12 @@ fn attach_decorators(
         Stmt::Class(mut c) => {
             c.derives = derives;
             c.attrs = attrs;
-            // `@attribute`/`@role`/`@semantic` on a class is invalid (attributes are structs only,
-            // `@semantic` marks enums); carried so the checker can report it.
+            // `@attribute`/`@role`/`@semantic`/`@packed` on a class is invalid (attributes are structs
+            // only, `@semantic` marks enums, `@packed` marks structs); carried so the checker reports it.
             c.attribute = attribute;
             c.role = role;
             c.semantic = semantic;
+            c.packed = packed;
             Stmt::Class(c)
         }
         Stmt::Struct(mut r) => {
@@ -359,14 +362,18 @@ fn attach_decorators(
             r.role = role;
             // `@semantic` marks enums, not records; carried so the checker can report the misplacement.
             r.semantic = semantic;
+            // `@packed` is the struct-only layout marker; the checker validates its fields.
+            r.packed = packed;
             Stmt::Struct(r)
         }
         Stmt::Enum(mut e) => {
             // An enum cannot be an attribute, so a stray `@attribute`/`@role` is dropped;
-            // `@semantic` is the one directive an enum accepts. derives/attrs still apply.
+            // `@semantic` is the one directive an enum accepts. `@packed` on an enum is a checker
+            // error (carried). derives/attrs still apply.
             e.derives = derives;
             e.attrs = attrs;
             e.semantic = semantic;
+            e.packed = packed;
             Stmt::Enum(e)
         }
         other => other,
@@ -1970,6 +1977,7 @@ where
                     derives: Vec::new(),
                     attrs: Vec::new(),
                     semantic: None,
+                    packed: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -2057,6 +2065,7 @@ where
                     attribute: None,
                     role: None,
                     semantic: None,
+                    packed: None,
                     span: ctx.to_span(e.span()),
                 })
             });
@@ -2106,6 +2115,7 @@ where
                     attribute: None,
                     role: None,
                     semantic: None,
+                    packed: None,
                     destructor,
                     span: ctx.to_span(e.span()),
                 })
@@ -2427,6 +2437,7 @@ where
                 let mut attribute: Option<Vec<(String, Span)>> = None;
                 let mut role: Option<Vec<RoleTag>> = None;
                 let mut semantic: Option<Span> = None;
+                let mut packed: Option<Span> = None;
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
@@ -2461,11 +2472,29 @@ where
                                 }
                                 semantic = Some(name_span);
                             }
+                            "packed" => {
+                                // `@packed` (P-PACK) — the struct-only flat-layout marker; takes no
+                                // arguments (rejected like `@semantic`, E0037). The checker validates
+                                // placement (struct-only) and the all-primitive field constraint.
+                                if let Some(arg) = args.first() {
+                                    ctx.diags.borrow_mut().push(
+                                        Diagnostic::error(
+                                            DiagnosticCode::InvalidDirectiveArgument,
+                                            arg.0.1,
+                                            "`@packed` takes no arguments".to_string(),
+                                        )
+                                        .with_help(
+                                            "`@packed` marks a struct of primitives for unboxed flat layout",
+                                        ),
+                                    );
+                                }
+                                packed = Some(name_span);
+                            }
                             _ => ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
                                 name_span,
                                 format!(
-                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, and `@semantic`"
+                                    "unknown directive `@{name}`; the directives are `@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`, and `@packed`"
                                 ),
                             )),
                         },
@@ -2473,7 +2502,7 @@ where
                     }
                 }
                 set_public(
-                    attach_decorators(stmt, derives, attrs, attribute, role, semantic),
+                    attach_decorators(stmt, derives, attrs, attribute, role, semantic, packed),
                     pub_kw.is_some(),
                 )
             });
@@ -3206,6 +3235,28 @@ mod tests {
         assert_eq!(attr_names, ["Skip", "Group"]);
         // The trailing `#[Route(...)] struct` still parses via the decorator path.
         assert!(matches!(&parsed.program.stmts[1], Stmt::Struct(_)));
+    }
+
+    #[test]
+    fn packed_directive_marks_a_struct() {
+        // P-PACK Phase 0: `@packed` is a fifth decorator directive (name-based dispatch), marking a
+        // struct; it coexists with `@derive(...)` and takes no arguments.
+        let parsed = parse_str("@derive(Equatable)\n@packed\nstruct Vec3 { x: float; y: float }\n");
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        let Stmt::Struct(s) = &parsed.program.stmts[0] else {
+            panic!("expected struct, got {:?}", parsed.program.stmts[0]);
+        };
+        assert!(s.packed.is_some(), "struct should be marked @packed");
+        assert_eq!(s.derives.len(), 1); // @packed coexists with @derive
+        // `@packed` takes no arguments.
+        let bad = parse_str("@packed(x)\nstruct V { a: int }\n");
+        assert!(
+            bad.diagnostics
+                .iter()
+                .any(|d| d.code == DiagnosticCode::InvalidDirectiveArgument),
+            "{:?}",
+            bad.diagnostics
+        );
     }
 
     #[test]

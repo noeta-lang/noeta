@@ -199,6 +199,11 @@ pub struct StructDecl {
     /// The `@semantic` directive (a misplacement here — it marks *enums* role-eligible). `Some(span)`
     /// on a struct is always a checker error (`E0031`), carried so the checker can point at it.
     pub semantic: Option<Span>,
+    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
+    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
+    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
+    /// an ordinary declaration.
+    pub packed: Option<Span>,
     pub span: Span,
 }
 
@@ -372,6 +377,11 @@ pub struct ClassDecl {
     /// A misplaced `@semantic` directive (it marks enums; a class is never role-eligible); see
     /// [`StructDecl::semantic`]. `Some` is always a checker error, kept so the checker can report it.
     pub semantic: Option<Span>,
+    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
+    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
+    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
+    /// an ordinary declaration.
+    pub packed: Option<Span>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.
@@ -439,6 +449,11 @@ pub struct EnumDecl {
     /// variants may be referenced by `@role(Enum.Variant)`. `None` for an ordinary enum. The built-in
     /// `Semantic` enum is implicitly semantic.
     pub semantic: Option<Span>,
+    /// The `@packed` layout directive (P-PACK): `Some(span)` marks a value `struct` for an unboxed,
+    /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
+    /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
+    /// an ordinary declaration.
+    pub packed: Option<Span>,
     pub span: Span,
 }
 

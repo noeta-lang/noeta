@@ -401,6 +401,10 @@ struct Checker {
     /// set, so it runs after `collect` has registered every declaration (a struct's `@role` may name
     /// a `@semantic` enum declared later in the file).
     semantic_enums: HashSet<String>,
+    /// Every struct marked `@packed` (P-PACK) — the value structs laid out unboxed and contiguous.
+    /// Collected in pass 1 so a packed struct's field-type validation (a field may be another packed
+    /// struct declared later) sees the full set, and so `List<Packed>` specialization can consult it.
+    packed_structs: HashSet<String>,
     /// An attribute's optional placement restriction from `@attribute(Method, Function, …)`:
     /// attribute name → the declaration kinds a `#[ThisType(...)]` use may attach to. An attribute
     /// *absent* from this map (bare `@attribute`) is unrestricted. Enforced per use site (E0030);
@@ -725,6 +729,9 @@ impl Checker {
                         .map(|f| (f.name.clone(), field_type(&f.ty)))
                         .collect();
                     self.records.insert(r.name.clone(), fields);
+                    if r.packed.is_some() {
+                        self.packed_structs.insert(r.name.clone());
+                    }
                     // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
                     // write is a copy-on-write rebind). Register them exactly as for a class; the
                     // binding-`mut` requirement that distinguishes the two is a slice-2 refinement.
@@ -3243,9 +3250,11 @@ impl Checker {
                 Stmt::Struct(r) => {
                     self.check_misplaced_semantic(r.semantic, &r.name, "record");
                     self.check_role_tags(r.name_span, r.role.as_deref(), r.attribute.is_some());
+                    self.check_packed_struct(r);
                 }
                 Stmt::Class(c) => {
                     self.check_misplaced_semantic(c.semantic, &c.name, "class");
+                    self.check_misplaced_packed(c.packed, &c.name, "class");
                     // A role tags an attribute, and attributes are structs only, so `@role` on a
                     // class is an error (E0031).
                     if c.role.is_some() {
@@ -3264,8 +3273,64 @@ impl Checker {
                         );
                     }
                 }
+                Stmt::Enum(e) => {
+                    self.check_misplaced_packed(e.packed, &e.name, "enum");
+                }
                 _ => {}
             }
+        }
+    }
+
+    /// Whether `ty` can be a field of a `@packed` struct (P-PACK): a primitive (`int`/`float`/`bool`)
+    /// or another packed struct (a non-generic `Named` in `packed_structs`). Everything else — a
+    /// string/list/map/class/enum/`dyn`/generic — is heap-shaped and cannot lay out flat.
+    fn is_packable_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Int | Type::Float | Type::Bool => true,
+            Type::Named(name, args) if args.is_empty() => self.packed_structs.contains(name),
+            _ => false,
+        }
+    }
+
+    /// Validate a `@packed` struct's all-primitive field constraint (P-PACK, `E0038`). A no-op for an
+    /// ordinary (non-packed) struct. Runs after `collect`, so a field naming a packed struct declared
+    /// later resolves.
+    fn check_packed_struct(&mut self, r: &StructDecl) {
+        if r.packed.is_none() {
+            return;
+        }
+        for f in &r.fields {
+            let ty = field_type(&f.ty);
+            if !self.is_packable_type(&ty) {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidPackedType,
+                        f.span,
+                        format!(
+                            "field `{}: {ty}` of packed struct `{}` is not a packable type",
+                            f.name, r.name
+                        ),
+                    )
+                    .with_help(
+                        "a `@packed` struct's fields must be primitives (`int`, `float`, `bool`) or other packed structs",
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Flag a `@packed` directive on a non-struct declaration (`E0038`): it is a value-`struct` layout
+    /// marker and has no meaning on a class or enum.
+    fn check_misplaced_packed(&mut self, packed: Option<Span>, name: &str, kind: &str) {
+        if let Some(span) = packed {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::InvalidPackedType,
+                    span,
+                    format!("`@packed` may only mark a struct, not the {kind} `{name}`"),
+                )
+                .with_help("`@packed` gives a value `struct` of primitives an unboxed flat layout"),
+            );
         }
     }
 
