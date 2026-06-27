@@ -1,0 +1,27 @@
+// Object-model slice 7b: with a control-flow head forbidding a bare top-level struct literal, the
+// `{` after an `if`/`while`/`for` condition is always the block — which lets the **empty** literal
+// `T {}` be enabled everywhere else. A `T {}` is valid when every field has a default (slice 5), so
+// `Cfg {}` constructs the all-defaults value; a struct literal is still usable in a condition by
+// parenthesizing it, `(Cfg { … })`. Both backends parse and run this identically (differential).
+// expect: stdout "false"
+// expect: stdout "3"
+// expect: stdout "debug on"
+// expect: stdout "paren works"
+// expect: exit 0
+struct Cfg {
+    debug: bool = false
+    retries: int = 3
+}
+
+c = Cfg {}
+echo c.debug
+echo c.retries
+
+cfg = Cfg { debug: true }
+if cfg.debug {
+    echo "debug on"
+}
+
+if (Cfg { debug: true }).debug {
+    echo "paren works"
+}

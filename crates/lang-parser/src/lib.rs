@@ -901,7 +901,43 @@ fn expr_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Expr, Extra<'src
 where
     I: ValueInput<'src, Token = T, Span = SimpleSpan>,
 {
+    expr_with(ctx, true)
+}
+
+/// The **control-flow-head** expression (object-model slice 7b): the expression grammar with a bare
+/// struct literal `T { … }` forbidden at the head's top level, so the `{` after an `if`/`while`/`for`
+/// condition is unambiguously the block — which is what lets the empty literal `T {}` be enabled
+/// everywhere else. Struct literals remain available inside parentheses/brackets/call-args within the
+/// head (those nest the *full* expression), so a struct literal in a condition is written `(T { … })`.
+fn head_expr_parser<'src, I>(ctx: Ctx<'src>) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+{
+    expr_with(ctx, false)
+}
+
+/// The expression grammar, parameterized by whether a bare struct literal may appear at the top
+/// level (`allow_struct`). When `false` (a control-flow head) the leading `name { … }` is parsed as
+/// a plain identifier and the braces are left for the block; **nested** sub-expressions still use the
+/// full grammar (`sub`), so a parenthesized/bracketed struct literal is unaffected.
+fn expr_with<'src, I>(
+    ctx: Ctx<'src>,
+    allow_struct: bool,
+) -> impl Parser<'src, I, Expr, Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+{
     recursive(move |expr| {
+        // Every *nested* sub-expression (a parenthesized expr, a call/index argument, a list/map/
+        // literal element, a closure body, an interpolation hole) parses with the **full** grammar:
+        // when `allow_struct` is already true this is just the recursive handle; when false (a head)
+        // it is a fresh full parser, so the struct-literal restriction applies only at the head's top
+        // level and a `(T { … })` inside the condition still parses.
+        let sub = if allow_struct {
+            expr.clone().boxed()
+        } else {
+            expr_parser(ctx).boxed()
+        };
         let id = ident_parser(ctx);
 
         // Literals.
@@ -954,7 +990,7 @@ where
         // parse error — see the slice-7 note about optional semicolons.)
         let obj_field = id
             .clone()
-            .then(just(T::Colon).ignore_then(expr.clone()).or_not())
+            .then(just(T::Colon).ignore_then(sub.clone()).or_not())
             .map_with(move |((name, name_span), value), e| {
                 let value = value.unwrap_or_else(|| Expr::Ident {
                     name: name.clone(),
@@ -968,47 +1004,56 @@ where
                 })
             });
         let obj_spread = just(T::DotDotDot)
-            .ignore_then(expr.clone())
+            .ignore_then(sub.clone())
             .map(|value| ObjItem::Spread(Box::new(value)));
+        // An object literal body. `at_least(0)` allows the **empty** literal `T {}` (a fully-defaulted
+        // type, object-model slice 5/7b) — unambiguous now that a control-flow head forbids a bare
+        // struct literal, so `if cond {}` is always the empty *block*, never `cond{}`.
         let object_body = choice((obj_spread, obj_field))
             .separated_by(just(T::Comma))
             .allow_trailing()
-            .at_least(1)
+            .at_least(0)
             .collect::<Vec<_>>()
             .delimited_by(just(T::LBrace), just(T::RBrace));
-        let obj_or_ident =
-            id.clone()
-                .then(object_body.or_not())
-                .map_with(move |((name, name_span), body), e| match body {
-                    Some(items) => {
-                        let mut fields = Vec::new();
-                        let mut spread = None;
-                        for item in items {
-                            match item {
-                                ObjItem::Field(field) => fields.push(field),
-                                ObjItem::Spread(value) => spread = Some(value),
-                            }
+        // In a control-flow head (`allow_struct == false`) the body is never attached: a trailing
+        // `{ … }` belongs to the block, so `name` parses as a bare identifier.
+        let object_body_opt = if allow_struct {
+            object_body.or_not().boxed()
+        } else {
+            empty().map(|()| None::<Vec<ObjItem>>).boxed()
+        };
+        let obj_or_ident = id.clone().then(object_body_opt).map_with(
+            move |((name, name_span), body), e| match body {
+                Some(items) => {
+                    let mut fields = Vec::new();
+                    let mut spread = None;
+                    for item in items {
+                        match item {
+                            ObjItem::Field(field) => fields.push(field),
+                            ObjItem::Spread(value) => spread = Some(value),
                         }
-                        Expr::Object(ObjectLit {
-                            type_name: name,
-                            type_name_span: name_span,
-                            fields,
-                            spread,
-                            span: ctx.to_span(e.span()),
-                        })
                     }
-                    None => Expr::Ident {
-                        name,
-                        span: name_span,
-                    },
-                });
+                    Expr::Object(ObjectLit {
+                        type_name: name,
+                        type_name_span: name_span,
+                        fields,
+                        spread,
+                        span: ctx.to_span(e.span()),
+                    })
+                }
+                None => Expr::Ident {
+                    name,
+                    span: name_span,
+                },
+            },
+        );
 
         // Anonymous function: `fn(params) => expr`. A closure parameter may carry a default; it is
         // evaluated in the closure's captured (definition) scope, like the closure body.
         let closure = just(T::FnKw)
-            .ignore_then(params_parser(ctx, expr.clone(), true))
+            .ignore_then(params_parser(ctx, sub.clone(), true))
             .then_ignore(just(T::FatArrow))
-            .then(expr.clone())
+            .then(sub.clone())
             .map_with(move |(params, body), e| Expr::Closure {
                 params,
                 body: Box::new(body),
@@ -1018,14 +1063,14 @@ where
         // `match scrutinee { pattern => body, ... }`.
         let arm = pattern_parser(ctx)
             .then_ignore(just(T::FatArrow))
-            .then(expr.clone())
+            .then(sub.clone())
             .map_with(move |(pattern, body), e| MatchArm {
                 pattern,
                 body,
                 span: ctx.to_span(e.span()),
             });
         let match_ = just(T::MatchKw)
-            .ignore_then(expr.clone())
+            .ignore_then(sub.clone())
             .then(
                 arm.separated_by(just(T::Comma))
                     .allow_trailing()
@@ -1042,9 +1087,9 @@ where
         // `...expr` for a spread or a plain `expr`). Spreads desugar to `~` concatenation in
         // `desugar_list_literal`. Map literal `{"k": v}` follows.
         let list_element = just(T::DotDotDot)
-            .ignore_then(expr.clone())
+            .ignore_then(sub.clone())
             .map(|e| (true, e))
-            .or(expr.clone().map(|e| (false, e)));
+            .or(sub.clone().map(|e| (false, e)));
         let list = list_element
             .separated_by(just(T::Comma))
             .allow_trailing()
@@ -1058,7 +1103,7 @@ where
         // reported when the entries are assembled).
         let entry = expr
             .clone()
-            .then(just(T::Colon).ignore_then(expr.clone()).or_not());
+            .then(just(T::Colon).ignore_then(sub.clone()).or_not());
         let map = entry
             .separated_by(just(T::Comma))
             .allow_trailing()
@@ -1097,7 +1142,7 @@ where
         // empty map).
         let set = just(T::Hash)
             .ignore_then(
-                expr.clone()
+                sub.clone()
                     .separated_by(just(T::Comma))
                     .allow_trailing()
                     .collect::<Vec<_>>()
@@ -1123,7 +1168,7 @@ where
         // exactly one element is the parenthesized expression (returned bare), two or more is an
         // `Expr::Tuple` (object-model slice 4). `()` is not produced here (handled as `unit`
         // elsewhere); a 1-tuple is unrepresentable by design.
-        let paren = expr
+        let paren = sub
             .clone()
             .separated_by(just(T::Comma))
             .at_least(1)
@@ -1146,11 +1191,11 @@ where
         // and any other condition becomes a `true`/`false` match. The else-arm extends maximally to
         // the right (ML-style), since the whole form is an atom whose else-branch is a full `expr`.
         let if_then_else = just(T::IfKw)
-            .ignore_then(expr.clone())
+            .ignore_then(sub.clone())
             .then_ignore(just(T::ThenKw))
-            .then(expr.clone())
+            .then(sub.clone())
             .then_ignore(just(T::ElseKw))
-            .then(expr.clone())
+            .then(sub.clone())
             .map_with(move |((cond, then_expr), else_expr), e| {
                 desugar_if_then_else(cond, then_expr, else_expr, ctx.to_span(e.span()))
             });
@@ -1171,7 +1216,7 @@ where
         // `type_of(value)` — the runtime reflection query. A keyword + parenthesized operand (like a
         // call surface), yielding the value's `Type` descriptor.
         let type_of = just(T::TypeOfKw)
-            .ignore_then(expr.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .ignore_then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
             .map_with(move |value, e| Expr::TypeOf {
                 value: Box::new(value),
                 span: ctx.to_span(e.span()),
@@ -1191,11 +1236,11 @@ where
         // yielding `Result<dyn, dyn>`.
         let invoke = just(T::InvokeKw)
             .ignore_then(
-                expr.clone()
+                sub.clone()
                     .then_ignore(just(T::Comma))
-                    .then(expr.clone())
+                    .then(sub.clone())
                     .then_ignore(just(T::Comma))
-                    .then(expr.clone())
+                    .then(sub.clone())
                     .delimited_by(just(T::LParen), just(T::RParen)),
             )
             .map_with(move |((recv, name), args), e| Expr::Invoke {
@@ -1234,7 +1279,7 @@ where
         let call_arg = ident_parser(ctx)
             .then_ignore(just(T::Colon))
             .or_not()
-            .ignore_then(expr.clone());
+            .ignore_then(sub.clone());
         let call_args = call_arg
             .separated_by(just(T::Comma))
             .collect::<Vec<_>>()
@@ -1326,7 +1371,7 @@ where
             // Binds as tightly as call/member, so `a[i].b` and `f()[0]` chain naturally.
             postfix(
                 10,
-                expr.clone()
+                sub.clone()
                     .delimited_by(just(T::LBracket), just(T::RBracket)),
                 move |receiver, index, e| Expr::Index {
                     receiver: Box::new(receiver),
@@ -1512,6 +1557,9 @@ where
 {
     recursive(move |stmt| {
         let expr = expr_parser(ctx);
+        // The condition/iterable of a control-flow head uses the **restricted** expression grammar
+        // (no bare top-level struct literal), so the `{` that follows is always the block (slice 7b).
+        let head_expr = head_expr_parser(ctx);
         let id = ident_parser(ctx);
         let block = recovering_list(stmt.clone()).delimited_by(just(T::LBrace), just(T::RBrace));
 
@@ -1575,7 +1623,7 @@ where
         let for_ = just(T::ForKw)
             .ignore_then(for_pattern)
             .then_ignore(just(T::InKw))
-            .then(expr.clone())
+            .then(head_expr.clone())
             .then(block.clone())
             .map_with(move |((pattern, iterable), body), e| Stmt::For {
                 pattern,
@@ -1586,7 +1634,7 @@ where
 
         // `while <cond> { body }` — repeat the body while the condition holds.
         let while_ = just(T::WhileKw)
-            .ignore_then(expr.clone())
+            .ignore_then(head_expr.clone())
             .then(block.clone())
             .map_with(move |(cond, body), e| Stmt::While {
                 cond,
@@ -1595,7 +1643,7 @@ where
             });
 
         // `else if` is an `else` whose body is a single nested `if`.
-        let if_expr = expr.clone();
+        let if_expr = head_expr.clone();
         let if_block = block.clone();
         let if_ = recursive(move |if_| {
             just(T::IfKw)
@@ -2999,6 +3047,15 @@ mod tests {
         insta::assert_snapshot!(pretty(
             "@test { fn adds() { return add(1, 2); } } @derive(Comparable) struct P { x: int } echo 1;"
         ));
+    }
+
+    #[test]
+    fn empty_literal_and_restricted_head_parse() {
+        // Object-model slice 7b: the empty literal `T {}` parses (a fully-defaulted type), and a
+        // control-flow head forbids a bare top-level struct literal so `if c { … }` is the block —
+        // a struct literal in a condition is parenthesized. `(empty C)` is the empty-fields object,
+        // and the `if` condition is the member access on the parenthesized literal, then the block.
+        insta::assert_snapshot!(pretty("c = C {}\nif (C { x: 1 }).x { echo \"y\" }"));
     }
 
     #[test]
