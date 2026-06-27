@@ -245,8 +245,21 @@ support for a raw-text span — the one genuinely new lexing concern).
     when every test ran and passed. `execute_real_host` factored out of `run_linked` so `lang run` and
     the runner execute identically. **Test fns are ordinary named fns → carry `: void` like any
     boundary** (the inferred-static rule is not special-cased). Unit + CLI integration tests.
-- **6c — annotation form `@test fn`.** Grouping-sugar equivalence with the block.
-- **6d — same-namespace private access** (in-source vs separate-file visibility).
+- **6c — annotation form `@test fn`. ✅ DONE (`18ad064`).** Pure parser desugar: a new
+  `tier_annotation` combinator builds the same one-item `Stmt::TierBlock` a `@test { fn … }` block
+  produces (snapshot: `@test fn adds()` → `(tier test … (fn adds …))`), so activation/checking/
+  lowering/the runner see exactly the block form — full equivalence, zero new downstream machinery.
+  Sits beside `tier_block` in the statement choice; the follow token disambiguates with no collision
+  (`@test {` → block, `@test fn` → annotation, `@derive(...) struct` → backtracks to the decorator
+  path). Wraps a top-level `fn`; test-only *types* use the block form. Snapshot + conformance strip
+  test + CLI integration test. Conformance 289.
+- **6d — same-namespace private access** (in-source vs separate-file visibility). **Finding:**
+  module-private **fns** already work for in-source tests by construction (`activate_tiers` inlines a
+  `@test` block into the *same* module, so a test fn is ordinary same-module code). Private **fields**
+  (E0035, type-scoped) are NOT accessible — a test fn is in the module but outside the type. Open
+  decision: white-box field access for in-source tests (Rust `#[cfg(test)]` model) vs. tests exercise
+  the public/method surface only. The "separate test-tier *file* sees only `pub`" half depends on the
+  package/test-file system (deferred to the package milestone).
 - **Later:** `@debug` statement form; `bench`; `doc` (text content-kind + verbatim capture +
   extraction); the profiles/TOML provider-map + manifest; third-party tiers.
 
