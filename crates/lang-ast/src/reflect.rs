@@ -4,7 +4,7 @@
 //! the tree-walker and the VM **by construction** — there is no second walk to drift from the first.
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
-use crate::{AttrArg, AttrValue, Attribute, FieldDecl, Program, Stmt};
+use crate::{AttrArg, AttrValue, Attribute, Expr, FieldDecl, Program, Stmt, UnaryOp};
 
 /// Everything reflection needs about a program, derived purely from its AST.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -110,6 +110,11 @@ pub struct TypeInfo {
     pub kind: TypeKind,
     /// Field names in declaration order (records/classes; empty for enums).
     pub fields: Vec<String>,
+    /// Each field's **literal default** (object-model slice 6i), parallel to `fields`: `Some` when
+    /// the field declared `name: T = <literal>`, `None` for a mandatory field or a non-literal
+    /// default. Used to fill an omitted optional field when materializing an attribute instance, so
+    /// `attributes_of` reports the declared default rather than a placeholder.
+    pub field_defaults: Vec<Option<AttrValue>>,
     /// Variants in declaration order (enums; empty otherwise).
     pub variants: Vec<VariantInfo>,
 }
@@ -151,6 +156,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Struct,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
+                    field_defaults: field_defaults(&decl.fields),
                     variants: Vec::new(),
                 });
             }
@@ -167,6 +173,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Class,
                     fields: decl.fields.iter().map(|f| f.name.clone()).collect(),
+                    field_defaults: field_defaults(&decl.fields),
                     variants: Vec::new(),
                 });
             }
@@ -191,6 +198,7 @@ pub fn build(program: &Program) -> ReflectionInfo {
                     name: decl.name.clone(),
                     kind: TypeKind::Enum,
                     fields: Vec::new(),
+                    field_defaults: Vec::new(),
                     variants: decl
                         .variants
                         .iter()
@@ -227,12 +235,103 @@ pub fn build(program: &Program) -> ReflectionInfo {
     }
 }
 
+/// Compute each field's literal default (object-model slice 6i), parallel to the field list: `Some`
+/// for a `name: T = <literal>` field whose default folds to a constant, `None` otherwise. Used to
+/// populate [`TypeInfo::field_defaults`].
+fn field_defaults(fields: &[FieldDecl]) -> Vec<Option<AttrValue>> {
+    fields
+        .iter()
+        .map(|f| f.default.as_ref().and_then(fold_const_expr))
+        .collect()
+}
+
+/// Fold a constant expression to an [`AttrValue`], or `None` if it is not a literal. A focused subset
+/// of the attribute-argument grammar — scalars, a negated numeric literal, and lists thereof — enough
+/// for the literal field defaults an attribute carries; a richer default (a call, a name) folds to
+/// `None` and the field is treated as having no materializable default.
+fn fold_const_expr(expr: &Expr) -> Option<AttrValue> {
+    Some(match expr {
+        Expr::Str { value, .. } => AttrValue::Str(value.clone()),
+        Expr::Int { value, .. } => AttrValue::Int(*value),
+        Expr::Float { value, .. } => AttrValue::Float(*value),
+        Expr::Bool { value, .. } => AttrValue::Bool(*value),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+            ..
+        } => match fold_const_expr(operand)? {
+            AttrValue::Int(n) => AttrValue::Int(-n),
+            AttrValue::Float(f) => AttrValue::Float(-f),
+            _ => return None,
+        },
+        Expr::List { items, .. } => AttrValue::List(
+            items
+                .iter()
+                .map(fold_const_expr)
+                .collect::<Option<Vec<_>>>()?,
+        ),
+        _ => return None,
+    })
+}
+
+/// The built-in test-metadata attributes' field shapes (object-model slice 6h/6i) — `(field names,
+/// their literal defaults)` — for `Skip`/`Name`/`Group`/`Data`. These are prelude `@attribute`
+/// structs the checker registers but that never reach [`build`]'s AST walk (they are not declared in
+/// the program), so their shape is supplied here for materialization. Only `Skip` has an optional
+/// field (`reason`, default `""`); the rest carry one mandatory field.
+fn builtin_attribute_shape(name: &str) -> Option<(Vec<String>, Vec<Option<AttrValue>>)> {
+    let one = |field: &str| (vec![field.to_string()], vec![None]);
+    Some(match name {
+        TEST_ATTR_SKIP => (
+            vec!["reason".to_string()],
+            vec![Some(AttrValue::Str(String::new()))],
+        ),
+        TEST_ATTR_NAME | TEST_ATTR_GROUP => one("value"),
+        TEST_ATTR_DATA => one("rows"),
+        _ => return None,
+    })
+}
+
+/// The materialization shape of an attribute named `type_name`: its field names and their literal
+/// defaults. Resolved from the reflected type registry (user-declared attributes) first, then the
+/// built-in test attributes, else empty. The boolean is whether it is a struct (vs a class) — only a
+/// class materializes with a class shape.
+pub fn attribute_shape(type_name: &str, info: &ReflectionInfo) -> AttributeShape {
+    if let Some(t) = info.type_named(type_name) {
+        return AttributeShape {
+            fields: t.fields.clone(),
+            defaults: t.field_defaults.clone(),
+            is_struct: !matches!(t.kind, TypeKind::Class),
+        };
+    }
+    let (fields, defaults) = builtin_attribute_shape(type_name).unwrap_or_default();
+    AttributeShape {
+        fields,
+        defaults,
+        is_struct: true,
+    }
+}
+
+/// An attribute type's materialization shape — its field names, their literal defaults (parallel),
+/// and whether it is a struct. Returned by [`attribute_shape`] so both backends build the same value.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct AttributeShape {
+    pub fields: Vec<String>,
+    pub defaults: Vec<Option<AttrValue>>,
+    pub is_struct: bool,
+}
+
 /// Resolve an attribute's arguments to its struct's field values, in declaration order — the shared
 /// mapping both backends use to materialize the attribute instance, so they build identical values.
-/// Positional arguments fill fields left to right; named arguments bind by field name. The use-site
-/// construction check (E0009/E0007/E0005) guarantees a well-formed program supplies exactly one
-/// value per field, so a runnable program never leaves a field unresolved.
-pub fn materialize_args(attr: &AttributeRecord, fields: &[String]) -> Vec<AttrValue> {
+/// Positional arguments fill fields left to right; named arguments bind by field name. An omitted
+/// **optional** field (one with a default) is filled from `defaults`; the construction check
+/// (E0009/E0007/E0005) guarantees every *mandatory* field is supplied, so the `unit` fallback is
+/// unreachable for a runnable program.
+pub fn materialize_args(
+    attr: &AttributeRecord,
+    fields: &[String],
+    defaults: &[Option<AttrValue>],
+) -> Vec<AttrValue> {
     let mut values: Vec<Option<AttrValue>> = vec![None; fields.len()];
     let mut next_positional = 0usize;
     for arg in &attr.args {
@@ -250,11 +349,13 @@ pub fn materialize_args(attr: &AttributeRecord, fields: &[String]) -> Vec<AttrVa
             values[i] = Some(arg.value.clone());
         }
     }
-    // A field with no supplied value cannot occur in a runnable program (the construction check
-    // rejects it); the `unit` fallback is unreachable defensive code.
     values
         .into_iter()
-        .map(|v| v.unwrap_or(AttrValue::Bool(false)))
+        .enumerate()
+        .map(|(i, v)| {
+            v.or_else(|| defaults.get(i).cloned().flatten())
+                .unwrap_or(AttrValue::Bool(false))
+        })
         .collect()
 }
 

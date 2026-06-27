@@ -380,7 +380,7 @@ fn cmd_test(
     // never fails the suite (a skipped `#[Data]` test counts as one skip, not one per row).
     let (skipped_refs, runnable): (Vec<&TierFn>, Vec<&TierFn>) =
         selected.into_iter().partition(|t| test_is_skipped(t));
-    let skipped: Vec<String> = skipped_refs.iter().map(|t| test_display_name(t)).collect();
+    let skipped: Vec<String> = skipped_refs.iter().map(|t| skip_label(t)).collect();
 
     // Expand each runnable test into its case(s): a `#[Data([…])]` test runs once per row (reported
     // `name[row]`); an ordinary test is a single zero-arg case.
@@ -519,6 +519,16 @@ fn test_is_skipped(test: &TierFn) -> bool {
     test.attrs
         .iter()
         .any(|a| a.name == lang_ast::reflect::TEST_ATTR_SKIP)
+}
+
+/// The report label for a skipped test: its display name, plus a `(reason)` when `#[Skip("reason")]`
+/// gave one.
+fn skip_label(test: &TierFn) -> String {
+    let name = test_display_name(test);
+    match string_attr(test, lang_ast::reflect::TEST_ATTR_SKIP) {
+        Some(reason) if !reason.is_empty() => format!("{name} ({reason})"),
+        _ => name,
+    }
 }
 
 /// A test's display name — the string in `#[Name("…")]` if present, else the fn's own name.

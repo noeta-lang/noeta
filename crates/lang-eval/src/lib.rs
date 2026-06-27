@@ -1291,13 +1291,9 @@ impl Interpreter {
     /// `TypeDef`s from the shared reflection info; the VM builds the matching shapes the same way, so
     /// the materialized values agree across backends by construction.
     fn materialize_attributes(&self, type_name: &str) -> Value {
-        let info = self.reflection.type_named(type_name);
-        let fields: Vec<String> = info.map(|t| t.fields.clone()).unwrap_or_default();
-        let is_struct = !matches!(
-            info.map(|t| t.kind),
-            Some(lang_ast::reflect::TypeKind::Class)
-        );
-        let attr_def = Rc::new(fresh_type_def(type_name, &fields, is_struct));
+        let shape = lang_ast::reflect::attribute_shape(type_name, &self.reflection);
+        let fields = shape.fields;
+        let attr_def = Rc::new(fresh_type_def(type_name, &fields, shape.is_struct));
         let attributed_def = Rc::new(fresh_type_def(
             "Attributed",
             &["target".to_string(), "value".to_string()],
@@ -1309,7 +1305,7 @@ impl Interpreter {
             .iter()
             .filter(|a| a.name == type_name)
             .map(|a| {
-                let values = lang_ast::reflect::materialize_args(a, &fields);
+                let values = lang_ast::reflect::materialize_args(a, &fields, &shape.defaults);
                 let t_fields: BTreeMap<String, Value> = fields
                     .iter()
                     .cloned()

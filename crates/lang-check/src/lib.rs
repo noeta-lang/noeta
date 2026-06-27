@@ -403,6 +403,11 @@ struct Checker {
     /// *absent* from this map (bare `@attribute`) is unrestricted. Enforced per use site (E0030);
     /// kind names are validated when this is built.
     attachable: HashMap<String, Vec<TargetKind>>,
+    /// Per struct/class, the fields that carry a default (`name: T = …`) and so are **optional** in a
+    /// `#[Foo(...)]` attribute construction (object-model slice 6i): such a field may be omitted, the
+    /// default supplies it. Keyed by type name → optional field names. The construction gate consults
+    /// this to suppress the missing-field error (E0009) for a defaulted field.
+    attribute_optional_fields: HashMap<String, HashSet<String>>,
     /// The generic type parameters in scope while checking the current declaration, each mapped to
     /// its declared trait **bounds** (`<T: Comparable>` → `{"T": ["Comparable"]}`). Empty at top
     /// level; saved and restored around each generic declaration. The bounds drive body-side
@@ -498,7 +503,9 @@ impl Checker {
     fn register_test_attributes(&mut self) {
         use lang_ast::reflect::{TEST_ATTR_DATA, TEST_ATTR_GROUP, TEST_ATTR_NAME, TEST_ATTR_SKIP};
         let attrs: [(&str, Vec<(String, Type)>); 4] = [
-            (TEST_ATTR_SKIP, Vec::new()),
+            // `Skip`'s `reason` is optional (default `""`), so both `#[Skip]` and `#[Skip("flaky")]`
+            // construct it — see the optional-fields registration below.
+            (TEST_ATTR_SKIP, vec![("reason".to_string(), Type::String)]),
             (TEST_ATTR_NAME, vec![("value".to_string(), Type::String)]),
             (TEST_ATTR_GROUP, vec![("value".to_string(), Type::String)]),
             (TEST_ATTR_DATA, vec![("rows".to_string(), Type::Dyn)]),
@@ -511,6 +518,12 @@ impl Checker {
             // Mark `@attribute` (bare — attachable anywhere) so the E0029 capability gate passes.
             self.record_attribute(name, Some(&[]));
         }
+        // `Skip.reason` defaults to `""`, so a bare `#[Skip]` is valid (the construction gate may omit
+        // it); the materialization default lives in `lang_ast::reflect::attribute_shape`.
+        self.attribute_optional_fields.insert(
+            TEST_ATTR_SKIP.to_string(),
+            HashSet::from([String::from("reason")]),
+        );
     }
 
     /// Register the prelude `Semantic` enum and `RoleBinding` struct. `Semantic` is the language's
@@ -724,6 +737,7 @@ impl Checker {
                     self.types.insert(r.name.clone());
                     self.type_kinds
                         .insert(r.name.clone(), lang_types::TypeKind::Struct);
+                    self.record_optional_fields(&r.name, &r.fields);
                     self.record_trait_impls(&r.name, r.derives.iter().map(|d| d.name.as_str()));
                     self.record_attribute(&r.name, r.attribute.as_deref());
                     self.generic_types.insert(
@@ -1957,7 +1971,8 @@ impl Checker {
             self.check_attr_value(&arg.value, &fty, &fname, arg.span);
         }
         for (i, (fname, fty)) in fields.iter().enumerate() {
-            if !filled[i] {
+            // A field with a default (`name: T = …`) is optional — it may be omitted (slice 6i).
+            if !filled[i] && !self.is_optional_attribute_field(&attr.name, fname) {
                 self.diags.push(Diagnostic::error(
                     DiagnosticCode::MissingField,
                     attr.span,
@@ -3141,6 +3156,29 @@ impl Checker {
                 ));
             }
         }
+    }
+
+    /// Record which of a type's `fields` carry a default (`name: T = …`) — and so are **optional** in
+    /// an attribute construction (object-model slice 6i). Used by the construction gate to omit a
+    /// defaulted field without an E0009.
+    fn record_optional_fields(&mut self, type_name: &str, fields: &[FieldDecl]) {
+        let optional: HashSet<String> = fields
+            .iter()
+            .filter(|f| f.default.is_some())
+            .map(|f| f.name.clone())
+            .collect();
+        if !optional.is_empty() {
+            self.attribute_optional_fields
+                .insert(type_name.to_string(), optional);
+        }
+    }
+
+    /// Whether field `field` of attribute `attr_name` is optional (has a default), so a `#[...]`
+    /// construction may omit it.
+    fn is_optional_attribute_field(&self, attr_name: &str, field: &str) -> bool {
+        self.attribute_optional_fields
+            .get(attr_name)
+            .is_some_and(|set| set.contains(field))
     }
 
     /// Record that user type `name` satisfies each of `traits` (its `@derive`/`impl` names). Only

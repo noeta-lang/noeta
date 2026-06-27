@@ -1,0 +1,20 @@
+// An `@attribute` struct may give a field a default (`ttl: int = 60`), object-model slice 6i. Such a
+// field is **optional** in a `#[...]` construction — `#[Cache]` omits both, `#[Cache(ttl: 5)]` omits
+// only `eager` — and materialization fills each omitted field from its declared default, so
+// `attributes_of` reports the default, not a placeholder. Both backends fill the same defaults, so
+// the differential agrees.
+// expect: stdout "60 false"
+// expect: stdout "5 true"
+// expect: exit 0
+@attribute
+struct Cache { ttl: int = 60  eager: bool = false }
+
+#[Cache]
+struct A { id: int }
+
+#[Cache(ttl: 5, eager: true)]
+struct B { id: int }
+
+for c in attributes_of::<Cache>() {
+    echo "${c.value.ttl} ${c.value.eager}"
+}

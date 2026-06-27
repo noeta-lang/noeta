@@ -483,6 +483,36 @@ fn bare_attribute_record_is_usable_anywhere() {
 }
 
 #[test]
+fn defaulted_attribute_field_is_optional() {
+    // An `@attribute` field with a default (`ttl: int = 60`) is optional in a construction (slice
+    // 6i): `#[Cache]` may omit it, and a mandatory field may still be supplied. No diagnostics.
+    let src = "@attribute\nstruct Cache { ttl: int = 60  eager: bool }\n#[Cache(eager: true)]\nstruct A { id: int }\n#[Cache(ttl: 5, eager: false)]\nstruct B { id: int }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
+fn mandatory_attribute_field_is_still_required() {
+    // A field *without* a default is still mandatory — omitting it is E0009, even when a sibling
+    // field has a default.
+    let src =
+        "@attribute\nstruct Cache { ttl: int = 60  eager: bool }\n#[Cache]\nstruct A { id: int }\n";
+    assert!(
+        codes(src).contains(&"E0009".to_string()),
+        "{:?}",
+        codes(src)
+    );
+}
+
+#[test]
+fn builtin_skip_reason_is_optional() {
+    // The built-in `Skip` attribute's `reason` defaults to `""`, so both `#[Skip]` and
+    // `#[Skip("…")]` construct it (slice 6i). A `@test` fn is stripped on a normal check, so this
+    // exercises the construction gate via an ordinary declaration.
+    let src = "#[Skip]\nstruct A { id: int }\n#[Skip(\"flaky\")]\nstruct B { id: int }\n";
+    assert!(codes(src).is_empty(), "{:?}", codes(src));
+}
+
+#[test]
 fn attributes_of_on_an_attribute_type_checks_clean() {
     // `attributes_of::<Route>()` is `List<Attributed<Route>>`, so `r.target` is a string and
     // `r.value` is a `Route` whose `.path` is a string — all resolve without diagnostics.

@@ -353,6 +353,20 @@ fn test_skip_is_reported_not_run_and_does_not_fail() {
 }
 
 #[test]
+fn test_skip_reason_is_shown() {
+    // `#[Skip("reason")]` (slice 6i — `Skip.reason` defaults to `""`, so the bare and reasoned forms
+    // both work) shows the reason after the skipped test's name.
+    let file = temp_program(
+        "test_skip_reason",
+        "#[Skip(\"flaky on CI\")]\n@test fn flaky(): void { assert(false) }\n",
+    );
+    lang().arg("test").arg(&file).assert().success().stdout(
+        predicate::str::contains("skip  flaky (flaky on CI)")
+            .and(predicate::str::contains("1 skipped")),
+    );
+}
+
+#[test]
 fn test_group_filter_runs_only_that_group() {
     let file = temp_program("test_group", ATTR_TESTS);
     lang()

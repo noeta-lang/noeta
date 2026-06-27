@@ -378,11 +378,12 @@ impl<'m> Vm<'m> {
             "Attributed",
             vec!["target".to_string(), "value".to_string()],
         ));
-        let info = self.module.reflection.type_named(type_name);
-        let fields: Vec<String> = info.map(|t| t.fields.clone()).unwrap_or_default();
-        let kind = match info.map(|t| t.kind) {
-            Some(lang_ast::reflect::TypeKind::Class) => ShapeKind::Class,
-            _ => ShapeKind::Struct,
+        let shape = lang_ast::reflect::attribute_shape(type_name, &self.module.reflection);
+        let fields = shape.fields;
+        let kind = if shape.is_struct {
+            ShapeKind::Struct
+        } else {
+            ShapeKind::Class
         };
         let items: Vec<Value> = self
             .module
@@ -391,10 +392,11 @@ impl<'m> Vm<'m> {
             .iter()
             .filter(|a| a.name == type_name)
             .map(|a| {
-                let values: Vec<Value> = lang_ast::reflect::materialize_args(a, &fields)
-                    .iter()
-                    .map(|v| attr_value_to_vm(v, &self.module.reflection))
-                    .collect();
+                let values: Vec<Value> =
+                    lang_ast::reflect::materialize_args(a, &fields, &shape.defaults)
+                        .iter()
+                        .map(|v| attr_value_to_vm(v, &self.module.reflection))
+                        .collect();
                 let t_shape = Rc::new(Shape::object(kind, type_name, fields.clone()));
                 let t_value = Value::object(t_shape, values);
                 Value::object(
