@@ -226,6 +226,13 @@ fn values_equal(left: Value, right: Value) -> bool {
             && sa.variant == sb.variant
             && slices_equal(&left.enum_data().unwrap(), &right.enum_data().unwrap());
     }
+    // Lists compare structurally element-wise (same length, equal positions), matching the
+    // tree-walker's `Value::List` equality. (Without this arm two equal lists fell through to
+    // `false` — a latent bug the P-PACK 2.3 differential surfaced, since no prior corpus case
+    // compared two equal list literals.)
+    if left.is_list() && right.is_list() {
+        return slices_equal(&left.list_items().unwrap(), &right.list_items().unwrap());
+    }
     // Tuples compare structurally element-wise (same arity, equal positions) — value semantics
     // (object-model slice 4), matching the tree-walker's `Value::Tuple` equality.
     if left.is_tuple() && right.is_tuple() {

@@ -1,0 +1,23 @@
+// List `==` is structural element-wise: two lists are equal iff they have the same length and equal
+// elements in order, nested arbitrarily deep (lists of lists, lists of structs). This pins a fix —
+// the VM's `values_equal` had no list arm, so *every* list comparison returned `false` (even two
+// equal literals); only the eval reference compared structurally. The differential now agrees.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+struct Point { x: int; y: int }
+
+echo [1, 2, 3] == [1, 2, 3]
+echo [1, 2, 3] == [1, 2, 4]
+echo [1, 2, 3] == [1, 2, 3]
+echo [1, 2] == [1, 2, 3]
+echo [] == []
+echo [[1, 2], [3]] == [[1, 2], [3]]
+echo [[1, 2], [3]] == [[1, 2], [4]]
+echo [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }] == [Point { x: 1, y: 2 }, Point { x: 3, y: 4 }]
