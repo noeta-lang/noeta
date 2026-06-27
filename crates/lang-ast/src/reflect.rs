@@ -479,3 +479,50 @@ fn push_attrs(manifest: &mut Vec<AttributeRecord>, target: &str, attrs: &[Attrib
         });
     }
 }
+
+/// The flat memory layout of a `@packed` struct value (P-PACK Phase 2): its fields in declared (slot)
+/// order, each a primitive — one machine word, pre-Phase-3 — or a nested packed struct laid out
+/// recursively. It fully describes how to **pack** a boxed value into a raw word buffer and
+/// **unpack** one back (the field names + kinds let a backend rebuild the nested objects without
+/// storing field kinds in its own shape). Built by the checker (which knows field types and `@packed`
+/// membership) and keyed by the list-construction span, so both backends pack/unpack identically —
+/// the flat `List<packed>` representation stays invisible to `RunResult`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedLayout {
+    /// The packed struct's type name — the nominal type of a materialized element.
+    pub type_name: String,
+    /// The fields in declared (slot) order.
+    pub fields: Vec<PackedField>,
+}
+
+/// One field of a [`PackedLayout`]: its name (for materializing the boxed value) and its kind.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackedField {
+    pub name: String,
+    pub kind: PackedKind,
+}
+
+/// A packed field's kind: a primitive occupying one word, or a nested packed struct flattened inline.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PackedKind {
+    Int,
+    Float,
+    Bool,
+    /// A nested `@packed` struct, laid out contiguously in the parent's buffer.
+    Struct(Box<PackedLayout>),
+}
+
+impl PackedLayout {
+    /// The number of machine words one value of this layout occupies — the sum of each field's width
+    /// (a primitive is 1; a nested struct is its own `word_count`). Pre-Phase-3 every primitive is one
+    /// 64-bit word; Phase 3 (`f32`) will narrow specific slots.
+    pub fn word_count(&self) -> usize {
+        self.fields
+            .iter()
+            .map(|f| match &f.kind {
+                PackedKind::Int | PackedKind::Float | PackedKind::Bool => 1,
+                PackedKind::Struct(inner) => inner.word_count(),
+            })
+            .sum()
+    }
+}

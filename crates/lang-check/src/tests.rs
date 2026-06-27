@@ -1562,3 +1562,100 @@ fn a_list_of_a_destructor_bearing_type_is_relevant() {
         r.params
     );
 }
+
+// --- P-PACK Phase 2: packed-list construction-site channel (`resolve_packed_list_sites`) ---
+
+use super::resolve_packed_list_sites;
+use lang_ast::reflect::{PackedKind, PackedLayout};
+
+/// Parse `text` and return the `PackedLayout`s recorded at its list-construction sites.
+fn packed_layouts(text: &str) -> Vec<PackedLayout> {
+    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    resolve_packed_list_sites(&parsed.program)
+        .into_values()
+        .collect()
+}
+
+#[test]
+fn packed_list_literal_is_recorded() {
+    let layouts = packed_layouts(
+        "@packed struct Vec3 { x: float; y: float; z: float }\n\
+         xs = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
+         echo xs.count()\n",
+    );
+    assert_eq!(layouts.len(), 1);
+    let l = &layouts[0];
+    assert_eq!(l.type_name, "Vec3");
+    assert_eq!(l.fields.len(), 3);
+    assert!(l.fields.iter().all(|f| f.kind == PackedKind::Float));
+    assert_eq!(
+        l.fields.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(),
+        ["x", "y", "z"]
+    );
+    assert_eq!(l.word_count(), 3);
+}
+
+#[test]
+fn packed_list_with_annotation_is_recorded() {
+    // The check-position arm (`xs: List<Vec3> = [...]`) records too.
+    let layouts = packed_layouts(
+        "@packed struct Vec3 { x: float; y: float; z: float }\n\
+         xs: List<Vec3> = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
+         echo xs.count()\n",
+    );
+    assert_eq!(layouts.len(), 1);
+    assert_eq!(layouts[0].type_name, "Vec3");
+}
+
+#[test]
+fn nested_packed_list_flattens() {
+    let layouts = packed_layouts(
+        "@packed struct Vec3 { x: float; y: float; z: float }\n\
+         @packed struct Segment { start: Vec3; end: Vec3 }\n\
+         v = Vec3 { x: 1.0, y: 2.0, z: 3.0 }\n\
+         xs = [Segment { start: v, end: v }]\n\
+         echo xs.count()\n",
+    );
+    assert_eq!(layouts.len(), 1);
+    let l = &layouts[0];
+    assert_eq!(l.type_name, "Segment");
+    assert_eq!(l.fields.len(), 2);
+    // Each field is a nested packed Vec3 (3 words), so a Segment is 6 words flat.
+    assert!(matches!(l.fields[0].kind, PackedKind::Struct(_)));
+    assert_eq!(l.word_count(), 6);
+}
+
+#[test]
+fn packed_list_with_int_and_bool_kinds() {
+    let layouts = packed_layouts(
+        "@packed struct Cell { n: int; on: bool }\n\
+         xs = [Cell { n: 1, on: true }]\n\
+         echo xs.count()\n",
+    );
+    assert_eq!(layouts.len(), 1);
+    assert_eq!(layouts[0].fields[0].kind, PackedKind::Int);
+    assert_eq!(layouts[0].fields[1].kind, PackedKind::Bool);
+}
+
+#[test]
+fn non_packed_struct_list_is_not_recorded() {
+    // An ordinary (non-`@packed`) value struct stays on the boxed representation.
+    let layouts = packed_layouts(
+        "struct Vec3 { x: float; y: float; z: float }\n\
+         xs = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
+         echo xs.count()\n",
+    );
+    assert!(layouts.is_empty());
+}
+
+#[test]
+fn primitive_list_is_not_recorded() {
+    assert!(packed_layouts("xs = [1, 2, 3]\necho xs.count()\n").is_empty());
+}

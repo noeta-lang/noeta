@@ -97,6 +97,8 @@ pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
     pub type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
+    pub packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -118,6 +120,7 @@ pub fn check_all(program: &Program) -> Checked {
     Checked {
         diagnostics: checker.diags,
         type_of_sites: checker.type_of_sites,
+        packed_list_sites: checker.packed_list_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -142,6 +145,19 @@ pub fn check(program: &Program) -> Vec<Diagnostic> {
 /// `type_of_sites` instead of calling this.
 pub fn resolve_type_of_sites(program: &Program) -> HashMap<Span, lang_ast::reflect::TypeRepr> {
     check_all(program).type_of_sites
+}
+
+/// Resolve every list-construction site whose element type is a `@packed` struct, keyed by the
+/// constructing expression's span → the element's flat [`PackedLayout`] (P-PACK Phase 2). Both
+/// backends consult this to lay out a `List<packed>` as one contiguous raw-primitive buffer rather
+/// than N boxed objects + N pointers. Runs the same inference as [`check`] (diagnostics discarded)
+/// and is **pure**, so both backends harvest identical maps on the same program — the flat layout
+/// stays invisible to `RunResult` and the differential holds. A thin projection of [`check_all`] for
+/// a backend with no precomputed map to thread.
+pub fn resolve_packed_list_sites(
+    program: &Program,
+) -> HashMap<Span, lang_ast::reflect::PackedLayout> {
+    check_all(program).packed_list_sites
 }
 
 /// Project a checker [`Type`] onto the reflection [`TypeRepr`] for a **concrete** `type_of` operand,
@@ -434,6 +450,13 @@ struct Checker {
     /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
     /// on the same program, so they emit identical `Type` values by construction.
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
+    /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
+    /// via [`resolve_packed_list_sites`] to lay out a `List<packed>` as one contiguous raw-primitive
+    /// buffer instead of N boxed objects. A pure function of the program, like `type_of_sites`, so the
+    /// two backends pick the same representation by construction (the flat layout stays invisible to
+    /// `RunResult`).
+    packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
@@ -2128,13 +2151,14 @@ impl Checker {
     fn check(&mut self, expr: &Expr, expected: &Type, env: &mut Env) -> Type {
         match expr {
             // A list literal absorbs an expected `List<T>`: check each element against `T`.
-            Expr::List { items, .. } if matches!(expected, Type::List(_)) => {
+            Expr::List { items, span } if matches!(expected, Type::List(_)) => {
                 let Type::List(elem) = expected else {
                     unreachable!()
                 };
                 for item in items {
                     self.check(item, elem, env);
                 }
+                self.note_packed_list(elem, *span);
                 Type::List(elem.clone())
             }
             // An empty map literal absorbs an expected `Map<K, V>` (the map analogue of the list
@@ -2386,6 +2410,7 @@ impl Checker {
                     );
                     elem = Type::Dyn; // recover as a mixed list
                 }
+                self.note_packed_list(&elem, *span);
                 Type::List(Box::new(elem))
             }
             // A tuple literal `(a, b, …)` synthesizes a `Type::Tuple` of its elements' types,
@@ -3289,6 +3314,46 @@ impl Checker {
             Type::Int | Type::Float | Type::Bool => true,
             Type::Named(name, args) if args.is_empty() => self.packed_structs.contains(name),
             _ => false,
+        }
+    }
+
+    /// The flat [`PackedLayout`] of `ty` if it is a `@packed` struct, else `None` (P-PACK Phase 2).
+    /// Recurses through nested packed fields, flattening them inline. `check_packed_struct` has
+    /// already guaranteed every field of a packed struct is packable, so the field walk never bails on
+    /// a well-typed program; the `?`s defend against a malformed registry (and an unpacked element).
+    fn packed_layout(&self, ty: &Type) -> Option<lang_ast::reflect::PackedLayout> {
+        use lang_ast::reflect::{PackedField, PackedKind, PackedLayout};
+        let Type::Named(name, args) = ty else {
+            return None;
+        };
+        if !args.is_empty() || !self.packed_structs.contains(name) {
+            return None;
+        }
+        let mut fields = Vec::new();
+        for (fname, fty) in self.records.get(name)? {
+            let kind = match fty {
+                Type::Int => PackedKind::Int,
+                Type::Float => PackedKind::Float,
+                Type::Bool => PackedKind::Bool,
+                Type::Named(..) => PackedKind::Struct(Box::new(self.packed_layout(fty)?)),
+                _ => return None,
+            };
+            fields.push(PackedField {
+                name: fname.clone(),
+                kind,
+            });
+        }
+        Some(PackedLayout {
+            type_name: name.clone(),
+            fields,
+        })
+    }
+
+    /// Record a list-construction site at `span` if its element type `elem` is a packed struct
+    /// (P-PACK Phase 2) — the span both backends key on to pick the flat raw-buffer representation.
+    fn note_packed_list(&mut self, elem: &Type, span: Span) {
+        if let Some(layout) = self.packed_layout(elem) {
+            self.packed_list_sites.insert(span, layout);
         }
     }
 
