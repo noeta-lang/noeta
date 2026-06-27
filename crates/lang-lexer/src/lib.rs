@@ -447,10 +447,128 @@ pub fn lex(source: &Source) -> Lexed {
         }
     }
 
+    let tokens = insert_terminators(source, tokens);
+
     Lexed {
         tokens,
         diagnostics,
     }
+}
+
+/// Insert synthetic statement terminators (`;`) at newlines (object-model slice 7): a line end can
+/// terminate a statement, so most `;` become optional. logos discards newlines, so the gap between
+/// two consecutive tokens is inspected in the *source text* for a newline — no token-set change.
+///
+/// A `;` is inserted in a gap iff **all** hold: the gap contains a newline; the bracket nesting of
+/// `(`/`[` is zero (inside a call/list/index a newline never terminates); the preceding token can
+/// *end* a statement ([`is_statement_ending`]); and the following token does not *continue* the line
+/// ([`is_leading_continuation`], so a leading `.`/`|>`/operator/`else`/closing brace joins the
+/// lines). At most one `;` per gap, so blank lines never yield empty statements. `{`/`}` are not
+/// depth-tracked: a `}` is a leading-continuation (suppressing a `;` before it), so multi-line
+/// blocks and `{...}` literals are unaffected and the parser's terminator tolerates a peeked `}`.
+fn insert_terminators(source: &Source, tokens: Vec<Token>) -> Vec<Token> {
+    let text = source.text();
+    let mut out: Vec<Token> = Vec::with_capacity(tokens.len());
+    let mut depth: u32 = 0;
+    for tok in tokens {
+        if let Some(prev) = out.last()
+            && depth == 0
+            && is_statement_ending(prev.kind)
+            && !is_leading_continuation(tok.kind)
+            && gap_has_newline(text, prev.span.end, tok.span.start)
+        {
+            let at = prev.span.end;
+            out.push(Token {
+                kind: TokenKind::Semicolon,
+                span: Span::empty_at_in(prev.span.source, at),
+            });
+        }
+        match tok.kind {
+            TokenKind::LParen | TokenKind::LBracket => depth += 1,
+            TokenKind::RParen | TokenKind::RBracket => depth = depth.saturating_sub(1),
+            _ => {}
+        }
+        out.push(tok);
+    }
+    out
+}
+
+/// Whether the source between two byte offsets contains a newline (the gap between two tokens —
+/// whitespace and/or a line comment logos skipped).
+fn gap_has_newline(text: &str, start: u32, end: u32) -> bool {
+    text.get(start as usize..end as usize)
+        .is_some_and(|gap| gap.contains('\n'))
+}
+
+/// Whether a token can be the **last** token of a statement, so a following newline terminates it:
+/// a value (literal/identifier/`true`/`false`), a closing bracket, the postfix try `?`, or one of
+/// the self-contained jump keywords (`return`/`break`/`continue`).
+fn is_statement_ending(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        TokenKind::Ident
+            | TokenKind::IntLit
+            | TokenKind::FloatLit
+            | TokenKind::StringLit
+            | TokenKind::RawStr
+            | TokenKind::TemplateStr
+            | TokenKind::TrueKw
+            | TokenKind::FalseKw
+            | TokenKind::RParen
+            | TokenKind::RBrace
+            | TokenKind::RBracket
+            | TokenKind::Question
+            | TokenKind::ReturnKw
+            | TokenKind::BreakKw
+            | TokenKind::ContinueKw
+    )
+}
+
+/// Whether a token, when it **starts** the next line, continues the previous statement (so no `;` is
+/// inserted before it): an infix/postfix operator, member/pipeline/range/coalesce punctuation, a
+/// separator, a closing bracket, or a clause keyword that extends the construct (`else`/`then`/`in`).
+fn is_leading_continuation(kind: TokenKind) -> bool {
+    matches!(
+        kind,
+        // Arithmetic / comparison / logical / union operators.
+        TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Star
+            | TokenKind::Slash
+            | TokenKind::Percent
+            | TokenKind::EqEq
+            | TokenKind::NotEq
+            | TokenKind::EqEqEq
+            | TokenKind::NotEqEq
+            | TokenKind::LtEq
+            | TokenKind::GtEq
+            | TokenKind::Lt
+            | TokenKind::Gt
+            | TokenKind::AmpAmp
+            | TokenKind::PipePipe
+            | TokenKind::Pipe
+            // Member / pipeline / coalesce / range.
+            | TokenKind::Dot
+            | TokenKind::PipeGt
+            | TokenKind::QuestionQuestion
+            | TokenKind::DotDot
+            | TokenKind::DotDotEq
+            // Separators / qualifiers / arrows.
+            | TokenKind::Comma
+            | TokenKind::Colon
+            | TokenKind::ColonColon
+            | TokenKind::FatArrow
+            // A closing bracket finishing a multi-line construct.
+            | TokenKind::RParen
+            | TokenKind::RBrace
+            | TokenKind::RBracket
+            // Postfix-ish / clause keywords that extend the preceding construct.
+            | TokenKind::AsKw
+            | TokenKind::IsKw
+            | TokenKind::ElseKw
+            | TokenKind::ThenKw
+            | TokenKind::InKw
+    )
 }
 
 /// Classify an un-tokenizable slice into the most specific diagnostic available.

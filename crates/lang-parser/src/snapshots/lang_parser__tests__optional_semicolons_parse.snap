@@ -1,0 +1,18 @@
+---
+source: crates/lang-parser/src/lib.rs
+assertion_line: 2988
+expression: "pretty(\"struct P {\\n  x: int\\n  y: int\\n}\\nt = 1 +\\n  2\\nfn f(): int { a = 1; return a }\\necho t\")"
+---
+(program @0..81
+  (struct P [x y] @0..30)
+  (binding t @31..42
+    (binary "+" @35..42
+      (int 1 @35..36)
+      (int 2 @41..42)))
+  (fn f [] @43..74
+    (binding a @57..63
+      (int 1 @61..62))
+    (return @64..72
+      (ident a @71..72)))
+  (echo @75..81
+    (ident t @80..81)))

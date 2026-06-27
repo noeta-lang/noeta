@@ -1,0 +1,44 @@
+// Object-model slice 7: a line end terminates a statement, so `;` is optional. A statement still
+// continues across a newline when it is syntactically incomplete — a trailing operator, a leading
+// operator/`.`/`|>` on the next line, or an open bracket. Type bodies stay newline-separated (no
+// terminator), and `;` remains valid for several statements on one line. This program uses no
+// statement-ending `;` except the one-line `f` body; both backends insert the same synthetic
+// terminators and run identically, so the differential agrees.
+// expect: stdout "6"
+// expect: stdout "12"
+// expect: stdout "positive"
+// expect: stdout "3"
+// expect: exit 0
+struct Point {
+    x: int
+    y: int
+}
+
+fn sign(n: int): string {
+    if n > 0 {
+        return "positive"
+    }
+    else {
+        return "non-positive"
+    }
+}
+
+// one line, explicit `;` between statements
+fn pack(): Point { a = 2; b = 4; return Point { x: a, y: b } }
+
+// trailing-operator continuation
+total = 1 +
+        2 +
+        3
+
+// leading-`|>` continuation
+scaled = [1, 2, 3]
+    |> map(fn(x) => x * 2)
+    |> sum()
+
+p = pack()
+
+echo total
+echo scaled
+echo sign(p.x)
+echo len([p.x, p.y, total])

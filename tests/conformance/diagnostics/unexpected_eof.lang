@@ -1,4 +1,6 @@
-// A statement that runs off the end of input (missing `;`) is E0004.
-// expect: error E0004 at 4:10
+// A *syntactically incomplete* statement that runs off the end of input is E0004. (A merely
+// missing trailing `;` is no longer an error — object-model slice 7 makes a line end / EOF
+// terminate a statement — so the incompleteness here is the dangling `+` with no right operand.)
+// expect: error E0004 at 6:8
 // expect: exit 1
-echo "hi"
+x = 1 +

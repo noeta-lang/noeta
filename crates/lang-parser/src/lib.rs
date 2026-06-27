@@ -1475,11 +1475,34 @@ where
         .ignored()
         .or(just(T::Semicolon).ignored());
 
-    stmt.map(Some)
-        .recover_with(via_parser(skip.map(|()| None)))
-        .repeated()
-        .collect::<Vec<_>>()
-        .map(|stmts| stmts.into_iter().flatten().collect())
+    // An empty statement — a lone `;` — produces no statement. With optional line-end semicolons
+    // (object-model slice 7) the lexer inserts a synthetic `;` after a block-bodied statement
+    // (`fn f() {}`, `if c {}`) when a newline follows, and a user may type a stray one; absorbing it
+    // here (a `None`, like a recovered token) keeps it a silent no-op rather than a parse error.
+    let empty = just(T::Semicolon).to(None);
+
+    choice((
+        empty,
+        stmt.map(Some).recover_with(via_parser(skip.map(|()| None))),
+    ))
+    .repeated()
+    .collect::<Vec<_>>()
+    .map(|stmts| stmts.into_iter().flatten().collect())
+}
+
+/// A statement terminator (object-model slice 7): an explicit or lexer-synthesized `;`, or — making
+/// the `;` before a closing brace or end-of-input optional, Go-style — a **peeked** `}` or EOF that
+/// is left unconsumed. So a one-line `{ echo 1 }` and a trailing statement with no newline both
+/// terminate, while two statements with neither `;` nor newline between them stay an error.
+fn stmt_terminator<'src, I>() -> impl Parser<'src, I, (), Extra<'src>> + Clone
+where
+    I: ValueInput<'src, Token = T, Span = SimpleSpan>,
+{
+    choice((
+        just(T::Semicolon).ignored(),
+        just(T::RBrace).rewind().ignored(),
+        end(),
+    ))
 }
 
 /// The statement grammar (recursive: blocks contain statements).
@@ -1494,7 +1517,7 @@ where
 
         let echo = just(T::EchoKw)
             .ignore_then(expr.clone())
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |value, e| Stmt::Echo {
                 value,
                 span: ctx.to_span(e.span()),
@@ -1505,7 +1528,7 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then_ignore(just(T::Eq))
             .then(expr.clone())
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |(((name, name_span), ty), value), e| Stmt::Binding {
                 mut_decl: true,
                 name,
@@ -1517,19 +1540,19 @@ where
 
         let return_ = just(T::ReturnKw)
             .ignore_then(expr.clone().or_not())
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |value, e| Stmt::Return {
                 value,
                 span: ctx.to_span(e.span()),
             });
 
         let break_ = just(T::BreakKw)
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |_, e| Stmt::Break {
                 span: ctx.to_span(e.span()),
             });
         let continue_ = just(T::ContinueKw)
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |_, e| Stmt::Continue {
                 span: ctx.to_span(e.span()),
             });
@@ -1677,7 +1700,10 @@ where
                 name_span,
                 args: args.unwrap_or_default(),
                 span: ctx.to_span(e.span()),
-            });
+            })
+            // A `#[...]` is a prefix of the declaration it decorates; absorb the synthetic `;` the
+            // lexer inserts when it sits on its own line above the declaration (slice 7).
+            .then_ignore(just(T::Semicolon).repeated());
 
         // `#[...] fn name<T: Bound>(params): Ret { body }` — a declaration (the `name` distinguishes
         // it from the `fn(...) =>` closure expression, which falls through to `expr`). Generic
@@ -1725,7 +1751,7 @@ where
                     .map(|value| (Vec::new(), Some(value))),
                 empty().to((Vec::new(), None)),
             )))
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(
                 move |((attrs, (name, name_span)), (fields, backed_value)), e| VariantDecl {
                     name,
@@ -1803,6 +1829,9 @@ where
             .then(
                 method
                     .clone()
+                    // Absorb the synthetic `;` the lexer inserts between members on separate lines
+                    // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
+                    .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
@@ -1833,6 +1862,8 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(
                 enum_member
+                    // Absorb the synthetic `;` between members on separate lines (slice 7).
+                    .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
@@ -1886,6 +1917,9 @@ where
             .then(
                 method
                     .clone()
+                    // Absorb the synthetic `;` the lexer inserts between members on separate lines
+                    // (object-model slice 7); a type/impl body is newline-separated, not `;`-ended.
+                    .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
@@ -1914,6 +1948,8 @@ where
                     class_impl.clone(),
                     class_field.clone(),
                 ))
+                // Absorb the synthetic `;` between members on separate lines (slice 7).
+                .then_ignore(just(T::Semicolon).repeated())
                 .repeated()
                 .collect::<Vec<_>>()
                 .delimited_by(just(T::LBrace), just(T::RBrace)),
@@ -1957,6 +1993,8 @@ where
             .then(type_params.clone())
             .then(
                 choice((class_method, class_impl, class_destructor, class_field))
+                    // Absorb the synthetic `;` between members on separate lines (slice 7).
+                    .then_ignore(just(T::Semicolon).repeated())
                     .repeated()
                     .collect::<Vec<_>>()
                     .delimited_by(just(T::LBrace), just(T::RBrace)),
@@ -2009,7 +2047,7 @@ where
                     .repeated()
                     .collect::<Vec<_>>(),
             )
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |((first, _), rest), e| {
                 let mut path = vec![first];
                 path.extend(rest.into_iter().map(|(name, _)| name));
@@ -2036,7 +2074,7 @@ where
         let use_decl = just(T::UseKw)
             .ignore_then(id.clone())
             .then(use_tail.repeated().collect::<Vec<_>>())
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |((first, first_span), tails), e| {
                 build_use(first, first_span, tails, ctx.to_span(e.span()))
             });
@@ -2060,7 +2098,7 @@ where
             .clone()
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(assign_op.then(expr.clone()).or_not())
-            .then_ignore(just(T::Semicolon))
+            .then_ignore(stmt_terminator())
             .map_with(move |((lhs, ty), tail), e| {
                 let span = ctx.to_span(e.span());
                 match tail {
@@ -2293,7 +2331,10 @@ where
                 name,
                 name_span,
                 args,
-            });
+            })
+            // A `@derive(...)`/`@attribute`/`@role`/`@semantic` directive prefixes a type decl;
+            // absorb the synthetic `;` when it sits on its own line above the decl (slice 7).
+            .then_ignore(just(T::Semicolon).repeated());
 
         // A `#[...]` data attribute in decorator position, wrapping the shared `attr_decl` (defined
         // above `fn_decl`) so type declarations and function declarations parse the same attribute.
@@ -2356,10 +2397,10 @@ where
         let tier_block = just(T::At)
             .ignore_then(id.clone())
             .then(
-                stmt.clone()
-                    .repeated()
-                    .collect::<Vec<_>>()
-                    .delimited_by(just(T::LBrace), just(T::RBrace)),
+                // A tier block's body is a statement list, so it uses the same recovering list as a
+                // `{ }` block — which absorbs the synthetic `;` the lexer inserts between members on
+                // separate lines (slice 7) and recovers from errors.
+                recovering_list(stmt.clone()).delimited_by(just(T::LBrace), just(T::RBrace)),
             )
             .map_with(move |((tier, tier_span), items), e| Stmt::TierBlock {
                 tier,
@@ -2939,6 +2980,17 @@ mod tests {
     }
 
     #[test]
+    fn optional_semicolons_parse() {
+        // Object-model slice 7: a newline terminates a statement (no `;` needed); a trailing
+        // operator continues the line; a multi-line type body stays newline-separated; and an
+        // explicit `;` still separates statements on one line. The AST is identical to the
+        // fully-`;`-terminated spelling.
+        insta::assert_snapshot!(pretty(
+            "struct P {\n  x: int\n  y: int\n}\nt = 1 +\n  2\nfn f(): int { a = 1; return a }\necho t"
+        ));
+    }
+
+    #[test]
     fn tier_block_parses() {
         // A `@<tier> { items }` dev-tier block (object-model slice 6) parses as a standalone block
         // statement carrying its declarations. It coexists with the `@derive(...)` decorator form:
@@ -3101,7 +3153,10 @@ mod tests {
 
     #[test]
     fn reports_unexpected_end_of_input() {
-        let parsed = parse_str("echo \"hi\"");
+        // A *syntactically incomplete* statement that runs out of input. (A merely missing trailing
+        // `;` is no longer an error — slice 7 makes line-end/EOF terminate a statement — so the
+        // incompleteness here is the dangling binary operator with no right operand.)
+        let parsed = parse_str("x = 1 +");
         assert_eq!(
             parsed.diagnostics[0].code,
             DiagnosticCode::UnexpectedEndOfInput

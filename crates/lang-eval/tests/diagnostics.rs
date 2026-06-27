@@ -46,7 +46,7 @@ fn diagnostic_gallery() {
         ("E0001 unexpected character", "echo $;"),
         ("E0002 unterminated string", "echo \"oops;"),
         ("E0003 unexpected token", "echo ;"),
-        ("E0004 unexpected end of input", "echo \"hi\""),
+        ("E0004 unexpected end of input", "x = 1 +"),
         ("E0005 unknown name", "echo missing;"),
         ("E0006 immutable assignment", "x = 1;\nx = 2;"),
         ("E0007 type mismatch", "echo 1 + true;"),
