@@ -77,9 +77,7 @@ use lang_types::{BuiltinTrait, Type};
 mod stdlib;
 pub mod tiers;
 
-pub use tiers::{Activated, DocBlock, TierFn, activate_tiers, collect_docs};
-
-use tiers::BUILTIN_TIERS;
+pub use tiers::{Activated, BUILTIN_TIERS, DocBlock, TierFn, activate_tiers, collect_docs};
 
 /// The full output of one checker run: the diagnostics **and** the resolved-type map both
 /// backends need. The two were once harvested by separate public entry points ([`check`] and

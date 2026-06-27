@@ -24,6 +24,8 @@ use lang_lexer::{TokenKind, lex};
 use lang_parser::parse;
 use lang_span::{Source, SourceId, SourceMap, Span};
 
+mod manifest;
+
 #[derive(Parser)]
 #[command(name = "lang", version, about = "The lang toolchain (working title)")]
 struct Cli {
@@ -39,9 +41,13 @@ enum Command {
         file: PathBuf,
         /// Activate a dev-tier for this run, e.g. `--tier debug` to compile in `@debug { … }`
         /// blocks (object-model slice 6). Repeatable. Without it, every tier block is stripped.
-        /// (The interim active-set interface until build profiles land.)
+        /// (The interim active-set interface, complementary to `--profile`.)
         #[arg(long)]
         tier: Vec<String>,
+        /// Activate the tiers a build profile makes live (from `lang.toml`), e.g.
+        /// `--profile dev`. Unioned with any `--tier`.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
@@ -53,6 +59,10 @@ enum Command {
         /// Number of tests to run concurrently (default: the machine's parallelism).
         #[arg(long, short)]
         jobs: Option<usize>,
+        /// Only run when the `test` tier is live in this `lang.toml` build profile; otherwise the
+        /// runner does nothing.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
     Bench {
@@ -62,11 +72,19 @@ enum Command {
         /// `@bench(iterations: N)` directive. Without either, a default count is used.
         #[arg(long)]
         iterations: Option<u64>,
+        /// Only run when the `bench` tier is live in this `lang.toml` build profile; otherwise the
+        /// runner does nothing.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Extract a program's `@doc { … }` text blocks to stdout (object-model slice 6).
     Doc {
         /// Path to a `.lang` file.
         file: PathBuf,
+        /// Only extract when the `doc` tier is live in this `lang.toml` build profile; otherwise
+        /// nothing is emitted.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Start an interactive REPL.
     Repl,
@@ -74,15 +92,41 @@ enum Command {
 
 fn main() -> ExitCode {
     match Cli::parse().command {
-        Command::Run { file, tier } => cmd_run(&file, &tier),
+        Command::Run {
+            file,
+            tier,
+            profile,
+        } => cmd_run(&file, &tier, &profile),
         Command::Test {
             file,
             fail_fast,
             jobs,
-        } => cmd_test(&file, fail_fast, jobs),
-        Command::Bench { file, iterations } => cmd_bench(&file, iterations),
-        Command::Doc { file } => cmd_doc(&file),
+            profile,
+        } => cmd_test(&file, fail_fast, jobs, &profile),
+        Command::Bench {
+            file,
+            iterations,
+            profile,
+        } => cmd_bench(&file, iterations, &profile),
+        Command::Doc { file, profile } => cmd_doc(&file, &profile),
         Command::Repl => cmd_repl(),
+    }
+}
+
+/// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was
+/// given (the runner always runs); `Ok(false)` when a profile was given but does not make `tier`
+/// live (the runner should no-op); `Err` on a profile-resolution failure (a fatal error the caller
+/// prints).
+fn tier_active_in_profile(
+    entry: &std::path::Path,
+    profile: &Option<String>,
+    tier: &str,
+) -> Result<bool, String> {
+    match profile {
+        None => Ok(true),
+        Some(name) => Ok(manifest::resolve_active_tiers(entry, name)?
+            .iter()
+            .any(|t| t == tier)),
     }
 }
 
@@ -166,7 +210,25 @@ fn emit_diagnostics_mapped<'a>(
     }
 }
 
-fn cmd_run(file: &std::path::Path, tiers: &[String]) -> ExitCode {
+fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+    // The active tier set is the union of any `--profile`'s live tiers (from `lang.toml`) and any
+    // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
+    let mut active: Vec<String> = match profile {
+        Some(name) => match manifest::resolve_active_tiers(file, name) {
+            Ok(tiers) => tiers,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        },
+        None => Vec::new(),
+    };
+    for tier in tiers {
+        if !active.contains(tier) {
+            active.push(tier.clone());
+        }
+    }
+
     // Load + link the program: sibling `.lang` modules the entry `use`s are resolved and merged
     // (M1.9); a lone file with no sibling modules links to exactly itself.
     match lang_loader::load(file) {
@@ -175,15 +237,15 @@ fn cmd_run(file: &std::path::Path, tiers: &[String]) -> ExitCode {
             ExitCode::from(2)
         }
         Ok(Ok(linked)) => {
-            // With `--tier`, activate those dev-tiers: inline their `@<tier> { … }` blocks (e.g.
-            // `@debug`) wherever they appear before checking/running. Without it, the program is run
+            // Activate the resolved dev-tiers: inline their `@<tier> { … }` blocks (e.g. `@debug`)
+            // wherever they appear before checking/running. With no active tiers the program is run
             // as-is and every tier block is stripped at lowering (the default). Activation borrows
             // nothing from the run, so an owned activated program is produced only when needed.
-            if tiers.is_empty() {
+            if active.is_empty() {
                 return exit_code(run_program(&linked.program, &linked.sources));
             }
-            let active: Vec<&str> = tiers.iter().map(String::as_str).collect();
-            let activated = lang_check::activate_tiers(&linked.program, &active);
+            let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
+            let activated = lang_check::activate_tiers(&linked.program, &active_refs);
             if !activated.diagnostics.is_empty() {
                 emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
                 return ExitCode::from(1);
@@ -196,6 +258,27 @@ fn cmd_run(file: &std::path::Path, tiers: &[String]) -> ExitCode {
                 let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
             }
             ExitCode::from(1)
+        }
+    }
+}
+
+/// Gate a tier runner on `--profile`: if a profile was given and does not make `tier` live, print a
+/// note and return the success exit code (the runner no-ops); on a resolution failure, print it and
+/// return the error code. `None` means "proceed" (no profile gate). The caller runs its body only
+/// when this returns `None`.
+fn profile_gate(entry: &std::path::Path, profile: &Option<String>, tier: &str) -> Option<ExitCode> {
+    match tier_active_in_profile(entry, profile, tier) {
+        Ok(true) => None,
+        Ok(false) => {
+            println!(
+                "tier `{tier}` is not active in profile `{}`",
+                profile.as_deref().unwrap_or_default()
+            );
+            Some(ExitCode::SUCCESS)
+        }
+        Err(err) => {
+            eprintln!("lang: {err}");
+            Some(ExitCode::from(1))
         }
     }
 }
@@ -214,7 +297,15 @@ struct TestOutcome {
 /// of them run even after a failure; `--fail-fast` stops at the first failure. A test fails when its
 /// fn aborts — a false `assert`/`panic` (or any runtime error) — and passes when it returns normally.
 /// The program's own top-level "main" effects are not run: `lang test` runs the tests, not the file.
-fn cmd_test(file: &std::path::Path, fail_fast: bool, jobs: Option<usize>) -> ExitCode {
+fn cmd_test(
+    file: &std::path::Path,
+    fail_fast: bool,
+    jobs: Option<usize>,
+    profile: &Option<String>,
+) -> ExitCode {
+    if let Some(code) = profile_gate(file, profile, "test") {
+        return code;
+    }
     let linked = match lang_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
@@ -466,7 +557,14 @@ const DEFAULT_BENCH_ITERATIONS: u64 = 200;
 /// the fixed per-run overhead (runtime startup, global/setup evaluation, IR lowering — all identical
 /// between the two runs). N comes from `--iterations`, else the per-bench `@bench(iterations: N)`
 /// directive, else [`DEFAULT_BENCH_ITERATIONS`].
-fn cmd_bench(file: &std::path::Path, iterations_override: Option<u64>) -> ExitCode {
+fn cmd_bench(
+    file: &std::path::Path,
+    iterations_override: Option<u64>,
+    profile: &Option<String>,
+) -> ExitCode {
+    if let Some(code) = profile_gate(file, profile, "bench") {
+        return code;
+    }
     let linked = match lang_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
@@ -647,7 +745,10 @@ fn fmt_per_iter(ns: f64) -> String {
 /// HTML-comment header noting its source location — valid markdown that renders to nothing. The
 /// program is not type-checked or run; doc extraction works on a parse alone, so docs can be pulled
 /// from work-in-progress code.
-fn cmd_doc(file: &std::path::Path) -> ExitCode {
+fn cmd_doc(file: &std::path::Path, profile: &Option<String>) -> ExitCode {
+    if let Some(code) = profile_gate(file, profile, "doc") {
+        return code;
+    }
     let linked = match lang_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());

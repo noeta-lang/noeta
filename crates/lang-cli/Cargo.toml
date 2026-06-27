@@ -24,6 +24,7 @@ lang-ir-passes = { workspace = true }
 lang-loader = { workspace = true }
 lang-runtime = { workspace = true }
 clap = { workspace = true }
+toml = { workspace = true }
 
 [dev-dependencies]
 assert_cmd = { workspace = true }
