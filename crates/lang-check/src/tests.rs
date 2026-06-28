@@ -1721,6 +1721,52 @@ fn indexed_method_call_is_not_fusable() {
     assert_eq!(n, 0);
 }
 
+// --- P-PACK 2.6 category B: `map(...)` packed-result site channel (`Checked::map_packed_sites`) ---
+
+/// Parse + check `text` and return how many `map(...)` calls produce a packed result.
+fn map_packed_count(text: &str) -> usize {
+    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    super::check_all(&parsed.program).map_packed_sites.len()
+}
+
+#[test]
+fn map_to_packed_struct_is_recorded() {
+    let n = map_packed_count(
+        "@packed struct Vec3 { x: float; y: float; z: float }\n\
+         ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
+         echo map(ps, fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z }).count()\n",
+    );
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn map_to_primitive_is_not_recorded() {
+    // `map(ps, fn(v) => v.x)` produces `List<float>` — not a packed struct, so it stays boxed.
+    let n = map_packed_count(
+        "@packed struct Vec3 { x: float; y: float; z: float }\n\
+         ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
+         echo map(ps, fn(v) => v.x).count()\n",
+    );
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn map_to_non_packed_struct_is_not_recorded() {
+    let n = map_packed_count(
+        "struct P { x: int; y: int }\n\
+         ps = [P { x: 1, y: 2 }]\n\
+         echo map(ps, fn(v) => P { x: v.x + 1, y: v.y }).count()\n",
+    );
+    assert_eq!(n, 0);
+}
+
 #[test]
 fn plain_field_read_is_not_fusable() {
     // A field read whose receiver is not an index expression is untouched.

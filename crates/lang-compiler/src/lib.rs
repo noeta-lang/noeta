@@ -102,6 +102,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         program,
         checked.type_of_sites,
         checked.packed_list_sites,
+        checked.map_packed_sites,
         checked.index_field_sites,
         &checked.destructor_relevance,
     )
@@ -127,6 +128,7 @@ pub fn compile_with_sites(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: HashSet<Span>,
     relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
@@ -134,6 +136,7 @@ pub fn compile_with_sites(
         program,
         type_of_sites,
         packed_list_sites,
+        map_packed_sites,
         index_field_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
@@ -144,6 +147,7 @@ fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: HashSet<Span>,
     relevance: Option<lang_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
@@ -199,10 +203,23 @@ fn compile_inner(
         fc.into_chunk(0, Vec::new())
     };
     module.protos[0] = main;
+    // Intern each packed `map(...)` result layout (P-PACK 2.6 category B) and pair it with the call
+    // span the VM's `map` builtin keys on. Sorted by span first so schema interning order — and thus
+    // the `packed_schemas` table — is deterministic regardless of the `HashMap`'s iteration order.
+    let map_packed_sites = {
+        let mut entries: Vec<(Span, &lang_ast::reflect::PackedLayout)> =
+            map_packed_sites.iter().map(|(s, l)| (*s, l)).collect();
+        entries.sort_by_key(|(s, _)| (s.source, s.start, s.end));
+        entries
+            .into_iter()
+            .map(|(span, layout)| (span, module.intern_packed_schema(layout)))
+            .collect()
+    };
     Ok(Module {
         protos: module.protos,
         shapes: module.shapes,
         packed_schemas: module.packed_schemas,
+        map_packed_sites,
         methods: module.methods,
         destructors: module.destructors,
         field_defaults: module.field_defaults,

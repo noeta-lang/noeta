@@ -131,6 +131,13 @@ fn packed_producers_keep_the_list_flat() {
         ("slice", "data.slice(0, data.count())"),
         ("filter", "filter(data, fn(v) => v.x > 0.0)"),
         ("set", "data.set(0, Vec3 { x: 9.0, y: 9.0, z: 9.0 })"),
+        // `map` to a packed struct keeps the result flat too (P-PACK 2.6 category B): each mapped
+        // element is packed straight into the buffer, so only one input + one output element are live
+        // at a time and the held result is a flat buffer.
+        (
+            "map",
+            "map(data, fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z })",
+        ),
         // `concat` (`~`) also stays flat (see `packed_set_concat.lang` + the `packed_concat` /
         // `packed_extend_in_place` miri tests); it is omitted here because its result-size growth and
         // `Vec` capacity doubling make the residency ratio too noisy for this half-of-boxed guard.

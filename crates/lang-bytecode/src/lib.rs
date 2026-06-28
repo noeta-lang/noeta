@@ -822,6 +822,11 @@ pub struct Module {
     /// The packed-list element layouts (P-PACK 2.4), referenced by index from
     /// [`Op::PackedListNew`]. Empty for a program with no `List<packed>` literal.
     pub packed_schemas: Vec<PackedSchemaDef>,
+    /// `map(...)` call sites whose result element type is packed (P-PACK 2.6 category B): the call's
+    /// `Span` paired with the index (into [`Self::packed_schemas`]) of the result element layout. The
+    /// VM's `map` builtin looks up its call span here to build a flat result. Empty for a program with
+    /// no such `map`.
+    pub map_packed_sites: Vec<(Span, u32)>,
     pub methods: Vec<MethodEntry>,
     /// `(type_name, proto)` for each class with a `destruct` block — the runtime-invoked
     /// destructor, compiled like a parameterless method (receiver in register 0). The VM runs

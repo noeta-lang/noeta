@@ -99,6 +99,10 @@ pub struct Checked {
     pub type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// `map(...)` call spans whose result element type is packed → the result element's layout. The
+    /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
+    /// `RunResult`, so the eval reference may ignore it and stay boxed.
+    pub map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// Member-access spans (`list[i].field`) lowering fuses into a single `Rvalue::IndexField`, so a
     /// packed list element's field is read without materializing the element (P-PACK 2.5+). A pure
     /// function of the program, like the other site maps; the fusion is invisible to `RunResult`.
@@ -125,6 +129,7 @@ pub fn check_all(program: &Program) -> Checked {
         diagnostics: checker.diags,
         type_of_sites: checker.type_of_sites,
         packed_list_sites: checker.packed_list_sites,
+        map_packed_sites: checker.map_packed_sites,
         index_field_sites: checker.index_field_sites,
         destructor_relevance: checker.relevance,
     }
@@ -468,6 +473,11 @@ struct Checker {
     /// two backends pick the same representation by construction (the flat layout stays invisible to
     /// `RunResult`).
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
+    /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
+    /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
+    /// site maps it is a pure function of the program, invisible to `RunResult`.
+    map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// `Expr::Index` spans whose receiver typed as a built-in `List` — recorded as each index is
     /// synthesized so that [`Checker::synth_member`] can recognize a `list[i].field` read without
     /// re-synthesizing (and re-diagnosing) the inner receiver. Internal scratch, not exported.
@@ -2457,9 +2467,11 @@ impl Checker {
                 t
             }
             Expr::Binary { op, lhs, rhs, span } => self.synth_binary(*op, lhs, rhs, *span, env),
-            Expr::Call { callee, args, .. } => {
+            Expr::Call {
+                callee, args, span, ..
+            } => {
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
-                self.synth_call(callee, &arg_types, env)
+                self.synth_call(callee, &arg_types, *span, env)
             }
             Expr::Closure {
                 params,
@@ -3117,9 +3129,11 @@ impl Checker {
             Expr::Call { callee, args, .. } => {
                 let mut arg_types = vec![piped];
                 arg_types.extend(args.iter().map(|a| self.synth(a, env)));
-                self.synth_call(callee, &arg_types, env)
+                self.synth_call(callee, &arg_types, right.span(), env)
             }
-            Expr::Ident { .. } | Expr::Member { .. } => self.synth_call(right, &[piped], env),
+            Expr::Ident { .. } | Expr::Member { .. } => {
+                self.synth_call(right, &[piped], right.span(), env)
+            }
             other => {
                 self.synth(other, env);
                 Type::Unknown
@@ -3127,7 +3141,7 @@ impl Checker {
         }
     }
 
-    fn synth_call(&mut self, callee: &Expr, args: &[Type], env: &mut Env) -> Type {
+    fn synth_call(&mut self, callee: &Expr, args: &[Type], call_span: Span, env: &mut Env) -> Type {
         let span = callee.span();
         match callee {
             // A plain `name(args)` call: a user function, else a prelude free function.
@@ -3147,7 +3161,16 @@ impl Checker {
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
                 // arguments are not arity-checked here.
-                stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
+                let result = stdlib::prelude_return(name, args).unwrap_or(Type::Unknown);
+                // A `map(list, fn)` whose result element type is a packed struct: record the call so
+                // the VM builds a flat result instead of N boxed objects (P-PACK 2.6 category B). Keyed
+                // by the whole-call span — the span the lowered `Rvalue::Call`/`Op::Call` carries.
+                if name == "map"
+                    && let Type::List(elem) = &result
+                {
+                    self.note_map_packed(elem, call_span);
+                }
+                result
             }
             Expr::Member { receiver, name, .. } => {
                 // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case
@@ -3463,6 +3486,14 @@ impl Checker {
     fn note_packed_list(&mut self, elem: &Type, span: Span) {
         if let Some(layout) = self.packed_layout(elem) {
             self.packed_list_sites.insert(span, layout);
+        }
+    }
+
+    /// Record a `map(...)` call site at `span` if its result element type `elem` is a packed struct
+    /// (P-PACK 2.6 category B) — the span the VM's `map` builtin keys on to build a flat result.
+    fn note_map_packed(&mut self, elem: &Type, span: Span) {
+        if let Some(layout) = self.packed_layout(elem) {
+            self.map_packed_sites.insert(span, layout);
         }
     }
 

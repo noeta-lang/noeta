@@ -176,6 +176,10 @@ struct Vm<'m> {
     /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
     /// elements that share shape identity with directly-constructed instances.
     packed_schemas: Vec<Rc<lang_object::PackedSchema>>,
+    /// `map(...)` call span → the result element's `Rc<PackedSchema>` (P-PACK 2.6 category B), resolved
+    /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
+    /// a flat result instead of N boxed objects.
+    map_packed: HashMap<Span, Rc<lang_object::PackedSchema>>,
     /// Instance-method dispatch: `(type_name, method)` to the method's prototype index.
     methods: HashMap<(String, String), u32>,
     /// `type_name` to its `destruct` prototype, for classes with a destructor.
@@ -326,10 +330,17 @@ fn execute_with_collector(
             word_count: def.word_count as usize,
         }));
     }
+    // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
+    let map_packed: HashMap<Span, Rc<lang_object::PackedSchema>> = module
+        .map_packed_sites
+        .iter()
+        .map(|(span, idx)| (*span, Rc::clone(&packed_schemas[*idx as usize])))
+        .collect();
     let mut vm = Vm {
         module,
         shapes,
         packed_schemas,
+        map_packed,
         methods,
         destructors,
         field_defaults,
@@ -3964,6 +3975,61 @@ impl<'m> Vm<'m> {
                         span,
                         format!("`map` expects a list, found {}", args[0].type_name()),
                     ));
+                }
+                // A `map(...)` whose result element type is packed (the checker marked this call span)
+                // builds a flat result directly (P-PACK 2.6 category B): each mapped element is packed
+                // into the buffer and its boxed object freed, so the result keeps the dense layout (and
+                // downstream `[i].field` fusion) instead of materializing N boxed objects. A packed
+                // input is read one element at a time (`packed_get`), so only one input element is live
+                // at once too.
+                if let Some(schema) = self.map_packed.get(&span).cloned() {
+                    let input = args[0];
+                    let n = input.list_len().expect("list");
+                    let packed_input = input.is_packed_list();
+                    let func = args[1];
+                    let flat = Value::packed_list(schema, Vec::new()); // owned, refcount 1
+                    let mut boxed: Option<Vec<Value>> = None;
+                    for i in 0..n {
+                        let element = if packed_input {
+                            input.packed_get(i)
+                        } else {
+                            let e = input.list_get(i).expect("in bounds");
+                            retain(e);
+                            e
+                        };
+                        let out = match self.call_value(func, vec![element], span) {
+                            Ok(v) => v,
+                            Err(abort) => {
+                                flat.release();
+                                if let Some(b) = boxed {
+                                    for v in b {
+                                        release(v);
+                                    }
+                                }
+                                return Err(abort);
+                            }
+                        };
+                        if let Some(b) = &mut boxed {
+                            b.push(out); // already in boxed mode
+                        } else if flat.packed_push(out) {
+                            release(out); // primitives copied into the buffer
+                        } else {
+                            // The mapped element did not pack (unreachable for a checker-marked site):
+                            // demote the accumulated flat elements to a boxed vec, then continue boxed.
+                            let count = flat.list_len().expect("packed");
+                            let mut b = Vec::with_capacity(n);
+                            for j in 0..count {
+                                b.push(flat.packed_get(j));
+                            }
+                            flat.release();
+                            b.push(out); // owned (not copied) — transferred into the vec
+                            boxed = Some(b);
+                        }
+                    }
+                    return Ok(match boxed {
+                        Some(b) => Value::list(b),
+                        None => flat,
+                    });
                 }
                 // Demote a packed list to a temporary boxed one (P-PACK 2.4); its elements are
                 // borrowed for the per-element calls and the temporary is released afterward.
