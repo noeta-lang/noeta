@@ -313,6 +313,25 @@ impl Value {
         Some(decode_packed_field(&kind, &slice, 0))
     }
 
+    /// If this is a packed `List<Vec3<f32>>` — a flat buffer whose element schema is exactly three
+    /// `f32` fields — return its shared schema and a copy of its byte buffer (the input to the bulk
+    /// `vec` kernels, P-PACK 4.2). `None` for a boxed list or any other element schema, so the caller
+    /// takes the scalar fallback.
+    pub fn packed_vec3_data(self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        if !self.is_packed_list() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, bytes }
+                if schema.fields.len() == 3
+                    && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
+            {
+                Some((Rc::clone(schema), bytes.clone()))
+            }
+            _ => None,
+        })
+    }
+
     /// Build a new flat packed list from selected element `indices` of this one, copying each
     /// selected element's word-block verbatim — no per-element materialization (P-PACK 2.6). The
     /// schema is shared (an `Rc` clone). This keeps a `List<packed>` *flat* through the selection

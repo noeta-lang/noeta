@@ -51,9 +51,103 @@ pub fn normalize(a: [f32; 3]) -> [f32; 3] {
     }
 }
 
+// --- Bulk kernels over a packed `List<Vec3<f32>>` byte buffer (P-PACK Phase 4.2) ---
+//
+// A packed `List<Vec3<f32>>` is a contiguous little-endian `f32` byte buffer (12 bytes/element).
+// These kernels read it through `f32::from_le_bytes` and write results the same way — on a
+// little-endian target the byte shuffles fold away, leaving a tight `f32` loop LLVM autovectorizes
+// under `-O`. Both backends store this layout identically, so they call these directly and agree by
+// construction. (No `unsafe`, no alignment assumption, no nightly `std::simd`.)
+
+/// Decode a packed f32 byte buffer into an aligned `Vec<f32>` — so the arithmetic loops below run on
+/// a contiguous, aligned `[f32]` (cleanly autovectorized) rather than over unaligned bytes.
+fn decode(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
+}
+
+/// Encode an `f32` slice back to a little-endian byte buffer (the packed-list representation).
+fn encode(floats: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(floats.len() * 4);
+    for &f in floats {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
+}
+
+/// Element-wise binary op over two equal-length packed f32 buffers, returning a new buffer. Used for
+/// `add_all`/`sub_all`: a Vec3 list is `[x0,y0,z0, x1,…]`, so a flat element-wise `f32` op over the
+/// whole buffer *is* the component-wise Vec3 op. The two operands must be the same length (same list
+/// length and element width); the caller guarantees it.
+fn zip_buffers(a: &[u8], b: &[u8], op: impl Fn(f32, f32) -> f32) -> Vec<u8> {
+    let (a, b) = (decode(a), decode(b));
+    let out: Vec<f32> = a.iter().zip(&b).map(|(&x, &y)| op(x, y)).collect();
+    encode(&out)
+}
+
+/// `add_all`: component-wise sum of two packed Vec3 lists.
+pub fn add_buffers(a: &[u8], b: &[u8]) -> Vec<u8> {
+    zip_buffers(a, b, |x, y| x + y)
+}
+
+/// `sub_all`: component-wise difference of two packed Vec3 lists.
+pub fn sub_buffers(a: &[u8], b: &[u8]) -> Vec<u8> {
+    zip_buffers(a, b, |x, y| x - y)
+}
+
+/// `scale_all`: scale every component of a packed Vec3 list by `s`.
+pub fn scale_buffer(a: &[u8], s: f32) -> Vec<u8> {
+    let out: Vec<f32> = decode(a).iter().map(|&x| x * s).collect();
+    encode(&out)
+}
+
+/// `dot_all`: the per-element dot product of two packed Vec3 lists → one `f32` per element.
+pub fn dot_buffers(a: &[u8], b: &[u8]) -> Vec<f32> {
+    let (a, b) = (decode(a), decode(b));
+    a.chunks_exact(3)
+        .zip(b.chunks_exact(3))
+        .map(|(p, q)| p[0] * q[0] + p[1] * q[1] + p[2] * q[2])
+        .collect()
+}
+
+/// `length_all`: the Euclidean length of each element of a packed Vec3 list → one `f32` per element.
+pub fn length_buffer(a: &[u8]) -> Vec<f32> {
+    decode(a)
+        .chunks_exact(3)
+        .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn buf(floats: &[f32]) -> Vec<u8> {
+        encode(floats)
+    }
+
+    #[test]
+    fn bulk_kernels_match_scalar() {
+        let a = buf(&[1.0, 2.0, 3.0, 4.0, 5.0, 6.0]); // two Vec3s
+        let b = buf(&[10.0, 20.0, 30.0, 40.0, 50.0, 60.0]);
+        assert_eq!(
+            decode(&add_buffers(&a, &b)),
+            [11.0, 22.0, 33.0, 44.0, 55.0, 66.0]
+        );
+        assert_eq!(
+            decode(&sub_buffers(&b, &a)),
+            [9.0, 18.0, 27.0, 36.0, 45.0, 54.0]
+        );
+        assert_eq!(
+            decode(&scale_buffer(&a, 2.0)),
+            [2.0, 4.0, 6.0, 8.0, 10.0, 12.0]
+        );
+        // dot: [1·10+2·20+3·30, 4·40+5·50+6·60] = [140, 770]
+        assert_eq!(dot_buffers(&a, &b), [140.0, 770.0]);
+        assert_eq!(length_buffer(&buf(&[3.0, 4.0, 0.0])), [5.0]);
+    }
 
     #[test]
     fn ops_match_hand_computation() {

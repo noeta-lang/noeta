@@ -872,6 +872,81 @@ impl<'m> Vm<'m> {
                 let a = self.read_vec3(func, args[0], span)?;
                 Ok(Value::f32(vec3::length(a)))
             }
+            // --- Bulk kernels over `List<Vec3<f32>>` (P-PACK 4.2). Packed inputs take the flat
+            // autovectorized buffer path; a boxed/demoted operand falls back to a scalar loop. ---
+            "add_all" | "sub_all" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                self.expect_list(func, args[0], span)?;
+                self.expect_list(func, args[1], span)?;
+                if let (Some((schema, a)), Some((_, b))) =
+                    (args[0].packed_vec3_data(), args[1].packed_vec3_data())
+                {
+                    if a.len() != b.len() {
+                        return Err(self.vec_len_error(func, span));
+                    }
+                    let out = if func == "add_all" {
+                        vec3::add_buffers(&a, &b)
+                    } else {
+                        vec3::sub_buffers(&a, &b)
+                    };
+                    return Ok(Value::packed_list(schema, out));
+                }
+                self.vec_bulk_binary_scalar(func, args[0], args[1], span)
+            }
+            "scale_all" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                self.expect_list(func, args[0], span)?;
+                let s = self.read_scalar_f32(func, args[1], span)?;
+                if let Some((schema, a)) = args[0].packed_vec3_data() {
+                    return Ok(Value::packed_list(schema, vec3::scale_buffer(&a, s)));
+                }
+                // Scalar fallback: materialize, scale each element, rebuild a boxed list.
+                let xb = args[0].realize_list();
+                let result = self.vec_map_scalar(func, xb, span, |c| vec3::scale(c, s));
+                xb.release();
+                result
+            }
+            "dot_all" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                self.expect_list(func, args[0], span)?;
+                self.expect_list(func, args[1], span)?;
+                if let (Some((_, a)), Some((_, b))) =
+                    (args[0].packed_vec3_data(), args[1].packed_vec3_data())
+                {
+                    if a.len() != b.len() {
+                        return Err(self.vec_len_error(func, span));
+                    }
+                    let scalars = vec3::dot_buffers(&a, &b);
+                    return Ok(self.f32_list(&scalars));
+                }
+                self.vec_bulk_dot_scalar(func, args[0], args[1], span)
+            }
+            "length_all" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                self.expect_list(func, args[0], span)?;
+                if let Some((_, a)) = args[0].packed_vec3_data() {
+                    let scalars = vec3::length_buffer(&a);
+                    return Ok(self.f32_list(&scalars));
+                }
+                let xb = args[0].realize_list();
+                let n = xb.list_len().unwrap_or(0);
+                let mut scalars = Vec::with_capacity(n);
+                let mut err = None;
+                for i in 0..n {
+                    match self.read_vec3(func, xb.list_get(i).expect("in bounds"), span) {
+                        Ok(c) => scalars.push(vec3::length(c)),
+                        Err(e) => {
+                            err = Some(e);
+                            break;
+                        }
+                    }
+                }
+                xb.release();
+                match err {
+                    Some(e) => Err(e),
+                    None => Ok(self.f32_list(&scalars)),
+                }
+            }
             _ => {
                 let error = lang_stdlib::no_function_error("vec", func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
@@ -922,6 +997,117 @@ impl<'m> Vm<'m> {
             shape,
             vec![Value::f32(c[0]), Value::f32(c[1]), Value::f32(c[2])],
         )
+    }
+
+    /// A boxed `List<f32>` from scalar results (the output of `dot_all`/`length_all`). Each `f32` is
+    /// an immediate, so the list owns no heap references.
+    fn f32_list(&self, scalars: &[f32]) -> Value {
+        Value::list(scalars.iter().map(|&f| Value::f32(f)).collect())
+    }
+
+    fn vec_len_error(&mut self, func: &str, span: Span) -> Abort {
+        self.error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!("`vec.{func}` expects two lists of equal length"),
+        )
+    }
+
+    /// Guard that `v` is a list (the bulk `vec.*_all` kernels operate on `List<Vec3>`); errors before
+    /// any `realize_list`, which assumes a list receiver.
+    fn expect_list(&mut self, func: &str, v: Value, span: Span) -> Result<(), Abort> {
+        if v.is_list() {
+            Ok(())
+        } else {
+            Err(self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`vec.{func}` expects a list, found {}", v.type_name()),
+            ))
+        }
+    }
+
+    /// Scalar fallback for `add_all`/`sub_all` on boxed/demoted operands: materialize both lists,
+    /// apply the component-wise op per element, and rebuild a boxed `List<Vec3>`.
+    fn vec_bulk_binary_scalar(
+        &mut self,
+        func: &str,
+        xs: Value,
+        ys: Value,
+        span: Span,
+    ) -> Result<Value, Abort> {
+        use lang_stdlib::vec3;
+        let xb = xs.realize_list();
+        let yb = ys.realize_list();
+        let result = (|| {
+            let n = xb.list_len().unwrap_or(0);
+            if yb.list_len() != Some(n) {
+                return Err(self.vec_len_error(func, span));
+            }
+            let mut out = Vec::with_capacity(n);
+            for i in 0..n {
+                let a = self.read_vec3(func, xb.list_get(i).expect("in bounds"), span)?;
+                let b = self.read_vec3(func, yb.list_get(i).expect("in bounds"), span)?;
+                let c = if func == "add_all" {
+                    vec3::add(a, b)
+                } else {
+                    vec3::sub(a, b)
+                };
+                out.push(self.build_vec3(xb.list_get(i).expect("in bounds"), c));
+            }
+            Ok(Value::list(out))
+        })();
+        xb.release();
+        yb.release();
+        result
+    }
+
+    /// Scalar fallback for `dot_all`: materialize both lists and reduce each element pair to an `f32`.
+    fn vec_bulk_dot_scalar(
+        &mut self,
+        func: &str,
+        xs: Value,
+        ys: Value,
+        span: Span,
+    ) -> Result<Value, Abort> {
+        use lang_stdlib::vec3;
+        let xb = xs.realize_list();
+        let yb = ys.realize_list();
+        let result = (|| {
+            let n = xb.list_len().unwrap_or(0);
+            if yb.list_len() != Some(n) {
+                return Err(self.vec_len_error(func, span));
+            }
+            let mut scalars = Vec::with_capacity(n);
+            for i in 0..n {
+                let a = self.read_vec3(func, xb.list_get(i).expect("in bounds"), span)?;
+                let b = self.read_vec3(func, yb.list_get(i).expect("in bounds"), span)?;
+                scalars.push(vec3::dot(a, b));
+            }
+            Ok(self.f32_list(&scalars))
+        })();
+        xb.release();
+        yb.release();
+        result
+    }
+
+    /// Map a component-wise unary op over a (materialized boxed) `List<Vec3>`, rebuilding a boxed
+    /// `List<Vec3>` — the `scale_all` scalar fallback.
+    fn vec_map_scalar(
+        &mut self,
+        func: &str,
+        list: Value,
+        span: Span,
+        op: impl Fn([f32; 3]) -> [f32; 3],
+    ) -> Result<Value, Abort> {
+        let n = list.list_len().unwrap_or(0);
+        let mut out = Vec::with_capacity(n);
+        for i in 0..n {
+            let elem = list.list_get(i).expect("in bounds");
+            let c = self.read_vec3(func, elem, span)?;
+            out.push(self.build_vec3(elem, op(c)));
+        }
+        Ok(Value::list(out))
     }
 
     /// The `random` module: a seeded PRNG whose state lives in the host (`self.host`), threaded

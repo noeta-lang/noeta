@@ -190,6 +190,31 @@ impl PackedList {
         }
     }
 
+    /// A packed list directly from a result byte buffer (P-PACK 4.2 bulk kernels). The `bytes` must
+    /// match `schema` (a whole number of `byte_size`-wide elements); the caller guarantees it.
+    pub(crate) fn from_bytes(schema: Rc<PackedSchema>, bytes: Vec<u8>) -> PackedList {
+        PackedList {
+            schema,
+            bytes: Rc::new(bytes),
+        }
+    }
+
+    /// If this is a `List<Vec3<f32>>` (element schema = exactly three `f32` fields), its shared
+    /// schema and a copy of its byte buffer — the input to the bulk `vec` kernels (P-PACK 4.2).
+    pub(crate) fn vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        if self.schema.fields.len() == 3
+            && self
+                .schema
+                .fields
+                .iter()
+                .all(|f| matches!(f.kind, SlotKind::F32))
+        {
+            Some((Rc::clone(&self.schema), (*self.bytes).clone()))
+        } else {
+            None
+        }
+    }
+
     /// Pack one `element` onto the end of the buffer, extending it **in place** when uniquely owned
     /// (which it always is along the streaming-construction chain — the accumulator is an ANF temp).
     /// Returns `false` without modifying the buffer if the element fails to pack (a non-object, or a
@@ -355,6 +380,19 @@ impl Value {
     /// Construct a boxed list value from an already-shared `Rc<Vec<Value>>`.
     pub(crate) fn list_rc(items: Rc<Vec<Value>>) -> Value {
         Value::List(ListRepr::Boxed(items))
+    }
+
+    /// If this is a packed `List<Vec3<f32>>`, its schema and byte buffer (P-PACK 4.2 bulk `vec`).
+    pub(crate) fn packed_vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        match self {
+            Value::List(ListRepr::Packed(p)) => p.vec3_data(),
+            _ => None,
+        }
+    }
+
+    /// Build a packed `List` value directly from a result byte buffer + schema (P-PACK 4.2).
+    pub(crate) fn packed_list_from(schema: Rc<PackedSchema>, bytes: Vec<u8>) -> Value {
+        Value::List(ListRepr::Packed(PackedList::from_bytes(schema, bytes)))
     }
 
     /// The display form used by `echo`, `~` concatenation, and (later) interpolation.

@@ -1,0 +1,36 @@
+// P-PACK Phase 4.2: bulk `vec` kernels over a `List<Vec3<f32>>`. A packed list takes the flat
+// byte-buffer kernel (the SIMD-amenable path); the result of `add_all`/`sub_all`/`scale_all` is a
+// `List<Vec3>` (stays packed), and `dot_all`/`length_all` reduce to a `List<f32>`. The kernels live
+// in `lang_stdlib::vec3`, so both backends agree — the differential pins it.
+// expect: stdout "[V3 {x: 11.0, y: 12.0, z: 13.0}, V3 {x: 5.0, y: 6.0, z: 7.0}]"
+// expect: stdout "[V3 {x: -9.0, y: -8.0, z: -7.0}, V3 {x: 3.0, y: 4.0, z: 5.0}]"
+// expect: stdout "[V3 {x: 2.0, y: 4.0, z: 6.0}, V3 {x: 8.0, y: 10.0, z: 12.0}]"
+// expect: stdout "[60.0, 15.0]"
+// expect: stdout "[5.0, 13.0]"
+// expect: stdout "11.0"
+// expect: stdout "[B3 {x: 11.0, y: 12.0, z: 13.0}]"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+// A plain (non-packed) struct: its lists are boxed, so the bulk ops take the scalar fallback — which
+// must agree with the packed kernel (both backends run the same fallback, so the differential holds).
+struct B3 { x: f32; y: f32; z: f32 }
+
+xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+ys = [V3 { x: 10.0f32, y: 10.0f32, z: 10.0f32 }, V3 { x: 1.0f32, y: 1.0f32, z: 1.0f32 }]
+
+echo vec.add_all(xs, ys)
+echo vec.sub_all(xs, ys)
+echo vec.scale_all(xs, 2.0f32)
+echo vec.dot_all(xs, ys)
+echo vec.length_all([V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }, V3 { x: 5.0f32, y: 12.0f32, z: 0.0f32 }])
+
+// The bulk result is a flat `List<Vec3>`, so an element's field is reachable (fused read).
+s = vec.add_all(xs, ys)
+echo s[0].x
+
+// Boxed (non-packed) operands take the scalar fallback and produce the same result.
+bx = [B3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }]
+by = [B3 { x: 10.0f32, y: 10.0f32, z: 10.0f32 }]
+echo vec.add_all(bx, by)

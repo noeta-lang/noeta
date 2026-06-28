@@ -185,6 +185,32 @@ fn packed_producer_src(n: usize, packed: bool, op: &str) -> String {
     )
 }
 
+/// A bulk `vec.add_all` workload (P-PACK Phase 4.2): build two `n`-element `Vec3<f32>` lists and add
+/// them component-wise. With `@packed` the operands are flat `f32` byte buffers and the kernel runs an
+/// autovectorized loop over them (`lang_stdlib::vec3::add_buffers`); the plain-`struct` variant misses
+/// the packed fast path and takes the scalar fallback (materialize each element, add, rebuild). The
+/// two are timed side by side: the flat-buffer kernel is ~1.8–2× faster (397µs vs 731µs at n=1k,
+/// 1.54ms vs 3.02ms at n=4k) — it avoids the N element materializations and runs an autovectorizable
+/// `f32` loop over contiguous data.
+fn vec_add_all_src(n: usize, packed: bool) -> String {
+    let kw = if packed { "@packed struct" } else { "struct" };
+    let mut elems = String::with_capacity(n * 36);
+    for i in 0..n {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str("V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }");
+    }
+    format!(
+        "use std.{{vec}}\n\
+         {kw} V3 {{ x: f32; y: f32; z: f32 }}\n\
+         xs = [{elems}]\n\
+         ys = [{elems}]\n\
+         r = vec.add_all(xs, ys)\n\
+         echo r.count()\n"
+    )
+}
+
 /// Sizes for the packed-list workload — a couple of points to confirm the per-element cost is flat.
 const PACKED_SIZES: &[usize] = &[1000, 4000];
 
@@ -478,6 +504,19 @@ fn vm_hot_paths(c: &mut Criterion) {
         }
     }
     prod.finish();
+
+    let mut vadd = c.benchmark_group("vm_vec_add_all");
+    for &n in PACKED_SIZES {
+        let packed = compile(&vec_add_all_src(n, true));
+        vadd.bench_with_input(BenchmarkId::new("packed", n), &packed, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let boxed = compile(&vec_add_all_src(n, false));
+        vadd.bench_with_input(BenchmarkId::new("boxed", n), &boxed, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    vadd.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

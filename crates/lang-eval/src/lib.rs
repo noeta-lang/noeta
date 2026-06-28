@@ -2281,11 +2281,138 @@ impl Interpreter {
                 let a = self.read_vec3(func, &args[0], span)?;
                 Ok(Value::F32(vec3::length(a)))
             }
+            // --- Bulk kernels over `List<Vec3<f32>>` (P-PACK 4.2). Packed inputs take the flat
+            // autovectorized buffer path; a boxed/demoted operand falls back to a scalar loop. ---
+            "add_all" | "sub_all" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                if let (Some((schema, a)), Some((_, b))) =
+                    (args[0].packed_vec3_data(), args[1].packed_vec3_data())
+                {
+                    if a.len() != b.len() {
+                        return Err(self.vec_len_error(func, span));
+                    }
+                    let out = if func == "add_all" {
+                        vec3::add_buffers(&a, &b)
+                    } else {
+                        vec3::sub_buffers(&a, &b)
+                    };
+                    return Ok(Value::packed_list_from(schema, out));
+                }
+                self.vec_bulk_binary_scalar(func, &args[0], &args[1], span)
+            }
+            "scale_all" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let s = self.read_scalar_f32(func, &args[1], span)?;
+                if let Some((schema, a)) = args[0].packed_vec3_data() {
+                    return Ok(Value::packed_list_from(schema, vec3::scale_buffer(&a, s)));
+                }
+                self.vec_map_scalar(func, &args[0], span, |c| vec3::scale(c, s))
+            }
+            "dot_all" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                if let (Some((_, a)), Some((_, b))) =
+                    (args[0].packed_vec3_data(), args[1].packed_vec3_data())
+                {
+                    if a.len() != b.len() {
+                        return Err(self.vec_len_error(func, span));
+                    }
+                    return Ok(f32_list(&vec3::dot_buffers(&a, &b)));
+                }
+                self.vec_bulk_dot_scalar(func, &args[0], &args[1], span)
+            }
+            "length_all" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                if let Some((_, a)) = args[0].packed_vec3_data() {
+                    return Ok(f32_list(&vec3::length_buffer(&a)));
+                }
+                let elems = self.expect_list(&args[0], func, span)?;
+                let mut scalars = Vec::with_capacity(elems.len());
+                for e in elems.iter() {
+                    scalars.push(vec3::length(self.read_vec3(func, e, span)?));
+                }
+                Ok(f32_list(&scalars))
+            }
             _ => {
                 let error = lang_stdlib::no_function_error("vec", func);
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }
+    }
+
+    fn vec_len_error(&mut self, func: &str, span: Span) -> Unwind {
+        self.runtime_error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!("`vec.{func}` expects two lists of equal length"),
+        )
+    }
+
+    /// Scalar fallback for `add_all`/`sub_all` on boxed/demoted operands.
+    fn vec_bulk_binary_scalar(
+        &mut self,
+        func: &str,
+        xs: &Value,
+        ys: &Value,
+        span: Span,
+    ) -> Eval<Value> {
+        use lang_stdlib::vec3;
+        let xe = self.expect_list(xs, func, span)?;
+        let ye = self.expect_list(ys, func, span)?;
+        if xe.len() != ye.len() {
+            return Err(self.vec_len_error(func, span));
+        }
+        let mut out = Vec::with_capacity(xe.len());
+        for (x, y) in xe.iter().zip(ye.iter()) {
+            let a = self.read_vec3(func, x, span)?;
+            let b = self.read_vec3(func, y, span)?;
+            let c = if func == "add_all" {
+                vec3::add(a, b)
+            } else {
+                vec3::sub(a, b)
+            };
+            out.push(build_vec3(x, c));
+        }
+        Ok(Value::list(out))
+    }
+
+    /// Scalar fallback for `dot_all`.
+    fn vec_bulk_dot_scalar(
+        &mut self,
+        func: &str,
+        xs: &Value,
+        ys: &Value,
+        span: Span,
+    ) -> Eval<Value> {
+        use lang_stdlib::vec3;
+        let xe = self.expect_list(xs, func, span)?;
+        let ye = self.expect_list(ys, func, span)?;
+        if xe.len() != ye.len() {
+            return Err(self.vec_len_error(func, span));
+        }
+        let mut scalars = Vec::with_capacity(xe.len());
+        for (x, y) in xe.iter().zip(ye.iter()) {
+            let a = self.read_vec3(func, x, span)?;
+            let b = self.read_vec3(func, y, span)?;
+            scalars.push(vec3::dot(a, b));
+        }
+        Ok(f32_list(&scalars))
+    }
+
+    /// Map a component-wise unary op over a `List<Vec3>` — the `scale_all` scalar fallback.
+    fn vec_map_scalar(
+        &mut self,
+        func: &str,
+        list: &Value,
+        span: Span,
+        op: impl Fn([f32; 3]) -> [f32; 3],
+    ) -> Eval<Value> {
+        let elems = self.expect_list(list, func, span)?;
+        let mut out = Vec::with_capacity(elems.len());
+        for e in elems.iter() {
+            let c = self.read_vec3(func, e, span)?;
+            out.push(build_vec3(e, op(c)));
+        }
+        Ok(Value::list(out))
     }
 
     /// Read a Vec3 argument — a struct value with exactly three `f32` fields — into `[f32; 3]`
@@ -3384,6 +3511,11 @@ fn cow_concat(left: Value, right: Value) -> Value {
         }
         (left, right) => Value::Str(format!("{}{}", left.display(), right.display())),
     }
+}
+
+/// A boxed `List<f32>` from scalar results (the output of `dot_all`/`length_all`).
+fn f32_list(scalars: &[f32]) -> Value {
+    Value::list(scalars.iter().map(|&f| Value::F32(f)).collect())
 }
 
 /// Build a Vec3 result with the same type (shape/`def`) as `like`, from three `f32` components

@@ -196,6 +196,9 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         ("vec", "add" | "sub" | "cross" | "dot") => vec![Type::Dyn, Type::Dyn],
         ("vec", "scale") => vec![Type::Dyn, Type::Dyn],
         ("vec", "length" | "normalize") => vec![Type::Dyn],
+        // Bulk kernels over `List<Vec3>` (P-PACK 4.2).
+        ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
+        ("vec", "length_all") => vec![Type::Dyn],
         _ => return None,
     })
 }
@@ -279,6 +282,10 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
         ("vec", "add" | "sub" | "scale" | "cross" | "normalize") => {
             args.first().cloned().unwrap_or(Type::Dyn)
         }
+        // Bulk kernels (P-PACK 4.2): `add_all`/`sub_all`/`scale_all` return a `List<Vec3>` of the
+        // same type as the first list; `dot_all`/`length_all` reduce to a `List<f32>`.
+        ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
+        ("vec", "dot_all" | "length_all") => list(Type::F32),
         _ => return None,
     })
 }
