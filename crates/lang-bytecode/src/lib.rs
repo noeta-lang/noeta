@@ -102,6 +102,8 @@ pub enum NarrowTarget {
     Float,
     Bool,
     String,
+    /// A `bytes` target (`x is bytes` / `x.as<bytes>()`) — P-PACK 4.4.
+    Bytes,
     Unit,
     List,
     Map,

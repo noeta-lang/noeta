@@ -145,6 +145,8 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::F32(_), Value::Int(_) | Value::Float(_))
         | (Value::Int(_) | Value::Float(_), Value::F32(_)) => as_f64(left) == as_f64(right),
         (Value::Str(a), Value::Str(b)) => a == b,
+        // Two byte buffers are equal iff their contents match (P-PACK 4.4).
+        (Value::Bytes(a), Value::Bytes(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::List(a), Value::List(b)) => a.elements_eq(b),
         // Tuples compare structurally element-wise (value semantics, object-model slice 4) —

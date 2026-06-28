@@ -3226,6 +3226,7 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
             "float" => NarrowTarget::Float,
             "bool" => NarrowTarget::Bool,
             "string" => NarrowTarget::String,
+            "bytes" => NarrowTarget::Bytes,
             "void" | "unit" => NarrowTarget::Unit,
             "dyn" | "Any" => NarrowTarget::Dyn,
             "List" | "list" => NarrowTarget::List,

@@ -1906,12 +1906,28 @@ impl Interpreter {
         {
             return self.call_map_method(method, entries, name, &args, span);
         }
+        // `list.to_bytes()` — serialize a `List<@packed>` to its raw flat buffer (P-PACK 4.4). A
+        // boxed list has no canonical serialized form, so it is a type error (surfaced, not silent).
+        if name == "to_bytes"
+            && let Value::List(repr) = &receiver
+        {
+            self.expect_std_arity(name, &args, 0, span)?;
+            return match repr.packed_raw_bytes() {
+                Some(buf) => Ok(Value::Bytes(Rc::new(buf))),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "`to_bytes` expects a packed list (a `List` of `@packed` structs)".to_string(),
+                )),
+            };
+        }
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
             ("count", Value::Set(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
             ("count", Value::Map(entries)) if arity_ok => Some(Value::Int(entries.len() as i64)),
             ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
+            ("count", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
             // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
             // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
@@ -3860,6 +3876,7 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
             "float" => matches!(value, Value::Float(_)),
             "bool" => matches!(value, Value::Bool(_)),
             "string" => matches!(value, Value::Str(_)),
+            "bytes" => matches!(value, Value::Bytes(_)),
             "void" | "unit" => matches!(value, Value::Unit),
             // Narrowing to the open top is a no-op: every value is a `dyn`.
             "dyn" | "Any" => true,

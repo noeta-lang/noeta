@@ -1,0 +1,20 @@
+// P-PACK 4.4: `bytes` + `to_bytes`. A `List<@packed>` serializes to its raw flat buffer via
+// `.to_bytes()` — an O(n) copy of the contiguous packed bytes (the binary alternative to JSON). The
+// buffer is opaque (`<N bytes>`), counts its length, compares by content, and reflects as `Type.Bytes`.
+// Both backends share the layout, so the byte buffer is identical — the differential pins it.
+// expect: stdout "<24 bytes>"
+// expect: stdout "24"
+// expect: stdout "true"
+// expect: stdout "Type.Bytes"
+// expect: stdout "true"
+// expect: exit 0
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+// Two Vec3<f32> elements = 2 × (3 × 4 bytes) = 24 bytes.
+xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+b = xs.to_bytes()
+echo b
+echo b.count()
+echo b == xs.to_bytes()
+echo type_of(b)
+echo b is bytes

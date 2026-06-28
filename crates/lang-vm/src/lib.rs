@@ -252,6 +252,7 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Float => "float",
         NarrowTarget::Bool => "bool",
         NarrowTarget::String => "string",
+        NarrowTarget::Bytes => "bytes",
         NarrowTarget::Unit => "unit",
         NarrowTarget::List => "list",
         NarrowTarget::Map => "map",
@@ -2823,6 +2824,31 @@ impl<'m> Vm<'m> {
                         frames[top].pc += 1;
                         continue;
                     }
+                    // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
+                    // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
+                    if method == "to_bytes" && v.is_list() {
+                        if !args.is_empty() {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "method `to_bytes` takes no arguments".to_string(),
+                            ));
+                        }
+                        let value = match v.packed_bytes() {
+                            Some(buf) => Value::bytes(buf),
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    "`to_bytes` expects a packed list (a `List` of `@packed` structs)"
+                                        .to_string(),
+                                ));
+                            }
+                        };
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // Built-in zero-argument methods on lists/maps/strings.
                     let result = if !args.is_empty() {
                         None
@@ -2831,6 +2857,7 @@ impl<'m> Vm<'m> {
                             .or_else(|| v.set_len())
                             .or_else(|| v.map_len())
                             .or_else(|| v.as_string().map(|s| s.chars().count()))
+                            .or_else(|| v.bytes_len())
                             .map(|n| Value::int(n as i64))
                     } else if method == "enumerate" && v.is_list() {
                         // A list of `(index, value)` **tuples** (object-model slice 4b), matching the

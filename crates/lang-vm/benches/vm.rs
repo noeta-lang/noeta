@@ -185,6 +185,32 @@ fn packed_producer_src(n: usize, packed: bool, op: &str) -> String {
     )
 }
 
+/// A serialization workload (P-PACK 4.4): build an `n`-element packed `List<Vec3<f32>>` and serialize
+/// it, either as raw `bytes` (`.to_bytes()` — an O(n) copy of the flat buffer) or as JSON
+/// (`json.stringify` — per-element formatting + a growing string). Timed side by side: the binary
+/// path is ~7× faster end-to-end (192µs vs 1.47ms at n=1k, 782µs vs 5.66ms at n=4k) — and the
+/// serialize step alone far more, since both share the list-build cost.
+fn serialize_src(n: usize, binary: bool) -> String {
+    let mut elems = String::with_capacity(n * 36);
+    for i in 0..n {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str("V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }");
+    }
+    let op = if binary {
+        "data.to_bytes().count()"
+    } else {
+        "json.stringify(data).count()"
+    };
+    format!(
+        "use std.{{json}}\n\
+         @packed struct V3 {{ x: f32; y: f32; z: f32 }}\n\
+         data = [{elems}]\n\
+         echo {op}\n"
+    )
+}
+
 /// A bulk `vec.add_all` workload (P-PACK Phase 4.2): build two `n`-element `Vec3<f32>` lists and add
 /// them component-wise. With `@packed` the operands are flat `f32` byte buffers and the kernel runs an
 /// autovectorized loop over them (`lang_stdlib::vec3::add_buffers`); the plain-`struct` variant misses
@@ -517,6 +543,19 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     vadd.finish();
+
+    let mut ser = c.benchmark_group("vm_serialize");
+    for &n in PACKED_SIZES {
+        let binary = compile(&serialize_src(n, true));
+        ser.bench_with_input(BenchmarkId::new("to_bytes", n), &binary, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let json = compile(&serialize_src(n, false));
+        ser.bench_with_input(BenchmarkId::new("json", n), &json, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    ser.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

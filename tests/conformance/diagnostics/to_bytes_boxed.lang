@@ -1,0 +1,7 @@
+// `to_bytes` serializes a *packed* list (a `List` of `@packed` structs); a boxed list — here a
+// `List<int>`, which is never packed — has no canonical flat buffer, so it is a runtime type error
+// (E0007), surfaced rather than silently producing wrong bytes. (P-PACK 4.4)
+// expect: error E0007 at 7:6
+// expect: exit 1
+xs = [1, 2, 3]
+echo xs.to_bytes()

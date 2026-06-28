@@ -93,6 +93,15 @@ impl ListRepr {
         }
     }
 
+    /// The raw flat byte buffer of a packed list (`to_bytes`, P-PACK 4.4), or `None` for a boxed list
+    /// (which has no canonical serialized form — the caller errors).
+    pub(crate) fn packed_raw_bytes(&self) -> Option<Vec<u8>> {
+        match self {
+            ListRepr::Packed(packed) => Some((*packed.bytes).clone()),
+            ListRepr::Boxed(_) => None,
+        }
+    }
+
     /// The elements as a boxed `Rc<Vec<Value>>`. For an already-boxed list this is a cheap
     /// `Rc::clone` (no element copy) — so routing a read-only op through it never regresses the boxed
     /// path; a packed buffer materializes every element into a fresh boxed vector.

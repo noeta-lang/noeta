@@ -345,6 +345,18 @@ impl Value {
         Some(decode_packed_field(&kind, &slice, 0))
     }
 
+    /// The raw flat byte buffer of a packed list (`to_bytes`, P-PACK 4.4), regardless of element
+    /// schema; `None` for a boxed list (which has no canonical serialized form).
+    pub fn packed_bytes(self) -> Option<Vec<u8>> {
+        if !self.is_packed_list() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::PackedList { bytes, .. } => Some(bytes.clone()),
+            _ => None,
+        })
+    }
+
     /// If this is a packed `List<Vec3<f32>>` — a flat buffer whose element schema is exactly three
     /// `f32` fields — return its shared schema and a copy of its byte buffer (the input to the bulk
     /// `vec` kernels, P-PACK 4.2). `None` for a boxed list or any other element schema, so the caller

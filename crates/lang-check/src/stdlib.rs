@@ -43,9 +43,17 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::List(elem) => list_method(name, elem),
         Type::Set(elem) => set_method(name, elem),
         Type::Map(_, val) => map_method(name, val),
+        Type::Bytes => bytes_method(name),
         Type::Named(n, _) if n == FILE_HANDLE => file_handle_method(name),
         _ => None,
     }
+}
+
+fn bytes_method(name: &str) -> Option<Type> {
+    Some(match name {
+        "count" => Type::Int, // the buffer length in bytes
+        _ => return None,
+    })
 }
 
 fn string_method(name: &str) -> Option<Type> {
@@ -66,6 +74,8 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         "first" | "last" => opt(elem.clone()),
         "to_set" => set(elem.clone()),
         "count" => Type::Int,
+        // `to_bytes` serializes a `List<@packed>` to its raw flat buffer (P-PACK 4.4).
+        "to_bytes" => Type::Bytes,
         // `enumerate` yields a list of `(index, item)` tuples (object-model slice 4b).
         "enumerate" => list(Type::Tuple(vec![Type::Int, elem.clone()])),
         _ => return None,
@@ -112,6 +122,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
         Type::Map(_, val) => map_params(name, val),
+        Type::Bytes if name == "count" => Some(vec![]),
         Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
         _ => None,
     }
@@ -129,7 +140,9 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "reverse" | "sorted" | "count" | "first" | "last" | "to_set" | "enumerate" => vec![],
+        "reverse" | "sorted" | "count" | "first" | "last" | "to_set" | "enumerate" | "to_bytes" => {
+            vec![]
+        }
         "contains" => vec![elem.clone()],
         "join" => vec![Type::String],
         "slice" => vec![Type::Int, Type::Int],
