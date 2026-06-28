@@ -92,40 +92,36 @@ pub fn abs(a: [f32; 3]) -> [f32; 3] {
     [a[0].abs(), a[1].abs(), a[2].abs()]
 }
 
-// --- Bulk kernels over a packed `List<Vec3<f32>>` byte buffer (P-PACK Phase 4.2) ---
+// --- Bulk kernels over a packed `List<Vec3<f32>>` byte buffer (P-PACK Phase 4.2/4.3) ---
 //
 // A packed `List<Vec3<f32>>` is a contiguous little-endian `f32` byte buffer (12 bytes/element).
-// These kernels read it through `f32::from_le_bytes` and write results the same way — on a
-// little-endian target the byte shuffles fold away, leaving a tight `f32` loop LLVM autovectorizes
-// under `-O`. Both backends store this layout identically, so they call these directly and agree by
-// construction. (No `unsafe`, no alignment assumption, no nightly `std::simd`.)
+// These kernels stream over it **byte-direct** through `f32::from_le_bytes`/`to_le_bytes` — on a
+// little-endian target those fold to plain loads/stores, and `chunks_exact` elides bounds checks,
+// so the body is a tight `f32` loop LLVM autovectorizes under `-O`. Going byte-direct (one output
+// allocation, one pass) rather than decode→`Vec<f32>`→compute→encode (four allocations, four passes)
+// is a small but real win — ~1.5–3% on the packed `add_all` path (`vm_vec_add_all` bench, P-PACK 4.3);
+// modest because the kernel is a fraction of the op's cost (building the result list dominates). Both
+// backends store this layout identically, so they call these directly and agree by construction.
+// (`lang-stdlib` is `unsafe`-free and the buffer is `Vec<u8>` / 1-aligned, so a zero-copy `&[f32]`
+// reinterpret — the path to true aligned SIMD — is unavailable here without either `unsafe` in
+// `lang-value` (which would break the shared-kernel design) or an SoA layout; deferred.)
 
-/// Decode a packed f32 byte buffer into an aligned `Vec<f32>` — so the arithmetic loops below run on
-/// a contiguous, aligned `[f32]` (cleanly autovectorized) rather than over unaligned bytes.
-fn decode(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
-        .collect()
+/// Read one little-endian `f32` from the first 4 bytes of `c`.
+#[inline]
+fn read_f32(c: &[u8]) -> f32 {
+    f32::from_le_bytes([c[0], c[1], c[2], c[3]])
 }
 
-/// Encode an `f32` slice back to a little-endian byte buffer (the packed-list representation).
-fn encode(floats: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(floats.len() * 4);
-    for &f in floats {
-        out.extend_from_slice(&f.to_le_bytes());
-    }
-    out
-}
-
-/// Element-wise binary op over two equal-length packed f32 buffers, returning a new buffer. Used for
+/// Element-wise binary op over two equal-length packed f32 buffers, byte-direct. Used for
 /// `add_all`/`sub_all`: a Vec3 list is `[x0,y0,z0, x1,…]`, so a flat element-wise `f32` op over the
 /// whole buffer *is* the component-wise Vec3 op. The two operands must be the same length (same list
 /// length and element width); the caller guarantees it.
 fn zip_buffers(a: &[u8], b: &[u8], op: impl Fn(f32, f32) -> f32) -> Vec<u8> {
-    let (a, b) = (decode(a), decode(b));
-    let out: Vec<f32> = a.iter().zip(&b).map(|(&x, &y)| op(x, y)).collect();
-    encode(&out)
+    let mut out = Vec::with_capacity(a.len());
+    for (p, q) in a.chunks_exact(4).zip(b.chunks_exact(4)) {
+        out.extend_from_slice(&op(read_f32(p), read_f32(q)).to_le_bytes());
+    }
+    out
 }
 
 /// `add_all`: component-wise sum of two packed Vec3 lists.
@@ -140,25 +136,50 @@ pub fn sub_buffers(a: &[u8], b: &[u8]) -> Vec<u8> {
 
 /// `scale_all`: scale every component of a packed Vec3 list by `s`.
 pub fn scale_buffer(a: &[u8], s: f32) -> Vec<u8> {
-    let out: Vec<f32> = decode(a).iter().map(|&x| x * s).collect();
-    encode(&out)
+    let mut out = Vec::with_capacity(a.len());
+    for c in a.chunks_exact(4) {
+        out.extend_from_slice(&(read_f32(c) * s).to_le_bytes());
+    }
+    out
 }
 
 /// `dot_all`: the per-element dot product of two packed Vec3 lists → one `f32` per element.
 pub fn dot_buffers(a: &[u8], b: &[u8]) -> Vec<f32> {
-    let (a, b) = (decode(a), decode(b));
-    a.chunks_exact(3)
-        .zip(b.chunks_exact(3))
-        .map(|(p, q)| p[0] * q[0] + p[1] * q[1] + p[2] * q[2])
+    a.chunks_exact(12)
+        .zip(b.chunks_exact(12))
+        .map(|(p, q)| {
+            read_f32(&p[0..]) * read_f32(&q[0..])
+                + read_f32(&p[4..]) * read_f32(&q[4..])
+                + read_f32(&p[8..]) * read_f32(&q[8..])
+        })
         .collect()
 }
 
 /// `length_all`: the Euclidean length of each element of a packed Vec3 list → one `f32` per element.
 pub fn length_buffer(a: &[u8]) -> Vec<f32> {
-    decode(a)
-        .chunks_exact(3)
-        .map(|p| (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt())
+    a.chunks_exact(12)
+        .map(|p| {
+            let (x, y, z) = (read_f32(&p[0..]), read_f32(&p[4..]), read_f32(&p[8..]));
+            (x * x + y * y + z * z).sqrt()
+        })
         .collect()
+}
+
+/// Encode an `f32` slice to a little-endian byte buffer — the packed-list representation. Used to
+/// build test inputs and to check kernel outputs.
+#[cfg(test)]
+fn encode(floats: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(floats.len() * 4);
+    for &f in floats {
+        out.extend_from_slice(&f.to_le_bytes());
+    }
+    out
+}
+
+/// Decode a packed f32 byte buffer into a `Vec<f32>` — the inverse of [`encode`], for tests.
+#[cfg(test)]
+fn decode(bytes: &[u8]) -> Vec<f32> {
+    bytes.chunks_exact(4).map(read_f32).collect()
 }
 
 #[cfg(test)]

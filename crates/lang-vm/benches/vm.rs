@@ -189,9 +189,9 @@ fn packed_producer_src(n: usize, packed: bool, op: &str) -> String {
 /// them component-wise. With `@packed` the operands are flat `f32` byte buffers and the kernel runs an
 /// autovectorized loop over them (`lang_stdlib::vec3::add_buffers`); the plain-`struct` variant misses
 /// the packed fast path and takes the scalar fallback (materialize each element, add, rebuild). The
-/// two are timed side by side: the flat-buffer kernel is ~1.8–2× faster (397µs vs 731µs at n=1k,
-/// 1.54ms vs 3.02ms at n=4k) — it avoids the N element materializations and runs an autovectorizable
-/// `f32` loop over contiguous data.
+/// two are timed side by side: the flat-buffer kernel is ~1.8–2× faster (383µs vs 733µs at n=1k,
+/// 1.52ms vs 3.10ms at n=4k, with the P-PACK 4.3 byte-direct kernel) — it avoids the N element
+/// materializations and runs an autovectorizable `f32` loop over contiguous data.
 fn vec_add_all_src(n: usize, packed: bool) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };
     let mut elems = String::with_capacity(n * 36);
