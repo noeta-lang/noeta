@@ -1473,6 +1473,7 @@ fn const_value(c: &lang_ir::Const) -> Value {
         lang_ir::Const::Bool(b) => Value::Bool(*b),
         lang_ir::Const::Int(i) => Value::Int(*i),
         lang_ir::Const::Float(f) => Value::Float(*f),
+        lang_ir::Const::F32(f) => Value::F32(*f),
         lang_ir::Const::Str(s) => Value::Str(s.clone()),
     }
 }

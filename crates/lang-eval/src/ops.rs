@@ -78,8 +78,29 @@ fn arithmetic(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpErro
         };
     }
 
-    if let (Some(a), Some(b)) = (as_f64(left), as_f64(right)) {
-        return Ok(Value::Float(match op {
+    // Numeric widening lattice `int < f32 < float` (P-PACK Phase 3): the result takes the higher
+    // rank. A `float` operand promotes the computation to f64; otherwise (the operands are `int`/`f32`
+    // with at least one `f32`, the int+int case having returned above) it computes at f32.
+    let rank = |v: &Value| match v {
+        Value::Int(_) => Some(0u8),
+        Value::F32(_) => Some(1),
+        Value::Float(_) => Some(2),
+        _ => None,
+    };
+    if let (Some(l), Some(r)) = (rank(left), rank(right)) {
+        if l.max(r) >= 2 {
+            let (a, b) = (as_f64(left).unwrap(), as_f64(right).unwrap());
+            return Ok(Value::Float(match op {
+                BinaryOp::Add => a + b,
+                BinaryOp::Sub => a - b,
+                BinaryOp::Mul => a * b,
+                BinaryOp::Div => a / b,
+                BinaryOp::Rem => a % b,
+                _ => unreachable!("arithmetic only handles + - * / %"),
+            }));
+        }
+        let (a, b) = (as_f32(left).unwrap(), as_f32(right).unwrap());
+        return Ok(Value::F32(match op {
             BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,
             BinaryOp::Mul => a * b,
@@ -117,6 +138,11 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Float(a), Value::Float(b)) => a == b,
         (Value::Int(a), Value::Float(b)) => (*a as f64) == *b,
         (Value::Float(a), Value::Int(b)) => *a == (*b as f64),
+        // `f32` equality, including cross-type numeric `==` (compared as the lossless f64 widening,
+        // P-PACK Phase 3) so `1.0f32 == 1.0` / `1.0f32 == 1` behave like the int/float cross-arms.
+        (Value::F32(a), Value::F32(b)) => a == b,
+        (Value::F32(_), Value::Int(_) | Value::Float(_))
+        | (Value::Int(_) | Value::Float(_), Value::F32(_)) => as_f64(left) == as_f64(right),
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Bool(a), Value::Bool(b)) => a == b,
         (Value::List(a), Value::List(b)) => a.elements_eq(b),
@@ -159,11 +185,22 @@ fn values_identical(left: &Value, right: &Value) -> bool {
     }
 }
 
-/// Numeric coercion to `f64`, for mixed int/float arithmetic and comparison.
+/// Numeric coercion to `f64`, for mixed int/f32/float arithmetic and comparison. An `f32` widens
+/// losslessly into `f64`.
 fn as_f64(value: &Value) -> Option<f64> {
     match value {
         Value::Int(i) => Some(*i as f64),
+        Value::F32(f) => Some(*f as f64),
         Value::Float(f) => Some(*f),
+        _ => None,
+    }
+}
+
+/// Numeric coercion to `f32`, for the f32 arithmetic path (`int`/`f32` operands, P-PACK Phase 3).
+fn as_f32(value: &Value) -> Option<f32> {
+    match value {
+        Value::Int(i) => Some(*i as f32),
+        Value::F32(f) => Some(*f),
         _ => None,
     }
 }

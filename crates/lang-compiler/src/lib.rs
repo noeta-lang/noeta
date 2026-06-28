@@ -3172,6 +3172,9 @@ fn const_value(c: &IrConst) -> Const {
         IrConst::Bool(b) => Const::Bool(*b),
         IrConst::Int(i) => Const::Int(*i),
         IrConst::Float(f) => Const::Float(*f),
+        // `f32` is boxed at runtime (like `Str`), so it is *not* an immediate const — the
+        // post-constructor release path reclaims it, and `is_immediate_const` excludes it.
+        IrConst::F32(f) => Const::F32(*f),
         IrConst::Str(s) => Const::Str(s.clone()),
     }
 }

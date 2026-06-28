@@ -483,6 +483,7 @@ impl Lowerer<'_> {
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
             Expr::Float { value, .. } => Ok(Atom::Const(Const::Float(*value))),
+            Expr::F32 { value, .. } => Ok(Atom::Const(Const::F32(*value))),
             Expr::Bool { value, .. } => Ok(Atom::Const(Const::Bool(*value))),
             Expr::Ident { name, span } => Ok(Atom::Var {
                 name: name.clone(),

@@ -4552,6 +4552,7 @@ fn materialize(c: &Const) -> Value {
         Const::Bool(b) => Value::bool(*b),
         Const::Int(i) => Value::int(*i),
         Const::Float(f) => Value::float(*f),
+        Const::F32(f) => Value::f32(*f),
         Const::Str(s) => Value::string(s),
         Const::NativeModule(name) => Value::native_module(name),
     }

@@ -106,8 +106,34 @@ fn arithmetic(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError>
         };
     }
 
-    if let (Some(a), Some(b)) = (as_f64(left), as_f64(right)) {
-        return Ok(Value::float(match op {
+    // Numeric widening lattice `int < f32 < float` (P-PACK Phase 3): the result takes the higher
+    // rank. A `float` operand promotes to f64; otherwise (operands `int`/`f32` with at least one
+    // `f32`, the int+int case having returned above) the computation is at f32.
+    let rank = |v: Value| {
+        if v.as_float().is_some() {
+            Some(2u8)
+        } else if v.is_f32() {
+            Some(1)
+        } else if v.as_int().is_some() {
+            Some(0)
+        } else {
+            None
+        }
+    };
+    if let (Some(l), Some(r)) = (rank(left), rank(right)) {
+        if l.max(r) >= 2 {
+            let (a, b) = (as_f64(left).unwrap(), as_f64(right).unwrap());
+            return Ok(Value::float(match op {
+                BinaryOp::Add => a + b,
+                BinaryOp::Sub => a - b,
+                BinaryOp::Mul => a * b,
+                BinaryOp::Div => a / b,
+                BinaryOp::Rem => a % b,
+                _ => unreachable!("arithmetic only handles + - * / %"),
+            }));
+        }
+        let (a, b) = (as_f32(left).unwrap(), as_f32(right).unwrap());
+        return Ok(Value::f32(match op {
             BinaryOp::Add => a + b,
             BinaryOp::Sub => a - b,
             BinaryOp::Mul => a * b,
@@ -137,7 +163,11 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
         return Some(a.cmp(&b));
     }
-    let num = |v: Value| v.as_float().or_else(|| v.as_int().map(|i| i as f64));
+    let num = |v: Value| {
+        v.as_float()
+            .or_else(|| v.as_f32().map(|f| f as f64))
+            .or_else(|| v.as_int().map(|i| i as f64))
+    };
     num(left)?.partial_cmp(&num(right)?)
 }
 
@@ -312,11 +342,18 @@ fn int_operand(value: Value) -> Option<i64> {
     }
 }
 
-/// Numeric coercion to `f64`, for mixed int/float arithmetic and comparison.
+/// Numeric coercion to `f64`, for mixed int/f32/float arithmetic and comparison. An `f32` widens
+/// losslessly into `f64`.
 fn as_f64(value: Value) -> Option<f64> {
     value
         .as_float()
+        .or_else(|| value.as_f32().map(|f| f as f64))
         .or_else(|| value.as_int().map(|i| i as f64))
+}
+
+/// Numeric coercion to `f32`, for the f32 arithmetic path (`int`/`f32` operands, P-PACK Phase 3).
+fn as_f32(value: Value) -> Option<f32> {
+    value.as_f32().or_else(|| value.as_int().map(|i| i as f32))
 }
 
 fn div_by_zero() -> OpError {

@@ -47,7 +47,9 @@ impl ReflectionInfo {
         let dyn_box = || Box::new(TypeRepr::Dyn);
         match name {
             "int" => TypeRepr::Int,
-            "float" => TypeRepr::Float,
+            // P-PACK Phase 3 interim: `f32` reflects as `Float` until the prelude `Type` ADT gains an
+            // `F32` case (a follow-up). Both backends share this builder, so they still agree.
+            "float" | "f32" => TypeRepr::Float,
             "bool" => TypeRepr::Bool,
             "string" => TypeRepr::Str,
             "void" | "unit" => TypeRepr::Unit,

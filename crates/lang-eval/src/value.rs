@@ -27,6 +27,9 @@ pub enum Value {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// A 32-bit float (P-PACK Phase 3) — a distinct primitive from `Float`, with observable f32
+    /// precision. Arithmetic rounds at f32 (see `apply_binary_op`); display matches the VM.
+    F32(f32),
     Str(String),
     /// An immutable list. The backing [`ListRepr`] is either the general boxed `Rc<Vec<Value>>`
     /// (any element type) or, for a `List<packed>`, a flat raw-primitive buffer (P-PACK Phase 2).
@@ -340,6 +343,7 @@ impl Value {
             Value::Bool(b) => b.to_string(),
             Value::Int(i) => i.to_string(),
             Value::Float(f) => format_float(*f),
+            Value::F32(f) => format_f32(*f),
             Value::Str(s) => s.clone(),
             Value::List(repr) => {
                 let parts: Vec<String> = repr.to_rc_vec().iter().map(Value::repr).collect();
@@ -391,6 +395,7 @@ impl Value {
             Value::Bool(_) => "bool",
             Value::Int(_) => "int",
             Value::Float(_) => "float",
+            Value::F32(_) => "f32",
             Value::Str(_) => "string",
             Value::List(_) => "list",
             Value::Tuple(_) => "tuple",
@@ -414,6 +419,7 @@ impl fmt::Debug for Value {
             Value::Bool(b) => write!(f, "Bool({b})"),
             Value::Int(i) => write!(f, "Int({i})"),
             Value::Float(x) => write!(f, "Float({x})"),
+            Value::F32(x) => write!(f, "F32({x})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
             Value::List(repr) => write!(f, "List({repr:?})"),
             Value::Tuple(items) => write!(f, "Tuple({items:?})"),
@@ -438,6 +444,7 @@ impl PartialEq for Value {
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
+            (Value::F32(a), Value::F32(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::List(a), Value::List(b)) => a.elements_eq(b),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
@@ -457,6 +464,17 @@ impl PartialEq for Value {
 /// Render a float deterministically. Whole-valued floats keep a trailing `.0` so they
 /// are visibly distinct from ints (`3.0`, not `3`).
 fn format_float(f: f64) -> String {
+    if f.is_finite() && f.fract() == 0.0 {
+        format!("{f:.1}")
+    } else {
+        f.to_string()
+    }
+}
+
+/// Display an `f32` (P-PACK Phase 3). Mirrors [`format_float`] but at f32 precision (the shortest
+/// round-tripping f32 decimal), so e.g. `0.1f32` shows `0.1`, not the f64-widened `0.10000000149…`.
+/// The VM carries a byte-identical copy, so the two backends agree under the differential.
+pub(crate) fn format_f32(f: f32) -> String {
     if f.is_finite() && f.fract() == 0.0 {
         format!("{f:.1}")
     } else {

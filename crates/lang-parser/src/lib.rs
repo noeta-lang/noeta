@@ -1007,6 +1007,13 @@ where
                 span,
             }
         });
+        let f32_lit = just(T::F32Lit).map_with(move |_, e| {
+            let span = ctx.to_span(e.span());
+            Expr::F32 {
+                value: parse_f32_literal(ctx.source.slice(span)),
+                span,
+            }
+        });
         let string = just(T::StringLit)
             .map_with(move |_, e| parse_string_literal(ctx, ctx.to_span(e.span())));
         let raw_string =
@@ -1309,6 +1316,7 @@ where
 
         let atom = choice((
             int,
+            f32_lit,
             float,
             string,
             raw_string,
@@ -2939,6 +2947,15 @@ fn parse_int_literal(text: &str) -> Result<i64, std::num::ParseIntError> {
 /// guarantees a well-formed decimal/scientific shape, so `f64::from_str` always succeeds.
 fn parse_float_literal(text: &str) -> f64 {
     let cleaned: String = text.chars().filter(|&c| c != '_').collect();
+    cleaned.parse().unwrap_or(0.0)
+}
+
+/// Parse an `f32` literal's source text into an `f32`, stripping the `f32` suffix and `_` separators
+/// (P-PACK Phase 3). The lexer's `F32Lit` regex guarantees the `f32` suffix and a well-formed numeric
+/// body, so `f32::from_str` always succeeds.
+fn parse_f32_literal(text: &str) -> f32 {
+    let body = text.strip_suffix("f32").unwrap_or(text);
+    let cleaned: String = body.chars().filter(|&c| c != '_').collect();
     cleaned.parse().unwrap_or(0.0)
 }
 

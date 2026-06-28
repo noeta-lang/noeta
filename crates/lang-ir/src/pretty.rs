@@ -348,6 +348,7 @@ fn atom(atom: &Atom) -> String {
             Const::Bool(b) => b.to_string(),
             Const::Int(i) => i.to_string(),
             Const::Float(f) => format!("{f:?}"),
+            Const::F32(f) => format!("{f:?}f32"),
             Const::Str(s) => format!("{s:?}"),
         },
         Atom::Temp(t) => format!("%{}", t.0),

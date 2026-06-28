@@ -78,6 +78,10 @@ pub enum Type {
     Unit,
     Int,
     Float,
+    /// A 32-bit float (P-PACK Phase 3) — a distinct primitive from the 64-bit `Float`, with its own
+    /// observable precision. Written with the `f32` literal suffix (`1.0f32`); arithmetic widens it
+    /// within the numeric lattice `int < f32 < float`, but assignment is strict (like `int`/`float`).
+    F32,
     Bool,
     String,
     List(Box<Type>),
@@ -125,7 +129,19 @@ impl Type {
     /// checker separately lets an interior hole / `dyn` operand through via
     /// [`Self::defers_to_runtime`], so this is the strict concrete test only.)
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Type::Int | Type::Float)
+        matches!(self, Type::Int | Type::Float | Type::F32)
+    }
+
+    /// This numeric type's rank in the widening lattice `int (0) < f32 (1) < float (2)`. Arithmetic
+    /// over two numerics yields the higher-ranked type (`f32 + int → f32`, `f32 + float → float`),
+    /// the production-language widening rule. `None` for a non-numeric type.
+    pub fn numeric_rank(&self) -> Option<u8> {
+        match self {
+            Type::Int => Some(0),
+            Type::F32 => Some(1),
+            Type::Float => Some(2),
+            _ => None,
+        }
     }
 
     /// Whether this type is an unresolved **inference hole** — the internal "nothing known yet"
@@ -234,6 +250,7 @@ impl Type {
             name,
             "int"
                 | "float"
+                | "f32"
                 | "bool"
                 | "string"
                 | "void"
@@ -310,6 +327,7 @@ impl Type {
                 match name.as_str() {
                     "int" => Type::Int,
                     "float" => Type::Float,
+                    "f32" => Type::F32,
                     "bool" => Type::Bool,
                     "string" => Type::String,
                     "void" | "unit" => Type::Unit,
@@ -344,6 +362,7 @@ impl std::fmt::Display for Type {
             Type::Unit => f.write_str("void"),
             Type::Int => f.write_str("int"),
             Type::Float => f.write_str("float"),
+            Type::F32 => f.write_str("f32"),
             Type::Bool => f.write_str("bool"),
             Type::String => f.write_str("string"),
             Type::List(t) => write!(f, "List<{t}>"),

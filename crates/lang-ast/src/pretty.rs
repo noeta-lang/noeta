@@ -491,6 +491,9 @@ impl Pretty for Expr {
             Expr::Float { value, span: s } => {
                 out.push_str(&format!("(float {value} {})", span(*s)));
             }
+            Expr::F32 { value, span: s } => {
+                out.push_str(&format!("(f32 {value} {})", span(*s)));
+            }
             Expr::Bool { value, span: s } => {
                 out.push_str(&format!("(bool {value} {})", span(*s)));
             }

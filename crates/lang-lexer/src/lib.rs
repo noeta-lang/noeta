@@ -127,6 +127,13 @@ pub enum TokenKind {
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?")]
     #[regex(r"[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*")]
     FloatLit,
+    /// A 32-bit float literal: a numeric literal with the `f32` suffix (P-PACK Phase 3). Examples:
+    /// `1.0f32`, `2.5e3f32`, `5f32` (an integer with the suffix is an `f32`, not an `int`). Maximal
+    /// munch picks this over `FloatLit`/`IntLit` + an `f32` identifier, while a bare `f32` (no leading
+    /// digits) stays an identifier — the type name.
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f32")]
+    #[regex(r"[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f32")]
+    F32Lit,
     /// An integer literal: decimal, or `0x`/`0o`/`0b` radix-prefixed, with optional `_` digit
     /// separators (stripped by the parser). Examples: `42`, `1_000_000`, `0xDE_AD`, `0o755`, `0b1010`.
     #[regex(r"[0-9][0-9_]*")]
@@ -286,6 +293,7 @@ impl TokenKind {
             TokenKind::RawStr => "RawStr",
             TokenKind::TemplateStr => "TemplateStr",
             TokenKind::FloatLit => "FloatLit",
+            TokenKind::F32Lit => "F32Lit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
             TokenKind::Semicolon => "Semicolon",
@@ -375,6 +383,7 @@ impl TokenKind {
             TokenKind::RawStr => "a raw string literal",
             TokenKind::TemplateStr => "a template string literal",
             TokenKind::FloatLit => "a float literal",
+            TokenKind::F32Lit => "an f32 literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",
             TokenKind::Semicolon => "`;`",
@@ -593,6 +602,7 @@ fn is_statement_ending(kind: TokenKind) -> bool {
         TokenKind::Ident
             | TokenKind::IntLit
             | TokenKind::FloatLit
+            | TokenKind::F32Lit
             | TokenKind::StringLit
             | TokenKind::RawStr
             | TokenKind::TemplateStr

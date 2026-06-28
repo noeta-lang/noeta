@@ -585,6 +585,8 @@ pub enum Expr {
     Int { value: i64, span: Span },
     /// A floating-point literal.
     Float { value: f64, span: Span },
+    /// A 32-bit float literal (`1.0f32`, P-PACK Phase 3) — a distinct primitive from `Float`.
+    F32 { value: f32, span: Span },
     /// A boolean literal.
     Bool { value: bool, span: Span },
     /// A reference to a binding.
@@ -860,6 +862,7 @@ impl Expr {
             Expr::Str { span, .. }
             | Expr::Int { span, .. }
             | Expr::Float { span, .. }
+            | Expr::F32 { span, .. }
             | Expr::Bool { span, .. }
             | Expr::Ident { span, .. }
             | Expr::Unary { span, .. }
@@ -903,6 +906,7 @@ impl Expr {
             Expr::Str { .. }
             | Expr::Int { .. }
             | Expr::Float { .. }
+            | Expr::F32 { .. }
             | Expr::Bool { .. }
             | Expr::AttributesOf { .. }
             | Expr::RolesOf { .. } => false,

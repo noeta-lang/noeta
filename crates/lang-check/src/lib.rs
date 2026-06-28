@@ -199,7 +199,8 @@ fn type_to_repr(
     let rec = |t: &Type| type_to_repr(t, kinds);
     match ty {
         Type::Int => TypeRepr::Int,
-        Type::Float => TypeRepr::Float,
+        // P-PACK Phase 3 interim: `f32` reflects as `Float` until the prelude `Type` ADT gains `F32`.
+        Type::Float | Type::F32 => TypeRepr::Float,
         Type::Bool => TypeRepr::Bool,
         Type::String => TypeRepr::Str,
         Type::Unit => TypeRepr::Unit,
@@ -2423,6 +2424,7 @@ impl Checker {
             Expr::Str { .. } => Type::String,
             Expr::Int { .. } => Type::Int,
             Expr::Float { .. } => Type::Float,
+            Expr::F32 { .. } => Type::F32,
             Expr::Bool { .. } => Type::Bool,
             Expr::Interp { parts, .. } => {
                 for part in parts {
@@ -2997,10 +2999,10 @@ impl Checker {
                 if !acceptable(self, &lt) || !acceptable(self, &rt) {
                     self.report_operator_error(op, &lt, &rt, trait_name, span);
                     Type::Unknown
-                } else if lt == Type::Float || rt == Type::Float {
-                    Type::Float
-                } else if lt == Type::Int && rt == Type::Int {
-                    Type::Int
+                } else if let (Some(lr), Some(rr)) = (lt.numeric_rank(), rt.numeric_rank()) {
+                    // Numeric widening lattice `int < f32 < float`: the result is the higher-ranked
+                    // operand (`f32 + int → f32`, `f32 + float → float`), the production widening rule.
+                    if lr >= rr { lt } else { rt }
                 } else {
                     Type::Unknown
                 }
@@ -4168,12 +4170,13 @@ fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
 fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
     use Type::*;
     match trait_name {
-        "Comparable" | "Equatable" => matches!(ty, Int | Float | String | Bool),
-        "Add" | "Sub" | "Mul" | "Div" => matches!(ty, Int | Float),
+        "Comparable" | "Equatable" => matches!(ty, Int | Float | F32 | String | Bool),
+        "Add" | "Sub" | "Mul" | "Div" => matches!(ty, Int | Float | F32),
         "Concat" => matches!(ty, String | List(_)),
         "Display" => matches!(
             ty,
             Int | Float
+                | F32
                 | String
                 | Bool
                 | Unit
@@ -4317,7 +4320,7 @@ fn param_type(p: &Param) -> Type {
 fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
     match ty {
         // No value, or a primitive scalar: a drop runs no destructor.
-        Type::Unit | Type::Int | Type::Float | Type::Bool | Type::String => false,
+        Type::Unit | Type::Int | Type::Float | Type::F32 | Type::Bool | Type::String => false,
         // Missing information / the dynamic top / an abstract kind / a function value: assume relevant.
         Type::Unknown | Type::Dyn | Type::Kind(_) | Type::Fn { .. } => true,
         // Aggregates are relevant exactly when a part they own is.

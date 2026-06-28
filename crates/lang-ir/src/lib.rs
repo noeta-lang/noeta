@@ -97,6 +97,8 @@ pub enum Const {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// A 32-bit float literal (`1.0f32`, P-PACK Phase 3).
+    F32(f32),
     Str(String),
 }
 

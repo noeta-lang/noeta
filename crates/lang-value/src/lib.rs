@@ -547,6 +547,28 @@ impl Value {
         }
     }
 
+    /// A 32-bit float (P-PACK Phase 3), boxed for now (a GC leaf).
+    pub fn f32(f: f32) -> Value {
+        heap::alloc(Payload::F32(f))
+    }
+
+    /// Whether this is an `f32` value.
+    pub fn is_f32(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::F32(_)))
+    }
+
+    /// The `f32` value, if this is one.
+    pub fn as_f32(self) -> Option<f32> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::F32(f) => Some(*f),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// A clone of the string value, if this is a heap string.
     pub fn as_string(self) -> Option<String> {
         if self.is_pointer() {
@@ -1037,6 +1059,8 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => s.clone(),
                 Payload::Int(i) => i.to_string(),
+                // An `f32` displays at f32 precision, byte-identical to the tree-walker's `format_f32`.
+                Payload::F32(f) => format_f32(*f),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
                 Payload::Closure { .. } | Payload::NativeFn(_) => "<fn>".to_string(),
                 // A cell is internal capture storage and never reaches a display site (the
@@ -1133,6 +1157,8 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => json_string(s),
                 Payload::Int(i) => i.to_string(),
+                // An `f32` serializes as a JSON number at f32 precision.
+                Payload::F32(f) => format_f32(*f),
                 Payload::List(items) => {
                     let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
                     format!("[{}]", parts.join(","))
@@ -1202,6 +1228,8 @@ impl Value {
             // "function".
             if self.as_closure().is_some() || self.as_native_fn().is_some() {
                 "function"
+            } else if self.is_f32() {
+                "f32"
             } else if self.is_list() {
                 "list"
             } else if self.is_tuple() {
@@ -1405,6 +1433,16 @@ impl std::fmt::Debug for Value {
 /// Render a float deterministically: whole-valued floats keep a trailing `.0` so they are
 /// visibly distinct from ints (mirrors the M0 tree-walker exactly).
 fn format_float(f: f64) -> String {
+    if f.is_finite() && f.fract() == 0.0 {
+        format!("{f:.1}")
+    } else {
+        f.to_string()
+    }
+}
+
+/// Display an `f32` (P-PACK Phase 3) at f32 precision — byte-identical to the tree-walker's
+/// `format_f32`, so the two backends agree under the differential.
+fn format_f32(f: f32) -> String {
     if f.is_finite() && f.fract() == 0.0 {
         format!("{f:.1}")
     } else {
@@ -1620,6 +1658,27 @@ mod tests {
         assert_eq!(boxed.list_len(), Some(1));
         assert_eq!(boxed.display(), "[V {x: 5, y: 6}]");
         boxed.release(); // frees the list and its owned element, so miri sees no leak
+    }
+
+    #[test]
+    fn f32_round_trips_and_frees() {
+        // P-PACK Phase 3: an `f32` is a boxed leaf value. Round-trips through `as_f32`, names itself
+        // `f32`, displays at f32 precision, and frees cleanly (checked under miri).
+        let v = Value::f32(1.5);
+        assert_eq!(v.as_f32(), Some(1.5));
+        assert!(v.is_f32());
+        assert_eq!(v.as_float(), None); // not an f64 float
+        assert_eq!(v.as_int(), None);
+        assert_eq!(v.type_name(), "f32");
+        assert_eq!(v.display(), "1.5");
+        assert!(v.dec_ref());
+        v.free();
+
+        // f32 precision is observable: 0.1 + 0.2 at f32 is exactly 0.3 (f64 would be 0.30000…04).
+        let sum = Value::f32(0.1 + 0.2_f32);
+        assert_eq!(sum.display(), "0.3");
+        assert!(sum.dec_ref());
+        sum.free();
     }
 
     #[test]

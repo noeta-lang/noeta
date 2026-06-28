@@ -1,0 +1,42 @@
+// P-PACK Phase 3: `f32` is a distinct 32-bit float primitive, written with the `f32` literal suffix
+// (`1.0f32`, `5f32`). Arithmetic follows the widening lattice `int < f32 < float`: `f32 op f32 → f32`,
+// `f32 op int → f32`, `f32 op float → float`. Its observable precision differs from `float` (f64), so
+// `0.1f32 + 0.2f32` is `0.3` where `0.1 + 0.2` is `0.30000000000000004`. The two backends must agree
+// (the differential pins eval against the VM); display is byte-identical f32 formatting.
+// expect: stdout "3.5"
+// expect: stdout "3.0"
+// expect: stdout "-0.5"
+// expect: stdout "1.3333334"
+// expect: stdout "1.5"
+// expect: stdout "2.5"
+// expect: stdout "3.0"
+// expect: stdout "2.5"
+// expect: stdout "0.3"
+// expect: stdout "0.30000000000000004"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "5.0"
+// expect: stdout "6.0"
+// expect: exit 0
+x = 1.5f32
+y = 2.0f32
+echo x + y
+echo x * y
+echo x - y
+echo y / x
+echo x
+echo x + 1
+echo 2 * x
+echo x + 1.0
+echo 0.1f32 + 0.2f32
+echo 0.1 + 0.2
+echo 1.0f32 == 1.0f32
+echo 1.0f32 == 1
+echo 2.5f32 < 3.0f32
+echo 5f32
+mut s = 0.0f32
+for i in 0..4 {
+  s = s + 1.5f32
+}
+echo s

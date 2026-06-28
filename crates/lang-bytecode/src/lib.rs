@@ -83,6 +83,8 @@ pub enum Const {
     Bool(bool),
     Int(i64),
     Float(f64),
+    /// A 32-bit float literal (`1.0f32`, P-PACK Phase 3).
+    F32(f32),
     Str(String),
     /// A Ring 2 native module, by surface name (`use std.{json}` lowers to loading this then
     /// storing it into the named global).
@@ -958,6 +960,7 @@ fn const_repr(c: &Const) -> String {
         Const::Bool(b) => b.to_string(),
         Const::Int(i) => i.to_string(),
         Const::Float(f) => format!("{f:?}"),
+        Const::F32(f) => format!("{f:?}f32"),
         Const::Str(s) => format!("{s:?}"),
         Const::NativeModule(name) => format!("module {name}"),
     }
