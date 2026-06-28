@@ -1566,14 +1566,14 @@ impl Interpreter {
             };
             fields.push(PackedSlot { kind });
         }
-        let word_count = layout.word_count();
-        if word_count == 0 {
+        let byte_size = layout.byte_size();
+        if byte_size == 0 {
             return None; // a zero-field packed struct has no recoverable element count — stay boxed.
         }
         Some(Rc::new(PackedSchema {
             def,
             fields,
-            word_count,
+            byte_size,
         }))
     }
 

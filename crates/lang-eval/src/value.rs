@@ -140,7 +140,7 @@ impl fmt::Debug for ListRepr {
 #[derive(Clone)]
 pub struct PackedList {
     schema: Rc<PackedSchema>,
-    words: Rc<Vec<u64>>,
+    bytes: Rc<Vec<u8>>,
 }
 
 impl fmt::Debug for PackedList {
@@ -159,8 +159,9 @@ pub(crate) struct PackedSchema {
     pub(crate) def: Rc<TypeDef>,
     /// One entry per field, in `def.fields` (slot) order.
     pub(crate) fields: Vec<PackedSlot>,
-    /// Words per element — the sum of each field's width.
-    pub(crate) word_count: usize,
+    /// Bytes per element — the sum of each field's [`SlotKind::byte_width`] (P-PACK 3.2b: a byte-
+    /// addressed buffer, so an `f32` field is 4 bytes, not 8).
+    pub(crate) byte_size: usize,
 }
 
 /// One field of a [`PackedSchema`].
@@ -185,7 +186,7 @@ impl PackedList {
     pub(crate) fn empty(schema: Rc<PackedSchema>) -> PackedList {
         PackedList {
             schema,
-            words: Rc::new(Vec::new()),
+            bytes: Rc::new(Vec::new()),
         }
     }
 
@@ -196,11 +197,11 @@ impl PackedList {
     /// the partial pack is staged in a scratch vector first so a failure leaves the buffer intact.
     #[must_use]
     pub(crate) fn push(&mut self, element: &Value) -> bool {
-        let mut staged = Vec::with_capacity(self.schema.word_count);
+        let mut staged = Vec::with_capacity(self.schema.byte_size);
         if pack_object(element, &self.schema, &mut staged).is_none() {
             return false;
         }
-        Rc::make_mut(&mut self.words).extend(staged);
+        Rc::make_mut(&mut self.bytes).extend(staged);
         true
     }
 
@@ -212,7 +213,7 @@ impl PackedList {
 
     /// The number of elements.
     fn len(&self) -> usize {
-        self.words.len() / self.schema.word_count
+        self.bytes.len() / self.schema.byte_size
     }
 
     /// Materialize the element at `index` into a boxed `Value::Object`, or `None` if out of range.
@@ -220,8 +221,8 @@ impl PackedList {
         if index >= self.len() {
             return None;
         }
-        let offset = index * self.schema.word_count;
-        let (value, _) = unpack_object(&self.schema, &self.words, offset);
+        let offset = index * self.schema.byte_size;
+        let (value, _) = unpack_object(&self.schema, &self.bytes, offset);
         Some(value)
     }
 
@@ -234,12 +235,12 @@ impl PackedList {
             return None;
         }
         let slot = self.schema.def.slot_of(name)?;
-        // Field `slot`'s offset within the element is the sum of the prior fields' widths.
-        let mut at = index * self.schema.word_count;
+        // Field `slot`'s byte offset within the element is the sum of the prior fields' widths.
+        let mut at = index * self.schema.byte_size;
         for s in &self.schema.fields[..slot] {
-            at += s.kind.width();
+            at += s.kind.byte_width();
         }
-        Some(decode_slot(&self.schema.fields[slot].kind, &self.words, at))
+        Some(decode_slot(&self.schema.fields[slot].kind, &self.bytes, at))
     }
 
     /// Materialize every element into a boxed vector — the fallback for any op not specialized for
@@ -252,32 +253,44 @@ impl PackedList {
 }
 
 impl SlotKind {
-    /// The number of machine words this field occupies — a primitive is one word; a nested packed
-    /// struct is its own `word_count` (laid out contiguously inline).
-    fn width(&self) -> usize {
+    /// The number of bytes this field occupies (P-PACK 3.2b): an `f32` is 4, the other primitives 8,
+    /// a nested struct its own `byte_size`.
+    fn byte_width(&self) -> usize {
         match self {
-            SlotKind::Int | SlotKind::Float | SlotKind::F32 | SlotKind::Bool => 1,
-            SlotKind::Struct(inner) => inner.word_count,
+            SlotKind::F32 => 4,
+            SlotKind::Int | SlotKind::Float | SlotKind::Bool => 8,
+            SlotKind::Struct(inner) => inner.byte_size,
         }
     }
 }
 
-/// Decode one field at `offset` into a boxed [`Value`] — the per-field counterpart of
+/// Read 8 little-endian bytes at `offset` as a `u64` (the `int`/`float`/`bool` storage word).
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
+}
+
+/// Read 4 little-endian bytes at `offset` as a `u32` (the `f32` storage word).
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+/// Decode one field at byte `offset` into a boxed [`Value`] — the per-field counterpart of
 /// [`unpack_object`], used by [`PackedList::field`] to read a single field without materializing the
 /// whole element.
-fn decode_slot(kind: &SlotKind, words: &[u64], offset: usize) -> Value {
+fn decode_slot(kind: &SlotKind, bytes: &[u8], offset: usize) -> Value {
     match kind {
-        SlotKind::Int => Value::Int(words[offset] as i64),
-        SlotKind::Float => Value::Float(f64::from_bits(words[offset])),
-        SlotKind::F32 => Value::F32(f32::from_bits(words[offset] as u32)),
-        SlotKind::Bool => Value::Bool(words[offset] != 0),
-        SlotKind::Struct(inner) => unpack_object(inner, words, offset).0,
+        SlotKind::Int => Value::Int(read_u64(bytes, offset) as i64),
+        SlotKind::Float => Value::Float(f64::from_bits(read_u64(bytes, offset))),
+        SlotKind::F32 => Value::F32(f32::from_bits(read_u32(bytes, offset))),
+        SlotKind::Bool => Value::Bool(read_u64(bytes, offset) != 0),
+        SlotKind::Struct(inner) => unpack_object(inner, bytes, offset).0,
     }
 }
 
-/// Pack one element `value` (a `Value::Object` of `schema`'s type) onto the end of `out`, one word
-/// per primitive field, recursing into nested packed structs. Returns `None` on any shape mismatch.
-fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u64>) -> Option<()> {
+/// Pack one element `value` (a `Value::Object` of `schema`'s type) onto the end of `out` — each
+/// primitive field as its little-endian bytes (`f32` 4, others 8), recursing into nested packed
+/// structs. Returns `None` on any shape mismatch.
+fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u8>) -> Option<()> {
     let Value::Object(object) = value else {
         return None;
     };
@@ -287,10 +300,10 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u64>) -> Opti
     }
     for (slot, field) in schema.fields.iter().zip(slots.iter()) {
         match (&slot.kind, field) {
-            (SlotKind::Int, Value::Int(i)) => out.push(*i as u64),
-            (SlotKind::Float, Value::Float(x)) => out.push(x.to_bits()),
-            (SlotKind::F32, Value::F32(f)) => out.push(u64::from(f.to_bits())),
-            (SlotKind::Bool, Value::Bool(b)) => out.push(u64::from(*b)),
+            (SlotKind::Int, Value::Int(i)) => out.extend_from_slice(&(*i as u64).to_le_bytes()),
+            (SlotKind::Float, Value::Float(x)) => out.extend_from_slice(&x.to_bits().to_le_bytes()),
+            (SlotKind::F32, Value::F32(f)) => out.extend_from_slice(&f.to_bits().to_le_bytes()),
+            (SlotKind::Bool, Value::Bool(b)) => out.extend_from_slice(&u64::from(*b).to_le_bytes()),
             (SlotKind::Struct(inner), nested) => pack_object(nested, inner, out)?,
             _ => return None,
         }
@@ -298,31 +311,31 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u64>) -> Opti
     Some(())
 }
 
-/// Materialize one element from `words` starting at `offset`, returning the value and the offset
+/// Materialize one element from `bytes` starting at byte `offset`, returning the value and the offset
 /// just past it (so nested structs and the caller advance in lock-step with [`pack_object`]).
-fn unpack_object(schema: &PackedSchema, words: &[u64], offset: usize) -> (Value, usize) {
+fn unpack_object(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value, usize) {
     let mut slots = Vec::with_capacity(schema.fields.len());
     let mut at = offset;
     for slot in &schema.fields {
         match &slot.kind {
             SlotKind::Int => {
-                slots.push(Value::Int(words[at] as i64));
-                at += 1;
+                slots.push(Value::Int(read_u64(bytes, at) as i64));
+                at += 8;
             }
             SlotKind::Float => {
-                slots.push(Value::Float(f64::from_bits(words[at])));
-                at += 1;
+                slots.push(Value::Float(f64::from_bits(read_u64(bytes, at))));
+                at += 8;
             }
             SlotKind::F32 => {
-                slots.push(Value::F32(f32::from_bits(words[at] as u32)));
-                at += 1;
+                slots.push(Value::F32(f32::from_bits(read_u32(bytes, at))));
+                at += 4;
             }
             SlotKind::Bool => {
-                slots.push(Value::Bool(words[at] != 0));
-                at += 1;
+                slots.push(Value::Bool(read_u64(bytes, at) != 0));
+                at += 8;
             }
             SlotKind::Struct(inner) => {
-                let (nested, next) = unpack_object(inner, words, at);
+                let (nested, next) = unpack_object(inner, bytes, at);
                 slots.push(nested);
                 at = next;
             }

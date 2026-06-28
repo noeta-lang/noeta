@@ -189,33 +189,53 @@ fn vec3_typed_src(n: usize, f32_fields: bool) -> String {
 
 #[test]
 fn packed_f32_list_is_roughly_half_of_float() {
-    // VM-only narrowing (P-PACK 3.2b): an f32 `Vec3` is 12 bytes/element, a float `Vec3` is 24 — so the
-    // held f32 packed list's peak is well under the float one's. (Eval keeps 8-byte words, so this
-    // measures the VM, the perf backend.)
+    // Byte-addressed narrowing (P-PACK 3.2b VM + the eval follow-up): an f32 `Vec3` is 12 bytes/
+    // element, a float `Vec3` is 24 — so the held f32 packed list saves the narrowed bytes vs the
+    // float one. Both backends are byte-addressed now, so both are measured.
     const N: usize = 4_000;
+    let kib = |b: usize| b as f64 / 1024.0;
+    let expected = N * 3 * 4; // 3 fields, 4 bytes narrower each
+
+    // Each closure precompiles/lowers outside the measured region (see `compile_program`/`eval_runner`).
     let vm_f32 = compile_program(&vec3_typed_src(N, true));
     let vm_float = compile_program(&vec3_typed_src(N, false));
-    let (r_a, f32_peak) = peak_during(|| VmBackend::new().run_module(&vm_f32));
-    let (r_b, float_peak) = peak_during(|| VmBackend::new().run_module(&vm_float));
+    let (r_a, vm_f32_peak) = peak_during(|| VmBackend::new().run_module(&vm_f32));
+    let (r_b, vm_float_peak) = peak_during(|| VmBackend::new().run_module(&vm_float));
     assert_eq!(r_a.stdout, "4000\n");
     assert_eq!(r_b.stdout, "4000\n");
-    let kib = |b: usize| b as f64 / 1024.0;
+
+    let (r_c, ev_f32_peak) = peak_during(eval_runner(parse_program(&vec3_typed_src(N, true))));
+    let (r_d, ev_float_peak) = peak_during(eval_runner(parse_program(&vec3_typed_src(N, false))));
+    assert_eq!(r_c.stdout, "4000\n");
+    assert_eq!(r_d.stdout, "4000\n");
+
+    println!("\nP-PACK 3.2b f32 narrowing, List<Vec3> n={N}");
     println!(
-        "\nP-PACK 3.2b f32 narrowing, List<Vec3> n={N}: f32 {:.1} KiB vs float {:.1} KiB ({:.2}× smaller)",
-        kib(f32_peak),
-        kib(float_peak),
-        float_peak as f64 / f32_peak.max(1) as f64
+        "  vm    f32 {:>8.1} KiB  float {:>8.1} KiB  (saved {:.1} KiB)",
+        kib(vm_f32_peak),
+        kib(vm_float_peak),
+        kib(vm_float_peak - vm_f32_peak)
     );
-    // The f32 buffer is exactly half the float buffer (12 vs 24 bytes/element); the rest of the peak
-    // is fixed run overhead, so assert on the *delta* — it must be ~the narrowed bytes (3 fields × 4
-    // bytes saved × N = 48 KiB), which directly proves the f32 slot is 4 bytes, not 8.
-    let saved = float_peak.saturating_sub(f32_peak);
-    let expected = N * 3 * 4; // 3 fields, 4 bytes narrower each
-    assert!(
-        saved as f64 >= expected as f64 * 0.9,
-        "f32 narrowing should save ~{expected} B (3 fields × 4 B × {N}); saved only {saved} B \
-         (f32 {f32_peak} vs float {float_peak})"
+    println!(
+        "  eval  f32 {:>8.1} KiB  float {:>8.1} KiB  (saved {:.1} KiB)",
+        kib(ev_f32_peak),
+        kib(ev_float_peak),
+        kib(ev_float_peak - ev_f32_peak)
     );
+    // On each backend the f32 buffer is exactly half the float buffer (12 vs 24 bytes/element); the
+    // rest of the peak is fixed run overhead, so assert on the *delta* — it must be ~the narrowed
+    // bytes (3 fields × 4 B × N = 48 KiB), proving the f32 slot is 4 bytes, not 8, on *both* backends.
+    for (label, f32_peak, float_peak) in [
+        ("vm", vm_f32_peak, vm_float_peak),
+        ("eval", ev_f32_peak, ev_float_peak),
+    ] {
+        let saved = float_peak.saturating_sub(f32_peak);
+        assert!(
+            saved as f64 >= expected as f64 * 0.9,
+            "{label}: f32 narrowing should save ~{expected} B (3 fields × 4 B × {N}); saved only \
+             {saved} B (f32 {f32_peak} vs float {float_peak})"
+        );
+    }
 }
 
 #[test]
