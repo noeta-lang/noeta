@@ -155,6 +155,34 @@ fn packed_list_src(n: usize, packed: bool) -> String {
     )
 }
 
+/// A `List<packed>` **producer** workload (P-PACK 2.6): build the list, run it through a selection
+/// producer (`op` over `data`), then index + sum a field over the result. With `@packed` the VM keeps
+/// the result flat — copying the kept elements' words — instead of allocating `n` boxed objects; the
+/// plain-`struct` variant materializes a boxed result. The producer + downstream scalar read are timed
+/// together. `reverse`/`slice` are pure word copies — ~14–16% faster than boxed (no N allocations);
+/// `filter` must materialize each element to run the predicate (a temp alloc per element), so it is a
+/// ~5% time cost but a 2.3× memory win (the result stays flat — see the `peak_memory` residency test).
+fn packed_producer_src(n: usize, packed: bool, op: &str) -> String {
+    let kw = if packed { "@packed struct" } else { "struct" };
+    let mut elems = String::with_capacity(n * 32);
+    for i in 0..n {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str("Vec3 { x: 1.0, y: 2.0, z: 3.0 }");
+    }
+    format!(
+        "{kw} Vec3 {{ x: float; y: float; z: float }}\n\
+         data = [{elems}]\n\
+         result = {op}\n\
+         mut sum = 0.0\n\
+         for i in 0..result.count() {{\n    \
+            sum = sum + result[i].x\n\
+         }}\n\
+         echo sum\n"
+    )
+}
+
 /// Sizes for the packed-list workload — a couple of points to confirm the per-element cost is flat.
 const PACKED_SIZES: &[usize] = &[1000, 4000];
 
@@ -420,6 +448,28 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     pl.finish();
+
+    let mut prod = c.benchmark_group("vm_packed_producer");
+    for (op_label, op) in [
+        ("reverse", "data.reverse()"),
+        ("filter", "filter(data, fn(v) => v.x > 0.0)"),
+    ] {
+        for &n in PACKED_SIZES {
+            let packed = compile(&packed_producer_src(n, true, op));
+            prod.bench_with_input(
+                BenchmarkId::new(format!("{op_label}-packed"), n),
+                &packed,
+                |b, module| b.iter(|| black_box(VmBackend::new().run_module(black_box(module)))),
+            );
+            let boxed = compile(&packed_producer_src(n, false, op));
+            prod.bench_with_input(
+                BenchmarkId::new(format!("{op_label}-boxed"), n),
+                &boxed,
+                |b, module| b.iter(|| black_box(VmBackend::new().run_module(black_box(module)))),
+            );
+        }
+    }
+    prod.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

@@ -489,6 +489,31 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         if list.is_packed_list() {
+            // Selection producers keep the list *flat* — `reverse`/`slice` build a new packed buffer
+            // by copying the selected elements' word-blocks (P-PACK 2.6), instead of demoting to N
+            // boxed objects. Their arity/bounds checks and errors mirror the boxed arms exactly, so
+            // the result is observably identical. Every other method demotes (materialize-on-read).
+            match method {
+                lang_stdlib::ListMethod::Reverse => {
+                    self.stdlib_arity(name, args, 0, span)?;
+                    let n = list.list_len().expect("packed list");
+                    let indices: Vec<usize> = (0..n).rev().collect();
+                    return Ok(list.packed_select(&indices));
+                }
+                lang_stdlib::ListMethod::Slice => {
+                    self.stdlib_arity(name, args, 2, span)?;
+                    let start = self.stdlib_int(name, args[0], span)?;
+                    let end = self.stdlib_int(name, args[1], span)?;
+                    let len = list.list_len().expect("packed list");
+                    if start < 0 || end < start || end as usize > len {
+                        let error = lang_stdlib::slice_bounds_error(start, end, len);
+                        return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                    }
+                    let indices: Vec<usize> = (start as usize..end as usize).collect();
+                    return Ok(list.packed_select(&indices));
+                }
+                _ => {}
+            }
             let boxed = list.realize_list();
             let result = self.call_list_method_boxed(boxed, method, name, args, span);
             boxed.release();
@@ -3936,6 +3961,36 @@ impl<'m> Vm<'m> {
                         span,
                         format!("`filter` expects a list, found {}", args[0].type_name()),
                     ));
+                }
+                // A packed list stays *flat* (P-PACK 2.6): test each element (materialized only for the
+                // predicate call, then consumed by it), record the indices that pass, and rebuild a new
+                // packed buffer from those word-blocks — never demoting the whole list to boxed.
+                if args[0].is_packed_list() {
+                    let list = args[0];
+                    let func = args[1];
+                    let n = list.list_len().expect("packed list");
+                    let mut kept: Vec<usize> = Vec::new();
+                    for i in 0..n {
+                        let element = list.packed_get(i); // owned (rc 1), consumed by the call
+                        let verdict = self.call_value(func, vec![element], span)?;
+                        match verdict.as_bool() {
+                            Some(true) => kept.push(i),
+                            Some(false) => {}
+                            None => {
+                                let type_name = verdict.type_name();
+                                release(verdict);
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    span,
+                                    format!(
+                                        "`filter` predicate must return a bool, found {type_name}"
+                                    ),
+                                ));
+                            }
+                        }
+                        release(verdict); // the bool verdict (an immediate) is no longer needed
+                    }
+                    return Ok(list.packed_select(&kept));
                 }
                 // Demote a packed list (P-PACK 2.4); elements are borrowed from the temporary, which
                 // is released after the loop (a kept element is retained into the result first).

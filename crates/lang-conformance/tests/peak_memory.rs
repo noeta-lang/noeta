@@ -91,6 +91,68 @@ fn eval_runner(program: lang_ast::Program) -> impl FnOnce() -> lang_backend::Run
     move || TreeWalkBackend::new().run_ir(&program, &ir, sites)
 }
 
+/// Build an `n`-element packed/boxed `Vec3` list, run it through a flat-preserving **producer**
+/// (`reverse`/`slice`/`filter`), hold the *result* (sum a field over it), and keep the input alive
+/// too. With `@packed` and a producer that stays flat (P-PACK 2.6, VM) both the input and the result
+/// are flat `Vec<u64>` buffers; if the producer silently demoted, the result would balloon to `n`
+/// boxed objects and the residency would jump toward the boxed figure — which the test's ratio guard
+/// then catches. `op` is a `.lang` expression over `data` producing the result list.
+fn producer_vec3_src(n: usize, packed: bool, op: &str) -> String {
+    let kw = if packed { "@packed struct" } else { "struct" };
+    let mut elems = String::with_capacity(n * 32);
+    for i in 0..n {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str("Vec3 { x: 1.0, y: 2.0, z: 3.0 }");
+    }
+    format!(
+        "{kw} Vec3 {{ x: float; y: float; z: float }}\n\
+         data = [{elems}]\n\
+         result = {op}\n\
+         mut sum = 0.0\n\
+         for i in 0..result.count() {{\n    \
+            sum = sum + result[i].x\n\
+         }}\n\
+         echo data.count()\n\
+         echo sum\n"
+    )
+}
+
+#[test]
+fn packed_producers_keep_the_list_flat() {
+    // VM-only this slice (eval's list dispatch materializes its receiver, so its producers still
+    // demote — a deliberate, RunResult-invisible asymmetry). Each producer holds its result *and* the
+    // input; if it stayed flat the VM peak is two flat buffers, well under half the boxed peak. A
+    // silent demote of the result would push the packed peak toward boxed and trip the `* 2 <` guard.
+    const N: usize = 2_000;
+    let cases = [
+        ("reverse", "data.reverse()"),
+        ("slice", "data.slice(0, data.count())"),
+        ("filter", "filter(data, fn(v) => v.x > 0.0)"),
+    ];
+    for (label, op) in cases {
+        let vm_packed = compile_program(&producer_vec3_src(N, true, op));
+        let vm_boxed = compile_program(&producer_vec3_src(N, false, op));
+        let (r_p, packed_peak) = peak_during(|| VmBackend::new().run_module(&vm_packed));
+        let (r_b, boxed_peak) = peak_during(|| VmBackend::new().run_module(&vm_boxed));
+        assert!(!r_p.stdout.is_empty(), "{label}: packed produced no output");
+        assert_eq!(r_p.stdout, r_b.stdout, "{label}: packed vs boxed stdout");
+        let kib = |b: usize| b as f64 / 1024.0;
+        println!(
+            "  vm producer {label:<8} packed {:>8.1} KiB  boxed {:>8.1} KiB  ({:.2}× smaller)",
+            kib(packed_peak),
+            kib(boxed_peak),
+            boxed_peak as f64 / packed_peak.max(1) as f64
+        );
+        assert!(
+            packed_peak * 2 < boxed_peak,
+            "{label}: packed peak ({packed_peak} B) should be < half boxed ({boxed_peak} B) — \
+             did the producer silently demote the packed list to boxed?"
+        );
+    }
+}
+
 #[test]
 fn packed_list_peak_residency_is_a_fraction_of_boxed() {
     // The memory ratio is independent of `n` (both representations scale linearly), so a moderate

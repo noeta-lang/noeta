@@ -302,6 +302,27 @@ impl Value {
         Some(decode_packed_field(&kind, &words, 0))
     }
 
+    /// Build a new flat packed list from selected element `indices` of this one, copying each
+    /// selected element's word-block verbatim — no per-element materialization (P-PACK 2.6). The
+    /// schema is shared (an `Rc` clone). This keeps a `List<packed>` *flat* through the selection
+    /// producers (`reverse`/`slice`/`filter`) instead of demoting to N boxed objects. A packed list
+    /// is a GC leaf, so the new buffer owns no child references; the caller owns the result (rc 1).
+    /// Every index must be in range (callers validate against [`Value::list_len`]).
+    pub fn packed_select(self, indices: &[usize]) -> Value {
+        let (schema, buf) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, words } => {
+                let wc = schema.word_count;
+                let mut out = Vec::with_capacity(indices.len() * wc);
+                for &i in indices {
+                    out.extend_from_slice(&words[i * wc..i * wc + wc]);
+                }
+                (Rc::clone(schema), out)
+            }
+            _ => unreachable!("packed_select on a non-packed list"),
+        });
+        Value::packed_list(schema, buf)
+    }
+
     /// Materialize every packed element into an owned vector (each refcount 1). Used by
     /// [`Value::realize_list`]; the words are copied out before allocating so no heap borrow is held
     /// across element construction.
@@ -1534,6 +1555,43 @@ mod tests {
         // Out of range and unknown field both decline (the caller then falls back).
         assert!(list.packed_field(2, "x").is_none());
         assert!(list.packed_field(0, "z").is_none());
+
+        list.release();
+    }
+
+    #[test]
+    fn packed_select_keeps_the_list_flat() {
+        // P-PACK 2.6: `packed_select` rebuilds a flat buffer from chosen element word-blocks (the
+        // selection producers reverse/slice/filter). The result is still a packed list (no demote) and
+        // owns no child refs, so it frees cleanly — checked under miri.
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "V",
+            vec!["x".into(), "y".into()],
+        ));
+        let schema = Rc::new(PackedSchema {
+            shape: Rc::clone(&shape),
+            fields: vec![PackedKind::Int, PackedKind::Int],
+            word_count: 2,
+        });
+        // Three elements: (3,1), (1,2), (7,9).
+        let list = Value::packed_list(Rc::clone(&schema), vec![3, 1, 1, 2, 7, 9]);
+
+        // Reverse-order selection yields a flat packed list with the blocks reordered.
+        let reversed = list.packed_select(&[2, 1, 0]);
+        assert!(reversed.is_packed_list());
+        assert_eq!(reversed.list_len(), Some(3));
+        assert_eq!(
+            reversed.display(),
+            "[V {x: 7, y: 9}, V {x: 1, y: 2}, V {x: 3, y: 1}]"
+        );
+        reversed.release();
+
+        // A subset selection (a filter/slice keeping a prefix) stays flat too.
+        let kept = list.packed_select(&[0, 2]);
+        assert!(kept.is_packed_list());
+        assert_eq!(kept.display(), "[V {x: 3, y: 1}, V {x: 7, y: 9}]");
+        kept.release();
 
         list.release();
     }
