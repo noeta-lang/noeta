@@ -798,8 +798,9 @@ pub struct PackedSchemaDef {
     pub shape: u32,
     /// One entry per field, in slot (declared) order.
     pub fields: Vec<PackedFieldDef>,
-    /// Words per element (the per-element stride into the flat buffer).
-    pub word_count: u32,
+    /// Bytes per element (the per-element stride into the flat byte buffer; P-PACK 3.2b — an `f32`
+    /// field is 4 bytes, the other primitives 8).
+    pub byte_size: u32,
 }
 
 /// A compiled packed field's kind — the pure-data form of a `lang_object::PackedKind`. A nested
@@ -926,10 +927,10 @@ impl Module {
                     .collect();
                 let _ = writeln!(
                     out,
-                    "  packed{i} = s{} [{}] ({} words)",
+                    "  packed{i} = s{} [{}] ({} bytes)",
                     schema.shape,
                     fields.join(", "),
-                    schema.word_count
+                    schema.byte_size
                 );
             }
         }

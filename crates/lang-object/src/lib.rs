@@ -142,20 +142,33 @@ pub struct PackedSchema {
     pub shape: std::rc::Rc<Shape>,
     /// One entry per field, in `shape.fields` (slot) order.
     pub fields: Vec<PackedKind>,
-    /// Words per element — the sum of each field's width.
-    pub word_count: usize,
+    /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (P-PACK 3.2b: the
+    /// VM stores a `List<packed>` as a byte buffer so an `f32` field is 4 bytes, not 8).
+    pub byte_size: usize,
 }
 
-/// A packed field's storage: a primitive occupying one word, or a nested packed struct flattened
-/// inline (its own sub-schema laid out contiguously in the parent's buffer).
+/// A packed field's storage: a primitive occupying a fixed run of bytes, or a nested packed struct
+/// flattened inline (its own sub-schema laid out contiguously in the parent's buffer).
 #[derive(Debug, Clone)]
 pub enum PackedKind {
     Int,
     Float,
-    /// A 32-bit float field (P-PACK Phase 3).
+    /// A 32-bit float field (P-PACK Phase 3) — **4 bytes** (slice 3.2b), half an `int`/`float`.
     F32,
     Bool,
     Struct(std::rc::Rc<PackedSchema>),
+}
+
+impl PackedKind {
+    /// The number of bytes this field occupies in a packed buffer (P-PACK 3.2b): an `f32` is 4, the
+    /// other primitives are 8, and a nested struct is its own `byte_size`.
+    pub fn byte_width(&self) -> usize {
+        match self {
+            PackedKind::F32 => 4,
+            PackedKind::Int | PackedKind::Float | PackedKind::Bool => 8,
+            PackedKind::Struct(inner) => inner.byte_size,
+        }
+    }
 }
 
 #[cfg(test)]

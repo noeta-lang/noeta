@@ -774,7 +774,7 @@ impl ModuleCompiler {
         let def = lang_bytecode::PackedSchemaDef {
             shape,
             fields,
-            word_count: layout.word_count() as u32,
+            byte_size: layout.byte_size() as u32,
         };
         if let Some(i) = self.packed_schemas.iter().position(|s| *s == def) {
             return i as u32;

@@ -164,6 +164,60 @@ fn packed_producers_keep_the_list_flat() {
     }
 }
 
+/// Build + hold an `n`-element list of `Vec3` whose fields are `f32` (4 bytes each) or `float`
+/// (f64, 8 bytes), then sum a field. With the VM's byte-addressed packed buffer (P-PACK 3.2b) the
+/// f32 list is ~half the float list's residency — the density win of the narrowed slot.
+fn vec3_typed_src(n: usize, f32_fields: bool) -> String {
+    let ty = if f32_fields { "f32" } else { "float" };
+    let lit = if f32_fields { "1.0f32" } else { "1.0" };
+    let mut elems = String::with_capacity(n * 40);
+    for i in 0..n {
+        if i > 0 {
+            elems.push_str(", ");
+        }
+        elems.push_str(&format!("Vec3 {{ x: {lit}, y: {lit}, z: {lit} }}"));
+    }
+    format!(
+        "@packed struct Vec3 {{ x: {ty}; y: {ty}; z: {ty} }}\n\
+         data = [{elems}]\n\
+         mut sum = 0.0{}\n\
+         for i in 0..{n} {{\n    sum = sum + data[i].x\n}}\n\
+         echo data.count()\n",
+        if f32_fields { "f32" } else { "" }
+    )
+}
+
+#[test]
+fn packed_f32_list_is_roughly_half_of_float() {
+    // VM-only narrowing (P-PACK 3.2b): an f32 `Vec3` is 12 bytes/element, a float `Vec3` is 24 — so the
+    // held f32 packed list's peak is well under the float one's. (Eval keeps 8-byte words, so this
+    // measures the VM, the perf backend.)
+    const N: usize = 4_000;
+    let vm_f32 = compile_program(&vec3_typed_src(N, true));
+    let vm_float = compile_program(&vec3_typed_src(N, false));
+    let (r_a, f32_peak) = peak_during(|| VmBackend::new().run_module(&vm_f32));
+    let (r_b, float_peak) = peak_during(|| VmBackend::new().run_module(&vm_float));
+    assert_eq!(r_a.stdout, "4000\n");
+    assert_eq!(r_b.stdout, "4000\n");
+    let kib = |b: usize| b as f64 / 1024.0;
+    println!(
+        "\nP-PACK 3.2b f32 narrowing, List<Vec3> n={N}: f32 {:.1} KiB vs float {:.1} KiB ({:.2}× smaller)",
+        kib(f32_peak),
+        kib(float_peak),
+        float_peak as f64 / f32_peak.max(1) as f64
+    );
+    // The f32 buffer is exactly half the float buffer (12 vs 24 bytes/element); the rest of the peak
+    // is fixed run overhead, so assert on the *delta* — it must be ~the narrowed bytes (3 fields × 4
+    // bytes saved × N = 48 KiB), which directly proves the f32 slot is 4 bytes, not 8.
+    let saved = float_peak.saturating_sub(f32_peak);
+    let expected = N * 3 * 4; // 3 fields, 4 bytes narrower each
+    assert!(
+        saved as f64 >= expected as f64 * 0.9,
+        "f32 narrowing should save ~{expected} B (3 fields × 4 B × {N}); saved only {saved} B \
+         (f32 {f32_peak} vs float {float_peak})"
+    );
+}
+
 #[test]
 fn packed_list_peak_residency_is_a_fraction_of_boxed() {
     // The memory ratio is independent of `n` (both representations scale linearly), so a moderate

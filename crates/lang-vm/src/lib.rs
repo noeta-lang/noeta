@@ -328,7 +328,7 @@ fn execute_with_collector(
         packed_schemas.push(Rc::new(lang_object::PackedSchema {
             shape: Rc::clone(&shapes[def.shape as usize]),
             fields,
-            word_count: def.word_count as usize,
+            byte_size: def.byte_size as usize,
         }));
     }
     // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).

@@ -181,13 +181,13 @@ impl Value {
         heap::alloc(Payload::Set(items))
     }
 
-    /// A flat `List<packed>` value (refcount 1, P-PACK 2.4): `words` holds the elements packed as
-    /// raw primitive bits (`schema.word_count` words each), interpreted through `schema`. A leaf —
-    /// it owns no child `Value`s (only primitive words), so freeing it just drops the buffer. The
-    /// elements are materialized on demand (index, iterate, demote), so the layout is invisible to
-    /// `RunResult`.
-    pub fn packed_list(schema: Rc<PackedSchema>, words: Vec<u64>) -> Value {
-        heap::alloc(Payload::PackedList { schema, words })
+    /// A flat `List<packed>` value (refcount 1, P-PACK 2.4): `bytes` holds the elements packed as raw
+    /// primitive bytes (`schema.byte_size` bytes each — an `f32` field is 4 bytes, P-PACK 3.2b),
+    /// interpreted through `schema`. A leaf — it owns no child `Value`s (only primitive bytes), so
+    /// freeing it just drops the buffer. The elements are materialized on demand (index, iterate,
+    /// demote), so the layout is invisible to `RunResult`.
+    pub fn packed_list(schema: Rc<PackedSchema>, bytes: Vec<u8>) -> Value {
+        heap::alloc(Payload::PackedList { schema, bytes })
     }
 
     /// Whether this is a flat packed list (the `List<packed>` representation, P-PACK 2.4).
@@ -195,26 +195,32 @@ impl Value {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::PackedList { .. }))
     }
 
-    /// Pack this value (a value-struct instance) onto the end of `out` per `schema`, one word per
-    /// primitive field, recursing into nested packed structs. Returns `false` on any shape mismatch
-    /// (a non-object, wrong field count, or a field whose runtime kind disagrees) so the caller can
-    /// fall back to a boxed list — the flat form is only ever used when exactly correct.
-    pub fn pack_element(self, schema: &PackedSchema, out: &mut Vec<u64>) -> bool {
+    /// Pack this value (a value-struct instance) onto the end of `out` per `schema` — each primitive
+    /// field as its little-endian bytes (`int`/`float`/`bool` 8, `f32` 4; P-PACK 3.2b), recursing into
+    /// nested packed structs. Returns `false` on any shape mismatch (a non-object, wrong field count,
+    /// or a field whose runtime kind disagrees) so the caller can fall back to a boxed list — the flat
+    /// form is only ever used when exactly correct.
+    pub fn pack_element(self, schema: &PackedSchema, out: &mut Vec<u8>) -> bool {
         heap::with_payload(self, |p| match p {
             Payload::Object { slots, .. } if slots.len() == schema.fields.len() => {
                 for (kind, &slot) in schema.fields.iter().zip(slots.iter()) {
                     let ok = match kind {
-                        PackedKind::Int => slot.as_int().map(|i| out.push(i as u64)).is_some(),
-                        PackedKind::Float => {
-                            slot.as_float().map(|f| out.push(f.to_bits())).is_some()
-                        }
+                        PackedKind::Int => slot
+                            .as_int()
+                            .map(|i| out.extend_from_slice(&(i as u64).to_le_bytes()))
+                            .is_some(),
+                        PackedKind::Float => slot
+                            .as_float()
+                            .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
+                            .is_some(),
                         PackedKind::F32 => slot
                             .as_f32()
-                            .map(|f| out.push(u64::from(f.to_bits())))
+                            .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
                             .is_some(),
-                        PackedKind::Bool => {
-                            slot.as_bool().map(|b| out.push(u64::from(b))).is_some()
-                        }
+                        PackedKind::Bool => slot
+                            .as_bool()
+                            .map(|b| out.extend_from_slice(&u64::from(b).to_le_bytes()))
+                            .is_some(),
                         PackedKind::Struct(inner) => slot.pack_element(inner, out),
                     };
                     if !ok {
@@ -240,10 +246,10 @@ impl Value {
             "packed_push requires a uniquely-owned packed list"
         );
         heap::with_payload_mut(self, |p| match p {
-            Payload::PackedList { schema, words } => {
-                let mut staged = Vec::with_capacity(schema.word_count);
+            Payload::PackedList { schema, bytes } => {
+                let mut staged = Vec::with_capacity(schema.byte_size);
                 if element.pack_element(schema, &mut staged) {
-                    words.extend(staged);
+                    bytes.extend(staged);
                     true
                 } else {
                     false
@@ -272,15 +278,15 @@ impl Value {
     /// single-element read with no full-list materialization. The caller owns the returned value.
     /// `index` must be in bounds (callers check via [`Value::list_len`]).
     pub fn packed_get(self, index: usize) -> Value {
-        let (schema, words) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, words } => {
-                let wc = schema.word_count;
-                let offset = index * wc;
-                (Rc::clone(schema), words[offset..offset + wc].to_vec())
+        let (schema, elem) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, bytes } => {
+                let stride = schema.byte_size;
+                let offset = index * stride;
+                (Rc::clone(schema), bytes[offset..offset + stride].to_vec())
             }
             _ => unreachable!("packed_get on a non-packed list"),
         });
-        unpack_element(&schema, &words, 0).0
+        unpack_element(&schema, &elem, 0).0
     }
 
     /// Read a single field of the packed element at `index` (P-PACK 2.5+ fused `list[i].field`),
@@ -290,24 +296,24 @@ impl Value {
     /// real field reads on a packed type, so a hit is the norm; the caller falls back on `None`). No
     /// full-element materialization — this is the scalar-access win over `packed_get`.
     pub fn packed_field(self, index: usize, field: &str) -> Option<Value> {
-        let (kind, words) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, words } => {
-                let count = words.len() / schema.word_count;
+        let (kind, slice) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, bytes } => {
+                let count = bytes.len() / schema.byte_size;
                 if index >= count {
                     return None;
                 }
                 let slot = schema.shape.slot_of(field)?;
-                // Field `slot`'s offset within the element is the sum of the prior fields' widths.
-                let mut at = index * schema.word_count;
+                // Field `slot`'s byte offset within the element is the sum of the prior fields' widths.
+                let mut at = index * schema.byte_size;
                 for kind in &schema.fields[..slot] {
-                    at += packed_kind_width(kind);
+                    at += kind.byte_width();
                 }
-                let width = packed_kind_width(&schema.fields[slot]);
-                Some((schema.fields[slot].clone(), words[at..at + width].to_vec()))
+                let width = schema.fields[slot].byte_width();
+                Some((schema.fields[slot].clone(), bytes[at..at + width].to_vec()))
             }
             _ => None,
         })?;
-        Some(decode_packed_field(&kind, &words, 0))
+        Some(decode_packed_field(&kind, &slice, 0))
     }
 
     /// Build a new flat packed list from selected element `indices` of this one, copying each
@@ -318,11 +324,11 @@ impl Value {
     /// Every index must be in range (callers validate against [`Value::list_len`]).
     pub fn packed_select(self, indices: &[usize]) -> Value {
         let (schema, buf) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, words } => {
-                let wc = schema.word_count;
-                let mut out = Vec::with_capacity(indices.len() * wc);
+            Payload::PackedList { schema, bytes } => {
+                let stride = schema.byte_size;
+                let mut out = Vec::with_capacity(indices.len() * stride);
                 for &i in indices {
-                    out.extend_from_slice(&words[i * wc..i * wc + wc]);
+                    out.extend_from_slice(&bytes[i * stride..i * stride + stride]);
                 }
                 (Rc::clone(schema), out)
             }
@@ -336,15 +342,15 @@ impl Value {
     /// `element`. Returns `None` (so the caller demotes) if `element` does not pack into the schema.
     pub fn packed_set(self, index: usize, element: Value) -> Option<Value> {
         let (schema, mut buf) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
             _ => unreachable!("packed_set on a non-packed list"),
         });
-        let wc = schema.word_count;
-        let mut staged = Vec::with_capacity(wc);
+        let stride = schema.byte_size;
+        let mut staged = Vec::with_capacity(stride);
         if !element.pack_element(&schema, &mut staged) {
             return None;
         }
-        buf[index * wc..index * wc + wc].copy_from_slice(&staged);
+        buf[index * stride..index * stride + stride].copy_from_slice(&staged);
         Some(Value::packed_list(schema, buf))
     }
 
@@ -360,11 +366,11 @@ impl Value {
             "packed_set_in_place requires a uniquely-owned packed list"
         );
         heap::with_payload_mut(self, |p| match p {
-            Payload::PackedList { schema, words } => {
-                let wc = schema.word_count;
-                let mut staged = Vec::with_capacity(wc);
+            Payload::PackedList { schema, bytes } => {
+                let stride = schema.byte_size;
+                let mut staged = Vec::with_capacity(stride);
                 if element.pack_element(schema, &mut staged) {
-                    words[index * wc..index * wc + wc].copy_from_slice(&staged);
+                    bytes[index * stride..index * stride + stride].copy_from_slice(&staged);
                     true
                 } else {
                     false
@@ -382,17 +388,17 @@ impl Value {
             return None;
         }
         let (schema, mut buf) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
             _ => unreachable!("packed_concat on a non-packed list"),
         });
-        let other_words = heap::with_payload(other, |p| match p {
+        let other_bytes = heap::with_payload(other, |p| match p {
             Payload::PackedList {
                 schema: s2,
-                words: w2,
-            } => Rc::ptr_eq(&schema.shape, &s2.shape).then(|| w2.clone()),
+                bytes: b2,
+            } => Rc::ptr_eq(&schema.shape, &s2.shape).then(|| b2.clone()),
             _ => None,
         })?;
-        buf.extend_from_slice(&other_words);
+        buf.extend_from_slice(&other_bytes);
         Some(Value::packed_list(schema, buf))
     }
 
@@ -409,15 +415,15 @@ impl Value {
         if !other.is_packed_list() {
             return false;
         }
-        let (other_schema, other_words) = heap::with_payload(other, |p| match p {
-            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+        let (other_schema, other_bytes) = heap::with_payload(other, |p| match p {
+            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
             _ => unreachable!("packed_extend_in_place on a non-packed list"),
         });
         heap::with_payload_mut(self, |p| match p {
-            Payload::PackedList { schema, words }
+            Payload::PackedList { schema, bytes }
                 if Rc::ptr_eq(&schema.shape, &other_schema.shape) =>
             {
-                words.extend_from_slice(&other_words);
+                bytes.extend_from_slice(&other_bytes);
                 true
             }
             _ => false,
@@ -428,15 +434,15 @@ impl Value {
     /// [`Value::realize_list`]; the words are copied out before allocating so no heap borrow is held
     /// across element construction.
     fn packed_items(self) -> Vec<Value> {
-        let (schema, words) = heap::with_payload(self, |p| match p {
-            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+        let (schema, bytes) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
             _ => unreachable!("packed_items on a non-packed list"),
         });
-        let count = words.len() / schema.word_count;
+        let count = bytes.len() / schema.byte_size;
         let mut out = Vec::with_capacity(count);
         let mut at = 0;
         for _ in 0..count {
-            let (value, next) = unpack_element(&schema, &words, at);
+            let (value, next) = unpack_element(&schema, &bytes, at);
             out.push(value);
             at = next;
         }
@@ -750,9 +756,9 @@ impl Value {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::List(items) => Some(items.len()),
-                // A packed list's length is its word count divided by the per-element stride — O(1),
+                // A packed list's length is its byte count divided by the per-element stride — O(1),
                 // no materialization.
-                Payload::PackedList { schema, words } => Some(words.len() / schema.word_count),
+                Payload::PackedList { schema, bytes } => Some(bytes.len() / schema.byte_size),
                 _ => None,
             })
         } else {
@@ -1463,51 +1469,52 @@ fn format_f32(f: f32) -> String {
 /// advance in lock-step with [`Value::pack_element`]. Each primitive becomes an immediate (or a
 /// boxed int for a large magnitude); each nested struct recurses, the parent object owning its
 /// reference. The object reuses `schema.shape`, so it is shape-identical to a constructed instance.
-/// The number of machine words one packed field occupies — a primitive is one word; a nested packed
-/// struct is its own `word_count` (its fields laid out contiguously inline).
-fn packed_kind_width(kind: &PackedKind) -> usize {
-    match kind {
-        PackedKind::Int | PackedKind::Float | PackedKind::F32 | PackedKind::Bool => 1,
-        PackedKind::Struct(inner) => inner.word_count,
-    }
+/// Read 8 little-endian bytes at `offset` as a `u64` (the storage word for `int`/`float`/`bool`).
+fn read_u64(bytes: &[u8], offset: usize) -> u64 {
+    u64::from_le_bytes(bytes[offset..offset + 8].try_into().unwrap())
 }
 
-/// Decode one packed field at `offset` into an owned [`Value`] — the per-field counterpart of
+/// Read 4 little-endian bytes at `offset` as a `u32` (the storage word for `f32`).
+fn read_u32(bytes: &[u8], offset: usize) -> u32 {
+    u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap())
+}
+
+/// Decode one packed field at byte `offset` into an owned [`Value`] — the per-field counterpart of
 /// [`unpack_element`], used by [`Value::packed_field`] to read a single field without materializing
-/// the whole element.
-fn decode_packed_field(kind: &PackedKind, words: &[u64], offset: usize) -> Value {
+/// the whole element (P-PACK 3.2b byte-addressed).
+fn decode_packed_field(kind: &PackedKind, bytes: &[u8], offset: usize) -> Value {
     match kind {
-        PackedKind::Int => Value::int(words[offset] as i64),
-        PackedKind::Float => Value::float(f64::from_bits(words[offset])),
-        PackedKind::F32 => Value::f32(f32::from_bits(words[offset] as u32)),
-        PackedKind::Bool => Value::bool(words[offset] != 0),
-        PackedKind::Struct(inner) => unpack_element(inner, words, offset).0,
+        PackedKind::Int => Value::int(read_u64(bytes, offset) as i64),
+        PackedKind::Float => Value::float(f64::from_bits(read_u64(bytes, offset))),
+        PackedKind::F32 => Value::f32(f32::from_bits(read_u32(bytes, offset))),
+        PackedKind::Bool => Value::bool(read_u64(bytes, offset) != 0),
+        PackedKind::Struct(inner) => unpack_element(inner, bytes, offset).0,
     }
 }
 
-fn unpack_element(schema: &PackedSchema, words: &[u64], offset: usize) -> (Value, usize) {
+fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value, usize) {
     let mut slots = Vec::with_capacity(schema.fields.len());
     let mut at = offset;
     for kind in &schema.fields {
         match kind {
             PackedKind::Int => {
-                slots.push(Value::int(words[at] as i64));
-                at += 1;
+                slots.push(Value::int(read_u64(bytes, at) as i64));
+                at += 8;
             }
             PackedKind::Float => {
-                slots.push(Value::float(f64::from_bits(words[at])));
-                at += 1;
+                slots.push(Value::float(f64::from_bits(read_u64(bytes, at))));
+                at += 8;
             }
             PackedKind::F32 => {
-                slots.push(Value::f32(f32::from_bits(words[at] as u32)));
-                at += 1;
+                slots.push(Value::f32(f32::from_bits(read_u32(bytes, at))));
+                at += 4;
             }
             PackedKind::Bool => {
-                slots.push(Value::bool(words[at] != 0));
-                at += 1;
+                slots.push(Value::bool(read_u64(bytes, at) != 0));
+                at += 8;
             }
             PackedKind::Struct(inner) => {
-                let (nested, next) = unpack_element(inner, words, at);
+                let (nested, next) = unpack_element(inner, bytes, at);
                 slots.push(nested);
                 at = next;
             }
@@ -1542,6 +1549,14 @@ mod tests {
     use super::*;
     use lang_object::ShapeKind;
     use proptest::prelude::*;
+
+    /// Build a packed byte buffer from a sequence of `int` field values (each an 8-byte LE word) —
+    /// the byte-addressed form of the old `Vec<u64>` literals (P-PACK 3.2b).
+    fn ibytes(vals: &[i64]) -> Vec<u8> {
+        vals.iter()
+            .flat_map(|v| (*v as u64).to_le_bytes())
+            .collect()
+    }
 
     #[test]
     fn immediates_round_trip() {
@@ -1583,19 +1598,19 @@ mod tests {
         let schema = Rc::new(PackedSchema {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
-            word_count: 2,
+            byte_size: 16,
         });
 
         // Pack two `V { x, y }` instances into one flat buffer (the source objects are freed after).
-        let mut words = Vec::new();
+        let mut bytes = Vec::new();
         for (x, y) in [(3_i64, 1_i64), (1, 2)] {
             let obj = Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
-            assert!(obj.pack_element(&schema, &mut words));
+            assert!(obj.pack_element(&schema, &mut bytes));
             obj.release();
         }
-        assert_eq!(words.len(), 4);
+        assert_eq!(bytes.len(), 32); // 2 elements × 2 int fields × 8 bytes
 
-        let list = Value::packed_list(Rc::clone(&schema), words);
+        let list = Value::packed_list(Rc::clone(&schema), bytes);
         assert!(list.is_packed_list());
         assert!(list.is_list());
         assert_eq!(list.list_len(), Some(2));
@@ -1647,7 +1662,7 @@ mod tests {
         let schema = Rc::new(PackedSchema {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
-            word_count: 2,
+            byte_size: 16,
         });
 
         let list = Value::packed_list(Rc::clone(&schema), Vec::new());
@@ -1700,6 +1715,49 @@ mod tests {
     }
 
     #[test]
+    fn packed_f32_byte_layout_round_trips() {
+        // P-PACK 3.2b: an `f32` packed field is 4 bytes, an `int` 8 — a mixed `{f32, int}` element is
+        // 12 bytes, exercising unaligned byte offsets (the int starts at byte 4). Pack two, then read
+        // each field back: the f32 keeps f32 precision and the int its full value. Checked under miri.
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "P",
+            vec!["a".into(), "b".into()],
+        ));
+        let schema = Rc::new(PackedSchema {
+            shape: Rc::clone(&shape),
+            fields: vec![PackedKind::F32, PackedKind::Int],
+            byte_size: 12,
+        });
+        let mut bytes = Vec::new();
+        for (a, b) in [(0.1f32 + 0.2, 7_i64), (-1.5, 1_000_000)] {
+            let obj = Value::object(Rc::clone(&shape), vec![Value::f32(a), Value::int(b)]);
+            assert!(obj.pack_element(&schema, &mut bytes));
+            obj.release();
+        }
+        assert_eq!(bytes.len(), 24); // 2 elements × 12 bytes
+
+        let list = Value::packed_list(Rc::clone(&schema), bytes);
+        assert_eq!(list.list_len(), Some(2));
+        assert_eq!(
+            list.display(),
+            "[P {a: 0.3, b: 7}, P {a: -1.5, b: 1000000}]"
+        );
+        // Fused single-field reads land on the right byte offsets.
+        assert_eq!(list.packed_field(0, "a").and_then(Value::as_f32), Some(0.3));
+        assert_eq!(list.packed_field(0, "b").and_then(Value::as_int), Some(7));
+        assert_eq!(
+            list.packed_field(1, "a").and_then(Value::as_f32),
+            Some(-1.5)
+        );
+        assert_eq!(
+            list.packed_field(1, "b").and_then(Value::as_int),
+            Some(1_000_000)
+        );
+        list.release();
+    }
+
+    #[test]
     fn packed_field_reads_one_field_without_materializing() {
         // P-PACK 2.5+: the fused `list[i].field` read decodes a single field's word, returning an
         // owned primitive (or `None` for an out-of-range index / unknown field). Exercised under miri
@@ -1712,11 +1770,10 @@ mod tests {
         let schema = Rc::new(PackedSchema {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
-            word_count: 2,
+            byte_size: 16,
         });
         // Two elements: (3, 1) and (7, 9).
-        let words = vec![3_u64, 1, 7, 9];
-        let list = Value::packed_list(Rc::clone(&schema), words);
+        let list = Value::packed_list(Rc::clone(&schema), ibytes(&[3, 1, 7, 9]));
 
         assert_eq!(list.packed_field(0, "x").and_then(Value::as_int), Some(3));
         assert_eq!(list.packed_field(0, "y").and_then(Value::as_int), Some(1));
@@ -1742,10 +1799,10 @@ mod tests {
         let schema = Rc::new(PackedSchema {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
-            word_count: 2,
+            byte_size: 16,
         });
         // Three elements: (3,1), (1,2), (7,9).
-        let list = Value::packed_list(Rc::clone(&schema), vec![3, 1, 1, 2, 7, 9]);
+        let list = Value::packed_list(Rc::clone(&schema), ibytes(&[3, 1, 1, 2, 7, 9]));
 
         // Reverse-order selection yields a flat packed list with the blocks reordered.
         let reversed = list.packed_select(&[2, 1, 0]);
@@ -1780,14 +1837,14 @@ mod tests {
         let schema = Rc::new(PackedSchema {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
-            word_count: 2,
+            byte_size: 16,
         });
-        let mk = |words: Vec<u64>| Value::packed_list(Rc::clone(&schema), words);
+        let mk = |vals: &[i64]| Value::packed_list(Rc::clone(&schema), ibytes(vals));
         let elem =
             |x: i64, y: i64| Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
 
         // Functional `set`: a fresh flat list with one element replaced; the original is untouched.
-        let list = mk(vec![1, 1, 2, 2, 3, 3]);
+        let list = mk(&[1, 1, 2, 2, 3, 3]);
         let nine = elem(9, 9);
         let updated = list.packed_set(1, nine).expect("packs");
         nine.release();
@@ -1813,7 +1870,7 @@ mod tests {
         );
 
         // Functional concat of same-layout lists → a flat join; both inputs survive.
-        let other = mk(vec![7, 7]);
+        let other = mk(&[7, 7]);
         let joined = list.packed_concat(other).expect("same layout");
         assert!(joined.is_packed_list());
         assert_eq!(joined.list_len(), Some(4));
