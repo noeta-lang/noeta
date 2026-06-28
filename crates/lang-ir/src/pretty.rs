@@ -250,6 +250,12 @@ impl Printer<'_> {
             Rvalue::Index {
                 receiver, index, ..
             } => format!("{}[{}]", atom(receiver), atom(index)),
+            Rvalue::IndexField {
+                receiver,
+                index,
+                field,
+                ..
+            } => format!("{}[{}].{}", atom(receiver), atom(index), field),
             Rvalue::List { items, .. } => format!("[{}]", atoms(items)),
             Rvalue::PackedListNew { layout, .. } => {
                 format!("packed-list-new<{}>", layout.type_name)

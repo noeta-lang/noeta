@@ -375,6 +375,19 @@ pub enum Op {
         index: Reg,
         span: Span,
     },
+    /// `dst = recv[index].field` — a fused indexed field read (P-PACK 2.5+). The compiler emits this
+    /// only when the checker proved `recv` is a built-in `List` (see `Rvalue::IndexField`): a packed
+    /// list decodes the one field's word(s) directly, without materializing the indexed element; a
+    /// boxed (demoted) list does the ordinary index-then-load. Either way the result equals the
+    /// `Index` + `LoadField` it replaces. A non-int/out-of-bounds index or missing field raises the
+    /// same diagnostic at `span` as the unfused pair would.
+    IndexField {
+        dst: Reg,
+        recv: Reg,
+        index: Reg,
+        field: String,
+        span: Span,
+    },
     /// `dst = Type { named..., ...spread }` — construct a declared struct/class instance whose
     /// layout is `shapes[shape]`. `named` gives each provided field's slot index and value
     /// register; `spread` (if present) is a base object every still-unset declared slot is
@@ -1037,6 +1050,13 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Index {
             dst, recv, index, ..
         } => format!("Index       r{dst} <- r{recv}[r{index}]"),
+        Op::IndexField {
+            dst,
+            recv,
+            index,
+            field,
+            ..
+        } => format!("IndexField  r{dst} <- r{recv}[r{index}].{field}"),
         Op::MakeStruct {
             dst,
             shape,

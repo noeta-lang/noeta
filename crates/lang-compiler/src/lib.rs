@@ -102,6 +102,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         program,
         checked.type_of_sites,
         checked.packed_list_sites,
+        checked.index_field_sites,
         &checked.destructor_relevance,
     )
 }
@@ -126,12 +127,14 @@ pub fn compile_with_sites(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    index_field_sites: HashSet<Span>,
     relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
     compile_inner(
         program,
         type_of_sites,
         packed_list_sites,
+        index_field_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
     )
@@ -141,6 +144,7 @@ fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    index_field_sites: HashSet<Span>,
     relevance: Option<lang_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -151,12 +155,15 @@ fn compile_inner(
     // precise-RC drop-insertion pass (Phase 3) annotates the IR with `DropVar`s at last-use death
     // points; they lower to plain releases (prompt reclamation, no destructor) so this is
     // behavior-neutral, reclaiming a local's value at its last use instead of at frame teardown.
-    // Lower with the checker's `List<packed>` map so packed-list literals stream into a flat buffer
-    // (P-PACK 2.5); the resolved layout rides on the IR rvalue, so the bytecode compiler reads it
-    // from there (interning a schema at `PackedListNew`) and needs no separate span map of its own.
-    let ir = lang_ir::lower_with_packed(program, &packed_list_sites).map_err(|u| Unsupported {
-        reason: format!("not yet lowered to the Core IR: {}", u.feature),
-    })?;
+    // Lower with the checker's site maps: the `List<packed>` map streams packed-list literals into a
+    // flat buffer (P-PACK 2.5; the resolved layout rides on the IR rvalue, so the bytecode compiler
+    // reads it from there at `PackedListNew` and needs no separate span map of its own), and the
+    // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+).
+    let ir = lang_ir::lower_with_sites(program, &packed_list_sites, &index_field_sites).map_err(
+        |u| Unsupported {
+            reason: format!("not yet lowered to the Core IR: {}", u.feature),
+        },
+    )?;
     let ir = lang_ir_passes::insert_drops(&ir, relevance.as_ref());
     // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of the
     // drop-annotated IR, run identically by the IR interpreter (`reference_run`), so both backends
@@ -1995,6 +2002,29 @@ impl<'m> FnCompiler<'m> {
                     dst,
                     recv,
                     index: idx,
+                    span: *span,
+                });
+                self.drop_temp_receiver(receiver, recv);
+                Ok(())
+            }
+            Rvalue::IndexField {
+                receiver,
+                index,
+                field,
+                span,
+                ..
+            } => {
+                // Mirrors `Rvalue::Index`: the index atom is read in place (an int, not consumed),
+                // and the list receiver's temp — if any — is dropped after the read, exactly as the
+                // unfused `Index` would (the intermediate element temp the unfused pair created never
+                // exists, so there is nothing else to drop).
+                let recv = self.atom_reg(receiver)?;
+                let idx = self.atom_reg(index)?;
+                self.code.push(Op::IndexField {
+                    dst,
+                    recv,
+                    index: idx,
+                    field: field.clone(),
                     span: *span,
                 });
                 self.drop_temp_receiver(receiver, recv);

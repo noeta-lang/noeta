@@ -466,6 +466,9 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         }
         Rvalue::Index {
             receiver, index, ..
+        }
+        | Rvalue::IndexField {
+            receiver, index, ..
         } => {
             f(receiver);
             f(index);

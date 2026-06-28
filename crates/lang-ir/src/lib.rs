@@ -48,7 +48,7 @@ pub use lang_ast::{BinaryOp, ForPattern, Pattern, TypeRef, UnaryOp};
 
 mod lower;
 mod pretty;
-pub use lower::{Unsupported, lower, lower_with_packed};
+pub use lower::{Unsupported, lower, lower_with_sites};
 pub use pretty::dump;
 
 /// A whole lowered program: the top-level statement stream plus the size of its temporary
@@ -217,6 +217,20 @@ pub enum Rvalue {
     Index {
         receiver: Atom,
         index: Atom,
+        span: Span,
+    },
+    /// Fused indexed field read `list[index].field` (P-PACK 2.5+). Emitted by lowering only when the
+    /// checker proves `receiver` is a built-in `List` (its span recorded in `index_field_sites`), so
+    /// the backends can read a single packed-element field **without materializing the whole element**
+    /// — the scalar-access win the flat `List<packed>` layout otherwise leaves on the table. A packed
+    /// list decodes the one field's word(s) directly; a boxed (demoted) list does the ordinary
+    /// index-then-load, so the result is identical to the unfused [`Rvalue::Index`] + [`Rvalue::Field`]
+    /// it replaces — the layout stays invisible to `RunResult`.
+    IndexField {
+        receiver: Atom,
+        index: Atom,
+        field: String,
+        field_span: Span,
         span: Span,
     },
     /// A list literal `[a, b, c]`.

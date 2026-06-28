@@ -76,10 +76,15 @@ impl Backend for TreeWalkBackend {
         // accumulator each step — O(n²) instead of the O(n) in-place path the real run takes. A single
         // `check_all` yields both the `type_of` sites and the relevance, so the checker runs once.
         let checked = lang_check::check_all(program);
-        // Lower with the checker's `List<packed>` map so packed-list literals stream into a flat
-        // buffer (P-PACK 2.5); the layout is carried inline on the IR, so `run_ir` needs no map.
-        let ir = lang_ir::lower_with_packed(program, &checked.packed_list_sites)
-            .expect("Core-IR lowering is total over the parsed language");
+        // Lower with the checker's site maps: packed-list literals stream into a flat buffer
+        // (P-PACK 2.5) and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+). Both are
+        // carried inline on the IR, so `run_ir` needs no map.
+        let ir = lang_ir::lower_with_sites(
+            program,
+            &checked.packed_list_sites,
+            &checked.index_field_sites,
+        )
+        .expect("Core-IR lowering is total over the parsed language");
         let ir =
             lang_ir_passes::insert_drops(&ir, Some(&relevance_of(&checked.destructor_relevance)));
         let ir = lang_ir_passes::thread_reuse(&ir);
@@ -469,6 +474,12 @@ pub struct TypeDef {
 impl TypeDef {
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    /// The slot index of `name` in this type's declared field list, or `None` — a linear scan of the
+    /// (small) field list, used to locate a packed field by name in [`crate::value::PackedList::field`].
+    pub(crate) fn slot_of(&self, name: &str) -> Option<usize> {
+        self.fields.iter().position(|f| f.name == name)
     }
 }
 

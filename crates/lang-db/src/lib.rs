@@ -104,6 +104,9 @@ pub struct Checked {
     /// reason as `type_of_sites`: the eval reference reads it to lay flat lists out identically to
     /// the VM, computed once per check.
     pub packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// The fusable `list[i].field` set (P-PACK 2.5+), carried here for the same reason as
+    /// `packed_list_sites`: both backends read it to fuse indexed field reads identically.
+    pub index_field_sites: std::collections::HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b), threaded into the compiler so the drop pass
     /// annotates each `DropVar` — carried here for the same reason as `type_of_sites` (compute the
     /// checker's result once, reuse it without a second run).
@@ -184,6 +187,7 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
         diagnostics: out.diagnostics,
         type_of_sites: out.type_of_sites,
         packed_list_sites: out.packed_list_sites,
+        index_field_sites: out.index_field_sites,
         destructor_relevance: out.destructor_relevance,
     }
 }
@@ -199,10 +203,12 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let checked = checked(db, src);
     let sites = checked.type_of_sites.clone();
     let packed = checked.packed_list_sites.clone();
+    let index_fields = checked.index_field_sites.clone();
     Bytecode(lang_compiler::compile_with_sites(
         &parsed.0.program,
         sites,
         packed,
+        index_fields,
         &checked.destructor_relevance,
     ))
 }
@@ -301,6 +307,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
                 diagnostics: out.diagnostics,
                 type_of_sites: out.type_of_sites,
                 packed_list_sites: out.packed_list_sites,
+                index_field_sites: out.index_field_sites,
                 destructor_relevance: out.destructor_relevance,
             }
         }
@@ -308,6 +315,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             diagnostics: diags.clone(),
             type_of_sites: std::collections::HashMap::new(),
             packed_list_sites: std::collections::HashMap::new(),
+            index_field_sites: std::collections::HashSet::new(),
             destructor_relevance: lang_check::DestructorRelevance::default(),
         },
     }
@@ -324,10 +332,12 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
             let checked = linked_checked(db, ws);
             let sites = checked.type_of_sites.clone();
             let packed = checked.packed_list_sites.clone();
+            let index_fields = checked.index_field_sites.clone();
             Bytecode(lang_compiler::compile_with_sites(
                 program,
                 sites,
                 packed,
+                index_fields,
                 &checked.destructor_relevance,
             ))
         }

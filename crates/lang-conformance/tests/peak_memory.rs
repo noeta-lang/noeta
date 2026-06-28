@@ -75,8 +75,12 @@ fn compile_program(src: &str) -> Module {
 /// 8000-element literal (which on the eval side would otherwise dominate and hide the win).
 fn eval_runner(program: lang_ast::Program) -> impl FnOnce() -> lang_backend::RunResult {
     let checked = lang_check::check_all(&program);
-    let ir = lang_ir::lower_with_packed(&program, &checked.packed_list_sites)
-        .expect("Core-IR lowering is total over the parsed language");
+    let ir = lang_ir::lower_with_sites(
+        &program,
+        &checked.packed_list_sites,
+        &checked.index_field_sites,
+    )
+    .expect("Core-IR lowering is total over the parsed language");
     let relevance = lang_ir_passes::Relevance {
         locals: checked.destructor_relevance.locals.clone(),
         params: checked.destructor_relevance.params.clone(),

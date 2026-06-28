@@ -1659,3 +1659,75 @@ fn non_packed_struct_list_is_not_recorded() {
 fn primitive_list_is_not_recorded() {
     assert!(packed_layouts("xs = [1, 2, 3]\necho xs.count()\n").is_empty());
 }
+
+// --- P-PACK 2.5+: fused `list[i].field` site channel (`Checked::index_field_sites`) ---
+
+/// Parse + check `text` and return how many `list[i].field` reads the checker marked fusable.
+fn index_field_count(text: &str) -> usize {
+    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let lexed = lex(&source);
+    let parsed = parse(&source, &lexed.tokens);
+    assert!(
+        parsed.diagnostics.is_empty(),
+        "test program must parse cleanly: {:?}",
+        parsed.diagnostics
+    );
+    super::check_all(&parsed.program).index_field_sites.len()
+}
+
+#[test]
+fn packed_indexed_field_read_is_fusable() {
+    let n = index_field_count(
+        "@packed struct Vec3 { x: float; y: float; z: float }\n\
+         ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
+         echo ps[0].x\n",
+    );
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn boxed_struct_indexed_field_read_is_also_fusable() {
+    // Fusion is not packed-only: a `List<struct>[i].field` read fuses too (the backends' fast path is
+    // keyed on the runtime packed representation; a boxed list takes the equivalent fallback).
+    let n = index_field_count(
+        "struct P { x: int; y: int }\n\
+         ps = [P { x: 1, y: 2 }]\n\
+         echo ps[0].x\n",
+    );
+    assert_eq!(n, 1);
+}
+
+#[test]
+fn map_indexed_field_read_is_not_fusable() {
+    // A `map[key].field` indexes a `Map`, not a `List`, so it stays on the generic index+field path
+    // (the fused op's fallback is list-only).
+    let n = index_field_count(
+        "struct P { x: int; y: int }\n\
+         m = { \"a\": P { x: 1, y: 2 } }\n\
+         echo m[\"a\"].x\n",
+    );
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn indexed_method_call_is_not_fusable() {
+    // `list[i].method()` is a method call (the member is a call callee), never a field read, so no
+    // fuse site is recorded.
+    let n = index_field_count(
+        "struct P { x: int\n  fn get_x(self): int { return self.x } }\n\
+         ps = [P { x: 1 }]\n\
+         echo ps[0].get_x()\n",
+    );
+    assert_eq!(n, 0);
+}
+
+#[test]
+fn plain_field_read_is_not_fusable() {
+    // A field read whose receiver is not an index expression is untouched.
+    let n = index_field_count(
+        "struct P { x: int; y: int }\n\
+         p = P { x: 1, y: 2 }\n\
+         echo p.x\n",
+    );
+    assert_eq!(n, 0);
+}

@@ -20,7 +20,7 @@
 //! expose today; wiring that in is that phase's prerequisite, deliberately out of scope here
 //! so the Phase 1 IR stays a faithful, RC-neutral mirror of the AST.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use lang_ast::{
@@ -63,26 +63,35 @@ enum BodyKind<'a> {
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
-/// currently-supported subset. List literals lower to the boxed [`Rvalue::List`]; see
-/// [`lower_with_packed`] to additionally stream `List<packed>` literals into a flat buffer.
+/// currently-supported subset. List literals lower to the boxed [`Rvalue::List`] and `list[i].f`
+/// reads to the unfused [`Rvalue::Index`] + [`Rvalue::Field`]; see [`lower_with_sites`] to also
+/// stream `List<packed>` literals into a flat buffer and fuse indexed field reads.
 pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
-    lower_with_packed(program, &HashMap::new())
+    lower_with_sites(program, &HashMap::new(), &HashSet::new())
 }
 
-/// As [`lower`], but a list literal whose span appears in `packed_list_sites` (the checker's
-/// `List<@packed struct>` map, [`lang_ast::reflect::PackedLayout`]) lowers to a **streaming** flat
-/// build — [`Rvalue::PackedListNew`] then one [`Rvalue::PackedListPush`] per element, each element
-/// built immediately before its push — instead of a boxed [`Rvalue::List`]. The packed layout is
-/// invisible to observable behaviour, so this is a pure optimization: the production execution paths
-/// (`lang run`, the conformance reference, the bytecode compiler) pass the map; the REPL and IR
-/// corpus pass an empty one and stay boxed.
-pub fn lower_with_packed(
+/// As [`lower`], but driven by the checker's lowering-site maps (both pure functions of the program,
+/// so the optimizations they enable stay invisible to `RunResult`):
+///
+/// * A list literal whose span appears in `packed_list_sites` (the `List<@packed struct>` map,
+///   [`lang_ast::reflect::PackedLayout`]) lowers to a **streaming** flat build —
+///   [`Rvalue::PackedListNew`] then one [`Rvalue::PackedListPush`] per element — instead of a boxed
+///   [`Rvalue::List`].
+/// * A `list[i].field` member read whose span appears in `index_field_sites` (the checker's set of
+///   member accesses whose index receiver is a built-in `List`) fuses to a single
+///   [`Rvalue::IndexField`], so a packed element's field is read without materializing the element.
+///
+/// The production execution paths (`lang run`, the conformance reference, the bytecode compiler) pass
+/// the maps; the REPL and IR corpus pass empty ones and stay on the boxed/unfused path.
+pub fn lower_with_sites(
     program: &AstProgram,
     packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
+    index_field_sites: &HashSet<Span>,
 ) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
         temps: 0,
         packed_list_sites,
+        index_field_sites,
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -101,6 +110,9 @@ struct Lowerer<'a> {
     /// The checker's `List<packed>` construction-site map (keyed by list-literal span). Empty on
     /// the boxed-only paths; non-empty enables streaming flat-buffer construction in `Expr::List`.
     packed_list_sites: &'a HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// The checker's fusable `list[i].field` set (keyed by the member-access span). Empty on the
+    /// unfused paths; a hit enables emitting [`Rvalue::IndexField`] in the `Expr::Member` arm.
+    index_field_sites: &'a HashSet<Span>,
 }
 
 impl Lowerer<'_> {
@@ -698,6 +710,31 @@ impl Lowerer<'_> {
                 name_span,
                 span,
             } => {
+                // A `list[i].field` read the checker proved fusable (its index receiver is a built-in
+                // `List`) lowers to one [`Rvalue::IndexField`] over the list and index atoms, so a
+                // packed element's field is read without materializing the element (P-PACK 2.5+). Any
+                // other member access lowers to the ordinary field load.
+                if self.index_field_sites.contains(span)
+                    && let Expr::Index {
+                        receiver: list,
+                        index,
+                        ..
+                    } = receiver.as_ref()
+                {
+                    let list = self.lower_expr(list, out)?;
+                    let index = self.lower_expr(index, out)?;
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::IndexField {
+                            receiver: list,
+                            index,
+                            field: name.clone(),
+                            field_span: *name_span,
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
                 let receiver = self.lower_expr(receiver, out)?;
                 Ok(self.emit(
                     out,

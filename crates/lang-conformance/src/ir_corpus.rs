@@ -151,6 +151,7 @@ fn run(program: &lang_ast::Program, checked: &lang_db::Checked, report: &mut IrC
                 program,
                 checked.type_of_sites.clone(),
                 checked.packed_list_sites.clone(),
+                checked.index_field_sites.clone(),
                 &checked.destructor_relevance,
             );
             report.ran += 1;

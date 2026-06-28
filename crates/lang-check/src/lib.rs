@@ -99,6 +99,10 @@ pub struct Checked {
     pub type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// Member-access spans (`list[i].field`) lowering fuses into a single `Rvalue::IndexField`, so a
+    /// packed list element's field is read without materializing the element (P-PACK 2.5+). A pure
+    /// function of the program, like the other site maps; the fusion is invisible to `RunResult`.
+    pub index_field_sites: HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -121,6 +125,7 @@ pub fn check_all(program: &Program) -> Checked {
         diagnostics: checker.diags,
         type_of_sites: checker.type_of_sites,
         packed_list_sites: checker.packed_list_sites,
+        index_field_sites: checker.index_field_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -463,6 +468,16 @@ struct Checker {
     /// two backends pick the same representation by construction (the flat layout stays invisible to
     /// `RunResult`).
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// `Expr::Index` spans whose receiver typed as a built-in `List` — recorded as each index is
+    /// synthesized so that [`Checker::synth_member`] can recognize a `list[i].field` read without
+    /// re-synthesizing (and re-diagnosing) the inner receiver. Internal scratch, not exported.
+    index_on_list: HashSet<Span>,
+    /// Member-access spans (`list[i].field`) the checker proved fusable: the index receiver is a
+    /// built-in `List` and the field resolves on its element type. Lowering reads this (via
+    /// [`Checked::index_field_sites`]) to emit a single [`Rvalue::IndexField`] that reads a packed
+    /// element's field without materializing the element (P-PACK 2.5+). A pure function of the
+    /// program, invisible to `RunResult`, so both backends fuse the same sites by construction.
+    index_field_sites: HashSet<Span>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
@@ -2592,8 +2607,8 @@ impl Checker {
                 receiver,
                 name,
                 name_span,
-                ..
-            } => self.synth_member(receiver, name, *name_span, env),
+                span,
+            } => self.synth_member(receiver, name, *name_span, *span, env),
             Expr::Index {
                 receiver,
                 index,
@@ -2602,6 +2617,12 @@ impl Checker {
                 // Index into the receiver: a list element, a map value, a string char, or `dyn`.
                 let recv = self.synth(receiver, env);
                 self.synth(index, env);
+                // Note a list-typed index so a `list[i].field` member access can fuse (P-PACK 2.5+).
+                // Recorded here — where the receiver's type is already in hand — so `synth_member`
+                // need not re-synthesize the inner receiver.
+                if matches!(recv, Type::List(_)) {
+                    self.index_on_list.insert(*span);
+                }
                 match stdlib::index_return(&recv) {
                     Some(t) => t,
                     None => {
@@ -3729,6 +3750,7 @@ impl Checker {
         receiver: &Expr,
         name: &str,
         name_span: Span,
+        member_span: Span,
         env: &mut Env,
     ) -> Type {
         // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type.
@@ -3748,6 +3770,16 @@ impl Checker {
             // A private field is readable only inside its declaring type's own methods (slice 2d).
             if !self.field_visible(n, name) {
                 self.report_private_field(n, name, "read", name_span);
+            }
+            // Fusable indexed field read: `list[i].field`, where the index receiver typed as a
+            // built-in `List` (recorded in the `Expr::Index` arm) and the field resolved on the
+            // element type `n`. Lowering reads `index_field_sites` to emit a single `Rvalue::IndexField`
+            // (P-PACK 2.5+); restricting to a `List` receiver keeps the backends' fast path / boxed
+            // fallback list-only (no map/string/`Index`-trait dispatch to reproduce).
+            if let Expr::Index { span: idx_span, .. } = receiver
+                && self.index_on_list.contains(idx_span)
+            {
+                self.index_field_sites.insert(member_span);
             }
             // Substitute the class's type parameters from the receiver's type arguments, so a field
             // of a `Box<int>` reads as `int`. An unresolved parameter (the receiver's arguments are

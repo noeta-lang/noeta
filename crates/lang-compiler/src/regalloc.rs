@@ -207,6 +207,9 @@ fn op_facts(op: &Op) -> OpFacts {
         }
         Op::Index {
             dst, recv, index, ..
+        }
+        | Op::IndexField {
+            dst, recv, index, ..
         } => {
             f.def = Some(*dst);
             f.uses.push(*recv);
@@ -611,6 +614,9 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             }
         }
         Op::Index {
+            dst, recv, index, ..
+        }
+        | Op::IndexField {
             dst, recv, index, ..
         } => {
             m(dst);

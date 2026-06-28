@@ -2533,6 +2533,94 @@ impl<'m> Vm<'m> {
                         format!("cannot index a value of type {}", v.type_name()),
                     ));
                 }
+                Op::IndexField {
+                    dst,
+                    recv,
+                    index,
+                    field,
+                    span,
+                } => {
+                    let v = frames[top].regs[*recv as usize];
+                    let idx = frames[top].regs[*index as usize];
+                    // Fast path: a packed list decodes the one field's word(s) directly — no element
+                    // materialization (the P-PACK 2.5+ scalar-access win). Any miss (non-int index,
+                    // out of range, or unknown field) falls through to the boxed index-then-load,
+                    // which reproduces the exact diagnostics of the unfused `Index` + `LoadField`.
+                    if v.is_packed_list()
+                        && let Some(i) = idx.as_int()
+                        && i >= 0
+                        && let Some(value) = v.packed_field(i as usize, field)
+                    {
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    // Fallback. The static type guarantees a `List`; bounds-check the index exactly as
+                    // `Op::Index`'s list branch, then read the element's field exactly as
+                    // `Op::LoadField`. A boxed element is borrowed (only its loaded field is retained
+                    // into `dst`); a packed element reached here (unknown field — unreachable for a
+                    // checker-fused site) is materialized owned and released after.
+                    let Some(len) = v.list_len() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("cannot index a value of type {}", v.type_name()),
+                        ));
+                    };
+                    let Some(i) = idx.as_int() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("list index must be an int, found {}", idx.type_name()),
+                        ));
+                    };
+                    if i < 0 || i as usize >= len {
+                        return Err(self.error(
+                            DiagnosticCode::IndexOutOfBounds,
+                            *span,
+                            format!("index {i} out of bounds for list of length {len}"),
+                        ));
+                    }
+                    let packed = v.is_packed_list();
+                    let element = if packed {
+                        v.packed_get(i as usize) // owned (rc 1)
+                    } else {
+                        v.list_get(i as usize).expect("bounds checked above") // borrowed
+                    };
+                    let slot = element.shape().and_then(|sh| sh.slot_of(field));
+                    match slot.and_then(|s| element.slot_at(s)) {
+                        Some(value) => {
+                            retain(value);
+                            if packed {
+                                release(element);
+                            }
+                            set_reg(&mut frames[top].regs, *dst, value);
+                            frames[top].pc += 1;
+                        }
+                        None => {
+                            let err = if element.is_object() {
+                                self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!(
+                                        "type `{}` has no field `{field}`",
+                                        element.shape().unwrap().name
+                                    ),
+                                )
+                            } else {
+                                self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!("no field `{field}` on {}", element.type_name()),
+                                )
+                            };
+                            if packed {
+                                release(element);
+                            }
+                            return Err(err);
+                        }
+                    }
+                }
                 Op::MakeStruct {
                     dst,
                     shape,

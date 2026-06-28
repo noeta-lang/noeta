@@ -69,12 +69,12 @@ fn struct_fields_src(n: usize) -> String {
 
 /// A `List<packed>` workload: build an `n`-element list literal of a `Vec3`, then index every
 /// element and sum its three fields. When the element type is `@packed` the list is stored as one
-/// flat raw-primitive buffer (P-PACK 2.3) and each `data[i]` materializes a single element on
-/// demand; the plain-`struct` variant stores `n` boxed objects and `data[i]` clones a pointer. The
-/// two variants are run side-by-side so the cost of the pack-at-build / materialize-on-read layer is
-/// directly visible against the boxed baseline. This measures scalar-access *time*; the memory win
-/// (and that 2.5 streaming construction no longer spikes to the boxed peak) is measured by the
-/// `peak_memory` residency test in `lang-conformance`.
+/// flat raw-primitive buffer (P-PACK 2.3); the plain-`struct` variant stores `n` boxed objects. Each
+/// `data[i].field` read **fuses** to a single field decode (P-PACK 2.5+) — the packed list reads one
+/// word with no element object materialized, so this measures the scalar-access win the flat layout
+/// otherwise left on the table (2.3/2.4 were ~10% *slower* here than boxed; with fusion the gap is
+/// largely closed on eval and the VM flips to a win — see `crates/lang-vm/benches/vm.rs`). The peak
+/// memory win is measured separately by the `peak_memory` residency test in `lang-conformance`.
 fn packed_list_src(n: usize, packed: bool) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };
     let mut elems = String::with_capacity(n * 32);

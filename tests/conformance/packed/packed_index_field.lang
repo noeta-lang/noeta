@@ -1,0 +1,37 @@
+// P-PACK 2.5+: a `list[i].field` read on a `List<packed>` fuses to a single field decode (no element
+// materialization). The fusion is invisible to RunResult — it must read exactly the field the unfused
+// `list[i]` + `.field` would, on both a flat packed list (the fast path) and a demoted boxed list (the
+// fallback), and raise the same out-of-bounds error. The differential pins eval-fused against VM.
+// expect: stdout "1.0"
+// expect: stdout "6.0"
+// expect: stdout "true"
+// expect: stdout "9.0"
+// expect: stdout "0.0"
+// expect: stdout "3.0"
+// expect: stdout "2.0"
+// expect: error E0016 at 37:6
+// expect: exit 1
+@packed struct Vec3 { x: float; y: float; z: float }
+@packed struct Segment { start: Vec3; end: Vec3 }
+
+// Fast path: indexed field read straight off a flat packed buffer.
+ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }, Vec3 { x: 4.0, y: 5.0, z: 6.0 }, Vec3 { x: 7.0, y: 8.0, z: 9.0 }]
+echo ps[0].x
+echo ps[1].z
+
+// A nested packed field: `ps[i].field` where the field is itself a packed struct, then a further read.
+echo (ps[2].x > 0.0)
+echo ps[2].z
+
+// Demoted-boxed fallback: `map` yields a boxed list that is still statically `List<Vec3>`, so the
+// `qs[i].field` reads fuse — but at runtime the list is boxed, exercising the fused op's fallback.
+qs = map(ps, fn(v) => Vec3 { x: v.x - 1.0, y: v.y, z: v.z })
+echo qs[0].x
+echo qs[1].x
+
+// A nested-struct list, fused indexed field that decodes the inline sub-struct.
+segs = [Segment { start: Vec3 { x: 0.0, y: 0.0, z: 0.0 }, end: Vec3 { x: 1.0, y: 2.0, z: 2.0 } }]
+echo segs[0].end.z
+
+// Out-of-bounds on a fused site raises the same error as the unfused index would.
+echo ps[9].x

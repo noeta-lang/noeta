@@ -275,6 +275,33 @@ impl Value {
         unpack_element(&schema, &words, 0).0
     }
 
+    /// Read a single field of the packed element at `index` (P-PACK 2.5+ fused `list[i].field`),
+    /// decoding only that field's word(s) — a primitive materializes directly, a nested packed struct
+    /// is unpacked from its inline sub-range. Returns the owned field value (refcount 1), or `None`
+    /// if `index` is out of range or `field` is not in the element schema (the checker only fuses
+    /// real field reads on a packed type, so a hit is the norm; the caller falls back on `None`). No
+    /// full-element materialization — this is the scalar-access win over `packed_get`.
+    pub fn packed_field(self, index: usize, field: &str) -> Option<Value> {
+        let (kind, words) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, words } => {
+                let count = words.len() / schema.word_count;
+                if index >= count {
+                    return None;
+                }
+                let slot = schema.shape.slot_of(field)?;
+                // Field `slot`'s offset within the element is the sum of the prior fields' widths.
+                let mut at = index * schema.word_count;
+                for kind in &schema.fields[..slot] {
+                    at += packed_kind_width(kind);
+                }
+                let width = packed_kind_width(&schema.fields[slot]);
+                Some((schema.fields[slot].clone(), words[at..at + width].to_vec()))
+            }
+            _ => None,
+        })?;
+        Some(decode_packed_field(&kind, &words, 0))
+    }
+
     /// Materialize every packed element into an owned vector (each refcount 1). Used by
     /// [`Value::realize_list`]; the words are copied out before allocating so no heap borrow is held
     /// across element construction.
@@ -1276,6 +1303,27 @@ fn format_float(f: f64) -> String {
 /// advance in lock-step with [`Value::pack_element`]. Each primitive becomes an immediate (or a
 /// boxed int for a large magnitude); each nested struct recurses, the parent object owning its
 /// reference. The object reuses `schema.shape`, so it is shape-identical to a constructed instance.
+/// The number of machine words one packed field occupies — a primitive is one word; a nested packed
+/// struct is its own `word_count` (its fields laid out contiguously inline).
+fn packed_kind_width(kind: &PackedKind) -> usize {
+    match kind {
+        PackedKind::Int | PackedKind::Float | PackedKind::Bool => 1,
+        PackedKind::Struct(inner) => inner.word_count,
+    }
+}
+
+/// Decode one packed field at `offset` into an owned [`Value`] — the per-field counterpart of
+/// [`unpack_element`], used by [`Value::packed_field`] to read a single field without materializing
+/// the whole element.
+fn decode_packed_field(kind: &PackedKind, words: &[u64], offset: usize) -> Value {
+    match kind {
+        PackedKind::Int => Value::int(words[offset] as i64),
+        PackedKind::Float => Value::float(f64::from_bits(words[offset])),
+        PackedKind::Bool => Value::bool(words[offset] != 0),
+        PackedKind::Struct(inner) => unpack_element(inner, words, offset).0,
+    }
+}
+
 fn unpack_element(schema: &PackedSchema, words: &[u64], offset: usize) -> (Value, usize) {
     let mut slots = Vec::with_capacity(schema.fields.len());
     let mut at = offset;
@@ -1458,6 +1506,36 @@ mod tests {
         assert_eq!(boxed.list_len(), Some(1));
         assert_eq!(boxed.display(), "[V {x: 5, y: 6}]");
         boxed.release(); // frees the list and its owned element, so miri sees no leak
+    }
+
+    #[test]
+    fn packed_field_reads_one_field_without_materializing() {
+        // P-PACK 2.5+: the fused `list[i].field` read decodes a single field's word, returning an
+        // owned primitive (or `None` for an out-of-range index / unknown field). Exercised under miri
+        // to confirm the targeted slice read borrows the buffer correctly and leaks nothing.
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "V",
+            vec!["x".into(), "y".into()],
+        ));
+        let schema = Rc::new(PackedSchema {
+            shape: Rc::clone(&shape),
+            fields: vec![PackedKind::Int, PackedKind::Int],
+            word_count: 2,
+        });
+        // Two elements: (3, 1) and (7, 9).
+        let words = vec![3_u64, 1, 7, 9];
+        let list = Value::packed_list(Rc::clone(&schema), words);
+
+        assert_eq!(list.packed_field(0, "x").and_then(Value::as_int), Some(3));
+        assert_eq!(list.packed_field(0, "y").and_then(Value::as_int), Some(1));
+        assert_eq!(list.packed_field(1, "x").and_then(Value::as_int), Some(7));
+        assert_eq!(list.packed_field(1, "y").and_then(Value::as_int), Some(9));
+        // Out of range and unknown field both decline (the caller then falls back).
+        assert!(list.packed_field(2, "x").is_none());
+        assert!(list.packed_field(0, "z").is_none());
+
+        list.release();
     }
 
     #[test]

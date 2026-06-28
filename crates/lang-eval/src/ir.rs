@@ -630,6 +630,37 @@ impl Interpreter {
         }
     }
 
+    /// Read a member off a *borrowed* receiver value: an enum-variant constructor, an object field
+    /// load, or an associated-function reference (mirrors `eval_expr`'s `Member` arm). Shared by the
+    /// `Field` rvalue and the fused `IndexField` fallback so both produce identical results and
+    /// diagnostics. The receiver is borrowed (the field is cloned out); the caller owns lifetime.
+    fn read_member(&mut self, recv: &Value, name: &str, span: Span) -> Eval<Value> {
+        match recv {
+            Value::EnumType(def) => self.make_variant(def, name, vec![], span),
+            Value::Object(object) => match object.field(name) {
+                Some(value) => Ok(value),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("type `{}` has no field `{name}`", object.def.name()),
+                )),
+            },
+            Value::Type(def) => match def.methods.get(name) {
+                Some(method) => Ok(Value::Function(Rc::clone(method))),
+                None => Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("type `{}` has no associated function `{name}`", def.name()),
+                )),
+            },
+            other => Err(self.runtime_error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no field `{name}` on {}", other.type_name()),
+            )),
+        }
+    }
+
     /// Compute a primitive operation over already-resolved atoms. Each arm mirrors the
     /// matching `eval_expr` arm, delegating to the shared leaf helpers so behavior is
     /// identical by construction.
@@ -894,33 +925,49 @@ impl Interpreter {
                 // destructor iff it held the last reference (the field clone is a separate object,
                 // so it survives).
                 let recv = self.eval_ir_atom(receiver, frame)?;
-                let result = match &recv {
-                    Value::EnumType(def) => self.make_variant(def, name, vec![], *span),
-                    Value::Object(object) => match object.field(name) {
-                        Some(value) => Ok(value),
-                        None => Err(self.runtime_error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!("type `{}` has no field `{name}`", object.def.name()),
-                        )),
-                    },
-                    Value::Type(def) => match def.methods.get(name) {
-                        Some(method) => Ok(Value::Function(Rc::clone(method))),
-                        None => Err(self.runtime_error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!("type `{}` has no associated function `{name}`", def.name()),
-                        )),
-                    },
-                    other => Err(self.runtime_error(
-                        DiagnosticCode::UnknownName,
-                        *span,
-                        format!("no field `{name}` on {}", other.type_name()),
-                    )),
-                };
+                let result = self.read_member(&recv, name, *span);
                 if is_temp(receiver) {
                     self.destroy_value(recv);
                 }
+                result
+            }
+            lang_ir::Rvalue::IndexField {
+                receiver,
+                index,
+                field,
+                span,
+                ..
+            } => {
+                // Fused `list[i].field` (P-PACK 2.5+). A packed list decodes the one field directly,
+                // without materializing the element. Any miss (non-int/out-of-range index, or unknown
+                // field) falls through to the ordinary index-then-load, which reproduces the exact
+                // diagnostics of the unfused `Index` + `Field` it replaces.
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let idx = self.eval_ir_atom(index, frame)?;
+                if let Value::List(ListRepr::Packed(packed)) = &recv
+                    && let Value::Int(i) = &idx
+                    && *i >= 0
+                    && let Some(value) = packed.field(*i as usize, field)
+                {
+                    if is_temp(receiver) {
+                        self.destroy_value(recv);
+                    }
+                    return Ok(value);
+                }
+                // Fallback: index (a boxed/demoted list, or to surface the bounds/type error) then
+                // read the field. `eval_index` consumes the receiver, so clone for the call and
+                // destroy the held copy iff it was an owned temp — exactly as the `Index` arm does.
+                let element = if is_temp(receiver) {
+                    let r = self.eval_index(recv.clone(), idx, *span);
+                    self.destroy_value(recv);
+                    r
+                } else {
+                    self.eval_index(recv, idx, *span)
+                }?;
+                let result = self.read_member(&element, field, *span);
+                // The element is a fresh owned temp (a cloned boxed element or a materialized packed
+                // one); its field was cloned out, so destroy it now (firing its destructor iff last).
+                self.destroy_value(element);
                 result
             }
             lang_ir::Rvalue::SetField {

@@ -220,12 +220,52 @@ impl PackedList {
         Some(value)
     }
 
+    /// Read a single field of the element at `index` (P-PACK 2.5+ fused `list[i].field`), decoding
+    /// only that field's word(s) — no full-element materialization. Returns `None` if `index` is out
+    /// of range or `name` is not a field (the checker only fuses real field reads on a packed type, so
+    /// a hit is the norm; the caller falls back on `None`).
+    pub(crate) fn field(&self, index: usize, name: &str) -> Option<Value> {
+        if index >= self.len() {
+            return None;
+        }
+        let slot = self.schema.def.slot_of(name)?;
+        // Field `slot`'s offset within the element is the sum of the prior fields' widths.
+        let mut at = index * self.schema.word_count;
+        for s in &self.schema.fields[..slot] {
+            at += s.kind.width();
+        }
+        Some(decode_slot(&self.schema.fields[slot].kind, &self.words, at))
+    }
+
     /// Materialize every element into a boxed vector — the fallback for any op not specialized for
     /// the flat representation.
     fn materialize(&self) -> Vec<Value> {
         (0..self.len())
             .map(|i| self.get(i).expect("index in range"))
             .collect()
+    }
+}
+
+impl SlotKind {
+    /// The number of machine words this field occupies — a primitive is one word; a nested packed
+    /// struct is its own `word_count` (laid out contiguously inline).
+    fn width(&self) -> usize {
+        match self {
+            SlotKind::Int | SlotKind::Float | SlotKind::Bool => 1,
+            SlotKind::Struct(inner) => inner.word_count,
+        }
+    }
+}
+
+/// Decode one field at `offset` into a boxed [`Value`] — the per-field counterpart of
+/// [`unpack_object`], used by [`PackedList::field`] to read a single field without materializing the
+/// whole element.
+fn decode_slot(kind: &SlotKind, words: &[u64], offset: usize) -> Value {
+    match kind {
+        SlotKind::Int => Value::Int(words[offset] as i64),
+        SlotKind::Float => Value::Float(f64::from_bits(words[offset])),
+        SlotKind::Bool => Value::Bool(words[offset] != 0),
+        SlotKind::Struct(inner) => unpack_object(inner, words, offset).0,
     }
 }
 

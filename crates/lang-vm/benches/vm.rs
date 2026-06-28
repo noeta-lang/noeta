@@ -128,11 +128,13 @@ fn int_list(n: usize) -> String {
 
 /// A `List<packed>` workload (P-PACK 2.4): build an `n`-element list literal of a `Vec3`, then index
 /// every element and sum its three fields. With `@packed` the VM stores the list as one flat
-/// raw-primitive buffer and each `data[i]` materializes a single element; the plain-`struct` variant
-/// stores `n` boxed objects and `data[i]` clones a pointer. Run side-by-side so the cost of the
-/// pack-at-build / materialize-on-read layer is visible against the boxed baseline. This measures
-/// scalar-access *time*; the memory win (P-PACK 2.5 streaming construction keeps the build peak at one
-/// element + the buffer, ~3.6× under boxed) is measured by the `peak_memory` residency test.
+/// raw-primitive buffer; the plain-`struct` variant stores `n` boxed objects. Each `data[i].field`
+/// read **fuses** to a single `Op::IndexField` (P-PACK 2.5+): the packed list decodes one word with
+/// no element object materialized. This was the scalar-access cost the flat layout otherwise paid —
+/// 2.4 was ~1.55× *slower* here than boxed; fusion eliminated that, making packed scalar access ~3–4%
+/// *faster* than boxed (and the boxed path itself ~7–10% faster, from one op replacing index+load).
+/// The memory win (2.5 streaming keeps the build peak at one element + the buffer, ~3.6× under boxed)
+/// is measured separately by the `peak_memory` residency test.
 fn packed_list_src(n: usize, packed: bool) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };
     let mut elems = String::with_capacity(n * 32);

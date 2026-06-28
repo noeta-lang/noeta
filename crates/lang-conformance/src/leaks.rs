@@ -138,6 +138,7 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     let checked = lang_db::checked(&db, src);
     let sites = checked.type_of_sites.clone();
     let packed = checked.packed_list_sites.clone();
+    let index_fields = checked.index_field_sites.clone();
 
     // Reference (Core-IR interpreter): measure the live `Rc`-aggregate delta across a full run.
     let before = lang_eval::live_count();
@@ -145,6 +146,7 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
         &parsed.0.program,
         sites,
         packed,
+        index_fields,
         &checked.destructor_relevance,
     );
     record(report, name, "eval", lang_eval::live_count() - before);
@@ -177,9 +179,16 @@ fn measure_workspace(name: &str, raw: &lang_loader::RawWorkspace, report: &mut L
     let checked = lang_db::linked_checked(&db, ws);
     let sites = checked.type_of_sites.clone();
     let packed = checked.packed_list_sites.clone();
+    let index_fields = checked.index_field_sites.clone();
 
     let before = lang_eval::live_count();
-    let _ = reference_run(program, sites, packed, &checked.destructor_relevance);
+    let _ = reference_run(
+        program,
+        sites,
+        packed,
+        index_fields,
+        &checked.destructor_relevance,
+    );
     record(report, name, "eval", lang_eval::live_count() - before);
     report.eval_measured += 1;
 

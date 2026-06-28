@@ -182,10 +182,15 @@ fn execute_real_host(
         locals: checked.destructor_relevance.locals.clone(),
         params: checked.destructor_relevance.params.clone(),
     };
-    // Lower with the checker's `List<packed>` map so packed-list literals stream into a flat buffer
-    // (P-PACK 2.5); the layout rides on the IR, so `run_ir_with_host` needs no separate map.
-    let ir = lang_ir::lower_with_packed(program, &checked.packed_list_sites)
-        .expect("Core-IR lowering is total over the parsed language");
+    // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
+    // and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+); both ride on the IR, so
+    // `run_ir_with_host` needs no separate map.
+    let ir = lang_ir::lower_with_sites(
+        program,
+        &checked.packed_list_sites,
+        &checked.index_field_sites,
+    )
+    .expect("Core-IR lowering is total over the parsed language");
     let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = lang_ir_passes::thread_reuse(&ir);
     Ok(TreeWalkBackend::new().run_ir_with_host(
@@ -916,8 +921,12 @@ fn bench_execute(
         locals: checked.destructor_relevance.locals.clone(),
         params: checked.destructor_relevance.params.clone(),
     };
-    let ir = lang_ir::lower_with_packed(program, &checked.packed_list_sites)
-        .expect("Core-IR lowering is total over the parsed language");
+    let ir = lang_ir::lower_with_sites(
+        program,
+        &checked.packed_list_sites,
+        &checked.index_field_sites,
+    )
+    .expect("Core-IR lowering is total over the parsed language");
     let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = lang_ir_passes::thread_reuse(&ir);
     let start = Instant::now();
