@@ -764,6 +764,7 @@ impl ModuleCompiler {
             .map(|f| match &f.kind {
                 PackedKind::Int => lang_bytecode::PackedFieldDef::Int,
                 PackedKind::Float => lang_bytecode::PackedFieldDef::Float,
+                PackedKind::F32 => lang_bytecode::PackedFieldDef::F32,
                 PackedKind::Bool => lang_bytecode::PackedFieldDef::Bool,
                 PackedKind::Struct(inner) => {
                     lang_bytecode::PackedFieldDef::Struct(self.intern_packed_schema(inner))

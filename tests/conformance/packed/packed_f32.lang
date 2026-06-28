@@ -1,0 +1,33 @@
+// P-PACK Phase 3.2a: an `f32` is a packable primitive, so a `List<@packed struct of f32>` is stored
+// flat (one word per field in 3.2a; slice 3.2b narrows the f32 slot to 4 bytes). The flat layout is
+// invisible to RunResult — construction, index, fused field read, iteration, arithmetic, display, and
+// equality all observe the same f32 values; the differential pins eval against the VM.
+// expect: stdout "[Vec3 {x: 1.0, y: 2.0, z: 3.0}, Vec3 {x: 4.0, y: 5.0, z: 6.0}]"
+// expect: stdout "Vec3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: stdout "5.0"
+// expect: stdout "5.0"
+// expect: stdout "5.0"
+// expect: stdout "0.3"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+@packed struct Vec3 { x: f32; y: f32; z: f32 }
+
+ps = [Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, Vec3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+echo ps
+echo ps[0]
+echo ps[1].y
+echo ps[0].x + ps[1].x
+
+mut sum = 0.0f32
+for v in ps {
+  sum = sum + v.x
+}
+echo sum
+
+// f32 precision survives the pack/unpack round-trip: 0.1 + 0.2 at f32 is 0.3.
+qs = [Vec3 { x: 0.1f32, y: 0.2f32, z: 0.0f32 }]
+echo qs[0].x + qs[0].y
+
+echo ps == [Vec3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, Vec3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+echo ps == [Vec3 { x: 9.0f32, y: 2.0f32, z: 3.0f32 }, Vec3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]

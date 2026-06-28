@@ -208,6 +208,10 @@ impl Value {
                         PackedKind::Float => {
                             slot.as_float().map(|f| out.push(f.to_bits())).is_some()
                         }
+                        PackedKind::F32 => slot
+                            .as_f32()
+                            .map(|f| out.push(u64::from(f.to_bits())))
+                            .is_some(),
                         PackedKind::Bool => {
                             slot.as_bool().map(|b| out.push(u64::from(b))).is_some()
                         }
@@ -1463,7 +1467,7 @@ fn format_f32(f: f32) -> String {
 /// struct is its own `word_count` (its fields laid out contiguously inline).
 fn packed_kind_width(kind: &PackedKind) -> usize {
     match kind {
-        PackedKind::Int | PackedKind::Float | PackedKind::Bool => 1,
+        PackedKind::Int | PackedKind::Float | PackedKind::F32 | PackedKind::Bool => 1,
         PackedKind::Struct(inner) => inner.word_count,
     }
 }
@@ -1475,6 +1479,7 @@ fn decode_packed_field(kind: &PackedKind, words: &[u64], offset: usize) -> Value
     match kind {
         PackedKind::Int => Value::int(words[offset] as i64),
         PackedKind::Float => Value::float(f64::from_bits(words[offset])),
+        PackedKind::F32 => Value::f32(f32::from_bits(words[offset] as u32)),
         PackedKind::Bool => Value::bool(words[offset] != 0),
         PackedKind::Struct(inner) => unpack_element(inner, words, offset).0,
     }
@@ -1491,6 +1496,10 @@ fn unpack_element(schema: &PackedSchema, words: &[u64], offset: usize) -> (Value
             }
             PackedKind::Float => {
                 slots.push(Value::float(f64::from_bits(words[at])));
+                at += 1;
+            }
+            PackedKind::F32 => {
+                slots.push(Value::f32(f32::from_bits(words[at] as u32)));
                 at += 1;
             }
             PackedKind::Bool => {

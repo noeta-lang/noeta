@@ -3445,7 +3445,7 @@ impl Checker {
     /// string/list/map/class/enum/`dyn`/generic — is heap-shaped and cannot lay out flat.
     fn is_packable_type(&self, ty: &Type) -> bool {
         match ty {
-            Type::Int | Type::Float | Type::Bool => true,
+            Type::Int | Type::Float | Type::F32 | Type::Bool => true,
             Type::Named(name, args) if args.is_empty() => self.packed_structs.contains(name),
             _ => false,
         }
@@ -3468,6 +3468,7 @@ impl Checker {
             let kind = match fty {
                 Type::Int => PackedKind::Int,
                 Type::Float => PackedKind::Float,
+                Type::F32 => PackedKind::F32,
                 Type::Bool => PackedKind::Bool,
                 Type::Named(..) => PackedKind::Struct(Box::new(self.packed_layout(fty)?)),
                 _ => return None,

@@ -1560,6 +1560,7 @@ impl Interpreter {
             let kind = match &layout_field.kind {
                 PackedKind::Int => SlotKind::Int,
                 PackedKind::Float => SlotKind::Float,
+                PackedKind::F32 => SlotKind::F32,
                 PackedKind::Bool => SlotKind::Bool,
                 PackedKind::Struct(inner) => SlotKind::Struct(self.resolve_packed_schema(inner)?),
             };

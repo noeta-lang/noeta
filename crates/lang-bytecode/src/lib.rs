@@ -808,6 +808,8 @@ pub struct PackedSchemaDef {
 pub enum PackedFieldDef {
     Int,
     Float,
+    /// A 32-bit float field (P-PACK Phase 3).
+    F32,
     Bool,
     Struct(u32),
 }
@@ -917,6 +919,7 @@ impl Module {
                     .map(|f| match f {
                         PackedFieldDef::Int => "int".to_string(),
                         PackedFieldDef::Float => "float".to_string(),
+                        PackedFieldDef::F32 => "f32".to_string(),
                         PackedFieldDef::Bool => "bool".to_string(),
                         PackedFieldDef::Struct(idx) => format!("packed{idx}"),
                     })

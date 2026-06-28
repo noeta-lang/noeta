@@ -509,6 +509,9 @@ pub struct PackedField {
 pub enum PackedKind {
     Int,
     Float,
+    /// A 32-bit float field (P-PACK Phase 3). One word like the other primitives in slice 3.2a; slice
+    /// 3.2b narrows it to a 4-byte slot.
+    F32,
     Bool,
     /// A nested `@packed` struct, laid out contiguously in the parent's buffer.
     Struct(Box<PackedLayout>),
@@ -522,7 +525,7 @@ impl PackedLayout {
         self.fields
             .iter()
             .map(|f| match &f.kind {
-                PackedKind::Int | PackedKind::Float | PackedKind::Bool => 1,
+                PackedKind::Int | PackedKind::Float | PackedKind::F32 | PackedKind::Bool => 1,
                 PackedKind::Struct(inner) => inner.word_count(),
             })
             .sum()

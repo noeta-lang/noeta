@@ -152,6 +152,8 @@ pub struct PackedSchema {
 pub enum PackedKind {
     Int,
     Float,
+    /// A 32-bit float field (P-PACK Phase 3).
+    F32,
     Bool,
     Struct(std::rc::Rc<PackedSchema>),
 }

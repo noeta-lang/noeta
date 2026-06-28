@@ -173,6 +173,8 @@ pub(crate) struct PackedSlot {
 pub(crate) enum SlotKind {
     Int,
     Float,
+    /// A 32-bit float field (P-PACK Phase 3).
+    F32,
     Bool,
     Struct(Rc<PackedSchema>),
 }
@@ -254,7 +256,7 @@ impl SlotKind {
     /// struct is its own `word_count` (laid out contiguously inline).
     fn width(&self) -> usize {
         match self {
-            SlotKind::Int | SlotKind::Float | SlotKind::Bool => 1,
+            SlotKind::Int | SlotKind::Float | SlotKind::F32 | SlotKind::Bool => 1,
             SlotKind::Struct(inner) => inner.word_count,
         }
     }
@@ -267,6 +269,7 @@ fn decode_slot(kind: &SlotKind, words: &[u64], offset: usize) -> Value {
     match kind {
         SlotKind::Int => Value::Int(words[offset] as i64),
         SlotKind::Float => Value::Float(f64::from_bits(words[offset])),
+        SlotKind::F32 => Value::F32(f32::from_bits(words[offset] as u32)),
         SlotKind::Bool => Value::Bool(words[offset] != 0),
         SlotKind::Struct(inner) => unpack_object(inner, words, offset).0,
     }
@@ -286,6 +289,7 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u64>) -> Opti
         match (&slot.kind, field) {
             (SlotKind::Int, Value::Int(i)) => out.push(*i as u64),
             (SlotKind::Float, Value::Float(x)) => out.push(x.to_bits()),
+            (SlotKind::F32, Value::F32(f)) => out.push(u64::from(f.to_bits())),
             (SlotKind::Bool, Value::Bool(b)) => out.push(u64::from(*b)),
             (SlotKind::Struct(inner), nested) => pack_object(nested, inner, out)?,
             _ => return None,
@@ -307,6 +311,10 @@ fn unpack_object(schema: &PackedSchema, words: &[u64], offset: usize) -> (Value,
             }
             SlotKind::Float => {
                 slots.push(Value::Float(f64::from_bits(words[at])));
+                at += 1;
+            }
+            SlotKind::F32 => {
+                slots.push(Value::F32(f32::from_bits(words[at] as u32)));
                 at += 1;
             }
             SlotKind::Bool => {

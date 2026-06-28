@@ -318,6 +318,7 @@ fn execute_with_collector(
             .map(|f| match f {
                 lang_bytecode::PackedFieldDef::Int => lang_object::PackedKind::Int,
                 lang_bytecode::PackedFieldDef::Float => lang_object::PackedKind::Float,
+                lang_bytecode::PackedFieldDef::F32 => lang_object::PackedKind::F32,
                 lang_bytecode::PackedFieldDef::Bool => lang_object::PackedKind::Bool,
                 lang_bytecode::PackedFieldDef::Struct(idx) => {
                     lang_object::PackedKind::Struct(Rc::clone(&packed_schemas[*idx as usize]))
