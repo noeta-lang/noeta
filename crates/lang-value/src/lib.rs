@@ -54,6 +54,10 @@ impl Value {
     pub(crate) const PTR_MASK: u64 = 0x0000_ffff_ffff_ffff;
     /// Discriminates an immediate small int from the unit/bool singletons (a free QNAN bit).
     const INT_TAG: u64 = 1 << 49;
+    /// Discriminates an immediate `f32` (P-PACK Phase 3): a distinct free QNAN bit, one below
+    /// `INT_TAG`. The 32 f32 bits live in the low 32 of the payload (bits 32–47 stay zero, and bit 49
+    /// — `INT_TAG` — stays clear, so an `f32` is neither a small int nor a float/pointer/singleton).
+    const F32_TAG: u64 = 1 << 48;
     /// Low-bit tags for the immediate singletons.
     const TAG_UNIT: u64 = 0;
     const TAG_FALSE: u64 = 1;
@@ -547,23 +551,21 @@ impl Value {
         }
     }
 
-    /// A 32-bit float (P-PACK Phase 3), boxed for now (a GC leaf).
+    /// A 32-bit float (P-PACK Phase 3) — an **immediate** value (no heap allocation, not refcounted),
+    /// its 32 bits NaN-boxed under `F32_TAG`.
     pub fn f32(f: f32) -> Value {
-        heap::alloc(Payload::F32(f))
+        Value(Self::QNAN | Self::F32_TAG | u64::from(f.to_bits()))
     }
 
-    /// Whether this is an `f32` value.
+    /// Whether this is an immediate `f32` value.
     pub fn is_f32(self) -> bool {
-        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::F32(_)))
+        !self.is_float() && !self.is_pointer() && (self.0 & Self::F32_TAG) != 0
     }
 
     /// The `f32` value, if this is one.
     pub fn as_f32(self) -> Option<f32> {
-        if self.is_pointer() {
-            heap::with_payload(self, |p| match p {
-                Payload::F32(f) => Some(*f),
-                _ => None,
-            })
+        if self.is_f32() {
+            Some(f32::from_bits((self.0 & 0xffff_ffff) as u32))
         } else {
             None
         }
@@ -1055,12 +1057,13 @@ impl Value {
             self.as_int().unwrap().to_string()
         } else if self.is_float() {
             format_float(self.as_float().unwrap())
+        } else if self.is_f32() {
+            // An immediate `f32` displays at f32 precision, byte-identical to the tree-walker.
+            format_f32(self.as_f32().unwrap())
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => s.clone(),
                 Payload::Int(i) => i.to_string(),
-                // An `f32` displays at f32 precision, byte-identical to the tree-walker's `format_f32`.
-                Payload::F32(f) => format_f32(*f),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
                 Payload::Closure { .. } | Payload::NativeFn(_) => "<fn>".to_string(),
                 // A cell is internal capture storage and never reaches a display site (the
@@ -1153,12 +1156,13 @@ impl Value {
             self.as_int().unwrap().to_string()
         } else if self.is_float() {
             format_float(self.as_float().unwrap())
+        } else if self.is_f32() {
+            // An immediate `f32` serializes as a JSON number at f32 precision.
+            format_f32(self.as_f32().unwrap())
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => json_string(s),
                 Payload::Int(i) => i.to_string(),
-                // An `f32` serializes as a JSON number at f32 precision.
-                Payload::F32(f) => format_f32(*f),
                 Payload::List(items) => {
                     let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
                     format!("[{}]", parts.join(","))
@@ -1222,14 +1226,14 @@ impl Value {
             "int"
         } else if self.is_float() {
             "float"
+        } else if self.is_f32() {
+            "f32"
         } else if self.is_pointer() {
             // Boxed ints were already caught by `as_int` above, so a pointer here is a
             // closure, list, map, or string. M0 names both user functions and builtins
             // "function".
             if self.as_closure().is_some() || self.as_native_fn().is_some() {
                 "function"
-            } else if self.is_f32() {
-                "f32"
             } else if self.is_list() {
                 "list"
             } else if self.is_tuple() {
@@ -1661,24 +1665,29 @@ mod tests {
     }
 
     #[test]
-    fn f32_round_trips_and_frees() {
-        // P-PACK Phase 3: an `f32` is a boxed leaf value. Round-trips through `as_f32`, names itself
-        // `f32`, displays at f32 precision, and frees cleanly (checked under miri).
+    fn f32_is_immediate_and_round_trips() {
+        // P-PACK Phase 3: an `f32` is an *immediate* NaN-boxed value — no heap allocation, not
+        // refcounted (like an immediate int/float). Round-trips through `as_f32`, names itself `f32`,
+        // and is distinguishable from every other immediate.
         let v = Value::f32(1.5);
+        assert!(!v.is_pointer(), "f32 must be immediate, not a heap pointer");
         assert_eq!(v.as_f32(), Some(1.5));
         assert!(v.is_f32());
         assert_eq!(v.as_float(), None); // not an f64 float
-        assert_eq!(v.as_int(), None);
+        assert_eq!(v.as_int(), None); // not an int
+        assert_eq!(v.as_bool(), None);
+        assert!(!v.is_unit());
         assert_eq!(v.type_name(), "f32");
         assert_eq!(v.display(), "1.5");
-        assert!(v.dec_ref());
-        v.free();
 
         // f32 precision is observable: 0.1 + 0.2 at f32 is exactly 0.3 (f64 would be 0.30000…04).
-        let sum = Value::f32(0.1 + 0.2_f32);
-        assert_eq!(sum.display(), "0.3");
-        assert!(sum.dec_ref());
-        sum.free();
+        assert_eq!(Value::f32(0.1 + 0.2_f32).display(), "0.3");
+        // Bit patterns round-trip exactly, including the awkward ones.
+        for f in [0.0f32, -0.0, 1.0, -2.5, f32::MAX, f32::MIN, f32::EPSILON] {
+            assert_eq!(Value::f32(f).as_f32(), Some(f), "round-trip {f}");
+        }
+        // An immediate int and an immediate f32 with the same numeric value are distinct values.
+        assert_ne!(Value::f32(3.0).0, Value::int(3).0);
     }
 
     #[test]

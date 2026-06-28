@@ -168,10 +168,6 @@ pub fn collector_mode() -> CollectorMode {
 pub(crate) enum Payload {
     Str(String),
     Int(i64),
-    /// A 32-bit float (P-PACK Phase 3). Boxed for now — a GC **leaf** (no child values), freed by
-    /// just dropping it — so the generic pointer retain/release machinery manages its lifetime with
-    /// no per-site changes. (A later optimization can make `f32` an immediate NaN-boxed value.)
-    F32(f32),
     /// A function value: a prototype index plus the captured upvalue cells (empty for a
     /// top-level `fn`/closure, which captures only globals). The closure **owns one reference
     /// to each upvalue cell**, so it is a GC node — a closure capturing a cell that captures
@@ -368,7 +364,6 @@ pub(crate) fn free(value: Value) {
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
         | Payload::Int(_)
-        | Payload::F32(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
@@ -521,7 +516,6 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         // A packed list holds only primitive words (no child references) — a GC leaf.
         Payload::Str(_)
         | Payload::Int(_)
-        | Payload::F32(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
