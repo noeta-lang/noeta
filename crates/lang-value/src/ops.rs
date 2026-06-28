@@ -26,6 +26,12 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
         // display-based concatenation (each side stringified), so `1 ~ true` stays `"1true"`.
         BinaryOp::Concat => {
             if left.is_list() && right.is_list() {
+                // Two packed lists of the same layout stay flat (P-PACK 2.6): concatenate the word
+                // buffers directly instead of materializing N boxed elements. Any other pairing
+                // (boxed operand, or differing layouts) falls through to the demoting copy below.
+                if let Some(flat) = left.packed_concat(right) {
+                    return Ok(flat);
+                }
                 // Demote each operand to an owned boxed list (a packed list materializes; a boxed one
                 // gains a reference) so the borrow-then-retain logic below is uniform; the temporary
                 // demotions are released afterward, leaving only the result's references.

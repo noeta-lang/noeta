@@ -130,6 +130,10 @@ fn packed_producers_keep_the_list_flat() {
         ("reverse", "data.reverse()"),
         ("slice", "data.slice(0, data.count())"),
         ("filter", "filter(data, fn(v) => v.x > 0.0)"),
+        ("set", "data.set(0, Vec3 { x: 9.0, y: 9.0, z: 9.0 })"),
+        // `concat` (`~`) also stays flat (see `packed_set_concat.lang` + the `packed_concat` /
+        // `packed_extend_in_place` miri tests); it is omitted here because its result-size growth and
+        // `Vec` capacity doubling make the residency ratio too noisy for this half-of-boxed guard.
     ];
     for (label, op) in cases {
         let vm_packed = compile_program(&producer_vec3_src(N, true, op));

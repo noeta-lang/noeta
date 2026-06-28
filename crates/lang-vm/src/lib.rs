@@ -512,6 +512,23 @@ impl<'m> Vm<'m> {
                     let indices: Vec<usize> = (start as usize..end as usize).collect();
                     return Ok(list.packed_select(&indices));
                 }
+                lang_stdlib::ListMethod::Set => {
+                    self.stdlib_arity(name, args, 2, span)?;
+                    let i = self.stdlib_int(name, args[0], span)?;
+                    let len = list.list_len().expect("packed list");
+                    if i < 0 || i as usize >= len {
+                        return Err(self.error(
+                            DiagnosticCode::IndexOutOfBounds,
+                            span,
+                            format!("index {i} out of bounds for list of length {len}"),
+                        ));
+                    }
+                    // Stays flat unless the new element does not pack (impossible for a well-typed
+                    // `List<packed>.set` — then demote).
+                    if let Some(result) = list.packed_set(i as usize, args[1]) {
+                        return Ok(result);
+                    }
+                }
                 _ => {}
             }
             let boxed = list.realize_list();
@@ -1214,21 +1231,29 @@ impl<'m> Vm<'m> {
                 format!("index {i} out of bounds for list of length {len}"),
             ));
         }
-        // The in-place slot overwrite is a boxed-list fast path; a packed list (P-PACK 2.4) has no
-        // flat `set`, so it takes the copy path (which materializes via `call_list_method`).
-        if !list.is_packed_list() && list.refcount() == 1 {
-            let value = args[1];
-            retain(value);
-            let old = list.list_replace_slot(i as usize, value);
-            self.release_value(old);
-            Ok(list)
-        } else {
-            // Aliased (or packed): copy via the ordinary method, then drop the consumed reference.
-            let new =
-                self.call_list_method(list, lang_stdlib::ListMethod::Set, "set", args, span)?;
-            release(list);
-            Ok(new)
+        // Sole owner: overwrite the slot in place — O(word_count) for a packed list (its primitives
+        // copied into the buffer, P-PACK 2.6) or O(1) pointer-swap for a boxed one. An aliased list
+        // (or a packed element that does not pack) copies via `call_list_method` (still flat for a
+        // packed receiver) and then drops the consumed reference.
+        if list.refcount() == 1 {
+            if list.is_packed_list() {
+                if list.packed_set_in_place(i as usize, args[1]) {
+                    return Ok(list);
+                }
+                // element did not pack (impossible for a well-typed `List<packed>`) — copy below.
+            } else {
+                let value = args[1];
+                retain(value);
+                let old = list.list_replace_slot(i as usize, value);
+                self.release_value(old);
+                return Ok(list);
+            }
         }
+        // Aliased (or a packed pack-failure): copy via the ordinary method, then drop the consumed
+        // reference.
+        let new = self.call_list_method(list, lang_stdlib::ListMethod::Set, "set", args, span)?;
+        release(list);
+        Ok(new)
     }
 
     fn map_update_in_place(
@@ -1635,16 +1660,29 @@ impl<'m> Vm<'m> {
                     // `dst == lhs` store safe (the old occupant is now `unit`, not the live list).
                     frames[top].regs[*lhs as usize] = Value::unit();
                     let result = if l.is_list() && r.is_list() {
-                        if !l.is_packed_list() && !r.is_packed_list() && l.refcount() == 1 {
+                        if l.is_packed_list()
+                            && r.is_packed_list()
+                            && l.refcount() == 1
+                            && l.packed_extend_in_place(r)
+                        {
+                            // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s
+                            // buffer in place (P-PACK 2.6). The single reference moves into the result.
+                            l
+                        } else if !l.is_packed_list() && !r.is_packed_list() && l.refcount() == 1 {
                             // Sole owner, both boxed: extend the backing buffer in place (O(1)
                             // amortized). The single reference moves from `lhs` into the result.
                             l.list_extend(r);
                             l
+                        } else if let Some(flat) = l.packed_concat(r) {
+                            // Aliased but both flat (same layout): copy the word buffers, then drop the
+                            // consumed accumulator reference — stays flat without mutating the alias.
+                            release(l);
+                            flat
                         } else {
-                            // Aliased, or a packed operand (P-PACK 2.4, no flat concat): copy,
-                            // preserving immutable semantics. Demote each operand to an owned boxed
-                            // list, retain each element into the new list, release the demotions, then
-                            // drop the accumulator's consumed reference.
+                            // A mixed packed/boxed pairing (or differing layouts): copy, preserving
+                            // immutable semantics. Demote each operand to an owned boxed list, retain
+                            // each element into the new list, release the demotions, then drop the
+                            // accumulator's consumed reference.
                             let lb = l.realize_list();
                             let rb = r.realize_list();
                             let mut items = lb.list_items().unwrap();

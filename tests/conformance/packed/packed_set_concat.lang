@@ -1,0 +1,31 @@
+// P-PACK 2.6: `set` and `~`/concat keep a `List<packed>` flat — both the functional forms and the
+// in-place reuse forms (`acc = acc.set(i, v)`, `acc = acc ~ xs`). The flat representation is invisible
+// to RunResult, so the result must equal the boxed form element-for-element; the differential pins the
+// VM (flat) against the eval reference (which materializes), and the leak oracle pins residency 0.
+// expect: stdout "[V {x: 0, y: 0}, V {x: 9, y: 9}, V {x: 2, y: 2}]"
+// expect: stdout "[V {x: 0, y: 0}, V {x: 9, y: 9}, V {x: 2, y: 2}, V {x: 5, y: 5}]"
+// expect: stdout "4"
+// expect: stdout "[V {x: 1, y: 1}, V {x: 2, y: 2}]"
+// expect: stdout "[V {x: 1, y: 1}]"
+// expect: stdout "[V {x: 7, y: 7}, V {x: 1, y: 1}, V {x: 2, y: 2}]"
+// expect: exit 0
+@packed struct V { x: int; y: int }
+
+// In-place reuse `set` on a reassigned accumulator (uniquely owned → flat slot overwrite).
+mut acc = [V { x: 0, y: 0 }, V { x: 1, y: 1 }, V { x: 2, y: 2 }]
+acc = acc.set(1, V { x: 9, y: 9 })
+echo acc
+
+// In-place reuse concat `acc = acc ~ xs` (uniquely owned → flat buffer extend).
+acc = acc ~ [V { x: 5, y: 5 }]
+echo acc
+echo acc.count()
+
+// Aliased concat: both operands stay live, so the result is a flat copy and the inputs are unchanged.
+a = [V { x: 1, y: 1 }]
+b = [V { x: 2, y: 2 }]
+echo a ~ b
+echo a
+
+// Concat onto a prepended single element, then the original — exercises the flat-copy path again.
+echo [V { x: 7, y: 7 }] ~ a ~ b

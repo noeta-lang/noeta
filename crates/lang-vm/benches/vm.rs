@@ -159,9 +159,10 @@ fn packed_list_src(n: usize, packed: bool) -> String {
 /// producer (`op` over `data`), then index + sum a field over the result. With `@packed` the VM keeps
 /// the result flat — copying the kept elements' words — instead of allocating `n` boxed objects; the
 /// plain-`struct` variant materializes a boxed result. The producer + downstream scalar read are timed
-/// together. `reverse`/`slice` are pure word copies — ~14–16% faster than boxed (no N allocations);
-/// `filter` must materialize each element to run the predicate (a temp alloc per element), so it is a
-/// ~5% time cost but a 2.3× memory win (the result stays flat — see the `peak_memory` residency test).
+/// together. `reverse`/`slice`/`set`/`concat` are word copies — ~12–16% faster than boxed (no N
+/// allocations or retains); `filter` must materialize each element to run the predicate (a temp alloc
+/// per element), so it is a ~5% time cost. All keep the result flat (a 2.3× memory win — see the
+/// `peak_memory` residency test).
 fn packed_producer_src(n: usize, packed: bool, op: &str) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };
     let mut elems = String::with_capacity(n * 32);
@@ -453,6 +454,8 @@ fn vm_hot_paths(c: &mut Criterion) {
     for (op_label, op) in [
         ("reverse", "data.reverse()"),
         ("filter", "filter(data, fn(v) => v.x > 0.0)"),
+        ("set", "data.set(0, Vec3 { x: 9.0, y: 9.0, z: 9.0 })"),
+        ("concat", "data ~ data.slice(0, 1)"),
     ] {
         for &n in PACKED_SIZES {
             let packed = compile(&packed_producer_src(n, true, op));

@@ -323,6 +323,99 @@ impl Value {
         Value::packed_list(schema, buf)
     }
 
+    /// Build a new flat packed list with element `index` replaced by `element` (P-PACK 2.6 flat
+    /// `set`). The element's primitives are copied into a fresh buffer; the caller still owns
+    /// `element`. Returns `None` (so the caller demotes) if `element` does not pack into the schema.
+    pub fn packed_set(self, index: usize, element: Value) -> Option<Value> {
+        let (schema, mut buf) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+            _ => unreachable!("packed_set on a non-packed list"),
+        });
+        let wc = schema.word_count;
+        let mut staged = Vec::with_capacity(wc);
+        if !element.pack_element(&schema, &mut staged) {
+            return None;
+        }
+        buf[index * wc..index * wc + wc].copy_from_slice(&staged);
+        Some(Value::packed_list(schema, buf))
+    }
+
+    /// Overwrite element `index` of this packed list **in place** with `element` (P-PACK 2.6 reuse
+    /// path for `acc = acc.set(i, v)`). The caller must guarantee a uniquely-owned packed list
+    /// (`refcount == 1`). `element`'s primitives are copied into the buffer (no retain); the caller
+    /// still owns `element`. Returns `false` (buffer untouched) if `element` does not pack, so the
+    /// caller can fall back to the copy path.
+    #[must_use]
+    pub fn packed_set_in_place(self, index: usize, element: Value) -> bool {
+        debug_assert!(
+            self.is_packed_list() && heap::refcount(self) == 1,
+            "packed_set_in_place requires a uniquely-owned packed list"
+        );
+        heap::with_payload_mut(self, |p| match p {
+            Payload::PackedList { schema, words } => {
+                let wc = schema.word_count;
+                let mut staged = Vec::with_capacity(wc);
+                if element.pack_element(schema, &mut staged) {
+                    words[index * wc..index * wc + wc].copy_from_slice(&staged);
+                    true
+                } else {
+                    false
+                }
+            }
+            _ => false,
+        })
+    }
+
+    /// Concatenate two packed lists of the **same layout** into a new flat packed list (P-PACK 2.6
+    /// `a ~ b`), copying both word buffers. Returns `None` (so the caller demotes) unless both are
+    /// packed and share an element shape. Both operands are borrowed (the caller still owns them).
+    pub fn packed_concat(self, other: Value) -> Option<Value> {
+        if !self.is_packed_list() || !other.is_packed_list() {
+            return None;
+        }
+        let (schema, mut buf) = heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+            _ => unreachable!("packed_concat on a non-packed list"),
+        });
+        let other_words = heap::with_payload(other, |p| match p {
+            Payload::PackedList {
+                schema: s2,
+                words: w2,
+            } => Rc::ptr_eq(&schema.shape, &s2.shape).then(|| w2.clone()),
+            _ => None,
+        })?;
+        buf.extend_from_slice(&other_words);
+        Some(Value::packed_list(schema, buf))
+    }
+
+    /// Append `other`'s elements to this packed list **in place** (P-PACK 2.6 reuse path for
+    /// `acc = acc ~ xs`). The caller must guarantee a uniquely-owned packed list (`refcount == 1`).
+    /// `other` is borrowed (its words copied). Returns `false` (buffer untouched) unless `other` is a
+    /// packed list of the same layout, so the caller can fall back to the copy path.
+    #[must_use]
+    pub fn packed_extend_in_place(self, other: Value) -> bool {
+        debug_assert!(
+            self.is_packed_list() && heap::refcount(self) == 1,
+            "packed_extend_in_place requires a uniquely-owned packed list"
+        );
+        if !other.is_packed_list() {
+            return false;
+        }
+        let (other_schema, other_words) = heap::with_payload(other, |p| match p {
+            Payload::PackedList { schema, words } => (Rc::clone(schema), words.clone()),
+            _ => unreachable!("packed_extend_in_place on a non-packed list"),
+        });
+        heap::with_payload_mut(self, |p| match p {
+            Payload::PackedList { schema, words }
+                if Rc::ptr_eq(&schema.shape, &other_schema.shape) =>
+            {
+                words.extend_from_slice(&other_words);
+                true
+            }
+            _ => false,
+        })
+    }
+
     /// Materialize every packed element into an owned vector (each refcount 1). Used by
     /// [`Value::realize_list`]; the words are copied out before allocating so no heap borrow is held
     /// across element construction.
@@ -1593,6 +1686,71 @@ mod tests {
         assert_eq!(kept.display(), "[V {x: 3, y: 1}, V {x: 7, y: 9}]");
         kept.release();
 
+        list.release();
+    }
+
+    #[test]
+    fn packed_set_and_concat_keep_the_list_flat() {
+        // P-PACK 2.6: `set`/`~` on a packed list stay flat. `packed_set` (copy) and
+        // `packed_set_in_place` (sole-owner overwrite) replace one element's words; `packed_concat`
+        // (copy) and `packed_extend_in_place` (sole-owner append) join same-layout buffers. All
+        // results are still packed lists owning no child refs — checked under miri.
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "V",
+            vec!["x".into(), "y".into()],
+        ));
+        let schema = Rc::new(PackedSchema {
+            shape: Rc::clone(&shape),
+            fields: vec![PackedKind::Int, PackedKind::Int],
+            word_count: 2,
+        });
+        let mk = |words: Vec<u64>| Value::packed_list(Rc::clone(&schema), words);
+        let elem =
+            |x: i64, y: i64| Value::object(Rc::clone(&shape), vec![Value::int(x), Value::int(y)]);
+
+        // Functional `set`: a fresh flat list with one element replaced; the original is untouched.
+        let list = mk(vec![1, 1, 2, 2, 3, 3]);
+        let nine = elem(9, 9);
+        let updated = list.packed_set(1, nine).expect("packs");
+        nine.release();
+        assert!(updated.is_packed_list());
+        assert_eq!(
+            updated.display(),
+            "[V {x: 1, y: 1}, V {x: 9, y: 9}, V {x: 3, y: 3}]"
+        );
+        assert_eq!(
+            list.display(),
+            "[V {x: 1, y: 1}, V {x: 2, y: 2}, V {x: 3, y: 3}]"
+        );
+        updated.release();
+
+        // In-place `set` (sole owner): overwrite one block, the list keeps its single reference.
+        let eight = elem(8, 8);
+        assert!(list.packed_set_in_place(0, eight));
+        eight.release();
+        assert!(list.is_packed_list());
+        assert_eq!(
+            list.display(),
+            "[V {x: 8, y: 8}, V {x: 2, y: 2}, V {x: 3, y: 3}]"
+        );
+
+        // Functional concat of same-layout lists → a flat join; both inputs survive.
+        let other = mk(vec![7, 7]);
+        let joined = list.packed_concat(other).expect("same layout");
+        assert!(joined.is_packed_list());
+        assert_eq!(joined.list_len(), Some(4));
+        assert_eq!(other.list_len(), Some(1)); // input unchanged
+        joined.release();
+
+        // In-place extend (sole owner): append `other`'s words; `other` is borrowed (still owned).
+        assert!(list.packed_extend_in_place(other));
+        assert!(list.is_packed_list());
+        assert_eq!(
+            list.display(),
+            "[V {x: 8, y: 8}, V {x: 2, y: 2}, V {x: 3, y: 3}, V {x: 7, y: 7}]"
+        );
+        other.release();
         list.release();
     }
 
