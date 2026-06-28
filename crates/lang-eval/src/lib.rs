@@ -2599,6 +2599,36 @@ impl Interpreter {
                     }
                 }
             }
+            "write_bytes" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?.to_string();
+                let Value::Bytes(data) = &args[1] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`fs.write_bytes` expects a `bytes` value, found {}",
+                            args[1].type_name()
+                        ),
+                    ));
+                };
+                match self.host.fs_write_bytes(&path, data) {
+                    Ok(()) => Ok(Value::Unit),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "read_bytes" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let path = self.expect_std_string(func, &args[0], span)?;
+                match self.host.fs_read_bytes(path) {
+                    Ok(data) => Ok(Value::Bytes(Rc::new(data))),
+                    Err(error) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
             "read_lines" => {
                 self.expect_std_arity(func, args, 1, span)?;
                 let path = self.expect_std_string(func, &args[0], span)?;

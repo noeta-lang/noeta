@@ -1,0 +1,18 @@
+// P-PACK 4.4: binary file IO. `fs.write_bytes`/`fs.read_bytes` persist a `bytes` buffer as raw bytes
+// (not UTF-8 text), so a `to_bytes` serialization survives a disk round-trip exactly. The sandbox VFS
+// stores files as bytes (text is the UTF-8 view), so both backends agree.
+// expect: stdout "true"
+// expect: stdout "2"
+// expect: stdout "1.0"
+// expect: exit 0
+use std.{fs}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+fs.write_bytes("data.bin", xs.to_bytes())
+ys = from_bytes::<V3>(fs.read_bytes("data.bin"))
+
+echo ys == xs
+echo ys.count()
+echo ys[0].x

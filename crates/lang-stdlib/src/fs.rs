@@ -32,7 +32,10 @@ use std::collections::{BTreeMap, BTreeSet};
 /// and deterministic. Cloning is cheap-ish and only used in tests.
 #[derive(Debug, Default, Clone)]
 pub struct Vfs {
-    files: BTreeMap<String, String>,
+    /// Path → raw file bytes. A filesystem stores bytes; the text API ([`Vfs::read`]/[`Vfs::write`])
+    /// is the UTF-8 view, the binary API ([`Vfs::read_bytes`]/[`Vfs::write_bytes`], P-PACK 4.4) the
+    /// raw view — so a list serialized with `to_bytes` survives a write/read round-trip exactly.
+    files: BTreeMap<String, Vec<u8>>,
     /// Directories created with [`Vfs::mkdir`]. A directory also exists *implicitly* whenever a
     /// file lives under it (so `write("a/b.txt", …)` makes `a` a directory without a `mkdir`); this
     /// set records the *empty* ones that would otherwise leave no trace.
@@ -45,23 +48,39 @@ impl Vfs {
         Vfs::default()
     }
 
-    /// Write (creating or overwriting) the file at `path`.
+    /// Write (creating or overwriting) the file at `path` with UTF-8 text.
     pub fn write(&mut self, path: &str, content: &str) {
-        self.files.insert(path.to_string(), content.to_string());
+        self.files
+            .insert(path.to_string(), content.as_bytes().to_vec());
     }
 
-    /// Append to the file at `path`, creating it (empty) first if it does not exist.
+    /// Append UTF-8 text to the file at `path`, creating it (empty) first if it does not exist.
     pub fn append(&mut self, path: &str, content: &str) {
         self.files
             .entry(path.to_string())
             .or_default()
-            .push_str(content);
+            .extend_from_slice(content.as_bytes());
     }
 
-    /// Read the file at `path`, or an [`ErrorKind::Io`] error (→ `E0021`) if it does not exist.
+    /// Read the file at `path` as UTF-8 text, or an [`ErrorKind::Io`] error (→ `E0021`) if it does
+    /// not exist or its bytes are not valid UTF-8 (e.g. a binary file written with `write_bytes`).
     pub fn read(&self, path: &str) -> Result<String, StdError> {
         match self.files.get(path) {
-            Some(content) => Ok(content.clone()),
+            Some(bytes) => String::from_utf8(bytes.clone()).map_err(|_| not_utf8_error(path)),
+            None => Err(not_found_error(path)),
+        }
+    }
+
+    /// Write (creating or overwriting) the file at `path` with raw bytes (P-PACK 4.4 `fs.write_bytes`).
+    pub fn write_bytes(&mut self, path: &str, data: &[u8]) {
+        self.files.insert(path.to_string(), data.to_vec());
+    }
+
+    /// Read the file at `path` as raw bytes, or an [`ErrorKind::Io`] error if it does not exist
+    /// (P-PACK 4.4 `fs.read_bytes`).
+    pub fn read_bytes(&self, path: &str) -> Result<Vec<u8>, StdError> {
+        match self.files.get(path) {
+            Some(bytes) => Ok(bytes.clone()),
             None => Err(not_found_error(path)),
         }
     }
@@ -151,6 +170,14 @@ pub fn not_found_error(path: &str) -> StdError {
     StdError {
         kind: ErrorKind::Io,
         message: format!("no such file in sandbox: `{path}`"),
+    }
+}
+
+/// The "file is not valid UTF-8" error (→ `E0021`) — reading a binary file as text (P-PACK 4.4).
+pub fn not_utf8_error(path: &str) -> StdError {
+    StdError {
+        kind: ErrorKind::Io,
+        message: format!("file is not valid UTF-8 text: `{path}` (use `fs.read_bytes`)"),
     }
 }
 

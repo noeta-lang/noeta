@@ -107,6 +107,18 @@ impl Host for RealHost {
             .map_err(|e| io_error(format!("cannot read `{path}`: {e}")))
     }
 
+    fn fs_write_bytes(&mut self, path: &str, data: &[u8]) -> Result<(), StdError> {
+        self.runtime
+            .block_on(tokio::fs::write(path, data))
+            .map_err(|e| io_error(format!("cannot write `{path}`: {e}")))
+    }
+
+    fn fs_read_bytes(&self, path: &str) -> Result<Vec<u8>, StdError> {
+        self.runtime
+            .block_on(tokio::fs::read(path))
+            .map_err(|e| io_error(format!("cannot read `{path}`: {e}")))
+    }
+
     fn fs_exists(&self, path: &str) -> bool {
         std::path::Path::new(path).exists()
     }

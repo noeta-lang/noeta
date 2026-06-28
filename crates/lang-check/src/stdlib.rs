@@ -194,7 +194,8 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         ("random", "int") => vec![Type::Int, Type::Int],
         ("random", "float") => vec![],
         ("fs", "write" | "append") => vec![Type::String, Type::String],
-        ("fs", "read" | "read_lines" | "exists" | "remove" | "is_dir" | "mkdir") => {
+        ("fs", "write_bytes") => vec![Type::String, Type::Bytes],
+        ("fs", "read" | "read_lines" | "exists" | "remove" | "is_dir" | "mkdir" | "read_bytes") => {
             vec![Type::String]
         }
         ("fs", "open") => vec![Type::String, Type::String],
@@ -287,8 +288,9 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
         ("random", "seed") => Type::Unit,
         ("random", "int") => Type::Int,
         ("random", "float") => Type::Float,
-        ("fs", "write" | "append" | "mkdir") => Type::Unit,
+        ("fs", "write" | "append" | "mkdir" | "write_bytes") => Type::Unit,
         ("fs", "read") => Type::String,
+        ("fs", "read_bytes") => Type::Bytes,
         ("fs", "read_lines" | "list") => list(Type::String),
         ("fs", "exists" | "remove" | "is_dir") => Type::Bool,
         ("fs", "open") => Type::Named(FILE_HANDLE.to_string(), vec![]),

@@ -1288,6 +1288,36 @@ impl<'m> Vm<'m> {
                     }
                 }
             }
+            "write_bytes" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                let Some(data) = args[1].bytes_data() else {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`fs.write_bytes` expects a `bytes` value, found {}",
+                            args[1].type_name()
+                        ),
+                    ));
+                };
+                match self.host.fs_write_bytes(&path, &data) {
+                    Ok(()) => Ok(Value::unit()),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
+            "read_bytes" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let path = self.stdlib_string(func, args[0], span)?;
+                match self.host.fs_read_bytes(&path) {
+                    Ok(data) => Ok(Value::bytes(data)),
+                    Err(error) => {
+                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                    }
+                }
+            }
             "read" => {
                 self.stdlib_arity(func, args, 1, span)?;
                 let path = self.stdlib_string(func, args[0], span)?;

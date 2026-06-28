@@ -31,6 +31,10 @@ pub trait Host {
     fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_append(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_read(&self, path: &str) -> Result<String, StdError>;
+    /// Write raw bytes (P-PACK 4.4 `fs.write_bytes`) — the binary counterpart of `fs_write`.
+    fn fs_write_bytes(&mut self, path: &str, data: &[u8]) -> Result<(), StdError>;
+    /// Read raw bytes (P-PACK 4.4 `fs.read_bytes`) — the binary counterpart of `fs_read`.
+    fn fs_read_bytes(&self, path: &str) -> Result<Vec<u8>, StdError>;
     fn fs_exists(&self, path: &str) -> bool;
     fn fs_remove(&mut self, path: &str) -> Result<bool, StdError>;
     fn fs_list(&self) -> Result<Vec<String>, StdError>;
@@ -105,6 +109,15 @@ impl Host for SandboxHost {
 
     fn fs_read(&self, path: &str) -> Result<String, StdError> {
         self.fs.read(path)
+    }
+
+    fn fs_write_bytes(&mut self, path: &str, data: &[u8]) -> Result<(), StdError> {
+        self.fs.write_bytes(path, data);
+        Ok(())
+    }
+
+    fn fs_read_bytes(&self, path: &str) -> Result<Vec<u8>, StdError> {
+        self.fs.read_bytes(path)
     }
 
     fn fs_exists(&self, path: &str) -> bool {
