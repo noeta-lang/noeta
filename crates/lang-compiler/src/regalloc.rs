@@ -303,6 +303,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
+        Op::FromBytes { dst, src, .. } => {
+            f.def = Some(*dst);
+            f.uses.push(*src);
+        }
         Op::TypeOfStatic { dst, .. } => f.def = Some(*dst),
         Op::TypeValue { dst, .. } => f.def = Some(*dst),
         Op::Invoke {
@@ -701,6 +705,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::AttributesOf { dst, .. } => m(dst),
         Op::RolesOf { dst } => m(dst),
         Op::TypeOf { dst, src } => {
+            m(dst);
+            m(src);
+        }
+        Op::FromBytes { dst, src, .. } => {
             m(dst);
             m(src);
         }

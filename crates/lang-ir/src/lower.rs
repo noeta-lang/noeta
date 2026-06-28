@@ -859,6 +859,22 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            Expr::FromBytes { blob, span, .. } => {
+                let blob = self.lower_expr(blob, out)?;
+                // The element layout was recorded by the checker at this span in the same channel
+                // list literals use (`packed_list_sites`); `None` means T was not packable (already
+                // a checker error), and the backend then fails cleanly rather than mis-decoding.
+                let layout = self.packed_list_sites.get(span).cloned();
+                Ok(self.emit(
+                    out,
+                    Rvalue::FromBytes {
+                        blob,
+                        layout,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::AttributesOf { ty, span } => Ok(self.emit(
                 out,
                 Rvalue::AttributesOf {

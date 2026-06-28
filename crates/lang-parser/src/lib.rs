@@ -1286,6 +1286,19 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>`. Combines the
+        // turbofish type argument (like `attributes_of`) with a parenthesized operand (like
+        // `type_of`); the element type must be named because the byte buffer is opaque.
+        let from_bytes = just(T::FromBytesKw)
+            .ignore_then(just(T::ColonColon))
+            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |(ty, blob), e| Expr::FromBytes {
+                ty,
+                blob: Box::new(blob),
+                span: ctx.to_span(e.span()),
+            });
+
         // `roles_of()` — the semantic-role index query (P2.7). A keyword + empty `()` (no
         // type-argument; the index spans all role-tagged attributes), yielding `List<RoleBinding>`.
         let roles_of = just(T::RolesOfKw)
@@ -1327,6 +1340,7 @@ where
             match_,
             attributes_of,
             type_of,
+            from_bytes,
             roles_of,
             invoke,
             list,

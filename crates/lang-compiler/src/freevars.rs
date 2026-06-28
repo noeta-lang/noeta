@@ -509,6 +509,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::As { operand, .. }
         | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. } => f(operand),
+        Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {
             recv, name, args, ..
         } => {

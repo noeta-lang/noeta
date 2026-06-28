@@ -325,6 +325,15 @@ pub enum Rvalue {
     },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
+    /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).
+    /// `blob` is the byte operand; `layout` is element `T`'s packed layout (looked up by the lowering
+    /// in the `packed_list_sites` channel — the same one list literals use). `None` if the checker
+    /// did not record a layout (T not packable — already an error), letting the backend fail cleanly.
+    FromBytes {
+        blob: Atom,
+        layout: Option<lang_ast::reflect::PackedLayout>,
+        span: Span,
+    },
     /// `attributes_of::<T>()` — the manifest's `#[T(...)]` attributes.
     AttributesOf { ty: TypeRef, span: Span },
     /// `roles_of()` — the `(declaration, Role)` index.

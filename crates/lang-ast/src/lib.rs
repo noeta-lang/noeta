@@ -710,6 +710,14 @@ pub enum Expr {
     /// fidelity (B) it is the **head constructor** (`type_of([1])` is `List(Dyn)`, generics erased);
     /// the compile-time full-fidelity path rides the same `Expr` (P2.3). `value` is the operand.
     TypeOf { value: Box<Expr>, span: Span },
+    /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a `List<T>` (P-PACK 4.4). `ty` is
+    /// the element type (turbofish; must be a `@packed` struct), `blob` the `bytes` operand. The byte
+    /// buffer is opaque, so the element type must be named at the call site.
+    FromBytes {
+        ty: TypeRef,
+        blob: Box<Expr>,
+        span: Span,
+    },
     /// The reflection query `roles_of()` — the compiler-built `(declaration, Role)` index (P2.7),
     /// returned as a `List<RoleBinding>` (each `{ target: string, role: Role }`). Compile-time
     /// resolved from the attribute manifest's `@role(...)` tags; takes no operand.
@@ -884,6 +892,7 @@ impl Expr {
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
+            | Expr::FromBytes { span, .. }
             | Expr::RolesOf { span }
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. }
@@ -966,7 +975,8 @@ impl Expr {
             Expr::Try { expr, .. }
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
-            | Expr::TypeOf { value: expr, .. } => expr.mentions(name),
+            | Expr::TypeOf { value: expr, .. }
+            | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
             Expr::Invoke {
                 recv,
                 name: n,

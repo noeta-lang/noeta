@@ -1,0 +1,8 @@
+// `from_bytes::<T>` requires a packable `@packed` struct element type — the blob is a flat packed
+// buffer, so a non-packable `T` (here `int`, not a packed struct) has no layout to decode into. E0038,
+// the same diagnostic as a non-packable `@packed` field. (P-PACK 4.4)
+// expect: error E0038 at 8:6
+// expect: exit 1
+@packed struct V3 { x: f32; y: f32; z: f32 }
+blob = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }].to_bytes()
+echo from_bytes::<int>(blob)

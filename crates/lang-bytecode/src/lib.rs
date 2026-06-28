@@ -553,6 +553,15 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `from_bytes::<T>(blob)` — deserialize the `bytes` in `src` into a flat `List<T>` (P-PACK 4.4).
+    /// `schema` is element `T`'s interned [`PackedSchemaDef`] index; the VM wraps the raw buffer as a
+    /// packed list (validating the length is a whole number of elements). The inverse of `to_bytes`.
+    FromBytes {
+        dst: Reg,
+        src: Reg,
+        schema: u32,
+        span: Span,
+    },
     /// `type_of(value)` where the checker resolved the operand's **concrete** static type: `dst` is
     /// the full-fidelity [`lang_ast::reflect::TypeRepr`] baked as a constant (`Type.List(Type.Int)`),
     /// recovering the element/argument types runtime erasure drops. The operand is still evaluated
@@ -1185,6 +1194,11 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         }
         Op::RolesOf { dst } => format!("RolesOf     r{dst} <- roles_of()"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
+        Op::FromBytes {
+            dst, src, schema, ..
+        } => {
+            format!("FromBytes   r{dst} <- from_bytes(r{src}, schema {schema})")
+        }
         Op::TypeOfStatic { dst, repr } => format!("TypeOfStatic r{dst} <- {repr:?}"),
         Op::TypeValue { dst, name } => format!("TypeValue   r{dst} <- type {name}"),
         Op::Invoke {

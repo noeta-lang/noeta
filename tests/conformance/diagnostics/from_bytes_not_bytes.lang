@@ -1,0 +1,6 @@
+// `from_bytes::<T>` deserializes a `bytes` buffer — its operand must be `bytes`. A non-`bytes`
+// operand (here an `int`) is a type mismatch (E0007). (P-PACK 4.4)
+// expect: error E0007 at 6:23
+// expect: exit 1
+@packed struct V3 { x: f32; y: f32; z: f32 }
+echo from_bytes::<V3>(42)

@@ -1,0 +1,19 @@
+// P-PACK 4.4: the `bytes` round-trip. `list.to_bytes()` serializes a `List<@packed>` to its flat
+// buffer; `from_bytes::<T>(blob)` reconstructs it — turbofish names the element type because the byte
+// buffer is opaque. The reconstructed list is itself flat/packed (so `ys[1].y` fuses), and equals the
+// original. Both backends build it from the same bytes + schema, so the differential pins it.
+// expect: stdout "[V3 {x: 1.0, y: 2.0, z: 3.0}, V3 {x: 4.0, y: 5.0, z: 6.0}]"
+// expect: stdout "true"
+// expect: stdout "2"
+// expect: stdout "5.0"
+// expect: exit 0
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+blob = xs.to_bytes()
+ys = from_bytes::<V3>(blob)
+
+echo ys
+echo ys == xs
+echo ys.count()
+echo ys[1].y

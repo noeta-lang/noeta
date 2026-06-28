@@ -94,6 +94,11 @@ pub enum TokenKind {
     /// reflection surface is lexically distinct.
     #[token("type_of")]
     TypeOfKw,
+    /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer back into a `List<T>` (P-PACK 4.4). A
+    /// keyword so the turbofish type argument parses unambiguously; generic over any declared
+    /// `@packed` struct (no hardcoded type list — extension-friendly).
+    #[token("from_bytes")]
+    FromBytesKw,
     /// The reflection keyword `roles_of()` — the compiler-built `(declaration, Role)` index, returned
     /// as `List<RoleBinding>`. A keyword for symmetry with `attributes_of`/`type_of`.
     #[token("roles_of")]
@@ -286,6 +291,7 @@ impl TokenKind {
             TokenKind::IsKw => "IsKw",
             TokenKind::AttributesOfKw => "AttributesOfKw",
             TokenKind::TypeOfKw => "TypeOfKw",
+            TokenKind::FromBytesKw => "FromBytesKw",
             TokenKind::RolesOfKw => "RolesOfKw",
             TokenKind::InvokeKw => "InvokeKw",
             TokenKind::ColonColon => "ColonColon",
@@ -376,6 +382,7 @@ impl TokenKind {
             TokenKind::IsKw => "`is`",
             TokenKind::AttributesOfKw => "`attributes_of`",
             TokenKind::TypeOfKw => "`type_of`",
+            TokenKind::FromBytesKw => "`from_bytes`",
             TokenKind::RolesOfKw => "`roles_of`",
             TokenKind::InvokeKw => "`invoke`",
             TokenKind::ColonColon => "`::`",

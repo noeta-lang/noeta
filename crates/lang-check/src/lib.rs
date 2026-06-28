@@ -2819,6 +2819,38 @@ impl Checker {
                     Vec::new(),
                 )))
             }
+            Expr::FromBytes { ty, blob, span } => {
+                // The operand must be a `bytes` buffer (gradual holes tolerated).
+                let blob_ty = self.synth(blob, env);
+                if !matches!(blob_ty, Type::Bytes) && !blob_ty.defers_to_runtime() {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::TypeMismatch,
+                        blob.span(),
+                        format!("`from_bytes` expects a `bytes` value, found `{blob_ty}`"),
+                    ));
+                }
+                self.check_type_ref(ty);
+                let elem = Type::from_ref(ty);
+                // The element type must be a packable `@packed` struct — the blob is a flat packed
+                // buffer. Recording the layout in `packed_list_sites` (the channel list literals use)
+                // hands the backend the schema to rebuild the list. Generic over any declared packable
+                // type (no hardcoded list — extension-friendly).
+                match self.packed_layout(&elem) {
+                    Some(layout) => {
+                        self.packed_list_sites.insert(*span, layout);
+                    }
+                    None => {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::InvalidPackedType,
+                            *span,
+                            format!(
+                                "`from_bytes::<{elem}>` requires a packable `@packed` struct element type"
+                            ),
+                        ));
+                    }
+                }
+                Type::List(Box::new(elem))
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {

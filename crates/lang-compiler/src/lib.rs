@@ -2235,6 +2235,29 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::IsType { dst, src, target });
                 Ok(())
             }
+            Rvalue::FromBytes { blob, layout, span } => {
+                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
+                // schema from the layout the checker recorded (the same channel list literals use). A
+                // `None` layout means T was not packable — the checker already emitted E0038, so this
+                // program never runs; load unit to keep the register defined.
+                let src = self.atom_reg(blob)?;
+                match layout {
+                    Some(layout) => {
+                        let schema = self.module.intern_packed_schema(layout);
+                        self.code.push(Op::FromBytes {
+                            dst,
+                            src,
+                            schema,
+                            span: *span,
+                        });
+                    }
+                    None => {
+                        let k = self.add_const(Const::Unit);
+                        self.code.push(Op::LoadConst { dst, k });
+                    }
+                }
+                Ok(())
+            }
             Rvalue::TypeOf { operand, span } => {
                 // Evaluate the operand for its side effects in both fidelities. When the checker
                 // resolved a concrete static type for this site, bake the precise `Type` constant

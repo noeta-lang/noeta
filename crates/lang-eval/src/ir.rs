@@ -1021,6 +1021,45 @@ impl Interpreter {
                     None => Ok(crate::build_type_value(&crate::eval_type_repr(&v))),
                 }
             }
+            lang_ir::Rvalue::FromBytes { blob, layout, span } => {
+                // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): resolve T's schema,
+                // then wrap the raw bytes as a packed list — the inverse of `to_bytes`, an O(n) copy.
+                let blob_val = self.eval_ir_atom(blob, frame)?;
+                let Value::Bytes(bytes) = blob_val else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!(
+                            "`from_bytes` expects a `bytes` value, found {}",
+                            blob_val.type_name()
+                        ),
+                    ));
+                };
+                let schema = layout
+                    .as_ref()
+                    .and_then(|l| self.resolve_packed_schema(l))
+                    .ok_or_else(|| {
+                        self.runtime_error(
+                            DiagnosticCode::InvalidPackedType,
+                            *span,
+                            "`from_bytes` requires a packable `@packed` struct element type"
+                                .to_string(),
+                        )
+                    })?;
+                // The buffer must be a whole number of elements; a partial blob is corrupt input.
+                if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!(
+                            "`from_bytes` buffer of {} bytes is not a whole number of {}-byte elements",
+                            bytes.len(),
+                            schema.byte_size
+                        ),
+                    ));
+                }
+                Ok(Value::packed_list_from(schema, (*bytes).clone()))
+            }
             lang_ir::Rvalue::AttributesOf { ty, .. } => {
                 let type_name = match ty {
                     lang_ir::TypeRef::Named { name, .. } => name.as_str(),

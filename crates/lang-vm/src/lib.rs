@@ -2192,6 +2192,41 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, list);
                     frames[top].pc += 1;
                 }
+                Op::FromBytes {
+                    dst,
+                    src,
+                    schema,
+                    span,
+                } => {
+                    // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
+                    // bytes as a packed list of the interned schema — the inverse of `to_bytes`.
+                    let blob = frames[top].regs[*src as usize];
+                    let Some(bytes) = blob.bytes_data() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`from_bytes` expects a `bytes` value, found {}",
+                                blob.type_name()
+                            ),
+                        ));
+                    };
+                    let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
+                    if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`from_bytes` buffer of {} bytes is not a whole number of {}-byte elements",
+                                bytes.len(),
+                                schema.byte_size
+                            ),
+                        ));
+                    }
+                    let list = Value::packed_list(schema, bytes);
+                    set_reg(&mut frames[top].regs, *dst, list);
+                    frames[top].pc += 1;
+                }
                 Op::PackedListPush {
                     dst, list, value, ..
                 } => {
