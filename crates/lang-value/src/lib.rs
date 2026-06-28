@@ -102,6 +102,38 @@ impl Value {
         heap::alloc(Payload::Str(s.to_string()))
     }
 
+    /// A heap byte buffer (`bytes`, refcount 1), taking ownership of `data` (P-PACK 4.4).
+    pub fn bytes(data: Vec<u8>) -> Value {
+        heap::alloc(Payload::Bytes(data))
+    }
+
+    /// Whether this is a `bytes` value.
+    pub fn is_bytes(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Bytes(_)))
+    }
+
+    /// A copy of this `bytes` value's buffer, or `None` if it is not a `bytes`.
+    pub fn bytes_data(self) -> Option<Vec<u8>> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Bytes(b) => Some(b.clone()),
+            _ => None,
+        })
+    }
+
+    /// The length of this `bytes` value's buffer, or `None` if it is not a `bytes`.
+    pub fn bytes_len(self) -> Option<usize> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Bytes(b) => Some(b.len()),
+            _ => None,
+        })
+    }
+
     /// A heap closure (refcount 1) referencing function prototype `proto` in the module's
     /// proto table, capturing `upvalues` (the cells for enclosing-function locals it reads;
     /// empty for a top-level `fn`/closure). Ownership of one reference to each cell transfers
@@ -1089,6 +1121,9 @@ impl Value {
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => s.clone(),
+                // A byte buffer renders as a length summary (`<N bytes>`) — opaque and identical on
+                // both backends; its content round-trips through `from_bytes`, not display.
+                Payload::Bytes(b) => format!("<{} bytes>", b.len()),
                 Payload::Int(i) => i.to_string(),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
                 Payload::Closure { .. } | Payload::NativeFn(_) => "<fn>".to_string(),
@@ -1188,6 +1223,9 @@ impl Value {
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => json_string(s),
+                // A byte buffer has no JSON representation (it's the *binary* alternative to JSON);
+                // serialize its opaque summary as a string so `json.stringify` never panics.
+                Payload::Bytes(b) => json_string(&format!("<{} bytes>", b.len())),
                 Payload::Int(i) => i.to_string(),
                 Payload::List(items) => {
                     let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
@@ -1276,6 +1314,8 @@ impl Value {
                 "module"
             } else if self.is_file_handle() {
                 "file handle"
+            } else if self.is_bytes() {
+                "bytes"
             } else {
                 "string"
             }

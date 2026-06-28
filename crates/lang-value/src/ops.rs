@@ -240,6 +240,10 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
         return a == b;
     }
+    // Two byte buffers are equal iff their contents match (P-PACK 4.4).
+    if left.is_bytes() && right.is_bytes() {
+        return left.bytes_data() == right.bytes_data();
+    }
     if let (Some(a), Some(b)) = (left.as_bool(), right.as_bool()) {
         return a == b;
     }

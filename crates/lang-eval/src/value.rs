@@ -31,6 +31,9 @@ pub enum Value {
     /// precision. Arithmetic rounds at f32 (see `apply_binary_op`); display matches the VM.
     F32(f32),
     Str(String),
+    /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — the binary-serialization surface. `Rc`
+    /// keeps copies cheap; equality is content-wise. Mirrors the VM's `Payload::Bytes`.
+    Bytes(Rc<Vec<u8>>),
     /// An immutable list. The backing [`ListRepr`] is either the general boxed `Rc<Vec<Value>>`
     /// (any element type) or, for a `List<packed>`, a flat raw-primitive buffer (P-PACK Phase 2).
     /// `Rc` keeps copies cheap (map/filter produce new lists). The representation is invisible to
@@ -405,6 +408,9 @@ impl Value {
             Value::Float(f) => format_float(*f),
             Value::F32(f) => format_f32(*f),
             Value::Str(s) => s.clone(),
+            // A byte buffer renders as a length summary (`<N bytes>`) — opaque, identical on the VM;
+            // its content round-trips through `from_bytes`, not display.
+            Value::Bytes(b) => format!("<{} bytes>", b.len()),
             Value::List(repr) => {
                 let parts: Vec<String> = repr.to_rc_vec().iter().map(Value::repr).collect();
                 format!("[{}]", parts.join(", "))
@@ -457,6 +463,7 @@ impl Value {
             Value::Float(_) => "float",
             Value::F32(_) => "f32",
             Value::Str(_) => "string",
+            Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
             Value::Tuple(_) => "tuple",
             Value::Set(_) => "set",
@@ -481,6 +488,7 @@ impl fmt::Debug for Value {
             Value::Float(x) => write!(f, "Float({x})"),
             Value::F32(x) => write!(f, "F32({x})"),
             Value::Str(s) => write!(f, "Str({s:?})"),
+            Value::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
             Value::List(repr) => write!(f, "List({repr:?})"),
             Value::Tuple(items) => write!(f, "Tuple({items:?})"),
             Value::Set(items) => write!(f, "Set({items:?})"),
@@ -506,6 +514,7 @@ impl PartialEq for Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::F32(a), Value::F32(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::List(a), Value::List(b)) => a.elements_eq(b),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Set(a), Value::Set(b)) => a == b,

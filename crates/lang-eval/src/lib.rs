@@ -3680,6 +3680,7 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         Value::Float(_) => TypeRepr::Float,
         Value::F32(_) => TypeRepr::F32,
         Value::Str(_) => TypeRepr::Str,
+        Value::Bytes(_) => TypeRepr::Bytes,
         Value::Unit => TypeRepr::Unit,
         Value::List(_) => TypeRepr::List(dyn_()),
         // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
@@ -3715,6 +3716,7 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
         | TypeRepr::F32
         | TypeRepr::Bool
         | TypeRepr::Str
+        | TypeRepr::Bytes
         | TypeRepr::Unit
         | TypeRepr::Dyn => Vec::new(),
         TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {

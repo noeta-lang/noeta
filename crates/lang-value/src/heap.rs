@@ -167,6 +167,9 @@ pub fn collector_mode() -> CollectorMode {
 /// positional data. Freeing either releases its slots first (see [`free`]).
 pub(crate) enum Payload {
     Str(String),
+    /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — a GC leaf like `Str`; owns no child
+    /// references, freeing it just drops the `Vec<u8>`.
+    Bytes(Vec<u8>),
     Int(i64),
     /// A function value: a prototype index plus the captured upvalue cells (empty for a
     /// top-level `fn`/closure, which captures only globals). The closure **owns one reference
@@ -363,6 +366,7 @@ pub(crate) fn free(value: Value) {
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
+        | Payload::Bytes(_)
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
@@ -515,6 +519,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Cell(inner) => push(*inner),
         // A packed list holds only primitive words (no child references) — a GC leaf.
         Payload::Str(_)
+        | Payload::Bytes(_)
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)

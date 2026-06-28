@@ -4757,6 +4757,7 @@ fn vm_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         "float" => TypeRepr::Float,
         "f32" => TypeRepr::F32,
         "string" => TypeRepr::Str,
+        "bytes" => TypeRepr::Bytes,
         "unit" => TypeRepr::Unit,
         "list" => TypeRepr::List(dyn_()),
         "set" => TypeRepr::Set(dyn_()),
@@ -4787,6 +4788,7 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
         | TypeRepr::F32
         | TypeRepr::Bool
         | TypeRepr::Str
+        | TypeRepr::Bytes
         | TypeRepr::Unit
         | TypeRepr::Dyn => Vec::new(),
         TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => {

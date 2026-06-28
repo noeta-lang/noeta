@@ -51,6 +51,7 @@ impl ReflectionInfo {
             "f32" => TypeRepr::F32,
             "bool" => TypeRepr::Bool,
             "string" => TypeRepr::Str,
+            "bytes" => TypeRepr::Bytes,
             "void" | "unit" => TypeRepr::Unit,
             "dyn" | "Any" => TypeRepr::Dyn,
             "list" | "List" => TypeRepr::List(dyn_box()),
@@ -379,6 +380,8 @@ pub enum TypeRepr {
     Bool,
     /// The `string` scalar (variant name `String`, mirroring the lattice).
     Str,
+    /// The `bytes` scalar — a raw byte buffer (P-PACK 4.4; variant name `Bytes`).
+    Bytes,
     Unit,
     Dyn,
     List(Box<TypeRepr>),
@@ -413,6 +416,7 @@ impl TypeRepr {
             TypeRepr::F32 => "F32",
             TypeRepr::Bool => "Bool",
             TypeRepr::Str => "String",
+            TypeRepr::Bytes => "Bytes",
             TypeRepr::Unit => "Unit",
             TypeRepr::Dyn => "Dyn",
             TypeRepr::List(_) => "List",

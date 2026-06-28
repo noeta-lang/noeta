@@ -84,6 +84,9 @@ pub enum Type {
     F32,
     Bool,
     String,
+    /// A raw immutable byte buffer (`bytes`) — the binary-serialization surface (P-PACK 4.4). Produced
+    /// by `to_bytes`/`fs.read_bytes`, consumed by `from_bytes::<T>`/`fs.write_bytes`; no literal form.
+    Bytes,
     List(Box<Type>),
     Map(Box<Type>, Box<Type>),
     /// A set with element type `T` (the runtime `to_set` / set-builtin collection).
@@ -253,6 +256,7 @@ impl Type {
                 | "f32"
                 | "bool"
                 | "string"
+                | "bytes"
                 | "void"
                 | "unit"
                 | "dyn"
@@ -330,6 +334,7 @@ impl Type {
                     "f32" => Type::F32,
                     "bool" => Type::Bool,
                     "string" => Type::String,
+                    "bytes" => Type::Bytes,
                     "void" | "unit" => Type::Unit,
                     "dyn" | "Any" => Type::Dyn,
                     "List" => Type::List(Box::new(arg(0))),
@@ -365,6 +370,7 @@ impl std::fmt::Display for Type {
             Type::F32 => f.write_str("f32"),
             Type::Bool => f.write_str("bool"),
             Type::String => f.write_str("string"),
+            Type::Bytes => f.write_str("bytes"),
             Type::List(t) => write!(f, "List<{t}>"),
             Type::Set(t) => write!(f, "Set<{t}>"),
             Type::Map(k, v) => write!(f, "Map<{k}, {v}>"),

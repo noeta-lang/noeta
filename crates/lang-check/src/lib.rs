@@ -203,6 +203,7 @@ fn type_to_repr(
         Type::F32 => TypeRepr::F32,
         Type::Bool => TypeRepr::Bool,
         Type::String => TypeRepr::Str,
+        Type::Bytes => TypeRepr::Bytes,
         Type::Unit => TypeRepr::Unit,
         Type::List(e) => TypeRepr::List(Box::new(rec(e))),
         Type::Set(e) => TypeRepr::Set(Box::new(rec(e))),
@@ -635,7 +636,9 @@ impl Checker {
         let ty = || Type::Named("Type".to_string(), Vec::new());
         let list_of_ty = || Type::List(Box::new(ty()));
         let mut variants = Vec::new();
-        for name in ["Int", "Float", "F32", "Bool", "String", "Unit", "Dyn"] {
+        for name in [
+            "Int", "Float", "F32", "Bool", "String", "Bytes", "Unit", "Dyn",
+        ] {
             variants.push(VariantInfo {
                 name: name.to_string(),
                 fields: Vec::new(),
@@ -4321,7 +4324,13 @@ fn param_type(p: &Param) -> Type {
 fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
     match ty {
         // No value, or a primitive scalar: a drop runs no destructor.
-        Type::Unit | Type::Int | Type::Float | Type::F32 | Type::Bool | Type::String => false,
+        Type::Unit
+        | Type::Int
+        | Type::Float
+        | Type::F32
+        | Type::Bool
+        | Type::String
+        | Type::Bytes => false,
         // Missing information / the dynamic top / an abstract kind / a function value: assume relevant.
         Type::Unknown | Type::Dyn | Type::Kind(_) | Type::Fn { .. } => true,
         // Aggregates are relevant exactly when a part they own is.
