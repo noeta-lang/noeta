@@ -164,8 +164,9 @@ impl PackedKind {
     /// other primitives are 8, and a nested struct is its own `byte_size`.
     pub fn byte_width(&self) -> usize {
         match self {
+            PackedKind::Bool => 1,
             PackedKind::F32 => 4,
-            PackedKind::Int | PackedKind::Float | PackedKind::Bool => 8,
+            PackedKind::Int | PackedKind::Float => 8,
             PackedKind::Struct(inner) => inner.byte_size,
         }
     }

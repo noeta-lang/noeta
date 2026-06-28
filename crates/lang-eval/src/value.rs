@@ -257,8 +257,9 @@ impl SlotKind {
     /// a nested struct its own `byte_size`.
     fn byte_width(&self) -> usize {
         match self {
+            SlotKind::Bool => 1,
             SlotKind::F32 => 4,
-            SlotKind::Int | SlotKind::Float | SlotKind::Bool => 8,
+            SlotKind::Int | SlotKind::Float => 8,
             SlotKind::Struct(inner) => inner.byte_size,
         }
     }
@@ -282,7 +283,7 @@ fn decode_slot(kind: &SlotKind, bytes: &[u8], offset: usize) -> Value {
         SlotKind::Int => Value::Int(read_u64(bytes, offset) as i64),
         SlotKind::Float => Value::Float(f64::from_bits(read_u64(bytes, offset))),
         SlotKind::F32 => Value::F32(f32::from_bits(read_u32(bytes, offset))),
-        SlotKind::Bool => Value::Bool(read_u64(bytes, offset) != 0),
+        SlotKind::Bool => Value::Bool(bytes[offset] != 0),
         SlotKind::Struct(inner) => unpack_object(inner, bytes, offset).0,
     }
 }
@@ -303,7 +304,7 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u8>) -> Optio
             (SlotKind::Int, Value::Int(i)) => out.extend_from_slice(&(*i as u64).to_le_bytes()),
             (SlotKind::Float, Value::Float(x)) => out.extend_from_slice(&x.to_bits().to_le_bytes()),
             (SlotKind::F32, Value::F32(f)) => out.extend_from_slice(&f.to_bits().to_le_bytes()),
-            (SlotKind::Bool, Value::Bool(b)) => out.extend_from_slice(&u64::from(*b).to_le_bytes()),
+            (SlotKind::Bool, Value::Bool(b)) => out.push(u8::from(*b)),
             (SlotKind::Struct(inner), nested) => pack_object(nested, inner, out)?,
             _ => return None,
         }
@@ -331,8 +332,8 @@ fn unpack_object(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value, 
                 at += 4;
             }
             SlotKind::Bool => {
-                slots.push(Value::Bool(read_u64(bytes, at) != 0));
-                at += 8;
+                slots.push(Value::Bool(bytes[at] != 0));
+                at += 1;
             }
             SlotKind::Struct(inner) => {
                 let (nested, next) = unpack_object(inner, bytes, at);

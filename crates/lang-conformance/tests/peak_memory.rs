@@ -187,6 +187,52 @@ fn vec3_typed_src(n: usize, f32_fields: bool) -> String {
     )
 }
 
+/// Build + hold an `n`-element list of an 8-field `@packed` struct whose fields are all `bool` (1
+/// byte each) or all `int` (8 bytes). With the byte-addressed buffer, the bool struct is 8 bytes/
+/// element vs 64 — so the bool list saves 7 bytes/field.
+fn flags8_src(n: usize, bool_fields: bool) -> String {
+    let ty = if bool_fields { "bool" } else { "int" };
+    let lit = if bool_fields { "true" } else { "0" };
+    let decl: Vec<String> = (0..8).map(|i| format!("f{i}: {ty}")).collect();
+    let init: Vec<String> = (0..8).map(|i| format!("f{i}: {lit}")).collect();
+    let one = format!("F8 {{ {} }}", init.join(", "));
+    let elems = vec![one; n].join(", ");
+    format!(
+        "@packed struct F8 {{ {} }}\n\
+         data = [{elems}]\n\
+         echo data.count()\n",
+        decl.join("; ")
+    )
+}
+
+#[test]
+fn packed_bool_field_is_one_byte() {
+    // P-PACK bool narrowing: a `bool` packed field is 1 byte, an `int` 8 — so an 8-`bool` element is
+    // 8 bytes vs an 8-`int` element's 64. The held bool list's peak is far under the int list's; the
+    // delta is ~7 bytes/field × 8 fields × N, proving each bool is 1 byte. Measured on the VM.
+    const N: usize = 4_000;
+    let vm_bool = compile_program(&flags8_src(N, true));
+    let vm_int = compile_program(&flags8_src(N, false));
+    let (r_a, bool_peak) = peak_during(|| VmBackend::new().run_module(&vm_bool));
+    let (r_b, int_peak) = peak_during(|| VmBackend::new().run_module(&vm_int));
+    assert_eq!(r_a.stdout, "4000\n");
+    assert_eq!(r_b.stdout, "4000\n");
+    let kib = |b: usize| b as f64 / 1024.0;
+    let saved = int_peak.saturating_sub(bool_peak);
+    println!(
+        "\nP-PACK bool narrowing, List<F8> n={N}: bool {:.1} KiB vs int {:.1} KiB (saved {:.1} KiB)",
+        kib(bool_peak),
+        kib(int_peak),
+        kib(saved)
+    );
+    let expected = N * 8 * 7; // 8 fields, 7 bytes narrower each (8→1)
+    assert!(
+        saved as f64 >= expected as f64 * 0.9,
+        "bool narrowing should save ~{expected} B (8 fields × 7 B × {N}); saved only {saved} B \
+         (bool {bool_peak} vs int {int_peak})"
+    );
+}
+
 #[test]
 fn packed_f32_list_is_roughly_half_of_float() {
     // Byte-addressed narrowing (P-PACK 3.2b VM + the eval follow-up): an f32 `Vec3` is 12 bytes/

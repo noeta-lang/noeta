@@ -531,16 +531,17 @@ impl PackedLayout {
             .sum()
     }
 
-    /// The number of **bytes** one value of this layout occupies when stored in a byte-addressed
-    /// packed buffer (P-PACK 3.2b): an `f32` field is 4 bytes, the other primitives 8, a nested struct
-    /// its own `byte_size`. The VM's `List<packed>` uses this; the eval reference still uses the
-    /// word-addressed `word_count` (the layout is invisible to `RunResult`, so the two may differ).
+    /// The number of **bytes** one value of this layout occupies in the byte-addressed packed buffer
+    /// (P-PACK 3.2b): `bool` is 1 byte, `f32` is 4, `int`/`float` are 8, a nested struct its own
+    /// `byte_size`. Both backends use this layout (the eval reference was narrowed to bytes too); the
+    /// legacy `word_count` survives only for any remaining word-addressed callers.
     pub fn byte_size(&self) -> usize {
         self.fields
             .iter()
             .map(|f| match &f.kind {
+                PackedKind::Bool => 1,
                 PackedKind::F32 => 4,
-                PackedKind::Int | PackedKind::Float | PackedKind::Bool => 8,
+                PackedKind::Int | PackedKind::Float => 8,
                 PackedKind::Struct(inner) => inner.byte_size(),
             })
             .sum()

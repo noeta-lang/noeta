@@ -217,10 +217,7 @@ impl Value {
                             .as_f32()
                             .map(|f| out.extend_from_slice(&f.to_bits().to_le_bytes()))
                             .is_some(),
-                        PackedKind::Bool => slot
-                            .as_bool()
-                            .map(|b| out.extend_from_slice(&u64::from(b).to_le_bytes()))
-                            .is_some(),
+                        PackedKind::Bool => slot.as_bool().map(|b| out.push(u8::from(b))).is_some(),
                         PackedKind::Struct(inner) => slot.pack_element(inner, out),
                     };
                     if !ok {
@@ -1487,7 +1484,7 @@ fn decode_packed_field(kind: &PackedKind, bytes: &[u8], offset: usize) -> Value 
         PackedKind::Int => Value::int(read_u64(bytes, offset) as i64),
         PackedKind::Float => Value::float(f64::from_bits(read_u64(bytes, offset))),
         PackedKind::F32 => Value::f32(f32::from_bits(read_u32(bytes, offset))),
-        PackedKind::Bool => Value::bool(read_u64(bytes, offset) != 0),
+        PackedKind::Bool => Value::bool(bytes[offset] != 0),
         PackedKind::Struct(inner) => unpack_element(inner, bytes, offset).0,
     }
 }
@@ -1510,8 +1507,8 @@ fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value,
                 at += 4;
             }
             PackedKind::Bool => {
-                slots.push(Value::bool(read_u64(bytes, at) != 0));
-                at += 8;
+                slots.push(Value::bool(bytes[at] != 0));
+                at += 1;
             }
             PackedKind::Struct(inner) => {
                 let (nested, next) = unpack_element(inner, bytes, at);
