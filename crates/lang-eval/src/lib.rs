@@ -2238,6 +2238,92 @@ impl Interpreter {
             lang_stdlib::NativeModule::Time => self.call_time(func, args, span),
             lang_stdlib::NativeModule::Env => self.call_env(func, args, span),
             lang_stdlib::NativeModule::Args => self.call_args(func, args, span),
+            lang_stdlib::NativeModule::Vec => self.call_vec(func, args, span),
+        }
+    }
+
+    /// The `vec` 3D-math module (P-PACK Phase 4.1): scalar Vec3 ops over structural 3-`f32` objects.
+    /// The arithmetic lives in `lang_stdlib::vec3`, so both backends compute identically; this is glue
+    /// — read the components, dispatch, rebuild a same-shape result (mirrors the VM's `call_vec`).
+    fn call_vec(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
+        use lang_stdlib::vec3;
+        match func {
+            "add" | "sub" | "cross" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let a = self.read_vec3(func, &args[0], span)?;
+                let b = self.read_vec3(func, &args[1], span)?;
+                let out = match func {
+                    "add" => vec3::add(a, b),
+                    "sub" => vec3::sub(a, b),
+                    _ => vec3::cross(a, b),
+                };
+                Ok(build_vec3(&args[0], out))
+            }
+            "scale" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let a = self.read_vec3(func, &args[0], span)?;
+                let s = self.read_scalar_f32(func, &args[1], span)?;
+                Ok(build_vec3(&args[0], vec3::scale(a, s)))
+            }
+            "normalize" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let a = self.read_vec3(func, &args[0], span)?;
+                Ok(build_vec3(&args[0], vec3::normalize(a)))
+            }
+            "dot" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let a = self.read_vec3(func, &args[0], span)?;
+                let b = self.read_vec3(func, &args[1], span)?;
+                Ok(Value::F32(vec3::dot(a, b)))
+            }
+            "length" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let a = self.read_vec3(func, &args[0], span)?;
+                Ok(Value::F32(vec3::length(a)))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("vec", func);
+                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Read a Vec3 argument — a struct value with exactly three `f32` fields — into `[f32; 3]`
+    /// (slot order), or a type error.
+    fn read_vec3(&mut self, func: &str, value: &Value, span: Span) -> Eval<[f32; 3]> {
+        if let Value::Object(obj) = value {
+            let slots = obj.slots.borrow();
+            if slots.len() == 3
+                && let (Value::F32(x), Value::F32(y), Value::F32(z)) =
+                    (&slots[0], &slots[1], &slots[2])
+            {
+                return Ok([*x, *y, *z]);
+            }
+        }
+        Err(self.runtime_error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            format!(
+                "`vec.{func}` expects a Vec3 (a struct of three f32 fields), found {}",
+                value.type_name()
+            ),
+        ))
+    }
+
+    /// Read a numeric scalar (`f32`/`float`/`int`) as an `f32` — the `vec.scale` factor.
+    fn read_scalar_f32(&mut self, func: &str, value: &Value, span: Span) -> Eval<f32> {
+        match value {
+            Value::F32(f) => Ok(*f),
+            Value::Float(f) => Ok(*f as f32),
+            Value::Int(i) => Ok(*i as f32),
+            _ => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`vec.{func}` expects a number factor, found {}",
+                    value.type_name()
+                ),
+            )),
         }
     }
 
@@ -3298,6 +3384,18 @@ fn cow_concat(left: Value, right: Value) -> Value {
         }
         (left, right) => Value::Str(format!("{}{}", left.display(), right.display())),
     }
+}
+
+/// Build a Vec3 result with the same type (shape/`def`) as `like`, from three `f32` components
+/// (P-PACK Phase 4). The caller (`call_vec`) has verified `like` is a 3-`f32` object.
+fn build_vec3(like: &Value, c: [f32; 3]) -> Value {
+    let Value::Object(obj) = like else {
+        unreachable!("read_vec3 verified an object")
+    };
+    Value::Object(Rc::new(ObjectValue::new(
+        Rc::clone(&obj.def),
+        vec![Value::F32(c[0]), Value::F32(c[1]), Value::F32(c[2])],
+    )))
 }
 
 /// Construct a built-in `Result`/`Option`/`Ordering` value (`Ok`/`Err`/`some`/`none`, or

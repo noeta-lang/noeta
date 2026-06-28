@@ -16,7 +16,8 @@ use lang_types::Type;
 pub(super) const FILE_HANDLE: &str = "FileHandle";
 
 /// The Ring 2 module names a `use std.{…}` import can bind (mirrors `NativeModule::from_name`).
-pub(super) const STD_MODULES: &[&str] = &["json", "math", "random", "fs", "time", "env", "args"];
+pub(super) const STD_MODULES: &[&str] =
+    &["json", "math", "random", "fs", "time", "env", "args", "vec"];
 
 fn list(t: Type) -> Type {
     Type::List(Box::new(t))
@@ -190,6 +191,11 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         ("env", "get") => vec![Type::String],
         ("env", "keys") => vec![],
         ("args", "all") => vec![],
+        // The `vec` 3D-math module (P-PACK Phase 4). A Vec3 argument is `dyn` (the structural 3-`f32`
+        // check is at runtime); the `scale` factor is numeric (`dyn` accepts int/float/f32).
+        ("vec", "add" | "sub" | "cross" | "dot") => vec![Type::Dyn, Type::Dyn],
+        ("vec", "scale") => vec![Type::Dyn, Type::Dyn],
+        ("vec", "length" | "normalize") => vec![Type::Dyn],
         _ => return None,
     })
 }
@@ -267,6 +273,12 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
         ("env", "get") => Type::String,
         ("env", "keys") => list(Type::String),
         ("args", "all") => list(Type::String),
+        // `vec` 3D-math (P-PACK Phase 4): `dot`/`length` reduce to an `f32`; the rest return a Vec3
+        // of the same type as the first argument (`vec.add(v, w): typeof v`), or `dyn` if untyped.
+        ("vec", "dot" | "length") => Type::F32,
+        ("vec", "add" | "sub" | "scale" | "cross" | "normalize") => {
+            args.first().cloned().unwrap_or(Type::Dyn)
+        }
         _ => return None,
     })
 }

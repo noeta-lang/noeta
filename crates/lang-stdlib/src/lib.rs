@@ -25,6 +25,7 @@ pub mod host;
 pub mod json;
 pub mod math;
 pub mod random;
+pub mod vec3;
 
 pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush};
 pub use host::{Host, SandboxHost};
@@ -246,6 +247,10 @@ pub enum NativeModule {
     Time,
     Env,
     Args,
+    /// The `vec` 3D-math module (P-PACK Phase 4): Vec3 ops over `@packed` 3-`f32` structs, scalar
+    /// and bulk. Its functions take/return objects and lists (not scalar `Arg`/`Output`), so unlike
+    /// the other modules they are dispatched **per backend** (over `Value`s) rather than here.
+    Vec,
 }
 
 impl NativeModule {
@@ -259,6 +264,7 @@ impl NativeModule {
             "time" => Some(NativeModule::Time),
             "env" => Some(NativeModule::Env),
             "args" => Some(NativeModule::Args),
+            "vec" => Some(NativeModule::Vec),
             _ => None,
         }
     }
@@ -273,9 +279,16 @@ impl NativeModule {
             NativeModule::Time => "time",
             NativeModule::Env => "env",
             NativeModule::Args => "args",
+            NativeModule::Vec => "vec",
         }
     }
 }
+
+/// The `vec` module's scalar Vec3 function names (P-PACK Phase 4.1), in surface order. A "Vec3" is
+/// any `@packed`-or-plain struct value with exactly three `f32` fields; structural, so a user names
+/// the type. `dot`/`length` return an `f32`; the rest return a Vec3 of the same shape as the input.
+pub const VEC_SCALAR_FUNCTIONS: &[&str] =
+    &["add", "sub", "scale", "dot", "cross", "length", "normalize"];
 
 /// Build the canonical "no such function on a native module" error (→ `E0005`).
 pub fn no_function_error(module: &str, func: &str) -> StdError {

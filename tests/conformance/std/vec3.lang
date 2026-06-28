@@ -1,0 +1,34 @@
+// P-PACK Phase 4.1: the `vec` 3D-math module — scalar Vec3 ops over a structural "Vec3" (any struct
+// with three `f32` fields). `add`/`sub`/`scale`/`cross`/`normalize` return a same-shape Vec3 (so the
+// result is typed as the input struct and its fields are reachable); `dot`/`length` return an `f32`.
+// The arithmetic is shared (lang_stdlib::vec3), so both backends agree — the differential pins it.
+// expect: stdout "V3 {x: 5.0, y: 7.0, z: 9.0}"
+// expect: stdout "V3 {x: 3.0, y: 3.0, z: 3.0}"
+// expect: stdout "V3 {x: 2.0, y: 4.0, z: 6.0}"
+// expect: stdout "32.0"
+// expect: stdout "V3 {x: -3.0, y: 6.0, z: -3.0}"
+// expect: stdout "5.0"
+// expect: stdout "V3 {x: 0.6, y: 0.8, z: 0.0}"
+// expect: stdout "V3 {x: 0.0, y: 0.0, z: 0.0}"
+// expect: stdout "3.0"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
+b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }
+
+echo vec.add(a, b)
+echo vec.sub(b, a)
+echo vec.scale(a, 2.0f32)
+echo vec.dot(a, b)
+echo vec.cross(a, b)
+echo vec.length(V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 })
+echo vec.normalize(V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 })
+// A zero vector normalizes to the zero vector (no NaN), a deterministic convention.
+echo vec.normalize(V3 { x: 0.0f32, y: 0.0f32, z: 0.0f32 })
+
+// The result is typed as the input struct, so its fields are reachable.
+c = vec.add(a, b)
+echo c.x + c.y - c.z

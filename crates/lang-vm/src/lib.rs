@@ -808,6 +808,7 @@ impl<'m> Vm<'m> {
             Some(lang_stdlib::NativeModule::Time) => self.call_time(func, args, span),
             Some(lang_stdlib::NativeModule::Env) => self.call_env(func, args, span),
             Some(lang_stdlib::NativeModule::Args) => self.call_args(func, args, span),
+            Some(lang_stdlib::NativeModule::Vec) => self.call_vec(func, args, span),
             // Only valid module names are ever bound, so this is unreachable in practice.
             None => {
                 let error = lang_stdlib::no_function_error(module, func);
@@ -830,6 +831,97 @@ impl<'m> Vm<'m> {
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
+    }
+
+    /// The `vec` 3D-math module (P-PACK Phase 4.1): scalar Vec3 ops over structural 3-`f32` objects.
+    /// The arithmetic lives in `lang_stdlib::vec3`, so this is glue — read the components, dispatch,
+    /// rebuild a same-shape result (mirrors the tree-walker's `call_vec`).
+    fn call_vec(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        use lang_stdlib::vec3;
+        match func {
+            "add" | "sub" | "cross" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                let b = self.read_vec3(func, args[1], span)?;
+                let out = match func {
+                    "add" => vec3::add(a, b),
+                    "sub" => vec3::sub(a, b),
+                    _ => vec3::cross(a, b),
+                };
+                Ok(self.build_vec3(args[0], out))
+            }
+            "scale" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                let s = self.read_scalar_f32(func, args[1], span)?;
+                Ok(self.build_vec3(args[0], vec3::scale(a, s)))
+            }
+            "normalize" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                Ok(self.build_vec3(args[0], vec3::normalize(a)))
+            }
+            "dot" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                let b = self.read_vec3(func, args[1], span)?;
+                Ok(Value::f32(vec3::dot(a, b)))
+            }
+            "length" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                Ok(Value::f32(vec3::length(a)))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("vec", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Read a Vec3 argument — a struct value with exactly three `f32` fields — into `[f32; 3]`, or a
+    /// type error. The fields are taken in slot (declared) order.
+    fn read_vec3(&mut self, func: &str, value: Value, span: Span) -> Result<[f32; 3], Abort> {
+        let slots = value.slots().filter(|s| s.len() == 3);
+        let components: Option<[f32; 3]> =
+            slots.and_then(|s| Some([s[0].as_f32()?, s[1].as_f32()?, s[2].as_f32()?]));
+        components.ok_or_else(|| {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`vec.{func}` expects a Vec3 (a struct of three f32 fields), found {}",
+                    value.type_name()
+                ),
+            )
+        })
+    }
+
+    /// Read a numeric scalar (`f32`/`float`/`int`) as an `f32` — the `vec.scale` factor.
+    fn read_scalar_f32(&mut self, func: &str, value: Value, span: Span) -> Result<f32, Abort> {
+        value
+            .as_f32()
+            .or_else(|| value.as_float().map(|f| f as f32))
+            .or_else(|| value.as_int().map(|i| i as f32))
+            .ok_or_else(|| {
+                self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "`vec.{func}` expects a number factor, found {}",
+                        value.type_name()
+                    ),
+                )
+            })
+    }
+
+    /// Build a Vec3 result with the same shape as `like`, from three `f32` components.
+    fn build_vec3(&self, like: Value, c: [f32; 3]) -> Value {
+        let shape = like.shape().expect("read_vec3 verified an object shape");
+        Value::object(
+            shape,
+            vec![Value::f32(c[0]), Value::f32(c[1]), Value::f32(c[2])],
+        )
     }
 
     /// The `random` module: a seeded PRNG whose state lives in the host (`self.host`), threaded
