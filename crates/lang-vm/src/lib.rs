@@ -839,16 +839,44 @@ impl<'m> Vm<'m> {
     fn call_vec(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
         use lang_stdlib::vec3;
         match func {
-            "add" | "sub" | "cross" => {
+            "add" | "sub" | "cross" | "reflect" | "min" | "max" => {
                 self.stdlib_arity(func, args, 2, span)?;
                 let a = self.read_vec3(func, args[0], span)?;
                 let b = self.read_vec3(func, args[1], span)?;
                 let out = match func {
                     "add" => vec3::add(a, b),
                     "sub" => vec3::sub(a, b),
-                    _ => vec3::cross(a, b),
+                    "cross" => vec3::cross(a, b),
+                    "reflect" => vec3::reflect(a, b),
+                    "min" => vec3::min(a, b),
+                    _ => vec3::max(a, b),
                 };
                 Ok(self.build_vec3(args[0], out))
+            }
+            "abs" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                Ok(self.build_vec3(args[0], vec3::abs(a)))
+            }
+            "distance" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                let b = self.read_vec3(func, args[1], span)?;
+                Ok(Value::f32(vec3::distance(a, b)))
+            }
+            "lerp" => {
+                self.stdlib_arity(func, args, 3, span)?;
+                let a = self.read_vec3(func, args[0], span)?;
+                let b = self.read_vec3(func, args[1], span)?;
+                let t = self.read_scalar_f32(func, args[2], span)?;
+                Ok(self.build_vec3(args[0], vec3::lerp(a, b, t)))
+            }
+            "clamp" => {
+                self.stdlib_arity(func, args, 3, span)?;
+                let v = self.read_vec3(func, args[0], span)?;
+                let lo = self.read_vec3(func, args[1], span)?;
+                let hi = self.read_vec3(func, args[2], span)?;
+                Ok(self.build_vec3(args[0], vec3::clamp(v, lo, hi)))
             }
             "scale" => {
                 self.stdlib_arity(func, args, 2, span)?;

@@ -51,6 +51,47 @@ pub fn normalize(a: [f32; 3]) -> [f32; 3] {
     }
 }
 
+/// Euclidean distance between two points, `‖a − b‖`.
+pub fn distance(a: [f32; 3], b: [f32; 3]) -> f32 {
+    length(sub(a, b))
+}
+
+/// Linear interpolation `a + (b − a)·t` (component-wise; `t` is not clamped).
+pub fn lerp(a: [f32; 3], b: [f32; 3], t: f32) -> [f32; 3] {
+    add(a, scale(sub(b, a), t))
+}
+
+/// Reflect `v` about the plane with normal `n`: `v − 2·(v·n)·n` (the standard mirror reflection;
+/// `n` is assumed unit-length, matching every graphics library).
+pub fn reflect(v: [f32; 3], n: [f32; 3]) -> [f32; 3] {
+    sub(v, scale(n, 2.0 * dot(v, n)))
+}
+
+/// Component-wise clamp into `[lo, hi]`, computed as `max(lo).min(hi)` per component so it is total
+/// even if `lo > hi` (no panic, deterministic).
+pub fn clamp(v: [f32; 3], lo: [f32; 3], hi: [f32; 3]) -> [f32; 3] {
+    [
+        v[0].max(lo[0]).min(hi[0]),
+        v[1].max(lo[1]).min(hi[1]),
+        v[2].max(lo[2]).min(hi[2]),
+    ]
+}
+
+/// Component-wise minimum.
+pub fn min(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0].min(b[0]), a[1].min(b[1]), a[2].min(b[2])]
+}
+
+/// Component-wise maximum.
+pub fn max(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
+    [a[0].max(b[0]), a[1].max(b[1]), a[2].max(b[2])]
+}
+
+/// Component-wise absolute value.
+pub fn abs(a: [f32; 3]) -> [f32; 3] {
+    [a[0].abs(), a[1].abs(), a[2].abs()]
+}
+
 // --- Bulk kernels over a packed `List<Vec3<f32>>` byte buffer (P-PACK Phase 4.2) ---
 //
 // A packed `List<Vec3<f32>>` is a contiguous little-endian `f32` byte buffer (12 bytes/element).
@@ -159,5 +200,18 @@ mod tests {
         assert_eq!(length([3.0, 4.0, 0.0]), 5.0);
         assert_eq!(normalize([3.0, 4.0, 0.0]), [0.6, 0.8, 0.0]);
         assert_eq!(normalize([0.0, 0.0, 0.0]), [0.0, 0.0, 0.0]);
+        assert_eq!(distance([0.0, 0.0, 0.0], [3.0, 4.0, 0.0]), 5.0);
+        assert_eq!(
+            lerp([0.0, 0.0, 0.0], [10.0, 20.0, 30.0], 0.5),
+            [5.0, 10.0, 15.0]
+        );
+        assert_eq!(reflect([1.0, -1.0, 0.0], [0.0, 1.0, 0.0]), [1.0, 1.0, 0.0]);
+        assert_eq!(
+            clamp([5.0, -5.0, 2.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]),
+            [1.0, 0.0, 1.0]
+        );
+        assert_eq!(min([1.0, 5.0, 3.0], [4.0, 2.0, 3.0]), [1.0, 2.0, 3.0]);
+        assert_eq!(max([1.0, 5.0, 3.0], [4.0, 2.0, 3.0]), [4.0, 5.0, 3.0]);
+        assert_eq!(abs([-1.0, 2.0, -3.0]), [1.0, 2.0, 3.0]);
     }
 }

@@ -193,9 +193,12 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         ("args", "all") => vec![],
         // The `vec` 3D-math module (P-PACK Phase 4). A Vec3 argument is `dyn` (the structural 3-`f32`
         // check is at runtime); the `scale` factor is numeric (`dyn` accepts int/float/f32).
-        ("vec", "add" | "sub" | "cross" | "dot") => vec![Type::Dyn, Type::Dyn],
+        ("vec", "add" | "sub" | "cross" | "dot" | "reflect" | "min" | "max" | "distance") => {
+            vec![Type::Dyn, Type::Dyn]
+        }
         ("vec", "scale") => vec![Type::Dyn, Type::Dyn],
-        ("vec", "length" | "normalize") => vec![Type::Dyn],
+        ("vec", "lerp" | "clamp") => vec![Type::Dyn, Type::Dyn, Type::Dyn],
+        ("vec", "length" | "normalize" | "abs") => vec![Type::Dyn],
         // Bulk kernels over `List<Vec3>` (P-PACK 4.2).
         ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
         ("vec", "length_all") => vec![Type::Dyn],
@@ -278,10 +281,12 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
         ("args", "all") => list(Type::String),
         // `vec` 3D-math (P-PACK Phase 4): `dot`/`length` reduce to an `f32`; the rest return a Vec3
         // of the same type as the first argument (`vec.add(v, w): typeof v`), or `dyn` if untyped.
-        ("vec", "dot" | "length") => Type::F32,
-        ("vec", "add" | "sub" | "scale" | "cross" | "normalize") => {
-            args.first().cloned().unwrap_or(Type::Dyn)
-        }
+        ("vec", "dot" | "length" | "distance") => Type::F32,
+        (
+            "vec",
+            "add" | "sub" | "scale" | "cross" | "normalize" | "reflect" | "min" | "max" | "abs"
+            | "lerp" | "clamp",
+        ) => args.first().cloned().unwrap_or(Type::Dyn),
         // Bulk kernels (P-PACK 4.2): `add_all`/`sub_all`/`scale_all` return a `List<Vec3>` of the
         // same type as the first list; `dot_all`/`length_all` reduce to a `List<f32>`.
         ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),

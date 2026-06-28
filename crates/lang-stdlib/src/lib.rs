@@ -287,8 +287,22 @@ impl NativeModule {
 /// The `vec` module's scalar Vec3 function names (P-PACK Phase 4.1), in surface order. A "Vec3" is
 /// any `@packed`-or-plain struct value with exactly three `f32` fields; structural, so a user names
 /// the type. `dot`/`length` return an `f32`; the rest return a Vec3 of the same shape as the input.
-pub const VEC_SCALAR_FUNCTIONS: &[&str] =
-    &["add", "sub", "scale", "dot", "cross", "length", "normalize"];
+pub const VEC_SCALAR_FUNCTIONS: &[&str] = &[
+    "add",
+    "sub",
+    "scale",
+    "dot",
+    "cross",
+    "length",
+    "normalize",
+    "distance",
+    "lerp",
+    "reflect",
+    "clamp",
+    "min",
+    "max",
+    "abs",
+];
 
 /// Build the canonical "no such function on a native module" error (→ `E0005`).
 pub fn no_function_error(module: &str, func: &str) -> StdError {

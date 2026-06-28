@@ -1,0 +1,25 @@
+// P-PACK Phase 4 follow-on: the additional scalar `vec` ops (distance/lerp/reflect/clamp/min/max/abs).
+// Like the rest of `vec`, the math is shared (lang_stdlib::vec3), so both backends agree.
+// expect: stdout "5.0"
+// expect: stdout "V3 {x: 5.0, y: 10.0, z: 15.0}"
+// expect: stdout "V3 {x: 1.0, y: 1.0, z: 0.0}"
+// expect: stdout "V3 {x: 1.0, y: 0.0, z: 1.0}"
+// expect: stdout "V3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: stdout "V3 {x: 4.0, y: 5.0, z: 3.0}"
+// expect: stdout "V3 {x: 1.0, y: 2.0, z: 3.0}"
+// expect: exit 0
+use std.{vec}
+
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+a = V3 { x: 0.0f32, y: 0.0f32, z: 0.0f32 }
+b = V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }
+
+echo vec.distance(a, b)
+echo vec.lerp(a, V3 { x: 10.0f32, y: 20.0f32, z: 30.0f32 }, 0.5f32)
+// Reflecting (1,-1,0) about the up normal (0,1,0) flips the y component → (1,1,0).
+echo vec.reflect(V3 { x: 1.0f32, y: -1.0f32, z: 0.0f32 }, V3 { x: 0.0f32, y: 1.0f32, z: 0.0f32 })
+echo vec.clamp(V3 { x: 5.0f32, y: -5.0f32, z: 2.0f32 }, a, V3 { x: 1.0f32, y: 1.0f32, z: 1.0f32 })
+echo vec.min(V3 { x: 1.0f32, y: 5.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 2.0f32, z: 3.0f32 })
+echo vec.max(V3 { x: 1.0f32, y: 5.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 2.0f32, z: 3.0f32 })
+echo vec.abs(V3 { x: -1.0f32, y: 2.0f32, z: -3.0f32 })
