@@ -52,6 +52,7 @@ pub fn apply_unary(op: UnaryOp, value: &Value) -> Result<Value, OpError> {
     match (op, value) {
         (UnaryOp::Neg, Value::Int(i)) => Ok(Value::Int(i.wrapping_neg())),
         (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
+        (UnaryOp::Neg, Value::F32(f)) => Ok(Value::F32(-f)),
         (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
         // `...xs` (list spread) is the runtime identity — the value flows straight into the
         // surrounding `~` concatenation; the list requirement is enforced statically.
@@ -353,6 +354,10 @@ mod tests {
     fn unary_operators() {
         assert_eq!(apply_unary(UnaryOp::Neg, &int(5)), Ok(int(-5)));
         assert_eq!(apply_unary(UnaryOp::Neg, &float(2.5)), Ok(float(-2.5)));
+        assert_eq!(
+            apply_unary(UnaryOp::Neg, &Value::F32(2.5)),
+            Ok(Value::F32(-2.5))
+        );
         assert_eq!(
             apply_unary(UnaryOp::Not, &Value::Bool(true)),
             Ok(Value::Bool(false))

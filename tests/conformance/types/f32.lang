@@ -18,6 +18,7 @@
 // expect: stdout "true"
 // expect: stdout "5.0"
 // expect: stdout "6.0"
+// expect: stdout "-2.0"
 // expect: exit 0
 x = 1.5f32
 y = 2.0f32
@@ -40,3 +41,5 @@ for i in 0..4 {
   s = s + 1.5f32
 }
 echo s
+// Unary negation of an f32 stays an f32.
+echo -y

@@ -80,6 +80,7 @@ pub fn apply_unary(op: UnaryOp, value: Value) -> Result<Value, OpError> {
             Ok(Value::int(value.as_int().unwrap().wrapping_neg()))
         }
         UnaryOp::Neg if value.as_float().is_some() => Ok(Value::float(-value.as_float().unwrap())),
+        UnaryOp::Neg if value.is_f32() => Ok(Value::f32(-value.as_f32().unwrap())),
         UnaryOp::Not if value.as_bool().is_some() => Ok(Value::bool(!value.as_bool().unwrap())),
         // `...xs` (list spread) is the runtime identity — the value flows straight into the
         // surrounding `~` concatenation; the list requirement is enforced statically.
