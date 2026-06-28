@@ -1,0 +1,32 @@
+// P-PACK Phase 4 follow-on: the `quat` quaternion module — transform ops over a structural "Quat"
+// (any struct with four `f32` fields, ordered x,y,z,w). `mul`/`conjugate`/`normalize`/`slerp` →
+// same-type Quat; `dot`/`length` → f32; `rotate_vec3` → the Vec3 it rotates. The math is shared
+// (lang_stdlib::quat), so both backends agree bit-for-bit (incl. the f32 rounding below — e.g. a
+// 90° rotation lands y at 0.99999994, not 1.0; the differential pins this exactly).
+// expect: stdout "Q {x: 0.1, y: 0.2, z: 0.3, w: 0.9}"
+// expect: stdout "Q {x: -0.1, y: -0.2, z: -0.3, w: 0.9}"
+// expect: stdout "1.0"
+// expect: stdout "0.9499999"
+// expect: stdout "V3 {x: 0.0, y: 0.99999994, z: 0.0}"
+// expect: stdout "Q {x: 0.0, y: 0.0, z: 0.0, w: 1.0}"
+// expect: exit 0
+use std.{quat}
+
+@packed struct Q { x: f32; y: f32; z: f32; w: f32 }
+@packed struct V3 { x: f32; y: f32; z: f32 }
+
+id = Q { x: 0.0f32, y: 0.0f32, z: 0.0f32, w: 1.0f32 }
+q = Q { x: 0.1f32, y: 0.2f32, z: 0.3f32, w: 0.9f32 }
+
+// Identity is a multiplicative unit; conjugate flips the vector part.
+echo quat.mul(id, q)
+echo quat.conjugate(q)
+echo quat.length(id)
+echo quat.dot(q, q)
+
+// A unit quaternion for a 90° rotation about +z (half-angle 45°) maps +x → +y.
+rz = Q { x: 0.0f32, y: 0.0f32, z: 0.70710677f32, w: 0.70710677f32 }
+echo quat.rotate_vec3(rz, V3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 })
+
+// slerp at t=0 returns the start.
+echo quat.slerp(id, q, 0.0f32)

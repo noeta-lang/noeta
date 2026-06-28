@@ -809,6 +809,7 @@ impl<'m> Vm<'m> {
             Some(lang_stdlib::NativeModule::Env) => self.call_env(func, args, span),
             Some(lang_stdlib::NativeModule::Args) => self.call_args(func, args, span),
             Some(lang_stdlib::NativeModule::Vec) => self.call_vec(func, args, span),
+            Some(lang_stdlib::NativeModule::Quat) => self.call_quat(func, args, span),
             // Only valid module names are ever bound, so this is unreachable in practice.
             None => {
                 let error = lang_stdlib::no_function_error(module, func);
@@ -1024,6 +1025,95 @@ impl<'m> Vm<'m> {
         Value::object(
             shape,
             vec![Value::f32(c[0]), Value::f32(c[1]), Value::f32(c[2])],
+        )
+    }
+
+    /// The `quat` quaternion module (Phase 4 follow-on): transform ops over structural 4-`f32`
+    /// quaternions. Math lives in `lang_stdlib::quat`; glue mirrors `call_vec`.
+    fn call_quat(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
+        use lang_stdlib::quat;
+        match func {
+            "mul" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let a = self.read_quat(func, args[0], span)?;
+                let b = self.read_quat(func, args[1], span)?;
+                Ok(self.build_quat(args[0], quat::mul(a, b)))
+            }
+            "conjugate" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let q = self.read_quat(func, args[0], span)?;
+                Ok(self.build_quat(args[0], quat::conjugate(q)))
+            }
+            "normalize" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let q = self.read_quat(func, args[0], span)?;
+                Ok(self.build_quat(args[0], quat::normalize(q)))
+            }
+            "dot" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let a = self.read_quat(func, args[0], span)?;
+                let b = self.read_quat(func, args[1], span)?;
+                Ok(Value::f32(quat::dot(a, b)))
+            }
+            "length" => {
+                self.stdlib_arity(func, args, 1, span)?;
+                let q = self.read_quat(func, args[0], span)?;
+                Ok(Value::f32(quat::length(q)))
+            }
+            "slerp" => {
+                self.stdlib_arity(func, args, 3, span)?;
+                let a = self.read_quat(func, args[0], span)?;
+                let b = self.read_quat(func, args[1], span)?;
+                let t = self.read_scalar_f32(func, args[2], span)?;
+                Ok(self.build_quat(args[0], quat::slerp(a, b, t)))
+            }
+            "rotate_vec3" => {
+                self.stdlib_arity(func, args, 2, span)?;
+                let q = self.read_quat(func, args[0], span)?;
+                let v = self.read_vec3(func, args[1], span)?;
+                Ok(self.build_vec3(args[1], quat::rotate_vec3(q, v)))
+            }
+            _ => {
+                let error = lang_stdlib::no_function_error("quat", func);
+                Err(self.error(stdlib_error_code(error.kind), span, error.message))
+            }
+        }
+    }
+
+    /// Read a Quat argument — a struct with exactly four `f32` fields — into `[f32; 4]` (slot order).
+    fn read_quat(&mut self, func: &str, value: Value, span: Span) -> Result<[f32; 4], Abort> {
+        let slots = value.slots().filter(|s| s.len() == 4);
+        let components: Option<[f32; 4]> = slots.and_then(|s| {
+            Some([
+                s[0].as_f32()?,
+                s[1].as_f32()?,
+                s[2].as_f32()?,
+                s[3].as_f32()?,
+            ])
+        });
+        components.ok_or_else(|| {
+            self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!(
+                    "`quat.{func}` expects a Quat (a struct of four f32 fields), found {}",
+                    value.type_name()
+                ),
+            )
+        })
+    }
+
+    /// Build a Quat result with the same shape as `like`, from four `f32` components.
+    fn build_quat(&self, like: Value, c: [f32; 4]) -> Value {
+        let shape = like.shape().expect("read_quat verified an object shape");
+        Value::object(
+            shape,
+            vec![
+                Value::f32(c[0]),
+                Value::f32(c[1]),
+                Value::f32(c[2]),
+                Value::f32(c[3]),
+            ],
         )
     }
 

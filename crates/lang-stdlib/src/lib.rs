@@ -24,6 +24,7 @@ pub mod handle;
 pub mod host;
 pub mod json;
 pub mod math;
+pub mod quat;
 pub mod random;
 pub mod vec3;
 
@@ -251,6 +252,9 @@ pub enum NativeModule {
     /// and bulk. Its functions take/return objects and lists (not scalar `Arg`/`Output`), so unlike
     /// the other modules they are dispatched **per backend** (over `Value`s) rather than here.
     Vec,
+    /// The `quat` quaternion module (Phase 4 follow-on): transform ops over structural 4-`f32`
+    /// quaternions. Like `vec`, it takes/returns objects and is dispatched per backend.
+    Quat,
 }
 
 impl NativeModule {
@@ -265,6 +269,7 @@ impl NativeModule {
             "env" => Some(NativeModule::Env),
             "args" => Some(NativeModule::Args),
             "vec" => Some(NativeModule::Vec),
+            "quat" => Some(NativeModule::Quat),
             _ => None,
         }
     }
@@ -280,6 +285,7 @@ impl NativeModule {
             NativeModule::Env => "env",
             NativeModule::Args => "args",
             NativeModule::Vec => "vec",
+            NativeModule::Quat => "quat",
         }
     }
 }

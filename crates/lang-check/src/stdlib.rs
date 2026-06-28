@@ -16,8 +16,9 @@ use lang_types::Type;
 pub(super) const FILE_HANDLE: &str = "FileHandle";
 
 /// The Ring 2 module names a `use std.{…}` import can bind (mirrors `NativeModule::from_name`).
-pub(super) const STD_MODULES: &[&str] =
-    &["json", "math", "random", "fs", "time", "env", "args", "vec"];
+pub(super) const STD_MODULES: &[&str] = &[
+    "json", "math", "random", "fs", "time", "env", "args", "vec", "quat",
+];
 
 fn list(t: Type) -> Type {
     Type::List(Box::new(t))
@@ -202,6 +203,10 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         // Bulk kernels over `List<Vec3>` (P-PACK 4.2).
         ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
         ("vec", "length_all") => vec![Type::Dyn],
+        // The `quat` quaternion module (Phase 4 follow-on).
+        ("quat", "mul" | "dot" | "rotate_vec3") => vec![Type::Dyn, Type::Dyn],
+        ("quat", "conjugate" | "normalize" | "length") => vec![Type::Dyn],
+        ("quat", "slerp") => vec![Type::Dyn, Type::Dyn, Type::Dyn],
         _ => return None,
     })
 }
@@ -291,6 +296,13 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
         // same type as the first list; `dot_all`/`length_all` reduce to a `List<f32>`.
         ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
         ("vec", "dot_all" | "length_all") => list(Type::F32),
+        // `quat`: `dot`/`length` → f32; `rotate_vec3` returns the *vector* (its 2nd arg); the rest
+        // return a quaternion of the same type as the first argument.
+        ("quat", "dot" | "length") => Type::F32,
+        ("quat", "rotate_vec3") => args.get(1).cloned().unwrap_or(Type::Dyn),
+        ("quat", "mul" | "conjugate" | "normalize" | "slerp") => {
+            args.first().cloned().unwrap_or(Type::Dyn)
+        }
         _ => return None,
     })
 }
