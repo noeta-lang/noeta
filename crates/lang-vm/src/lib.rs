@@ -4359,6 +4359,7 @@ fn vm_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         "bool" => TypeRepr::Bool,
         "int" => TypeRepr::Int,
         "float" => TypeRepr::Float,
+        "f32" => TypeRepr::F32,
         "string" => TypeRepr::Str,
         "unit" => TypeRepr::Unit,
         "list" => TypeRepr::List(dyn_()),
@@ -4387,6 +4388,7 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
     let data: Vec<Value> = match repr {
         TypeRepr::Int
         | TypeRepr::Float
+        | TypeRepr::F32
         | TypeRepr::Bool
         | TypeRepr::Str
         | TypeRepr::Unit

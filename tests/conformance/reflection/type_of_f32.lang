@@ -1,0 +1,30 @@
+// P-PACK Phase 3 (reflection fidelity): `type_of` distinguishes `f32` from `float` — the prelude
+// `Type` ADT has a dedicated `Type.F32` variant, matchable like any other. Both backends build the
+// reflected `Type` value identically (the differential pins eval against the VM).
+// expect: stdout "Type.F32"
+// expect: stdout "Type.Float"
+// expect: stdout "Type.F32"
+// expect: stdout "f32"
+// expect: stdout "float"
+// expect: stdout "[Type.F32, Type.Int]"
+// expect: exit 0
+echo type_of(1.0f32)
+echo type_of(1.0)
+
+v = 2.5f32
+echo type_of(v)
+
+echo match type_of(1.0f32) {
+  Type.F32 => "f32",
+  Type.Float => "float",
+  _ => "other",
+}
+echo match type_of(3.0) {
+  Type.F32 => "f32",
+  Type.Float => "float",
+  _ => "other",
+}
+
+// f32 also flows through nested reflected types (a tuple's element types via `type_of` of a struct
+// field is out of scope here, but a list element type is a quick check via the `Type` ADT directly).
+echo [type_of(1.0f32), type_of(0)]

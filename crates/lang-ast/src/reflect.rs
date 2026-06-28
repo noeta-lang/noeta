@@ -47,9 +47,8 @@ impl ReflectionInfo {
         let dyn_box = || Box::new(TypeRepr::Dyn);
         match name {
             "int" => TypeRepr::Int,
-            // P-PACK Phase 3 interim: `f32` reflects as `Float` until the prelude `Type` ADT gains an
-            // `F32` case (a follow-up). Both backends share this builder, so they still agree.
-            "float" | "f32" => TypeRepr::Float,
+            "float" => TypeRepr::Float,
+            "f32" => TypeRepr::F32,
             "bool" => TypeRepr::Bool,
             "string" => TypeRepr::Str,
             "void" | "unit" => TypeRepr::Unit,
@@ -375,6 +374,8 @@ pub fn materialize_args(
 pub enum TypeRepr {
     Int,
     Float,
+    /// The 32-bit float scalar `f32` (P-PACK Phase 3; variant name `F32`).
+    F32,
     Bool,
     /// The `string` scalar (variant name `String`, mirroring the lattice).
     Str,
@@ -409,6 +410,7 @@ impl TypeRepr {
         match self {
             TypeRepr::Int => "Int",
             TypeRepr::Float => "Float",
+            TypeRepr::F32 => "F32",
             TypeRepr::Bool => "Bool",
             TypeRepr::Str => "String",
             TypeRepr::Unit => "Unit",

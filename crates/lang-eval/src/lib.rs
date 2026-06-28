@@ -3328,8 +3328,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
     match value {
         Value::Bool(_) => TypeRepr::Bool,
         Value::Int(_) => TypeRepr::Int,
-        // P-PACK Phase 3 interim: `f32` reflects as `Float` (the prelude `Type` ADT has no `F32` yet).
-        Value::Float(_) | Value::F32(_) => TypeRepr::Float,
+        Value::Float(_) => TypeRepr::Float,
+        Value::F32(_) => TypeRepr::F32,
         Value::Str(_) => TypeRepr::Str,
         Value::Unit => TypeRepr::Unit,
         Value::List(_) => TypeRepr::List(dyn_()),
@@ -3363,6 +3363,7 @@ fn build_type_value(repr: &lang_ast::reflect::TypeRepr) -> Value {
     let data: Vec<Value> = match repr {
         TypeRepr::Int
         | TypeRepr::Float
+        | TypeRepr::F32
         | TypeRepr::Bool
         | TypeRepr::Str
         | TypeRepr::Unit

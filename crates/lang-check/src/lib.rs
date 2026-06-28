@@ -199,8 +199,8 @@ fn type_to_repr(
     let rec = |t: &Type| type_to_repr(t, kinds);
     match ty {
         Type::Int => TypeRepr::Int,
-        // P-PACK Phase 3 interim: `f32` reflects as `Float` until the prelude `Type` ADT gains `F32`.
-        Type::Float | Type::F32 => TypeRepr::Float,
+        Type::Float => TypeRepr::Float,
+        Type::F32 => TypeRepr::F32,
         Type::Bool => TypeRepr::Bool,
         Type::String => TypeRepr::Str,
         Type::Unit => TypeRepr::Unit,
@@ -635,7 +635,7 @@ impl Checker {
         let ty = || Type::Named("Type".to_string(), Vec::new());
         let list_of_ty = || Type::List(Box::new(ty()));
         let mut variants = Vec::new();
-        for name in ["Int", "Float", "Bool", "String", "Unit", "Dyn"] {
+        for name in ["Int", "Float", "F32", "Bool", "String", "Unit", "Dyn"] {
             variants.push(VariantInfo {
                 name: name.to_string(),
                 fields: Vec::new(),
