@@ -28,6 +28,16 @@ use lang_vm::VmBackend;
 #[global_allocator]
 static GLOBAL: TrackingAlloc = TrackingAlloc;
 
+/// The allocator's peak counter is process-wide, so two peak tests running on parallel test threads
+/// would corrupt each other's high-water measurement. Each test holds this lock for its whole body
+/// (compilation allocates too), serializing the measurements. Poison is ignored — a panic in one
+/// test must not wedge the rest.
+static PEAK_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn serial() -> std::sync::MutexGuard<'static, ()> {
+    PEAK_SERIAL.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 /// Build + hold an `n`-element list of `Vec3 { x, y, z }`, then sum a field over it. The full list is
 /// resident at the moment the loop starts, so the run's peak is dominated by the list's storage:
 /// `@packed` ⇒ one `Vec<u64>` of `3n` words; plain ⇒ `n` boxed objects + the outer pointer vec.
@@ -121,6 +131,7 @@ fn producer_vec3_src(n: usize, packed: bool, op: &str) -> String {
 
 #[test]
 fn packed_producers_keep_the_list_flat() {
+    let _serial = serial();
     // VM-only this slice (eval's list dispatch materializes its receiver, so its producers still
     // demote — a deliberate, RunResult-invisible asymmetry). Each producer holds its result *and* the
     // input; if it stayed flat the VM peak is two flat buffers, well under half the boxed peak. A
@@ -207,6 +218,7 @@ fn flags8_src(n: usize, bool_fields: bool) -> String {
 
 #[test]
 fn packed_bool_field_is_one_byte() {
+    let _serial = serial();
     // P-PACK bool narrowing: a `bool` packed field is 1 byte, an `int` 8 — so an 8-`bool` element is
     // 8 bytes vs an 8-`int` element's 64. The held bool list's peak is far under the int list's; the
     // delta is ~7 bytes/field × 8 fields × N, proving each bool is 1 byte. Measured on the VM.
@@ -235,6 +247,7 @@ fn packed_bool_field_is_one_byte() {
 
 #[test]
 fn packed_f32_list_is_roughly_half_of_float() {
+    let _serial = serial();
     // Byte-addressed narrowing (P-PACK 3.2b VM + the eval follow-up): an f32 `Vec3` is 12 bytes/
     // element, a float `Vec3` is 24 — so the held f32 packed list saves the narrowed bytes vs the
     // float one. Both backends are byte-addressed now, so both are measured.
@@ -286,6 +299,7 @@ fn packed_f32_list_is_roughly_half_of_float() {
 
 #[test]
 fn packed_list_peak_residency_is_a_fraction_of_boxed() {
+    let _serial = serial();
     // The memory ratio is independent of `n` (both representations scale linearly), so a moderate
     // size shows the win while keeping this test (which runs under a tracking global allocator, so
     // every allocation is instrumented) reasonably quick. A list literal also builds each element
