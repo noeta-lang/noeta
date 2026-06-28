@@ -10,12 +10,13 @@
 //! - `floor`/`ceil`/`round` yield an *int* — you floor to get an index, not a float.
 //! - `abs`/`min`/`max` *preserve* their argument kind (int in → int out) so integer code
 //!   stays integer.
+//! - `sin`/`cos`/`tan` always yield a float (argument in radians).
 
 use crate::{Arg, Dispatch, ErrorKind, Output, StdError};
 
 /// The `math` function names, in dispatch order — for tooling that wants the surface.
 pub const FUNCTIONS: &[&str] = &[
-    "pi", "e", "sqrt", "pow", "abs", "floor", "ceil", "round", "min", "max",
+    "pi", "e", "sqrt", "pow", "abs", "floor", "ceil", "round", "min", "max", "sin", "cos", "tan",
 ];
 
 /// Dispatch a `math` module function. Returns [`Dispatch::Unknown`] when `func` is not part of
@@ -77,6 +78,19 @@ fn call_inner(func: &str, args: &[Arg]) -> Result<Output, StdError> {
         "max" => {
             want_arity(func, args, 2)?;
             Ok(pick(func, args, Ordering::Max)?)
+        }
+        // Trigonometry — real-valued, argument in radians (ints widen). Always a float.
+        "sin" => {
+            want_arity(func, args, 1)?;
+            Ok(Output::Float(want_float(func, args, 0)?.sin()))
+        }
+        "cos" => {
+            want_arity(func, args, 1)?;
+            Ok(Output::Float(want_float(func, args, 0)?.cos()))
+        }
+        "tan" => {
+            want_arity(func, args, 1)?;
+            Ok(Output::Float(want_float(func, args, 0)?.tan()))
         }
         // FUNCTIONS gates entry, so every listed function is handled above.
         _ => unreachable!("unlisted math function `{func}`"),
@@ -208,7 +222,16 @@ mod tests {
     }
 
     #[test]
+    fn trig_yields_float() {
+        assert_eq!(done("sin", &[Arg::Float(0.0)]), Output::Float(0.0));
+        assert_eq!(done("cos", &[Arg::Float(0.0)]), Output::Float(1.0));
+        assert_eq!(done("tan", &[Arg::Float(0.0)]), Output::Float(0.0));
+        // Ints widen to radians.
+        assert_eq!(done("sin", &[Arg::Int(0)]), Output::Float(0.0));
+    }
+
+    #[test]
     fn unknown_function_falls_through() {
-        assert_eq!(call("tan", &[Arg::Float(1.0)]), Dispatch::Unknown);
+        assert_eq!(call("log", &[Arg::Float(1.0)]), Dispatch::Unknown);
     }
 }

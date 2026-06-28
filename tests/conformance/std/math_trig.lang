@@ -1,0 +1,15 @@
+// `math.sin`/`cos`/`tan` — real-valued trigonometry (argument in radians, ints widen). Always a
+// float; the math lives in lang_stdlib::math, so both backends agree (the differential pins it).
+// expect: stdout "0.0"
+// expect: stdout "1.0"
+// expect: stdout "0.0"
+// expect: stdout "-1.0"
+// expect: stdout "1.0"
+// expect: exit 0
+use std.{math}
+
+echo math.sin(0.0)
+echo math.cos(0.0)
+echo math.tan(0.0)
+echo math.cos(math.pi())
+echo math.sin(math.pi() / 2.0)

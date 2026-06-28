@@ -186,7 +186,7 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
         ("json", "parse") => vec![Type::String],
         ("json", "stringify") => vec![Type::Dyn],
         ("math", "pi" | "e") => vec![],
-        ("math", "sqrt" | "floor" | "ceil" | "round") => vec![Type::Float],
+        ("math", "sqrt" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan") => vec![Type::Float],
         ("math", "pow") => vec![Type::Float, Type::Float],
         ("math", "abs") => vec![Type::Dyn],
         ("math", "min" | "max") => vec![Type::Dyn, Type::Dyn],
@@ -281,7 +281,7 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     Some(match (module, name) {
         ("json", "parse") => Type::Dyn,
         ("json", "stringify") => Type::String,
-        ("math", "pi" | "e" | "sqrt" | "pow") => Type::Float,
+        ("math", "pi" | "e" | "sqrt" | "pow" | "sin" | "cos" | "tan") => Type::Float,
         ("math", "floor" | "ceil" | "round") => Type::Int,
         ("math", "abs" | "min" | "max") => numeric_preserving(args),
         ("random", "seed") => Type::Unit,
