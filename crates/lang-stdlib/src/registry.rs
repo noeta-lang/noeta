@@ -523,7 +523,10 @@ fn fs_dispatch(
                 return Err(crate::handle::unknown_mode_error(mode_spec));
             };
             let handle = match mode {
-                crate::FileMode::Read => crate::FileHandle::open_read(path, host.fs_read(path)?),
+                // The host decides eager-vs-lazy delivery (sandbox snapshots; real host streams).
+                crate::FileMode::Read => {
+                    crate::FileHandle::open_read(path, host.fs_open_read(path)?)
+                }
                 crate::FileMode::Write => crate::FileHandle::open_write(path),
                 crate::FileMode::Append => crate::FileHandle::open_append(path),
             };

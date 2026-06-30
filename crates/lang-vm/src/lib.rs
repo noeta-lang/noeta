@@ -1091,7 +1091,10 @@ impl<'m> Vm<'m> {
         match method {
             M::ReadLine => {
                 self.stdlib_arity(name, args, 0, span)?;
-                match recv.with_file_handle_mut(|handle| handle.read_line()) {
+                // `with_file_handle_mut` works on `recv` (a `Value`), not on `self`, so capturing
+                // `self.host` in the closure is conflict-free; a lazy handle refills through it.
+                let host = &mut *self.host;
+                match recv.with_file_handle_mut(|handle| handle.read_line(host)) {
                     Ok(Some(line)) => Ok(make_some(Value::string(&line))),
                     Ok(None) => Ok(make_none()),
                     Err(error) => {
@@ -1102,7 +1105,8 @@ impl<'m> Vm<'m> {
             M::Read => {
                 self.stdlib_arity(name, args, 1, span)?;
                 let count = self.stdlib_int(name, args[0], span)?;
-                match recv.with_file_handle_mut(|handle| handle.read(count)) {
+                let host = &mut *self.host;
+                match recv.with_file_handle_mut(|handle| handle.read(count, host)) {
                     Ok(Some(chunk)) => Ok(make_some(Value::string(&chunk))),
                     Ok(None) => Ok(make_none()),
                     Err(error) => {

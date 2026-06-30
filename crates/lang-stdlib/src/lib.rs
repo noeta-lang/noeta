@@ -31,7 +31,7 @@ pub mod random;
 pub mod registry;
 pub mod vec3;
 
-pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush};
+pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush, ReadSource};
 pub use host::{Host, SandboxHost};
 pub use registry::{
     ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType, StdExtension,

@@ -133,6 +133,16 @@ impl Host for RealHost {
             .map_err(|e| io_error(format!("cannot remove `{path}`: {e}")))
     }
 
+    fn fs_open_read(&mut self, path: &str) -> Result<lang_stdlib::ReadSource, StdError> {
+        // P-LAZY commit 1: still eager (whole-file snapshot), so behavior is unchanged while the seam
+        // lands. Commit 2 swaps this for a streaming reader.
+        Ok(lang_stdlib::ReadSource::Snapshot(self.fs_read(path)?))
+    }
+
+    fn fs_read_more(&mut self, _id: u64) -> Result<Option<String>, StdError> {
+        unreachable!("RealHost does not yet open a lazy reader (P-LAZY commit 1)")
+    }
+
     fn fs_list(&self) -> Result<Vec<String>, StdError> {
         self.read_dir_names(".")
     }

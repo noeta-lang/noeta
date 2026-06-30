@@ -2473,7 +2473,9 @@ impl Interpreter {
         match method {
             M::ReadLine => {
                 self.expect_std_arity(name, args, 0, span)?;
-                match handle.borrow_mut().read_line() {
+                // `handle` is an independent `Rc`, so borrowing it and `self.host` at once is fine;
+                // a lazy handle refills through the host mid-read.
+                match handle.borrow_mut().read_line(&mut *self.host) {
                     Ok(Some(line)) => Ok(builtin_enum("Option", "some", vec![Value::Str(line)])),
                     Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
                     Err(error) => {
@@ -2484,7 +2486,7 @@ impl Interpreter {
             M::Read => {
                 self.expect_std_arity(name, args, 1, span)?;
                 let count = self.expect_std_int(name, &args[0], span)?;
-                match handle.borrow_mut().read(count) {
+                match handle.borrow_mut().read(count, &mut *self.host) {
                     Ok(Some(chunk)) => Ok(builtin_enum("Option", "some", vec![Value::Str(chunk)])),
                     Ok(None) => Ok(builtin_enum("Option", "none", Vec::new())),
                     Err(error) => {

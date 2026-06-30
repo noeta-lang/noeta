@@ -26,18 +26,25 @@
 //!
 //! ## State model
 //!
-//! `fs.open(path, mode)` returns a handle. In **read** mode the handle takes a *snapshot* of the
-//! file content at open time and advances a byte cursor over it (`read_line`/`read`); the snapshot
-//! is deterministic and disconnected from later writes. In **write**/**append** mode the handle
-//! buffers `write`s and the backend flushes them to the host on `close` — write truncates, append
-//! grows. A handle that is never closed never persists its buffer; that is the deliberate
-//! must-close-to-flush contract, and it is the same on both backends.
+//! `fs.open(path, mode)` returns a handle. In **read** mode the handle streams a byte cursor over the
+//! file content (`read_line`/`read`); how those bytes are delivered is the host's choice (see
+//! [`ReadSource`]). In **write**/**append** mode the handle buffers `write`s and the backend flushes
+//! them to the host on `close` — write truncates, append grows. A handle that is never closed never
+//! persists its buffer; that is the deliberate must-close-to-flush contract, and it is the same on
+//! both backends.
 //!
-//! The snapshot means real-disk reads are not yet lazy (the whole file is read at open); the handle
-//! *API* is what M2.5 fixes, and a later pass can make `RealHost` stream without changing this
-//! surface or the sandbox behavior.
+//! ## Eager vs lazy reads (P-LAZY)
+//!
+//! A read handle does not own a file descriptor — the pure handle cannot reach the host — so its
+//! refill strategy is supplied at open as a [`ReadSource`]. The deterministic [`crate::SandboxHost`]
+//! hands over a whole-file [`ReadSource::Snapshot`]: the content is buffered up front and the cursor
+//! streams over it with no further host calls, exactly as before P-LAZY (so the differential is
+//! unchanged). The real host hands over a [`ReadSource::Lazy`] reader id and the handle pulls more
+//! bytes on demand via [`crate::Host::fs_read_more`] as the cursor consumes them — so a large file is
+//! never buffered whole. The cursor/line/character logic below is identical for both; only where the
+//! bytes come from differs.
 
-use crate::{ErrorKind, StdError};
+use crate::{ErrorKind, Host, StdError};
 
 /// The mode a handle was opened in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,27 +86,60 @@ pub enum Flush {
     Append { path: String, content: String },
 }
 
+/// How a read handle's bytes are delivered, decided by the host at `fs.open` time and handed to
+/// [`FileHandle::open_read`]. Keeping this choice in one neutral enum is what lets the same handle be
+/// eager on the deterministic sandbox and lazy on the real host without the handle knowing which.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadSource {
+    /// The entire file content, already in memory. The handle streams over it with no further host
+    /// calls — deterministic, and byte-identical to the pre-P-LAZY snapshot behavior. The sandbox
+    /// always uses this (its files are small in-memory fixtures).
+    Snapshot(String),
+    /// A host-side lazy reader identified by this id; the handle pulls more bytes via
+    /// [`crate::Host::fs_read_more`] as the cursor consumes them. Real-host only.
+    Lazy(u64),
+}
+
+/// A read handle's private refill strategy — the companion to the cursor. `Eager` is fully buffered
+/// (a [`ReadSource::Snapshot`], or any write/append handle, which never reads); `Lazy` pulls more
+/// from the host by id until the host signals EOF.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum ReadBacking {
+    Eager,
+    Lazy { id: u64, eof: bool },
+}
+
 /// A cursor-bearing file handle. See the module docs for the state model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileHandle {
     path: String,
     mode: FileMode,
-    /// Read mode: the immutable snapshot being streamed. Write/append mode: the pending buffer.
+    /// Read mode: the bytes streamed so far (a whole snapshot, or the lazily-pulled prefix).
+    /// Write/append mode: the pending buffer.
     buffer: String,
     /// Read cursor as a byte offset into `buffer`. Only ever advanced past whole lines or whole
     /// characters, so it always lands on a UTF-8 boundary.
     cursor: usize,
+    /// Where more read bytes come from when the cursor outruns `buffer` (read mode); always `Eager`
+    /// for write/append handles.
+    backing: ReadBacking,
     closed: bool,
 }
 
 impl FileHandle {
-    /// Open a read handle over a snapshot of the file's `content`.
-    pub fn open_read(path: &str, content: String) -> FileHandle {
+    /// Open a read handle from the host-supplied [`ReadSource`]: a whole-file snapshot is buffered up
+    /// front (eager); a lazy reader starts empty and pulls on demand.
+    pub fn open_read(path: &str, source: ReadSource) -> FileHandle {
+        let (buffer, backing) = match source {
+            ReadSource::Snapshot(content) => (content, ReadBacking::Eager),
+            ReadSource::Lazy(id) => (String::new(), ReadBacking::Lazy { id, eof: false }),
+        };
         FileHandle {
             path: path.to_string(),
             mode: FileMode::Read,
-            buffer: content,
+            buffer,
             cursor: 0,
+            backing,
             closed: false,
         }
     }
@@ -111,6 +151,7 @@ impl FileHandle {
             mode: FileMode::Write,
             buffer: String::new(),
             cursor: 0,
+            backing: ReadBacking::Eager,
             closed: false,
         }
     }
@@ -122,6 +163,7 @@ impl FileHandle {
             mode: FileMode::Append,
             buffer: String::new(),
             cursor: 0,
+            backing: ReadBacking::Eager,
             closed: false,
         }
     }
@@ -149,9 +191,16 @@ impl FileHandle {
 
     /// Read the next line (without its trailing newline), advancing the cursor past it. Returns
     /// `none` at end of input. Matches `read_lines`/`str::lines`: a trailing newline does not yield
-    /// a final empty line.
-    pub fn read_line(&mut self) -> Result<Option<String>, StdError> {
+    /// a final empty line. A lazy handle pulls from the host until a full line is buffered or EOF.
+    pub fn read_line(&mut self, host: &mut dyn Host) -> Result<Option<String>, StdError> {
         self.ensure_readable()?;
+        // Pull more from a lazy source until a newline is buffered (a complete line) or EOF. On an
+        // eager handle `fill_more` is an immediate `false`, so this loop is a no-op there.
+        while !self.buffer[self.cursor..].contains('\n') {
+            if !self.fill_more(host)? {
+                break;
+            }
+        }
         if self.cursor >= self.buffer.len() {
             return Ok(None);
         }
@@ -172,16 +221,48 @@ impl FileHandle {
 
     /// Read up to `count` characters from the cursor, advancing past them. Returns `none` only at
     /// end of input; a non-negative `count` at a live cursor always returns `some` (possibly the
-    /// empty string for `count <= 0`).
-    pub fn read(&mut self, count: i64) -> Result<Option<String>, StdError> {
+    /// empty string for `count <= 0`). A lazy handle pulls from the host until `count` characters are
+    /// buffered or EOF.
+    pub fn read(&mut self, count: i64, host: &mut dyn Host) -> Result<Option<String>, StdError> {
         self.ensure_readable()?;
+        let want = count.max(0) as usize;
+        // Pull more from a lazy source until `want` characters are buffered from the cursor or EOF.
+        while self.buffer[self.cursor..].chars().count() < want {
+            if !self.fill_more(host)? {
+                break;
+            }
+        }
         if self.cursor >= self.buffer.len() {
             return Ok(None);
         }
-        let want = count.max(0) as usize;
         let chunk: String = self.buffer[self.cursor..].chars().take(want).collect();
         self.cursor += chunk.len();
         Ok(Some(chunk))
+    }
+
+    /// Pull the next chunk from a lazy source into `buffer`, returning whether anything was appended.
+    /// An eager (snapshot) handle has nothing more to pull, so this is always `false` for it — which
+    /// is what makes the refill loops above no-ops on the snapshot path (behavior identical to the
+    /// pre-P-LAZY handle, so the sandbox differential is unchanged). The host delivers valid-UTF-8
+    /// chunks (it reads a line at a time), so appending can never split a character.
+    fn fill_more(&mut self, host: &mut dyn Host) -> Result<bool, StdError> {
+        // Copy the id out (so the `&mut self.backing` borrow ends) before touching `self.buffer`.
+        let id = match self.backing {
+            ReadBacking::Lazy { id, eof: false } => id,
+            _ => return Ok(false), // eager, or a lazy reader already at EOF
+        };
+        match host.fs_read_more(id)? {
+            Some(chunk) if !chunk.is_empty() => {
+                self.buffer.push_str(&chunk);
+                Ok(true)
+            }
+            _ => {
+                if let ReadBacking::Lazy { eof, .. } = &mut self.backing {
+                    *eof = true;
+                }
+                Ok(false)
+            }
+        }
     }
 
     /// Append `chunk` to the pending buffer of a write/append handle.
@@ -290,6 +371,100 @@ impl FileHandleMethod {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::SandboxHost;
+    use std::collections::VecDeque;
+
+    /// A whole-file snapshot source, for the eager-read tests.
+    fn snap(content: &str) -> ReadSource {
+        ReadSource::Snapshot(content.to_string())
+    }
+
+    /// A real working host for the eager tests. An eager (snapshot) handle never calls back into the
+    /// host, so any `Host` works; the deterministic sandbox is the natural choice.
+    fn sandbox() -> SandboxHost {
+        SandboxHost::new()
+    }
+
+    /// A host that serves a read handle lazily from a canned queue of chunks (one per `fs_read_more`),
+    /// to exercise the handle's lazy refill loop in isolation — without real disk. Every other host
+    /// method is irrelevant to a read handle, so they panic if reached.
+    struct LazyMock {
+        chunks: VecDeque<String>,
+    }
+
+    impl LazyMock {
+        fn new(chunks: &[&str]) -> LazyMock {
+            LazyMock {
+                chunks: chunks.iter().map(|c| c.to_string()).collect(),
+            }
+        }
+    }
+
+    impl Host for LazyMock {
+        fn fs_open_read(&mut self, _path: &str) -> Result<ReadSource, StdError> {
+            Ok(ReadSource::Lazy(1))
+        }
+        fn fs_read_more(&mut self, _id: u64) -> Result<Option<String>, StdError> {
+            Ok(self.chunks.pop_front())
+        }
+        fn fs_write(&mut self, _: &str, _: &str) -> Result<(), StdError> {
+            unimplemented!()
+        }
+        fn fs_append(&mut self, _: &str, _: &str) -> Result<(), StdError> {
+            unimplemented!()
+        }
+        fn fs_read(&self, _: &str) -> Result<String, StdError> {
+            unimplemented!()
+        }
+        fn fs_write_bytes(&mut self, _: &str, _: &[u8]) -> Result<(), StdError> {
+            unimplemented!()
+        }
+        fn fs_read_bytes(&self, _: &str) -> Result<Vec<u8>, StdError> {
+            unimplemented!()
+        }
+        fn fs_exists(&self, _: &str) -> bool {
+            unimplemented!()
+        }
+        fn fs_remove(&mut self, _: &str) -> Result<bool, StdError> {
+            unimplemented!()
+        }
+        fn fs_list(&self) -> Result<Vec<String>, StdError> {
+            unimplemented!()
+        }
+        fn fs_list_dir(&self, _: &str) -> Result<Vec<String>, StdError> {
+            unimplemented!()
+        }
+        fn fs_mkdir(&mut self, _: &str) -> Result<(), StdError> {
+            unimplemented!()
+        }
+        fn fs_is_dir(&self, _: &str) -> bool {
+            unimplemented!()
+        }
+        fn rng_seed(&mut self, _: i64) {
+            unimplemented!()
+        }
+        fn rng_int(&mut self, _: i64, _: i64) -> Result<i64, StdError> {
+            unimplemented!()
+        }
+        fn rng_float(&mut self) -> f64 {
+            unimplemented!()
+        }
+        fn clock_monotonic(&mut self) -> u64 {
+            unimplemented!()
+        }
+        fn clock_sleep(&mut self, _: i64) {
+            unimplemented!()
+        }
+        fn env_get(&self, _: &str) -> Option<String> {
+            unimplemented!()
+        }
+        fn env_keys(&self) -> Vec<String> {
+            unimplemented!()
+        }
+        fn args(&self) -> Vec<String> {
+            unimplemented!()
+        }
+    }
 
     #[test]
     fn mode_parsing_accepts_terse_and_spelled_out() {
@@ -302,30 +477,57 @@ mod tests {
 
     #[test]
     fn read_line_streams_to_eof_like_str_lines() {
-        let mut h = FileHandle::open_read("f", "alpha\nbeta\n".to_string());
-        assert_eq!(h.read_line().unwrap(), Some("alpha".to_string()));
-        assert_eq!(h.read_line().unwrap(), Some("beta".to_string()));
+        let mut host = sandbox();
+        let mut h = FileHandle::open_read("f", snap("alpha\nbeta\n"));
+        assert_eq!(h.read_line(&mut host).unwrap(), Some("alpha".to_string()));
+        assert_eq!(h.read_line(&mut host).unwrap(), Some("beta".to_string()));
         // A trailing newline does not produce a final empty line.
-        assert_eq!(h.read_line().unwrap(), None);
+        assert_eq!(h.read_line(&mut host).unwrap(), None);
         // EOF is sticky.
-        assert_eq!(h.read_line().unwrap(), None);
+        assert_eq!(h.read_line(&mut host).unwrap(), None);
     }
 
     #[test]
     fn read_line_handles_a_final_unterminated_line() {
-        let mut h = FileHandle::open_read("f", "a\nb".to_string());
-        assert_eq!(h.read_line().unwrap(), Some("a".to_string()));
-        assert_eq!(h.read_line().unwrap(), Some("b".to_string()));
-        assert_eq!(h.read_line().unwrap(), None);
+        let mut host = sandbox();
+        let mut h = FileHandle::open_read("f", snap("a\nb"));
+        assert_eq!(h.read_line(&mut host).unwrap(), Some("a".to_string()));
+        assert_eq!(h.read_line(&mut host).unwrap(), Some("b".to_string()));
+        assert_eq!(h.read_line(&mut host).unwrap(), None);
     }
 
     #[test]
     fn read_takes_characters_by_count() {
-        let mut h = FileHandle::open_read("f", "héllo".to_string());
+        let mut host = sandbox();
+        let mut h = FileHandle::open_read("f", snap("héllo"));
         // Characters, not bytes: `é` is one character though two bytes.
-        assert_eq!(h.read(3).unwrap(), Some("hél".to_string()));
-        assert_eq!(h.read(10).unwrap(), Some("lo".to_string()));
-        assert_eq!(h.read(1).unwrap(), None);
+        assert_eq!(h.read(3, &mut host).unwrap(), Some("hél".to_string()));
+        assert_eq!(h.read(10, &mut host).unwrap(), Some("lo".to_string()));
+        assert_eq!(h.read(1, &mut host).unwrap(), None);
+    }
+
+    #[test]
+    fn lazy_read_line_assembles_across_chunk_boundaries() {
+        // The host delivers a line at a time; a line split across two `fs_read_more` chunks must
+        // still read back whole, and EOF (an exhausted queue) ends the stream like `str::lines`.
+        let mut host = LazyMock::new(&["al", "pha\n", "beta\n"]);
+        let mut h = FileHandle::open_read("f", host.fs_open_read("f").unwrap());
+        assert_eq!(h.read_line(&mut host).unwrap(), Some("alpha".to_string()));
+        assert_eq!(h.read_line(&mut host).unwrap(), Some("beta".to_string()));
+        assert_eq!(h.read_line(&mut host).unwrap(), None);
+        // EOF is sticky even though the host would keep returning `None`.
+        assert_eq!(h.read_line(&mut host).unwrap(), None);
+    }
+
+    #[test]
+    fn lazy_read_counts_characters_across_chunks() {
+        // `read(n)` pulls lazily until `n` characters are buffered; a multi-byte character that
+        // arrives in a later chunk is still counted as one character.
+        let mut host = LazyMock::new(&["hé", "llo"]);
+        let mut h = FileHandle::open_read("f", host.fs_open_read("f").unwrap());
+        assert_eq!(h.read(3, &mut host).unwrap(), Some("hél".to_string()));
+        assert_eq!(h.read(10, &mut host).unwrap(), Some("lo".to_string()));
+        assert_eq!(h.read(1, &mut host).unwrap(), None);
     }
 
     #[test]
@@ -359,17 +561,18 @@ mod tests {
 
     #[test]
     fn read_handle_never_flushes() {
-        let mut h = FileHandle::open_read("f", "data".to_string());
+        let mut h = FileHandle::open_read("f", snap("data"));
         assert_eq!(h.close(), None);
     }
 
     #[test]
     fn mode_mismatches_and_closed_use_are_io_errors() {
-        let mut reader = FileHandle::open_read("f", "x".to_string());
+        let mut host = sandbox();
+        let mut reader = FileHandle::open_read("f", snap("x"));
         assert_eq!(reader.write("y").unwrap_err().kind, ErrorKind::Io);
 
         let mut writer = FileHandle::open_write("f");
-        assert_eq!(writer.read_line().unwrap_err().kind, ErrorKind::Io);
+        assert_eq!(writer.read_line(&mut host).unwrap_err().kind, ErrorKind::Io);
 
         writer.close();
         assert_eq!(writer.write("z").unwrap_err().kind, ErrorKind::Io);

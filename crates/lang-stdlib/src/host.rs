@@ -39,6 +39,15 @@ pub trait Host {
     fn fs_remove(&mut self, path: &str) -> Result<bool, StdError>;
     fn fs_list(&self) -> Result<Vec<String>, StdError>;
 
+    // Read-handle backing (P-LAZY). `fs.open(path, "r")` calls `fs_open_read` to learn how the
+    // file's bytes are delivered: a deterministic whole-file [`crate::ReadSource::Snapshot`] (the
+    // sandbox) or a [`crate::ReadSource::Lazy`] reader the handle pulls from via `fs_read_more`
+    // (the real host, so a large file is never buffered whole). `fs_read_more` is only ever called
+    // with an id this host returned in a `Lazy`, and returns the next chunk (valid UTF-8 — a line at
+    // a time) or `None` at EOF.
+    fn fs_open_read(&mut self, path: &str) -> Result<crate::ReadSource, StdError>;
+    fn fs_read_more(&mut self, id: u64) -> Result<Option<String>, StdError>;
+
     // Directory hierarchy (M2.5). `fs_list_dir` returns a directory's immediate children (sorted);
     // `fs_mkdir` creates a directory and its ancestors; `fs_is_dir` reports whether a path is one.
     fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError>;
@@ -130,6 +139,17 @@ impl Host for SandboxHost {
 
     fn fs_list(&self) -> Result<Vec<String>, StdError> {
         Ok(self.fs.list())
+    }
+
+    /// The sandbox is in-memory with tiny fixtures, so it always snapshots — keeping reads
+    /// deterministic and behavior byte-identical to the pre-P-LAZY handle. It therefore never hands
+    /// out a lazy id, so `fs_read_more` is unreachable here.
+    fn fs_open_read(&mut self, path: &str) -> Result<crate::ReadSource, StdError> {
+        Ok(crate::ReadSource::Snapshot(self.fs.read(path)?))
+    }
+
+    fn fs_read_more(&mut self, _id: u64) -> Result<Option<String>, StdError> {
+        unreachable!("SandboxHost never opens a lazy reader, so it is never asked for more")
     }
 
     fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError> {
