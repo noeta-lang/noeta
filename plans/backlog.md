@@ -73,3 +73,19 @@ co-located, tree-shaken (via the existing DCE), manifest-discovered `test`/`benc
 on one `@dev`-declared-tier primitive (content-kind = code|text), `test` implemented first — the clean
 co-located-TDD experience PHP can't strip. Re-scopes Phase 5.2 (class-as-value → struct), breaking
 surface migration (`record`/`type X={}` → `struct X{}`).
+
+## Packed-field-kind enum duplication (low priority — mostly inherent)
+
+**Status:** noted, not scheduled. Four parallel enums encode "what kind is each packed field":
+`lang_ast::reflect::PackedKind` (`Struct(Box<PackedLayout>)`, check-time channel), `lang_bytecode::
+PackedFieldDef` (`Struct(u32)` shape index, serialized), `lang_object::PackedKind` (`Struct(Rc<
+PackedSchema>)`, VM runtime), eval `SlotKind` (`Struct(Rc<PackedSchema>)`, tree-walker runtime). The
+four primitive leaves (Int/Float/F32/Bool) are identical, but the `Struct` variant *must* differ per
+phase (a portable layout before shapes exist; a u32 index in non-`Rc` bytecode; a resolved `Rc<schema>`
+at runtime) — standard phase-appropriate re-encoding, not copy-paste. Only the leaves are truly
+shareable, and hoisting them into a common `PrimKind` would couple four crates to a shared crate for a
+4-variant enum (likely costs more than it saves). **Natural time to revisit:** when `vec`/`quat` leave
+core for a package and the native-extension API must expose packed layout *across* the package boundary
+— a single public layout vocabulary would then earn its keep and could subsume some of these. Until
+then: leave it. (The native-extension registry deliberately does **not** add a 5th copy — its bulk
+packed kernels stay per-backend; see `plans/native-extensions/README.md` option B.)

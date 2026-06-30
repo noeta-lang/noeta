@@ -15,8 +15,9 @@
 //! [`NativeValue`] (the argument view) and lifts the [`NativeOut`] result back — two functions
 //! written once per backend, not a `read_vec3`/`build_vec3` per native function. [`NativeValue`]
 //! widens the scalar [`crate::Arg`] seam with the shapes richer modules need (bytes and file
-//! handles for `fs`; objects and packed buffers when `vec`/`quat` migrate). Migrated so far:
-//! `math`/`random`/`time`/`env`/`args`/`fs`.
+//! handles for `fs`; objects for the `vec`/`quat` scalar ops). Migrated so far:
+//! `math`/`random`/`time`/`env`/`args`/`fs`, and the **scalar** `vec`/`quat` ops — their bulk
+//! `*_all` kernels stay per-backend (a packed-layout specialization, not a value-seam concern).
 //!
 //! Host-coupled effects (filesystem, clock, PRNG, environment) are threaded through the same
 //! [`crate::Host`] seam the backends already inject, so `random`/`time`/`env`/`args` dispatch
@@ -45,6 +46,13 @@ pub enum NativeValue {
     Str(String),
     /// A `bytes` buffer (e.g. `fs.write_bytes`). Marshalled by value — IO is never a hot path.
     Bytes(Vec<u8>),
+    /// An object's primitive fields in slot order (e.g. a `Vec3`'s three `f32`s). `type_name` is the
+    /// shape's name, kept for error messages. The shared dispatch reads the scalars; the backend
+    /// supplies the *result* shape (via [`RetTy::SameAsArg`]) when materializing.
+    Object {
+        type_name: &'static str,
+        fields: Vec<Scalar>,
+    },
     /// Any value a dispatch function never inspects — carries the type name for error messages.
     Opaque(&'static str),
 }
@@ -56,6 +64,9 @@ pub enum NativeOut {
     Str(String),
     Bytes(Vec<u8>),
     Unit,
+    /// An object result as its field scalars in slot order (e.g. `vec.add` → a `Vec3`). The backend
+    /// supplies the shape from the function's [`RetTy::SameAsArg`], so the dispatch never names a type.
+    Object(Vec<Scalar>),
     /// A homogeneous list (e.g. `env.keys()` → list of strings). The backend builds its native
     /// list; nested `NativeOut` keeps it general for later recursive modules.
     List(Vec<NativeOut>),
@@ -222,7 +233,7 @@ fn native_type_name(value: &NativeValue) -> &str {
         NativeValue::Scalar(Scalar::Bool(_)) => "bool",
         NativeValue::Str(_) => "string",
         NativeValue::Bytes(_) => "bytes",
-        NativeValue::Opaque(name) => name,
+        NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => type_name,
     }
 }
 
@@ -236,7 +247,7 @@ fn to_arg(value: &NativeValue) -> Arg<'_> {
         NativeValue::Scalar(Scalar::F32(f)) => Arg::Float(*f as f64),
         NativeValue::Scalar(Scalar::Bool(b)) => Arg::Bool(*b),
         NativeValue::Str(s) => Arg::Str(s),
-        NativeValue::Bytes(_) | NativeValue::Opaque(_) => Arg::Other,
+        NativeValue::Bytes(_) | NativeValue::Object { .. } | NativeValue::Opaque(_) => Arg::Other,
     }
 }
 
@@ -452,9 +463,214 @@ fn fs_dispatch(
     }
 }
 
+// --- `vec` / `quat`: scalar 3D-math over structural f32 objects ---------------------------------
+//
+// These exercise the *object* seam: read an argument's `f32` fields, compute (math in
+// `lang_stdlib::vec3`/`quat`), and return the result's field scalars — the backend supplies the
+// result shape from the function's `RetTy::SameAsArg`. Only the **scalar** ops migrate here; the
+// bulk `*_all` kernels operate on the packed `List<Vec3>` buffer and stay per-backend (they are a
+// packed-layout specialization, not a value-seam concern), so they are not registered and the
+// router falls through to the backend's `call_vec` for them.
+
+/// Read a Vec3 argument — an object of exactly three `f32` fields — into `[f32; 3]`. The message
+/// keeps the `vec.` prefix even for `quat.rotate_vec3`'s vector argument, matching the prior glue.
+fn read_vec3(func: &str, args: &[NativeValue], i: usize) -> Result<[f32; 3], StdError> {
+    if let Some(NativeValue::Object { fields, .. }) = args.get(i)
+        && let [Scalar::F32(x), Scalar::F32(y), Scalar::F32(z)] = fields[..]
+    {
+        return Ok([x, y, z]);
+    }
+    Err(shape_error(
+        "vec",
+        func,
+        "a Vec3 (a struct of three f32 fields)",
+        args.get(i),
+    ))
+}
+
+/// Read a Quat argument — an object of exactly four `f32` fields — into `[f32; 4]`.
+fn read_quat(func: &str, args: &[NativeValue], i: usize) -> Result<[f32; 4], StdError> {
+    if let Some(NativeValue::Object { fields, .. }) = args.get(i)
+        && let [
+            Scalar::F32(x),
+            Scalar::F32(y),
+            Scalar::F32(z),
+            Scalar::F32(w),
+        ] = fields[..]
+    {
+        return Ok([x, y, z, w]);
+    }
+    Err(shape_error(
+        "quat",
+        func,
+        "a Quat (a struct of four f32 fields)",
+        args.get(i),
+    ))
+}
+
+/// Read a numeric scalar (`f32`/`float`/`int`) as an `f32` — e.g. the `vec.scale` factor.
+fn read_factor(func: &str, args: &[NativeValue], i: usize) -> Result<f32, StdError> {
+    match args.get(i) {
+        Some(NativeValue::Scalar(Scalar::F32(f))) => Ok(*f),
+        Some(NativeValue::Scalar(Scalar::Float(f))) => Ok(*f as f32),
+        Some(NativeValue::Scalar(Scalar::Int(n))) => Ok(*n as f32),
+        other => Err(StdError {
+            kind: crate::ErrorKind::ArgType,
+            message: format!(
+                "`vec.{func}` expects a number factor, found {}",
+                other.map(native_type_name).unwrap_or("nothing")
+            ),
+        }),
+    }
+}
+
+fn shape_error(module: &str, func: &str, expected: &str, value: Option<&NativeValue>) -> StdError {
+    StdError {
+        kind: crate::ErrorKind::ArgType,
+        message: format!(
+            "`{module}.{func}` expects {expected}, found {}",
+            value.map(native_type_name).unwrap_or("nothing")
+        ),
+    }
+}
+
+fn vec3_out(c: [f32; 3]) -> NativeOut {
+    NativeOut::Object(vec![
+        Scalar::F32(c[0]),
+        Scalar::F32(c[1]),
+        Scalar::F32(c[2]),
+    ])
+}
+
+fn quat_out(c: [f32; 4]) -> NativeOut {
+    NativeOut::Object(vec![
+        Scalar::F32(c[0]),
+        Scalar::F32(c[1]),
+        Scalar::F32(c[2]),
+        Scalar::F32(c[3]),
+    ])
+}
+
+fn vec_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::vec3;
+    match func {
+        "add" | "sub" | "cross" | "reflect" | "min" | "max" => {
+            want_arity(func, args, 2)?;
+            let a = read_vec3(func, args, 0)?;
+            let b = read_vec3(func, args, 1)?;
+            Ok(vec3_out(match func {
+                "add" => vec3::add(a, b),
+                "sub" => vec3::sub(a, b),
+                "cross" => vec3::cross(a, b),
+                "reflect" => vec3::reflect(a, b),
+                "min" => vec3::min(a, b),
+                _ => vec3::max(a, b),
+            }))
+        }
+        "abs" => {
+            want_arity(func, args, 1)?;
+            Ok(vec3_out(vec3::abs(read_vec3(func, args, 0)?)))
+        }
+        "normalize" => {
+            want_arity(func, args, 1)?;
+            Ok(vec3_out(vec3::normalize(read_vec3(func, args, 0)?)))
+        }
+        "scale" => {
+            want_arity(func, args, 2)?;
+            let a = read_vec3(func, args, 0)?;
+            Ok(vec3_out(vec3::scale(a, read_factor(func, args, 1)?)))
+        }
+        "lerp" => {
+            want_arity(func, args, 3)?;
+            let a = read_vec3(func, args, 0)?;
+            let b = read_vec3(func, args, 1)?;
+            Ok(vec3_out(vec3::lerp(a, b, read_factor(func, args, 2)?)))
+        }
+        "clamp" => {
+            want_arity(func, args, 3)?;
+            let v = read_vec3(func, args, 0)?;
+            let lo = read_vec3(func, args, 1)?;
+            let hi = read_vec3(func, args, 2)?;
+            Ok(vec3_out(vec3::clamp(v, lo, hi)))
+        }
+        "dot" => {
+            want_arity(func, args, 2)?;
+            let a = read_vec3(func, args, 0)?;
+            let b = read_vec3(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::F32(vec3::dot(a, b))))
+        }
+        "distance" => {
+            want_arity(func, args, 2)?;
+            let a = read_vec3(func, args, 0)?;
+            let b = read_vec3(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::F32(vec3::distance(a, b))))
+        }
+        "length" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::F32(vec3::length(read_vec3(
+                func, args, 0,
+            )?))))
+        }
+        _ => Err(no_function_error("vec", func)),
+    }
+}
+
+fn quat_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    use crate::quat;
+    match func {
+        "mul" => {
+            want_arity(func, args, 2)?;
+            let a = read_quat(func, args, 0)?;
+            let b = read_quat(func, args, 1)?;
+            Ok(quat_out(quat::mul(a, b)))
+        }
+        "conjugate" => {
+            want_arity(func, args, 1)?;
+            Ok(quat_out(quat::conjugate(read_quat(func, args, 0)?)))
+        }
+        "normalize" => {
+            want_arity(func, args, 1)?;
+            Ok(quat_out(quat::normalize(read_quat(func, args, 0)?)))
+        }
+        "slerp" => {
+            want_arity(func, args, 3)?;
+            let a = read_quat(func, args, 0)?;
+            let b = read_quat(func, args, 1)?;
+            Ok(quat_out(quat::slerp(a, b, read_factor(func, args, 2)?)))
+        }
+        "dot" => {
+            want_arity(func, args, 2)?;
+            let a = read_quat(func, args, 0)?;
+            let b = read_quat(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::F32(quat::dot(a, b))))
+        }
+        "length" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::F32(quat::length(read_quat(
+                func, args, 0,
+            )?))))
+        }
+        "rotate_vec3" => {
+            want_arity(func, args, 2)?;
+            let q = read_quat(func, args, 0)?;
+            let v = read_vec3(func, args, 1)?;
+            Ok(vec3_out(quat::rotate_vec3(q, v)))
+        }
+        _ => Err(no_function_error("quat", func)),
+    }
+}
+
 // --- the std extension's module table -----------------------------------------------------------
 
-use RetTy::{Concrete, NumericPreserving};
+use RetTy::{Concrete, NumericPreserving, SameAsArg};
 use SigType::{Dyn, Float, Int, String as Str};
 
 const MATH_FNS: &[ExtFn] = &[
@@ -640,6 +856,121 @@ const FS_FNS: &[ExtFn] = &[
     },
 ];
 
+// Only the *scalar* `vec`/`quat` ops are registered; the bulk `*_all` kernels stay per-backend.
+// Structural arguments are `Dyn` (the 3/4-`f32` shape is checked at dispatch); object results are
+// `SameAsArg` (same shape as the indicated argument).
+const VEC_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "add",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "sub",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "cross",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "reflect",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "min",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "max",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "abs",
+        params: &[Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "normalize",
+        params: &[Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "scale",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "lerp",
+        params: &[Dyn, Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "clamp",
+        params: &[Dyn, Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "dot",
+        params: &[Dyn, Dyn],
+        ret: Concrete(SigType::F32),
+    },
+    ExtFn {
+        name: "distance",
+        params: &[Dyn, Dyn],
+        ret: Concrete(SigType::F32),
+    },
+    ExtFn {
+        name: "length",
+        params: &[Dyn],
+        ret: Concrete(SigType::F32),
+    },
+];
+
+const QUAT_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "mul",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "conjugate",
+        params: &[Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "normalize",
+        params: &[Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "slerp",
+        params: &[Dyn, Dyn, Dyn],
+        ret: SameAsArg(0),
+    },
+    ExtFn {
+        name: "dot",
+        params: &[Dyn, Dyn],
+        ret: Concrete(SigType::F32),
+    },
+    ExtFn {
+        name: "length",
+        params: &[Dyn],
+        ret: Concrete(SigType::F32),
+    },
+    // `rotate_vec3(q, v)` returns the *vector* (its second argument's shape).
+    ExtFn {
+        name: "rotate_vec3",
+        params: &[Dyn, Dyn],
+        ret: SameAsArg(1),
+    },
+];
+
 const STD_MODULES: &[ExtModule] = &[
     ExtModule {
         name: "math",
@@ -670,6 +1001,16 @@ const STD_MODULES: &[ExtModule] = &[
         name: "fs",
         functions: FS_FNS,
         dispatch: fs_dispatch,
+    },
+    ExtModule {
+        name: "vec",
+        functions: VEC_FNS,
+        dispatch: vec_dispatch,
+    },
+    ExtModule {
+        name: "quat",
+        functions: QUAT_FNS,
+        dispatch: quat_dispatch,
     },
 ];
 
@@ -794,6 +1135,13 @@ mod tests {
             Some(Concrete(SigType::List(_)))
         ));
         assert!(find_function("math", "nope").is_none());
-        assert!(find_module("vec").is_none()); // not migrated yet
+        // `vec.add` is registered (a scalar op) and returns the same shape as its first argument;
+        // the bulk `vec.add_all` kernel is *not* registered (it stays per-backend).
+        assert!(matches!(
+            find_function("vec", "add").map(|f| f.ret),
+            Some(SameAsArg(0))
+        ));
+        assert!(find_function("vec", "add_all").is_none());
+        assert!(find_function("json", "parse").is_none()); // json migrates in Phase B
     }
 }

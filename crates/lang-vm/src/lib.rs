@@ -801,33 +801,36 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // Modules migrated to the native-extension registry dispatch through the shared seam:
-        // project arguments onto `NativeValue`, run the one shared dispatch body (host threaded
-        // in), and materialize the `NativeOut` result. The not-yet-migrated modules keep their
-        // per-backend dispatch below.
-        if lang_stdlib::registry::find_module(module).is_some() {
+        // A function registered in the native-extension registry dispatches through the shared
+        // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
+        // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
+        // function's `RetTy`). Routing is per-function so a partially-migrated module (`vec`/`quat`,
+        // whose bulk `*_all` kernels stay per-backend) falls through for its unmigrated functions.
+        if let Some(sig) = lang_stdlib::registry::find_function(module, func) {
             let nargs: Vec<lang_stdlib::NativeValue> =
                 args.iter().map(|a| marshal_native_arg(*a)).collect();
             return match lang_stdlib::registry::dispatch(module, func, &mut *self.host, &nargs) {
-                Ok(out) => Ok(materialize_native(out)),
+                Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
             };
         }
         match lang_stdlib::NativeModule::from_name(module) {
             Some(lang_stdlib::NativeModule::Json) => self.call_json(func, args, span),
+            // `vec`: only the bulk `*_all` kernels are unmigrated and reach here; an unknown
+            // function falls through to `call_vec`'s own "no such function" arm.
             Some(lang_stdlib::NativeModule::Vec) => self.call_vec(func, args, span),
-            Some(lang_stdlib::NativeModule::Quat) => self.call_quat(func, args, span),
-            // Migrated modules are handled by the registry above.
+            // A fully-migrated module reaching here means an unknown function on it. `quat` is fully
+            // migrated (no bulk ops), so it joins this group.
             Some(
                 lang_stdlib::NativeModule::Math
                 | lang_stdlib::NativeModule::Random
                 | lang_stdlib::NativeModule::Time
                 | lang_stdlib::NativeModule::Env
                 | lang_stdlib::NativeModule::Args
-                | lang_stdlib::NativeModule::Fs,
-            ) => unreachable!("module `{module}` is dispatched by the native-extension registry"),
-            // Only valid module names are ever bound, so this is unreachable in practice.
-            None => {
+                | lang_stdlib::NativeModule::Fs
+                | lang_stdlib::NativeModule::Quat,
+            )
+            | None => {
                 let error = lang_stdlib::no_function_error(module, func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
@@ -837,72 +840,14 @@ impl<'m> Vm<'m> {
     /// The `vec` 3D-math module (P-PACK Phase 4.1): scalar Vec3 ops over structural 3-`f32` objects.
     /// The arithmetic lives in `lang_stdlib::vec3`, so this is glue — read the components, dispatch,
     /// rebuild a same-shape result (mirrors the tree-walker's `call_vec`).
+    /// The `vec` module's **bulk** kernels over `List<Vec3<f32>>` (P-PACK 4.2). The scalar ops
+    /// (`add`/`dot`/…) migrated to the shared native-extension dispatch; these stay per-backend
+    /// because they operate on the packed buffer (a layout specialization, not a value-seam
+    /// concern). Packed inputs take the flat autovectorized buffer path; a boxed/demoted operand
+    /// falls back to a scalar loop.
     fn call_vec(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
         use lang_stdlib::vec3;
         match func {
-            "add" | "sub" | "cross" | "reflect" | "min" | "max" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                let b = self.read_vec3(func, args[1], span)?;
-                let out = match func {
-                    "add" => vec3::add(a, b),
-                    "sub" => vec3::sub(a, b),
-                    "cross" => vec3::cross(a, b),
-                    "reflect" => vec3::reflect(a, b),
-                    "min" => vec3::min(a, b),
-                    _ => vec3::max(a, b),
-                };
-                Ok(self.build_vec3(args[0], out))
-            }
-            "abs" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                Ok(self.build_vec3(args[0], vec3::abs(a)))
-            }
-            "distance" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                let b = self.read_vec3(func, args[1], span)?;
-                Ok(Value::f32(vec3::distance(a, b)))
-            }
-            "lerp" => {
-                self.stdlib_arity(func, args, 3, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                let b = self.read_vec3(func, args[1], span)?;
-                let t = self.read_scalar_f32(func, args[2], span)?;
-                Ok(self.build_vec3(args[0], vec3::lerp(a, b, t)))
-            }
-            "clamp" => {
-                self.stdlib_arity(func, args, 3, span)?;
-                let v = self.read_vec3(func, args[0], span)?;
-                let lo = self.read_vec3(func, args[1], span)?;
-                let hi = self.read_vec3(func, args[2], span)?;
-                Ok(self.build_vec3(args[0], vec3::clamp(v, lo, hi)))
-            }
-            "scale" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                let s = self.read_scalar_f32(func, args[1], span)?;
-                Ok(self.build_vec3(args[0], vec3::scale(a, s)))
-            }
-            "normalize" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                Ok(self.build_vec3(args[0], vec3::normalize(a)))
-            }
-            "dot" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                let b = self.read_vec3(func, args[1], span)?;
-                Ok(Value::f32(vec3::dot(a, b)))
-            }
-            "length" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let a = self.read_vec3(func, args[0], span)?;
-                Ok(Value::f32(vec3::length(a)))
-            }
-            // --- Bulk kernels over `List<Vec3<f32>>` (P-PACK 4.2). Packed inputs take the flat
-            // autovectorized buffer path; a boxed/demoted operand falls back to a scalar loop. ---
             "add_all" | "sub_all" => {
                 self.stdlib_arity(func, args, 2, span)?;
                 self.expect_list(func, args[0], span)?;
@@ -1025,95 +970,6 @@ impl<'m> Vm<'m> {
         Value::object(
             shape,
             vec![Value::f32(c[0]), Value::f32(c[1]), Value::f32(c[2])],
-        )
-    }
-
-    /// The `quat` quaternion module (Phase 4 follow-on): transform ops over structural 4-`f32`
-    /// quaternions. Math lives in `lang_stdlib::quat`; glue mirrors `call_vec`.
-    fn call_quat(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        use lang_stdlib::quat;
-        match func {
-            "mul" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let a = self.read_quat(func, args[0], span)?;
-                let b = self.read_quat(func, args[1], span)?;
-                Ok(self.build_quat(args[0], quat::mul(a, b)))
-            }
-            "conjugate" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let q = self.read_quat(func, args[0], span)?;
-                Ok(self.build_quat(args[0], quat::conjugate(q)))
-            }
-            "normalize" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let q = self.read_quat(func, args[0], span)?;
-                Ok(self.build_quat(args[0], quat::normalize(q)))
-            }
-            "dot" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let a = self.read_quat(func, args[0], span)?;
-                let b = self.read_quat(func, args[1], span)?;
-                Ok(Value::f32(quat::dot(a, b)))
-            }
-            "length" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let q = self.read_quat(func, args[0], span)?;
-                Ok(Value::f32(quat::length(q)))
-            }
-            "slerp" => {
-                self.stdlib_arity(func, args, 3, span)?;
-                let a = self.read_quat(func, args[0], span)?;
-                let b = self.read_quat(func, args[1], span)?;
-                let t = self.read_scalar_f32(func, args[2], span)?;
-                Ok(self.build_quat(args[0], quat::slerp(a, b, t)))
-            }
-            "rotate_vec3" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let q = self.read_quat(func, args[0], span)?;
-                let v = self.read_vec3(func, args[1], span)?;
-                Ok(self.build_vec3(args[1], quat::rotate_vec3(q, v)))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("quat", func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// Read a Quat argument — a struct with exactly four `f32` fields — into `[f32; 4]` (slot order).
-    fn read_quat(&mut self, func: &str, value: Value, span: Span) -> Result<[f32; 4], Abort> {
-        let slots = value.slots().filter(|s| s.len() == 4);
-        let components: Option<[f32; 4]> = slots.and_then(|s| {
-            Some([
-                s[0].as_f32()?,
-                s[1].as_f32()?,
-                s[2].as_f32()?,
-                s[3].as_f32()?,
-            ])
-        });
-        components.ok_or_else(|| {
-            self.error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!(
-                    "`quat.{func}` expects a Quat (a struct of four f32 fields), found {}",
-                    value.type_name()
-                ),
-            )
-        })
-    }
-
-    /// Build a Quat result with the same shape as `like`, from four `f32` components.
-    fn build_quat(&self, like: Value, c: [f32; 4]) -> Value {
-        let shape = like.shape().expect("read_quat verified an object shape");
-        Value::object(
-            shape,
-            vec![
-                Value::f32(c[0]),
-                Value::f32(c[1]),
-                Value::f32(c[2]),
-                Value::f32(c[3]),
-            ],
         )
     }
 
@@ -4487,8 +4343,70 @@ fn marshal_native_arg(value: Value) -> lang_stdlib::NativeValue {
         NativeValue::Str(s)
     } else if let Some(b) = value.bytes_data() {
         NativeValue::Bytes(b)
+    } else if value.is_object() {
+        // An object with all-scalar fields (e.g. a `Vec3`) projects to its field scalars in slot
+        // order; anything with a non-scalar field is opaque (a dispatch that wanted an object will
+        // report the type error). Reading the slots mirrors the prior `read_vec3`.
+        match value.slots() {
+            Some(slots) => {
+                let fields: Option<Vec<Scalar>> =
+                    slots.iter().map(|s| value_to_scalar(*s)).collect();
+                match fields {
+                    Some(fields) => NativeValue::Object {
+                        type_name: value.type_name(),
+                        fields,
+                    },
+                    None => NativeValue::Opaque(value.type_name()),
+                }
+            }
+            None => NativeValue::Opaque(value.type_name()),
+        }
     } else {
         NativeValue::Opaque(value.type_name())
+    }
+}
+
+/// Project a primitive VM value onto a [`Scalar`], or `None` if it is not a primitive.
+fn value_to_scalar(value: Value) -> Option<lang_stdlib::Scalar> {
+    use lang_stdlib::Scalar;
+    if let Some(n) = value.as_int() {
+        Some(Scalar::Int(n))
+    } else if let Some(f) = value.as_f32() {
+        Some(Scalar::F32(f))
+    } else if let Some(f) = value.as_float() {
+        Some(Scalar::Float(f))
+    } else {
+        value.as_bool().map(Scalar::Bool)
+    }
+}
+
+fn scalar_to_value(scalar: lang_stdlib::Scalar) -> Value {
+    use lang_stdlib::Scalar;
+    match scalar {
+        Scalar::Int(n) => Value::int(n),
+        Scalar::Float(f) => Value::float(f),
+        Scalar::F32(f) => Value::f32(f),
+        Scalar::Bool(b) => Value::bool(b),
+    }
+}
+
+/// Lift a native-extension [`lang_stdlib::NativeOut`] result back into a VM value, supplying the
+/// result *shape* for an object result from the function's [`RetTy`] (the same shape as the named
+/// argument — e.g. `vec.add(v, w)` builds a value shaped like `v`).
+fn materialize_ext(out: lang_stdlib::NativeOut, ret: lang_stdlib::RetTy, args: &[Value]) -> Value {
+    use lang_stdlib::{NativeOut, RetTy};
+    match out {
+        NativeOut::Object(fields) => {
+            let i = match ret {
+                RetTy::SameAsArg(i) => i,
+                _ => 0,
+            };
+            let shape = args[i]
+                .shape()
+                .expect("an object result is shaped like an object argument");
+            Value::object(shape, fields.into_iter().map(scalar_to_value).collect())
+        }
+        other => materialize_native(other),
     }
 }
 
@@ -4505,6 +4423,11 @@ fn materialize_native(out: lang_stdlib::NativeOut) -> Value {
         NativeOut::Unit => Value::unit(),
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
         NativeOut::FileHandle(handle) => Value::file_handle(handle),
+        // Object results carry no shape, so they are built by `materialize_ext` (which has the
+        // function's `RetTy` + arguments) and never reach here.
+        NativeOut::Object(_) => {
+            unreachable!("object results are materialized by `materialize_ext`")
+        }
     }
 }
 
