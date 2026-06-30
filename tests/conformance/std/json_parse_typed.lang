@@ -1,0 +1,45 @@
+// `json.parse::<T>(text)` — call-site-typed deserialization (Phase B). Native code parses the JSON
+// and builds a value of the turbofish type `T` from a checker-resolved recipe: flat structs, nested
+// structs, lists, and optional fields. The parsed struct is a real instance (its methods work), and
+// both backends build identical values (differential).
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: stdout "Niro"
+// expect: stdout "3"
+// expect: stdout "true"
+// expect: stdout "42"
+// expect: stdout "20"
+// expect: stdout "none"
+// expect: stdout "some(hi)"
+// expect: exit 0
+use std.{json};
+
+struct Point {
+    x: int
+    y: int
+    fn sum(): int { return x + y; }
+}
+p = json.parse::<Point>("{\"x\": 1, \"y\": 2}");
+echo p.x;
+echo p.y;
+
+struct Person { name: string age: int active: bool }
+who = json.parse::<Person>("{\"name\": \"Niro\", \"age\": 3, \"active\": true}");
+echo who.name;
+echo who.age;
+echo who.active;
+
+// A parsed struct is a real instance — its methods are callable.
+q = json.parse::<Point>("{\"x\": 10, \"y\": 32}");
+echo q.sum();
+
+// Nested list of structs.
+pts = json.parse::<List<Point>>("[{\"x\":20,\"y\":10},{\"x\":3,\"y\":4}]");
+echo pts[0].x;
+
+// Optional fields: absent decodes to `none`, present to `some`.
+struct Opt { name: string note: ?string }
+a = json.parse::<Opt>("{\"name\": \"a\"}");
+echo a.note;
+b = json.parse::<Opt>("{\"name\": \"b\", \"note\": \"hi\"}");
+echo b.note;

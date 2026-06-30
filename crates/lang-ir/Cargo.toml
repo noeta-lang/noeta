@@ -9,6 +9,7 @@ rust-version.workspace = true
 [dependencies]
 lang-span = { workspace = true }
 lang-ast = { workspace = true }
+lang-stdlib = { workspace = true }
 lang-types = { workspace = true }
 lang-diagnostics = { workspace = true }
 

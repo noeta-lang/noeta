@@ -617,6 +617,7 @@ dependencies = [
  "lang-diagnostics",
  "lang-object",
  "lang-span",
+ "lang-stdlib",
 ]
 
 [[package]]
@@ -695,6 +696,7 @@ dependencies = [
  "lang-loader",
  "lang-parser",
  "lang-span",
+ "lang-stdlib",
  "lang-value",
  "lang-vm",
  "predicates",
@@ -715,6 +717,7 @@ dependencies = [
  "lang-loader",
  "lang-parser",
  "lang-span",
+ "lang-stdlib",
  "salsa",
 ]
 
@@ -765,6 +768,7 @@ dependencies = [
  "lang-lexer",
  "lang-parser",
  "lang-span",
+ "lang-stdlib",
  "lang-types",
 ]
 

@@ -83,6 +83,7 @@ impl Backend for TreeWalkBackend {
             program,
             &checked.packed_list_sites,
             &checked.index_field_sites,
+            &checked.ext_call_sites,
         )
         .expect("Core-IR lowering is total over the parsed language");
         let ir =

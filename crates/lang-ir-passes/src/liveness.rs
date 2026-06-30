@@ -567,6 +567,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(name);
             f(args);
         }
+        // `module.func::<T>(args)` reads each argument atom (`json.parse::<T>(s)`).
+        Rvalue::ExtCall { args, .. } => args.iter().for_each(&mut *f),
         Rvalue::Closure { .. } | Rvalue::AttributesOf { .. } | Rvalue::RolesOf { .. } => {}
     }
 }

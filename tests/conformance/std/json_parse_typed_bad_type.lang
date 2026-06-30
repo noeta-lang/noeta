@@ -1,0 +1,8 @@
+// `json.parse::<T>` is rejected at check time when `T` has no JSON decoding — an enum here (a sum
+// with no canonical JSON form; only value structs, scalars, lists, options and string-keyed maps
+// decode). A compile-time E0007, so both backends agree (the program never runs).
+// expect: error E0007 at 7:5
+use std.{json};
+enum Color { Red; Green; Blue; }
+c = json.parse::<Color>("\"Red\"");
+echo c;

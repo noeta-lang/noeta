@@ -1299,6 +1299,41 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `module.func::<T>(args)` — a call-site-typed native module call (`json.parse::<T>(s)`).
+        // The receiver is always a bare module name (never an arbitrary expression), so this is an
+        // atom — `ident . ident ::< T > ( args )` — rather than a postfix; that keeps it off the
+        // (arity-bounded) pratt op table and disambiguates cleanly: a plain identifier or a `.member`
+        // with no `::` fails here and falls through to `obj_or_ident` (then ordinary postfix calls).
+        let typed_module_call = ident_parser(ctx)
+            .then_ignore(just(T::Dot))
+            .then(ident_parser(ctx))
+            .then_ignore(just(T::ColonColon))
+            .then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .then(
+                ident_parser(ctx)
+                    .then_ignore(just(T::Colon))
+                    .or_not()
+                    .ignore_then(sub.clone())
+                    .separated_by(just(T::Comma))
+                    .collect::<Vec<_>>()
+                    .delimited_by(just(T::LParen), just(T::RParen)),
+            )
+            .map_with(move |(((module, func), ty), args), e| {
+                let (module_name, module_span) = module;
+                let (func, func_span) = func;
+                Expr::TypedModuleCall {
+                    recv: Box::new(Expr::Ident {
+                        name: module_name,
+                        span: module_span,
+                    }),
+                    func,
+                    func_span,
+                    ty,
+                    args,
+                    span: ctx.to_span(e.span()),
+                }
+            });
+
         // `roles_of()` — the semantic-role index query (P2.7). A keyword + empty `()` (no
         // type-argument; the index spans all role-tagged attributes), yielding `List<RoleBinding>`.
         let roles_of = just(T::RolesOfKw)
@@ -1343,6 +1378,7 @@ where
             from_bytes,
             roles_of,
             invoke,
+            typed_module_call,
             list,
             map,
             set,

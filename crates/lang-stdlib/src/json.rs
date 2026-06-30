@@ -104,10 +104,12 @@ fn decode(json: &Json, recipe: &TypeRecipe) -> Result<NativeOut, StdError> {
                 let mut slots = Vec::with_capacity(fields.len());
                 for (field, field_recipe) in fields {
                     match entries.iter().find(|(key, _)| key == field) {
-                        Some((_, value)) => slots.push(decode(value, field_recipe)?),
+                        Some((_, value)) => {
+                            slots.push((field.clone(), decode(value, field_recipe)?))
+                        }
                         // A missing optional field is `None`; a missing required field is an error.
                         None if matches!(field_recipe, TypeRecipe::Option(_)) => {
-                            slots.push(NativeOut::None)
+                            slots.push((field.clone(), NativeOut::None))
                         }
                         None => {
                             return Err(StdError {
@@ -243,8 +245,8 @@ mod tests {
             NativeOut::Struct {
                 name: "Point".into(),
                 fields: vec![
-                    NativeOut::Scalar(Scalar::Int(1)),
-                    NativeOut::Scalar(Scalar::Int(2)),
+                    ("x".into(), NativeOut::Scalar(Scalar::Int(1))),
+                    ("y".into(), NativeOut::Scalar(Scalar::Int(2))),
                 ],
             }
         );
@@ -264,7 +266,10 @@ mod tests {
             parse_typed("{\"a\": 1}", &recipe).unwrap(),
             NativeOut::Struct {
                 name: "Pair".into(),
-                fields: vec![NativeOut::Scalar(Scalar::Int(1)), NativeOut::None],
+                fields: vec![
+                    ("a".into(), NativeOut::Scalar(Scalar::Int(1))),
+                    ("b".into(), NativeOut::None),
+                ],
             }
         );
         // `a` absent → error.

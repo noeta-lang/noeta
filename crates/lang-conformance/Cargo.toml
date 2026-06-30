@@ -18,6 +18,7 @@ lang-backend = { workspace = true }
 lang-eval = { workspace = true }
 lang-value = { workspace = true }
 lang-check = { workspace = true }
+lang-stdlib = { workspace = true }
 lang-compiler = { workspace = true }
 lang-vm = { workspace = true }
 lang-db = { workspace = true }

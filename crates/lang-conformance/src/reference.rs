@@ -35,12 +35,19 @@ pub fn reference_run(
     sites: HashMap<Span, TypeRepr>,
     packed_list_sites: HashMap<Span, PackedLayout>,
     index_field_sites: HashSet<Span>,
+    ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     relevance: &lang_check::DestructorRelevance,
 ) -> RunResult {
     // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
     // and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+). Both ride on the IR, so
     // `run_ir` needs no map (the VM compiles the same).
-    let ir = lang_ir::lower_with_sites(program, &packed_list_sites, &index_field_sites).expect(
+    let ir = lang_ir::lower_with_sites(
+        program,
+        &packed_list_sites,
+        &index_field_sites,
+        &ext_call_sites,
+    )
+    .expect(
         "Core-IR lowering is total over the parsed language \
          (gate: ir_lowering_is_total_over_the_corpus)",
     );

@@ -345,6 +345,17 @@ pub enum Rvalue {
         args: Atom,
         span: Span,
     },
+    /// A call-site-typed native module call (`json.parse::<T>(args)`). `recipe` is the turbofish `T`
+    /// resolved by the checker (baked here from `ext_call_sites`); `None` means `T` had no decoding
+    /// (already a checker error), letting the backend fail cleanly. The backend marshals `args`, runs
+    /// the shared native function, and materializes the result tree into a value of `T`.
+    ExtCall {
+        module: String,
+        func: String,
+        args: Vec<Atom>,
+        recipe: Option<lang_stdlib::TypeRecipe>,
+        span: Span,
+    },
 }
 
 /// A statement in an IR [`Block`]. The `let`/`eval`/`bind`/`echo`/`return` forms are

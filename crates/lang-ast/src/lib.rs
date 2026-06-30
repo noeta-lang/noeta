@@ -718,6 +718,19 @@ pub enum Expr {
         blob: Box<Expr>,
         span: Span,
     },
+    /// A call-site-typed native module call `module.func::<T>(args)` — a native function whose
+    /// result type is named by the turbofish `T` (call-site-typed construction, Phase B). The only
+    /// such function today is `json.parse::<T>(text)`: native code parses `text` and builds a `T`
+    /// from a checker-resolved type recipe. `recv` is the module (an identifier, validated by the
+    /// checker), `func` the function name, `ty` the turbofish type, `args` the call arguments.
+    TypedModuleCall {
+        recv: Box<Expr>,
+        func: String,
+        func_span: Span,
+        ty: TypeRef,
+        args: Vec<Expr>,
+        span: Span,
+    },
     /// The reflection query `roles_of()` — the compiler-built `(declaration, Role)` index (P2.7),
     /// returned as a `List<RoleBinding>` (each `{ target: string, role: Role }`). Compile-time
     /// resolved from the attribute manifest's `@role(...)` tags; takes no operand.
@@ -893,6 +906,7 @@ impl Expr {
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
             | Expr::FromBytes { span, .. }
+            | Expr::TypedModuleCall { span, .. }
             | Expr::RolesOf { span }
             | Expr::Invoke { span, .. }
             | Expr::TypeTest { span, .. }
@@ -983,6 +997,7 @@ impl Expr {
                 args,
                 ..
             } => recv.mentions(name) || n.mentions(name) || args.mentions(name),
+            Expr::TypedModuleCall { recv, args, .. } => recv.mentions(name) || any(args),
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),

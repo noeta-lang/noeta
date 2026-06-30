@@ -716,6 +716,26 @@ impl Pretty for Expr {
             Expr::RolesOf { span: s } => {
                 out.push_str(&format!("(roles_of {})", span(*s)));
             }
+            Expr::TypedModuleCall {
+                recv,
+                func,
+                ty,
+                args,
+                span: s,
+                ..
+            } => {
+                out.push_str(&format!(
+                    "(typed-call {func} {} {}\n",
+                    type_ref_str(ty),
+                    span(*s)
+                ));
+                recv.pretty(out, level + 1);
+                for arg in args {
+                    out.push('\n');
+                    arg.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
             Expr::FieldSet {
                 receiver,
                 field,

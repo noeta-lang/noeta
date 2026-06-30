@@ -1,0 +1,7 @@
+// `json.parse::<T>` whose JSON does not match `T` is a runtime E0007 (a missing required field
+// here), identical in both backends — the typed decode is shared.
+// expect: error E0007 at 6:5
+use std.{json};
+struct Point { x: int y: int }
+p = json.parse::<Point>("{\"x\": 1}");
+echo p.x;

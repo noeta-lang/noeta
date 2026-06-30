@@ -15,6 +15,7 @@ lang-parser = { workspace = true }
 lang-bytecode = { workspace = true }
 lang-compiler = { workspace = true }
 lang-check = { workspace = true }
+lang-stdlib = { workspace = true }
 lang-loader = { workspace = true }
 salsa = { workspace = true }
 

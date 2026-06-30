@@ -189,6 +189,7 @@ fn execute_real_host(
         program,
         &checked.packed_list_sites,
         &checked.index_field_sites,
+        &checked.ext_call_sites,
     )
     .expect("Core-IR lowering is total over the parsed language");
     let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
@@ -925,6 +926,7 @@ fn bench_execute(
         program,
         &checked.packed_list_sites,
         &checked.index_field_sites,
+        &checked.ext_call_sites,
     )
     .expect("Core-IR lowering is total over the parsed language");
     let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));

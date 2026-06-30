@@ -1844,6 +1844,60 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, list);
                     frames[top].pc += 1;
                 }
+                Op::ExtCall {
+                    dst,
+                    module,
+                    func,
+                    args,
+                    recipe,
+                    span,
+                } => {
+                    // A call-site-typed native module call (`json.parse::<T>(s)`). The recipe is
+                    // required; its absence was already reported by the checker.
+                    let Some(recipe) = recipe else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("`{module}.{func}::<T>(...)` has no resolved result type"),
+                        ));
+                    };
+                    // The only call-site-typed native function today is `json.parse::<T>(text)`.
+                    if module == "json" && func == "parse" {
+                        let text = args
+                            .first()
+                            .map(|r| frames[top].regs[*r as usize])
+                            .and_then(|v| v.as_string());
+                        let Some(text) = text else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "`json.parse` expects a `string` argument".to_string(),
+                            ));
+                        };
+                        match lang_stdlib::json::parse_typed(&text, recipe) {
+                            Ok(out) => {
+                                let value = materialize_recipe(out);
+                                set_reg(&mut frames[top].regs, *dst, value);
+                            }
+                            Err(error) => {
+                                return Err(self.error(
+                                    stdlib_error_code(error.kind),
+                                    *span,
+                                    error.message,
+                                ));
+                            }
+                        }
+                    } else {
+                        return Err(self.error(
+                            DiagnosticCode::UnknownName,
+                            *span,
+                            format!(
+                                "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
+                            ),
+                        ));
+                    }
+                    frames[top].pc += 1;
+                }
                 Op::PackedListPush {
                     dst, list, value, ..
                 } => {
@@ -4697,6 +4751,48 @@ fn make_some(value: Value) -> Value {
 fn make_none() -> Value {
     let shape = Rc::new(Shape::enum_variant("Option", "none", Vec::new(), true));
     Value::enum_value(shape, Vec::new())
+}
+
+/// Materialize a `json.parse::<T>` result tree ([`lang_stdlib::NativeOut`]) into a VM value of `T`.
+/// A struct is built from a fresh same-name shape (exactly as reflection materializes attribute
+/// structs); method dispatch keys on the type *name*, so the instance behaves like a literal. The
+/// tree-walker builds the same value through its real type definition, so both backends agree.
+/// Every value is freshly built (refcount 1), so each container adopts its children with no extra
+/// retain (matching `materialize_native`/`attr_value_to_vm`).
+fn materialize_recipe(out: lang_stdlib::NativeOut) -> Value {
+    use lang_stdlib::{NativeOut, Scalar};
+    match out {
+        NativeOut::Scalar(Scalar::Int(n)) => Value::int(n),
+        NativeOut::Scalar(Scalar::Float(f)) => Value::float(f),
+        NativeOut::Scalar(Scalar::F32(f)) => Value::f32(f),
+        NativeOut::Scalar(Scalar::Bool(b)) => Value::bool(b),
+        NativeOut::Str(s) => Value::string(&s),
+        NativeOut::Bytes(b) => Value::bytes(b),
+        NativeOut::Unit => Value::unit(),
+        NativeOut::None => make_none(),
+        NativeOut::Some(inner) => make_some(materialize_recipe(*inner)),
+        NativeOut::List(items) => Value::list(items.into_iter().map(materialize_recipe).collect()),
+        NativeOut::Map(entries) => {
+            let mut map = BTreeMap::new();
+            for (key, value) in entries {
+                map.insert(key, materialize_recipe(value));
+            }
+            Value::map(map)
+        }
+        NativeOut::Struct { name, fields } => {
+            let names: Vec<String> = fields.iter().map(|(n, _)| n.clone()).collect();
+            let shape = Rc::new(Shape::object(ShapeKind::Struct, &name, names));
+            let values: Vec<Value> = fields
+                .into_iter()
+                .map(|(_, v)| materialize_recipe(v))
+                .collect();
+            Value::object(shape, values)
+        }
+        // `Object` (shape-from-argument) and `FileHandle` are never produced by a recipe decode.
+        NativeOut::Object(_) | NativeOut::FileHandle(_) => {
+            unreachable!("json.parse recipe decode never yields an Object/FileHandle result")
+        }
+    }
 }
 
 /// Convert a parsed JSON tree into a VM value: arrays become lists, objects become sorted-key

@@ -104,6 +104,9 @@ pub struct Checked {
     /// reason as `type_of_sites`: the eval reference reads it to lay flat lists out identically to
     /// the VM, computed once per check.
     pub packed_list_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// Call-site-typed native-call recipes (`json.parse::<T>`), carried here for the same reason as
+    /// `packed_list_sites`: the lowering bakes them into `Rvalue::ExtCall`, computed once per check.
+    pub ext_call_sites: std::collections::HashMap<Span, lang_stdlib::TypeRecipe>,
     /// `map(...)` call sites whose result element type is packed (P-PACK 2.6 category B), carried here
     /// for the same reason as `packed_list_sites`: the VM builds a flat `map` result at these spans.
     pub map_packed_sites: std::collections::HashMap<Span, lang_ast::reflect::PackedLayout>,
@@ -190,6 +193,7 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
         diagnostics: out.diagnostics,
         type_of_sites: out.type_of_sites,
         packed_list_sites: out.packed_list_sites,
+        ext_call_sites: out.ext_call_sites,
         map_packed_sites: out.map_packed_sites,
         index_field_sites: out.index_field_sites,
         destructor_relevance: out.destructor_relevance,
@@ -209,12 +213,14 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
     let packed = checked.packed_list_sites.clone();
     let map_packed = checked.map_packed_sites.clone();
     let index_fields = checked.index_field_sites.clone();
+    let ext = checked.ext_call_sites.clone();
     Bytecode(lang_compiler::compile_with_sites(
         &parsed.0.program,
         sites,
         packed,
         map_packed,
         index_fields,
+        ext,
         &checked.destructor_relevance,
     ))
 }
@@ -313,6 +319,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
                 diagnostics: out.diagnostics,
                 type_of_sites: out.type_of_sites,
                 packed_list_sites: out.packed_list_sites,
+                ext_call_sites: out.ext_call_sites,
                 map_packed_sites: out.map_packed_sites,
                 index_field_sites: out.index_field_sites,
                 destructor_relevance: out.destructor_relevance,
@@ -322,6 +329,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             diagnostics: diags.clone(),
             type_of_sites: std::collections::HashMap::new(),
             packed_list_sites: std::collections::HashMap::new(),
+            ext_call_sites: std::collections::HashMap::new(),
             map_packed_sites: std::collections::HashMap::new(),
             index_field_sites: std::collections::HashSet::new(),
             destructor_relevance: lang_check::DestructorRelevance::default(),
@@ -342,12 +350,14 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
             let packed = checked.packed_list_sites.clone();
             let map_packed = checked.map_packed_sites.clone();
             let index_fields = checked.index_field_sites.clone();
+            let ext = checked.ext_call_sites.clone();
             Bytecode(lang_compiler::compile_with_sites(
                 program,
                 sites,
                 packed,
                 map_packed,
                 index_fields,
+                ext,
                 &checked.destructor_relevance,
             ))
         }

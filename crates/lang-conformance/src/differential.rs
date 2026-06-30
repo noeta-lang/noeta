@@ -168,11 +168,13 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
     let sites = checked.type_of_sites.clone();
     let packed = checked.packed_list_sites.clone();
     let index_fields = checked.index_field_sites.clone();
+    let ext = checked.ext_call_sites.clone();
     let tree = reference_run(
         &parsed.0.program,
         sites,
         packed,
         index_fields,
+        ext,
         &checked.destructor_relevance,
     );
     match &lang_db::bytecode(&db, src).0 {
@@ -220,11 +222,13 @@ fn compare_backends_workspace(
     let sites = checked.type_of_sites.clone();
     let packed = checked.packed_list_sites.clone();
     let index_fields = checked.index_field_sites.clone();
+    let ext = checked.ext_call_sites.clone();
     let tree = reference_run(
         program,
         sites,
         packed,
         index_fields,
+        ext,
         &checked.destructor_relevance,
     );
     match &lang_db::linked_bytecode(&db, ws).0 {

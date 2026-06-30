@@ -1115,6 +1115,101 @@ impl Interpreter {
                 let args_val = self.eval_ir_atom(args, frame)?;
                 self.invoke_dynamic(receiver, name_val, args_val, *span)
             }
+            lang_ir::Rvalue::ExtCall {
+                module,
+                func,
+                args,
+                recipe,
+                span,
+            } => {
+                let arg_vals: Vec<Value> = args
+                    .iter()
+                    .map(|a| self.eval_ir_atom(a, frame))
+                    .collect::<Result<_, _>>()?;
+                // The recipe is required; its absence was already reported by the checker.
+                let Some(recipe) = recipe else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!("`{module}.{func}::<T>(...)` has no resolved result type"),
+                    ));
+                };
+                // The only call-site-typed native function today is `json.parse::<T>(text)`.
+                if module == "json" && func == "parse" {
+                    let Some(Value::Str(text)) = arg_vals.first() else {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            "`json.parse` expects a `string` argument".to_string(),
+                        ));
+                    };
+                    match lang_stdlib::json::parse_typed(text, recipe) {
+                        Ok(out) => self.materialize_recipe(out, *span),
+                        Err(error) => Err(self.runtime_error(
+                            crate::std_error_code(error.kind),
+                            *span,
+                            error.message,
+                        )),
+                    }
+                } else {
+                    Err(self.runtime_error(
+                        DiagnosticCode::UnknownName,
+                        *span,
+                        format!(
+                            "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
+                        ),
+                    ))
+                }
+            }
+        }
+    }
+
+    /// Materialize a `json.parse::<T>` result tree ([`lang_stdlib::NativeOut`]) into a value of `T`.
+    /// A struct is built through [`Self::construct_object`] — its real registered definition, so the
+    /// instance has its methods/defaults exactly like a literal; the VM builds a matching same-name
+    /// shape, so both backends agree.
+    fn materialize_recipe(&mut self, out: lang_stdlib::NativeOut, span: Span) -> Eval<Value> {
+        use lang_stdlib::{NativeOut, Scalar};
+        match out {
+            NativeOut::Scalar(Scalar::Int(n)) => Ok(Value::Int(n)),
+            NativeOut::Scalar(Scalar::Float(f)) => Ok(Value::Float(f)),
+            NativeOut::Scalar(Scalar::F32(f)) => Ok(Value::F32(f)),
+            NativeOut::Scalar(Scalar::Bool(b)) => Ok(Value::Bool(b)),
+            NativeOut::Str(s) => Ok(Value::Str(s)),
+            NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
+            NativeOut::Unit => Ok(Value::Unit),
+            NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
+            NativeOut::Some(inner) => {
+                let value = self.materialize_recipe(*inner, span)?;
+                Ok(crate::builtin_enum("Option", "some", vec![value]))
+            }
+            NativeOut::List(items) => {
+                let mut values = Vec::with_capacity(items.len());
+                for item in items {
+                    values.push(self.materialize_recipe(item, span)?);
+                }
+                Ok(Value::list(values))
+            }
+            NativeOut::Map(entries) => {
+                let mut map = std::collections::BTreeMap::new();
+                for (key, value) in entries {
+                    let value = self.materialize_recipe(value, span)?;
+                    map.insert(key, value);
+                }
+                Ok(Value::Map(Rc::new(map)))
+            }
+            NativeOut::Struct { name, fields } => {
+                let mut field_values = Vec::with_capacity(fields.len());
+                for (fname, fout) in fields {
+                    let value = self.materialize_recipe(fout, span)?;
+                    field_values.push((fname, span, value));
+                }
+                self.construct_object(&name, span, field_values, None, span)
+            }
+            // `Object` (shape-from-argument) and `FileHandle` are never produced by a recipe decode.
+            NativeOut::Object(_) | NativeOut::FileHandle(_) => {
+                unreachable!("json.parse recipe decode never yields an Object/FileHandle result")
+            }
         }
     }
 

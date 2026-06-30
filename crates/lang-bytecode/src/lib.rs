@@ -594,6 +594,18 @@ pub enum Op {
         err_shape: u32,
         span: Span,
     },
+    /// A call-site-typed native module call (`json.parse::<T>(args)`): `dst = T`. The VM marshals the
+    /// argument registers, runs the shared native function (keyed by `module`/`func`), and
+    /// materializes the result tree into a value of `T` per `recipe` (the checker-resolved turbofish
+    /// type; `None` means `T` had no decoding — a checker error — and the VM raises at `span`).
+    ExtCall {
+        dst: Reg,
+        module: String,
+        func: String,
+        args: Box<[Reg]>,
+        recipe: Option<lang_stdlib::TypeRecipe>,
+        span: Span,
+    },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the
     /// next arm). Three variants for the three literal pattern kinds.
     MatchInt {
@@ -1208,6 +1220,19 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             args,
             ..
         } => format!("Invoke      r{dst} <- invoke(r{recv}, r{name}, r{args})"),
+        Op::ExtCall {
+            dst,
+            module,
+            func,
+            args,
+            ..
+        } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!(
+                "ExtCall     r{dst} <- {module}.{func}::<T>({})",
+                args.join(", ")
+            )
+        }
         Op::IsType { dst, src, target } => {
             format!("IsType      r{dst} <- r{src} is {target:?}")
         }

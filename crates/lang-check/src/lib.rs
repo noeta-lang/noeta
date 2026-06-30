@@ -99,6 +99,10 @@ pub struct Checked {
     pub type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// Call-site-typed native-call recipes (`json.parse::<T>`): the turbofish `T` resolved into a
+    /// [`lang_stdlib::TypeRecipe`] the lowering bakes into `Rvalue::ExtCall`. A pure function of the
+    /// program, like the other site maps.
+    pub ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     /// `map(...)` call spans whose result element type is packed → the result element's layout. The
     /// VM's `map` builtin builds a flat result at these sites (P-PACK 2.6 category B); invisible to
     /// `RunResult`, so the eval reference may ignore it and stay boxed.
@@ -129,6 +133,7 @@ pub fn check_all(program: &Program) -> Checked {
         diagnostics: checker.diags,
         type_of_sites: checker.type_of_sites,
         packed_list_sites: checker.packed_list_sites,
+        ext_call_sites: checker.ext_call_sites,
         map_packed_sites: checker.map_packed_sites,
         index_field_sites: checker.index_field_sites,
         destructor_relevance: checker.relevance,
@@ -475,6 +480,10 @@ struct Checker {
     /// two backends pick the same representation by construction (the flat layout stays invisible to
     /// `RunResult`).
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// Call-site-typed native-call recipes (`json.parse::<T>`), keyed by the `Expr::TypedModuleCall`
+    /// span → the turbofish `T` resolved into a [`lang_stdlib::TypeRecipe`]. Both backends harvest
+    /// this on the same program, so the lowering bakes identical recipes into `Rvalue::ExtCall`.
+    ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
     /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
     /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
@@ -2851,6 +2860,69 @@ impl Checker {
                 }
                 Type::List(Box::new(elem))
             }
+            Expr::TypedModuleCall {
+                recv,
+                func,
+                func_span,
+                ty,
+                args,
+                span,
+            } => {
+                let module = match recv.as_ref() {
+                    Expr::Ident { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                // Arguments are synthesized (checked as expressions) regardless of which function.
+                let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
+                // The only call-site-typed native function today is `json.parse::<T>(text)`. (When
+                // more land, this resolves through the registry's `RetTy::TypeArg` functions; the
+                // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.)
+                if module == "json" && func == "parse" {
+                    if arg_types.len() != 1 {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`json.parse::<T>` takes 1 argument, found {}",
+                                arg_types.len()
+                            ),
+                        ));
+                    } else if !matches!(arg_types[0], Type::String)
+                        && !arg_types[0].defers_to_runtime()
+                    {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            args[0].span(),
+                            format!("`json.parse` expects a `string`, found `{}`", arg_types[0]),
+                        ));
+                    }
+                } else {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::UnknownName,
+                        *func_span,
+                        format!(
+                            "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
+                        ),
+                    ));
+                }
+                self.check_type_ref(ty);
+                let t = Type::from_ref(ty);
+                // Record the build recipe; a type with no JSON decoding (an enum, class, generic, …)
+                // is an error here.
+                match self.type_to_recipe(&t) {
+                    Some(recipe) => {
+                        self.ext_call_sites.insert(*span, recipe);
+                    }
+                    None => {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("`{t}` cannot be deserialized from JSON with `json.parse`"),
+                        ));
+                    }
+                }
+                t
+            }
             Expr::Invoke {
                 recv, name, args, ..
             } => {
@@ -3490,6 +3562,48 @@ impl Checker {
     /// Recurses through nested packed fields, flattening them inline. `check_packed_struct` has
     /// already guaranteed every field of a packed struct is packable, so the field walk never bails on
     /// a well-typed program; the `?`s defend against a malformed registry (and an unpacked element).
+    /// Resolve a checker [`Type`] into a [`lang_stdlib::TypeRecipe`] for call-site-typed
+    /// deserialization (`json.parse::<T>`), or `None` if `T` has no JSON decoding: an enum or class
+    /// (a reference/identity type, or a sum with no canonical JSON form), a tuple/set/result/`dyn`,
+    /// a non-string-keyed map, a generic instantiation, or a struct with any such field. A struct
+    /// records its fields in **declared order** (so the decoder emits them in the order the backend's
+    /// registered type expects).
+    fn type_to_recipe(&self, ty: &Type) -> Option<lang_stdlib::TypeRecipe> {
+        use lang_stdlib::TypeRecipe;
+        Some(match ty {
+            Type::Int => TypeRecipe::Int,
+            Type::Float => TypeRecipe::Float,
+            Type::F32 => TypeRecipe::F32,
+            Type::Bool => TypeRecipe::Bool,
+            Type::String => TypeRecipe::Str,
+            Type::Unit => TypeRecipe::Unit,
+            Type::Option(e) => TypeRecipe::Option(Box::new(self.type_to_recipe(e)?)),
+            Type::List(e) => TypeRecipe::List(Box::new(self.type_to_recipe(e)?)),
+            // JSON object keys are strings, so only string-keyed maps decode.
+            Type::Map(k, v) if matches!(**k, Type::String) => {
+                TypeRecipe::Map(Box::new(self.type_to_recipe(v)?))
+            }
+            // Only a non-generic value struct decodes (a class is reference/identity; an enum has no
+            // canonical JSON shape). The field set is the declared record fields, in order.
+            Type::Named(name, args)
+                if args.is_empty()
+                    && self.type_kinds.get(name) == Some(&lang_types::TypeKind::Struct) =>
+            {
+                let fields = self
+                    .records
+                    .get(name)?
+                    .iter()
+                    .map(|(fname, fty)| Some((fname.clone(), self.type_to_recipe(fty)?)))
+                    .collect::<Option<Vec<_>>>()?;
+                TypeRecipe::Struct {
+                    name: name.clone(),
+                    fields,
+                }
+            }
+            _ => return None,
+        })
+    }
+
     fn packed_layout(&self, ty: &Type) -> Option<lang_ast::reflect::PackedLayout> {
         use lang_ast::reflect::{PackedField, PackedKind, PackedLayout};
         let Type::Named(name, args) = ty else {

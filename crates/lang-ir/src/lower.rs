@@ -67,7 +67,7 @@ enum BodyKind<'a> {
 /// reads to the unfused [`Rvalue::Index`] + [`Rvalue::Field`]; see [`lower_with_sites`] to also
 /// stream `List<packed>` literals into a flat buffer and fuse indexed field reads.
 pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
-    lower_with_sites(program, &HashMap::new(), &HashSet::new())
+    lower_with_sites(program, &HashMap::new(), &HashSet::new(), &HashMap::new())
 }
 
 /// As [`lower`], but driven by the checker's lowering-site maps (both pure functions of the program,
@@ -87,11 +87,13 @@ pub fn lower_with_sites(
     program: &AstProgram,
     packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: &HashSet<Span>,
+    ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
 ) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
         temps: 0,
         packed_list_sites,
         index_field_sites,
+        ext_call_sites,
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -113,6 +115,9 @@ struct Lowerer<'a> {
     /// The checker's fusable `list[i].field` set (keyed by the member-access span). Empty on the
     /// unfused paths; a hit enables emitting [`Rvalue::IndexField`] in the `Expr::Member` arm.
     index_field_sites: &'a HashSet<Span>,
+    /// The checker's call-site-typed native-call recipes (`json.parse::<T>`), keyed by the
+    /// `Expr::TypedModuleCall` span. Baked into [`Rvalue::ExtCall`]; empty on the bare `lower` path.
+    ext_call_sites: &'a HashMap<Span, lang_stdlib::TypeRecipe>,
 }
 
 impl Lowerer<'_> {
@@ -870,6 +875,36 @@ impl Lowerer<'_> {
                     Rvalue::FromBytes {
                         blob,
                         layout,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            Expr::TypedModuleCall {
+                recv,
+                func,
+                args,
+                span,
+                ..
+            } => {
+                let module = match recv.as_ref() {
+                    Expr::Ident { name, .. } => name.clone(),
+                    _ => String::new(),
+                };
+                let args = args
+                    .iter()
+                    .map(|a| self.lower_expr(a, out))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // The recipe was resolved by the checker at this span (the same channel the other
+                // typed sites use); `None` means `T` had no decoding (already a checker error).
+                let recipe = self.ext_call_sites.get(span).cloned();
+                Ok(self.emit(
+                    out,
+                    Rvalue::ExtCall {
+                        module,
+                        func: func.clone(),
+                        args,
+                        recipe,
                         span: *span,
                     },
                     *span,

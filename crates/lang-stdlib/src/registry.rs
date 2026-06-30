@@ -73,15 +73,15 @@ pub enum NativeOut {
     /// A file handle (`fs.open`). The shared dispatch builds the backend-agnostic
     /// [`crate::FileHandle`]; each backend wraps it in its own mutable-handle value.
     FileHandle(crate::FileHandle),
-    /// A struct/record instance built by a call-site type recipe (`json.parse::<T>`): the type
-    /// name and its fields **in the type's declared order** (the recipe records fields in that
-    /// order, so the decoder preserves it). Unlike [`NativeOut::Object`] — whose shape is supplied
-    /// from an argument via [`RetTy::SameAsArg`] — a `Struct` names its own type, so the backend
-    /// looks the registered type up by name and builds the instance (methods and layout match a
-    /// normal literal). The fields are themselves `NativeOut`, so nesting recurses.
+    /// A value-struct instance built by a call-site type recipe (`json.parse::<T>`): the type name
+    /// and its `(field, value)` pairs **in the type's declared order**. Unlike [`NativeOut::Object`]
+    /// — whose shape is supplied from an argument via [`RetTy::SameAsArg`] — a `Struct` names its own
+    /// type, so the backend builds the instance by name (the tree-walker through its real registered
+    /// definition, so methods/defaults match a normal literal; the VM through a fresh same-name shape,
+    /// as reflection already does). Field values are themselves `NativeOut`, so nesting recurses.
     Struct {
         name: String,
-        fields: Vec<NativeOut>,
+        fields: Vec<(String, NativeOut)>,
     },
     /// A string-keyed map (a JSON object decoded under a `Map` recipe), entries in key order.
     Map(Vec<(String, NativeOut)>),

@@ -104,6 +104,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.packed_list_sites,
         checked.map_packed_sites,
         checked.index_field_sites,
+        checked.ext_call_sites,
         &checked.destructor_relevance,
     )
 }
@@ -130,6 +131,7 @@ pub fn compile_with_sites(
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: HashSet<Span>,
+    ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
     compile_inner(
@@ -138,17 +140,22 @@ pub fn compile_with_sites(
         packed_list_sites,
         map_packed_sites,
         index_field_sites,
+        ext_call_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
     )
 }
 
+// Threads the checker's several lowering-site maps plus relevance through to the IR lowering; each
+// is a distinct precomputed input, so they are passed positionally rather than bundled.
+#[allow(clippy::too_many_arguments)]
 fn compile_inner(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: HashSet<Span>,
+    ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     relevance: Option<lang_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -163,11 +170,15 @@ fn compile_inner(
     // flat buffer (P-PACK 2.5; the resolved layout rides on the IR rvalue, so the bytecode compiler
     // reads it from there at `PackedListNew` and needs no separate span map of its own), and the
     // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+).
-    let ir = lang_ir::lower_with_sites(program, &packed_list_sites, &index_field_sites).map_err(
-        |u| Unsupported {
-            reason: format!("not yet lowered to the Core IR: {}", u.feature),
-        },
-    )?;
+    let ir = lang_ir::lower_with_sites(
+        program,
+        &packed_list_sites,
+        &index_field_sites,
+        &ext_call_sites,
+    )
+    .map_err(|u| Unsupported {
+        reason: format!("not yet lowered to the Core IR: {}", u.feature),
+    })?;
     let ir = lang_ir_passes::insert_drops(&ir, relevance.as_ref());
     // Thread in-place-reuse tokens (Phase 5) onto self-update constructors. A pure function of the
     // drop-annotated IR, run identically by the IR interpreter (`reference_run`), so both backends
@@ -2292,6 +2303,24 @@ impl<'m> FnCompiler<'m> {
                 args,
                 span,
             } => self.lower_invoke(recv, name, args, dst, *span),
+            Rvalue::ExtCall {
+                module,
+                func,
+                args,
+                recipe,
+                span,
+            } => {
+                let args = self.atom_regs(args)?;
+                self.code.push(Op::ExtCall {
+                    dst,
+                    module: module.clone(),
+                    func: func.clone(),
+                    args,
+                    recipe: recipe.clone(),
+                    span: *span,
+                });
+                Ok(())
+            }
         }
     }
 
