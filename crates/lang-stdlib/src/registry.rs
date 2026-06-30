@@ -73,6 +73,22 @@ pub enum NativeOut {
     /// A file handle (`fs.open`). The shared dispatch builds the backend-agnostic
     /// [`crate::FileHandle`]; each backend wraps it in its own mutable-handle value.
     FileHandle(crate::FileHandle),
+    /// A struct/record instance built by a call-site type recipe (`json.parse::<T>`): the type
+    /// name and its fields **in the type's declared order** (the recipe records fields in that
+    /// order, so the decoder preserves it). Unlike [`NativeOut::Object`] — whose shape is supplied
+    /// from an argument via [`RetTy::SameAsArg`] — a `Struct` names its own type, so the backend
+    /// looks the registered type up by name and builds the instance (methods and layout match a
+    /// normal literal). The fields are themselves `NativeOut`, so nesting recurses.
+    Struct {
+        name: String,
+        fields: Vec<NativeOut>,
+    },
+    /// A string-keyed map (a JSON object decoded under a `Map` recipe), entries in key order.
+    Map(Vec<(String, NativeOut)>),
+    /// `Option::None` — an absent optional field, or a JSON `null` decoded under an `Option` recipe.
+    None,
+    /// `Option::Some(x)` — a present optional value.
+    Some(Box<NativeOut>),
 }
 
 /// lang-stdlib's small signature vocabulary. lang-stdlib cannot depend on `lang_types::Type` (that
@@ -106,9 +122,39 @@ pub enum RetTy {
     SameAsArg(usize),
     /// `int` if every argument is concretely `int`, else `float` (`math.abs`/`min`/`max`).
     NumericPreserving,
-    /// The result type is named at the call site by a turbofish (`json.parse::<T>(): T`).
-    /// No in-scope consumer yet — reserved for the Phase B construction work.
+    /// The result type is named at the call site by a turbofish (`json.parse::<T>(): T`). The
+    /// concrete `T` arrives as a [`TypeRecipe`] the checker records at the call site and the backend
+    /// threads into the dispatch (call-site-typed construction).
     TypeArg,
+}
+
+/// A recursive build recipe for a call-site type argument (`json.parse::<T>`). The checker resolves
+/// the turbofish `T` into a `TypeRecipe`; the dispatch walks an input (a JSON tree) against it to
+/// produce a [`NativeOut`] tree the backend materializes into a value of `T`.
+///
+/// lang-stdlib cannot see `lang_types::Type` (the very reason the checker's type tables live in
+/// `lang-check`), so the recipe is this neutral, self-contained vocabulary — a leaf type the
+/// bytecode op can carry and the dispatch can walk without any type-system dependency. A struct
+/// records its fields **in declared order**, with field names, so the decoder both matches input
+/// keys and emits fields in the order the backend's registered type expects.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeRecipe {
+    Int,
+    Float,
+    F32,
+    Bool,
+    Str,
+    /// The unit value (a JSON `null`).
+    Unit,
+    Option(Box<TypeRecipe>),
+    List(Box<TypeRecipe>),
+    /// A string-keyed map; the boxed recipe is the value type (JSON object keys are always strings).
+    Map(Box<TypeRecipe>),
+    /// A struct/record type: its name and `(field, recipe)` pairs in the type's declared order.
+    Struct {
+        name: String,
+        fields: Vec<(String, TypeRecipe)>,
+    },
 }
 
 /// One native function's static signature (for the checker and tooling). Dispatch is per-module

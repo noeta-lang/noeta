@@ -3607,6 +3607,11 @@ fn materialize_native(out: lang_stdlib::NativeOut) -> Value {
         NativeOut::Object(_) => {
             unreachable!("object results are materialized by `materialize_ext`")
         }
+        // Recipe results (`json.parse::<T>`) name their own types, so they are built by the
+        // typed-call path (which has the interpreter's type registry), not this free function.
+        NativeOut::Struct { .. } | NativeOut::Map(_) | NativeOut::None | NativeOut::Some(_) => {
+            unreachable!("recipe results are materialized by the typed-call path")
+        }
     }
 }
 

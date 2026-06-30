@@ -33,6 +33,7 @@ pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush};
 pub use host::{Host, SandboxHost};
 pub use registry::{
     ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType, StdExtension,
+    TypeRecipe,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
