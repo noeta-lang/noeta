@@ -250,6 +250,10 @@ pub(crate) enum IterState {
     Map { source: Value, func: Value },
     /// Yield the elements of `source` for which `pred(element)` is true (`filter(f)`, Track I.1c).
     Filter { source: Value, pred: Value },
+    /// A generator (Track G): `step` is a closure (a state machine over `mut`-captured cells) called
+    /// once per element with one resume argument, returning `?T` (`some(x)` → element, `none` → end).
+    /// Owns one reference to the closure.
+    Gen { step: Value },
 }
 
 /// A snapshot of an [`IterState`]'s shape, with its child [`Value`]s (Copy) and counters copied out.
@@ -265,6 +269,7 @@ pub(crate) enum IterShape {
     Zip { a: Value, b: Value },
     Map { source: Value, func: Value },
     Filter { source: Value, pred: Value },
+    Gen { step: Value },
 }
 
 impl IterState {
@@ -279,6 +284,7 @@ impl IterState {
             IterState::Zip { a, b } => [Some(*a), Some(*b)],
             IterState::Map { source, func } => [Some(*source), Some(*func)],
             IterState::Filter { source, pred } => [Some(*source), Some(*pred)],
+            IterState::Gen { step } => [Some(*step), None],
         }
     }
 
@@ -313,6 +319,7 @@ impl IterState {
                 source: *source,
                 pred: *pred,
             },
+            IterState::Gen { step } => IterShape::Gen { step: *step },
         }
     }
 }

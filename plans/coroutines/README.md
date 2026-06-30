@@ -144,13 +144,51 @@ reference objects).
 
 `yield` as sugar onto the substrate.
 
-- A function containing `yield` lowers (in `lang-ir`) to a `class` implementing `Iterator`: locals
-  live across a `yield` become fields, the body becomes a `next()` state machine, each `yield e`
-  returns `some(e)` and parks at the next state, falling off the end returns `none`.
+- A function containing `yield` is a **generator**; it lowers to a **closure state machine wrapped in
+  an iterator** (see the representation note below), each `yield e` returns `some(e)` and parks at the
+  next state, falling off the end returns `none`.
 - Inherits the **coloring** limit (no `yield` inside a closure passed to `map`) and the
   restricted-control-flow-across-suspend rules from the substrate.
 - Determinism: in-oracle, same as Track I — a generator is just an `Iterator` whose `next()` happens
   to be a generated state machine.
+
+### Representation — closure state machine wrapped in an `Iterator` (decided 2026-06-30)
+
+Rather than synthesizing a fresh `class` per generator (which would also need the `for`/iterator
+machinery to recognize a *user* class as an `Iterator`, which it does not), a generator lowers to an
+**ordinary closure** whose captured **mutable cells** hold the state (a `$state` discriminant + the
+locals live across a `yield`), wrapped in **one new `IterState::Gen { step }` variant** of the Track-I
+`Value::Iter`. This reuses everything already built — closures, `mut`-captured cells, `match`,
+`Option`, and the Track-I iterator/adapter protocol — so the transform is a **pure lowering producing
+ordinary constructs**, and both backends run it identically by construction (no runtime suspension, no
+new value kind beyond the `Iter` variant). `Gen`'s `next()` calls the step closure (reusing the I.1c
+closure-from-`next` applier — the step takes one ignored *resume* argument, forward-compatible with
+Track A passing a real resume value) and interprets its returned `?T` (`some(x)` → element, `none` →
+end). Because `Gen` is just another `IterState`, generators **compose with every adapter for free**
+(`count().map(f).take(10)`).
+
+The step closure body is the state machine: `loop { match $state { 0 => …; n => return none } }`,
+where a control-flow edge sets `$state` and re-enters the dispatch loop, and a `yield e` sets `$state`
+to its successor and `return some(e)`. The hard compiler content (shared with Track A) is **liveness
+across a `yield`** (which locals become cells) and **mapping structured control flow to states**.
+
+### Typing (decided 2026-06-30 — see also the consolidated points)
+
+Generators type cleanly in the inferred-static system precisely because we chose **pure pull**
+(`next() -> ?T`, no argument): `yield` is a **statement**, not a value-producing expression, so there
+is no "type sent into the generator" to infer (unlike Python/JS bidirectional generators).
+
+- **Return type is plain `Iterator<T>`** — the Track-I type, no new surface type, no `Generator<T>`.
+- **Marker is syntactic**: a function body containing `yield` *is* a generator (no `gen fn` keyword).
+- **Checking mode, not inference**: with the declared `: Iterator<T>` (required at boundaries by
+  E0022 anyway), the checker checks each `yield e` against `T` bidirectionally — `e <: T` or E0007.
+- **Un-annotated generators** (a local `fn`/closure with `yield` and no return type) are the only
+  inference case: synthesize `T` as the join of the `yield` expression types — the **same mechanism as
+  list-literal element inference** (E0023 when it can't be determined / yields disagree).
+- **`return` in a generator**: bare `return;` ends iteration; **`return e;` (with a value) is
+  forbidden** (there is no completion-value type under pure pull) → E0007/E0039.
+- **Diagnostics**: `yield` value ≠ element type → E0007; `yield` outside a generator, or inside a
+  closure passed to a builtin (coloring), or `return e;` in a generator → the E0039 budget.
 
 ## Track A — async/await (planned now, built later)
 
@@ -194,6 +232,12 @@ Decision points to settle before A is built (none block I/G):
 3. ✅ **RESOLVED — `next()` returns `?T`** (folded into #2).
 4. **Generator coloring + restricted control flow across a suspend** — confirm the stackless limits
    are acceptable (open; Track G, not needed for Track I).
+4b. ✅ **RESOLVED — generator typing** (2026-06-30). Return is plain `Iterator<T>` (no new type, no
+   `gen` keyword — `yield` in the body marks it); the declared element type makes `yield e` a
+   *checking-mode* `e <: T` (E0007); un-annotated local generators synthesize `T` as the join of the
+   yields (list-literal inference path, E0023); `return e;` with a value is forbidden under pure pull.
+   See the Track-G *Typing* note. Possible because `next()` takes no argument, so `yield` is a
+   statement (no send-type).
 5. ✅ **RESOLVED — (b) deterministic executor as an injected capability** (2026-06-30). Two impls: a
    deterministic single-threaded sandbox executor (in-oracle, simulation-testable, built first) and
    the real tokio executor (production, out-of-oracle) — the FoundationDB "simulate deterministically,

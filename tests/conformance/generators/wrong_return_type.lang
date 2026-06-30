@@ -1,0 +1,8 @@
+// Track G.1a — a generator (a function that uses `yield`) must declare its return type as
+// `Iterator<T>`; any other return type is E0039.
+// expect: error E0039 at 5:4
+// expect: exit 1
+fn nums(): int {
+    yield 1
+}
+echo "x"

@@ -79,6 +79,9 @@ pub enum Stmt {
     },
     /// `return <expr>;` or `return;`.
     Return { value: Option<Expr>, span: Span },
+    /// `yield <expr>;` — produce the next element of a generator (Track G). Only valid in a generator
+    /// body (a function containing `yield`); checked, then desugared into the state machine.
+    Yield { value: Expr, span: Span },
     /// `if cond { ... } else if cond { ... } else { ... }`. An `else if` is represented
     /// as an `else_body` containing a single nested `If`.
     If {
@@ -141,6 +144,7 @@ impl Stmt {
             | Stmt::Namespace { span, .. }
             | Stmt::Use { span, .. }
             | Stmt::Return { span, .. }
+            | Stmt::Yield { span, .. }
             | Stmt::If { span, .. }
             | Stmt::For { span, .. }
             | Stmt::While { span, .. }

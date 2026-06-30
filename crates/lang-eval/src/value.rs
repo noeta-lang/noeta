@@ -94,6 +94,8 @@ pub enum IterState {
     Map { source: Value, func: Value },
     /// Yield the elements of `source` for which `pred(element)` is true (`filter(f)`, Track I.1c).
     Filter { source: Value, pred: Value },
+    /// A generator (Track G): `step` is a closure called once per element, returning `?T`.
+    Gen { step: Value },
 }
 
 /// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,

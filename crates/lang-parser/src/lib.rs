@@ -1729,6 +1729,15 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `yield <expr>` — a generator step (Track G). The value is required (no bare `yield`).
+        let yield_ = just(T::YieldKw)
+            .ignore_then(expr.clone())
+            .then_ignore(stmt_terminator())
+            .map_with(move |value, e| Stmt::Yield {
+                value,
+                span: ctx.to_span(e.span()),
+            });
+
         let break_ = just(T::BreakKw)
             .then_ignore(stmt_terminator())
             .map_with(move |_, e| Stmt::Break {
@@ -2727,6 +2736,7 @@ where
             echo,
             mut_binding,
             return_,
+            yield_,
             if_,
             for_,
             while_,

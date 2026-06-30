@@ -1,0 +1,8 @@
+// Track G.1a — a `yield`ed value is checked against the generator's element type `T` (from the
+// declared `Iterator<T>` return), in checking mode: a `string` where `int` is expected is E0007.
+// expect: error E0007 at 6:11
+// expect: exit 1
+fn nums(): Iterator<int> {
+    yield "hi"
+}
+echo "x"

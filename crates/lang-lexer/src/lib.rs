@@ -33,6 +33,10 @@ pub enum TokenKind {
     FnKw,
     #[token("return")]
     ReturnKw,
+    /// `yield expr` — produce the next element of a generator (Track G). A function whose body
+    /// contains `yield` is a generator returning an `Iterator<T>`.
+    #[token("yield")]
+    YieldKw,
     #[token("if")]
     IfKw,
     /// The conditional-expression keyword: `if cond then a else b`. Forks the grammar from the
@@ -272,6 +276,7 @@ impl TokenKind {
             TokenKind::FalseKw => "FalseKw",
             TokenKind::FnKw => "FnKw",
             TokenKind::ReturnKw => "ReturnKw",
+            TokenKind::YieldKw => "YieldKw",
             TokenKind::IfKw => "IfKw",
             TokenKind::ThenKw => "ThenKw",
             TokenKind::ElseKw => "ElseKw",
@@ -364,6 +369,7 @@ impl TokenKind {
             TokenKind::FalseKw => "`false`",
             TokenKind::FnKw => "`fn`",
             TokenKind::ReturnKw => "`return`",
+            TokenKind::YieldKw => "`yield`",
             TokenKind::IfKw => "`if`",
             TokenKind::ThenKw => "`then`",
             TokenKind::ElseKw => "`else`",

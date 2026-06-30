@@ -1,0 +1,9 @@
+// Track G.1a — a generator's `return` cannot carry a value (no completion type under pure-pull
+// `next() -> ?T`); only bare `return;` ends iteration. A value is E0039.
+// expect: error E0039 at 7:5
+// expect: exit 1
+fn nums(): Iterator<int> {
+    yield 1
+    return 9
+}
+echo "x"

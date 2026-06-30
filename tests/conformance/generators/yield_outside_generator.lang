@@ -1,0 +1,6 @@
+// Track G.1a — `yield` is only valid inside a generator (a function whose body contains `yield`).
+// At the top level it is E0039.
+// expect: error E0039 at 6:1
+// expect: exit 1
+echo "start"
+yield 5

@@ -125,6 +125,12 @@ impl Pretty for Stmt {
                     None => out.push_str(&format!("(return {})", span(*s))),
                 }
             }
+            Stmt::Yield { value, span: s } => {
+                indent(out, level);
+                out.push_str(&format!("(yield {}\n", span(*s)));
+                value.pretty(out, level + 1);
+                out.push(')');
+            }
             Stmt::If {
                 cond,
                 then_body,

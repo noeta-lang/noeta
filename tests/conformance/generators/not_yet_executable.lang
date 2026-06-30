@@ -1,0 +1,11 @@
+// Track G.1a — a well-formed generator type-checks (correct `Iterator<int>` return, `yield`ed values
+// match the element type), but is not yet executable: the `yield` state-machine lowering lands in
+// G.1b. Until then a clean generator is gated with E0039 (rather than panicking the lowering). This
+// case pins that the typing accepts the generator shape — only the execution gate fires.
+// expect: error E0039 at 7:4
+// expect: exit 1
+fn nums(): Iterator<int> {
+    yield 1
+    yield 2
+}
+echo "x"

@@ -606,6 +606,13 @@ impl Value {
         heap::alloc(Payload::Iter(IterState::Filter { source, pred }))
     }
 
+    /// A generator iterator (Track G): `step` is a closure (a state machine over `mut`-captured cells)
+    /// invoked once per `next()` and returning `?T`. Owns one reference to the closure.
+    pub fn iter_gen(step: Value) -> Value {
+        step.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Gen { step }))
+    }
+
     /// Whether this is an iterator.
     pub fn is_iter(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter(_)))
@@ -767,8 +774,37 @@ impl Value {
                         }
                     }
                 }
+                // A generator (Track G): run the step closure (one resume arg, here unit) and
+                // interpret its returned `?T`. `option_take` consumes the returned Option wrapper.
+                IterShape::Gen { step } => {
+                    let opt = match apply(step, Value::unit()) {
+                        Ok(v) => v,
+                        Err(err) => return Err(IterAbort::Closure(err)),
+                    };
+                    return Ok(opt.option_take());
+                }
             }
         }
+    }
+
+    /// Deconstruct an `Option` value a generator step returned: `some(x)` → `Some(x)` (the payload
+    /// retained for the new owner), `none`/anything else → `None`. Consumes one reference to `self`
+    /// (the Option wrapper).
+    fn option_take(self) -> Option<Value> {
+        if !self.is_pointer() {
+            return None;
+        }
+        let extracted = heap::with_payload(self, |p| match p {
+            Payload::Enum { shape, data } if shape.variant.as_deref() == Some("some") => {
+                data.first().copied()
+            }
+            _ => None,
+        });
+        if let Some(x) = extracted {
+            x.inc_ref(); // retain for the new owner before the wrapper is released
+        }
+        self.release(); // drop the Option wrapper (its `some` payload now survives via the bump above)
+        extracted
     }
 
     /// Advance a **closure-free** iterator (no `map`/`filter` in the pipeline). The caller must have
@@ -2702,6 +2738,56 @@ mod tests {
             _ => panic!("expected a FilterNotBool abort"),
         }
         filtered2.release();
+        assert_eq!(live_count(), before);
+    }
+
+    #[test]
+    fn generator_iterator_steps_and_frees_without_leaking() {
+        // Track G: a `Gen` iterator drives a step closure returning `?T`. Here a Rust closure stands
+        // in for the lowered generator (the real backend passes a real closure), building an `Option`
+        // each call. Exercises `option_take`'s some-payload extraction + Option-wrapper release with
+        // heap elements, plus the adapter owning the heap step value — live count returns to baseline.
+        let before = live_count();
+
+        let some_shape = std::rc::Rc::new(lang_object::Shape::enum_variant(
+            "Option",
+            "some",
+            vec!["0".into()],
+            true,
+        ));
+        let none_shape = std::rc::Rc::new(lang_object::Shape::enum_variant(
+            "Option",
+            "none",
+            Vec::new(),
+            true,
+        ));
+
+        let step = Value::string("step"); // heap stand-in for the closure the adapter retains
+        let g = Value::iter_gen(step);
+        step.release(); // `g` is now the sole owner of `step`
+
+        let mut calls = 0;
+        let mut apply = |_s: Value, arg: Value| -> Result<Value, ()> {
+            arg.release(); // the resume argument is consumed by the call
+            calls += 1;
+            Ok(match calls {
+                1 => Value::enum_value(std::rc::Rc::clone(&some_shape), vec![Value::string("a")]),
+                2 => Value::enum_value(std::rc::Rc::clone(&some_shape), vec![Value::string("b")]),
+                _ => Value::enum_value(std::rc::Rc::clone(&none_shape), Vec::new()),
+            })
+        };
+
+        let mut out = Vec::new();
+        while let Some(e) = g.iter_next_apply(&mut apply).expect("no abort") {
+            out.push(e);
+        }
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].as_string().as_deref(), Some("a"));
+        for e in out {
+            e.release();
+        }
+        g.release(); // frees the generator and its step value
+        drop((some_shape, none_shape));
         assert_eq!(live_count(), before);
     }
 

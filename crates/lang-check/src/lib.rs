@@ -468,6 +468,11 @@ struct Checker {
     /// (a named function declares its return, so its `return`s are checked, not collected). Saved and
     /// restored around each closure so nesting is correct.
     collected_returns: Option<Vec<Type>>,
+    /// When `Some(T)`, the checker is inside a **generator** body (a function containing `yield`)
+    /// whose element type is `T`: each `yield e` is checked `e <: T` (Track G). `None` outside a
+    /// generator, so a stray `yield` is `E0039`. Saved/restored around each function and reset to
+    /// `None` when entering a closure (so `yield` cannot cross a closure boundary — the coloring rule).
+    current_yield: Option<Type>,
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
@@ -1143,6 +1148,20 @@ impl Checker {
         expected: Option<&Type>,
         env: &mut Env,
     ) -> Type {
+        // A closure is a fresh callable: an enclosing generator's `yield` context does not cross into
+        // it (a `yield` inside a closure is E0039 — the coloring rule). Restored after the body.
+        let saved_yield = self.current_yield.take();
+        let result = self.closure_body_type_inner(body, expected, env);
+        self.current_yield = saved_yield;
+        result
+    }
+
+    fn closure_body_type_inner(
+        &mut self,
+        body: &lang_ast::ClosureBody,
+        expected: Option<&Type>,
+        env: &mut Env,
+    ) -> Type {
         match body {
             lang_ast::ClosureBody::Expr(e) => match expected {
                 Some(exp) => self.check(e, exp, env),
@@ -1295,7 +1314,21 @@ impl Checker {
             Stmt::Expr { expr, .. } => {
                 self.check(expr, &Type::Unknown, env);
             }
-            Stmt::Return { value, .. } => {
+            Stmt::Return { value, span } => {
+                // In a generator, only bare `return;` is allowed (it ends iteration); a value has no
+                // place under pure-pull `next() -> ?T` (no completion type) → E0039.
+                if self.current_yield.is_some() {
+                    if value.is_some() {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::GeneratorMisuse,
+                            *span,
+                            "a generator's `return` cannot carry a value; use bare `return;` to end \
+                             iteration (the elements come from `yield`)"
+                                .to_string(),
+                        ));
+                    }
+                    return;
+                }
                 // Check the returned value against the enclosing function's declared return
                 // (`current_ret` is `Unknown` when inferring a closure, so the check is a no-op
                 // there), and — when inferring a block-bodied closure's return — record its type so
@@ -1309,6 +1342,25 @@ impl Checker {
                 };
                 if let Some(returns) = &mut self.collected_returns {
                     returns.push(ty);
+                }
+            }
+            Stmt::Yield { value, span } => {
+                // `yield e` is valid only inside a generator (a function containing `yield`), where it
+                // is checked against the element type `T` of the declared `Iterator<T>` return.
+                match self.current_yield.clone() {
+                    Some(elem) => {
+                        self.check(value, &elem, env);
+                    }
+                    None => {
+                        self.synth(value, env); // still type the operand for nested checks
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::GeneratorMisuse,
+                            *span,
+                            "`yield` is only valid inside a generator (a function whose body \
+                             contains `yield`, returning `Iterator<T>`)"
+                                .to_string(),
+                        ));
+                    }
                 }
             }
             Stmt::If {
@@ -1454,6 +1506,32 @@ impl Checker {
             .as_ref()
             .map(Type::from_ref)
             .unwrap_or(Type::Unknown);
+        // A function whose body contains `yield` is a generator (Track G): its declared return must
+        // be `Iterator<T>`, and its body's `yield e` are checked against the element type `T`. The
+        // yield context is reset for a non-generator (so an enclosing generator's context does not
+        // leak into a nested ordinary function) and saved/restored around the body.
+        let is_generator = body_has_yield(&decl.body);
+        let yield_elem = if is_generator {
+            match &ret {
+                Type::Named(n, args) if n == stdlib::ITERATOR => {
+                    Some(args.first().cloned().unwrap_or(Type::Unknown))
+                }
+                _ => {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::GeneratorMisuse,
+                        decl.name_span,
+                        format!(
+                            "a generator (a function that uses `yield`) must declare its return \
+                             type as `Iterator<T>`, found `{ret}`"
+                        ),
+                    ));
+                    Some(Type::Unknown)
+                }
+            }
+        } else {
+            None
+        };
+        let saved_yield = std::mem::replace(&mut self.current_yield, yield_elem);
         let saved_ret = std::mem::replace(&mut self.current_ret, ret);
         // A function body is a fresh control-flow context: `break`/`continue` inside it cannot
         // target a loop the *enclosing* code is in, so reset the depth (restored after).
@@ -1469,12 +1547,32 @@ impl Checker {
         for p in &decl.params {
             bind(env, &p.name, param_type(p));
         }
+        let diags_before_body = self.diags.len();
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
+        }
+        // G.1a gate: generator typing is complete, but the state-machine lowering that makes a
+        // generator *run* lands in G.1b. A well-formed generator (correct `Iterator<T>` return, a
+        // body that otherwise type-checks) gets a clean diagnostic rather than reaching the unfinished
+        // lowering (which would panic the "lowering is total" invariant). Suppressed when the body
+        // already has an error, so a specific diagnostic (e.g. a `yield` type mismatch) is not
+        // duplicated.
+        if self.current_yield.is_some()
+            && matches!(self.current_ret, Type::Named(ref n, _) if n == stdlib::ITERATOR)
+            && self.diags.len() == diags_before_body
+        {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::GeneratorMisuse,
+                decl.name_span,
+                "generators are not yet executable — the `yield` state-machine lowering lands in a \
+                 follow-up slice (Track G.1b)"
+                    .to_string(),
+            ));
         }
         env.pop();
         self.in_dev_tier = saved_dev_tier;
         self.current_ret = saved_ret;
+        self.current_yield = saved_yield;
         self.loop_depth = saved_loop_depth;
         self.type_params = saved_type_params;
     }
@@ -4262,7 +4360,15 @@ impl Checker {
 /// maps to a bool. It resolves to a [`Type::Named`] but is a legal annotation, so the unknown-type
 /// check (`E0013`) accepts it. (The bare `list`/`map`/`set` spellings are now lattice built-ins —
 /// they desugar to collections of `dyn`.)
-const PRELUDE_TYPES: &[&str] = &["Ordering", "Type", "Semantic", "RoleBinding"];
+const PRELUDE_TYPES: &[&str] = &[
+    "Ordering",
+    "Type",
+    "Semantic",
+    "RoleBinding",
+    // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
+    // generator returns produce `Iterator<T>` values.
+    "Iterator",
+];
 
 /// The built-in trait an operand of `op` must satisfy, for the trait-backed operators: arithmetic
 /// (`+ - * /` → `Add`/`Sub`/`Mul`/`Div`) and ordering (`< <= > >=` → `Comparable`). `%` (no trait —
@@ -4384,6 +4490,26 @@ fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
             ret: Box::new(apply_subst(ret, subst)),
         },
         other => other.clone(),
+    }
+}
+
+/// Whether a statement sequence contains a `yield` (Track G), making its enclosing function a
+/// **generator**. Descends into control-flow bodies (`if`/`for`/`while`) but **not** into nested
+/// function declarations or closures — a `yield` there belongs to that inner callable, not this one.
+fn body_has_yield(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_has_yield)
+}
+
+fn stmt_has_yield(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Yield { .. } => true,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_has_yield(then_body) || else_body.as_deref().is_some_and(body_has_yield),
+        Stmt::For { body, .. } | Stmt::While { body, .. } => body_has_yield(body),
+        _ => false,
     }
 }
 

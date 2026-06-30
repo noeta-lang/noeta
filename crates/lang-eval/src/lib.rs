@@ -3415,6 +3415,7 @@ enum IterShape {
     Zip { a: Value, b: Value },
     Map { source: Value, func: Value },
     Filter { source: Value, pred: Value },
+    Gen { step: Value },
 }
 
 impl Interpreter {
@@ -3463,6 +3464,7 @@ impl Interpreter {
                     source: source.clone(),
                     pred: pred.clone(),
                 },
+                IterState::Gen { step } => IterShape::Gen { step: step.clone() },
             };
             match shape {
                 // No recursion, no user code: read and advance the cursor under one short borrow.
@@ -3543,6 +3545,15 @@ impl Interpreter {
                         return Ok(None);
                     };
                     return Ok(Some(self.call(func, vec![elem], span)?));
+                }
+                // A generator (Track G): run the step closure (one resume arg, here unit) and
+                // interpret its returned `?T` — `some(x)` → element, `none`/other → end.
+                IterShape::Gen { step } => {
+                    let opt = self.call(step, vec![Value::Unit], span)?;
+                    return Ok(match opt {
+                        Value::Enum(e) if e.variant == "some" => e.data.first().cloned(),
+                        _ => None,
+                    });
                 }
                 IterShape::Filter { source, pred } => loop {
                     let Some(elem) = self.iter_value_next(&source, span)? else {

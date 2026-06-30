@@ -202,6 +202,20 @@ impl Lowerer<'_> {
                 });
                 Ok(())
             }
+            // `yield` (Track G) is desugared into the generator state machine in a dedicated pass
+            // (Track G.1b). Until that lands, every generator is gated as a checker error (E0039 "not
+            // yet executable"), so a `yield` never reaches a *run* path through a clean program. To
+            // keep lowering **total** (the `lower(...).expect(...)` invariant the eval backend and the
+            // determinism property test rely on — both lower regardless of diagnostics), the interim
+            // lowering evaluates the operand for effect and discards it, like an expression statement.
+            // Replaced by the real state-machine desugar in G.1b.
+            AstStmt::Yield { value, .. } => {
+                let atom = self.lower_expr(value, out)?;
+                if let Atom::Temp(t) = atom {
+                    out.push(Stmt::Drop(t));
+                }
+                Ok(())
+            }
             AstStmt::If {
                 cond,
                 then_body,

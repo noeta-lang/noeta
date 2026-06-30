@@ -152,6 +152,11 @@ pub enum DiagnosticCode {
     /// `bool`) and other packed structs may be packed, never a heap value (string/list/map/class/
     /// enum/`dyn`/unbounded generic).
     InvalidPackedType,
+    /// A generator construct is misused (Track G): `yield` appears outside a generator (or, later,
+    /// inside a closure passed to a builtin — the coloring rule), a generator's declared return type
+    /// is not `Iterator<T>`, or a `return` with a value appears in a generator (only bare `return;`
+    /// ends iteration — there is no completion value under pure-pull `next() -> ?T`).
+    GeneratorMisuse,
 }
 
 impl DiagnosticCode {
@@ -196,6 +201,7 @@ impl DiagnosticCode {
         DiagnosticCode::UnknownTier,
         DiagnosticCode::InvalidDirectiveArgument,
         DiagnosticCode::InvalidPackedType,
+        DiagnosticCode::GeneratorMisuse,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -240,6 +246,7 @@ impl DiagnosticCode {
             DiagnosticCode::UnknownTier => "E0036",
             DiagnosticCode::InvalidDirectiveArgument => "E0037",
             DiagnosticCode::InvalidPackedType => "E0038",
+            DiagnosticCode::GeneratorMisuse => "E0039",
         }
     }
 
