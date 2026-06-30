@@ -148,6 +148,7 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
         packed,
         index_fields,
         checked.ext_call_sites.clone(),
+        checked.for_stream_sites.clone(),
         &checked.destructor_relevance,
     );
     record(report, name, "eval", lang_eval::live_count() - before);
@@ -189,6 +190,7 @@ fn measure_workspace(name: &str, raw: &lang_loader::RawWorkspace, report: &mut L
         packed,
         index_fields,
         checked.ext_call_sites.clone(),
+        checked.for_stream_sites.clone(),
         &checked.destructor_relevance,
     );
     record(report, name, "eval", lang_eval::live_count() - before);

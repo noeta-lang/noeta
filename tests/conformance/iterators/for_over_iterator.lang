@@ -1,0 +1,49 @@
+// Track I.2 — `for` drives a lazy `Iterator<T>` directly: it streams via `next()` instead of
+// materializing a list, so a `map`/`filter` pipeline runs element-by-element and an early `break`
+// stops the source. `continue` re-advances; tuple-destructuring `for (i, x)` rides along via the
+// existing `enumerate` desugar. A `for` over a plain collection keeps its fast cursor (unchanged).
+// expect: stdout "60"
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[20]"
+// expect: stdout "0:a|1:b|2:c|"
+// expect: stdout "6"
+// expect: exit 0
+
+// Streams a map pipeline (sum of 10+20+30).
+xs = [1, 2, 3]
+mut total = 0
+for x in xs.iter().map(fn(n) => n * 10) {
+    total = total + x
+}
+echo total
+
+// Early `break` stops the source after the threshold.
+ys = [1, 2, 3, 4, 5, 6, 7, 8]
+mut seen = []
+for y in ys.iter().map(fn(n) => n * 2) {
+    seen ~= [y]
+    if y >= 6 { break }
+}
+echo seen
+
+// `continue` re-advances; a filter+map pipeline streams.
+mut evens = []
+for v in xs.iter().filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10) {
+    if v == 0 { continue }
+    evens ~= [v]
+}
+echo evens
+
+// Tuple destructuring over `enumerate()` (the desugar rides along on the streaming loop).
+mut s = ""
+for (i, c) in ["a", "b", "c"].iter().enumerate() {
+    s = s ~ "${i}:${c}|"
+}
+echo s
+
+// A plain collection `for` is unchanged (fast cursor).
+mut c = 0
+for n in [1, 2, 3] {
+    c = c + n
+}
+echo c

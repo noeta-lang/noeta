@@ -194,6 +194,11 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*list);
             f.uses.push(*index);
         }
+        // Defines two registers (`elem` here, `has` via `extra_defs`); reads the iterator.
+        Op::IterForNext { iter, elem, .. } => {
+            f.def = Some(*elem);
+            f.uses.push(*iter);
+        }
         Op::CallBuiltin { dst, args, .. } => {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
@@ -401,8 +406,13 @@ fn op_facts(op: &Op) -> OpFacts {
 /// Registers an op writes *in addition* to its primary `def`. No current op is multi-def (the only
 /// one, `DestructurePair`, was retired with the tuple-destructure migration — object-model slice 4b),
 /// but the mechanism is kept so a future multi-def op needs no liveness rework.
-fn extra_defs(_op: &Op) -> Option<Reg> {
-    None
+fn extra_defs(op: &Op) -> Option<Reg> {
+    // `IterForNext` writes a second register — the bool continue flag (its element is the primary
+    // `def`); both must be treated as defined by liveness (Track I.2).
+    match op {
+        Op::IterForNext { has, .. } => Some(*has),
+        _ => None,
+    }
 }
 
 /// Per-instruction live-register sets, as fixed-width bitsets (one `u64` word per 64 registers).
@@ -605,6 +615,13 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(list);
             m(index);
+        }
+        Op::IterForNext {
+            iter, elem, has, ..
+        } => {
+            m(iter);
+            m(elem);
+            m(has);
         }
         Op::CallBuiltin { dst, args, .. } => {
             m(dst);

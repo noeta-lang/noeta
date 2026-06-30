@@ -67,7 +67,13 @@ enum BodyKind<'a> {
 /// reads to the unfused [`Rvalue::Index`] + [`Rvalue::Field`]; see [`lower_with_sites`] to also
 /// stream `List<packed>` literals into a flat buffer and fuse indexed field reads.
 pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
-    lower_with_sites(program, &HashMap::new(), &HashSet::new(), &HashMap::new())
+    lower_with_sites(
+        program,
+        &HashMap::new(),
+        &HashSet::new(),
+        &HashMap::new(),
+        &HashSet::new(),
+    )
 }
 
 /// As [`lower`], but driven by the checker's lowering-site maps (both pure functions of the program,
@@ -88,12 +94,14 @@ pub fn lower_with_sites(
     packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: &HashSet<Span>,
     ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
+    for_stream_sites: &HashSet<Span>,
 ) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
         temps: 0,
         packed_list_sites,
         index_field_sites,
         ext_call_sites,
+        for_stream_sites,
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -118,6 +126,9 @@ struct Lowerer<'a> {
     /// The checker's call-site-typed native-call recipes (`json.parse::<T>`), keyed by the
     /// `Expr::TypedModuleCall` span. Baked into [`Rvalue::ExtCall`]; empty on the bare `lower` path.
     ext_call_sites: &'a HashMap<Span, lang_stdlib::TypeRecipe>,
+    /// The checker's streaming-`for` set (keyed by the `for` statement's span): the iterable is
+    /// statically an `Iterator<T>`, so the lowered [`Stmt::For`] gets `stream: true` (Track I.2).
+    for_stream_sites: &'a HashSet<Span>,
 }
 
 impl Lowerer<'_> {
@@ -227,6 +238,7 @@ impl Lowerer<'_> {
                 body,
                 span,
             } => {
+                let stream = self.for_stream_sites.contains(span);
                 let iterable = self.lower_expr(iterable, out)?;
                 match pattern {
                     AstForPattern::Single { .. } => {
@@ -236,6 +248,7 @@ impl Lowerer<'_> {
                             iterable,
                             body,
                             span: *span,
+                            stream,
                         });
                     }
                     // A tuple destructure `for (a, b, …) in …` (object-model slice 4b) desugars to a
@@ -257,6 +270,7 @@ impl Lowerer<'_> {
                             iterable,
                             body: Block::stmts(body_stmts),
                             span: *span,
+                            stream,
                         });
                     }
                 }

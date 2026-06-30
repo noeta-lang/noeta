@@ -413,12 +413,16 @@ pub enum Stmt {
         span: Span,
     },
     /// `for pattern in iterable { body }`. The iterable is pre-computed to an atom; the
-    /// loop pattern reuses the surface [`ForPattern`].
+    /// loop pattern reuses the surface [`ForPattern`]. `stream` is set (from the checker's
+    /// `for_stream_sites`) when the iterable is statically an `Iterator<T>` (Track I.2): the loop
+    /// then drives `next()` one element at a time instead of snapshotting a list, so a lazy source
+    /// streams (and `break` stops early). A collection iterable keeps the snapshot/cursor fast path.
     For {
         pattern: ForPattern,
         iterable: Atom,
         body: Block,
         span: Span,
+        stream: bool,
     },
     /// `match scrutinee { arms }`. When the match is used as an expression its value is
     /// written to `dst`; in statement position `dst` is `None`. Patterns reuse the surface

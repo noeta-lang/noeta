@@ -335,6 +335,16 @@ pub enum Op {
         list: Reg,
         index: Reg,
     },
+    /// Streaming `for` step (Track I.2): advance the iterator in `iter` (a `Value::Iter`) one element.
+    /// On success `elem` ← the next element (retained, owned) and `has` ← `true`; at end `elem` ← unit
+    /// and `has` ← `false`. A `map`/`filter` closure runs here, so it can raise (a closure error, or a
+    /// non-bool `filter` verdict → E0007) at `span`. The loop tests `has` to continue or exit.
+    IterForNext {
+        iter: Reg,
+        elem: Reg,
+        has: Reg,
+        span: Span,
+    },
     /// `dst = builtin(args...)` — a prelude collection builtin (`len`/`map`/`filter`/`sum`).
     /// `map`/`filter` re-enter the VM to call their closure argument per element.
     CallBuiltin {
@@ -1057,6 +1067,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::IterSnapshot { dst, src, .. } => format!("IterSnapshot r{dst} <- r{src}"),
         Op::ListLen { dst, src, .. } => format!("ListLen     r{dst} <- len r{src}"),
         Op::ListGet { dst, list, index } => format!("ListGet     r{dst} <- r{list}[r{index}]"),
+        Op::IterForNext {
+            iter, elem, has, ..
+        } => format!("IterForNext r{elem}, r{has} <- next r{iter}"),
         Op::CallBuiltin {
             dst, builtin, args, ..
         } => {

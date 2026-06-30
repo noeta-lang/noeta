@@ -31,6 +31,7 @@ fn lowered_ir(src: &str) -> String {
         &checked.packed_list_sites,
         &checked.index_field_sites,
         &checked.ext_call_sites,
+        &checked.for_stream_sites,
     )
     .expect("lowering is total over the parsed language");
     lang_ir::dump(&ir)

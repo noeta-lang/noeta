@@ -175,6 +175,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
         packed,
         index_fields,
         ext,
+        checked.for_stream_sites.clone(),
         &checked.destructor_relevance,
     );
     match &lang_db::bytecode(&db, src).0 {
@@ -229,6 +230,7 @@ fn compare_backends_workspace(
         packed,
         index_fields,
         ext,
+        checked.for_stream_sites.clone(),
         &checked.destructor_relevance,
     );
     match &lang_db::linked_bytecode(&db, ws).0 {

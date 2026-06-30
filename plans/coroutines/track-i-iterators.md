@@ -102,10 +102,30 @@ VM needs validating. So:
     (O(1) extra vs O(stages·n) intermediate lists) **and on early termination**: with `take(10)` after
     `map→filter`, lazy is **~27× faster** at n=1k (4.8µs vs 131µs) and the gap widens with n (lazy is
     ~constant in n, eager O(n)).
-- **I.2 — `for` over the protocol (optimization/unification, optional).** Rewrite the `for` lowering
-  to drive `iter()`/`next()` instead of `iter_elements`' eager `Vec` materialization, so `for` over a
-  lazy source streams. Keep a fast cursor for built-in collections. Tuple-destructuring `for (a,b)`
-  rides along. Diagnostic budget: next free **E0039** (not-iterable / `next` must return `?T`).
+- **I.2 — `for` over the protocol. ✅ DONE** (2026-06-30): a `for` whose iterable is statically an
+  `Iterator<T>` now **streams** via `next()` instead of failing ("cannot iterate over iterator"), so a
+  lazy `map`/`filter` pipeline runs element-by-element and an early `break` stops the source. **Built-in
+  collections keep their snapshot/cursor fast path untouched** (no per-element iterator-dispatch
+  regression on hot `for i in 0..N` loops). The decision is **static**: the checker records each
+  `for`-over-`Iterator` span in `Checked.for_stream_sites`; IR lowering reads it to set a new
+  `Stmt::For.stream` flag on the node, so **both backends read the decision off the shared IR** — no
+  runtime type test, no runtime channel. VM: a streaming `for` lowers to a new op `Op::IterForNext`
+  (advance → `elem` + a bool `has`; runs any `map`/`filter` closure via `iter_for_next`, mapping an
+  `IterAbort` to the native error) + `JumpIfFalse has`; `continue` re-advances (no index increment).
+  The regalloc models its two defs via the existing `extra_defs` slot. Tree-walker: `exec_ir_for`
+  branches on `stream`, driving `iter_value_next`. The iterator value stays in its source register/temp,
+  released by the post-`for` `Drop` (the same machinery the snapshot path uses) — leak-clean both
+  backends. Also tightened the checker's `for`-element typing (Set→elem, Map→value, Iterator→T, not
+  just List). No new diagnostic code needed (E0039 stays free): a non-iterable `for` is still the
+  existing E0007, and a streaming source is checker-proven an iterator. Conformance
+  `iterators/for_over_iterator.lang` (stream + early-break + continue + tuple-destructure + plain-
+  collection-unchanged); 340 conformance / differential 331 / 0-skipped / backends agree, leaks 0 both,
+  clippy/fmt/workspace clean.
+
+**TRACK I COMPLETE (I.1a–I.1c + I.2).** The lazy-iterator protocol — `iter()` → `Iterator<T>`,
+`next()`/`collect()`/`count()`/`sum()` terminals, `take`/`drop`/`chain`/`enumerate`/`zip`/`map`/`filter`
+adapters (all fused, closure adapters included), and streaming `for` — is in. Next on the parent plan:
+Track G (generators / `yield`) and Track A (async/await), both building on this same stackless substrate.
 
 ## Verification (every sub-slice)
 

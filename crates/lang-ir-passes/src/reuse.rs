@@ -475,11 +475,13 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>, bound: &HashSet<String>) -> S
             iterable,
             body,
             span,
+            stream,
         } => Stmt::For {
             pattern: pattern.clone(),
             iterable: iterable.clone(),
             body: rewrite_block(body, od, bound),
             span: *span,
+            stream: *stream,
         },
         Stmt::Match {
             scrutinee,

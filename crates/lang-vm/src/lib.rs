@@ -1295,6 +1295,16 @@ impl<'m> Vm<'m> {
         })
     }
 
+    /// Advance an iterator one element for a streaming `for` (Track I.2) — drives `iter_next_apply`
+    /// with the closure applier (so `map`/`filter` run) and maps an abort to the VM's native error.
+    fn iter_for_next(&mut self, iter: Value, span: Span) -> Result<Option<Value>, Abort> {
+        let stepped = {
+            let mut apply = |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+            iter.iter_next_apply(&mut apply)
+        };
+        stepped.map_err(|err| self.iter_abort(err, span))
+    }
+
     /// Map an iterator-pull abort (Track I.1c) back into the VM's native error: a closure failure
     /// carries its `Abort` through unchanged; a non-bool `filter` verdict becomes a `TypeMismatch`.
     fn iter_abort(&mut self, err: lang_value::IterAbort<Abort>, span: Span) -> Abort {
@@ -2257,6 +2267,28 @@ impl<'m> Vm<'m> {
                         .expect("the loop keeps the index in bounds");
                     retain(element);
                     set_reg(&mut frames[top].regs, *dst, element);
+                    frames[top].pc += 1;
+                }
+                // Streaming `for` step (Track I.2): advance the iterator, binding the element + a bool
+                // continue flag. A `map`/`filter` closure runs here (via `iter_for_next`), so it can
+                // abort. `set_reg` releases the previous element / flag each iteration.
+                Op::IterForNext {
+                    iter,
+                    elem,
+                    has,
+                    span,
+                } => {
+                    let it = frames[top].regs[*iter as usize];
+                    match self.iter_for_next(it, *span)? {
+                        Some(element) => {
+                            set_reg(&mut frames[top].regs, *elem, element);
+                            set_reg(&mut frames[top].regs, *has, Value::bool(true));
+                        }
+                        None => {
+                            set_reg(&mut frames[top].regs, *elem, Value::unit());
+                            set_reg(&mut frames[top].regs, *has, Value::bool(false));
+                        }
+                    }
                     frames[top].pc += 1;
                 }
                 Op::CallBuiltin {

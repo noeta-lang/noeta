@@ -113,6 +113,9 @@ pub struct Checked {
     /// The fusable `list[i].field` set (P-PACK 2.5+), carried here for the same reason as
     /// `packed_list_sites`: both backends read it to fuse indexed field reads identically.
     pub index_field_sites: std::collections::HashSet<Span>,
+    /// Streaming-`for` site set (Track I.2), carried here for the same reason as the other site
+    /// maps: the lowering sets `Stmt::For.stream` from it so both backends stream the same loops.
+    pub for_stream_sites: std::collections::HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b), threaded into the compiler so the drop pass
     /// annotates each `DropVar` — carried here for the same reason as `type_of_sites` (compute the
     /// checker's result once, reuse it without a second run).
@@ -196,6 +199,7 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
         ext_call_sites: out.ext_call_sites,
         map_packed_sites: out.map_packed_sites,
         index_field_sites: out.index_field_sites,
+        for_stream_sites: out.for_stream_sites,
         destructor_relevance: out.destructor_relevance,
     }
 }
@@ -221,6 +225,7 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
         map_packed,
         index_fields,
         ext,
+        checked.for_stream_sites.clone(),
         &checked.destructor_relevance,
     ))
 }
@@ -322,6 +327,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
                 ext_call_sites: out.ext_call_sites,
                 map_packed_sites: out.map_packed_sites,
                 index_field_sites: out.index_field_sites,
+                for_stream_sites: out.for_stream_sites,
                 destructor_relevance: out.destructor_relevance,
             }
         }
@@ -332,6 +338,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             ext_call_sites: std::collections::HashMap::new(),
             map_packed_sites: std::collections::HashMap::new(),
             index_field_sites: std::collections::HashSet::new(),
+            for_stream_sites: std::collections::HashSet::new(),
             destructor_relevance: lang_check::DestructorRelevance::default(),
         },
     }
@@ -358,6 +365,7 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
                 map_packed,
                 index_fields,
                 ext,
+                checked.for_stream_sites.clone(),
                 &checked.destructor_relevance,
             ))
         }

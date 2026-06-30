@@ -105,6 +105,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.map_packed_sites,
         checked.index_field_sites,
         checked.ext_call_sites,
+        checked.for_stream_sites,
         &checked.destructor_relevance,
     )
 }
@@ -125,6 +126,7 @@ fn passes_relevance(r: &lang_check::DestructorRelevance) -> lang_ir_passes::Rele
 /// differential harness — means a redundant checker run. An orchestrator that already holds a
 /// [`lang_check::Checked`] threads its `type_of_sites` here so the checker runs only once. The
 /// map is a pure function of the program, so this is behavior-identical to [`compile`].
+#[allow(clippy::too_many_arguments)]
 pub fn compile_with_sites(
     program: &Program,
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
@@ -132,6 +134,7 @@ pub fn compile_with_sites(
     map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: HashSet<Span>,
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
+    for_stream_sites: HashSet<Span>,
     relevance: &lang_check::DestructorRelevance,
 ) -> Result<Module, Unsupported> {
     compile_inner(
@@ -141,6 +144,7 @@ pub fn compile_with_sites(
         map_packed_sites,
         index_field_sites,
         ext_call_sites,
+        for_stream_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
     )
@@ -156,6 +160,7 @@ fn compile_inner(
     map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     index_field_sites: HashSet<Span>,
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
+    for_stream_sites: HashSet<Span>,
     relevance: Option<lang_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -175,6 +180,7 @@ fn compile_inner(
         &packed_list_sites,
         &index_field_sites,
         &ext_call_sites,
+        &for_stream_sites,
     )
     .map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
@@ -1185,7 +1191,8 @@ impl<'m> FnCompiler<'m> {
                 iterable,
                 body,
                 span,
-            } => self.for_stmt(pattern, iterable, body, *span),
+                stream,
+            } => self.for_stmt(pattern, iterable, body, *span, *stream),
             Stmt::While { cond, body, span } => self.while_stmt(cond, body, *span),
             // `break`/`continue` emit a placeholder `Jump` recorded on the innermost loop, which
             // patches it once its exit / continue target is known. The checker guarantees a loop is
@@ -1377,7 +1384,13 @@ impl<'m> FnCompiler<'m> {
         iterable: &Atom,
         body: &Block,
         span: Span,
+        stream: bool,
     ) -> Result<(), Unsupported> {
+        // A `for` over a statically-known `Iterator<T>` (Track I.2) drives `next()` one element at a
+        // time, so a lazy source streams (and `break` stops early) — no list snapshot.
+        if stream {
+            return self.for_stream_stmt(pattern, iterable, body, span);
+        }
         // The loop's bookkeeping registers live in the enclosing frame (a list snapshot, its
         // length, the running index, and a constant 1 to advance it). The iterable is a
         // pre-computed atom, snapshotted once into a fresh register.
@@ -1468,6 +1481,70 @@ impl<'m> FnCompiler<'m> {
         let end = self.code.len() as u32;
         self.patch_jump(exit_jump, end);
         // `break` lands past the back-edge.
+        for site in ctx.breaks {
+            self.patch_jump(site, end);
+        }
+        Ok(())
+    }
+
+    /// Streaming `for` over an `Iterator<T>` (Track I.2): drive `next()` each iteration via
+    /// [`Op::IterForNext`] (which runs any `map`/`filter` closure), bind the element, run the body,
+    /// and loop until the iterator is exhausted. No list snapshot — a lazy source streams and an early
+    /// `break` stops it. The iterator value stays in its source register, released by the post-`for`
+    /// `Drop` of its temp (the same machinery the snapshot path relies on).
+    fn for_stream_stmt(
+        &mut self,
+        pattern: &ForPattern,
+        iterable: &Atom,
+        body: &Block,
+        span: Span,
+    ) -> Result<(), Unsupported> {
+        let iter = self.atom_reg(iterable)?;
+        let elem = self.alloc_reg();
+        let has = self.alloc_reg();
+
+        let loop_top = self.code.len() as u32;
+        self.code.push(Op::IterForNext {
+            iter,
+            elem,
+            has,
+            span,
+        });
+        let exit_jump = self.code.len();
+        self.code.push(Op::JumpIfFalse {
+            reg: has,
+            target: 0,
+        });
+
+        self.scopes.push(HashMap::new());
+        self.loops.push(LoopCtx::default());
+        let result = (|| {
+            match pattern {
+                ForPattern::Single { name, .. } => {
+                    self.bind_loop_var(name, elem);
+                }
+                // A tuple for-pattern is desugared to a `Single` hidden var + `.N` projections in
+                // lowering (object-model slice 4b), so it never reaches the compiler.
+                ForPattern::Tuple { .. } => {
+                    unreachable!("a tuple for-pattern is desugared to projections in IR lowering")
+                }
+            }
+            for stmt in &body.stmts {
+                self.stmt(stmt)?;
+            }
+            Ok(())
+        })();
+        let ctx = self.loops.pop().expect("loop context");
+        self.scopes.pop();
+        result?;
+
+        // `continue` re-advances the iterator (there is no separate index increment to skip to).
+        for site in ctx.continues {
+            self.patch_jump(site, loop_top);
+        }
+        self.code.push(Op::Jump { target: loop_top });
+        let end = self.code.len() as u32;
+        self.patch_jump(exit_jump, end);
         for site in ctx.breaks {
             self.patch_jump(site, end);
         }

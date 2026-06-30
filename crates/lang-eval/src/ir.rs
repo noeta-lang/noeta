@@ -246,7 +246,8 @@ impl Interpreter {
                 iterable,
                 body,
                 span,
-            } => self.exec_ir_for(pattern, iterable, body, *span, frame),
+                stream,
+            } => self.exec_ir_for(pattern, iterable, body, *span, *stream, frame),
             lang_ir::Stmt::Match {
                 scrutinee,
                 arms,
@@ -587,9 +588,35 @@ impl Interpreter {
         iterable: &lang_ir::Atom,
         body: &lang_ir::Block,
         span: Span,
+        stream: bool,
         frame: &mut Frame,
     ) -> Eval<Flow> {
         let iterable_value = self.eval_ir_atom(iterable, frame)?;
+        // A statically-typed `Iterator<T>` source streams via `next()` (Track I.2) — one element at a
+        // time, so a lazy pipeline never materializes and an early `break` stops it; a `map`/`filter`
+        // closure runs inside the advance. A collection keeps the snapshot fast path.
+        if stream {
+            loop {
+                let element = match self.iter_value_next(&iterable_value, span)? {
+                    Some(e) => e,
+                    None => break,
+                };
+                let child = crate::Scope::child(&self.scope);
+                self.bind_for_pattern(&child, pattern, element, span)?;
+                let saved = std::mem::replace(&mut self.scope, child);
+                let flow = self.exec_ir_stmts(&body.stmts, frame);
+                if matches!(flow, Err(Unwind::Abort)) {
+                    self.fire_aborted_scope();
+                }
+                self.scope = saved;
+                match flow? {
+                    Flow::Return(value) => return Ok(Flow::Return(value)),
+                    Flow::Break => break,
+                    Flow::Continue | Flow::Normal => {}
+                }
+            }
+            return Ok(Flow::Normal);
+        }
         let elements = self.iter_elements(iterable_value, span)?;
         for element in elements {
             let child = crate::Scope::child(&self.scope);

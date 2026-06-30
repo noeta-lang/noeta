@@ -111,6 +111,9 @@ pub struct Checked {
     /// packed list element's field is read without materializing the element (P-PACK 2.5+). A pure
     /// function of the program, like the other site maps; the fusion is invisible to `RunResult`.
     pub index_field_sites: HashSet<Span>,
+    /// `for` statement spans whose iterable is statically an `Iterator<T>` (Track I.2) — the lowering
+    /// sets `Stmt::For.stream` so both backends drive the iterator's `next()` instead of snapshotting.
+    pub for_stream_sites: HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -136,6 +139,7 @@ pub fn check_all(program: &Program) -> Checked {
         ext_call_sites: checker.ext_call_sites,
         map_packed_sites: checker.map_packed_sites,
         index_field_sites: checker.index_field_sites,
+        for_stream_sites: checker.for_stream_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -499,6 +503,11 @@ struct Checker {
     /// element's field without materializing the element (P-PACK 2.5+). A pure function of the
     /// program, invisible to `RunResult`, so both backends fuse the same sites by construction.
     index_field_sites: HashSet<Span>,
+    /// `for` statement spans whose iterable is statically an `Iterator<T>` — the loop streams via
+    /// `next()` instead of snapshotting a list (Track I.2). Lowering reads this (via
+    /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
+    /// collection or `dyn` iterable is absent here and keeps the snapshot/cursor fast path.
+    for_stream_sites: HashSet<Span>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
@@ -1332,9 +1341,15 @@ impl Checker {
                 pattern,
                 iterable,
                 body,
-                ..
+                span,
             } => {
                 let iter_ty = self.synth(iterable, env);
+                // A `for` over a statically-known `Iterator<T>` streams via `next()` (Track I.2); the
+                // lowering reads this set to set `Stmt::For.stream`. Collections / `dyn` keep the
+                // snapshot fast path.
+                if matches!(&iter_ty, Type::Named(n, _) if n == stdlib::ITERATOR) {
+                    self.for_stream_sites.insert(*span);
+                }
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);
                 self.loop_depth += 1;
@@ -4148,8 +4163,15 @@ impl Checker {
     // ----- pattern binding -----
 
     fn bind_for_pattern(&mut self, pattern: &ForPattern, iter_ty: &Type, env: &mut Env) {
+        // The element type a `for` loop binds: a list/set's element, a map's **value** (iteration
+        // yields values, like the runtime), or an `Iterator<T>`'s element (Track I.2). Anything else
+        // (a `dyn`/gradual source) binds a hole.
         let elem = match iter_ty {
-            Type::List(t) => (**t).clone(),
+            Type::List(t) | Type::Set(t) => (**t).clone(),
+            Type::Map(_, v) => (**v).clone(),
+            Type::Named(n, args) if n == stdlib::ITERATOR => {
+                args.first().cloned().unwrap_or(Type::Unknown)
+            }
             _ => Type::Unknown,
         };
         match pattern {
