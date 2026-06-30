@@ -1147,10 +1147,9 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Dispatch an iterator method (`next`/`collect`, Track I.1a). Mirrors the tree-walker's
-    /// `call_iter_method`: the cursor advances over the backing list shared by every alias.
-    /// `iter_next` hands back a freshly-retained element (consumed by `make_some`); `iter_collect`
-    /// drains the rest into a new list.
+    /// Dispatch an iterator method (Track I). Mirrors the tree-walker's `call_iter_method`. `next`/
+    /// `collect`/`count` consume the cursor; `take`/`drop`/`chain` build a new adapter that retains
+    /// the receiver (and `chain`'s argument) — the same retain pattern as `iter()`, leak-verified.
     fn call_iter_method(
         &mut self,
         recv: Value,
@@ -1160,13 +1159,41 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         use lang_stdlib::IterMethod as M;
-        self.stdlib_arity(name, args, 0, span)?;
         Ok(match method {
-            M::Next => match recv.iter_next() {
-                Some(element) => make_some(element),
-                None => make_none(),
-            },
-            M::Collect => recv.iter_collect(),
+            M::Next => {
+                self.stdlib_arity(name, args, 0, span)?;
+                match recv.iter_next() {
+                    Some(element) => make_some(element),
+                    None => make_none(),
+                }
+            }
+            M::Collect => {
+                self.stdlib_arity(name, args, 0, span)?;
+                recv.iter_collect()
+            }
+            M::Count => {
+                self.stdlib_arity(name, args, 0, span)?;
+                let mut n = 0i64;
+                // Drain the iterator, releasing each element `iter_next` retained.
+                while let Some(element) = recv.iter_next() {
+                    element.release();
+                    n += 1;
+                }
+                Value::int(n)
+            }
+            M::Take | M::Drop => {
+                self.stdlib_arity(name, args, 1, span)?;
+                let n = self.stdlib_int(name, args[0], span)?.max(0) as usize;
+                if method == M::Take {
+                    Value::iter_take(recv, n)
+                } else {
+                    Value::iter_drop(recv, n)
+                }
+            }
+            M::Chain => {
+                self.stdlib_arity(name, args, 1, span)?;
+                Value::iter_chain(recv, args[0])
+            }
         })
     }
 

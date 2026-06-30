@@ -48,9 +48,21 @@ VM needs validating. So:
   a retained backing list then `release` the local ref). Conformance `iterators/spine.lang` (incl. an
   **alias-shares-cursor** check — the reference-semantics property). Differential 326/0-skipped/agree,
   leaks 0 both, miri clean. **No closures, no `for` change** (as planned).
-- **I.1b — closure-free adapters + terminals.** `take(n)`/`drop(n)`/`enumerate()`/`zip(other)`/
-  `chain(other)` (lazy, each a wrapping `Iter`), and `count()`/`sum()` terminals. Bench the fused
-  pipeline (`xs.iter().take(k)…`) allocates O(1) intermediate vs the eager O(n).
+- **I.1b — closure-free adapters + terminals.** Split into two for review:
+  - **I.1b.1 ✅ DONE** (2026-06-30): `take(n)`/`drop(n)`/`chain(other)` + `count()`. `Payload::Iter`
+    (VM) / eval `IterState` became an **enum** (`List` base + adapter variants), the fused-pipeline
+    state machine — each adapter holds its source iterator(s) and pulls lazily, so `drop(2).take(2)`
+    streams one element at a time with no intermediate list. GC: an iterator is a node owning one ref
+    per source (`children()` enumerates 1–2). `iter_next` is now the recursive driver (an adapter
+    advances its source — a distinct object, so the nested `with_payload_mut` is miri-safe). Refcounts:
+    `take`/`drop`/`chain` retain the receiver (the `iter()` pattern); `drop` releases skipped
+    elements; `count` releases each drained element. Checker: `take`/`drop`/`chain`→`Iterator<T>`,
+    `count`→`int`; `chain` takes `Iterator<T>`. Conformance `iterators/adapters.lang`; differential
+    327/0-skipped/agree, leaks 0 both, miri clean (a multi-source + drop-skip lang-value unit test).
+  - **I.1b.2 (next):** `enumerate()` (→ `(int, T)` tuples) + `zip(other)` (→ `(A, B)` tuples) +
+    `sum()`. The tuple-producing adapters and the numeric terminal.
+- **The fused-pipeline allocation bench** moves to **I.1c** (map/filter), where the eager
+  `xs.map(f).filter(g)` baseline gives an apples-to-apples O(1)-vs-O(stages·n) comparison.
 - **I.1c — closure adapters.** `map(f)`/`filter(f)` as `Iter`s that call the closure from `next()`;
   validate the closure-from-`next` path in the VM. Fused-pipeline alloc bench vs eager `map().filter()`.
 - **I.2 — `for` over the protocol (optimization/unification, optional).** Rewrite the `for` lowering

@@ -1917,7 +1917,7 @@ impl Interpreter {
                 Value::Map(entries) => Value::list(entries.values().cloned().collect()),
                 _ => unreachable!("guarded to list/set/map above"),
             };
-            return Ok(Value::Iter(Rc::new(RefCell::new(IterState {
+            return Ok(Value::Iter(Rc::new(RefCell::new(IterState::List {
                 list,
                 cursor: 0,
             }))));
@@ -2550,9 +2550,8 @@ impl Interpreter {
         }
     }
 
-    /// Dispatch an iterator method (`next`/`collect`, Track I.1a). The cursor advances over the
-    /// backing list shared by every alias; `next` reads one element, `collect` drains the rest.
-    /// Mirrors the VM's `call_iter_method` (which advances the same way over its heap list).
+    /// Dispatch an iterator method (Track I). `next`/`collect`/`count` consume the cursor;
+    /// `take`/`drop`/`chain` wrap this iterator in a new adapter. Mirrors the VM's `call_iter_method`.
     fn call_iter_method(
         &mut self,
         method: lang_stdlib::IterMethod,
@@ -2562,18 +2561,54 @@ impl Interpreter {
         span: Span,
     ) -> Eval<Value> {
         use lang_stdlib::IterMethod as M;
-        self.expect_std_arity(name, args, 0, span)?;
+        // This iterator as a value, to use as an adapter's source.
+        let source = || Value::Iter(Rc::clone(state));
+        let wrap = |inner| Value::Iter(Rc::new(RefCell::new(inner)));
         match method {
-            M::Next => Ok(match iter_advance(state) {
-                Some(v) => builtin_enum("Option", "some", vec![v]),
-                None => builtin_enum("Option", "none", Vec::new()),
-            }),
+            M::Next => {
+                self.expect_std_arity(name, args, 0, span)?;
+                Ok(match iter_advance(state) {
+                    Some(v) => builtin_enum("Option", "some", vec![v]),
+                    None => builtin_enum("Option", "none", Vec::new()),
+                })
+            }
             M::Collect => {
+                self.expect_std_arity(name, args, 0, span)?;
                 let mut out = Vec::new();
                 while let Some(v) = iter_advance(state) {
                     out.push(v);
                 }
                 Ok(Value::list(out))
+            }
+            M::Count => {
+                self.expect_std_arity(name, args, 0, span)?;
+                let mut n = 0i64;
+                while iter_advance(state).is_some() {
+                    n += 1;
+                }
+                Ok(Value::Int(n))
+            }
+            M::Take | M::Drop => {
+                self.expect_std_arity(name, args, 1, span)?;
+                let n = self.expect_std_int(name, &args[0], span)?.max(0) as usize;
+                Ok(wrap(if method == M::Take {
+                    IterState::Take {
+                        source: source(),
+                        remaining: n,
+                    }
+                } else {
+                    IterState::Drop {
+                        source: source(),
+                        pending: n,
+                    }
+                }))
+            }
+            M::Chain => {
+                self.expect_std_arity(name, args, 1, span)?;
+                Ok(wrap(IterState::Chain {
+                    first: source(),
+                    second: args[0].clone(),
+                }))
             }
         }
     }
@@ -3308,19 +3343,58 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
     }))
 }
 
-/// Read an iterator's element at its cursor and advance, or `None` at end (Track I.1a). Shared by
-/// `next` (one step) and `collect` (drain). The backing is always a `Value::List`; `ListRepr::get`
-/// materializes a packed element on demand, so a `List<@packed>` iterates transparently.
+/// Advance an iterator value one step, or `None` at end. An adapter pulls from its source(s) by
+/// advancing them recursively — each is a distinct `RefCell` from `state`, so the borrows never
+/// overlap (an iterator can never be its own source).
+fn iter_value_next(it: &Value) -> Option<Value> {
+    match it {
+        Value::Iter(state) => iter_advance(state),
+        _ => None,
+    }
+}
+
+/// Read an iterator's next element and advance (Track I). Shared by `next` (one step), `collect`
+/// (drain), and `count`. The base cursors a `Value::List` (`ListRepr::get` materializes a packed
+/// element on demand); adapters delegate to their source(s).
 fn iter_advance(state: &Rc<RefCell<IterState>>) -> Option<Value> {
     let mut st = state.borrow_mut();
-    let elem = match &st.list {
-        Value::List(repr) => repr.get(st.cursor),
-        _ => None,
-    };
-    if elem.is_some() {
-        st.cursor += 1;
+    match &mut *st {
+        IterState::List { list, cursor } => {
+            let elem = match list {
+                Value::List(repr) => repr.get(*cursor),
+                _ => None,
+            };
+            if elem.is_some() {
+                *cursor += 1;
+            }
+            elem
+        }
+        IterState::Take { source, remaining } => {
+            if *remaining == 0 {
+                return None;
+            }
+            let elem = iter_value_next(source);
+            if elem.is_some() {
+                *remaining -= 1;
+            }
+            elem
+        }
+        IterState::Drop { source, pending } => {
+            while *pending > 0 {
+                match iter_value_next(source) {
+                    Some(_) => *pending -= 1, // the skipped element is dropped (Rc auto-frees)
+                    None => {
+                        *pending = 0;
+                        return None;
+                    }
+                }
+            }
+            iter_value_next(source)
+        }
+        IterState::Chain { first, second } => {
+            iter_value_next(first).or_else(|| iter_value_next(second))
+        }
     }
-    elem
 }
 
 /// The `Result.Err(msg)` returned when a by-name `invoke` cannot resolve (unknown name, wrong

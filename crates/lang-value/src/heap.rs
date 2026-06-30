@@ -222,14 +222,38 @@ pub(crate) enum Payload {
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
     /// is a GC leaf like `Str`.
     FileHandle(FileHandle),
-    /// A lazy iterator (Track I.1a): a reference-semantic cursor over a `list` value. `iter()`
-    /// builds one; `next()` advances the cursor returning `some(elem)`/`none`; `collect()` drains it
-    /// to a new list. It **owns one reference** to its backing list (a GC node like [`Self::Cell`]),
-    /// and the cursor mutation through `next()` is shared by every alias, exactly like a file handle.
-    Iter {
-        list: Value,
-        cursor: usize,
-    },
+    /// A lazy iterator (Track I): a reference-semantic pull cursor. The base (`iter()`) is a cursor
+    /// over a list; adapters (`take`/`drop`/`chain`/…) wrap one or two **source** iterators and pull
+    /// from them on demand, so a pipeline fuses with no intermediate list. It **owns one reference**
+    /// to each source it holds (a GC node like [`Self::Cell`]); the cursor mutation through `next()`
+    /// is shared by every alias, exactly like a file handle. See [`IterState`].
+    Iter(IterState),
+}
+
+/// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
+/// holds the source iterator(s) it pulls from. `lang-eval` mirrors this enum over its own `Value`.
+pub(crate) enum IterState {
+    /// Cursor over a backing list — the base iterator from `iter()`.
+    List { list: Value, cursor: usize },
+    /// Yield at most `remaining` more elements from `source` (`take(n)`).
+    Take { source: Value, remaining: usize },
+    /// Skip `pending` elements from `source`, then yield the rest (`drop(n)`).
+    Drop { source: Value, pending: usize },
+    /// Yield all of `first`, then all of `second` (`chain(other)`).
+    Chain { first: Value, second: Value },
+}
+
+impl IterState {
+    /// The child iterator/list values this state owns one reference to (for GC trace/free).
+    fn children(&self) -> [Option<Value>; 2] {
+        match self {
+            IterState::List { list, .. } => [Some(*list), None],
+            IterState::Take { source, .. } | IterState::Drop { source, .. } => {
+                [Some(*source), None]
+            }
+            IterState::Chain { first, second } => [Some(*first), Some(*second)],
+        }
+    }
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
@@ -371,8 +395,12 @@ pub(crate) fn free(value: Value) {
             }
         }
         Payload::Cell(inner) => release_child(*inner),
-        // An iterator owns one reference to its backing list (a node like `Cell`).
-        Payload::Iter { list, .. } => release_child(*list),
+        // An iterator owns one reference to each source it holds (a node like `Cell`).
+        Payload::Iter(state) => {
+            for child in state.children().into_iter().flatten() {
+                release_child(child);
+            }
+        }
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
@@ -527,8 +555,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),
         Payload::Closure { upvalues, .. } => upvalues.iter().copied().for_each(&mut push),
         Payload::Cell(inner) => push(*inner),
-        // An iterator owns one reference to its backing list.
-        Payload::Iter { list, .. } => push(*list),
+        // An iterator owns one reference to each source it holds.
+        Payload::Iter(state) => state.children().into_iter().flatten().for_each(&mut push),
         // A packed list holds only primitive words (no child references) — a GC leaf.
         Payload::Str(_)
         | Payload::Bytes(_)

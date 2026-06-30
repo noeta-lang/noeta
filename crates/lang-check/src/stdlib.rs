@@ -88,6 +88,9 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
         "next" => opt(elem.clone()),
         "collect" => list(elem.clone()),
+        // Adapters return another `Iterator<T>` over the same element type (Track I.1b).
+        "take" | "drop" | "chain" => iterable_iter(elem.clone()),
+        "count" => Type::Int,
         _ => return None,
     })
 }
@@ -172,14 +175,19 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::Map(_, val) => map_params(name, val),
         Type::Bytes if name == "count" => Some(vec![]),
         Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
-        Type::Named(n, _) if n == ITERATOR => iterator_params(name),
+        Type::Named(n, args) if n == ITERATOR => {
+            iterator_params(name, args.first().unwrap_or(&Type::Dyn))
+        }
         _ => None,
     }
 }
 
-fn iterator_params(name: &str) -> Option<Vec<Type>> {
+fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "next" | "collect" => vec![],
+        "next" | "collect" | "count" => vec![],
+        "take" | "drop" => vec![Type::Int],
+        // `chain` takes another iterator over the same element type.
+        "chain" => vec![iterable_iter(elem.clone())],
         _ => return None,
     })
 }

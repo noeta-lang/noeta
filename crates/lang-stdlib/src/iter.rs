@@ -13,6 +13,14 @@ pub enum IterMethod {
     Next,
     /// `collect()` → a `List` of the remaining elements (drains the iterator).
     Collect,
+    /// `take(n)` → an iterator yielding at most `n` more elements (Track I.1b).
+    Take,
+    /// `drop(n)` → an iterator skipping the next `n` elements, yielding the rest (Track I.1b).
+    Drop,
+    /// `chain(other)` → an iterator yielding all of `self` then all of `other` (Track I.1b).
+    Chain,
+    /// `count()` → the number of remaining elements as an `int` (drains the iterator, Track I.1b).
+    Count,
 }
 
 impl IterMethod {
@@ -20,6 +28,10 @@ impl IterMethod {
         match name {
             "next" => Some(IterMethod::Next),
             "collect" => Some(IterMethod::Collect),
+            "take" => Some(IterMethod::Take),
+            "drop" => Some(IterMethod::Drop),
+            "chain" => Some(IterMethod::Chain),
+            "count" => Some(IterMethod::Count),
             _ => None,
         }
     }

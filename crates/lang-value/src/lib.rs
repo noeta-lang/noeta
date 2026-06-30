@@ -36,7 +36,7 @@ use lang_bytecode::Builtin;
 use lang_object::{PackedKind, PackedSchema, Shape};
 use lang_stdlib::FileHandle;
 
-use heap::Payload;
+use heap::{IterState, Payload};
 
 /// A NaN-boxed runtime value (one 64-bit word). `Copy`: it is just an integer; ownership of
 /// any heap object it points at is tracked by refcount, not by Rust's move semantics.
@@ -535,34 +535,88 @@ impl Value {
     /// reference to its backing list (retained here); the caller's reference to `list` is untouched.
     pub fn iter(list: Value) -> Value {
         list.inc_ref();
-        heap::alloc(Payload::Iter { list, cursor: 0 })
+        heap::alloc(Payload::Iter(IterState::List { list, cursor: 0 }))
+    }
+
+    /// A `take(n)` adapter: yields at most `n` elements from `source` (Track I.1b). The adapter owns
+    /// one reference to `source` (retained here); the caller's reference to `source` is untouched.
+    pub fn iter_take(source: Value, n: usize) -> Value {
+        source.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Take {
+            source,
+            remaining: n,
+        }))
+    }
+
+    /// A `drop(n)` adapter: skips the first `n` elements of `source`, yields the rest (Track I.1b).
+    pub fn iter_drop(source: Value, n: usize) -> Value {
+        source.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Drop { source, pending: n }))
+    }
+
+    /// A `chain(other)` adapter: yields all of `first`, then all of `second` (Track I.1b). Owns one
+    /// reference to each.
+    pub fn iter_chain(first: Value, second: Value) -> Value {
+        first.inc_ref();
+        second.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Chain { first, second }))
     }
 
     /// Whether this is an iterator.
     pub fn is_iter(self) -> bool {
-        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter { .. }))
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter(_)))
     }
 
     /// Advance the iterator, returning the next element — a freshly-retained owning reference the
     /// caller takes ownership of — or `None` at end. The caller must have checked [`Value::is_iter`].
+    ///
+    /// An adapter pulls from its source(s) by calling `iter_next` on them recursively. Each source is
+    /// a **distinct** heap object from `self` (an iterator can never be its own source — construction
+    /// always wraps an existing one), so the recursive `with_payload_mut` accesses a different
+    /// allocation than the one held here (no aliasing; miri-verified).
     pub fn iter_next(self) -> Option<Value> {
-        // The backing list is a distinct heap object from this iterator, so reading it inside the
-        // iterator's `with_payload_mut` accesses a different allocation (no aliasing).
-        let elem = heap::with_payload_mut(self, |p| {
-            let Payload::Iter { list, cursor } = p else {
+        heap::with_payload_mut(self, |p| {
+            let Payload::Iter(state) = p else {
                 return None;
             };
-            let e = list.list_get(*cursor);
-            if e.is_some() {
-                *cursor += 1;
+            match state {
+                IterState::List { list, cursor } => {
+                    let e = list.list_get(*cursor)?;
+                    *cursor += 1;
+                    // `list_get` shares the list's reference; retain it for the new owner.
+                    e.inc_ref();
+                    Some(e)
+                }
+                // The source's `iter_next` already retains the element it returns, so it is handed
+                // straight back.
+                IterState::Take { source, remaining } => {
+                    if *remaining == 0 {
+                        return None;
+                    }
+                    let e = source.iter_next()?;
+                    *remaining -= 1;
+                    Some(e)
+                }
+                IterState::Drop { source, pending } => {
+                    while *pending > 0 {
+                        match source.iter_next() {
+                            Some(skipped) => {
+                                skipped.release(); // drop the skipped element's retained reference
+                                *pending -= 1;
+                            }
+                            None => {
+                                *pending = 0;
+                                return None;
+                            }
+                        }
+                    }
+                    source.iter_next()
+                }
+                IterState::Chain { first, second } => {
+                    first.iter_next().or_else(|| second.iter_next())
+                }
             }
-            e
-        });
-        // `list_get` shares the list's reference without retaining; retain for the new owner.
-        if let Some(e) = elem {
-            e.inc_ref();
-        }
-        elem
+        })
     }
 
     /// Drain the iterator from its current cursor into a new list — each element retained into it
@@ -2276,6 +2330,47 @@ mod tests {
         // Freeing the iterator releases its backing list, which frees its elements.
         assert!(it.dec_ref());
         it.free();
+        assert_eq!(live_count(), before);
+    }
+
+    #[test]
+    fn iterator_adapters_free_without_leaking() {
+        // Heap elements again, exercising the recursive `iter_next` (Take → Chain → List), `drop`'s
+        // skip-release, and the multi-source GC node (Chain owns two children). Live count must
+        // return to baseline after the whole pipeline is released.
+        let before = live_count();
+        let l1 = Value::list(vec![Value::string("a"), Value::string("b")]);
+        let l2 = Value::list(vec![Value::string("c")]);
+        let i1 = Value::iter(l1);
+        l1.release(); // i1 is now l1's sole owner
+        let i2 = Value::iter(l2);
+        l2.release();
+        let chained = Value::iter_chain(i1, i2); // retains i1, i2
+        i1.release();
+        i2.release(); // `chained` is now the sole owner of i1, i2
+        let taken = Value::iter_take(chained, 2); // retains chained
+        chained.release();
+        // take(2) over chain([a, b], [c]) yields "a", "b".
+        let collected = taken.iter_collect();
+        assert_eq!(collected.list_len(), Some(2));
+        collected.release();
+        taken.release(); // frees taken → chained → i1/i2 → l1/l2 → their strings
+        assert_eq!(live_count(), before);
+
+        // `drop` skips (and releases) the first n, yielding the rest.
+        let l3 = Value::list(vec![
+            Value::string("x"),
+            Value::string("y"),
+            Value::string("z"),
+        ]);
+        let i3 = Value::iter(l3);
+        l3.release();
+        let dropped = Value::iter_drop(i3, 2); // retains i3
+        i3.release();
+        let rest = dropped.iter_collect(); // ["z"]
+        assert_eq!(rest.list_len(), Some(1));
+        rest.release();
+        dropped.release();
         assert_eq!(live_count(), before);
     }
 

@@ -1,0 +1,22 @@
+// Track I.1b — closure-free lazy adapters: `take`/`drop`/`chain` (each yields a new iterator) and the
+// `count` terminal. Adapters fuse: `drop(2).take(2)` pulls one element at a time through the chain
+// with no intermediate list, and an adapter is itself an iterator. `take`/`drop` clamp to the
+// available elements; `count` drains.
+// expect: stdout "[1, 2, 3]"
+// expect: stdout "[3, 4, 5]"
+// expect: stdout "[3, 4]"
+// expect: stdout "5"
+// expect: stdout "3"
+// expect: stdout "[1, 2, 3, 4]"
+// expect: stdout "[]"
+// expect: stdout "[1, 2, 3, 4, 5]"
+// expect: exit 0
+xs = [1, 2, 3, 4, 5];
+echo xs.iter().take(3).collect();
+echo xs.iter().drop(2).collect();
+echo xs.iter().drop(2).take(2).collect();
+echo xs.iter().count();
+echo xs.iter().take(3).count();
+echo [1, 2].iter().chain([3, 4].iter()).collect();
+echo xs.iter().drop(10).collect();
+echo xs.iter().take(100).collect();

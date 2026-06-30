@@ -73,12 +73,19 @@ pub enum Value {
     Iter(Rc<RefCell<IterState>>),
 }
 
-/// The state of a [`Value::Iter`]: the backing list (always a `Value::List`) and a cursor over its
-/// elements. `next()` reads the element at `cursor` and advances; `collect()` drains the rest.
+/// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
+/// `heap::IterState`. The base cursors a list; each adapter holds the source iterator(s) it pulls
+/// from, so a pipeline fuses with no intermediate list.
 #[derive(Debug)]
-pub struct IterState {
-    pub list: Value,
-    pub cursor: usize,
+pub enum IterState {
+    /// Cursor over a backing list — the base iterator from `iter()`.
+    List { list: Value, cursor: usize },
+    /// Yield at most `remaining` more elements from `source` (`take(n)`).
+    Take { source: Value, remaining: usize },
+    /// Skip `pending` elements from `source`, then yield the rest (`drop(n)`).
+    Drop { source: Value, pending: usize },
+    /// Yield all of `first`, then all of `second` (`chain(other)`).
+    Chain { first: Value, second: Value },
 }
 
 /// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,
@@ -524,7 +531,7 @@ impl fmt::Debug for Value {
             Value::Object(object) => write!(f, "Object({})", object.display()),
             Value::NativeModule(module) => write!(f, "NativeModule({module})"),
             Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
-            Value::Iter(state) => write!(f, "Iter(cursor={})", state.borrow().cursor),
+            Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
         }
     }
 }
