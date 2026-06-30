@@ -68,7 +68,7 @@ flexible + runtime stacks.** Our oracle wants stackless.
 |---|---|---|---|
 | **I — lazy iterator protocol** | `Iterator` (`next() -> ?T`) + `Iterable` (`iter()`); `for` drives it; lazy `map`/`filter`/`take`/`zip`/`enumerate` adapters | deterministic → **in-oracle** | small–moderate (mostly front-end) |
 | **G — generators (`yield`)** | `yield` sugar → the stackless state machine on the shared substrate; a generator *is* an `Iterator` | deterministic → **in-oracle** | moderate (the transform + liveness) |
-| **A — async/await** | `await`, an awaitable/`Future` type, an executor over the per-isolate tokio | non-deterministic IO → **out-of-oracle** | milestone (runtime + determinism story) |
+| **A — async/await** | `await`, an awaitable/`Future` type, an **injected executor** (deterministic sandbox + real tokio) | sandbox executor **in-oracle**; production out-of-oracle | milestone (runtime + determinism story) |
 
 Sequencing: **I → G → A**. I is independently valuable and ships alone. G needs the substrate. A is a
 later milestone — but **planned now so the substrate is async-ready** and we don't build the transform
@@ -158,12 +158,19 @@ Rides the **same** state machine; the differences are all about the *runtime*, a
 is a separate milestone rather than "generators with a different keyword."
 
 Decision points to settle before A is built (none block I/G):
-- **Determinism in testing — the big one.** Async IO/timing is non-deterministic, so async **cannot
-  sit in the differential oracle the usual way.** Two routes: (a) async is simply *outside* the
-  oracle, integration-tested only — mirroring the existing `RealHost` split (real IO is CLI-only,
-  never differential-tested); or (b) a **deterministic sandbox scheduler** that makes async programs
-  reproducible enough to differential-test. **Recommend (a) first**, with (b) as a later hardening
-  step if async coverage needs the oracle.
+- **Determinism in testing — DECIDED (b), 2026-06-30.** The async runtime is an **injected
+  capability** (like `Host`) with two implementations: a **deterministic sandbox executor**
+  (single-threaded, logical-time, deterministic ready-queue order → reproducible, **in-oracle**,
+  simulation-testable) and the **real tokio executor** (production, out-of-oracle). This is the
+  FoundationDB / TigerBeetle model — *simulate deterministically, deploy on real hardware* — chosen
+  on its own production-grade merits (reproducible concurrency bugs, no flaky tests, replay), with
+  oracle membership of the sandbox path a free consequence. It extends the existing
+  `SandboxHost`/`RealHost` two-world split to scheduling, and the marginal cost over today's sandbox
+  is mostly the deterministic queue ordering (time/disk/PRNG/env determinism already exist). The
+  resume-driver the substrate hands async **is** this injected executor, so it must exist from day
+  one and the **sandbox executor is a first-class deliverable** (built before the real one, mirroring
+  `SandboxHost` → `RealHost`). Discipline: every nondeterminism source routes through the runtime;
+  the single-threaded logical-time sandbox executor physically can't touch the real reactor.
 - **`await` ↔ the per-isolate tokio.** M2 built the tokio `current_thread` runtime per isolate
   precisely so the async surface would be additive ("`block_on` at the leaf today → `await` later").
   A pins down the awaitable/`Future` type and how `await` maps onto that runtime.
@@ -187,9 +194,11 @@ Decision points to settle before A is built (none block I/G):
 3. ✅ **RESOLVED — `next()` returns `?T`** (folded into #2).
 4. **Generator coloring + restricted control flow across a suspend** — confirm the stackless limits
    are acceptable (open; Track G, not needed for Track I).
-5. **Async oracle treatment** — **provisional default: (a) out-of-oracle, like `RealHost`** (settle
-   for real when Track A is built; (b) a deterministic sandbox scheduler keeps async in the oracle at
-   real runtime cost). Track-A-only — does not gate I or G (both are pull-based/deterministic).
+5. ✅ **RESOLVED — (b) deterministic executor as an injected capability** (2026-06-30). Two impls: a
+   deterministic single-threaded sandbox executor (in-oracle, simulation-testable, built first) and
+   the real tokio executor (production, out-of-oracle) — the FoundationDB "simulate deterministically,
+   deploy real" model, extending the `SandboxHost`/`RealHost` split to scheduling. Track-A-only — does
+   not gate I or G — but the executor seam must exist in the substrate from day one.
 6. **Async runtime** — `Future`/executor model; unify coroutine substrate yes/no (open; Track A).
 7. **New diagnostics** — next free code is **E0039** (e.g. *not iterable*, *`next` must return `?T`*,
    *`yield` outside a generator / inside a closure*).
