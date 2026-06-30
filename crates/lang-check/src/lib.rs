@@ -2705,10 +2705,25 @@ impl Checker {
                     if !self.field_visible(&lit.type_name, &f.name) {
                         self.report_private_field(&lit.type_name, &f.name, "set", f.name_span);
                     }
-                    if !pset.is_empty()
-                        && let Some((_, declared)) = decls.iter().find(|(n, _)| n == &f.name)
-                    {
-                        bind_type_params(declared, &vty, &pset, &mut subst);
+                    if let Some((_, declared)) = decls.iter().find(|(n, _)| n == &f.name) {
+                        if !pset.is_empty() {
+                            bind_type_params(declared, &vty, &pset, &mut subst);
+                        }
+                        // The field value must be assignable to the declared field type (`E0007`),
+                        // mirroring the field-default check. The type's own parameters are erased to
+                        // `dyn` (they are inferred from this very value above), so a generic field
+                        // accepts any value while a concrete field type is enforced.
+                        let expected = erase_type_params(declared.clone(), &pset);
+                        if !self.arg_assignable(&vty, &expected) {
+                            self.diags.push(Diagnostic::error(
+                                DiagnosticCode::TypeMismatch,
+                                f.value.span(),
+                                format!(
+                                    "field `{}` expects type `{expected}`, found `{vty}`",
+                                    f.name
+                                ),
+                            ));
+                        }
                     }
                 }
                 let args = if subst.is_empty() {

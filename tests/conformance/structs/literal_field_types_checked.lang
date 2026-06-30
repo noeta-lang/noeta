@@ -1,0 +1,20 @@
+// A struct literal's field values must match the declared field types — concrete fields are enforced
+// while a generic field still accepts any value (its parameter is inferred from the value). Correct
+// types run cleanly.
+// expect: stdout "7"
+// expect: stdout "hi"
+// expect: stdout "5"
+// expect: exit 0
+struct Point {
+    x: int
+    y: int
+}
+class Box<T> {
+    pub value: T
+}
+p = Point { x: 7, y: 2 };
+echo p.x;
+labelled = Box { value: "hi" };
+echo labelled.value;
+n = Box { value: 5 };
+echo n.value;

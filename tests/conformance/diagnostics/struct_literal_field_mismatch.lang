@@ -1,0 +1,8 @@
+// A struct/class literal's field values are now type-checked against the declared field types
+// (E0007), mirroring the field-default check — a wrong-typed literal field is rejected rather than
+// silently accepted.
+// expect: error E0007 at 7:14
+// expect: exit 1
+struct Box { f: int }
+b = Box { f: "hi" };
+echo b.f;
