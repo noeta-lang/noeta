@@ -57,11 +57,17 @@ pub struct Relevance {
 /// A function's droppable locals mapped to their destructor-relevance bit.
 type DropSet = HashMap<String, bool>;
 
-/// Program-wide context threaded through the rewrite: the globals (never dropped) and the
-/// destructor-relevance oracle (`None` ⇒ conservatively relevant).
+/// Program-wide context threaded through the rewrite: the globals (never dropped), the
+/// destructor-relevance oracle (`None` ⇒ conservatively relevant), and the **enclosing locals** —
+/// every name local to a lexically-enclosing function. A bare assignment to such a name *reassigns*
+/// it (the language's outward-searching `assign`), so it is an **upvalue**, not a local of the
+/// function being rewritten, and must never be dropped here: a captured cell is shared with — and
+/// outlives — the current activation (a closure reads it again on a later call). Extended at each
+/// function boundary by [`rewrite_func`].
 struct Cx<'a> {
     globals: &'a VarSet,
     relevance: Option<&'a Relevance>,
+    enclosing: VarSet,
 }
 
 /// Insert source-variable drops throughout a program, returning the annotated IR. The top level is
@@ -72,6 +78,8 @@ pub fn insert_drops(program: &Program, relevance: Option<&Relevance>) -> Program
     let cx = Cx {
         globals: &globals,
         relevance,
+        // The top level has no enclosing function; its own names are globals, handled separately.
+        enclosing: VarSet::new(),
     };
     // The top-level block is a global scope: no `DropVar`s for its own bindings (an empty drop set),
     // but `rewrite_block` still recurses into its nested function bodies.
@@ -168,6 +176,8 @@ fn collect_exit_drops(
 /// relevance, then walk it inserting drops. Nested functions inside it are rewritten by recursion.
 fn rewrite_func(func: &Func, cx: &Cx) -> Func {
     let live = liveness_of_body(func);
+    // This function's drop sets are computed against the *parent* context: `cx.enclosing` holds the
+    // names local to enclosing functions, which are this function's upvalues and must stay undropped.
     let droppable = drop_set(func, cx);
     // The broader **owned** set (Phase 4.2a): every owned local, including reassigned (multi-bind)
     // ones the single-assignment `droppable` set excludes. These drive the scope-exit drops that
@@ -175,13 +185,22 @@ fn rewrite_func(func: &Func, cx: &Cx) -> Func {
     // control falls off the block's end — the last-use drops above only catch values that die at a
     // straight-line use mid-block.
     let owned = owned_set(func, cx);
+    // Descend into this function's body with its own locals added to the enclosing set, so a nested
+    // closure treats them as upvalues (never dropping a captured cell it shares with this frame).
+    let mut enclosing = cx.enclosing.clone();
+    enclosing.extend(function_locals(func));
+    let child = Cx {
+        globals: cx.globals,
+        relevance: cx.relevance,
+        enclosing,
+    };
     let mut scopes: Vec<ScopeFrame> = Vec::new();
     let body = rewrite_block(
         &func.body,
         &live,
         &droppable,
         &owned,
-        cx,
+        &child,
         &mut scopes,
         false,
     );
@@ -521,7 +540,11 @@ fn rewrite_rvalue(rvalue: &Rvalue, scopes: &[ScopeFrame], cx: &Cx) -> Rvalue {
 /// `(func.span, name)`; a local by its `Bind` `name_span`; with no oracle (or a name that cannot
 /// be located) the drop is conservatively relevant.
 fn drop_set(func: &Func, cx: &Cx) -> DropSet {
-    relevance_map(func, cx, single_assignment_locals(func, cx.globals))
+    relevance_map(
+        func,
+        cx,
+        single_assignment_locals(func, cx.globals, &cx.enclosing),
+    )
 }
 
 /// Build the **owned-locals → relevance** map for one function: *every* owned local (not just the
@@ -529,7 +552,7 @@ fn drop_set(func: &Func, cx: &Cx) -> DropSet {
 /// (Phase 4.2a). Same exclusions as the droppable set otherwise — globals, captured names, and
 /// loop/`match`-pattern bindings stay out.
 fn owned_set(func: &Func, cx: &Cx) -> DropSet {
-    relevance_map(func, cx, owned_locals(func, cx.globals))
+    relevance_map(func, cx, owned_locals(func, cx.globals, &cx.enclosing))
 }
 
 /// Look each name up in the destructor-relevance oracle. A parameter is keyed by `(func.span, name)`;
@@ -601,7 +624,7 @@ fn collect_bind_spans(block: &Block, out: &mut HashMap<String, Span>) {
 /// The single-assignment function-local names eligible for a drop: a parameter the body never
 /// reassigns, or a name bound exactly once in the body, excluding globals and loop/`match`-pattern
 /// bindings. (See the module note for why single-assignment is the safe first target.)
-fn single_assignment_locals(func: &Func, globals: &VarSet) -> VarSet {
+fn single_assignment_locals(func: &Func, globals: &VarSet, enclosing: &VarSet) -> VarSet {
     let mut bind_counts: HashMap<String, u32> = HashMap::new();
     let mut excluded: VarSet = VarSet::new();
     count_binds_block(&func.body, &mut bind_counts, &mut excluded);
@@ -610,6 +633,11 @@ fn single_assignment_locals(func: &Func, globals: &VarSet) -> VarSet {
     // shared cell). Over-approximate captures as every name referenced anywhere inside a nested
     // closure/`fn` body and exclude them — conservative (over-excludes → fewer drops → safe).
     collect_captured(&func.body, &mut excluded);
+    // A name local to an enclosing function is an **upvalue** here (a bare assignment reassigns it),
+    // not a local of this function — never drop it (the shared cell outlives this frame). Parameters
+    // and `mut`/pattern locals genuinely declared here legitimately shadow an enclosing name; this
+    // excludes such a shadow too, which only defers its reclamation to frame teardown (safe).
+    excluded.extend(enclosing.iter().cloned());
 
     let mut droppable = VarSet::new();
     // A parameter is bound once (at entry); it stays droppable only if the body never reassigns it.
@@ -637,11 +665,14 @@ fn single_assignment_locals(func: &Func, globals: &VarSet) -> VarSet {
 /// exists so its *surviving* value — and any never-read dead store — is reclaimed at scope exit
 /// (Phase 4.2a). The exclusions are identical: globals, closure-captured names, and `for`/`match`
 /// pattern bindings stay out.
-fn owned_locals(func: &Func, globals: &VarSet) -> VarSet {
+fn owned_locals(func: &Func, globals: &VarSet, enclosing: &VarSet) -> VarSet {
     let mut bind_counts: HashMap<String, u32> = HashMap::new();
     let mut excluded: VarSet = VarSet::new();
     count_binds_block(&func.body, &mut bind_counts, &mut excluded);
     collect_captured(&func.body, &mut excluded);
+    // Upvalues (names local to an enclosing function) are never owned here — see
+    // `single_assignment_locals`.
+    excluded.extend(enclosing.iter().cloned());
 
     let mut owned = VarSet::new();
     // A parameter is owned unless reassigned in the body, captured, or shadowing a global.
@@ -697,6 +728,21 @@ fn collect_captured(block: &Block, out: &mut VarSet) {
             _ => {}
         }
     }
+}
+
+/// Every name `func` introduces into its own scope — parameters plus every name bound in its body
+/// (`Bind` targets, nested-`fn` names, and `for`/`match` pattern bindings), not descending into
+/// nested closures (their bindings belong to them). Used to extend the enclosing-locals set when
+/// rewriting `func`'s body, so a nested closure recognizes these as upvalues and never drops one.
+/// Over-approximation is safe — a name wrongly listed only suppresses a drop (deferring it to
+/// teardown).
+fn function_locals(func: &Func) -> VarSet {
+    let mut counts: HashMap<String, u32> = HashMap::new();
+    let mut names: VarSet = VarSet::new();
+    count_binds_block(&func.body, &mut counts, &mut names);
+    names.extend(counts.into_keys());
+    names.extend(func.params.iter().cloned());
+    names
 }
 
 /// Collect every source-variable name a nested function captures — over-approximated as every name

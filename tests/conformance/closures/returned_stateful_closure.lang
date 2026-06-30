@@ -1,0 +1,26 @@
+// A closure that captures a `mut` local of its defining function, then **outlives** that function
+// (it is returned and called repeatedly afterwards). Each call mutates the captured cell, and a call
+// that only *reads* the captured value must leave it intact for the next call. This exercises the
+// captured cell as state shared across invocations after the frame that created it is gone — the
+// pattern generators (Track G) rest on. Regression guard: the drop-insertion pass must not treat an
+// upvalue as a droppable frame-local (a spurious last-use drop would clear the shared cell, so a
+// read-only call would corrupt the state).
+// expect: stdout "1"
+// expect: stdout "101"
+// expect: stdout "101"
+// expect: stdout "2"
+// expect: exit 0
+fn make(): (int) -> int {
+    mut s = 0
+    step = fn(r) {
+        if s == 0 { s = 1; return s }
+        if r == 9 { s = s + 1; return s }
+        return 100 + s
+    }
+    return step
+}
+f = make()
+echo f(0)   // s: 0 -> 1, returns 1
+echo f(0)   // read-only: returns 100 + 1; s stays 1
+echo f(0)   // read-only again: still 101 (the read did not clear s)
+echo f(9)   // s: 1 -> 2, returns 2
