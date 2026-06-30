@@ -1029,7 +1029,7 @@ impl Checker {
                 Stmt::Use { path, names, .. } => {
                     let is_std = path.len() == 1 && path[0] == "std";
                     for name in names {
-                        if is_std && stdlib::STD_MODULES.contains(&name.name.as_str()) {
+                        if is_std && stdlib::is_std_module(&name.name) {
                             self.modules.insert(name.name.clone());
                         } else {
                             self.types.insert(name.name.clone());

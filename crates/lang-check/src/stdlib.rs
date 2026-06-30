@@ -9,16 +9,38 @@
 //! `lang-stdlib`; if a name is added there without a row here it simply falls back to `dyn`/runtime
 //! dispatch, never to a wrong type.
 
+use lang_stdlib::registry;
 use lang_types::Type;
 
 /// Reserved built-in type name for the value `fs.open` returns (the runtime `FileHandle`). A
 /// receiver of this `Named` type dispatches the file-handle methods.
 pub(super) const FILE_HANDLE: &str = "FileHandle";
 
-/// The Ring 2 module names a `use std.{…}` import can bind (mirrors `NativeModule::from_name`).
-pub(super) const STD_MODULES: &[&str] = &[
-    "json", "math", "random", "fs", "time", "env", "args", "vec", "quat",
-];
+/// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. The migrated modules come from the
+/// native-extension registry; `json` is not yet registered (it migrates with the Phase B recursive
+/// value seam), so it is admitted explicitly.
+pub(super) fn is_std_module(name: &str) -> bool {
+    name == "json" || registry::find_module(name).is_some()
+}
+
+/// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`].
+fn sig_to_type(sig: &registry::SigType) -> Type {
+    use registry::SigType;
+    match sig {
+        SigType::Int => Type::Int,
+        SigType::Float => Type::Float,
+        SigType::F32 => Type::F32,
+        SigType::Bool => Type::Bool,
+        SigType::String => Type::String,
+        SigType::Bytes => Type::Bytes,
+        SigType::Unit => Type::Unit,
+        SigType::Dyn => Type::Dyn,
+        SigType::List(t) => list(sig_to_type(t)),
+        SigType::Option(t) => opt(sig_to_type(t)),
+        SigType::Map(k, v) => Type::Map(Box::new(sig_to_type(k)), Box::new(sig_to_type(v))),
+        SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
+    }
+}
 
 fn list(t: Type) -> Type {
     Type::List(Box::new(t))
@@ -182,45 +204,21 @@ fn file_handle_params(name: &str) -> Option<Vec<Type>> {
 /// parameters (`math.abs`/`min`/`max`, and any numeric position) are typed `dyn` so an `int` or
 /// `float` argument is accepted without a spurious mismatch.
 pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
+    // `fs.list` takes an optional dir argument (0 or 1) — not arity-checked. (It is registered with
+    // a fixed signature for dispatch, so this skip must precede the registry lookup.)
+    if module == "fs" && name == "list" {
+        return None;
+    }
+    // Migrated modules: parameter types come from the native-extension registry.
+    if let Some(f) = registry::find_function(module, name) {
+        return Some(f.params.iter().map(sig_to_type).collect());
+    }
+    // Not yet in the registry: `json` (Phase B) and the `vec` bulk `*_all` kernels (per-backend).
     Some(match (module, name) {
         ("json", "parse") => vec![Type::String],
         ("json", "stringify") => vec![Type::Dyn],
-        ("math", "pi" | "e") => vec![],
-        ("math", "sqrt" | "floor" | "ceil" | "round" | "sin" | "cos" | "tan") => vec![Type::Float],
-        ("math", "pow") => vec![Type::Float, Type::Float],
-        ("math", "abs") => vec![Type::Dyn],
-        ("math", "min" | "max") => vec![Type::Dyn, Type::Dyn],
-        ("random", "seed") => vec![Type::Int],
-        ("random", "int") => vec![Type::Int, Type::Int],
-        ("random", "float") => vec![],
-        ("fs", "write" | "append") => vec![Type::String, Type::String],
-        ("fs", "write_bytes") => vec![Type::String, Type::Bytes],
-        ("fs", "read" | "read_lines" | "exists" | "remove" | "is_dir" | "mkdir" | "read_bytes") => {
-            vec![Type::String]
-        }
-        ("fs", "open") => vec![Type::String, Type::String],
-        // `fs.list` takes an optional dir argument (0 or 1) — not arity-checked.
-        ("fs", "list") => return None,
-        ("time", "monotonic") => vec![],
-        ("time", "sleep") => vec![Type::Int],
-        ("env", "get") => vec![Type::String],
-        ("env", "keys") => vec![],
-        ("args", "all") => vec![],
-        // The `vec` 3D-math module (P-PACK Phase 4). A Vec3 argument is `dyn` (the structural 3-`f32`
-        // check is at runtime); the `scale` factor is numeric (`dyn` accepts int/float/f32).
-        ("vec", "add" | "sub" | "cross" | "dot" | "reflect" | "min" | "max" | "distance") => {
-            vec![Type::Dyn, Type::Dyn]
-        }
-        ("vec", "scale") => vec![Type::Dyn, Type::Dyn],
-        ("vec", "lerp" | "clamp") => vec![Type::Dyn, Type::Dyn, Type::Dyn],
-        ("vec", "length" | "normalize" | "abs") => vec![Type::Dyn],
-        // Bulk kernels over `List<Vec3>` (P-PACK 4.2).
         ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
         ("vec", "length_all") => vec![Type::Dyn],
-        // The `quat` quaternion module (Phase 4 follow-on).
-        ("quat", "mul" | "dot" | "rotate_vec3") => vec![Type::Dyn, Type::Dyn],
-        ("quat", "conjugate" | "normalize" | "length") => vec![Type::Dyn],
-        ("quat", "slerp") => vec![Type::Dyn, Type::Dyn, Type::Dyn],
         _ => return None,
     })
 }
@@ -279,45 +277,26 @@ pub(super) fn index_return(receiver: &Type) -> Option<Type> {
 
 /// The return type of a Ring 2 module call `module.name(args)`, or `None` if unknown.
 pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<Type> {
+    // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
+    // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
+    // kind-preserving rule; `Concrete` maps directly.
+    if let Some(f) = registry::find_function(module, name) {
+        use registry::RetTy;
+        return Some(match f.ret {
+            RetTy::Concrete(s) => sig_to_type(&s),
+            RetTy::SameAsArg(i) => args.get(i).cloned().unwrap_or(Type::Dyn),
+            RetTy::NumericPreserving => numeric_preserving(args),
+            // The call-site-typed turbofish form lands in Phase B; until then no registered function
+            // uses it, so a hole is the safe fallback.
+            RetTy::TypeArg => Type::Unknown,
+        });
+    }
+    // Not yet in the registry: `json` (Phase B) and the `vec` bulk `*_all` kernels (per-backend).
     Some(match (module, name) {
         ("json", "parse") => Type::Dyn,
         ("json", "stringify") => Type::String,
-        ("math", "pi" | "e" | "sqrt" | "pow" | "sin" | "cos" | "tan") => Type::Float,
-        ("math", "floor" | "ceil" | "round") => Type::Int,
-        ("math", "abs" | "min" | "max") => numeric_preserving(args),
-        ("random", "seed") => Type::Unit,
-        ("random", "int") => Type::Int,
-        ("random", "float") => Type::Float,
-        ("fs", "write" | "append" | "mkdir" | "write_bytes") => Type::Unit,
-        ("fs", "read") => Type::String,
-        ("fs", "read_bytes") => Type::Bytes,
-        ("fs", "read_lines" | "list") => list(Type::String),
-        ("fs", "exists" | "remove" | "is_dir") => Type::Bool,
-        ("fs", "open") => Type::Named(FILE_HANDLE.to_string(), vec![]),
-        ("time", "monotonic") => Type::Int,
-        ("time", "sleep") => Type::Unit,
-        ("env", "get") => Type::String,
-        ("env", "keys") => list(Type::String),
-        ("args", "all") => list(Type::String),
-        // `vec` 3D-math (P-PACK Phase 4): `dot`/`length` reduce to an `f32`; the rest return a Vec3
-        // of the same type as the first argument (`vec.add(v, w): typeof v`), or `dyn` if untyped.
-        ("vec", "dot" | "length" | "distance") => Type::F32,
-        (
-            "vec",
-            "add" | "sub" | "scale" | "cross" | "normalize" | "reflect" | "min" | "max" | "abs"
-            | "lerp" | "clamp",
-        ) => args.first().cloned().unwrap_or(Type::Dyn),
-        // Bulk kernels (P-PACK 4.2): `add_all`/`sub_all`/`scale_all` return a `List<Vec3>` of the
-        // same type as the first list; `dot_all`/`length_all` reduce to a `List<f32>`.
         ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
         ("vec", "dot_all" | "length_all") => list(Type::F32),
-        // `quat`: `dot`/`length` → f32; `rotate_vec3` returns the *vector* (its 2nd arg); the rest
-        // return a quaternion of the same type as the first argument.
-        ("quat", "dot" | "length") => Type::F32,
-        ("quat", "rotate_vec3") => args.get(1).cloned().unwrap_or(Type::Dyn),
-        ("quat", "mul" | "conjugate" | "normalize" | "slerp") => {
-            args.first().cloned().unwrap_or(Type::Dyn)
-        }
         _ => return None,
     })
 }
