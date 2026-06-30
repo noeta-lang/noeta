@@ -1,0 +1,83 @@
+// Track G.2 — a generator's `yield` may sit inside `if`/`while` (any nesting), with `break`/
+// `continue`. The body is flattened into a state machine (a `while true` dispatch loop over a hidden
+// `$state`): each `yield` suspends, control flow becomes state transitions. This unlocks infinite
+// generators (`while true { yield … }`, consumed lazily with `take`), bounded loops, conditional
+// yields, and early `break`. A self-contained `for` with no `yield` still runs whole within a state.
+// expect: stdout "[0, 1, 2, 3, 4]"
+// expect: stdout "[0, 1, 2]"
+// expect: stdout "[\"even\", \"odd\", \"even\"]"
+// expect: stdout "[0, 10, 20, 999]"
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[6, 12]"
+// expect: exit 0
+
+// Infinite generator, consumed lazily.
+fn naturals(): Iterator<int> {
+    mut n = 0
+    while true {
+        yield n
+        n = n + 1
+    }
+}
+echo naturals().take(5).collect()
+
+// Bounded `while`.
+fn upto(limit: int): Iterator<int> {
+    mut i = 0
+    while i < limit {
+        yield i
+        i = i + 1
+    }
+}
+echo upto(3).collect()
+
+// Conditional yield (`if`/`else` straddling the suspend).
+fn parity(): Iterator<string> {
+    mut k = 0
+    while k < 3 {
+        if k % 2 == 0 {
+            yield "even"
+        } else {
+            yield "odd"
+        }
+        k = k + 1
+    }
+}
+echo parity().collect()
+
+// `break` ends the loop early; a trailing `yield` still runs.
+fn capped(): Iterator<int> {
+    mut n = 0
+    while true {
+        if n >= 3 { break }
+        yield n * 10
+        n = n + 1
+    }
+    yield 999
+}
+echo capped().collect()
+
+// `continue` skips an iteration before the `yield`.
+fn evens(): Iterator<int> {
+    mut n = 0
+    while n < 6 {
+        n = n + 1
+        if n % 2 == 1 { continue }
+        yield n
+    }
+}
+echo evens().collect()
+
+// A `for` with no `yield` runs whole inside a state (wholesale), accumulating between yields.
+fn running(): Iterator<int> {
+    mut acc = 0
+    mut round = 0
+    while round < 2 {
+        for x in [1, 2, 3] {
+            acc = acc + x
+        }
+        yield acc
+        round = round + 1
+    }
+}
+echo running().collect()

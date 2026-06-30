@@ -68,9 +68,30 @@ statement (no send-type). `return e;` in a generator is forbidden; bare `return;
     composed with `take`/`map`/`filter`/`enumerate`/streaming `for`), `yield_in_control_flow.lang`
     (the G.2 gate), and `closures/returned_stateful_closure.lang` (the drop-fix regression guard).
     347 conformance / differential 337 / 0-skipped / leaks 0 both / clippy+fmt+workspace clean.
-- **G.2 — control flow across `yield`.** Extend the transform to `while`/`loop`/`if`/`match` and
-  `break`/`continue` straddling a `yield` (the dispatch-loop state assignment). This is the
-  high-value slice — infinite generators (`loop { yield … }`), `while`, conditional yields.
+- **G.2 — control flow across `yield`. ✅ DONE** (2026-06-30). The straight-line if-chain became a
+  **CFG flattener** (`Flattener` in `lang-ir/lower.rs`): the body lowers to a graph of states, and the
+  step closure is a `while true` dispatch loop over `$state` where a state either **returns** (a
+  `yield` → `some`, or exhaustion → `none`) or **jumps** (`$state = j; continue`). `yield` becomes a
+  `Yield(e, next)` terminator; `if`-with-yield/escaping-ctrl becomes a `Branch`; `while`-with-yield
+  becomes a head/​body/​after loop with a back-edge; `break`/`continue` become `Goto` to the enclosing
+  flattened loop's after/​head. A construct with **no yield and no escaping `break`/`continue`** is
+  emitted **verbatim** (a `match` — its arms are expressions, so it never carries yield/ctrl; a
+  self-contained `for`/​`while`/​`if`), running whole within one state. This unlocks infinite
+  generators (`while true { yield … }` + `take`), bounded `while`, conditional yields (`if`/`else`
+  straddling the suspend), early `break`, and `continue`. Every flattened-level local (now including
+  those inside flattened `if`/`while`) is hoisted to a cell, and a `mut x = …`/`let x = …` is rewritten
+  to a bare assignment so it reassigns the cell instead of re-shadowing it (a latent G.1b gap for
+  `mut` locals, fixed here).
+  - **Checker:** the G.1b gate narrowed — `yield` inside `if`/`while` now runs; only a `yield` inside a
+    `for` is still E0039 ("a later slice adds `for`", via `first_yield_under_for`). `for`-across-yield
+    needs the iterator cursor as machine state; deferred.
+  - Conformance: `generators/control_flow.lang` (infinite + `take`, bounded `while`, conditional
+    yield, `break`, `continue`, wholesale `for`), `yield_in_for.lang` (the remaining gate). 348
+    conformance / differential 339 / 0-skipped / leaks 0 both / clippy+fmt+workspace clean.
+- **G.4 — `for` across `yield`.** Lift the G.2 gate: a `for x in src { … yield … }` lowers to the
+  iterator protocol (`it = src.iter()`; the cursor `it` becomes a hoisted cell; the loop is a flattened
+  `while` over `it.next()`), so the source iterator's position is part of the machine state. (Numbered
+  after G.3 in spirit but independent — either order works.)
 - **G.3 — liveness (optimization) + coloring.** Replace the conservative hoist-everything with real
   liveness (only locals live across a `yield` become cells); enforce the coloring rule (`yield` inside
   a closure passed to a builtin → E0039).

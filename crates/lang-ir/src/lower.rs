@@ -1254,64 +1254,48 @@ struct GeneratorDesugar {
     step: Expr,
 }
 
-/// Build the [`GeneratorDesugar`] for a straight-line generator body (Track G.1b). See
-/// [`Lowerer::lower_generator`] for the shape and the rationale. All synthesized nodes carry the
-/// generator's `span`; reused source statements/expressions keep their own spans.
+/// Build the [`GeneratorDesugar`] for a generator body (Track G.1b straight-line + G.2 control flow).
+///
+/// The body is flattened into a **control-flow graph of states** — a stackless state machine. Each
+/// `yield` is a suspend point; `if`/`while` carrying a `yield` (and any `break`/`continue` reaching an
+/// enclosing flattened loop) become state transitions. The step closure is a `while true` dispatch
+/// loop over `$state`: state *k* runs its statements and then either **returns** (a `yield` → `some`,
+/// or exhaustion → `none`) or **jumps** (`$state = j; continue`) to re-enter the loop at another
+/// state. A construct with no `yield` and no escaping control flow is emitted **verbatim** (a `match`,
+/// a self-contained `for`/`while`), so it runs whole within one step. A `yield` inside a `for` is
+/// rejected by the checker (E0039) and never reaches here through a clean program.
+///
+/// Every top-level / flattened-level local is conservatively hoisted to a captured `mut` cell (the
+/// prelude declares it; its in-body `let x = …` is rewritten to a bare assignment that reassigns the
+/// cell), so a value computed before a `yield` survives into the next state. G.3 narrows this with
+/// real liveness. All synthesized nodes carry the generator's `span`; reused source nodes keep theirs.
 fn desugar_generator(body: &[AstStmt], span: Span) -> GeneratorDesugar {
-    // Conservatively hoist every top-level local to an outer cell (G.3 narrows this with real
-    // liveness). A local declared *inside* control flow that holds no `yield` never straddles a
-    // suspend, so it stays a closure-local within its segment and is not hoisted.
-    let mut hoisted: Vec<String> = Vec::new();
-    let mut hoist = |name: &str| {
-        if !hoisted.iter().any(|n| n == name) {
-            hoisted.push(name.to_string());
-        }
+    let mut flat = Flattener {
+        blocks: Vec::new(),
+        hoisted: Vec::new(),
     };
-    for stmt in body {
-        match stmt {
-            AstStmt::Binding { name, .. } => hoist(name),
-            AstStmt::Destructure { targets, .. } => {
-                for (name, _) in targets {
-                    hoist(name);
-                }
-            }
-            _ => {}
-        }
-    }
+    let entry = flat.new_block();
+    let exit = flat.lower_seq(body, entry, None);
+    flat.blocks[exit].term = Term::Done;
 
-    // Split the body at each top-level `yield` into states. State k runs segment k (the statements up
-    // to the k-th yield), advances `$state`, and returns `some(<yielded>)`; the final state runs the
-    // trailing statements and returns `none`.
-    let mut arms: Vec<AstStmt> = Vec::new();
-    let mut segment: Vec<AstStmt> = Vec::new();
-    let mut state: i64 = 0;
-    for stmt in body {
-        match stmt {
-            AstStmt::Yield { value, .. } => {
-                let mut block = std::mem::take(&mut segment);
-                block.push(assign_state(state + 1, span));
-                block.push(AstStmt::Return {
-                    value: Some(call_some(value.clone(), span)),
-                    span,
-                });
-                arms.push(state_arm(state, block, span));
-                state += 1;
-            }
-            other => segment.push(other.clone()),
-        }
+    // Render each state as `if $state == idx { <stmts> <terminator> }`, wrapped in a `while true`
+    // dispatch loop; the trailing `return none` fires once `$state` reaches the terminal sentinel.
+    let terminal = flat.blocks.len();
+    let mut chain: Vec<AstStmt> = Vec::with_capacity(flat.blocks.len() + 1);
+    for (idx, block) in flat.blocks.iter().enumerate() {
+        let mut stmts = block.stmts.clone();
+        block.term.render(&mut stmts, terminal, span);
+        chain.push(state_arm(idx as i64, stmts, span));
     }
-    let mut last = segment;
-    last.push(assign_state(state + 1, span));
-    last.push(AstStmt::Return {
+    chain.push(AstStmt::Return {
         value: Some(none_expr(span)),
         span,
     });
-    arms.push(state_arm(state, last, span));
-    // Terminal: once exhausted, every further `next()` yields `none`.
-    arms.push(AstStmt::Return {
-        value: Some(none_expr(span)),
+    let dispatch = AstStmt::While {
+        cond: Expr::Bool { value: true, span },
+        body: chain,
         span,
-    });
+    };
 
     let step = Expr::Closure {
         params: vec![Param {
@@ -1322,7 +1306,7 @@ fn desugar_generator(body: &[AstStmt], span: Span) -> GeneratorDesugar {
             span,
         }],
         ret: None,
-        body: ClosureBody::Block(arms),
+        body: ClosureBody::Block(vec![dispatch]),
         span,
     };
 
@@ -1334,7 +1318,7 @@ fn desugar_generator(body: &[AstStmt], span: Span) -> GeneratorDesugar {
         value: Expr::Int { value: 0, span },
         span,
     }];
-    for name in &hoisted {
+    for name in &flat.hoisted {
         prelude.push(AstStmt::Binding {
             mut_decl: true,
             name: name.clone(),
@@ -1348,8 +1332,239 @@ fn desugar_generator(body: &[AstStmt], span: Span) -> GeneratorDesugar {
     GeneratorDesugar { prelude, step }
 }
 
-/// `if $state == k { body }` — one dispatch arm. The body ends in a `return`, so the chain runs at
-/// most one arm per step (G.2 replaces the if-chain with a dispatch loop for control-flow re-entry).
+/// A state's terminator in the flattened generator CFG — how control leaves the state.
+enum Term {
+    /// Jump to another state and re-enter the dispatch loop (`$state = k; continue`).
+    Goto(usize),
+    /// Suspend: `$state = k; return some(<expr>)` — the next step resumes at state `k`.
+    Yield(Expr, usize),
+    /// Two-way branch on a condition (`if cond { $state = t } else { $state = e } continue`).
+    Branch(Expr, usize, usize),
+    /// End of iteration: `$state = <terminal>; return none` (every later step also returns `none`).
+    Done,
+}
+
+impl Term {
+    /// Emit the statements that realize this terminator, appended after a state's own statements.
+    fn render(&self, out: &mut Vec<AstStmt>, terminal: usize, span: Span) {
+        match self {
+            Term::Goto(k) => {
+                out.push(assign_state(*k as i64, span));
+                out.push(AstStmt::Continue { span });
+            }
+            Term::Yield(value, k) => {
+                out.push(assign_state(*k as i64, span));
+                out.push(AstStmt::Return {
+                    value: Some(call_some(value.clone(), span)),
+                    span,
+                });
+            }
+            Term::Branch(cond, then_state, else_state) => {
+                out.push(AstStmt::If {
+                    cond: cond.clone(),
+                    then_body: vec![assign_state(*then_state as i64, span)],
+                    else_body: Some(vec![assign_state(*else_state as i64, span)]),
+                    span,
+                });
+                out.push(AstStmt::Continue { span });
+            }
+            Term::Done => {
+                out.push(assign_state(terminal as i64, span));
+                out.push(AstStmt::Return {
+                    value: Some(none_expr(span)),
+                    span,
+                });
+            }
+        }
+    }
+}
+
+/// One state of the flattened generator: the statements it runs and how it leaves.
+struct BlockBuf {
+    stmts: Vec<AstStmt>,
+    term: Term,
+}
+
+/// Flattens a generator body into a CFG of [`BlockBuf`] states (Track G.2). See
+/// [`desugar_generator`].
+struct Flattener {
+    blocks: Vec<BlockBuf>,
+    /// Flattened-level locals to hoist into captured cells (deduped, in first-seen order).
+    hoisted: Vec<String>,
+}
+
+impl Flattener {
+    /// Allocate a fresh empty state (terminator filled in by the caller; `Done` is a safe default for
+    /// an unreachable continuation).
+    fn new_block(&mut self) -> usize {
+        let idx = self.blocks.len();
+        self.blocks.push(BlockBuf {
+            stmts: Vec::new(),
+            term: Term::Done,
+        });
+        idx
+    }
+
+    fn hoist(&mut self, name: &str) {
+        if !self.hoisted.iter().any(|n| n == name) {
+            self.hoisted.push(name.to_string());
+        }
+    }
+
+    /// Lower a statement sequence starting at state `entry`, returning the state where control
+    /// continues afterward. `loop_ctx` is `(continue_target, break_target)` of the innermost
+    /// enclosing **flattened** loop (`None` at the top level), routing `continue`/`break`.
+    fn lower_seq(
+        &mut self,
+        stmts: &[AstStmt],
+        entry: usize,
+        loop_ctx: Option<(usize, usize)>,
+    ) -> usize {
+        let mut cur = entry;
+        for stmt in stmts {
+            cur = self.lower_one(stmt, cur, loop_ctx);
+        }
+        cur
+    }
+
+    /// Lower one statement into the CFG at state `cur`, returning the state control continues at.
+    fn lower_one(&mut self, stmt: &AstStmt, cur: usize, loop_ctx: Option<(usize, usize)>) -> usize {
+        match stmt {
+            AstStmt::Yield { value, .. } => {
+                let next = self.new_block();
+                self.blocks[cur].term = Term::Yield(value.clone(), next);
+                next
+            }
+            // Bare `return;` ends iteration; `return e;` is checker-rejected (E0039) — treat both as
+            // end-of-iteration so lowering stays total. Statements after it are unreachable.
+            AstStmt::Return { .. } => {
+                self.blocks[cur].term = Term::Done;
+                self.new_block()
+            }
+            AstStmt::Break { .. } => {
+                // `break` to the enclosing flattened loop's exit (or end iteration if there is none —
+                // a `break` outside a loop is already a checker error E0024, so this never runs).
+                self.blocks[cur].term = match loop_ctx {
+                    Some((_, brk)) => Term::Goto(brk),
+                    None => Term::Done,
+                };
+                self.new_block()
+            }
+            AstStmt::Continue { .. } => {
+                self.blocks[cur].term = match loop_ctx {
+                    Some((cont, _)) => Term::Goto(cont),
+                    None => Term::Done,
+                };
+                self.new_block()
+            }
+            // A flattened-level local: hoist it to a captured cell and rewrite its declaration to a
+            // bare assignment (the prelude already declares the cell, so this reassigns it — including
+            // a `mut`-declared local, which must not re-shadow the cell).
+            AstStmt::Binding {
+                name, value, span, ..
+            } => {
+                self.hoist(name);
+                self.blocks[cur].stmts.push(AstStmt::Binding {
+                    mut_decl: false,
+                    name: name.clone(),
+                    name_span: *span,
+                    ty: None,
+                    value: value.clone(),
+                    span: *span,
+                });
+                cur
+            }
+            AstStmt::Destructure {
+                targets,
+                value,
+                span,
+                ..
+            } => {
+                for (name, _) in targets {
+                    self.hoist(name);
+                }
+                self.blocks[cur].stmts.push(AstStmt::Destructure {
+                    mut_decl: false,
+                    targets: targets.clone(),
+                    value: value.clone(),
+                    span: *span,
+                });
+                cur
+            }
+            AstStmt::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } if needs_flatten_if(then_body, else_body.as_deref()) => {
+                let then_entry = self.new_block();
+                let else_entry = self.new_block();
+                let join = self.new_block();
+                self.blocks[cur].term = Term::Branch(cond.clone(), then_entry, else_entry);
+                let then_exit = self.lower_seq(then_body, then_entry, loop_ctx);
+                self.blocks[then_exit].term = Term::Goto(join);
+                let else_exit =
+                    self.lower_seq(else_body.as_deref().unwrap_or(&[]), else_entry, loop_ctx);
+                self.blocks[else_exit].term = Term::Goto(join);
+                join
+            }
+            AstStmt::While { cond, body, .. } if body_has_yield(body) => {
+                let head = self.new_block();
+                self.blocks[cur].term = Term::Goto(head);
+                let body_entry = self.new_block();
+                let after = self.new_block();
+                self.blocks[head].term = Term::Branch(cond.clone(), body_entry, after);
+                // The loop body's `break`/`continue` route to `after`/`head`; the body falls back to
+                // `head` (the back-edge).
+                let body_exit = self.lower_seq(body, body_entry, Some((head, after)));
+                self.blocks[body_exit].term = Term::Goto(head);
+                after
+            }
+            // No `yield` and no escaping control flow: emit verbatim — it runs whole within this state
+            // (a `match`, a self-contained `for`/`while`/`if`). Its own `break`/`continue` target
+            // itself, so it needs no state interaction.
+            other => {
+                self.blocks[cur].stmts.push(other.clone());
+                cur
+            }
+        }
+    }
+}
+
+/// Whether an `if` must be flattened into the state machine: it carries a `yield`, or a `break`/
+/// `continue` that **escapes** the `if` (targeting an enclosing flattened loop) — emitting it verbatim
+/// would make that jump a real `break`/`continue` of the dispatch loop.
+fn needs_flatten_if(then_body: &[AstStmt], else_body: Option<&[AstStmt]>) -> bool {
+    let yields = body_has_yield(then_body) || else_body.is_some_and(body_has_yield);
+    let escapes =
+        body_has_escaping_ctrl(then_body) || else_body.is_some_and(body_has_escaping_ctrl);
+    yields || escapes
+}
+
+/// Whether a statement sequence contains a `break`/`continue` that escapes to an **enclosing** loop —
+/// i.e. one not absorbed by a `while`/`for` within the sequence. An `if` is transparent to control
+/// flow (its `break` targets the outer loop); a `while`/`for` absorbs its own (no labels); a `match`
+/// arm is an expression (no statements); nested callables are separate scopes.
+fn body_has_escaping_ctrl(stmts: &[AstStmt]) -> bool {
+    stmts.iter().any(stmt_has_escaping_ctrl)
+}
+
+fn stmt_has_escaping_ctrl(stmt: &AstStmt) -> bool {
+    match stmt {
+        AstStmt::Break { .. } | AstStmt::Continue { .. } => true,
+        AstStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => {
+            body_has_escaping_ctrl(then_body)
+                || else_body.as_deref().is_some_and(body_has_escaping_ctrl)
+        }
+        _ => false,
+    }
+}
+
+/// `if $state == k { body }` — one state's dispatch arm inside the `while true` step loop.
 fn state_arm(k: i64, body: Vec<AstStmt>, span: Span) -> AstStmt {
     AstStmt::If {
         cond: Expr::Binary {

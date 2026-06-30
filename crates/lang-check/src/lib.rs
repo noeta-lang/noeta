@@ -1550,21 +1550,21 @@ impl Checker {
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
         }
-        // G.1b gate: a straight-line generator (every `yield` a top-level statement) is now
-        // executable — it desugars into a state-machine step closure wrapped in an iterator. A
-        // `yield` nested in control flow (`if`/`for`/`while`) still needs the dispatch-loop transform
-        // that lands in Track G.2; gate it cleanly until then. Only fires for a generator whose
-        // signature is otherwise well-formed (correct `Iterator<T>` return), so it never piles onto a
-        // wrong-return-type generator that already reported E0039.
+        // G.2 gate: a generator now desugars into a full state machine — `yield` at the top level or
+        // inside `if`/`while` (any nesting) runs, including infinite `while true { yield … }` with
+        // `break`/`continue`. A `yield` inside a `for` loop still needs the iterator-driven loop state
+        // (the cursor becomes machine state); gate it cleanly until that lands. Only fires for a
+        // generator whose signature is otherwise well-formed (correct `Iterator<T>` return), so it
+        // never piles onto a wrong-return-type generator that already reported E0039.
         if self.current_yield.is_some()
             && matches!(self.current_ret, Type::Named(ref n, _) if n == stdlib::ITERATOR)
-            && let Some(nested) = first_nested_yield(&decl.body)
+            && let Some(in_for) = first_yield_under_for(&decl.body, false)
         {
             self.diags.push(Diagnostic::error(
                 DiagnosticCode::GeneratorMisuse,
-                nested,
-                "a `yield` inside control flow (`if`/`for`/`while`) is not yet supported — only \
-                 straight-line generators run today (Track G.2)"
+                in_for,
+                "a `yield` inside a `for` loop is not yet supported — yield at the top level or \
+                 inside `if`/`while` (a later slice adds `for`)"
                     .to_string(),
             ));
         }
@@ -4512,57 +4512,39 @@ fn stmt_has_yield(stmt: &Stmt) -> bool {
     }
 }
 
-/// The span of the first `yield` that appears **inside control flow** (`if`/`for`/`while`) at any
-/// depth within `stmts` — i.e. a `yield` that is *not* a top-level statement. Used by the G.1b gate:
-/// only straight-line generators (all `yield`s at the top level) run today; a `yield` under control
-/// flow needs the dispatch-loop transform (Track G.2) and is gated until then. Does not descend into
-/// nested callables (their `yield`s are already rejected as "outside a generator").
-fn first_nested_yield(stmts: &[Stmt]) -> Option<Span> {
+/// The span of the first `yield` that appears **inside a `for` loop** at any depth within `stmts`
+/// (the `under_for` flag becomes `true` once descent passes through a `for` body). Used by the G.2
+/// gate: `yield` runs at the top level and inside `if`/`while`, but a `yield` inside a `for` needs
+/// the iterator-driven loop state that a later slice adds, so it is rejected until then. Descends
+/// through control flow but not into nested callables (their `yield`s are already rejected as
+/// "outside a generator").
+fn first_yield_under_for(stmts: &[Stmt], under_for: bool) -> Option<Span> {
     for stmt in stmts {
         match stmt {
+            Stmt::Yield { span, .. } if under_for => return Some(*span),
+            Stmt::Yield { .. } => {}
             Stmt::If {
                 then_body,
                 else_body,
                 ..
             } => {
-                if let Some(span) = first_yield(then_body) {
+                if let Some(span) = first_yield_under_for(then_body, under_for) {
                     return Some(span);
                 }
-                if let Some(span) = else_body.as_deref().and_then(first_yield) {
-                    return Some(span);
-                }
-            }
-            Stmt::For { body, .. } | Stmt::While { body, .. } => {
-                if let Some(span) = first_yield(body) {
-                    return Some(span);
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-/// The span of the first `yield` anywhere in `stmts` (descending into control flow, not nested
-/// callables). Helper for [`first_nested_yield`].
-fn first_yield(stmts: &[Stmt]) -> Option<Span> {
-    for stmt in stmts {
-        match stmt {
-            Stmt::Yield { span, .. } => return Some(*span),
-            Stmt::If {
-                then_body,
-                else_body,
-                ..
-            } => {
-                if let Some(span) = first_yield(then_body) {
-                    return Some(span);
-                }
-                if let Some(span) = else_body.as_deref().and_then(first_yield) {
+                if let Some(span) = else_body
+                    .as_deref()
+                    .and_then(|b| first_yield_under_for(b, under_for))
+                {
                     return Some(span);
                 }
             }
-            Stmt::For { body, .. } | Stmt::While { body, .. } => {
-                if let Some(span) = first_yield(body) {
+            Stmt::While { body, .. } => {
+                if let Some(span) = first_yield_under_for(body, under_for) {
+                    return Some(span);
+                }
+            }
+            Stmt::For { body, .. } => {
+                if let Some(span) = first_yield_under_for(body, true) {
                     return Some(span);
                 }
             }
