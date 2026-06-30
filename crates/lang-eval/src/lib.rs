@@ -2610,6 +2610,50 @@ impl Interpreter {
                     second: args[0].clone(),
                 }))
             }
+            M::Enumerate => {
+                self.expect_std_arity(name, args, 0, span)?;
+                Ok(wrap(IterState::Enumerate {
+                    source: source(),
+                    index: 0,
+                }))
+            }
+            M::Zip => {
+                self.expect_std_arity(name, args, 1, span)?;
+                Ok(wrap(IterState::Zip {
+                    a: source(),
+                    b: args[0].clone(),
+                }))
+            }
+            M::Sum => {
+                self.expect_std_arity(name, args, 0, span)?;
+                let mut int_total: i64 = 0;
+                let mut float_total: f64 = 0.0;
+                let mut any_float = false;
+                while let Some(e) = iter_advance(state) {
+                    match e {
+                        Value::Int(i) => int_total = int_total.wrapping_add(i),
+                        Value::Float(f) => {
+                            any_float = true;
+                            float_total += f;
+                        }
+                        other => {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "`sum` expects numeric elements, found {}",
+                                    other.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                }
+                Ok(if any_float {
+                    Value::Float(float_total + int_total as f64)
+                } else {
+                    Value::Int(int_total)
+                })
+            }
         }
     }
 
@@ -3393,6 +3437,18 @@ fn iter_advance(state: &Rc<RefCell<IterState>>) -> Option<Value> {
         }
         IterState::Chain { first, second } => {
             iter_value_next(first).or_else(|| iter_value_next(second))
+        }
+        IterState::Enumerate { source, index } => {
+            let elem = iter_value_next(source)?;
+            let tuple = Value::Tuple(Rc::new(vec![Value::Int(*index as i64), elem]));
+            *index += 1;
+            Some(tuple)
+        }
+        IterState::Zip { a, b } => {
+            // Pull from both; the shorter source ends the zip (a leftover `a` element is dropped).
+            let ea = iter_value_next(a)?;
+            let eb = iter_value_next(b)?;
+            Some(Value::Tuple(Rc::new(vec![ea, eb])))
         }
     }
 }

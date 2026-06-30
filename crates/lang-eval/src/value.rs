@@ -86,6 +86,10 @@ pub enum IterState {
     Drop { source: Value, pending: usize },
     /// Yield all of `first`, then all of `second` (`chain(other)`).
     Chain { first: Value, second: Value },
+    /// Yield `(index, element)` tuples from `source`, indexing from `index` (`enumerate()`).
+    Enumerate { source: Value, index: usize },
+    /// Yield `(a_elem, b_elem)` tuples, stopping when either runs dry (`zip(other)`).
+    Zip { a: Value, b: Value },
 }
 
 /// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,

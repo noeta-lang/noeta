@@ -562,6 +562,21 @@ impl Value {
         heap::alloc(Payload::Iter(IterState::Chain { first, second }))
     }
 
+    /// An `enumerate()` adapter: yields `(index, element)` tuples from `source`, indexing from 0
+    /// (Track I.1b.2). Owns one reference to `source`.
+    pub fn iter_enumerate(source: Value) -> Value {
+        source.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Enumerate { source, index: 0 }))
+    }
+
+    /// A `zip(other)` adapter: yields `(a_elem, b_elem)` tuples, stopping at the shorter source
+    /// (Track I.1b.2). Owns one reference to each source.
+    pub fn iter_zip(a: Value, b: Value) -> Value {
+        a.inc_ref();
+        b.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Zip { a, b }))
+    }
+
     /// Whether this is an iterator.
     pub fn is_iter(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter(_)))
@@ -615,6 +630,26 @@ impl Value {
                 IterState::Chain { first, second } => {
                     first.iter_next().or_else(|| second.iter_next())
                 }
+                // The source's element (already retained by its `iter_next`) and the immediate index
+                // are handed to the new tuple, which takes ownership of one reference to each.
+                IterState::Enumerate { source, index } => {
+                    let e = source.iter_next()?;
+                    let tuple = Value::tuple(vec![Value::int(*index as i64), e]);
+                    *index += 1;
+                    Some(tuple)
+                }
+                // Pull from both, shorter wins. If `a` ran dry there is nothing to release; if only
+                // `b` did, release `a`'s already-retained element so it does not leak.
+                IterState::Zip { a, b } => {
+                    let ea = a.iter_next()?;
+                    match b.iter_next() {
+                        Some(eb) => Some(Value::tuple(vec![ea, eb])),
+                        None => {
+                            ea.release();
+                            None
+                        }
+                    }
+                }
             }
         })
     }
@@ -627,6 +662,35 @@ impl Value {
             out.push(e);
         }
         Value::list(out)
+    }
+
+    /// Drain the iterator, summing its numeric elements (Track I.1b.2) — `int` if every element is an
+    /// `int`, else `float`. Mirrors the eager `sum` builtin's accumulation exactly so the two paths
+    /// agree. Each drained element's retained reference is released; on the first non-numeric element
+    /// it (and the partial state) is dropped and its type name returned as `Err` for the caller's
+    /// diagnostic. The caller must have checked [`Value::is_iter`].
+    pub fn iter_sum(self) -> Result<Value, &'static str> {
+        let mut int_total: i64 = 0;
+        let mut float_total: f64 = 0.0;
+        let mut any_float = false;
+        while let Some(e) = self.iter_next() {
+            if let Some(i) = e.as_int() {
+                int_total = int_total.wrapping_add(i);
+            } else if let Some(f) = e.as_float() {
+                any_float = true;
+                float_total += f;
+            } else {
+                let name = e.type_name();
+                e.release();
+                return Err(name);
+            }
+            e.release();
+        }
+        Ok(if any_float {
+            Value::float(float_total + int_total as f64)
+        } else {
+            Value::int(int_total)
+        })
     }
 
     /// A Ring 2 native module value (refcount 1), identified by its surface name (e.g. `"json"`).
@@ -2371,6 +2435,64 @@ mod tests {
         assert_eq!(rest.list_len(), Some(1));
         rest.release();
         dropped.release();
+        assert_eq!(live_count(), before);
+    }
+
+    #[test]
+    fn iterator_tuple_adapters_and_sum_free_without_leaking() {
+        // Track I.1b.2: `enumerate` builds `(int, element)` tuples (each owning the heap element
+        // `iter_next` handed it), `zip` pairs two sources and releases a leftover element of the
+        // longer one, and `sum`'s error path releases the offending heap element. Live count must
+        // return to baseline throughout.
+        let before = live_count();
+
+        // `enumerate` over heap strings → a list of `(index, string)` tuples.
+        let le = Value::list(vec![Value::string("a"), Value::string("b")]);
+        let ie = Value::iter(le);
+        le.release();
+        let enumerated = Value::iter_enumerate(ie);
+        ie.release();
+        let collected = enumerated.iter_collect(); // [(0, "a"), (1, "b")]
+        assert_eq!(collected.list_len(), Some(2));
+        collected.release();
+        enumerated.release();
+        assert_eq!(live_count(), before);
+
+        // `zip` with a longer left source: the leftover "c" pulled from `a` after `b` runs dry must
+        // be released, not leaked.
+        let la = Value::list(vec![
+            Value::string("a"),
+            Value::string("b"),
+            Value::string("c"),
+        ]);
+        let lb = Value::list(vec![Value::string("x")]);
+        let ia = Value::iter(la);
+        la.release();
+        let ib = Value::iter(lb);
+        lb.release();
+        let zipped = Value::iter_zip(ia, ib); // retains ia, ib
+        ia.release();
+        ib.release();
+        let pairs = zipped.iter_collect(); // [("a", "x")] — "b" stays in the source, "c" consumed+freed
+        assert_eq!(pairs.list_len(), Some(1));
+        pairs.release();
+        zipped.release();
+        assert_eq!(live_count(), before);
+
+        // `sum` over ints totals to an immediate and frees the iterator.
+        let ls = Value::list(vec![Value::int(1), Value::int(2), Value::int(3)]);
+        let is = Value::iter(ls);
+        ls.release();
+        assert_eq!(is.iter_sum().unwrap().as_int(), Some(6));
+        is.release();
+        assert_eq!(live_count(), before);
+
+        // `sum`'s error path: a heap (non-numeric) element is released as the error is raised.
+        let lerr = Value::list(vec![Value::int(1), Value::string("nope")]);
+        let ierr = Value::iter(lerr);
+        lerr.release();
+        assert_eq!(ierr.iter_sum().unwrap_err(), "string");
+        ierr.release();
         assert_eq!(live_count(), before);
     }
 

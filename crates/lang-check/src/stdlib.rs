@@ -90,7 +90,20 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
         "collect" => list(elem.clone()),
         // Adapters return another `Iterator<T>` over the same element type (Track I.1b).
         "take" | "drop" | "chain" => iterable_iter(elem.clone()),
+        // `enumerate()` → `Iterator<(int, T)>` (Track I.1b.2).
+        "enumerate" => iterable_iter(Type::Tuple(vec![Type::Int, elem.clone()])),
+        // `zip(other)` → `Iterator<(T, B)>`; the second element type comes from the argument, which
+        // `method_return` cannot see, so the precise type is filled at the call site (`synth_call`).
+        // This fallback is used only when that refinement does not apply.
+        "zip" => iterable_iter(Type::Tuple(vec![elem.clone(), Type::Dyn])),
         "count" => Type::Int,
+        // `sum()` → `int` for a concrete `Iterator<int>`, `float` for `Iterator<float>`, else a
+        // numeric hole — mirroring the eager `sum` builtin (Track I.1b.2).
+        "sum" => match elem {
+            Type::Int => Type::Int,
+            Type::Float => Type::Float,
+            _ => Type::Unknown,
+        },
         _ => return None,
     })
 }
@@ -184,10 +197,13 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
 
 fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "next" | "collect" | "count" => vec![],
+        "next" | "collect" | "count" | "enumerate" | "sum" => vec![],
         "take" | "drop" => vec![Type::Int],
         // `chain` takes another iterator over the same element type.
         "chain" => vec![iterable_iter(elem.clone())],
+        // `zip` takes any iterator (its element type may differ — it becomes the tuple's second
+        // component); `Iterator<dyn>` accepts every `Iterator<B>` while still rejecting non-iterators.
+        "zip" => vec![iterable_iter(Type::Dyn)],
         _ => return None,
     })
 }

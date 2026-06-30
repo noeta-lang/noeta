@@ -1194,6 +1194,27 @@ impl<'m> Vm<'m> {
                 self.stdlib_arity(name, args, 1, span)?;
                 Value::iter_chain(recv, args[0])
             }
+            M::Enumerate => {
+                self.stdlib_arity(name, args, 0, span)?;
+                Value::iter_enumerate(recv)
+            }
+            M::Zip => {
+                self.stdlib_arity(name, args, 1, span)?;
+                Value::iter_zip(recv, args[0])
+            }
+            M::Sum => {
+                self.stdlib_arity(name, args, 0, span)?;
+                match recv.iter_sum() {
+                    Ok(total) => total,
+                    Err(found) => {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("`sum` expects numeric elements, found {found}"),
+                        ));
+                    }
+                }
+            }
         })
     }
 

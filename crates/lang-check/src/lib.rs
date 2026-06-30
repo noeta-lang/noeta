@@ -3362,6 +3362,25 @@ impl Checker {
                     return self.call_user_method(name, &sig, args, span, recv_args);
                 }
                 self.check_method_args(&recv, name, args, span);
+                // `it.zip(other)` → `Iterator<(A, B)>`: both element types are needed and only `recv`
+                // reaches `method_return`, so the precise tuple is assembled here where the argument
+                // type is in scope (A from the receiver, B from the argument iterator).
+                if name == "zip"
+                    && let Type::Named(rn, ra) = &recv
+                    && rn == stdlib::ITERATOR
+                {
+                    let a = ra.first().cloned().unwrap_or(Type::Dyn);
+                    let b = match args.first() {
+                        Some(Type::Named(an, aa)) if an == stdlib::ITERATOR => {
+                            aa.first().cloned().unwrap_or(Type::Dyn)
+                        }
+                        _ => Type::Dyn,
+                    };
+                    return Type::Named(
+                        stdlib::ITERATOR.to_string(),
+                        vec![Type::Tuple(vec![a, b])],
+                    );
+                }
                 let ret = self.method_call_return(&recv, name);
                 // A method call on a concrete primitive with no such built-in method is an error,
                 // mirroring the non-indexable check (`42[0]`). `dyn`/holes defer (their result is

@@ -59,8 +59,20 @@ VM needs validating. So:
     elements; `count` releases each drained element. Checker: `take`/`drop`/`chain`→`Iterator<T>`,
     `count`→`int`; `chain` takes `Iterator<T>`. Conformance `iterators/adapters.lang`; differential
     327/0-skipped/agree, leaks 0 both, miri clean (a multi-source + drop-skip lang-value unit test).
-  - **I.1b.2 (next):** `enumerate()` (→ `(int, T)` tuples) + `zip(other)` (→ `(A, B)` tuples) +
-    `sum()`. The tuple-producing adapters and the numeric terminal.
+  - **I.1b.2 ✅ DONE** (2026-06-30): `enumerate()` (→ `Iterator<(int, T)>`) + `zip(other)` (→
+    `Iterator<(A, B)>`, stops at the shorter source, releasing a leftover element of the longer) +
+    `sum()` (drains, `int` unless a `float` appears — mirrors the eager `sum` builtin exactly, errs
+    `E0007` at runtime on a non-numeric element). New `IterState` variants `Enumerate { source, index }` /
+    `Zip { a, b }` (both backends; `Zip` is a two-source GC node like `Chain`); `iter_next` builds a
+    `Tuple` per step (the source's retained element + the immediate index transfer into it). `sum` is
+    a `Value::iter_sum` terminal in lang-value (releases each drained element; on a non-numeric one
+    returns its type name as `Err` for the backend's diagnostic) mirrored by the tree-walker inline.
+    Checker: `enumerate`→`Iterator<(int,T)>`, `sum`→`int`/`float`/numeric-hole; `zip`'s param is
+    `Iterator<dyn>` (accepts any `Iterator<B>`, rejects non-iterators) and its **precise**
+    `Iterator<(A,B)>` result is assembled at the call site (`synth_call`) where both element types
+    are in scope — `method_return` sees only the receiver. Conformance `iterators/tuple_adapters_and_sum.lang`;
+    337 conformance / differential 328/0-skipped/agree, leaks 0 both, miri clean (a tuple-adapter +
+    zip-leftover-release + sum-error-release lang-value unit test).
 - **The fused-pipeline allocation bench** moves to **I.1c** (map/filter), where the eager
   `xs.map(f).filter(g)` baseline gives an apples-to-apples O(1)-vs-O(stages·n) comparison.
 - **I.1c — closure adapters.** `map(f)`/`filter(f)` as `Iter`s that call the closure from `next()`;

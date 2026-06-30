@@ -1,0 +1,26 @@
+// Track I.1b.2 — tuple-producing adapters (`enumerate`/`zip`) and the numeric `sum` terminal.
+// `enumerate` pairs each element with its 0-based index; `zip` pairs two iterators element-wise and
+// stops at the shorter one (a leftover element of the longer source is consumed and dropped); `sum`
+// drains and totals numeric elements (`int` unless a `float` appears, then `float`). All fuse with
+// the I.1b.1 adapters.
+// expect: stdout "[(0, 10), (1, 20), (2, 30)]"
+// expect: stdout "[(1, \"a\"), (2, \"b\"), (3, \"c\")]"
+// expect: stdout "[(1, 10), (2, 20)]"
+// expect: stdout "[(1, 10), (2, 20)]"
+// expect: stdout "10"
+// expect: stdout "4.0"
+// expect: stdout "3.5"
+// expect: stdout "7"
+// expect: stdout "[(0, 2), (1, 3)]"
+// expect: stdout "[]"
+// expect: exit 0
+echo [10, 20, 30].iter().enumerate().collect();
+echo [1, 2, 3].iter().zip(["a", "b", "c"].iter()).collect();
+echo [1, 2, 3].iter().zip([10, 20].iter()).collect();
+echo [1, 2].iter().zip([10, 20, 30].iter()).collect();
+echo [1, 2, 3, 4].iter().sum();
+echo [1.5, 2.5].iter().sum();
+echo [1, 2.5].iter().sum();
+echo [1, 2, 3, 4].iter().drop(2).sum();
+echo [1, 2, 3, 4, 5].iter().drop(1).enumerate().take(2).collect();
+echo [1].iter().drop(5).enumerate().collect();

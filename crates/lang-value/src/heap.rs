@@ -241,6 +241,10 @@ pub(crate) enum IterState {
     Drop { source: Value, pending: usize },
     /// Yield all of `first`, then all of `second` (`chain(other)`).
     Chain { first: Value, second: Value },
+    /// Yield `(index, element)` tuples from `source`, indexing from `index` (`enumerate()`).
+    Enumerate { source: Value, index: usize },
+    /// Yield `(a_elem, b_elem)` tuples, stopping when either runs dry (`zip(other)`).
+    Zip { a: Value, b: Value },
 }
 
 impl IterState {
@@ -248,10 +252,11 @@ impl IterState {
     fn children(&self) -> [Option<Value>; 2] {
         match self {
             IterState::List { list, .. } => [Some(*list), None],
-            IterState::Take { source, .. } | IterState::Drop { source, .. } => {
-                [Some(*source), None]
-            }
+            IterState::Take { source, .. }
+            | IterState::Drop { source, .. }
+            | IterState::Enumerate { source, .. } => [Some(*source), None],
             IterState::Chain { first, second } => [Some(*first), Some(*second)],
+            IterState::Zip { a, b } => [Some(*a), Some(*b)],
         }
     }
 }

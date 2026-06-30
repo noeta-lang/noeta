@@ -19,8 +19,15 @@ pub enum IterMethod {
     Drop,
     /// `chain(other)` → an iterator yielding all of `self` then all of `other` (Track I.1b).
     Chain,
+    /// `enumerate()` → an iterator of `(index, element)` tuples, indexing from 0 (Track I.1b.2).
+    Enumerate,
+    /// `zip(other)` → an iterator of `(self_elem, other_elem)` tuples, stopping at the shorter
+    /// (Track I.1b.2).
+    Zip,
     /// `count()` → the number of remaining elements as an `int` (drains the iterator, Track I.1b).
     Count,
+    /// `sum()` → the sum of the remaining numeric elements (drains the iterator, Track I.1b.2).
+    Sum,
 }
 
 impl IterMethod {
@@ -31,7 +38,10 @@ impl IterMethod {
             "take" => Some(IterMethod::Take),
             "drop" => Some(IterMethod::Drop),
             "chain" => Some(IterMethod::Chain),
+            "enumerate" => Some(IterMethod::Enumerate),
+            "zip" => Some(IterMethod::Zip),
             "count" => Some(IterMethod::Count),
+            "sum" => Some(IterMethod::Sum),
             _ => None,
         }
     }
