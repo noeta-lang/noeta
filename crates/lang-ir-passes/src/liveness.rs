@@ -558,6 +558,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         | Rvalue::As { operand, .. }
         | Rvalue::TypeTest { operand, .. }
         | Rvalue::TypeOf { operand, .. } => f(operand),
+        // The generator desugar's `make_gen(step)` reads its step-closure operand (Track G.1b).
+        Rvalue::MakeGen { step, .. } => f(step),
         // `from_bytes::<T>(blob)` reads its byte operand (P-PACK 4.4).
         Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {

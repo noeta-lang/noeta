@@ -2323,6 +2323,13 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::IsType { dst, src, target });
                 Ok(())
             }
+            Rvalue::MakeGen { step, .. } => {
+                // Wrap the lowered step closure into a generator iterator (Track G.1b). The closure was
+                // produced by a preceding `Rvalue::Closure`, so `step` is already in a register.
+                let src = self.atom_reg(step)?;
+                self.code.push(Op::MakeGen { dst, src });
+                Ok(())
+            }
             Rvalue::FromBytes { blob, layout, span } => {
                 // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
                 // schema from the layout the checker recorded (the same channel list literals use). A

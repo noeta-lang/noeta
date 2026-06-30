@@ -543,6 +543,14 @@ pub enum Op {
         src: Reg,
         target: NarrowTarget,
     },
+    /// `dst = make_gen(src)` (Track G.1b): wrap the step closure in `src` into a generator iterator
+    /// (`IterState::Gen`). The generator desugar emits this as the tail of a generator function — the
+    /// step closure is the lowered state machine over `mut`-captured cells; the resulting iterator
+    /// composes with every Track-I adapter. Cannot fail, so it carries no span.
+    MakeGen {
+        dst: Reg,
+        src: Reg,
+    },
     /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
     /// module manifest, each materialized into a `T` struct and paired with its target. `type_name`
     /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
@@ -1248,6 +1256,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         }
         Op::IsType { dst, src, target } => {
             format!("IsType      r{dst} <- r{src} is {target:?}")
+        }
+        Op::MakeGen { dst, src } => {
+            format!("MakeGen     r{dst} <- gen r{src}")
         }
         Op::MatchInt { src, value, fail } => {
             format!("MatchInt    r{src} == {value} else -> {fail}")

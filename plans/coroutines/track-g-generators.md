@@ -43,12 +43,31 @@ statement (no send-type). `return e;` in a generator is forbidden; bare `return;
     (pins that the typing accepts a well-formed generator). All fail at check time, never lowering.
   - Gates: conformance 345, differential 336/0-skipped/agree, leaks 0 both, clippy/fmt/workspace
     clean, miri clean. **E0039 is the first Track-G diagnostic code.**
-- **G.1b — straight-line desugar (executable generators, no control flow across `yield`).** The
-  AST→AST (post-check) transform for a body that is a flat statement sequence: split at each top-level
-  `yield` into states, conservatively hoist every local to a `$`-cell, emit the dispatch-loop step
-  closure + `__make_gen`. A `yield` inside any control-flow construct → E0039 "not yet supported
-  (Track G.2)". Conformance: a finite straight-line generator drained by `collect()`/`for`, composed
-  with an adapter (`gen().map(f)`).
+- **G.1b — straight-line desugar (executable generators, no control flow across `yield`). ✅ DONE**
+  (2026-06-30). The desugar runs in **IR lowering** (`lower_generator` in `lang-ir/lower.rs`), as an
+  AST→AST transform producing ordinary AST that the existing lowering paths turn into IR — only the
+  final wrap is a dedicated `Rvalue::MakeGen`/`Op::MakeGen` (→ `Value::iter_gen`, both backends). The
+  body becomes `mut $state = 0`, one `mut <local> = none` per **top-level** local (conservatively
+  hoisted to a captured cell), then `return make_gen(($resume) => { <if-chain over $state> })`. The
+  if-chain splits the body at each top-level `yield`: state *k* runs segment *k*, advances `$state`,
+  and `return some(<yielded>)`; the final segment `return none`. Hoisted `mut` locals become captured
+  cells, so a value computed before a `yield` survives into the next segment, and the original
+  `let x = …` inside the step reassigns the outer cell (the language's bare-assignment rule). The
+  desugar applies only at named-`fn`/method bodies (`generator: bool` on `lower_func`), never to a
+  closure or the generated step closure, so it runs exactly once. `$state`/`$resume`/`$step` use `$`
+  (lexer-forbidden in source) → collision-free.
+  - **Checker:** the G.1a "not yet executable" gate is gone; a `yield` nested in control flow
+    (`if`/`for`/`while`) is now E0039 "not yet supported (Track G.2)" (`first_nested_yield`).
+  - **Prerequisite bug fix (pre-existing, committed separately):** the drop-insertion pass
+    (`lang-ir-passes/drops.rs`) was treating a closure's **upvalue** as a droppable frame-local and
+    inserting a spurious last-use `DropVar`, which cleared the shared cell — so a stateful closure
+    that outlived its defining frame lost its captured state on a read-only call (`100,0,0` instead
+    of `100,200,0`). Fixed by threading the **enclosing-locals** chain through the pass and excluding
+    upvalues from the droppable/owned sets. Generators rest entirely on this pattern.
+  - Conformance: `generators/straight_line.lang` (drained generator, locals across yields, params,
+    composed with `take`/`map`/`filter`/`enumerate`/streaming `for`), `yield_in_control_flow.lang`
+    (the G.2 gate), and `closures/returned_stateful_closure.lang` (the drop-fix regression guard).
+    347 conformance / differential 337 / 0-skipped / leaks 0 both / clippy+fmt+workspace clean.
 - **G.2 — control flow across `yield`.** Extend the transform to `while`/`loop`/`if`/`match` and
   `break`/`continue` straddling a `yield` (the dispatch-loop state assignment). This is the
   high-value slice — infinite generators (`loop { yield … }`), `while`, conditional yields.

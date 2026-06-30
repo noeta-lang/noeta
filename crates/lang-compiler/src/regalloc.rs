@@ -302,6 +302,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
+        Op::MakeGen { dst, src } => {
+            f.def = Some(*dst);
+            f.uses.push(*src);
+        }
         Op::AttributesOf { dst, .. } => f.def = Some(*dst),
         Op::RolesOf { dst } => f.def = Some(*dst),
         Op::TypeOf { dst, src } => {
@@ -720,6 +724,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(src);
         }
         Op::IsType { dst, src, .. } => {
+            m(dst);
+            m(src);
+        }
+        Op::MakeGen { dst, src } => {
             m(dst);
             m(src);
         }

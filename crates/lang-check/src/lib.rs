@@ -1547,25 +1547,24 @@ impl Checker {
         for p in &decl.params {
             bind(env, &p.name, param_type(p));
         }
-        let diags_before_body = self.diags.len();
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
         }
-        // G.1a gate: generator typing is complete, but the state-machine lowering that makes a
-        // generator *run* lands in G.1b. A well-formed generator (correct `Iterator<T>` return, a
-        // body that otherwise type-checks) gets a clean diagnostic rather than reaching the unfinished
-        // lowering (which would panic the "lowering is total" invariant). Suppressed when the body
-        // already has an error, so a specific diagnostic (e.g. a `yield` type mismatch) is not
-        // duplicated.
+        // G.1b gate: a straight-line generator (every `yield` a top-level statement) is now
+        // executable — it desugars into a state-machine step closure wrapped in an iterator. A
+        // `yield` nested in control flow (`if`/`for`/`while`) still needs the dispatch-loop transform
+        // that lands in Track G.2; gate it cleanly until then. Only fires for a generator whose
+        // signature is otherwise well-formed (correct `Iterator<T>` return), so it never piles onto a
+        // wrong-return-type generator that already reported E0039.
         if self.current_yield.is_some()
             && matches!(self.current_ret, Type::Named(ref n, _) if n == stdlib::ITERATOR)
-            && self.diags.len() == diags_before_body
+            && let Some(nested) = first_nested_yield(&decl.body)
         {
             self.diags.push(Diagnostic::error(
                 DiagnosticCode::GeneratorMisuse,
-                decl.name_span,
-                "generators are not yet executable — the `yield` state-machine lowering lands in a \
-                 follow-up slice (Track G.1b)"
+                nested,
+                "a `yield` inside control flow (`if`/`for`/`while`) is not yet supported — only \
+                 straight-line generators run today (Track G.2)"
                     .to_string(),
             ));
         }
@@ -4511,6 +4510,66 @@ fn stmt_has_yield(stmt: &Stmt) -> bool {
         Stmt::For { body, .. } | Stmt::While { body, .. } => body_has_yield(body),
         _ => false,
     }
+}
+
+/// The span of the first `yield` that appears **inside control flow** (`if`/`for`/`while`) at any
+/// depth within `stmts` — i.e. a `yield` that is *not* a top-level statement. Used by the G.1b gate:
+/// only straight-line generators (all `yield`s at the top level) run today; a `yield` under control
+/// flow needs the dispatch-loop transform (Track G.2) and is gated until then. Does not descend into
+/// nested callables (their `yield`s are already rejected as "outside a generator").
+fn first_nested_yield(stmts: &[Stmt]) -> Option<Span> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                if let Some(span) = first_yield(then_body) {
+                    return Some(span);
+                }
+                if let Some(span) = else_body.as_deref().and_then(first_yield) {
+                    return Some(span);
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                if let Some(span) = first_yield(body) {
+                    return Some(span);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// The span of the first `yield` anywhere in `stmts` (descending into control flow, not nested
+/// callables). Helper for [`first_nested_yield`].
+fn first_yield(stmts: &[Stmt]) -> Option<Span> {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Yield { span, .. } => return Some(*span),
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                if let Some(span) = first_yield(then_body) {
+                    return Some(span);
+                }
+                if let Some(span) = else_body.as_deref().and_then(first_yield) {
+                    return Some(span);
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } => {
+                if let Some(span) = first_yield(body) {
+                    return Some(span);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 /// Whether a **built-in** type satisfies a built-in trait — the static mirror of what the backends

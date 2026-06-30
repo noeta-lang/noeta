@@ -3556,6 +3556,15 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::MakeGen { dst, src } => {
+                    // Wrap the step closure into a generator iterator (Track G.1b). `iter_gen` retains
+                    // its own reference to the closure; the source register's reference is released by
+                    // the register's normal end-of-life (exactly as `Op::Narrow` retains its payload).
+                    let step = frames[top].regs[*src as usize];
+                    let result = Value::iter_gen(step);
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
                 Op::AttributesOf { dst, type_name } => {
                     let result = self.materialize_attributes(type_name);
                     set_reg(&mut frames[top].regs, *dst, result);

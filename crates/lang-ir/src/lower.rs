@@ -24,8 +24,8 @@ use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
 use lang_ast::{
-    BinaryOp, Expr, ForPattern as AstForPattern, Param, Program as AstProgram, Stmt as AstStmt,
-    StrPart,
+    BinaryOp, ClosureBody, Expr, ForPattern as AstForPattern, Param, Program as AstProgram,
+    Stmt as AstStmt, StrPart,
 };
 use lang_span::Span;
 
@@ -342,7 +342,8 @@ impl Lowerer<'_> {
                 Ok(())
             }
             AstStmt::Fn(decl) => {
-                let func = self.lower_func(&decl.params, BodyKind::Block(&decl.body), decl.span)?;
+                let func =
+                    self.lower_func(&decl.params, BodyKind::Block(&decl.body), decl.span, true)?;
                 out.push(Stmt::Decl(Decl::Fn {
                     name: decl.name.clone(),
                     func: Rc::new(func),
@@ -353,7 +354,8 @@ impl Lowerer<'_> {
             AstStmt::Class(decl) => {
                 let mut methods = Vec::with_capacity(decl.methods.len());
                 for m in &decl.methods {
-                    let func = self.lower_func(&m.params, BodyKind::Block(&m.body), m.span)?;
+                    let func =
+                        self.lower_func(&m.params, BodyKind::Block(&m.body), m.span, true)?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
                 // The `destruct` block lowers to a parameterless block [`Func`] (fields resolve
@@ -363,6 +365,7 @@ impl Lowerer<'_> {
                         &[],
                         BodyKind::Block(body),
                         decl.span,
+                        false,
                     )?)),
                     None => None,
                 };
@@ -382,7 +385,8 @@ impl Lowerer<'_> {
                 // data stays on the surface `decl`.
                 let mut methods = Vec::with_capacity(decl.methods.len());
                 for m in &decl.methods {
-                    let func = self.lower_func(&m.params, BodyKind::Block(&m.body), m.span)?;
+                    let func =
+                        self.lower_func(&m.params, BodyKind::Block(&m.body), m.span, true)?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
                 out.push(Stmt::Decl(Decl::Enum(EnumDef {
@@ -398,7 +402,8 @@ impl Lowerer<'_> {
                 // none). Field/derive data stays on the surface `decl`.
                 let mut methods = Vec::with_capacity(decl.methods.len());
                 for m in &decl.methods {
-                    let func = self.lower_func(&m.params, BodyKind::Block(&m.body), m.span)?;
+                    let func =
+                        self.lower_func(&m.params, BodyKind::Block(&m.body), m.span, true)?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
                 let field_defaults = self.lower_field_defaults(&decl.fields)?;
@@ -438,6 +443,7 @@ impl Lowerer<'_> {
         params: &[Param],
         body: BodyKind<'_>,
         span: Span,
+        generator: bool,
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
@@ -454,6 +460,13 @@ impl Lowerer<'_> {
         }
         let body = match body {
             BodyKind::Arrow(expr) => self.lower_value_block(expr)?,
+            // A generator (a function whose body contains `yield`, Track G) lowers to a state-machine
+            // step closure wrapped in `make_gen` — not the body's statements directly. `generator` is
+            // set only at the call sites where a generator is legal (named `fn`/methods), never for a
+            // closure or the synthesized step closure itself, so the desugar applies exactly once.
+            BodyKind::Block(stmts) if generator && body_has_yield(stmts) => {
+                self.lower_generator(stmts, span)?
+            }
             BodyKind::Block(stmts) => self.lower_body(stmts)?,
         };
         let temp_count = self.temps;
@@ -465,6 +478,42 @@ impl Lowerer<'_> {
             temp_count,
             span,
         })
+    }
+
+    /// Lower a **generator** body (Track G.1b) — a function whose top-level statements include
+    /// `yield` — into the state-machine representation: a step closure (the desugared dispatch) wrapped
+    /// in [`Rvalue::MakeGen`]. The body becomes
+    ///
+    /// ```text
+    /// mut $state = 0                    // dispatch discriminant
+    /// mut <local> = none               // every top-level local, hoisted to a cell
+    /// ...
+    /// let $step = ($resume) => { <dispatch> }   // captures $state + the hoisted cells
+    /// return make_gen($step)
+    /// ```
+    ///
+    /// where the dispatch is an if-chain over `$state`: state *k* runs segment *k* (the statements up
+    /// to the *k*-th top-level `yield`), advances `$state`, and `return some(<yielded>)`; the final
+    /// segment runs the trailing statements and `return none`. The hoisted `mut` locals become
+    /// captured cells (the original `let x = …` inside the closure reassigns the outer binding rather
+    /// than declaring a closure-local — the language's bare-assignment rule), so a value computed in
+    /// one segment survives into the next. Straight-line only: a `yield` nested in control flow is
+    /// rejected by the checker (E0039, "not yet supported — Track G.2") and never reaches a *run*; if
+    /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
+    /// through the interim discard arm, keeping lowering total.
+    fn lower_generator(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
+        let desugar = desugar_generator(stmts, span);
+        let mut out = Vec::new();
+        for stmt in &desugar.prelude {
+            self.lower_stmt(stmt, &mut out)?;
+        }
+        let step = self.lower_expr(&desugar.step, &mut out)?;
+        let generator = self.emit(&mut out, Rvalue::MakeGen { step, span }, span);
+        out.push(Stmt::Return {
+            value: Some(generator),
+            span,
+        });
+        Ok(Block::stmts(out))
     }
 
     /// Lower each field carrying a default (`x: T = expr`) to a parameterless value [`Thunk`]
@@ -977,7 +1026,10 @@ impl Lowerer<'_> {
                     lang_ast::ClosureBody::Expr(e) => BodyKind::Arrow(e),
                     lang_ast::ClosureBody::Block(stmts) => BodyKind::Block(stmts),
                 };
-                let func = self.lower_func(params, body_kind, *span)?;
+                // A closure is never a generator: `yield` resets at a callable boundary (the checker
+                // already rejects a `yield` inside a closure), and the generator desugar's own step
+                // closure must not be re-desugared. So `generator` is `false` here.
+                let func = self.lower_func(params, body_kind, *span, false)?;
                 Ok(self.emit(
                     out,
                     Rvalue::Closure {
@@ -1184,5 +1236,187 @@ impl Lowerer<'_> {
                 span: *name_span,
             });
         }
+    }
+}
+
+/// The synthetic dispatch discriminant cell of a desugared generator. `$`-prefixed, so it can never
+/// collide with a source name (the lexer forbids `$` in identifiers).
+const STATE_VAR: &str = "$state";
+/// The ignored resume parameter of the step closure (one argument, forward-compatible with Track A's
+/// real resume value).
+const RESUME_PARAM: &str = "$resume";
+
+/// The AST product of the generator desugar ([`Lowerer::lower_generator`]): the hoisted-local prelude
+/// and the state-machine step closure. Kept as ordinary AST so the existing lowering paths produce the
+/// IR — only the final `make_gen` wrapper is a dedicated rvalue.
+struct GeneratorDesugar {
+    prelude: Vec<AstStmt>,
+    step: Expr,
+}
+
+/// Build the [`GeneratorDesugar`] for a straight-line generator body (Track G.1b). See
+/// [`Lowerer::lower_generator`] for the shape and the rationale. All synthesized nodes carry the
+/// generator's `span`; reused source statements/expressions keep their own spans.
+fn desugar_generator(body: &[AstStmt], span: Span) -> GeneratorDesugar {
+    // Conservatively hoist every top-level local to an outer cell (G.3 narrows this with real
+    // liveness). A local declared *inside* control flow that holds no `yield` never straddles a
+    // suspend, so it stays a closure-local within its segment and is not hoisted.
+    let mut hoisted: Vec<String> = Vec::new();
+    let mut hoist = |name: &str| {
+        if !hoisted.iter().any(|n| n == name) {
+            hoisted.push(name.to_string());
+        }
+    };
+    for stmt in body {
+        match stmt {
+            AstStmt::Binding { name, .. } => hoist(name),
+            AstStmt::Destructure { targets, .. } => {
+                for (name, _) in targets {
+                    hoist(name);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Split the body at each top-level `yield` into states. State k runs segment k (the statements up
+    // to the k-th yield), advances `$state`, and returns `some(<yielded>)`; the final state runs the
+    // trailing statements and returns `none`.
+    let mut arms: Vec<AstStmt> = Vec::new();
+    let mut segment: Vec<AstStmt> = Vec::new();
+    let mut state: i64 = 0;
+    for stmt in body {
+        match stmt {
+            AstStmt::Yield { value, .. } => {
+                let mut block = std::mem::take(&mut segment);
+                block.push(assign_state(state + 1, span));
+                block.push(AstStmt::Return {
+                    value: Some(call_some(value.clone(), span)),
+                    span,
+                });
+                arms.push(state_arm(state, block, span));
+                state += 1;
+            }
+            other => segment.push(other.clone()),
+        }
+    }
+    let mut last = segment;
+    last.push(assign_state(state + 1, span));
+    last.push(AstStmt::Return {
+        value: Some(none_expr(span)),
+        span,
+    });
+    arms.push(state_arm(state, last, span));
+    // Terminal: once exhausted, every further `next()` yields `none`.
+    arms.push(AstStmt::Return {
+        value: Some(none_expr(span)),
+        span,
+    });
+
+    let step = Expr::Closure {
+        params: vec![Param {
+            name: RESUME_PARAM.to_string(),
+            name_span: span,
+            ty: None,
+            default: None,
+            span,
+        }],
+        ret: None,
+        body: ClosureBody::Block(arms),
+        span,
+    };
+
+    let mut prelude = vec![AstStmt::Binding {
+        mut_decl: true,
+        name: STATE_VAR.to_string(),
+        name_span: span,
+        ty: None,
+        value: Expr::Int { value: 0, span },
+        span,
+    }];
+    for name in &hoisted {
+        prelude.push(AstStmt::Binding {
+            mut_decl: true,
+            name: name.clone(),
+            name_span: span,
+            ty: None,
+            value: none_expr(span),
+            span,
+        });
+    }
+
+    GeneratorDesugar { prelude, step }
+}
+
+/// `if $state == k { body }` — one dispatch arm. The body ends in a `return`, so the chain runs at
+/// most one arm per step (G.2 replaces the if-chain with a dispatch loop for control-flow re-entry).
+fn state_arm(k: i64, body: Vec<AstStmt>, span: Span) -> AstStmt {
+    AstStmt::If {
+        cond: Expr::Binary {
+            op: BinaryOp::Eq,
+            lhs: Box::new(Expr::Ident {
+                name: STATE_VAR.to_string(),
+                span,
+            }),
+            rhs: Box::new(Expr::Int { value: k, span }),
+            span,
+        },
+        then_body: body,
+        else_body: None,
+        span,
+    }
+}
+
+/// `$state = k` — advance the dispatch discriminant (a bare assignment, so it reassigns the captured
+/// cell rather than declaring a closure-local).
+fn assign_state(k: i64, span: Span) -> AstStmt {
+    AstStmt::Binding {
+        mut_decl: false,
+        name: STATE_VAR.to_string(),
+        name_span: span,
+        ty: None,
+        value: Expr::Int { value: k, span },
+        span,
+    }
+}
+
+/// `some(value)` — the per-element constructor of a generator step's `?T` result.
+fn call_some(value: Expr, span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Ident {
+            name: "some".to_string(),
+            span,
+        }),
+        args: vec![value],
+        span,
+    }
+}
+
+/// `none` — the end-of-iteration result and the placeholder a hoisted local is initialized to (it is
+/// always reassigned before it is read in a well-formed generator).
+fn none_expr(span: Span) -> Expr {
+    Expr::Ident {
+        name: "none".to_string(),
+        span,
+    }
+}
+
+/// Whether a statement sequence contains a `yield` (Track G), descending into control-flow bodies but
+/// **not** into nested callables (a closure/`fn` resets the generator context). Mirrors the checker's
+/// generator detection so the lowering desugars exactly the bodies the checker treats as generators.
+fn body_has_yield(stmts: &[AstStmt]) -> bool {
+    stmts.iter().any(stmt_has_yield)
+}
+
+fn stmt_has_yield(stmt: &AstStmt) -> bool {
+    match stmt {
+        AstStmt::Yield { .. } => true,
+        AstStmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_has_yield(then_body) || else_body.as_deref().is_some_and(body_has_yield),
+        AstStmt::For { body, .. } | AstStmt::While { body, .. } => body_has_yield(body),
+        _ => false,
     }
 }

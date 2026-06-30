@@ -321,6 +321,7 @@ impl Printer<'_> {
                 format!("{} is {}", atom(operand), type_ref(ty))
             }
             Rvalue::TypeOf { operand, .. } => format!("type_of({})", atom(operand)),
+            Rvalue::MakeGen { step, .. } => format!("make_gen({})", atom(step)),
             Rvalue::FromBytes { blob, layout, .. } => {
                 let ty = layout.as_ref().map(|l| l.type_name.as_str()).unwrap_or("?");
                 format!("from_bytes<{}>({})", ty, atom(blob))

@@ -1,0 +1,13 @@
+// Track G.1b — only straight-line generators run today. A `yield` nested in control flow
+// (`if`/`for`/`while`) needs the dispatch-loop state machine that lands in Track G.2, so it is gated
+// with E0039 (pointing at the offending `yield`) until then. The straight-line `yield` above it is
+// fine — it is the nested one that is rejected.
+// expect: error E0039 at 10:9
+// expect: exit 1
+fn nums(): Iterator<int> {
+    yield 1
+    while true {
+        yield 2
+    }
+}
+echo "x"

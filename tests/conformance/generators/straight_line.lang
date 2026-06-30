@@ -1,0 +1,52 @@
+// Track G.1b — a straight-line generator (every `yield` a top-level statement) is executable: it
+// desugars into a state-machine step closure wrapped in an `Iterator`. State persists across
+// `next()` calls through `mut`-captured cells, so a local computed before one `yield` survives into
+// the next segment, and the generator composes with every Track-I adapter (`take`/`map`/`filter`/
+// `enumerate`) and the streaming `for` for free.
+// expect: stdout "[1, 2, 3]"
+// expect: stdout "[5, 10, 15]"
+// expect: stdout "60"
+// expect: stdout "[1, 2]"
+// expect: stdout "[2, 4]"
+// expect: stdout "0:1|1:2|2:3|"
+// expect: exit 0
+
+// Plain yields, drained by `collect()`.
+fn nums(): Iterator<int> {
+    yield 1
+    yield 2
+    yield 3
+}
+echo nums().collect()
+
+// A local computed before a `yield` survives across the suspend (state machine over captured cells),
+// and a parameter is captured too.
+fn series(start: int): Iterator<int> {
+    a = start
+    yield a
+    b = a + a
+    yield b
+    yield a + b
+}
+echo series(5).collect()
+
+// Composes with a closure adapter + a numeric terminal.
+echo nums().map(fn(n) => n * 10).sum()
+
+// Composes with `take` (the generator is lazy — only two steps run).
+fn five(): Iterator<int> {
+    yield 1
+    yield 2
+    yield 3
+    yield 4
+    yield 5
+}
+echo five().take(2).collect()
+echo five().filter(fn(n) => n % 2 == 0).take(2).collect()
+
+// Streaming `for` over an `enumerate()` of a generator (tuple destructuring rides along).
+mut s = ""
+for (i, v) in nums().enumerate() {
+    s = s ~ "${i}:${v}|"
+}
+echo s

@@ -323,6 +323,12 @@ pub enum Rvalue {
         ty: TypeRef,
         span: Span,
     },
+    /// Wrap a step closure into a generator iterator (`IterState::Gen`) — the tail of a lowered
+    /// generator function (Track G.1b). `step` is the lowered state-machine closure (its `mut`-captured
+    /// cells hold the `$state` discriminant and the hoisted locals); the result is an ordinary
+    /// `Iterator` that drives `step` once per element. Produced only by the generator desugar
+    /// (`lower_generator`), never by surface syntax.
+    MakeGen { step: Atom, span: Span },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).

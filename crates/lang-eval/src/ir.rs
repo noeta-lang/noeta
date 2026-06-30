@@ -22,6 +22,7 @@
 //! to observable behavior, so the `Frame` model needs no last-use analysis to stay faithful
 //! in this phase.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -30,8 +31,8 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
 use crate::{
-    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, ListRepr, PackedList, RunResult,
-    TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo, compare_primitive,
+    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, IterState, ListRepr, PackedList,
+    RunResult, TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo, compare_primitive,
 };
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
@@ -1129,6 +1130,12 @@ impl Interpreter {
             }
             lang_ir::Rvalue::Closure { func, .. } => {
                 Ok(Value::Function(Rc::new(self.make_ir_closure(func))))
+            }
+            // Wrap the step closure into a generator iterator (Track G.1b) — the tree-walker mirror of
+            // the VM's `Op::MakeGen`.
+            lang_ir::Rvalue::MakeGen { step, .. } => {
+                let step = self.eval_ir_atom(step, frame)?;
+                Ok(Value::Iter(Rc::new(RefCell::new(IterState::Gen { step }))))
             }
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
             lang_ir::Rvalue::Invoke {
