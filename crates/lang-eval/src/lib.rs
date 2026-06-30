@@ -2246,16 +2246,34 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        // Modules migrated to the native-extension registry dispatch through the shared seam:
+        // project arguments onto `NativeValue`, run the one shared dispatch body (host threaded
+        // in), and materialize the `NativeOut` result. The not-yet-migrated modules keep their
+        // per-backend dispatch below.
+        let name = module.name();
+        if lang_stdlib::registry::find_module(name).is_some() {
+            let nargs: Vec<lang_stdlib::NativeValue> =
+                args.iter().map(marshal_native_arg).collect();
+            return match lang_stdlib::registry::dispatch(name, func, &mut *self.host, &nargs) {
+                Ok(out) => Ok(materialize_native(out)),
+                Err(error) => {
+                    Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                }
+            };
+        }
         match module {
             lang_stdlib::NativeModule::Json => self.call_json(func, args, span),
-            lang_stdlib::NativeModule::Math => self.call_math(func, args, span),
-            lang_stdlib::NativeModule::Random => self.call_random(func, args, span),
             lang_stdlib::NativeModule::Fs => self.call_fs(func, args, span),
-            lang_stdlib::NativeModule::Time => self.call_time(func, args, span),
-            lang_stdlib::NativeModule::Env => self.call_env(func, args, span),
-            lang_stdlib::NativeModule::Args => self.call_args(func, args, span),
             lang_stdlib::NativeModule::Vec => self.call_vec(func, args, span),
             lang_stdlib::NativeModule::Quat => self.call_quat(func, args, span),
+            // Migrated modules are handled by the registry above.
+            lang_stdlib::NativeModule::Math
+            | lang_stdlib::NativeModule::Random
+            | lang_stdlib::NativeModule::Time
+            | lang_stdlib::NativeModule::Env
+            | lang_stdlib::NativeModule::Args => {
+                unreachable!("module `{name}` is dispatched by the native-extension registry")
+            }
         }
     }
 
@@ -2811,124 +2829,6 @@ impl Interpreter {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                     }
                 }
-            }
-        }
-    }
-
-    /// The `time` module: a deterministic logical clock (no wall-clock, so output stays
-    /// reproducible and identical to the VM). `monotonic()` reads-then-increments; `sleep(ms)`
-    /// advances the clock without actually blocking. Mirrors the VM's `call_time`.
-    fn call_time(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
-        match func {
-            "monotonic" => {
-                self.expect_std_arity(func, args, 0, span)?;
-                let now = self.host.clock_monotonic();
-                Ok(Value::Int(now as i64))
-            }
-            "sleep" => {
-                self.expect_std_arity(func, args, 1, span)?;
-                let ms = self.expect_std_int(func, &args[0], span)?;
-                self.host.clock_sleep(ms);
-                Ok(Value::Unit)
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("time", func);
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// The `env` module: host environment introspection over the host's fixed sandbox fixture.
-    /// `get(key)` returns the value or an `E0021` if absent (mirroring `fs.read`); `keys()` is
-    /// sorted. Mirrors the VM's `call_env`.
-    fn call_env(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
-        match func {
-            "get" => {
-                self.expect_std_arity(func, args, 1, span)?;
-                let key = self.expect_std_string(func, &args[0], span)?.to_string();
-                match self.host.env_get(&key) {
-                    Some(value) => Ok(Value::Str(value)),
-                    None => {
-                        let error = lang_stdlib::env::not_found_error(&key);
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "keys" => {
-                self.expect_std_arity(func, args, 0, span)?;
-                let keys = self.host.env_keys().into_iter().map(Value::Str).collect();
-                Ok(Value::list(keys))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("env", func);
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// The `args` module: the program's argument vector. `all()` returns it as a list. Mirrors the
-    /// VM's `call_args`.
-    fn call_args(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
-        match func {
-            "all" => {
-                self.expect_std_arity(func, args, 0, span)?;
-                let all = self.host.args().into_iter().map(Value::Str).collect();
-                Ok(Value::list(all))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("args", func);
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// The `math` module: pure scalar functions whose semantics live entirely in
-    /// `lang-stdlib::math`, so both backends compute identically. Args project onto `Arg`, the
-    /// shared dispatcher runs, and the `Output` lifts back. Mirrors the VM's `call_math`.
-    fn call_math(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
-        let projected: Vec<lang_stdlib::Arg> = args.iter().map(project_arg).collect();
-        match lang_stdlib::math::call(func, &projected) {
-            lang_stdlib::Dispatch::Done(output) => Ok(output_to_value(output)),
-            lang_stdlib::Dispatch::Err(error) => {
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-            }
-            lang_stdlib::Dispatch::Unknown => {
-                let error = lang_stdlib::no_function_error("math", func);
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// The `random` module: a seeded PRNG. Stepping is shared (`lang-stdlib::random`); the state
-    /// lives in the host (`self.host`), threaded through each draw so a given seed yields the same
-    /// stream the VM produces. `seed(n)` re-seeds, `int(lo, hi)` and `float()` advance. Mirrors the
-    /// VM's `call_random`.
-    fn call_random(&mut self, func: &str, args: &[Value], span: Span) -> Eval<Value> {
-        match func {
-            "seed" => {
-                self.expect_std_arity(func, args, 1, span)?;
-                let n = self.expect_std_int(func, &args[0], span)?;
-                self.host.rng_seed(n);
-                Ok(Value::Unit)
-            }
-            "int" => {
-                self.expect_std_arity(func, args, 2, span)?;
-                let lo = self.expect_std_int(func, &args[0], span)?;
-                let hi = self.expect_std_int(func, &args[1], span)?;
-                match self.host.rng_int(lo, hi) {
-                    Ok(value) => Ok(Value::Int(value)),
-                    Err(error) => {
-                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "float" => {
-                self.expect_std_arity(func, args, 0, span)?;
-                Ok(Value::Float(self.host.rng_float()))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("random", func);
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
             }
         }
     }
@@ -3925,6 +3825,37 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 _ => false,
             },
         },
+    }
+}
+
+/// Project a tree-walker `Value` onto the native-extension registry's argument view. One of the
+/// two functions (with [`materialize_native`]) that form the backend's half of the value seam;
+/// every migrated module call goes through these rather than a per-function `read_*`. The
+/// scalar/host modules use only the scalar and string shapes; richer shapes are added as the
+/// modules that need them migrate. Mirrors the VM-side projection.
+fn marshal_native_arg(value: &Value) -> lang_stdlib::NativeValue {
+    use lang_stdlib::{NativeValue, Scalar};
+    match value {
+        Value::Int(n) => NativeValue::Scalar(Scalar::Int(*n)),
+        Value::Float(f) => NativeValue::Scalar(Scalar::Float(*f)),
+        Value::F32(f) => NativeValue::Scalar(Scalar::F32(*f)),
+        Value::Bool(b) => NativeValue::Scalar(Scalar::Bool(*b)),
+        Value::Str(s) => NativeValue::Str(s.clone()),
+        other => NativeValue::Opaque(other.type_name()),
+    }
+}
+
+/// Lift a native-extension [`lang_stdlib::NativeOut`] result back into a tree-walker `Value`.
+fn materialize_native(out: lang_stdlib::NativeOut) -> Value {
+    use lang_stdlib::{NativeOut, Scalar};
+    match out {
+        NativeOut::Scalar(Scalar::Int(n)) => Value::Int(n),
+        NativeOut::Scalar(Scalar::Float(f)) => Value::Float(f),
+        NativeOut::Scalar(Scalar::F32(f)) => Value::F32(f),
+        NativeOut::Scalar(Scalar::Bool(b)) => Value::Bool(b),
+        NativeOut::Str(s) => Value::Str(s),
+        NativeOut::Unit => Value::Unit,
+        NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
     }
 }
 

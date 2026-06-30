@@ -801,35 +801,34 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // Modules migrated to the native-extension registry dispatch through the shared seam:
+        // project arguments onto `NativeValue`, run the one shared dispatch body (host threaded
+        // in), and materialize the `NativeOut` result. The not-yet-migrated modules keep their
+        // per-backend dispatch below.
+        if lang_stdlib::registry::find_module(module).is_some() {
+            let nargs: Vec<lang_stdlib::NativeValue> =
+                args.iter().map(|a| marshal_native_arg(*a)).collect();
+            return match lang_stdlib::registry::dispatch(module, func, &mut *self.host, &nargs) {
+                Ok(out) => Ok(materialize_native(out)),
+                Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+            };
+        }
         match lang_stdlib::NativeModule::from_name(module) {
             Some(lang_stdlib::NativeModule::Json) => self.call_json(func, args, span),
-            Some(lang_stdlib::NativeModule::Math) => self.call_math(func, args, span),
-            Some(lang_stdlib::NativeModule::Random) => self.call_random(func, args, span),
             Some(lang_stdlib::NativeModule::Fs) => self.call_fs(func, args, span),
-            Some(lang_stdlib::NativeModule::Time) => self.call_time(func, args, span),
-            Some(lang_stdlib::NativeModule::Env) => self.call_env(func, args, span),
-            Some(lang_stdlib::NativeModule::Args) => self.call_args(func, args, span),
             Some(lang_stdlib::NativeModule::Vec) => self.call_vec(func, args, span),
             Some(lang_stdlib::NativeModule::Quat) => self.call_quat(func, args, span),
+            // Migrated modules are handled by the registry above.
+            Some(
+                lang_stdlib::NativeModule::Math
+                | lang_stdlib::NativeModule::Random
+                | lang_stdlib::NativeModule::Time
+                | lang_stdlib::NativeModule::Env
+                | lang_stdlib::NativeModule::Args,
+            ) => unreachable!("module `{module}` is dispatched by the native-extension registry"),
             // Only valid module names are ever bound, so this is unreachable in practice.
             None => {
                 let error = lang_stdlib::no_function_error(module, func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// The `math` module: pure scalar functions. Semantics live in `lang-stdlib::math`, so this
-    /// is thin glue — project args, dispatch, lift `Output`. Mirrors the tree-walker's `call_math`.
-    fn call_math(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        let projected: Vec<lang_stdlib::Arg> = args.iter().map(|a| project_arg(*a)).collect();
-        match lang_stdlib::math::call(func, &projected) {
-            lang_stdlib::Dispatch::Done(output) => Ok(stdlib_output_to_value(output)),
-            lang_stdlib::Dispatch::Err(error) => {
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
-            lang_stdlib::Dispatch::Unknown => {
-                let error = lang_stdlib::no_function_error("math", func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
@@ -1229,39 +1228,6 @@ impl<'m> Vm<'m> {
         Ok(Value::list(out))
     }
 
-    /// The `random` module: a seeded PRNG whose state lives in the host (`self.host`), threaded
-    /// through the shared stepper so the stream matches the tree-walker for a given seed. Mirrors
-    /// `call_random` there.
-    fn call_random(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        match func {
-            "seed" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let n = self.stdlib_int(func, args[0], span)?;
-                self.host.rng_seed(n);
-                Ok(Value::unit())
-            }
-            "int" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let lo = self.stdlib_int(func, args[0], span)?;
-                let hi = self.stdlib_int(func, args[1], span)?;
-                match self.host.rng_int(lo, hi) {
-                    Ok(value) => Ok(Value::int(value)),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "float" => {
-                self.stdlib_arity(func, args, 0, span)?;
-                Ok(Value::float(self.host.rng_float()))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("random", func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
     /// The `fs` module: file IO over the sandboxed in-memory [`lang_stdlib::fs::Vfs`]. Shared VFS
     /// semantics make this identical to the tree-walker's `call_fs` by construction.
     fn call_fs(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
@@ -1490,76 +1456,6 @@ impl<'m> Vm<'m> {
                         Err(self.error(stdlib_error_code(error.kind), span, error.message))
                     }
                 }
-            }
-        }
-    }
-
-    /// The `time` module: a deterministic logical clock. Mirrors the tree-walker's `call_time`.
-    fn call_time(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        match func {
-            "monotonic" => {
-                self.stdlib_arity(func, args, 0, span)?;
-                let now = self.host.clock_monotonic();
-                Ok(Value::int(now as i64))
-            }
-            "sleep" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let ms = self.stdlib_int(func, args[0], span)?;
-                self.host.clock_sleep(ms);
-                Ok(Value::unit())
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("time", func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// The `env` module: host environment introspection over the host's fixed sandbox fixture.
-    /// `get(key)` returns the value or an `E0021` if absent (mirroring `fs.read`); `keys()` is
-    /// sorted. Mirrors the tree-walker's `call_env`.
-    fn call_env(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        match func {
-            "get" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let key = self.stdlib_string(func, args[0], span)?;
-                match self.host.env_get(&key) {
-                    Some(value) => Ok(Value::string(&value)),
-                    None => {
-                        let error = lang_stdlib::env::not_found_error(&key);
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "keys" => {
-                self.stdlib_arity(func, args, 0, span)?;
-                let keys = self
-                    .host
-                    .env_keys()
-                    .iter()
-                    .map(|k| Value::string(k))
-                    .collect();
-                Ok(Value::list(keys))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("env", func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
-        }
-    }
-
-    /// The `args` module: the program's argument vector. `all()` returns it as a list. Mirrors the
-    /// tree-walker's `call_args`.
-    fn call_args(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        match func {
-            "all" => {
-                self.stdlib_arity(func, args, 0, span)?;
-                let all = self.host.args().iter().map(|a| Value::string(a)).collect();
-                Ok(Value::list(all))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("args", func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
     }
@@ -4737,25 +4633,44 @@ fn set_reg(regs: &mut [Value], dst: u16, value: Value) {
     release(old);
 }
 
-/// Lift a shared stdlib [`lang_stdlib::Output`] into a freshly-owned VM `Value` (refcount 1,
-/// owned by the destination register). Mirrors the tree-walker's `output_to_value`.
-/// Project a VM value onto the backend-agnostic [`lang_stdlib::Arg`] for the numeric native
-/// modules (`math`/`random`). These never inspect string *content*, so a string collapses to
-/// [`lang_stdlib::Arg::Other`] (same effect: it is "not a number") and no borrow is needed —
-/// keeping the result `'static`. The string-method site projects strings itself, since it does
-/// read their content.
-fn project_arg(value: Value) -> lang_stdlib::Arg<'static> {
-    if let Some(i) = value.as_int() {
-        lang_stdlib::Arg::Int(i)
+/// Project a VM value onto the native-extension registry's argument view. One of the two
+/// functions (with [`materialize_native`]) that form the backend's half of the value seam; every
+/// migrated module call goes through these rather than a per-function `read_*`. The scalar/host
+/// modules use only the scalar and string shapes; richer shapes are added as the modules that
+/// need them migrate. Mirrors the tree-walker's projection.
+fn marshal_native_arg(value: Value) -> lang_stdlib::NativeValue {
+    use lang_stdlib::{NativeValue, Scalar};
+    if let Some(n) = value.as_int() {
+        NativeValue::Scalar(Scalar::Int(n))
+    } else if let Some(f) = value.as_f32() {
+        NativeValue::Scalar(Scalar::F32(f))
     } else if let Some(f) = value.as_float() {
-        lang_stdlib::Arg::Float(f)
+        NativeValue::Scalar(Scalar::Float(f))
     } else if let Some(b) = value.as_bool() {
-        lang_stdlib::Arg::Bool(b)
+        NativeValue::Scalar(Scalar::Bool(b))
+    } else if let Some(s) = value.as_string() {
+        NativeValue::Str(s)
     } else {
-        lang_stdlib::Arg::Other
+        NativeValue::Opaque(value.type_name())
     }
 }
 
+/// Lift a native-extension [`lang_stdlib::NativeOut`] result back into a VM value.
+fn materialize_native(out: lang_stdlib::NativeOut) -> Value {
+    use lang_stdlib::{NativeOut, Scalar};
+    match out {
+        NativeOut::Scalar(Scalar::Int(n)) => Value::int(n),
+        NativeOut::Scalar(Scalar::Float(f)) => Value::float(f),
+        NativeOut::Scalar(Scalar::F32(f)) => Value::f32(f),
+        NativeOut::Scalar(Scalar::Bool(b)) => Value::bool(b),
+        NativeOut::Str(s) => Value::string(&s),
+        NativeOut::Unit => Value::unit(),
+        NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
+    }
+}
+
+/// Lift a shared stdlib [`lang_stdlib::Output`] into a freshly-owned VM `Value` (refcount 1,
+/// owned by the destination register). Mirrors the tree-walker's `output_to_value`.
 fn stdlib_output_to_value(output: lang_stdlib::Output) -> Value {
     match output {
         lang_stdlib::Output::Str(s) => Value::string(&s),
