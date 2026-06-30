@@ -174,13 +174,39 @@ go rather than flat-then-nested.)
   (decided here; a `Result<T,string>` variant could be added later). Fixtures cover flat / nested /
   lists / options / methods; differential-covered.
 
-**Not done — the registry generalization (call it B4, deferred):** `json` is deliberately still on the
-legacy `NativeModule` enum path (dynamic `json.parse(s)`/`stringify` unchanged); `Op::ExtCall` routes
-`json.parse` by a name match, not through `registry::dispatch_typed`. Finishing the dogfood —
-registering `json` as an `ExtModule` with a `RetTy::TypeArg` `parse` (+ a typed-dispatch fn-pointer),
-migrating `stringify` (needs the recursive **arg-side** `NativeValue` marshalling, which the typed
-parse did not), and removing the `NativeModule` enum — is the remaining cleanup. The arg-side recursion
-is the one genuinely new piece left.
+## Phase B4 — registry generalization (finish the dogfood, kill the enum) — ✅ DONE
+
+`json` now goes through the registry like every other core module, and the hardcoded `NativeModule`
+enum is gone. Three green slices:
+
+- **B4.1** ✅ (`4a8cf18`) — **shared JSON serializer**. The serializer (`value_to_json`/`to_json`) and
+  its `json_string`/`format_float`/`format_f32` helpers were hand-kept-identical copies in both
+  backends that had already drifted on untested inputs (an `f32`, a tuple, a `<builtin>` rendered
+  differently). Collapsed into one source: recursive `NativeValue` arg variants (`Unit`/`List`/`Map`),
+  a single `lang_stdlib::json::stringify(&NativeValue)`, and `lang_stdlib::format_*`/`json_string` as
+  the lone copies. Each backend now only marshals its value into the neutral tree
+  (`Value::to_native_deep` / `value_to_native_deep`); the shared walk produces the bytes. Marshalling
+  converged (tuples/sets → array, bytes → `<N bytes>`, f32 → number, fn → `<fn>`), fixing the latent
+  drift. Behaviour-preserving on every corpus-tested shape.
+- **B4.2** ✅ (`490127c`) — **route `json` through the registry**. `json` is a registered `ExtModule`:
+  dynamic `json.parse(text)` decodes through the shared `json::parse_dynamic` (Json → `NativeOut` tree:
+  object→Map, array→List, null→unit), `json.stringify(value)` through the shared serializer over a
+  **deeply** marshalled argument. A `deep_marshal` flag on `ExtModule` (only `json` sets it) selects the
+  recursive marshalling, so `vec`/`quat`'s flat hot path is untouched. Both backends deleted
+  `call_json`/`json_to_value` and gained a `NativeOut::Map` arm in `materialize_native`; the checker's
+  hardcoded `("json", …)` fallbacks and `is_std_module` special-case are gone. The typed
+  `json.parse::<T>` path is unchanged.
+- **B4.3** ✅ — **remove the `NativeModule` enum**. Resolution + routing are registry-based now:
+  `is_native_module`/`declare_use` use `registry::find_module`; the tree-walker's
+  `Value::NativeModule(NativeModule)` became `NativeModule(String)` (the VM already carried a `String`);
+  `call_native_module` takes the module name as `&str` and routes registered functions through the
+  shared dispatch, `vec`'s bulk `*_all` kernels through the per-backend `call_vec`, everything else to a
+  "no such function" error. The enum + `from_name`/`name` are deleted.
+
+The arg-side recursive marshalling (`to_native_deep`) was the one genuinely new piece, landed in B4.1.
+The typed `Op::ExtCall` path still name-matches `json.parse` rather than going through a
+`registry::dispatch_typed` — a small remaining nicety, not required to kill the enum; left for the
+`lang-native` extraction.
 
 ## Deferred (separate milestones)
 

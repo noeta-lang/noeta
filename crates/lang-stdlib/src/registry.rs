@@ -1,8 +1,8 @@
 //! The native-extension registry — the uniform API by which a crate registers native modules
 //! (and, later, first-class types) into the language.
 //!
-//! Today the Ring 2 modules are a hardcoded [`crate::NativeModule`] enum, dispatched per backend
-//! (`call_json`/`call_vec`/… duplicated in `lang-eval` and `lang-vm`). This module replaces that:
+//! The Ring 2 modules used to be a hardcoded `NativeModule` enum, dispatched per backend
+//! (`call_json`/`call_vec`/… duplicated in `lang-eval` and `lang-vm`). This module replaced that:
 //! an [`Extension`] declares its [`ExtModule`]s — each a set of [`ExtFn`] signatures plus one
 //! backend-agnostic `dispatch` function — and both backends route every module call through the
 //! same shared dispatch. Because the dispatch body lives here once, the differential oracle

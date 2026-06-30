@@ -87,7 +87,7 @@ fn unsupported<T>(reason: impl Into<String>) -> Result<T, Unsupported> {
 /// Whether `use <path>.{name}` imports a Ring 2 native module (`use std.{json}`) rather than a
 /// sibling-module declaration. Such names are bound as global values, not opaque types.
 fn is_native_module(path: &[String], name: &str) -> bool {
-    path == ["std"] && lang_stdlib::NativeModule::from_name(name).is_some()
+    path == ["std"] && lang_stdlib::registry::find_module(name).is_some()
 }
 
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.

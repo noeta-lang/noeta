@@ -820,27 +820,13 @@ impl<'m> Vm<'m> {
                 Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
             };
         }
-        match lang_stdlib::NativeModule::from_name(module) {
-            // `vec`: only the bulk `*_all` kernels are unmigrated and reach here; an unknown
-            // function falls through to `call_vec`'s own "no such function" arm.
-            Some(lang_stdlib::NativeModule::Vec) => self.call_vec(func, args, span),
-            // A fully-migrated module reaching here means an unknown function on it (`json` and
-            // `quat` are fully registered, so they join this group).
-            Some(
-                lang_stdlib::NativeModule::Json
-                | lang_stdlib::NativeModule::Math
-                | lang_stdlib::NativeModule::Random
-                | lang_stdlib::NativeModule::Time
-                | lang_stdlib::NativeModule::Env
-                | lang_stdlib::NativeModule::Args
-                | lang_stdlib::NativeModule::Fs
-                | lang_stdlib::NativeModule::Quat,
-            )
-            | None => {
-                let error = lang_stdlib::no_function_error(module, func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
+        // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
+        // every other reachable name is registered, so anything else here is an unknown function.
+        if module == "vec" {
+            return self.call_vec(func, args, span);
         }
+        let error = lang_stdlib::no_function_error(module, func);
+        Err(self.error(stdlib_error_code(error.kind), span, error.message))
     }
 
     /// The `vec` 3D-math module (P-PACK Phase 4.1): scalar Vec3 ops over structural 3-`f32` objects.

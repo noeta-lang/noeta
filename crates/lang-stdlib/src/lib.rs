@@ -14,9 +14,11 @@
 //! as the guard. Determinism is a hard requirement throughout (no wall clock, no
 //! hash-order, seeded PRNG) — see `plans/m1/slice-10-stdlib.md`.
 //!
-//! Ring 2 native modules (`json`, …) are imported with `use std.{name}` and dispatched as
-//! `name.func(args)`. The shared half lives here ([`NativeModule`], [`json`]); each backend
-//! binds the module value and converts results into its own values.
+//! Ring 2 native modules (`json`, `math`, `fs`, …) are imported with `use std.{name}` and
+//! dispatched as `name.func(args)` through the native-extension [`registry`]: each module declares
+//! its functions and one shared `dispatch`, and both backends route every call through it (so the
+//! differential holds by construction). Each backend only binds the module value and marshals
+//! arguments/results across the neutral [`registry::NativeValue`]/[`registry::NativeOut`] seam.
 
 pub mod env;
 pub mod fs;
@@ -239,59 +241,6 @@ pub fn slice_bounds_error(start: i64, end: i64, len: usize) -> StdError {
     StdError {
         kind: ErrorKind::Bounds,
         message: format!("slice [{start}..{end}] is out of bounds for list of length {len}"),
-    }
-}
-
-/// A Ring 2 native module, imported via `use std.{name}` and dispatched as `name.func(args)`.
-/// The variants grow as modules land (`json` first; `math`, `random`, IO/time to follow).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum NativeModule {
-    Json,
-    Math,
-    Random,
-    Fs,
-    Time,
-    Env,
-    Args,
-    /// The `vec` 3D-math module (P-PACK Phase 4): Vec3 ops over `@packed` 3-`f32` structs, scalar
-    /// and bulk. Its functions take/return objects and lists (not scalar `Arg`/`Output`), so unlike
-    /// the other modules they are dispatched **per backend** (over `Value`s) rather than here.
-    Vec,
-    /// The `quat` quaternion module (Phase 4 follow-on): transform ops over structural 4-`f32`
-    /// quaternions. Like `vec`, it takes/returns objects and is dispatched per backend.
-    Quat,
-}
-
-impl NativeModule {
-    /// Resolve a `use std.{name}` leaf to its native module, if `name` names one.
-    pub fn from_name(name: &str) -> Option<NativeModule> {
-        match name {
-            "json" => Some(NativeModule::Json),
-            "math" => Some(NativeModule::Math),
-            "random" => Some(NativeModule::Random),
-            "fs" => Some(NativeModule::Fs),
-            "time" => Some(NativeModule::Time),
-            "env" => Some(NativeModule::Env),
-            "args" => Some(NativeModule::Args),
-            "vec" => Some(NativeModule::Vec),
-            "quat" => Some(NativeModule::Quat),
-            _ => None,
-        }
-    }
-
-    /// The module's surface name, for display and diagnostics.
-    pub fn name(self) -> &'static str {
-        match self {
-            NativeModule::Json => "json",
-            NativeModule::Math => "math",
-            NativeModule::Random => "random",
-            NativeModule::Fs => "fs",
-            NativeModule::Time => "time",
-            NativeModule::Env => "env",
-            NativeModule::Args => "args",
-            NativeModule::Vec => "vec",
-            NativeModule::Quat => "quat",
-        }
     }
 }
 

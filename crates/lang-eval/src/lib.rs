@@ -1310,10 +1310,8 @@ impl Interpreter {
         // imports (and unrecognized `std` names) fall back to the opaque-stub binding.
         let is_std = path == ["std"];
         for imported in names {
-            let value = if is_std
-                && let Some(module) = lang_stdlib::NativeModule::from_name(&imported.name)
-            {
-                Value::NativeModule(module)
+            let value = if is_std && lang_stdlib::registry::find_module(&imported.name).is_some() {
+                Value::NativeModule(imported.name.clone())
             } else {
                 Value::Type(Rc::new(TypeDef {
                     name: imported.name.clone(),
@@ -1789,7 +1787,7 @@ impl Interpreter {
         }
         // `json.parse(...)` — a Ring 2 native module function call.
         if let Value::NativeModule(module) = &receiver {
-            return self.call_native_module(*module, name, &args, span);
+            return self.call_native_module(module, name, &args, span);
         }
         // `Order.new(...)` — an associated function (no instance); call it directly.
         if let Value::Type(def) = &receiver {
@@ -2242,7 +2240,7 @@ impl Interpreter {
     /// `call_native_module`.
     fn call_native_module(
         &mut self,
-        module: lang_stdlib::NativeModule,
+        module: &str,
         func: &str,
         args: &[Value],
         span: Span,
@@ -2252,7 +2250,7 @@ impl Interpreter {
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
         // function's `RetTy`). Routing is per-function so a partially-migrated module (`vec`, whose
         // bulk `*_all` kernels stay per-backend) falls through for its unmigrated functions.
-        let name = module.name();
+        let name = module;
         if let Some(sig) = lang_stdlib::registry::find_function(name, func) {
             // A reflective module (`json`) marshals its arguments deeply (the recursive value tree
             // `json.stringify` introspects); every other module uses the cheap shallow projection.
@@ -2269,24 +2267,13 @@ impl Interpreter {
                 }
             };
         }
-        match module {
-            // `vec`: only the bulk `*_all` kernels are unmigrated and reach here; an unknown
-            // function falls through to `call_vec`'s own "no such function" arm.
-            lang_stdlib::NativeModule::Vec => self.call_vec(func, args, span),
-            // A fully-migrated module reaching here means an unknown function on it (`json` and
-            // `quat` are fully registered, so they join this group).
-            lang_stdlib::NativeModule::Json
-            | lang_stdlib::NativeModule::Math
-            | lang_stdlib::NativeModule::Random
-            | lang_stdlib::NativeModule::Time
-            | lang_stdlib::NativeModule::Env
-            | lang_stdlib::NativeModule::Args
-            | lang_stdlib::NativeModule::Fs
-            | lang_stdlib::NativeModule::Quat => {
-                let error = lang_stdlib::no_function_error(name, func);
-                Err(self.runtime_error(std_error_code(error.kind), span, error.message))
-            }
+        // `vec`'s bulk `*_all` kernels are the only unmigrated native functions and stay per-backend;
+        // every other reachable name is registered, so anything else here is an unknown function.
+        if module == "vec" {
+            return self.call_vec(func, args, span);
         }
+        let error = lang_stdlib::no_function_error(name, func);
+        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
     }
 
     /// The `vec` 3D-math module (P-PACK Phase 4.1): scalar Vec3 ops over structural 3-`f32` objects.
@@ -3730,7 +3717,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         }
         Value::Enum(e) => NativeValue::Str(e.variant.clone()),
         Value::Function(_) | Value::Builtin(_) => NativeValue::Str("<fn>".to_string()),
-        Value::NativeModule(module) => NativeValue::Str(format!("<module {}>", module.name())),
+        Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),

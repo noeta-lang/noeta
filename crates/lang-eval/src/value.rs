@@ -60,9 +60,9 @@ pub enum Value {
     Type(Rc<TypeDef>),
     /// A struct or class *instance* — a bag of named field values.
     Object(Rc<ObjectValue>),
-    /// A Ring 2 native module (e.g. `json`), bound by `use std.{...}`; `module.func(args)`
-    /// dispatches to native code.
-    NativeModule(lang_stdlib::NativeModule),
+    /// A Ring 2 native module (e.g. `json`), bound by `use std.{...}` and identified by its surface
+    /// name; `module.func(args)` dispatches to native code via the extension registry.
+    NativeModule(String),
     /// An `fs.open` file handle (M2.5): a mutable cursor. `Rc<RefCell<…>>` gives the shared,
     /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
     /// same shared type both backends advance, so behavior is identical by construction.
@@ -448,7 +448,7 @@ impl Value {
             Value::Enum(value) => value.display(),
             Value::Type(def) => format!("<type {}>", def.name()),
             Value::Object(object) => object.display(),
-            Value::NativeModule(module) => format!("<module {}>", module.name()),
+            Value::NativeModule(module) => format!("<module {module}>"),
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
         }
@@ -508,7 +508,7 @@ impl fmt::Debug for Value {
             Value::Enum(value) => write!(f, "Enum({})", value.display()),
             Value::Type(def) => write!(f, "Type({})", def.name()),
             Value::Object(object) => write!(f, "Object({})", object.display()),
-            Value::NativeModule(module) => write!(f, "NativeModule({})", module.name()),
+            Value::NativeModule(module) => write!(f, "NativeModule({module})"),
             Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
         }
     }
