@@ -116,19 +116,33 @@ wires third-party crates in later.
 
 ---
 
-## Phase A — registry + seam + migration (no new language surface)
+## Phase A — registry + seam + migration (no new language surface) — ✅ DONE
 
-Internal unification only; every slice is differential-green by construction.
+Internal unification only; every slice differential-green by construction. (Re-sliced during
+implementation — `json` deferred to Phase B since its parse→value / stringify←value bridge needs the
+recursive value seam, not the flat one; `vec`/`quat` split into scalar-via-seam + bulk-per-backend per
+the option-B decision below.)
 
-- **A1** — registry skeleton in `lang-stdlib` (`Extension`/`ExtModule`/`ExtFn`/`SigType`/`RetTy`/
-  `NativeValue`/`NativeOut`/`SmallScalars`/`DispatchFn`) + `StdExtension` declaring all 9 modules with
-  shared dispatch fns. `vec`/`quat` math moves out of the per-backend `call_vec`/`call_quat` into shared
-  dispatch; `json`/`math`/… dispatch fns wrap the existing `lang_stdlib` inner fns. Pure addition.
-- **A2** — backend seam: `marshal_in`/`materialize` per backend; `call_native_module` routes **all 9**
-  through the registry dispatch (Host passed in); **delete** `NativeModule` enum + every per-backend
-  `call_*`/`read_vec3`/`build_vec3`. **Bench** scalar `vec.add` + `vm_vec_add_all` for no regression.
-- **A3** — checker registry-driven: replace `STD_MODULES`/`module_params`/`module_return` with registry
-  queries (`SigType`→`Type`; `SameAsArg(i)`→`args[i]`).
+- **A1** ✅ (`49b20e9`) — registry skeleton in `lang-stdlib` (`Extension`/`ExtModule`/`ExtFn`/`SigType`/
+  `RetTy`/`NativeValue`/`NativeOut`/`Scalar`/`DispatchFn` + `find_module`/`find_function`/`dispatch`) +
+  `StdExtension` declaring the scalar/host modules. Pure addition; unit-tested via `SandboxHost`.
+- **A2** ✅ (`f8e5274`) — backend seam `marshal_native_arg`/`materialize_native` per backend;
+  `call_native_module` routes `math`/`random`/`time`/`env`/`args` through registry dispatch (Host in);
+  deleted their per-backend `call_*`.
+- **A3** ✅ (`56670f3`) — `fs` migrated; seam widened with `NativeValue::Bytes`/`NativeOut::Bytes` +
+  `NativeOut::FileHandle` (`fs.open`); deleted `call_fs`.
+- **A4** ✅ (`8c482d9`) — `vec`/`quat` **scalar** ops via the **object seam** (`NativeValue::Object`/
+  `NativeOut::Object`, result shape from `RetTy::SameAsArg`); routing now **per-function** so the bulk
+  `*_all` kernels stay in a slimmed per-backend `call_vec` (option B — avoids re-homing packed-layout
+  vocab into lang-stdlib; see plans/backlog.md). `quat` fully migrated; `call_quat` deleted.
+- **A5** ✅ (`e9859a9`) — checker registry-driven: `module_params`/`module_return` query the registry
+  (`SigType`→`Type`, `RetTy`→`Type`); `is_std_module` for binding. Only `json` + `vec` bulk remain on a
+  small hardcoded fallback. The registry is now the single source of truth for a migrated module's
+  surface (checker + both backends read it).
+
+**Remaining un-migrated:** `json` (→ Phase B, the recursive seam) and the `vec` bulk `*_all` kernels
+(deferred with vec/quat's eventual eviction to a package). The `NativeModule` enum survives only to
+route those; it dies in Phase B.
 
 ## Phase B — turbofish + call-site-typed construction (lands `json.parse::<T>`)
 
