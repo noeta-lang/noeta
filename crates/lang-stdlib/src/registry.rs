@@ -53,6 +53,16 @@ pub enum NativeValue {
         type_name: &'static str,
         fields: Vec<Scalar>,
     },
+    /// The unit value (`json.stringify(unit)` → `null`). Part of the recursive "deep" arg view the
+    /// reflective `json` module uses.
+    Unit,
+    /// A list/tuple/set, each element deeply marshalled — the recursive arg view `json.stringify`
+    /// needs. (The shallow [`NativeValue::Object`] path `vec`/`quat` use is left untouched, so their
+    /// hot path keeps its flat scalar projection.)
+    List(Vec<NativeValue>),
+    /// A keyed aggregate — a map (key order) or an object/record (declared field order), each value
+    /// deeply marshalled. Both serialize to a JSON object, so one variant covers them.
+    Map(Vec<(String, NativeValue)>),
     /// Any value a dispatch function never inspects — carries the type name for error messages.
     Opaque(&'static str),
 }
@@ -279,6 +289,9 @@ fn native_type_name(value: &NativeValue) -> &str {
         NativeValue::Scalar(Scalar::Bool(_)) => "bool",
         NativeValue::Str(_) => "string",
         NativeValue::Bytes(_) => "bytes",
+        NativeValue::Unit => "unit",
+        NativeValue::List(_) => "list",
+        NativeValue::Map(_) => "map",
         NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => type_name,
     }
 }
@@ -293,7 +306,12 @@ fn to_arg(value: &NativeValue) -> Arg<'_> {
         NativeValue::Scalar(Scalar::F32(f)) => Arg::Float(*f as f64),
         NativeValue::Scalar(Scalar::Bool(b)) => Arg::Bool(*b),
         NativeValue::Str(s) => Arg::Str(s),
-        NativeValue::Bytes(_) | NativeValue::Object { .. } | NativeValue::Opaque(_) => Arg::Other,
+        NativeValue::Bytes(_)
+        | NativeValue::Unit
+        | NativeValue::List(_)
+        | NativeValue::Map(_)
+        | NativeValue::Object { .. }
+        | NativeValue::Opaque(_) => Arg::Other,
     }
 }
 

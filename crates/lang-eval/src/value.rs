@@ -542,22 +542,14 @@ impl PartialEq for Value {
 /// Render a float deterministically. Whole-valued floats keep a trailing `.0` so they
 /// are visibly distinct from ints (`3.0`, not `3`).
 fn format_float(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 {
-        format!("{f:.1}")
-    } else {
-        f.to_string()
-    }
+    lang_stdlib::format_float(f)
 }
 
-/// Display an `f32` (P-PACK Phase 3). Mirrors [`format_float`] but at f32 precision (the shortest
-/// round-tripping f32 decimal), so e.g. `0.1f32` shows `0.1`, not the f64-widened `0.10000000149…`.
-/// The VM carries a byte-identical copy, so the two backends agree under the differential.
+/// Display an `f32` (P-PACK Phase 3) at f32 precision (the shortest round-tripping f32 decimal), so
+/// e.g. `0.1f32` shows `0.1`, not the f64-widened `0.10000000149…`. Delegates to the shared
+/// [`lang_stdlib::format_f32`] so the two backends agree by construction.
 pub(crate) fn format_f32(f: f32) -> String {
-    if f.is_finite() && f.fract() == 0.0 {
-        format!("{f:.1}")
-    } else {
-        f.to_string()
-    }
+    lang_stdlib::format_f32(f)
 }
 
 #[cfg(test)]

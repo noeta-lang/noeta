@@ -331,6 +331,28 @@ pub fn invalid_json_error(detail: &str) -> StdError {
     }
 }
 
+/// Format an `f64` for display and serialization: a whole finite value keeps one decimal place
+/// (`2.0`, not `2`), everything else uses the shortest round-tripping form. Both backends' `display`
+/// and the shared JSON serializer call this, so numbers render identically everywhere — the
+/// single source the two duplicated copies used to be.
+pub fn format_float(f: f64) -> String {
+    if f.is_finite() && f.fract() == 0.0 {
+        format!("{f:.1}")
+    } else {
+        f.to_string()
+    }
+}
+
+/// Format an `f32` at f32 precision (the shortest round-tripping f32 decimal) — the `f32` analog of
+/// [`format_float`], so e.g. `0.1f32` shows `0.1`, not the f64-widened `0.10000000149…`.
+pub fn format_f32(f: f32) -> String {
+    if f.is_finite() && f.fract() == 0.0 {
+        format!("{f:.1}")
+    } else {
+        f.to_string()
+    }
+}
+
 /// "a string" / "an int" — pick the article so messages read naturally.
 fn an(noun: &str) -> String {
     let article = match noun.chars().next() {

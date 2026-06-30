@@ -1126,10 +1126,10 @@ impl Value {
         } else if self.is_small_int() {
             self.as_int().unwrap().to_string()
         } else if self.is_float() {
-            format_float(self.as_float().unwrap())
+            lang_stdlib::format_float(self.as_float().unwrap())
         } else if self.is_f32() {
             // An immediate `f32` displays at f32 precision, byte-identical to the tree-walker.
-            format_f32(self.as_f32().unwrap())
+            lang_stdlib::format_f32(self.as_f32().unwrap())
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => s.clone(),
@@ -1209,79 +1209,80 @@ impl Value {
         }
     }
 
-    /// The JSON encoding synthesized by `@derive(ToJson)`, mirrored exactly by the tree-walker.
-    /// Scalars reuse `display` (so the two backends format numbers identically); strings are
-    /// quoted and escaped via [`json_string`]; lists become JSON arrays, maps and objects JSON
-    /// objects (objects in declared slot order). The unit value is `null`; a value with no JSON
-    /// analog (closure/enum) falls back to its quoted display form.
+    /// The JSON encoding synthesized by `@derive(ToJson)` (and `json.stringify`). Marshals the value
+    /// into the neutral [`lang_stdlib::NativeValue`] tree (see [`Self::to_native_deep`]) and runs the
+    /// shared [`lang_stdlib::json::stringify`], so the tree-walker — driving the same walk over its
+    /// own marshalled tree — produces byte-identical output by construction.
     pub fn to_json(self) -> String {
-        // A packed list (P-PACK 2.4) serializes via a temporary boxed materialization, identical to
-        // the boxed equivalent.
+        lang_stdlib::json::stringify(&self.to_native_deep())
+    }
+
+    /// Deeply marshal this value into the neutral [`lang_stdlib::NativeValue`] tree the shared JSON
+    /// serializer ([`lang_stdlib::json::stringify`]) consumes — the VM half of `json.stringify` and
+    /// `@derive(Serialize<Json>)`. Numbers become scalars; strings, enum variants, and the opaque
+    /// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
+    /// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`]. Read-only — it never changes a
+    /// refcount (a packed list materializes a temporary that is released here).
+    pub fn to_native_deep(self) -> lang_stdlib::NativeValue {
+        use lang_stdlib::{NativeValue, Scalar};
+        // A packed list serializes via a temporary boxed materialization, identical to the boxed form.
         if self.is_packed_list() {
             let boxed = self.realize_list();
-            let out = boxed.to_json();
+            let out = boxed.to_native_deep();
             boxed.release();
             return out;
         }
         if let Some(b) = self.as_bool() {
-            b.to_string()
+            NativeValue::Scalar(Scalar::Bool(b))
         } else if self.is_small_int() {
-            self.as_int().unwrap().to_string()
+            NativeValue::Scalar(Scalar::Int(self.as_int().unwrap()))
         } else if self.is_float() {
-            format_float(self.as_float().unwrap())
+            NativeValue::Scalar(Scalar::Float(self.as_float().unwrap()))
         } else if self.is_f32() {
-            // An immediate `f32` serializes as a JSON number at f32 precision.
-            format_f32(self.as_f32().unwrap())
+            NativeValue::Scalar(Scalar::F32(self.as_f32().unwrap()))
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => json_string(s),
-                // A byte buffer has no JSON representation (it's the *binary* alternative to JSON);
-                // serialize its opaque summary as a string so `json.stringify` never panics.
-                Payload::Bytes(b) => json_string(&format!("<{} bytes>", b.len())),
-                Payload::Int(i) => i.to_string(),
-                Payload::List(items) => {
-                    let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
-                    format!("[{}]", parts.join(","))
+                Payload::Str(s) => NativeValue::Str(s.clone()),
+                // A byte buffer has no JSON representation (it is the *binary* alternative): a length
+                // summary string, so `json.stringify` never panics.
+                Payload::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),
+                Payload::Int(i) => NativeValue::Scalar(Scalar::Int(*i)),
+                // Lists, tuples, and sets all serialize as a JSON array (JSON has neither tuple nor
+                // set), so they marshal to one neutral list.
+                Payload::List(items) | Payload::Tuple(items) | Payload::Set(items) => {
+                    NativeValue::List(items.iter().map(|v| v.to_native_deep()).collect())
                 }
-                // A tuple serializes as a JSON array (JSON has no tuple type), like a list.
-                Payload::Tuple(items) => {
-                    let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
-                    format!("[{}]", parts.join(","))
-                }
-                // A set serializes as a JSON array (JSON has no set type).
-                Payload::Set(items) => {
-                    let parts: Vec<String> = items.iter().map(|v| v.to_json()).collect();
-                    format!("[{}]", parts.join(","))
-                }
-                Payload::Map(entries) => {
-                    let parts: Vec<String> = entries
+                Payload::Map(entries) => NativeValue::Map(
+                    entries
                         .iter()
-                        .map(|(k, v)| format!("{}:{}", json_string(k), v.to_json()))
-                        .collect();
-                    format!("{{{}}}", parts.join(","))
-                }
-                Payload::Object { shape, slots } => {
-                    let parts: Vec<String> = shape
+                        .map(|(k, v)| (k.clone(), v.to_native_deep()))
+                        .collect(),
+                ),
+                Payload::Object { shape, slots } => NativeValue::Map(
+                    shape
                         .fields
                         .iter()
                         .zip(slots)
-                        .map(|(name, v)| format!("{}:{}", json_string(name), v.to_json()))
-                        .collect();
-                    format!("{{{}}}", parts.join(","))
+                        .map(|(name, v)| (name.clone(), v.to_native_deep()))
+                        .collect(),
+                ),
+                Payload::Closure { .. } | Payload::NativeFn(_) => {
+                    NativeValue::Str("<fn>".to_string())
                 }
-                Payload::Closure { .. } | Payload::NativeFn(_) => json_string("<fn>"),
-                Payload::Cell(inner) => inner.to_json(),
+                Payload::Cell(inner) => inner.to_native_deep(),
                 Payload::Enum { shape, .. } => {
-                    json_string(shape.variant.as_deref().unwrap_or(&shape.name))
+                    NativeValue::Str(shape.variant.as_deref().unwrap_or(&shape.name).to_string())
                 }
-                Payload::NativeModule(name) => json_string(&format!("<module {name}>")),
-                // A handle has no JSON analog; fall back to its quoted display form, like a closure.
-                Payload::FileHandle(handle) => json_string(&handle.display()),
-                // Handled by the early return at the top of `to_json`.
-                Payload::PackedList { .. } => unreachable!("packed list demoted before to_json"),
+                Payload::NativeModule(name) => NativeValue::Str(format!("<module {name}>")),
+                // A handle has no JSON analog; its quoted display form, like a closure.
+                Payload::FileHandle(handle) => NativeValue::Str(handle.display()),
+                // Handled by the early return at the top.
+                Payload::PackedList { .. } => {
+                    unreachable!("packed list demoted before to_native_deep")
+                }
             })
         } else {
-            "null".to_string()
+            NativeValue::Unit
         }
     }
 
@@ -1514,24 +1515,6 @@ impl std::fmt::Debug for Value {
 
 /// Render a float deterministically: whole-valued floats keep a trailing `.0` so they are
 /// visibly distinct from ints (mirrors the M0 tree-walker exactly).
-fn format_float(f: f64) -> String {
-    if f.is_finite() && f.fract() == 0.0 {
-        format!("{f:.1}")
-    } else {
-        f.to_string()
-    }
-}
-
-/// Display an `f32` (P-PACK Phase 3) at f32 precision — byte-identical to the tree-walker's
-/// `format_f32`, so the two backends agree under the differential.
-fn format_f32(f: f32) -> String {
-    if f.is_finite() && f.fract() == 0.0 {
-        format!("{f:.1}")
-    } else {
-        f.to_string()
-    }
-}
-
 /// Materialize one packed element from `words` starting at `offset`, returning the owned
 /// `Value::Object` (refcount 1) and the offset just past it — so nested structs and the caller
 /// advance in lock-step with [`Value::pack_element`]. Each primitive becomes an immediate (or a
@@ -1589,27 +1572,6 @@ fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value,
         }
     }
     (Value::object(Rc::clone(&schema.shape), slots), at)
-}
-
-/// Encode a string as a JSON string literal: surrounding quotes plus the mandatory escapes.
-/// The tree-walker carries a byte-identical copy, so `@derive(ToJson)` produces the same output
-/// under both backends.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
-        }
-    }
-    out.push('"');
-    out
 }
 
 #[cfg(test)]

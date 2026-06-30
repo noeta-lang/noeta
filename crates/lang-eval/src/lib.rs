@@ -3691,66 +3691,64 @@ fn compare_field(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
 }
 
 /// The JSON encoding synthesized by `@derive(Serialize<Json>)`. The byte-for-byte mirror of the VM's
-/// `Value::to_json`: scalars reuse `display` (so both backends format numbers identically),
-/// strings are quoted/escaped via [`json_string`], lists become JSON arrays, maps and objects
-/// JSON objects (objects in declared field order), unit is `null`, and any other value falls
-/// back to its quoted display form.
+/// Serialize a tree-walker value to JSON (`json.stringify` and `@derive(Serialize<Json>)`). Marshals
+/// the value into the neutral [`lang_stdlib::NativeValue`] tree (see [`value_to_native_deep`]) and
+/// runs the shared [`lang_stdlib::json::stringify`], so the VM — driving the same walk over its own
+/// marshalled tree — produces byte-identical output by construction.
 fn value_to_json(value: &Value) -> String {
-    match value {
-        Value::Bool(_) | Value::Int(_) | Value::Float(_) => value.display(),
-        Value::Str(s) => json_string(s),
-        Value::List(repr) => {
-            let parts: Vec<String> = repr.to_rc_vec().iter().map(value_to_json).collect();
-            format!("[{}]", parts.join(","))
-        }
-        Value::Set(items) => {
-            let parts: Vec<String> = items.iter().map(value_to_json).collect();
-            format!("[{}]", parts.join(","))
-        }
-        Value::Map(entries) => {
-            let parts: Vec<String> = entries
-                .iter()
-                .map(|(k, v)| format!("{}:{}", json_string(k), value_to_json(v)))
-                .collect();
-            format!("{{{}}}", parts.join(","))
-        }
-        Value::Object(object) => {
-            // Slot order is declared order (records/classes) or sorted-key order (opaque imports).
-            // (Recursion is on field *values* — distinct objects — so holding this borrow is safe.)
-            let slots = object.slots.borrow();
-            let parts: Vec<String> = object
-                .def
-                .fields
-                .iter()
-                .zip(slots.iter())
-                .map(|(f, v)| format!("{}:{}", json_string(&f.name), value_to_json(v)))
-                .collect();
-            format!("{{{}}}", parts.join(","))
-        }
-        Value::Enum(e) => json_string(&e.variant),
-        Value::Unit => "null".to_string(),
-        other => json_string(&other.display()),
-    }
+    lang_stdlib::json::stringify(&value_to_native_deep(value))
 }
 
-/// Encode a string as a JSON string literal (quotes + the mandatory escapes). Byte-identical to
-/// the VM's copy so `@derive(Serialize<Json>)` renders the same under both backends.
-fn json_string(s: &str) -> String {
-    let mut out = String::with_capacity(s.len() + 2);
-    out.push('"');
-    for c in s.chars() {
-        match c {
-            '"' => out.push_str("\\\""),
-            '\\' => out.push_str("\\\\"),
-            '\n' => out.push_str("\\n"),
-            '\r' => out.push_str("\\r"),
-            '\t' => out.push_str("\\t"),
-            c if (c as u32) < 0x20 => out.push_str(&format!("\\u{:04x}", c as u32)),
-            c => out.push(c),
+/// Deeply marshal a tree-walker value into the neutral [`lang_stdlib::NativeValue`] tree the shared
+/// JSON serializer consumes. Numbers become scalars; strings, enum variants, and the opaque
+/// length/`<fn>`/`<module …>` summaries become [`NativeValue::Str`]; lists/tuples/sets become a
+/// [`NativeValue::List`]; maps and objects a [`NativeValue::Map`] (objects in declared field order).
+/// Mirrors the VM's [`lang_value::Value::to_native_deep`] so both backends agree.
+fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
+    use lang_stdlib::{NativeValue, Scalar};
+    match value {
+        Value::Unit => NativeValue::Unit,
+        Value::Bool(b) => NativeValue::Scalar(Scalar::Bool(*b)),
+        Value::Int(n) => NativeValue::Scalar(Scalar::Int(*n)),
+        Value::Float(f) => NativeValue::Scalar(Scalar::Float(*f)),
+        Value::F32(f) => NativeValue::Scalar(Scalar::F32(*f)),
+        Value::Str(s) => NativeValue::Str(s.clone()),
+        // A byte buffer has no JSON representation (it is the binary alternative): a length summary.
+        Value::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),
+        // Lists, tuples, and sets all serialize as a JSON array.
+        Value::List(repr) => {
+            NativeValue::List(repr.to_rc_vec().iter().map(value_to_native_deep).collect())
         }
+        Value::Tuple(items) | Value::Set(items) => {
+            NativeValue::List(items.iter().map(value_to_native_deep).collect())
+        }
+        Value::Map(entries) => NativeValue::Map(
+            entries
+                .iter()
+                .map(|(k, v)| (k.clone(), value_to_native_deep(v)))
+                .collect(),
+        ),
+        Value::Object(object) => {
+            // Declared field order (records/classes) or sorted-key order (opaque imports). Recursion
+            // is on field *values* (distinct objects), so holding this borrow is safe.
+            let slots = object.slots.borrow();
+            NativeValue::Map(
+                object
+                    .def
+                    .fields
+                    .iter()
+                    .zip(slots.iter())
+                    .map(|(f, v)| (f.name.clone(), value_to_native_deep(v)))
+                    .collect(),
+            )
+        }
+        Value::Enum(e) => NativeValue::Str(e.variant.clone()),
+        Value::Function(_) | Value::Builtin(_) => NativeValue::Str("<fn>".to_string()),
+        Value::NativeModule(module) => NativeValue::Str(format!("<module {}>", module.name())),
+        Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
+        // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
+        Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),
     }
-    out.push('"');
-    out
 }
 
 /// The total order of two primitives for `x.compare(y)`: integers compare exactly, strings
