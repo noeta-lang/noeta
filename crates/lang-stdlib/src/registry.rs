@@ -14,9 +14,9 @@
 //! A dispatch function never sees a backend `Value`. Each backend projects its values onto
 //! [`NativeValue`] (the argument view) and lifts the [`NativeOut`] result back — two functions
 //! written once per backend, not a `read_vec3`/`build_vec3` per native function. [`NativeValue`]
-//! widens the scalar [`crate::Arg`] seam with the shapes richer modules need (objects, packed
-//! buffers) as those modules migrate; this first slice covers the scalar/host modules
-//! (`math`/`random`/`time`/`env`/`args`), so only the scalar variants exist yet.
+//! widens the scalar [`crate::Arg`] seam with the shapes richer modules need (bytes and file
+//! handles for `fs`; objects and packed buffers when `vec`/`quat` migrate). Migrated so far:
+//! `math`/`random`/`time`/`env`/`args`/`fs`.
 //!
 //! Host-coupled effects (filesystem, clock, PRNG, environment) are threaded through the same
 //! [`crate::Host`] seam the backends already inject, so `random`/`time`/`env`/`args` dispatch
@@ -43,6 +43,8 @@ pub enum Scalar {
 pub enum NativeValue {
     Scalar(Scalar),
     Str(String),
+    /// A `bytes` buffer (e.g. `fs.write_bytes`). Marshalled by value — IO is never a hot path.
+    Bytes(Vec<u8>),
     /// Any value a dispatch function never inspects — carries the type name for error messages.
     Opaque(&'static str),
 }
@@ -52,10 +54,14 @@ pub enum NativeValue {
 pub enum NativeOut {
     Scalar(Scalar),
     Str(String),
+    Bytes(Vec<u8>),
     Unit,
     /// A homogeneous list (e.g. `env.keys()` → list of strings). The backend builds its native
     /// list; nested `NativeOut` keeps it general for later recursive modules.
     List(Vec<NativeOut>),
+    /// A file handle (`fs.open`). The shared dispatch builds the backend-agnostic
+    /// [`crate::FileHandle`]; each backend wraps it in its own mutable-handle value.
+    FileHandle(crate::FileHandle),
 }
 
 /// lang-stdlib's small signature vocabulary. lang-stdlib cannot depend on `lang_types::Type` (that
@@ -207,6 +213,19 @@ fn str_list(items: impl IntoIterator<Item = String>) -> NativeOut {
     NativeOut::List(items.into_iter().map(NativeOut::Str).collect())
 }
 
+/// The surface type name of an argument, for error messages (matches each backend's `type_name`).
+fn native_type_name(value: &NativeValue) -> &str {
+    match value {
+        NativeValue::Scalar(Scalar::Int(_)) => "int",
+        NativeValue::Scalar(Scalar::Float(_)) => "float",
+        NativeValue::Scalar(Scalar::F32(_)) => "f32",
+        NativeValue::Scalar(Scalar::Bool(_)) => "bool",
+        NativeValue::Str(_) => "string",
+        NativeValue::Bytes(_) => "bytes",
+        NativeValue::Opaque(name) => name,
+    }
+}
+
 // --- `math`: pure scalar functions, no host -----------------------------------------------------
 
 /// Project a [`NativeValue`] onto the scalar [`Arg`] seam `math` consumes.
@@ -217,7 +236,7 @@ fn to_arg(value: &NativeValue) -> Arg<'_> {
         NativeValue::Scalar(Scalar::F32(f)) => Arg::Float(*f as f64),
         NativeValue::Scalar(Scalar::Bool(b)) => Arg::Bool(*b),
         NativeValue::Str(s) => Arg::Str(s),
-        NativeValue::Opaque(_) => Arg::Other,
+        NativeValue::Bytes(_) | NativeValue::Opaque(_) => Arg::Other,
     }
 }
 
@@ -329,6 +348,107 @@ fn args_dispatch(
             Ok(str_list(host.args()))
         }
         _ => Err(no_function_error("args", func)),
+    }
+}
+
+// --- `fs`: file IO over the host's filesystem (sandbox VFS or real disk) ------------------------
+
+fn fs_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "write" => {
+            want_arity(func, args, 2)?;
+            host.fs_write(want_str(func, args, 0)?, want_str(func, args, 1)?)?;
+            Ok(NativeOut::Unit)
+        }
+        "append" => {
+            want_arity(func, args, 2)?;
+            host.fs_append(want_str(func, args, 0)?, want_str(func, args, 1)?)?;
+            Ok(NativeOut::Unit)
+        }
+        "write_bytes" => {
+            want_arity(func, args, 2)?;
+            let path = want_str(func, args, 0)?;
+            let NativeValue::Bytes(data) = &args[1] else {
+                return Err(StdError {
+                    kind: crate::ErrorKind::ArgType,
+                    message: format!(
+                        "`fs.write_bytes` expects a `bytes` value, found {}",
+                        native_type_name(&args[1])
+                    ),
+                });
+            };
+            host.fs_write_bytes(path, data)?;
+            Ok(NativeOut::Unit)
+        }
+        "read_bytes" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Bytes(
+                host.fs_read_bytes(want_str(func, args, 0)?)?,
+            ))
+        }
+        "read" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(host.fs_read(want_str(func, args, 0)?)?))
+        }
+        "read_lines" => {
+            want_arity(func, args, 1)?;
+            let content = host.fs_read(want_str(func, args, 0)?)?;
+            Ok(str_list(content.lines().map(str::to_string)))
+        }
+        "exists" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                host.fs_exists(want_str(func, args, 0)?),
+            )))
+        }
+        "remove" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                host.fs_remove(want_str(func, args, 0)?)?,
+            )))
+        }
+        "is_dir" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Scalar(Scalar::Bool(
+                host.fs_is_dir(want_str(func, args, 0)?),
+            )))
+        }
+        "mkdir" => {
+            want_arity(func, args, 1)?;
+            host.fs_mkdir(want_str(func, args, 0)?)?;
+            Ok(NativeOut::Unit)
+        }
+        // `list()` lists every file; `list(dir)` lists a directory's immediate children — the one
+        // optionally-arity'd function, so its arity is enforced here rather than by a fixed signature.
+        "list" => {
+            let paths = match args.len() {
+                0 => host.fs_list()?,
+                1 => host.fs_list_dir(want_str(func, args, 0)?)?,
+                n => return Err(arity_error(func, 1, n)),
+            };
+            Ok(str_list(paths))
+        }
+        // `open(path, mode)` → a cursor file handle. Read mode snapshots the file (a missing file
+        // is the same IO error as `fs.read`); write/append buffer until `close`.
+        "open" => {
+            want_arity(func, args, 2)?;
+            let path = want_str(func, args, 0)?;
+            let mode_spec = want_str(func, args, 1)?;
+            let Some(mode) = crate::FileMode::parse(mode_spec) else {
+                return Err(crate::handle::unknown_mode_error(mode_spec));
+            };
+            let handle = match mode {
+                crate::FileMode::Read => crate::FileHandle::open_read(path, host.fs_read(path)?),
+                crate::FileMode::Write => crate::FileHandle::open_write(path),
+                crate::FileMode::Append => crate::FileHandle::open_append(path),
+            };
+            Ok(NativeOut::FileHandle(handle))
+        }
+        _ => Err(no_function_error("fs", func)),
     }
 }
 
@@ -455,6 +575,71 @@ const ARGS_FNS: &[ExtFn] = &[ExtFn {
     ret: Concrete(SigType::List(&Str)),
 }];
 
+const FS_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "write",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "append",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "write_bytes",
+        params: &[Str, SigType::Bytes],
+        ret: Concrete(SigType::Unit),
+    },
+    ExtFn {
+        name: "read_bytes",
+        params: &[Str],
+        ret: Concrete(SigType::Bytes),
+    },
+    ExtFn {
+        name: "read",
+        params: &[Str],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "read_lines",
+        params: &[Str],
+        ret: Concrete(SigType::List(&Str)),
+    },
+    ExtFn {
+        name: "exists",
+        params: &[Str],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "remove",
+        params: &[Str],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "is_dir",
+        params: &[Str],
+        ret: Concrete(SigType::Bool),
+    },
+    ExtFn {
+        name: "mkdir",
+        params: &[Str],
+        ret: Concrete(SigType::Unit),
+    },
+    // `list` is variadic (0 or 1 args); its arity is enforced in dispatch, and the checker
+    // special-cases it (no fixed arity check), so the declared params here are not consulted.
+    ExtFn {
+        name: "list",
+        params: &[Str],
+        ret: Concrete(SigType::List(&Str)),
+    },
+    ExtFn {
+        name: "open",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Named("FileHandle")),
+    },
+];
+
 const STD_MODULES: &[ExtModule] = &[
     ExtModule {
         name: "math",
@@ -480,6 +665,11 @@ const STD_MODULES: &[ExtModule] = &[
         name: "args",
         functions: ARGS_FNS,
         dispatch: args_dispatch,
+    },
+    ExtModule {
+        name: "fs",
+        functions: FS_FNS,
+        dispatch: fs_dispatch,
     },
 ];
 

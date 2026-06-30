@@ -815,7 +815,6 @@ impl<'m> Vm<'m> {
         }
         match lang_stdlib::NativeModule::from_name(module) {
             Some(lang_stdlib::NativeModule::Json) => self.call_json(func, args, span),
-            Some(lang_stdlib::NativeModule::Fs) => self.call_fs(func, args, span),
             Some(lang_stdlib::NativeModule::Vec) => self.call_vec(func, args, span),
             Some(lang_stdlib::NativeModule::Quat) => self.call_quat(func, args, span),
             // Migrated modules are handled by the registry above.
@@ -824,7 +823,8 @@ impl<'m> Vm<'m> {
                 | lang_stdlib::NativeModule::Random
                 | lang_stdlib::NativeModule::Time
                 | lang_stdlib::NativeModule::Env
-                | lang_stdlib::NativeModule::Args,
+                | lang_stdlib::NativeModule::Args
+                | lang_stdlib::NativeModule::Fs,
             ) => unreachable!("module `{module}` is dispatched by the native-extension registry"),
             // Only valid module names are ever bound, so this is unreachable in practice.
             None => {
@@ -1226,171 +1226,6 @@ impl<'m> Vm<'m> {
             out.push(self.build_vec3(elem, op(c)));
         }
         Ok(Value::list(out))
-    }
-
-    /// The `fs` module: file IO over the sandboxed in-memory [`lang_stdlib::fs::Vfs`]. Shared VFS
-    /// semantics make this identical to the tree-walker's `call_fs` by construction.
-    fn call_fs(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        match func {
-            "write" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                let content = self.stdlib_string(func, args[1], span)?;
-                match self.host.fs_write(&path, &content) {
-                    Ok(()) => Ok(Value::unit()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "append" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                let content = self.stdlib_string(func, args[1], span)?;
-                match self.host.fs_append(&path, &content) {
-                    Ok(()) => Ok(Value::unit()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "write_bytes" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                let Some(data) = args[1].bytes_data() else {
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!(
-                            "`fs.write_bytes` expects a `bytes` value, found {}",
-                            args[1].type_name()
-                        ),
-                    ));
-                };
-                match self.host.fs_write_bytes(&path, &data) {
-                    Ok(()) => Ok(Value::unit()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "read_bytes" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                match self.host.fs_read_bytes(&path) {
-                    Ok(data) => Ok(Value::bytes(data)),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "read" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                match self.host.fs_read(&path) {
-                    Ok(content) => Ok(Value::string(&content)),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "read_lines" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                match self.host.fs_read(&path) {
-                    Ok(content) => {
-                        let lines = content.lines().map(Value::string).collect();
-                        Ok(Value::list(lines))
-                    }
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "exists" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                Ok(Value::bool(self.host.fs_exists(&path)))
-            }
-            "remove" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                match self.host.fs_remove(&path) {
-                    Ok(existed) => Ok(Value::bool(existed)),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            // `list()` lists every file; `list(dir)` lists a directory's immediate children.
-            "list" => {
-                let result = match args.len() {
-                    0 => self.host.fs_list(),
-                    1 => {
-                        let dir = self.stdlib_string(func, args[0], span)?;
-                        self.host.fs_list_dir(&dir)
-                    }
-                    n => {
-                        let error = lang_stdlib::arity_error(func, 1, n);
-                        return Err(self.error(stdlib_error_code(error.kind), span, error.message));
-                    }
-                };
-                match result {
-                    Ok(paths) => {
-                        let paths = paths.iter().map(|p| Value::string(p)).collect();
-                        Ok(Value::list(paths))
-                    }
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "mkdir" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                match self.host.fs_mkdir(&path) {
-                    Ok(()) => Ok(Value::unit()),
-                    Err(error) => {
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "is_dir" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                Ok(Value::bool(self.host.fs_is_dir(&path)))
-            }
-            // `open(path, mode)` → a cursor file handle. Read mode snapshots the file (a missing
-            // file is the same E0021 as `fs.read`); write/append buffer until `close`.
-            "open" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let path = self.stdlib_string(func, args[0], span)?;
-                let mode_spec = self.stdlib_string(func, args[1], span)?;
-                let Some(mode) = lang_stdlib::FileMode::parse(&mode_spec) else {
-                    let error = lang_stdlib::handle::unknown_mode_error(&mode_spec);
-                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
-                };
-                let handle = match mode {
-                    lang_stdlib::FileMode::Read => match self.host.fs_read(&path) {
-                        Ok(content) => lang_stdlib::FileHandle::open_read(&path, content),
-                        Err(error) => {
-                            return Err(self.error(
-                                stdlib_error_code(error.kind),
-                                span,
-                                error.message,
-                            ));
-                        }
-                    },
-                    lang_stdlib::FileMode::Write => lang_stdlib::FileHandle::open_write(&path),
-                    lang_stdlib::FileMode::Append => lang_stdlib::FileHandle::open_append(&path),
-                };
-                Ok(Value::file_handle(handle))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("fs", func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
-            }
-        }
     }
 
     /// Dispatch a file-handle method. Mirrors the tree-walker's `call_file_handle_method`: the
@@ -4650,6 +4485,8 @@ fn marshal_native_arg(value: Value) -> lang_stdlib::NativeValue {
         NativeValue::Scalar(Scalar::Bool(b))
     } else if let Some(s) = value.as_string() {
         NativeValue::Str(s)
+    } else if let Some(b) = value.bytes_data() {
+        NativeValue::Bytes(b)
     } else {
         NativeValue::Opaque(value.type_name())
     }
@@ -4664,8 +4501,10 @@ fn materialize_native(out: lang_stdlib::NativeOut) -> Value {
         NativeOut::Scalar(Scalar::F32(f)) => Value::f32(f),
         NativeOut::Scalar(Scalar::Bool(b)) => Value::bool(b),
         NativeOut::Str(s) => Value::string(&s),
+        NativeOut::Bytes(b) => Value::bytes(b),
         NativeOut::Unit => Value::unit(),
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
+        NativeOut::FileHandle(handle) => Value::file_handle(handle),
     }
 }
 
