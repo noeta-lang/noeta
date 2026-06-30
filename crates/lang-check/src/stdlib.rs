@@ -16,11 +16,11 @@ use lang_types::Type;
 /// receiver of this `Named` type dispatches the file-handle methods.
 pub(super) const FILE_HANDLE: &str = "FileHandle";
 
-/// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. The migrated modules come from the
-/// native-extension registry; `json` is not yet registered (it migrates with the Phase B recursive
-/// value seam), so it is admitted explicitly.
+/// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
+/// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
+/// small per-backend fallback in `module_params`/`module_return`.
 pub(super) fn is_std_module(name: &str) -> bool {
-    name == "json" || registry::find_module(name).is_some()
+    registry::find_module(name).is_some()
 }
 
 /// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`].
@@ -213,10 +213,9 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
     if let Some(f) = registry::find_function(module, name) {
         return Some(f.params.iter().map(sig_to_type).collect());
     }
-    // Not yet in the registry: `json` (Phase B) and the `vec` bulk `*_all` kernels (per-backend).
+    // Not in the registry: the `vec` bulk `*_all` kernels (per-backend, deferred with vec/quat's
+    // eventual eviction to a package).
     Some(match (module, name) {
-        ("json", "parse") => vec![Type::String],
-        ("json", "stringify") => vec![Type::Dyn],
         ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
         ("vec", "length_all") => vec![Type::Dyn],
         _ => return None,
@@ -291,10 +290,8 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
             RetTy::TypeArg => Type::Unknown,
         });
     }
-    // Not yet in the registry: `json` (Phase B) and the `vec` bulk `*_all` kernels (per-backend).
+    // Not in the registry: the `vec` bulk `*_all` kernels (per-backend).
     Some(match (module, name) {
-        ("json", "parse") => Type::Dyn,
-        ("json", "stringify") => Type::String,
         ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
         ("vec", "dot_all" | "length_all") => list(Type::F32),
         _ => return None,

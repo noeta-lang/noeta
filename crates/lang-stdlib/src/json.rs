@@ -46,6 +46,34 @@ pub fn parse_typed(text: &str, recipe: &TypeRecipe) -> Result<NativeOut, StdErro
     decode(&json, recipe)
 }
 
+/// Parse `text` as JSON and decode it into a **dynamic** value tree (`json.parse(text)`, no
+/// turbofish): a JSON object becomes a string-keyed [`NativeOut::Map`], an array a
+/// [`NativeOut::List`], `null` the unit value, and scalars their matching [`NativeOut::Scalar`]/
+/// [`NativeOut::Str`]. The backend materializes it into the same map/list/scalar values both
+/// backends build, so the differential holds by construction.
+pub fn parse_dynamic(text: &str) -> Result<NativeOut, StdError> {
+    let json = parse(text).map_err(|detail| invalid_json_error(&detail))?;
+    Ok(to_native(&json))
+}
+
+/// Convert a parsed [`Json`] tree into the neutral dynamic [`NativeOut`] tree (`json.parse`'s result).
+fn to_native(json: &Json) -> NativeOut {
+    match json {
+        Json::Null => NativeOut::Unit,
+        Json::Bool(b) => NativeOut::Scalar(Scalar::Bool(*b)),
+        Json::Int(n) => NativeOut::Scalar(Scalar::Int(*n)),
+        Json::Float(f) => NativeOut::Scalar(Scalar::Float(*f)),
+        Json::Str(s) => NativeOut::Str(s.clone()),
+        Json::Array(items) => NativeOut::List(items.iter().map(to_native).collect()),
+        Json::Object(entries) => NativeOut::Map(
+            entries
+                .iter()
+                .map(|(key, value)| (key.clone(), to_native(value)))
+                .collect(),
+        ),
+    }
+}
+
 /// Walk one JSON value against a recipe. Numeric widening matches the language lattice
 /// (`int <: f32 <: float`): a JSON integer satisfies a `float`/`f32` field, but a fractional
 /// number does not satisfy an `int`.

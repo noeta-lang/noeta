@@ -188,6 +188,12 @@ pub struct ExtModule {
     pub name: &'static str,
     pub functions: &'static [ExtFn],
     pub dispatch: ModuleDispatch,
+    /// Whether the backend should marshal this module's call arguments **deeply** — the recursive
+    /// `Unit`/`List`/`Map` [`NativeValue`] view — rather than the default shallow scalar projection.
+    /// Only the reflective `json` module needs it (`json.stringify` introspects an arbitrary value);
+    /// the scalar/`vec`/`quat` modules keep the cheap flat marshalling, so their hot path is
+    /// untouched. The module declares its own need here so the backends stay data-driven.
+    pub deep_marshal: bool,
 }
 
 /// A bundle of native modules (and, later, types) registered into the language. Core implements
@@ -1035,46 +1041,99 @@ const QUAT_FNS: &[ExtFn] = &[
     },
 ];
 
+// --- `json`: parse (dynamic) + stringify, over the recursive value seam ------------------------
+//
+// `json.parse(text)` decodes into a dynamic value tree (`NativeOut::Map`/`List`/scalars); the
+// turbofish form `json.parse::<T>(text)` is a separate call-site-typed path (`Op::ExtCall` + a
+// `TypeRecipe`), not this dynamic dispatch. `json.stringify(value)` serializes a **deeply**
+// marshalled argument (the module sets `deep_marshal`) through the shared `json::stringify`.
+
+const JSON_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "parse",
+        params: &[Str],
+        ret: Concrete(Dyn),
+    },
+    ExtFn {
+        name: "stringify",
+        params: &[Dyn],
+        ret: Concrete(Str),
+    },
+];
+
+fn json_dispatch(
+    func: &str,
+    _host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "parse" => {
+            want_arity(func, args, 1)?;
+            crate::json::parse_dynamic(want_str(func, args, 0)?)
+        }
+        "stringify" => {
+            want_arity(func, args, 1)?;
+            Ok(NativeOut::Str(crate::json::stringify(&args[0])))
+        }
+        _ => Err(no_function_error("json", func)),
+    }
+}
+
 const STD_MODULES: &[ExtModule] = &[
     ExtModule {
         name: "math",
         functions: MATH_FNS,
         dispatch: math_dispatch,
+        deep_marshal: false,
     },
     ExtModule {
         name: "random",
         functions: RANDOM_FNS,
         dispatch: random_dispatch,
+        deep_marshal: false,
     },
     ExtModule {
         name: "time",
         functions: TIME_FNS,
         dispatch: time_dispatch,
+        deep_marshal: false,
     },
     ExtModule {
         name: "env",
         functions: ENV_FNS,
         dispatch: env_dispatch,
+        deep_marshal: false,
     },
     ExtModule {
         name: "args",
         functions: ARGS_FNS,
         dispatch: args_dispatch,
+        deep_marshal: false,
     },
     ExtModule {
         name: "fs",
         functions: FS_FNS,
         dispatch: fs_dispatch,
+        deep_marshal: false,
     },
     ExtModule {
         name: "vec",
         functions: VEC_FNS,
         dispatch: vec_dispatch,
+        deep_marshal: false,
     },
     ExtModule {
         name: "quat",
         functions: QUAT_FNS,
         dispatch: quat_dispatch,
+        deep_marshal: false,
+    },
+    ExtModule {
+        name: "json",
+        functions: JSON_FNS,
+        dispatch: json_dispatch,
+        // `json.stringify` introspects an arbitrary value, so its arguments are marshalled deeply.
+        deep_marshal: true,
     },
 ];
 
@@ -1206,6 +1265,11 @@ mod tests {
             Some(SameAsArg(0))
         ));
         assert!(find_function("vec", "add_all").is_none());
-        assert!(find_function("json", "parse").is_none()); // json migrates in Phase B
+        // `json` is registered (B4): dynamic `parse` + `stringify` dispatch through the registry.
+        assert!(matches!(
+            find_function("json", "parse").map(|f| f.ret),
+            Some(Concrete(SigType::Dyn))
+        ));
+        assert!(find_module("json").is_some_and(|m| m.deep_marshal));
     }
 }

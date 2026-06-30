@@ -807,22 +807,28 @@ impl<'m> Vm<'m> {
         // function's `RetTy`). Routing is per-function so a partially-migrated module (`vec`/`quat`,
         // whose bulk `*_all` kernels stay per-backend) falls through for its unmigrated functions.
         if let Some(sig) = lang_stdlib::registry::find_function(module, func) {
-            let nargs: Vec<lang_stdlib::NativeValue> =
-                args.iter().map(|a| marshal_native_arg(*a)).collect();
+            // A reflective module (`json`) marshals its arguments deeply (the recursive value tree
+            // `json.stringify` introspects); every other module uses the cheap shallow projection.
+            let deep = lang_stdlib::registry::find_module(module).is_some_and(|m| m.deep_marshal);
+            let nargs: Vec<lang_stdlib::NativeValue> = if deep {
+                args.iter().map(|a| a.to_native_deep()).collect()
+            } else {
+                args.iter().map(|a| marshal_native_arg(*a)).collect()
+            };
             return match lang_stdlib::registry::dispatch(module, func, &mut *self.host, &nargs) {
                 Ok(out) => Ok(materialize_ext(out, sig.ret, args)),
                 Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
             };
         }
         match lang_stdlib::NativeModule::from_name(module) {
-            Some(lang_stdlib::NativeModule::Json) => self.call_json(func, args, span),
             // `vec`: only the bulk `*_all` kernels are unmigrated and reach here; an unknown
             // function falls through to `call_vec`'s own "no such function" arm.
             Some(lang_stdlib::NativeModule::Vec) => self.call_vec(func, args, span),
-            // A fully-migrated module reaching here means an unknown function on it. `quat` is fully
-            // migrated (no bulk ops), so it joins this group.
+            // A fully-migrated module reaching here means an unknown function on it (`json` and
+            // `quat` are fully registered, so they join this group).
             Some(
-                lang_stdlib::NativeModule::Math
+                lang_stdlib::NativeModule::Json
+                | lang_stdlib::NativeModule::Math
                 | lang_stdlib::NativeModule::Random
                 | lang_stdlib::NativeModule::Time
                 | lang_stdlib::NativeModule::Env
@@ -1147,32 +1153,6 @@ impl<'m> Vm<'m> {
                         Err(self.error(stdlib_error_code(error.kind), span, error.message))
                     }
                 }
-            }
-        }
-    }
-
-    /// The `json` module: `parse(text) -> value` and `stringify(value) -> string`. Parsing goes
-    /// through the shared `lang-stdlib` parser; stringifying reuses the structural `to_json`.
-    fn call_json(&mut self, func: &str, args: &[Value], span: Span) -> Result<Value, Abort> {
-        match func {
-            "parse" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let text = self.stdlib_string(func, args[0], span)?;
-                match lang_stdlib::json::parse(&text) {
-                    Ok(json) => Ok(json_to_value(json)),
-                    Err(detail) => {
-                        let error = lang_stdlib::invalid_json_error(&detail);
-                        Err(self.error(stdlib_error_code(error.kind), span, error.message))
-                    }
-                }
-            }
-            "stringify" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                Ok(Value::string(&args[0].to_json()))
-            }
-            _ => {
-                let error = lang_stdlib::no_function_error("json", func);
-                Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
     }
@@ -4476,15 +4456,23 @@ fn materialize_native(out: lang_stdlib::NativeOut) -> Value {
         NativeOut::Bytes(b) => Value::bytes(b),
         NativeOut::Unit => Value::unit(),
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
+        // A dynamic `json.parse` object → a string-keyed map (entries arrive in key order). Each
+        // value is freshly built (refcount 1), so the map owns its children without extra retains.
+        NativeOut::Map(entries) => Value::map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (k, materialize_native(v)))
+                .collect(),
+        ),
         NativeOut::FileHandle(handle) => Value::file_handle(handle),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
         // function's `RetTy` + arguments) and never reach here.
         NativeOut::Object(_) => {
             unreachable!("object results are materialized by `materialize_ext`")
         }
-        // Recipe results (`json.parse::<T>`) name their own types, so they are built by the
-        // typed-call path (which has the VM's shape table), not this free function.
-        NativeOut::Struct { .. } | NativeOut::Map(_) | NativeOut::None | NativeOut::Some(_) => {
+        // The typed `json.parse::<T>` results that name their own types are built by the typed-call
+        // path (`materialize_recipe`, which has the VM's shape table), not here.
+        NativeOut::Struct { .. } | NativeOut::None | NativeOut::Some(_) => {
             unreachable!("recipe results are materialized by the typed-call path")
         }
     }
@@ -4792,27 +4780,6 @@ fn materialize_recipe(out: lang_stdlib::NativeOut) -> Value {
         NativeOut::Object(_) | NativeOut::FileHandle(_) => {
             unreachable!("json.parse recipe decode never yields an Object/FileHandle result")
         }
-    }
-}
-
-/// Convert a parsed JSON tree into a VM value: arrays become lists, objects become sorted-key
-/// maps, `null` becomes unit. Each value is freshly built (refcount 1), so the containers own
-/// their children without extra retains. Mirrors the tree-walker's `json_to_value`.
-fn json_to_value(json: lang_stdlib::json::Json) -> Value {
-    use lang_stdlib::json::Json;
-    match json {
-        Json::Null => Value::unit(),
-        Json::Bool(b) => Value::bool(b),
-        Json::Int(i) => Value::int(i),
-        Json::Float(f) => Value::float(f),
-        Json::Str(s) => Value::string(&s),
-        Json::Array(items) => Value::list(items.into_iter().map(json_to_value).collect()),
-        Json::Object(entries) => Value::map(
-            entries
-                .into_iter()
-                .map(|(k, v)| (k, json_to_value(v)))
-                .collect(),
-        ),
     }
 }
 
