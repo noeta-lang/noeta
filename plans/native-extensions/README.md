@@ -144,20 +144,43 @@ the option-B decision below.)
 (deferred with vec/quat's eventual eviction to a package). The `NativeModule` enum survives only to
 route those; it dies in Phase B.
 
-## Phase B — turbofish + call-site-typed construction (lands `json.parse::<T>`)
+## Phase B — turbofish + call-site-typed construction (lands `json.parse::<T>`) — ✅ DONE (B1+B2)
 
-- **B1** — **recursive type-recipe channel**: checker records `span -> TypeRecipe` (struct =
-  name+`[(field, recipe)]`, list/option/map/primitive/dyn — `type_of` full-fidelity generalized into a
-  build recipe). Recursive `NativeValue`/`NativeOut` (objects hold `Vec`, not just scalars) + recursive
-  **materialization** in both backends (eval constructs by name; VM interns each struct shape in the
-  recipe, like from_bytes).
-- **B2** — grammar: postfix `. id ::< T > ( args )` → `Expr::TypedModuleCall` (mirrors the `.as<T>()`
-  postfix). Checker: receiver is a module + fn `RetTy == TypeArg` → result `T`; record recipe at span.
-  Lowering → `Rvalue::ExtCall { module, func, args, recipe }` → `Op::ExtCall`.
-- **B3** — first consumer `json.parse::<T>(s)`: native parse → walk JSON value × recipe → `NativeOut`
-  tree → typed `T`. **Flat structs first** (primitive/string/bool fields), then nesting/lists/option —
-  each green. Decide the failure story (runtime error vs `Result<T, string>`) here. Conformance fixtures
-  + differential.
+The headline feature — `json.parse::<T>(text)` — works end to end on both backends. (Re-sliced during
+implementation: the plan's B1/B2/B3 collapsed into two green commits, B1 = the stdlib half, B2 = the
+whole language wiring incl. nesting — the recursive materialization was uniform enough to land in one
+go rather than flat-then-nested.)
+
+- **B1** ✅ (`30c7250`) — **the recipe + shared decode, in lang-stdlib**: a neutral `TypeRecipe`
+  (scalar / option / list / string-keyed map / declared-order struct) and a recursive
+  `json::parse_typed(text, &TypeRecipe)` that walks a parsed JSON tree against the recipe into a
+  `NativeOut` tree. `TypeRecipe` lives in **lang-stdlib** (a leaf) — *not* `lang_ast::reflect` where
+  `TypeRepr`/`PackedLayout` live — because the walk lives here and lang-stdlib can't see the type
+  system; the bytecode op carries a `lang_stdlib::TypeRecipe`, no cycle. `NativeOut` gained recursive
+  recipe-result variants (`Struct`/`Map`/`None`/`Some`). Numeric widening matches the lattice
+  (`int <: f32 <: float`); a missing optional field → `None`, a missing required field → error. Unit-
+  tested via the decoder tests.
+- **B2** ✅ (`db7a72b`) — **the language wiring + both executors**. Grammar: `module.func::<T>(args)`
+  is an **atom** `Expr::TypedModuleCall` (`ident . ident ::< T > ( args )`) — the receiver is always a
+  bare module name, so it's an atom rather than a postfix, keeping it off the arity-bounded pratt op
+  table. Checker types it (result `T`), validates the call, resolves `T` into a `TypeRecipe` recorded
+  in the new **`ext_call_sites`** channel (parallel to `type_of_sites`); only value structs / scalars /
+  lists / options / string-keyed maps decode, else compile-time E0007. One shared lowering bakes the
+  recipe into `Rvalue::ExtCall` (read from `ext_call_sites`, exactly like `FromBytes` reads
+  packed-list sites); the VM compiler transcribes it to `Op::ExtCall`. Both backends marshal the args,
+  run the shared `parse_typed`, and **materialize recursively** — the tree-walker through its real
+  registered type (methods/defaults like a literal), the VM through a fresh same-name shape (method
+  dispatch is name-keyed), so they agree by construction. Failure = runtime E0007 at the call site
+  (decided here; a `Result<T,string>` variant could be added later). Fixtures cover flat / nested /
+  lists / options / methods; differential-covered.
+
+**Not done — the registry generalization (call it B4, deferred):** `json` is deliberately still on the
+legacy `NativeModule` enum path (dynamic `json.parse(s)`/`stringify` unchanged); `Op::ExtCall` routes
+`json.parse` by a name match, not through `registry::dispatch_typed`. Finishing the dogfood —
+registering `json` as an `ExtModule` with a `RetTy::TypeArg` `parse` (+ a typed-dispatch fn-pointer),
+migrating `stringify` (needs the recursive **arg-side** `NativeValue` marshalling, which the typed
+parse did not), and removing the `NativeModule` enum — is the remaining cleanup. The arg-side recursion
+is the one genuinely new piece left.
 
 ## Deferred (separate milestones)
 
