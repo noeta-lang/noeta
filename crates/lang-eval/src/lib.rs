@@ -2567,7 +2567,7 @@ impl Interpreter {
         match method {
             M::Next => {
                 self.expect_std_arity(name, args, 0, span)?;
-                Ok(match iter_advance(state) {
+                Ok(match self.iter_advance(state, span)? {
                     Some(v) => builtin_enum("Option", "some", vec![v]),
                     None => builtin_enum("Option", "none", Vec::new()),
                 })
@@ -2575,7 +2575,7 @@ impl Interpreter {
             M::Collect => {
                 self.expect_std_arity(name, args, 0, span)?;
                 let mut out = Vec::new();
-                while let Some(v) = iter_advance(state) {
+                while let Some(v) = self.iter_advance(state, span)? {
                     out.push(v);
                 }
                 Ok(Value::list(out))
@@ -2583,7 +2583,7 @@ impl Interpreter {
             M::Count => {
                 self.expect_std_arity(name, args, 0, span)?;
                 let mut n = 0i64;
-                while iter_advance(state).is_some() {
+                while self.iter_advance(state, span)?.is_some() {
                     n += 1;
                 }
                 Ok(Value::Int(n))
@@ -2624,12 +2624,26 @@ impl Interpreter {
                     b: args[0].clone(),
                 }))
             }
+            M::Map => {
+                self.expect_std_arity(name, args, 1, span)?;
+                Ok(wrap(IterState::Map {
+                    source: source(),
+                    func: args[0].clone(),
+                }))
+            }
+            M::Filter => {
+                self.expect_std_arity(name, args, 1, span)?;
+                Ok(wrap(IterState::Filter {
+                    source: source(),
+                    pred: args[0].clone(),
+                }))
+            }
             M::Sum => {
                 self.expect_std_arity(name, args, 0, span)?;
                 let mut int_total: i64 = 0;
                 let mut float_total: f64 = 0.0;
                 let mut any_float = false;
-                while let Some(e) = iter_advance(state) {
+                while let Some(e) = self.iter_advance(state, span)? {
                     match e {
                         Value::Int(i) => int_total = int_total.wrapping_add(i),
                         Value::Float(f) => {
@@ -3387,68 +3401,168 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
     }))
 }
 
-/// Advance an iterator value one step, or `None` at end. An adapter pulls from its source(s) by
-/// advancing them recursively — each is a distinct `RefCell` from `state`, so the borrows never
-/// overlap (an iterator can never be its own source).
-fn iter_value_next(it: &Value) -> Option<Value> {
-    match it {
-        Value::Iter(state) => iter_advance(state),
-        _ => None,
-    }
+/// One snapshot of an [`IterState`]'s shape (its child values cloned, its counters copied). Read
+/// under a *short* `RefCell` borrow so the driver can recurse into a source — or run a `map`/`filter`
+/// closure — with **no** borrow held, mirroring the VM's [`lang_value::Value::iter_next_apply`]: a
+/// user closure that re-enters the same iterator must not find it already borrowed (which would panic).
+enum IterShape {
+    List,
+    Take { source: Value, remaining: usize },
+    Drop { source: Value, pending: usize },
+    Chain { first: Value, second: Value },
+    Enumerate { source: Value, index: usize },
+    Zip { a: Value, b: Value },
+    Map { source: Value, func: Value },
+    Filter { source: Value, pred: Value },
 }
 
-/// Read an iterator's next element and advance (Track I). Shared by `next` (one step), `collect`
-/// (drain), and `count`. The base cursors a `Value::List` (`ListRepr::get` materializes a packed
-/// element on demand); adapters delegate to their source(s).
-fn iter_advance(state: &Rc<RefCell<IterState>>) -> Option<Value> {
-    let mut st = state.borrow_mut();
-    match &mut *st {
-        IterState::List { list, cursor } => {
-            let elem = match list {
-                Value::List(repr) => repr.get(*cursor),
-                _ => None,
+impl Interpreter {
+    /// Advance an iterator value one step, or `None` at end (Track I). `map`/`filter` adapters run a
+    /// user closure, so stepping is fallible.
+    fn iter_value_next(&mut self, it: &Value, span: Span) -> Eval<Option<Value>> {
+        match it {
+            Value::Iter(state) => self.iter_advance(state, span),
+            _ => Ok(None),
+        }
+    }
+
+    /// Read an iterator's next element and advance (Track I). Shared by `next` (one step), `collect`
+    /// (drain), `count`, and `sum`. The base cursors a `Value::List` (`ListRepr::get` materializes a
+    /// packed element on demand); adapters delegate to their source(s). The shape is snapshotted under
+    /// a short borrow ([`IterShape`]) so no borrow is held across a recursive pull or a closure call.
+    fn iter_advance(&mut self, state: &Rc<RefCell<IterState>>, span: Span) -> Eval<Option<Value>> {
+        loop {
+            let shape = match &*state.borrow() {
+                IterState::List { .. } => IterShape::List,
+                IterState::Take { source, remaining } => IterShape::Take {
+                    source: source.clone(),
+                    remaining: *remaining,
+                },
+                IterState::Drop { source, pending } => IterShape::Drop {
+                    source: source.clone(),
+                    pending: *pending,
+                },
+                IterState::Chain { first, second } => IterShape::Chain {
+                    first: first.clone(),
+                    second: second.clone(),
+                },
+                IterState::Enumerate { source, index } => IterShape::Enumerate {
+                    source: source.clone(),
+                    index: *index,
+                },
+                IterState::Zip { a, b } => IterShape::Zip {
+                    a: a.clone(),
+                    b: b.clone(),
+                },
+                IterState::Map { source, func } => IterShape::Map {
+                    source: source.clone(),
+                    func: func.clone(),
+                },
+                IterState::Filter { source, pred } => IterShape::Filter {
+                    source: source.clone(),
+                    pred: pred.clone(),
+                },
             };
-            if elem.is_some() {
-                *cursor += 1;
-            }
-            elem
-        }
-        IterState::Take { source, remaining } => {
-            if *remaining == 0 {
-                return None;
-            }
-            let elem = iter_value_next(source);
-            if elem.is_some() {
-                *remaining -= 1;
-            }
-            elem
-        }
-        IterState::Drop { source, pending } => {
-            while *pending > 0 {
-                match iter_value_next(source) {
-                    Some(_) => *pending -= 1, // the skipped element is dropped (Rc auto-frees)
-                    None => {
-                        *pending = 0;
-                        return None;
+            match shape {
+                // No recursion, no user code: read and advance the cursor under one short borrow.
+                IterShape::List => {
+                    let mut st = state.borrow_mut();
+                    let IterState::List { list, cursor } = &mut *st else {
+                        unreachable!("shape matched List")
+                    };
+                    let elem = match list {
+                        Value::List(repr) => repr.get(*cursor),
+                        _ => None,
+                    };
+                    if elem.is_some() {
+                        *cursor += 1;
                     }
+                    return Ok(elem);
                 }
+                IterShape::Take { source, remaining } => {
+                    if remaining == 0 {
+                        return Ok(None);
+                    }
+                    let elem = self.iter_value_next(&source, span)?;
+                    if elem.is_some()
+                        && let IterState::Take { remaining, .. } = &mut *state.borrow_mut()
+                    {
+                        *remaining -= 1;
+                    }
+                    return Ok(elem);
+                }
+                IterShape::Drop { source, pending } => {
+                    if pending > 0 {
+                        match self.iter_value_next(&source, span)? {
+                            Some(_) => {
+                                // The skipped element is dropped (Rc auto-frees).
+                                if let IterState::Drop { pending, .. } = &mut *state.borrow_mut() {
+                                    *pending -= 1;
+                                }
+                                continue;
+                            }
+                            None => {
+                                if let IterState::Drop { pending, .. } = &mut *state.borrow_mut() {
+                                    *pending = 0;
+                                }
+                                return Ok(None);
+                            }
+                        }
+                    }
+                    return self.iter_value_next(&source, span);
+                }
+                IterShape::Chain { first, second } => {
+                    if let Some(e) = self.iter_value_next(&first, span)? {
+                        return Ok(Some(e));
+                    }
+                    return self.iter_value_next(&second, span);
+                }
+                IterShape::Enumerate { source, index } => {
+                    let Some(elem) = self.iter_value_next(&source, span)? else {
+                        return Ok(None);
+                    };
+                    let tuple = Value::Tuple(Rc::new(vec![Value::Int(index as i64), elem]));
+                    if let IterState::Enumerate { index, .. } = &mut *state.borrow_mut() {
+                        *index += 1;
+                    }
+                    return Ok(Some(tuple));
+                }
+                IterShape::Zip { a, b } => {
+                    // Pull from both; the shorter source ends the zip (a leftover element is dropped).
+                    let Some(ea) = self.iter_value_next(&a, span)? else {
+                        return Ok(None);
+                    };
+                    let Some(eb) = self.iter_value_next(&b, span)? else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(Value::Tuple(Rc::new(vec![ea, eb]))));
+                }
+                IterShape::Map { source, func } => {
+                    let Some(elem) = self.iter_value_next(&source, span)? else {
+                        return Ok(None);
+                    };
+                    return Ok(Some(self.call(func, vec![elem], span)?));
+                }
+                IterShape::Filter { source, pred } => loop {
+                    let Some(elem) = self.iter_value_next(&source, span)? else {
+                        return Ok(None);
+                    };
+                    match self.call(pred.clone(), vec![elem.clone()], span)? {
+                        Value::Bool(true) => return Ok(Some(elem)),
+                        Value::Bool(false) => {} // try the next source element
+                        other => {
+                            return Err(self.runtime_error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!(
+                                    "`filter` predicate must return a bool, found {}",
+                                    other.type_name()
+                                ),
+                            ));
+                        }
+                    }
+                },
             }
-            iter_value_next(source)
-        }
-        IterState::Chain { first, second } => {
-            iter_value_next(first).or_else(|| iter_value_next(second))
-        }
-        IterState::Enumerate { source, index } => {
-            let elem = iter_value_next(source)?;
-            let tuple = Value::Tuple(Rc::new(vec![Value::Int(*index as i64), elem]));
-            *index += 1;
-            Some(tuple)
-        }
-        IterState::Zip { a, b } => {
-            // Pull from both; the shorter source ends the zip (a leftover `a` element is dropped).
-            let ea = iter_value_next(a)?;
-            let eb = iter_value_next(b)?;
-            Some(Value::Tuple(Rc::new(vec![ea, eb])))
         }
     }
 }

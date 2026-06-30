@@ -73,10 +73,35 @@ VM needs validating. So:
     are in scope — `method_return` sees only the receiver. Conformance `iterators/tuple_adapters_and_sum.lang`;
     337 conformance / differential 328/0-skipped/agree, leaks 0 both, miri clean (a tuple-adapter +
     zip-leftover-release + sum-error-release lang-value unit test).
-- **The fused-pipeline allocation bench** moves to **I.1c** (map/filter), where the eager
-  `xs.map(f).filter(g)` baseline gives an apples-to-apples O(1)-vs-O(stages·n) comparison.
-- **I.1c — closure adapters.** `map(f)`/`filter(f)` as `Iter`s that call the closure from `next()`;
-  validate the closure-from-`next` path in the VM. Fused-pipeline alloc bench vs eager `map().filter()`.
+- **I.1c — closure adapters. ✅ DONE** (2026-06-30): `map(f)`/`filter(f)` as lazy `Iter`s that call a
+  user closure from inside `next()` — the slice that validated the closure-from-`next` path. **The pull
+  driver was restructured to thread an applier and hold no heap borrow across a source pull or a
+  closure call.** lang-value's `iter_next` became `iter_next_apply<E>(self, apply: &mut dyn FnMut(Value,
+  Value) -> Result<Value, E>) -> Result<Option<Value>, IterAbort<E>>`: each node reads its [`IterShape`]
+  (child values + counters copied out) under a *short* borrow, then recurses / runs the closure with
+  **no** borrow held, then writes any cursor change under another short borrow — so a user closure that
+  re-enters the same iterator cannot alias a live `&mut` (UB) — and writes back the counter after. New
+  `IterAbort<E>` enum (`Closure(E)` carries the backend's call error; `FilterNotBool(name)` a non-bool
+  predicate verdict) the backend maps to its native error (`Abort` / `Unwind`). The VM applier is
+  `|f,a| self.call_value(f, vec![a], span)` (reentrant call, the proven eager-`map` mechanism); the
+  tree-walker mirror made `iter_advance`/`iter_value_next` `&mut self` methods that snapshot the same
+  `IterShape` and call `self.call(...)`. Refcounts: `map` lets `apply` consume the source element and
+  returns the result; `filter` retains the element once for the predicate call and hands it back or
+  releases it (and on a closure error / non-bool verdict releases the held reference). Adapters own a
+  reference to the closure (a GC child). Checker: `filter`→`Iterator<T>`, `map`→`Iterator<R>` (R = the
+  closure's return, resolved at the call site like `zip`); params are typed (`map`: `Fn(T)->dyn`,
+  `filter`: `Fn(T)->bool`, so a wrongly-typed *typed* closure is a static E0007; an untyped-param
+  closure defers to the runtime check). Conformance `iterators/closure_adapters.lang` +
+  `filter_predicate_not_bool.lang`; 339 conformance / differential 330/0-skipped/agree, leaks 0 both,
+  miri clean (a map / filter / non-bool-error lang-value unit test with heap elements + a heap closure
+  stand-in).
+  - **Bench (`vm_iter_pipeline` / `vm_iter_take_pipeline`, honest):** full-drain `map→filter→sum` is
+    ~14% *slower* lazy than the eager two-pass at n=1k (149µs vs 131µs) — the per-element iterator
+    dispatch (shape read + recursion + per-step `call_value`) outweighs the saved allocations when
+    everything is consumed (we have no monomorphization/inlining like Rust). **Laziness wins on memory**
+    (O(1) extra vs O(stages·n) intermediate lists) **and on early termination**: with `take(10)` after
+    `map→filter`, lazy is **~27× faster** at n=1k (4.8µs vs 131µs) and the gap widens with n (lazy is
+    ~constant in n, eager O(n)).
 - **I.2 — `for` over the protocol (optimization/unification, optional).** Rewrite the `for` lowering
   to drive `iter()`/`next()` instead of `iter_elements`' eager `Vec` materialization, so `for` over a
   lazy source streams. Keep a fast cursor for built-in collections. Tuple-destructuring `for (a,b)`

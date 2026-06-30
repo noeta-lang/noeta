@@ -1,0 +1,20 @@
+// Track I.1c — the closure adapters `map(f)` / `filter(f)`, which call a user closure from inside the
+// iterator's `next()`. They are lazy and fuse with every other adapter: a whole `map → filter → take`
+// pipeline streams one element at a time with no intermediate list. `map` over an empty/exhausted
+// source yields nothing; `filter`'s predicate must return a bool.
+// expect: stdout "[10, 20, 30]"
+// expect: stdout "[2, 4]"
+// expect: stdout "[20, 40]"
+// expect: stdout "[16, 25]"
+// expect: stdout "15"
+// expect: stdout "[]"
+// expect: stdout "[(0, 2), (1, 4)]"
+// expect: exit 0
+xs = [1, 2, 3, 4, 5];
+echo xs.iter().map(fn(n) => n * 10).take(3).collect();
+echo xs.iter().filter(fn(n) => n % 2 == 0).collect();
+echo xs.iter().filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).collect();
+echo xs.iter().map(fn(n) => n * n).filter(fn(n) => n > 10).collect();
+echo xs.iter().map(fn(n) => n + 1).filter(fn(n) => n > 3).sum();
+echo xs.iter().drop(10).map(fn(n) => n * 2).collect();
+echo xs.iter().filter(fn(n) => n % 2 == 0).enumerate().collect();

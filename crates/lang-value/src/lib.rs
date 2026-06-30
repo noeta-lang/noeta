@@ -36,7 +36,20 @@ use lang_bytecode::Builtin;
 use lang_object::{PackedKind, PackedSchema, Shape};
 use lang_stdlib::FileHandle;
 
-use heap::{IterState, Payload};
+use heap::{IterShape, IterState, Payload};
+
+/// Why an iterator pull ([`Value::iter_next_apply`]) aborted (Track I.1c). The closure adapters
+/// (`map`/`filter`) run user code, which the simple closure-free pull could not, so stepping is now
+/// fallible. `Closure` carries the backend's own call error (generic `E`) verbatim; `FilterNotBool`
+/// reports a `filter` predicate that returned a non-bool (its type name) for the backend to phrase as
+/// a diagnostic. The backend maps both back into its native error.
+#[derive(Debug)]
+pub enum IterAbort<E> {
+    /// A `map`/`filter` closure call failed; the backend's error is carried through unchanged.
+    Closure(E),
+    /// A `filter` predicate returned a value of this type instead of a `bool`.
+    FilterNotBool(&'static str),
+}
 
 /// A NaN-boxed runtime value (one 64-bit word). `Copy`: it is just an integer; ownership of
 /// any heap object it points at is tracked by refcount, not by Rust's move semantics.
@@ -577,6 +590,22 @@ impl Value {
         heap::alloc(Payload::Iter(IterState::Zip { a, b }))
     }
 
+    /// A `map(f)` adapter: yields `func(element)` for each element of `source` (Track I.1c). Owns one
+    /// reference to `source` and one to the closure `func`.
+    pub fn iter_map(source: Value, func: Value) -> Value {
+        source.inc_ref();
+        func.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Map { source, func }))
+    }
+
+    /// A `filter(f)` adapter: yields the elements of `source` for which `pred(element)` is true
+    /// (Track I.1c). Owns one reference to `source` and one to the closure `pred`.
+    pub fn iter_filter(source: Value, pred: Value) -> Value {
+        source.inc_ref();
+        pred.inc_ref();
+        heap::alloc(Payload::Iter(IterState::Filter { source, pred }))
+    }
+
     /// Whether this is an iterator.
     pub fn is_iter(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter(_)))
@@ -585,77 +614,178 @@ impl Value {
     /// Advance the iterator, returning the next element — a freshly-retained owning reference the
     /// caller takes ownership of — or `None` at end. The caller must have checked [`Value::is_iter`].
     ///
-    /// An adapter pulls from its source(s) by calling `iter_next` on them recursively. Each source is
-    /// a **distinct** heap object from `self` (an iterator can never be its own source — construction
-    /// always wraps an existing one), so the recursive `with_payload_mut` accesses a different
-    /// allocation than the one held here (no aliasing; miri-verified).
-    pub fn iter_next(self) -> Option<Value> {
-        heap::with_payload_mut(self, |p| {
-            let Payload::Iter(state) = p else {
-                return None;
+    /// `apply(func, arg)` runs a `map`/`filter` closure on an element (consuming `arg`'s reference,
+    /// returning an owned result), letting the closure adapters call back into the backend's call
+    /// machinery (Track I.1c); a closure-free pipeline never reaches it. The generic `E` is the
+    /// backend's own call-error type, surfaced through [`IterAbort::Closure`].
+    ///
+    /// **Borrow discipline (soundness):** an adapter reads its [`IterShape`] under a *short* borrow,
+    /// then recurses into its source / runs the closure with **no** borrow held on this node, and
+    /// finally writes any cursor change under another short borrow. So even if the user closure
+    /// re-enters this same iterator, no live `&mut` to the node is aliased (miri-verified). Each
+    /// source is also a distinct allocation (an iterator can never be its own source).
+    pub fn iter_next_apply<E>(
+        self,
+        apply: &mut dyn FnMut(Value, Value) -> Result<Value, E>,
+    ) -> Result<Option<Value>, IterAbort<E>> {
+        loop {
+            let shape = heap::with_payload(self, |p| match p {
+                Payload::Iter(state) => Some(state.shape()),
+                _ => None,
+            });
+            let Some(shape) = shape else {
+                return Ok(None);
             };
-            match state {
-                IterState::List { list, cursor } => {
-                    let e = list.list_get(*cursor)?;
-                    *cursor += 1;
-                    // `list_get` shares the list's reference; retain it for the new owner.
-                    e.inc_ref();
-                    Some(e)
+            match shape {
+                // No recursion and no user code: the cursor is read and advanced under one short
+                // borrow. `list_get` shares the list's reference; retain it for the new owner.
+                IterShape::List => {
+                    return Ok(heap::with_payload_mut(self, |p| {
+                        let Payload::Iter(IterState::List { list, cursor }) = p else {
+                            return None;
+                        };
+                        let e = list.list_get(*cursor)?;
+                        *cursor += 1;
+                        e.inc_ref();
+                        Some(e)
+                    }));
                 }
-                // The source's `iter_next` already retains the element it returns, so it is handed
-                // straight back.
-                IterState::Take { source, remaining } => {
-                    if *remaining == 0 {
-                        return None;
+                IterShape::Take { source, remaining } => {
+                    if remaining == 0 {
+                        return Ok(None);
                     }
-                    let e = source.iter_next()?;
-                    *remaining -= 1;
-                    Some(e)
+                    return Ok(match source.iter_next_apply(apply)? {
+                        Some(e) => {
+                            heap::with_payload_mut(self, |p| {
+                                if let Payload::Iter(IterState::Take { remaining, .. }) = p {
+                                    *remaining -= 1;
+                                }
+                            });
+                            Some(e)
+                        }
+                        None => None,
+                    });
                 }
-                IterState::Drop { source, pending } => {
-                    while *pending > 0 {
-                        match source.iter_next() {
+                IterShape::Drop { source, pending } => {
+                    if pending > 0 {
+                        match source.iter_next_apply(apply)? {
                             Some(skipped) => {
-                                skipped.release(); // drop the skipped element's retained reference
-                                *pending -= 1;
+                                skipped.release(); // the skipped element's retained reference
+                                heap::with_payload_mut(self, |p| {
+                                    if let Payload::Iter(IterState::Drop { pending, .. }) = p {
+                                        *pending -= 1;
+                                    }
+                                });
+                                continue; // skip the next pending element
                             }
                             None => {
-                                *pending = 0;
-                                return None;
+                                heap::with_payload_mut(self, |p| {
+                                    if let Payload::Iter(IterState::Drop { pending, .. }) = p {
+                                        *pending = 0;
+                                    }
+                                });
+                                return Ok(None);
                             }
                         }
                     }
-                    source.iter_next()
+                    return source.iter_next_apply(apply);
                 }
-                IterState::Chain { first, second } => {
-                    first.iter_next().or_else(|| second.iter_next())
+                IterShape::Chain { first, second } => {
+                    if let Some(e) = first.iter_next_apply(apply)? {
+                        return Ok(Some(e));
+                    }
+                    return second.iter_next_apply(apply);
                 }
-                // The source's element (already retained by its `iter_next`) and the immediate index
-                // are handed to the new tuple, which takes ownership of one reference to each.
-                IterState::Enumerate { source, index } => {
-                    let e = source.iter_next()?;
-                    let tuple = Value::tuple(vec![Value::int(*index as i64), e]);
-                    *index += 1;
-                    Some(tuple)
+                // The source's element (already retained) and the immediate index are handed to the
+                // new tuple, which takes ownership of one reference to each.
+                IterShape::Enumerate { source, index } => {
+                    return Ok(match source.iter_next_apply(apply)? {
+                        Some(e) => {
+                            let tuple = Value::tuple(vec![Value::int(index as i64), e]);
+                            heap::with_payload_mut(self, |p| {
+                                if let Payload::Iter(IterState::Enumerate { index, .. }) = p {
+                                    *index += 1;
+                                }
+                            });
+                            Some(tuple)
+                        }
+                        None => None,
+                    });
                 }
                 // Pull from both, shorter wins. If `a` ran dry there is nothing to release; if only
                 // `b` did, release `a`'s already-retained element so it does not leak.
-                IterState::Zip { a, b } => {
-                    let ea = a.iter_next()?;
-                    match b.iter_next() {
+                IterShape::Zip { a, b } => {
+                    let Some(ea) = a.iter_next_apply(apply)? else {
+                        return Ok(None);
+                    };
+                    return Ok(match b.iter_next_apply(apply)? {
                         Some(eb) => Some(Value::tuple(vec![ea, eb])),
                         None => {
                             ea.release();
                             None
                         }
+                    });
+                }
+                // `apply` consumes the source element's reference and returns the mapped result (owned).
+                // On a closure error the call already consumed that reference, so nothing leaks here.
+                IterShape::Map { source, func } => {
+                    let Some(e) = source.iter_next_apply(apply)? else {
+                        return Ok(None);
+                    };
+                    return apply(func, e).map(Some).map_err(IterAbort::Closure);
+                }
+                // Retain the element once for the predicate call (which consumes a reference) and keep
+                // one to hand back if it passes. On a closure error release the held reference; a
+                // non-bool verdict is a typed abort the backend phrases as a diagnostic.
+                IterShape::Filter { source, pred } => {
+                    let Some(e) = source.iter_next_apply(apply)? else {
+                        return Ok(None);
+                    };
+                    e.inc_ref();
+                    let verdict = match apply(pred, e) {
+                        Ok(v) => v,
+                        Err(err) => {
+                            e.release();
+                            return Err(IterAbort::Closure(err));
+                        }
+                    };
+                    match verdict.as_bool() {
+                        Some(true) => {
+                            verdict.release();
+                            return Ok(Some(e));
+                        }
+                        Some(false) => {
+                            verdict.release();
+                            e.release();
+                            continue; // try the next source element
+                        }
+                        None => {
+                            let name = verdict.type_name();
+                            verdict.release();
+                            e.release();
+                            return Err(IterAbort::FilterNotBool(name));
+                        }
                     }
                 }
             }
-        })
+        }
     }
 
-    /// Drain the iterator from its current cursor into a new list — each element retained into it
-    /// (via [`Value::iter_next`]). The caller must have checked [`Value::is_iter`].
+    /// Advance a **closure-free** iterator (no `map`/`filter` in the pipeline). The caller must have
+    /// checked [`Value::is_iter`]; reaching a closure adapter without an applier panics. Used by the
+    /// closure-free terminals below and the unit tests.
+    pub fn iter_next(self) -> Option<Value> {
+        let mut applier = |_: Value, _: Value| -> Result<Value, ()> {
+            unreachable!("closure-free iterator reached a map/filter adapter without an applier")
+        };
+        match self.iter_next_apply(&mut applier) {
+            Ok(v) => v,
+            Err(_) => unreachable!("closure-free pipeline cannot abort"),
+        }
+    }
+
+    /// Drain a closure-free iterator from its current cursor into a new list — each element retained
+    /// into it. The caller must have checked [`Value::is_iter`].
     pub fn iter_collect(self) -> Value {
         let mut out = Vec::new();
         while let Some(e) = self.iter_next() {
@@ -664,10 +794,10 @@ impl Value {
         Value::list(out)
     }
 
-    /// Drain the iterator, summing its numeric elements (Track I.1b.2) — `int` if every element is an
-    /// `int`, else `float`. Mirrors the eager `sum` builtin's accumulation exactly so the two paths
-    /// agree. Each drained element's retained reference is released; on the first non-numeric element
-    /// it (and the partial state) is dropped and its type name returned as `Err` for the caller's
+    /// Drain a closure-free iterator, summing its numeric elements (Track I.1b.2) — `int` if every
+    /// element is an `int`, else `float`. Mirrors the eager `sum` builtin's accumulation exactly so
+    /// the two paths agree. Each drained element's retained reference is released; on the first
+    /// non-numeric element it is dropped and its type name returned as `Err` for the caller's
     /// diagnostic. The caller must have checked [`Value::is_iter`].
     pub fn iter_sum(self) -> Result<Value, &'static str> {
         let mut int_total: i64 = 0;
@@ -2493,6 +2623,85 @@ mod tests {
         lerr.release();
         assert_eq!(ierr.iter_sum().unwrap_err(), "string");
         ierr.release();
+        assert_eq!(live_count(), before);
+    }
+
+    #[test]
+    fn iterator_closure_adapters_free_without_leaking() {
+        // Track I.1c: `map`/`filter` call back into a supplied applier (the real backend runs a user
+        // closure; here a Rust closure stands in). Exercises the source-element-consumed-by-apply path,
+        // the adapter owning a heap "closure" value, filter's keep/drop refcounting, and the non-bool
+        // error path — all of which must return the live count to baseline.
+        let before = live_count();
+
+        // `map`: each int element → a fresh heap string. `func` is a heap stand-in the adapter retains.
+        let lm = Value::list(vec![Value::int(1), Value::int(2), Value::int(3)]);
+        let im = Value::iter(lm);
+        lm.release();
+        let func = Value::string("f");
+        let mapped = Value::iter_map(im, func);
+        im.release();
+        func.release(); // the adapter is now the sole owner of `im` and `func`
+        let mut to_str = |_f: Value, arg: Value| -> Result<Value, ()> {
+            let n = arg.as_int().expect("int element");
+            arg.release(); // the call consumes the argument's reference
+            Ok(Value::string(&n.to_string()))
+        };
+        let mut out = Vec::new();
+        while let Some(e) = mapped.iter_next_apply(&mut to_str).expect("no abort") {
+            out.push(e);
+        }
+        assert_eq!(out.len(), 3);
+        for e in out {
+            e.release();
+        }
+        mapped.release(); // frees mapped → im → lm and the func string
+        assert_eq!(live_count(), before);
+
+        // `filter`: keep the even elements — exercises the inc_ref + keep-or-release element paths.
+        let lf = Value::list(vec![
+            Value::int(1),
+            Value::int(2),
+            Value::int(3),
+            Value::int(4),
+        ]);
+        let iff = Value::iter(lf);
+        lf.release();
+        let pred = Value::string("p");
+        let filtered = Value::iter_filter(iff, pred);
+        iff.release();
+        pred.release();
+        let mut even = |_f: Value, arg: Value| -> Result<Value, ()> {
+            let keep = arg.as_int().is_some_and(|n| n % 2 == 0);
+            arg.release(); // the predicate consumes the argument
+            Ok(Value::bool(keep))
+        };
+        let mut kept = Vec::new();
+        while let Some(e) = filtered.iter_next_apply(&mut even).expect("no abort") {
+            kept.push(e);
+        }
+        assert_eq!(kept.len(), 2);
+        for e in kept {
+            e.release();
+        }
+        filtered.release();
+        assert_eq!(live_count(), before);
+
+        // `filter`'s non-bool error path: the held element is released as the abort is raised.
+        let le = Value::list(vec![Value::int(5)]);
+        let ie = Value::iter(le);
+        le.release();
+        let filtered2 = Value::iter_filter(ie, Value::int(0));
+        ie.release();
+        let mut bad = |_f: Value, arg: Value| -> Result<Value, ()> {
+            arg.release();
+            Ok(Value::int(99)) // a non-bool verdict
+        };
+        match filtered2.iter_next_apply(&mut bad) {
+            Err(IterAbort::FilterNotBool(name)) => assert_eq!(name, "int"),
+            _ => panic!("expected a FilterNotBool abort"),
+        }
+        filtered2.release();
         assert_eq!(live_count(), before);
     }
 

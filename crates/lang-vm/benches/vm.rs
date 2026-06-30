@@ -237,6 +237,35 @@ fn vec_add_all_src(n: usize, packed: bool) -> String {
     )
 }
 
+/// A fused lazy-iterator pipeline vs the eager `map`/`filter` equivalent (Track I.1c). Both compute
+/// `sum(map(xs, *2) |> filter(even))`; the `sum` terminal means neither materializes a *result* list,
+/// so the difference is purely the **intermediate** lists. The eager form allocates two full
+/// `n`-element lists (one from `map`, one from `filter`); the lazy form streams one element at a time
+/// through `map → filter → sum` with no intermediate list at all (O(1) extra space). This isolates the
+/// allocation the closure adapters eliminate.
+fn iter_pipeline_src(n: usize, lazy: bool) -> String {
+    let pipeline = if lazy {
+        "xs.iter().map(fn(v) => v * 2).filter(fn(v) => v % 2 == 0).sum()".to_string()
+    } else {
+        "sum(filter(map(xs, fn(v) => v * 2), fn(v) => v % 2 == 0))".to_string()
+    };
+    format!("xs = 0..{n}\necho {pipeline}\n")
+}
+
+/// The early-stop case (Track I.1c): take only the first 10 results of `map → filter`. The lazy form
+/// stops pulling once `take(10)` is satisfied — it touches ~20 source elements regardless of `n`; the
+/// eager form must build the *entire* mapped and filtered lists before slicing the first 10, so its
+/// work grows with `n`. This is where laziness wins on **time**, not just memory.
+fn iter_take_pipeline_src(n: usize, lazy: bool) -> String {
+    let pipeline = if lazy {
+        "xs.iter().map(fn(v) => v * 2).filter(fn(v) => v % 2 == 0).take(10).collect().count()"
+            .to_string()
+    } else {
+        "filter(map(xs, fn(v) => v * 2), fn(v) => v % 2 == 0).slice(0, 10).count()".to_string()
+    };
+    format!("xs = 0..{n}\necho {pipeline}\n")
+}
+
 /// Sizes for the packed-list workload — a couple of points to confirm the per-element cost is flat.
 const PACKED_SIZES: &[usize] = &[1000, 4000];
 
@@ -556,6 +585,37 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     ser.finish();
+
+    // Fused lazy pipeline vs eager map/filter (Track I.1c): `lazy` streams with no intermediate list,
+    // `eager` allocates two full n-element lists. Timed side by side over n so both the constant-factor
+    // and the allocation difference are visible.
+    let mut pipe = c.benchmark_group("vm_iter_pipeline");
+    for &n in LOOP_SIZES {
+        let lazy = compile(&iter_pipeline_src(n, true));
+        pipe.bench_with_input(BenchmarkId::new("lazy", n), &lazy, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let eager = compile(&iter_pipeline_src(n, false));
+        pipe.bench_with_input(BenchmarkId::new("eager", n), &eager, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    pipe.finish();
+
+    // Early-stop pipeline (Track I.1c): `take(10)` after map→filter. The lazy form's work is constant
+    // in n (it stops after 10 results); the eager form builds the full lists first, so it grows with n.
+    let mut takepipe = c.benchmark_group("vm_iter_take_pipeline");
+    for &n in LOOP_SIZES {
+        let lazy = compile(&iter_take_pipeline_src(n, true));
+        takepipe.bench_with_input(BenchmarkId::new("lazy", n), &lazy, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let eager = compile(&iter_take_pipeline_src(n, false));
+        takepipe.bench_with_input(BenchmarkId::new("eager", n), &eager, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    takepipe.finish();
 
     let mut disp = c.benchmark_group("vm_member_dispatch");
     for &n in LOOP_SIZES {

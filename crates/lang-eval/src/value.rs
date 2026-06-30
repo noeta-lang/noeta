@@ -90,6 +90,10 @@ pub enum IterState {
     Enumerate { source: Value, index: usize },
     /// Yield `(a_elem, b_elem)` tuples, stopping when either runs dry (`zip(other)`).
     Zip { a: Value, b: Value },
+    /// Yield `func(element)` for each element of `source` (`map(f)`, Track I.1c).
+    Map { source: Value, func: Value },
+    /// Yield the elements of `source` for which `pred(element)` is true (`filter(f)`, Track I.1c).
+    Filter { source: Value, pred: Value },
 }
 
 /// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,

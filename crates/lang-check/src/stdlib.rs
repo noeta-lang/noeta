@@ -96,6 +96,10 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
         // `method_return` cannot see, so the precise type is filled at the call site (`synth_call`).
         // This fallback is used only when that refinement does not apply.
         "zip" => iterable_iter(Type::Tuple(vec![elem.clone(), Type::Dyn])),
+        // `filter(f)` keeps the element type; `map(f)` → `Iterator<R>` where `R` is the closure's
+        // return — also resolved at the call site (it needs the argument type). (Track I.1c.)
+        "filter" => iterable_iter(elem.clone()),
+        "map" => iterable_iter(Type::Dyn),
         "count" => Type::Int,
         // `sum()` → `int` for a concrete `Iterator<int>`, `float` for `Iterator<float>`, else a
         // numeric hole — mirroring the eager `sum` builtin (Track I.1b.2).
@@ -204,6 +208,16 @@ fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
         // `zip` takes any iterator (its element type may differ — it becomes the tuple's second
         // component); `Iterator<dyn>` accepts every `Iterator<B>` while still rejecting non-iterators.
         "zip" => vec![iterable_iter(Type::Dyn)],
+        // `map(f)` takes a closure of the element type → any result; `filter(f)` one returning `bool`
+        // (so a wrongly-typed closure is rejected statically, matching the runtime check). (Track I.1c.)
+        "map" => vec![Type::Fn {
+            params: vec![elem.clone()],
+            ret: Box::new(Type::Dyn),
+        }],
+        "filter" => vec![Type::Fn {
+            params: vec![elem.clone()],
+            ret: Box::new(Type::Bool),
+        }],
         _ => return None,
     })
 }

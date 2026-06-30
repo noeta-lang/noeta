@@ -1,0 +1,7 @@
+// Track I.1c — a `filter` predicate must return a bool. With an untyped closure parameter the return
+// type defers, so this is caught at runtime (E0007), identically on both backends — the closure-from-
+// `next()` error path. (A closure with a typed parameter would be rejected statically instead.)
+// expect: error E0007 at 7:6
+// expect: exit 1
+xs = [1, 2, 3];
+echo xs.iter().filter(fn(n) => n + 1).collect();

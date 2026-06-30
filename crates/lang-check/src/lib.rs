@@ -3381,6 +3381,18 @@ impl Checker {
                         vec![Type::Tuple(vec![a, b])],
                     );
                 }
+                // `it.map(f)` → `Iterator<R>` where `R` is the closure's return type — known here from
+                // the argument but not to `method_return` (which sees only the receiver). (Track I.1c.)
+                if name == "map"
+                    && let Type::Named(rn, _) = &recv
+                    && rn == stdlib::ITERATOR
+                {
+                    let r = match args.first() {
+                        Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                        _ => Type::Dyn,
+                    };
+                    return Type::Named(stdlib::ITERATOR.to_string(), vec![r]);
+                }
                 let ret = self.method_call_return(&recv, name);
                 // A method call on a concrete primitive with no such built-in method is an error,
                 // mirroring the non-indexable check (`42[0]`). `dyn`/holes defer (their result is

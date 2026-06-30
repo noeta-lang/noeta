@@ -1162,22 +1162,59 @@ impl<'m> Vm<'m> {
         Ok(match method {
             M::Next => {
                 self.stdlib_arity(name, args, 0, span)?;
-                match recv.iter_next() {
-                    Some(element) => make_some(element),
-                    None => make_none(),
+                let stepped = {
+                    let mut apply =
+                        |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+                    recv.iter_next_apply(&mut apply)
+                };
+                match stepped {
+                    Ok(Some(element)) => make_some(element),
+                    Ok(None) => make_none(),
+                    Err(err) => return Err(self.iter_abort(err, span)),
                 }
             }
             M::Collect => {
                 self.stdlib_arity(name, args, 0, span)?;
-                recv.iter_collect()
+                let mut out = Vec::new();
+                let result = {
+                    let mut apply =
+                        |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+                    loop {
+                        match recv.iter_next_apply(&mut apply) {
+                            Ok(Some(e)) => out.push(e),
+                            Ok(None) => break Ok(()),
+                            Err(err) => break Err(err),
+                        }
+                    }
+                };
+                if let Err(err) = result {
+                    for v in out {
+                        release(v); // free the elements collected before the closure aborted
+                    }
+                    return Err(self.iter_abort(err, span));
+                }
+                Value::list(out)
             }
             M::Count => {
                 self.stdlib_arity(name, args, 0, span)?;
                 let mut n = 0i64;
-                // Drain the iterator, releasing each element `iter_next` retained.
-                while let Some(element) = recv.iter_next() {
-                    element.release();
-                    n += 1;
+                let result = {
+                    let mut apply =
+                        |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+                    loop {
+                        match recv.iter_next_apply(&mut apply) {
+                            // Drain the iterator, releasing each element it retained.
+                            Ok(Some(e)) => {
+                                e.release();
+                                n += 1;
+                            }
+                            Ok(None) => break Ok(()),
+                            Err(err) => break Err(err),
+                        }
+                    }
+                };
+                if let Err(err) = result {
+                    return Err(self.iter_abort(err, span));
                 }
                 Value::int(n)
             }
@@ -1202,20 +1239,73 @@ impl<'m> Vm<'m> {
                 self.stdlib_arity(name, args, 1, span)?;
                 Value::iter_zip(recv, args[0])
             }
+            M::Map => {
+                self.stdlib_arity(name, args, 1, span)?;
+                Value::iter_map(recv, args[0])
+            }
+            M::Filter => {
+                self.stdlib_arity(name, args, 1, span)?;
+                Value::iter_filter(recv, args[0])
+            }
             M::Sum => {
                 self.stdlib_arity(name, args, 0, span)?;
-                match recv.iter_sum() {
-                    Ok(total) => total,
-                    Err(found) => {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            span,
-                            format!("`sum` expects numeric elements, found {found}"),
-                        ));
+                let mut int_total: i64 = 0;
+                let mut float_total: f64 = 0.0;
+                let mut any_float = false;
+                let mut bad: Option<&'static str> = None;
+                let result = {
+                    let mut apply =
+                        |func: Value, arg: Value| self.call_value(func, vec![arg], span);
+                    loop {
+                        match recv.iter_next_apply(&mut apply) {
+                            Ok(Some(e)) => {
+                                if let Some(i) = e.as_int() {
+                                    int_total = int_total.wrapping_add(i);
+                                } else if let Some(f) = e.as_float() {
+                                    any_float = true;
+                                    float_total += f;
+                                } else {
+                                    bad = Some(e.type_name());
+                                    e.release();
+                                    break Ok(());
+                                }
+                                e.release();
+                            }
+                            Ok(None) => break Ok(()),
+                            Err(err) => break Err(err),
+                        }
                     }
+                };
+                if let Err(err) = result {
+                    return Err(self.iter_abort(err, span));
+                }
+                if let Some(found) = bad {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`sum` expects numeric elements, found {found}"),
+                    ));
+                }
+                if any_float {
+                    Value::float(float_total + int_total as f64)
+                } else {
+                    Value::int(int_total)
                 }
             }
         })
+    }
+
+    /// Map an iterator-pull abort (Track I.1c) back into the VM's native error: a closure failure
+    /// carries its `Abort` through unchanged; a non-bool `filter` verdict becomes a `TypeMismatch`.
+    fn iter_abort(&mut self, err: lang_value::IterAbort<Abort>, span: Span) -> Abort {
+        match err {
+            lang_value::IterAbort::Closure(abort) => abort,
+            lang_value::IterAbort::FilterNotBool(found) => self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`filter` predicate must return a bool, found {found}"),
+            ),
+        }
     }
 
     /// A Ring 1 map method (`keys`/`values`/`has`). Mirrors the tree-walker's `call_map_method`.

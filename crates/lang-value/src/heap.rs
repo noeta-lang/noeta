@@ -245,10 +245,30 @@ pub(crate) enum IterState {
     Enumerate { source: Value, index: usize },
     /// Yield `(a_elem, b_elem)` tuples, stopping when either runs dry (`zip(other)`).
     Zip { a: Value, b: Value },
+    /// Yield `func(element)` for each element of `source` (`map(f)`, Track I.1c). Owns a reference to
+    /// the closure `func` so it stays alive for the iterator's lifetime.
+    Map { source: Value, func: Value },
+    /// Yield the elements of `source` for which `pred(element)` is true (`filter(f)`, Track I.1c).
+    Filter { source: Value, pred: Value },
+}
+
+/// A snapshot of an [`IterState`]'s shape, with its child [`Value`]s (Copy) and counters copied out.
+/// Reading this under a *short* borrow lets the pull driver recurse into a source — or run a user
+/// closure — with **no** borrow held on the node, so a re-entrant access to the same iterator cannot
+/// alias the live `&mut` (which would be undefined behavior). See [`crate::Value::iter_next_apply`].
+pub(crate) enum IterShape {
+    List,
+    Take { source: Value, remaining: usize },
+    Drop { source: Value, pending: usize },
+    Chain { first: Value, second: Value },
+    Enumerate { source: Value, index: usize },
+    Zip { a: Value, b: Value },
+    Map { source: Value, func: Value },
+    Filter { source: Value, pred: Value },
 }
 
 impl IterState {
-    /// The child iterator/list values this state owns one reference to (for GC trace/free).
+    /// The child iterator/list/closure values this state owns one reference to (for GC trace/free).
     fn children(&self) -> [Option<Value>; 2] {
         match self {
             IterState::List { list, .. } => [Some(*list), None],
@@ -257,6 +277,42 @@ impl IterState {
             | IterState::Enumerate { source, .. } => [Some(*source), None],
             IterState::Chain { first, second } => [Some(*first), Some(*second)],
             IterState::Zip { a, b } => [Some(*a), Some(*b)],
+            IterState::Map { source, func } => [Some(*source), Some(*func)],
+            IterState::Filter { source, pred } => [Some(*source), Some(*pred)],
+        }
+    }
+
+    /// Copy this state's shape out (child values + counters) so the caller can act without holding a
+    /// borrow on the node. `List` carries no copy — it has no recursion or user code, so its cursor is
+    /// advanced under its own short borrow.
+    pub(crate) fn shape(&self) -> IterShape {
+        match self {
+            IterState::List { .. } => IterShape::List,
+            IterState::Take { source, remaining } => IterShape::Take {
+                source: *source,
+                remaining: *remaining,
+            },
+            IterState::Drop { source, pending } => IterShape::Drop {
+                source: *source,
+                pending: *pending,
+            },
+            IterState::Chain { first, second } => IterShape::Chain {
+                first: *first,
+                second: *second,
+            },
+            IterState::Enumerate { source, index } => IterShape::Enumerate {
+                source: *source,
+                index: *index,
+            },
+            IterState::Zip { a, b } => IterShape::Zip { a: *a, b: *b },
+            IterState::Map { source, func } => IterShape::Map {
+                source: *source,
+                func: *func,
+            },
+            IterState::Filter { source, pred } => IterShape::Filter {
+                source: *source,
+                pred: *pred,
+            },
         }
     }
 }

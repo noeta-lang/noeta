@@ -28,6 +28,10 @@ pub enum IterMethod {
     Count,
     /// `sum()` → the sum of the remaining numeric elements (drains the iterator, Track I.1b.2).
     Sum,
+    /// `map(f)` → an iterator yielding `f(element)` for each element (Track I.1c).
+    Map,
+    /// `filter(f)` → an iterator yielding the elements for which `f(element)` is true (Track I.1c).
+    Filter,
 }
 
 impl IterMethod {
@@ -42,6 +46,8 @@ impl IterMethod {
             "zip" => Some(IterMethod::Zip),
             "count" => Some(IterMethod::Count),
             "sum" => Some(IterMethod::Sum),
+            "map" => Some(IterMethod::Map),
+            "filter" => Some(IterMethod::Filter),
             _ => None,
         }
     }
