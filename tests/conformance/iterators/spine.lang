@@ -1,0 +1,29 @@
+// Track I.1a — the lazy iterator spine. `iter()` builds an `Iterator` over a list/set/map; `next()`
+// yields `some(elem)`/`none` advancing the shared cursor; `collect()` drains the rest into a list.
+// The round-trip `xs.iter().collect()` reproduces the list. An iterator is a reference value, so an
+// alias shares the cursor (the differential-critical property — both backends agree by construction).
+// expect: stdout "some(1)"
+// expect: stdout "some(2)"
+// expect: stdout "[3]"
+// expect: stdout "[10, 20, 30]"
+// expect: stdout "none"
+// expect: stdout "[1, 2, 3]"
+// expect: stdout "[1, 2]"
+// expect: stdout "some(7)"
+// expect: stdout "some(8)"
+// expect: exit 0
+xs = [1, 2, 3];
+it = xs.iter();
+echo it.next();
+echo it.next();
+echo it.collect();
+echo [10, 20, 30].iter().collect();
+empty: List<int> = [];
+echo empty.iter().next();
+echo [3, 1, 2].to_set().iter().collect();
+m = { "a": 1, "b": 2 };
+echo m.iter().collect();
+shared = [7, 8].iter();
+alias = shared;
+echo shared.next();
+echo alias.next();

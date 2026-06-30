@@ -36,11 +36,18 @@ VM needs validating. So:
 
 ## Sub-slices (each its own green, in-oracle commit)
 
-- **I.1a — the spine.** `Value::Iter` / `Payload::Iter` reference object + `IterMethod`; `xs.iter()`
-  on list/set/map → a cursor iterator; `it.next() -> ?T`; `it.collect() -> List<T>`. Checker types:
-  `iter(): Iterator<T>`, `next(): ?T`, `collect(): List<T>`. Round-trip `xs.iter().collect() == xs`
-  is the acceptance test. Mirrors `FileHandle` end to end (construction, dispatch, display, GC leaf,
-  checker). **No closures, no `for` change.**
+- **I.1a — the spine. ✅ DONE** (2026-06-30). `Value::Iter(Rc<RefCell<IterState>>)` (eval) /
+  `Payload::Iter { list, cursor }` (VM, a GC **node** owning one child — its backing list — like
+  `Cell`, not a leaf) + shared `IterMethod` (next/collect). `xs.iter()` on list/set/map → a cursor
+  iterator (set/map first build a list of elements/values, the `for` order; a list shares its
+  backing). `it.next() -> ?T` (`some`/`none`, advancing the shared cursor), `it.collect() -> List<T>`
+  (drains the rest). Checker: `Iterator<T>` = `Type::Named("Iterator",[T])` (const `ITERATOR`,
+  mirroring `FILE_HANDLE`); `iter()` on list/set/map returns it (map → value type); `next()`→`?T`,
+  `collect()`→`List<T>` via `method_return`/`method_params`. VM refcounts are manual and
+  miri-verified (`iter` retains its list; `iter_next` retains the element it hands out; set/map build
+  a retained backing list then `release` the local ref). Conformance `iterators/spine.lang` (incl. an
+  **alias-shares-cursor** check — the reference-semantics property). Differential 326/0-skipped/agree,
+  leaks 0 both, miri clean. **No closures, no `for` change** (as planned).
 - **I.1b — closure-free adapters + terminals.** `take(n)`/`drop(n)`/`enumerate()`/`zip(other)`/
   `chain(other)` (lazy, each a wrapping `Iter`), and `count()`/`sum()` terminals. Bench the fused
   pipeline (`xs.iter().take(k)…`) allocates O(1) intermediate vs the eager O(n).

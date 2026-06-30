@@ -531,6 +531,50 @@ impl Value {
         heap::with_file_handle_mut(self, f)
     }
 
+    /// A lazy iterator value (Track I.1a) cursoring over `list` from the start. The iterator owns one
+    /// reference to its backing list (retained here); the caller's reference to `list` is untouched.
+    pub fn iter(list: Value) -> Value {
+        list.inc_ref();
+        heap::alloc(Payload::Iter { list, cursor: 0 })
+    }
+
+    /// Whether this is an iterator.
+    pub fn is_iter(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter { .. }))
+    }
+
+    /// Advance the iterator, returning the next element — a freshly-retained owning reference the
+    /// caller takes ownership of — or `None` at end. The caller must have checked [`Value::is_iter`].
+    pub fn iter_next(self) -> Option<Value> {
+        // The backing list is a distinct heap object from this iterator, so reading it inside the
+        // iterator's `with_payload_mut` accesses a different allocation (no aliasing).
+        let elem = heap::with_payload_mut(self, |p| {
+            let Payload::Iter { list, cursor } = p else {
+                return None;
+            };
+            let e = list.list_get(*cursor);
+            if e.is_some() {
+                *cursor += 1;
+            }
+            e
+        });
+        // `list_get` shares the list's reference without retaining; retain for the new owner.
+        if let Some(e) = elem {
+            e.inc_ref();
+        }
+        elem
+    }
+
+    /// Drain the iterator from its current cursor into a new list — each element retained into it
+    /// (via [`Value::iter_next`]). The caller must have checked [`Value::is_iter`].
+    pub fn iter_collect(self) -> Value {
+        let mut out = Vec::new();
+        while let Some(e) = self.iter_next() {
+            out.push(e);
+        }
+        Value::list(out)
+    }
+
     /// A Ring 2 native module value (refcount 1), identified by its surface name (e.g. `"json"`).
     pub fn native_module(name: &str) -> Value {
         heap::alloc(Payload::NativeModule(name.to_string()))
@@ -1200,6 +1244,8 @@ impl Value {
                 Payload::NativeModule(name) => format!("<module {name}>"),
                 // `<file "path" (mode)>`, rendered by the shared handle so both backends match.
                 Payload::FileHandle(handle) => handle.display(),
+                // An iterator is an opaque reference value (like a file handle).
+                Payload::Iter { .. } => "<iterator>".to_string(),
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1276,6 +1322,8 @@ impl Value {
                 Payload::NativeModule(name) => NativeValue::Str(format!("<module {name}>")),
                 // A handle has no JSON analog; its quoted display form, like a closure.
                 Payload::FileHandle(handle) => NativeValue::Str(handle.display()),
+                // An iterator has no JSON analog either — its opaque display form.
+                Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -1327,6 +1375,8 @@ impl Value {
                 "module"
             } else if self.is_file_handle() {
                 "file handle"
+            } else if self.is_iter() {
+                "iterator"
             } else if self.is_bytes() {
                 "bytes"
             } else {
@@ -2195,6 +2245,38 @@ mod tests {
         assert_eq!(v.as_string().as_deref(), Some("x"));
         assert!(v.dec_ref()); // count 0
         v.free();
+    }
+
+    #[test]
+    fn iterator_advances_collects_and_frees_without_leaking() {
+        // Heap elements (strings) so the refcount + unsafe heap-access paths in `iter`/`iter_next`/
+        // `iter_collect` are actually exercised (immediates would no-op the refcounting). The leak
+        // oracle's invariant: live count returns to baseline once every reference is released.
+        let before = live_count();
+        let list = Value::list(vec![Value::string("a"), Value::string("b")]); // list + 2 strings
+        let it = Value::iter(list); // +1 (iter); retains the list (rc 2)
+        // The iterator now owns the list; drop this local reference (rc → 1, still alive).
+        assert!(!list.dec_ref());
+
+        // `next()` hands back a freshly-retained element.
+        let a = it.iter_next().unwrap();
+        assert_eq!(a.as_string().as_deref(), Some("a"));
+        // The backing list still owns "a", so this only drops the next()-retained reference.
+        assert!(!a.dec_ref());
+
+        // `collect()` drains the rest into a new list (["b"]).
+        let rest = it.iter_collect();
+        assert_eq!(rest.list_len(), Some(1));
+        assert!(rest.dec_ref());
+        rest.free();
+
+        // A drained iterator yields `none` and is safe to keep calling.
+        assert!(it.iter_next().is_none());
+
+        // Freeing the iterator releases its backing list, which frees its elements.
+        assert!(it.dec_ref());
+        it.free();
+        assert_eq!(live_count(), before);
     }
 
     proptest! {

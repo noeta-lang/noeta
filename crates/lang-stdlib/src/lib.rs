@@ -24,6 +24,7 @@ pub mod env;
 pub mod fs;
 pub mod handle;
 pub mod host;
+pub mod iter;
 pub mod json;
 pub mod math;
 pub mod quat;
@@ -33,6 +34,7 @@ pub mod vec3;
 
 pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush, ReadSource};
 pub use host::{Host, SandboxHost};
+pub use iter::IterMethod;
 pub use registry::{
     ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType, StdExtension,
     TypeRecipe,

@@ -67,6 +67,18 @@ pub enum Value {
     /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
     /// same shared type both backends advance, so behavior is identical by construction.
     FileHandle(Rc<RefCell<FileHandle>>),
+    /// A lazy iterator (Track I.1a): a reference-semantic cursor over a list value — the tree-walker
+    /// twin of the VM's `Payload::Iter`. `Rc<RefCell<…>>` gives the shared interior-mutable cursor so
+    /// every alias advances the same iterator, exactly like a file handle.
+    Iter(Rc<RefCell<IterState>>),
+}
+
+/// The state of a [`Value::Iter`]: the backing list (always a `Value::List`) and a cursor over its
+/// elements. `next()` reads the element at `cursor` and advances; `collect()` drains the rest.
+#[derive(Debug)]
+pub struct IterState {
+    pub list: Value,
+    pub cursor: usize,
 }
 
 /// The backing representation of a [`Value::List`] (P-PACK Phase 2). `Boxed` is the general form,
@@ -451,6 +463,7 @@ impl Value {
             Value::NativeModule(module) => format!("<module {module}>"),
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
+            Value::Iter(_) => "<iterator>".to_string(),
         }
     }
 
@@ -484,6 +497,7 @@ impl Value {
             Value::Object(_) => "object",
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
+            Value::Iter(_) => "iterator",
         }
     }
 }
@@ -510,6 +524,7 @@ impl fmt::Debug for Value {
             Value::Object(object) => write!(f, "Object({})", object.display()),
             Value::NativeModule(module) => write!(f, "NativeModule({module})"),
             Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
+            Value::Iter(state) => write!(f, "Iter(cursor={})", state.borrow().cursor),
         }
     }
 }

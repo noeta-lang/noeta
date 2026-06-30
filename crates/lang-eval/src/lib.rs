@@ -23,7 +23,7 @@ mod leak;
 mod ops;
 mod value;
 pub use leak::live_count;
-pub use value::{ListRepr, Value};
+pub use value::{IterState, ListRepr, Value};
 use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 
 // The `Backend`/`RunResult` seam moved into its own crate in M1 so the tree-walker and the
@@ -1899,6 +1899,29 @@ impl Interpreter {
             let handle = Rc::clone(handle);
             return self.call_file_handle_method(method, &handle, name, &args, span);
         }
+        // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file handle above.
+        if let Value::Iter(state) = &receiver
+            && let Some(method) = lang_stdlib::IterMethod::from_name(name)
+        {
+            let state = Rc::clone(state);
+            return self.call_iter_method(method, &state, name, &args, span);
+        }
+        // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A set/map first becomes a
+        // list of its elements / values (the iteration order `for` uses); a list shares its backing.
+        // Guarded to built-in collections so it does not shadow a user object's own `iter` method.
+        if name == "iter" && matches!(receiver, Value::List(_) | Value::Set(_) | Value::Map(_)) {
+            self.expect_std_arity(name, &args, 0, span)?;
+            let list = match &receiver {
+                Value::List(_) => receiver.clone(),
+                Value::Set(items) => Value::List(ListRepr::Boxed(Rc::clone(items))),
+                Value::Map(entries) => Value::list(entries.values().cloned().collect()),
+                _ => unreachable!("guarded to list/set/map above"),
+            };
+            return Ok(Value::Iter(Rc::new(RefCell::new(IterState {
+                list,
+                cursor: 0,
+            }))));
+        }
         // Ring 1 map methods (keys/values/has).
         if let Value::Map(entries) = &receiver
             && let Some(method) = lang_stdlib::MapMethod::from_name(name)
@@ -2523,6 +2546,34 @@ impl Interpreter {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                     }
                 }
+            }
+        }
+    }
+
+    /// Dispatch an iterator method (`next`/`collect`, Track I.1a). The cursor advances over the
+    /// backing list shared by every alias; `next` reads one element, `collect` drains the rest.
+    /// Mirrors the VM's `call_iter_method` (which advances the same way over its heap list).
+    fn call_iter_method(
+        &mut self,
+        method: lang_stdlib::IterMethod,
+        state: &Rc<RefCell<IterState>>,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        use lang_stdlib::IterMethod as M;
+        self.expect_std_arity(name, args, 0, span)?;
+        match method {
+            M::Next => Ok(match iter_advance(state) {
+                Some(v) => builtin_enum("Option", "some", vec![v]),
+                None => builtin_enum("Option", "none", Vec::new()),
+            }),
+            M::Collect => {
+                let mut out = Vec::new();
+                while let Some(v) = iter_advance(state) {
+                    out.push(v);
+                }
+                Ok(Value::list(out))
             }
         }
     }
@@ -3257,6 +3308,21 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
     }))
 }
 
+/// Read an iterator's element at its cursor and advance, or `None` at end (Track I.1a). Shared by
+/// `next` (one step) and `collect` (drain). The backing is always a `Value::List`; `ListRepr::get`
+/// materializes a packed element on demand, so a `List<@packed>` iterates transparently.
+fn iter_advance(state: &Rc<RefCell<IterState>>) -> Option<Value> {
+    let mut st = state.borrow_mut();
+    let elem = match &st.list {
+        Value::List(repr) => repr.get(st.cursor),
+        _ => None,
+    };
+    if elem.is_some() {
+        st.cursor += 1;
+    }
+    elem
+}
+
 /// The `Result.Err(msg)` returned when a by-name `invoke` cannot resolve (unknown name, wrong
 /// arity, non-string name, non-list args, or a non-invokable receiver). The VM builds the same
 /// value from `Op::Invoke`'s baked `err_shape`.
@@ -3293,10 +3359,12 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
             TypeRepr::Struct(o.def.name().to_string(), Vec::new())
         }
         Value::Object(o) => TypeRepr::Class(o.def.name().to_string(), Vec::new()),
-        // A type value, module, file handle, or enum-type has no nameable lattice type → the top.
-        Value::EnumType(_) | Value::Type(_) | Value::NativeModule(_) | Value::FileHandle(_) => {
-            TypeRepr::Dyn
-        }
+        // A type value, module, file handle, iterator, or enum-type has no nameable lattice type → top.
+        Value::EnumType(_)
+        | Value::Type(_)
+        | Value::NativeModule(_)
+        | Value::FileHandle(_)
+        | Value::Iter(_) => TypeRepr::Dyn,
     }
 }
 
@@ -3724,6 +3792,8 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::Function(_) | Value::Builtin(_) => NativeValue::Str("<fn>".to_string()),
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
+        // An iterator has no JSON analog — its opaque display form, like the VM.
+        Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),
     }

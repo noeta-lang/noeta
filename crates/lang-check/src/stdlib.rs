@@ -16,6 +16,10 @@ use lang_types::Type;
 /// receiver of this `Named` type dispatches the file-handle methods.
 pub(super) const FILE_HANDLE: &str = "FileHandle";
 
+/// Reserved built-in type name for the value `iter()` returns (Track I.1a). `Iterator<T>` carries its
+/// element type as its single argument; a receiver of this `Named` type dispatches `next`/`collect`.
+pub(super) const ITERATOR: &str = "Iterator";
+
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
@@ -67,8 +71,25 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Map(_, val) => map_method(name, val),
         Type::Bytes => bytes_method(name),
         Type::Named(n, _) if n == FILE_HANDLE => file_handle_method(name),
+        Type::Named(n, args) if n == ITERATOR => {
+            iterator_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
         _ => None,
     }
+}
+
+/// `iter()` (Track I.1a) — available on every iterable, returning an `Iterator<T>` over the element
+/// type. A map iterates its **values** (the order `for` uses), so its element type is the value type.
+fn iterable_iter(elem: Type) -> Type {
+    Type::Named(ITERATOR.to_string(), vec![elem])
+}
+
+fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "next" => opt(elem.clone()),
+        "collect" => list(elem.clone()),
+        _ => return None,
+    })
 }
 
 fn bytes_method(name: &str) -> Option<Type> {
@@ -100,6 +121,8 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         "to_bytes" => Type::Bytes,
         // `enumerate` yields a list of `(index, item)` tuples (object-model slice 4b).
         "enumerate" => list(Type::Tuple(vec![Type::Int, elem.clone()])),
+        // `iter()` → a lazy `Iterator<T>` over the elements (Track I.1a).
+        "iter" => iterable_iter(elem.clone()),
         _ => return None,
     })
 }
@@ -109,6 +132,7 @@ fn set_method(name: &str, elem: &Type) -> Option<Type> {
         "contains" => Type::Bool,
         "union" | "intersection" | "add" | "remove" => set(elem.clone()),
         "count" => Type::Int,
+        "iter" => iterable_iter(elem.clone()),
         _ => return None,
     })
 }
@@ -121,6 +145,8 @@ fn map_method(name: &str, val: &Type) -> Option<Type> {
         "count" => Type::Int,
         // `set`/`remove` return a new map of the same type (keys are always strings).
         "set" | "remove" => Type::Map(Box::new(Type::String), Box::new(val.clone())),
+        // `iter()` yields the map's **values** (the iteration order `for` uses).
+        "iter" => iterable_iter(val.clone()),
         _ => return None,
     })
 }
@@ -146,8 +172,16 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::Map(_, val) => map_params(name, val),
         Type::Bytes if name == "count" => Some(vec![]),
         Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
+        Type::Named(n, _) if n == ITERATOR => iterator_params(name),
         _ => None,
     }
+}
+
+fn iterator_params(name: &str) -> Option<Vec<Type>> {
+    Some(match name {
+        "next" | "collect" => vec![],
+        _ => return None,
+    })
 }
 
 fn string_params(name: &str) -> Option<Vec<Type>> {
@@ -162,7 +196,8 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "reverse" | "sorted" | "count" | "first" | "last" | "to_set" | "enumerate" | "to_bytes" => {
+        "reverse" | "sorted" | "count" | "first" | "last" | "to_set" | "enumerate" | "to_bytes"
+        | "iter" => {
             vec![]
         }
         "contains" => vec![elem.clone()],
@@ -175,7 +210,7 @@ fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
 
 fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "count" => vec![],
+        "count" | "iter" => vec![],
         "contains" | "add" | "remove" => vec![elem.clone()],
         "union" | "intersection" => vec![set(elem.clone())],
         _ => return None,
@@ -184,7 +219,7 @@ fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
 
 fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "keys" | "values" | "count" => vec![],
+        "keys" | "values" | "count" | "iter" => vec![],
         "has" | "remove" => vec![Type::String], // runtime map keys are strings
         "set" => vec![Type::String, val.clone()], // `set(key, value)`
         _ => return None,

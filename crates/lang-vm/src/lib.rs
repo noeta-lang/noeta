@@ -1147,6 +1147,29 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Dispatch an iterator method (`next`/`collect`, Track I.1a). Mirrors the tree-walker's
+    /// `call_iter_method`: the cursor advances over the backing list shared by every alias.
+    /// `iter_next` hands back a freshly-retained element (consumed by `make_some`); `iter_collect`
+    /// drains the rest into a new list.
+    fn call_iter_method(
+        &mut self,
+        recv: Value,
+        method: lang_stdlib::IterMethod,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        use lang_stdlib::IterMethod as M;
+        self.stdlib_arity(name, args, 0, span)?;
+        Ok(match method {
+            M::Next => match recv.iter_next() {
+                Some(element) => make_some(element),
+                None => make_none(),
+            },
+            M::Collect => recv.iter_collect(),
+        })
+    }
+
     /// A Ring 1 map method (`keys`/`values`/`has`). Mirrors the tree-walker's `call_map_method`.
     fn call_map_method(
         &mut self,
@@ -2488,6 +2511,19 @@ impl<'m> Vm<'m> {
                         frames[top].pc += 1;
                         continue;
                     }
+                    // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
+                    // handle above.
+                    if v.is_iter()
+                        && let Some(iter_method) = lang_stdlib::IterMethod::from_name(method)
+                    {
+                        let arg_values: Vec<Value> =
+                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        let value =
+                            self.call_iter_method(v, iter_method, method, &arg_values, *span)?;
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // Ring 1 map methods (keys/values/has).
                     if v.is_map()
                         && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
@@ -2520,6 +2556,40 @@ impl<'m> Vm<'m> {
                                         .to_string(),
                                 ));
                             }
+                        };
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
+                    // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
+                    // its backing (the iterator retains one reference); a set/map first becomes a list
+                    // of its elements / values (the iteration order `for` uses).
+                    if method == "iter" && (v.is_list() || v.is_set() || v.is_map()) {
+                        if !args.is_empty() {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                "method `iter` takes no arguments".to_string(),
+                            ));
+                        }
+                        let value = if v.is_list() {
+                            Value::iter(v)
+                        } else {
+                            let items = if v.is_set() {
+                                v.set_items()
+                            } else {
+                                v.map_values()
+                            }
+                            .expect("set/map receiver");
+                            for item in &items {
+                                item.inc_ref();
+                            }
+                            let list = Value::list(items);
+                            let iter = Value::iter(list);
+                            // `Value::iter` retained the list; drop this local reference so the
+                            // iterator is its sole owner.
+                            list.release();
+                            iter
                         };
                         set_reg(&mut frames[top].regs, *dst, value);
                         frames[top].pc += 1;

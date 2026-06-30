@@ -222,6 +222,14 @@ pub(crate) enum Payload {
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
     /// is a GC leaf like `Str`.
     FileHandle(FileHandle),
+    /// A lazy iterator (Track I.1a): a reference-semantic cursor over a `list` value. `iter()`
+    /// builds one; `next()` advances the cursor returning `some(elem)`/`none`; `collect()` drains it
+    /// to a new list. It **owns one reference** to its backing list (a GC node like [`Self::Cell`]),
+    /// and the cursor mutation through `next()` is shared by every alias, exactly like a file handle.
+    Iter {
+        list: Value,
+        cursor: usize,
+    },
 }
 
 /// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
@@ -363,6 +371,8 @@ pub(crate) fn free(value: Value) {
             }
         }
         Payload::Cell(inner) => release_child(*inner),
+        // An iterator owns one reference to its backing list (a node like `Cell`).
+        Payload::Iter { list, .. } => release_child(*list),
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
@@ -517,6 +527,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Map(entries) => entries.values().copied().for_each(&mut push),
         Payload::Closure { upvalues, .. } => upvalues.iter().copied().for_each(&mut push),
         Payload::Cell(inner) => push(*inner),
+        // An iterator owns one reference to its backing list.
+        Payload::Iter { list, .. } => push(*list),
         // A packed list holds only primitive words (no child references) — a GC leaf.
         Payload::Str(_)
         | Payload::Bytes(_)
