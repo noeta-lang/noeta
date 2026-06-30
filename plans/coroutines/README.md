@@ -177,15 +177,20 @@ Decision points to settle before A is built (none block I/G):
 
 ## Consolidated decision points (for the user)
 
-1. **Lazy-by-default vs explicit `.iter()`** (recommend explicit/Rust-style; preserves value
-   semantics). ← gates Track I surface.
-2. **Protocol surface** — trait names (`Iterable`/`Iterator`), method names (`iter`/`next`), terminal
-   (`collect` vs `to_list`).
-3. **`next()` return** — `?T` (recommend; reuses `Option`).
+1. ✅ **RESOLVED — explicit Rust-style** (2026-06-30). Today's eager `xs.map(f)` stays
+   (value-semantic, returns a list); laziness is opt-in via `xs.iter().map(f).filter(g).collect()`.
+   Preserves value semantics, non-breaking.
+2. ✅ **RESOLVED — protocol surface** (2026-06-30). PHP-flavored friendly names: `Iterable` (has
+   `iter() -> Iterator`), `Iterator` (has `next() -> ?T`), terminal `collect()`. **The clean single
+   `next() -> ?T` form** — *not* PHP's full `current`/`next`/`valid`/`rewind` protocol — since it
+   reuses `Option` (`some(x)` = element, `none` = end) and is the better fit.
+3. ✅ **RESOLVED — `next()` returns `?T`** (folded into #2).
 4. **Generator coloring + restricted control flow across a suspend** — confirm the stackless limits
-   are acceptable.
-5. **Async oracle treatment** — out-of-oracle first (recommend) vs deterministic scheduler.
-6. **Async runtime** — `Future`/executor model; unify coroutine substrate yes/no.
+   are acceptable (open; Track G, not needed for Track I).
+5. **Async oracle treatment** — **provisional default: (a) out-of-oracle, like `RealHost`** (settle
+   for real when Track A is built; (b) a deterministic sandbox scheduler keeps async in the oracle at
+   real runtime cost). Track-A-only — does not gate I or G (both are pull-based/deterministic).
+6. **Async runtime** — `Future`/executor model; unify coroutine substrate yes/no (open; Track A).
 7. **New diagnostics** — next free code is **E0039** (e.g. *not iterable*, *`next` must return `?T`*,
    *`yield` outside a generator / inside a closure*).
 
