@@ -21,7 +21,10 @@
 //! map onto `tokio::fs`'s `read_dir`/`create_dir_all` and `Path::is_dir`, mirroring the
 //! sandbox VFS's directory model.
 
-use lang_stdlib::{ErrorKind, Host, StdError};
+use lang_stdlib::{ErrorKind, Host, ReadSource, StdError};
+use std::collections::HashMap;
+use tokio::fs::File;
+use tokio::io::BufReader;
 use tokio::runtime::Runtime;
 
 /// The real host: real process `env`/`args` and real-disk file IO over a per-isolate
@@ -36,6 +39,13 @@ pub struct RealHost {
     /// choice, not a side effect of this slice.
     rng: u64,
     clock: u64,
+    /// Open lazy read streams (P-LAZY), keyed by the id handed to the file handle. A read handle
+    /// pulls a line at a time via `fs_read_more` rather than buffering the whole file at open. An
+    /// entry is dropped at EOF; any handle closed before EOF leaves its stream here until the host
+    /// (the isolate) is dropped — acceptable for the short-lived CLI runs that use `RealHost`.
+    readers: HashMap<u64, BufReader<File>>,
+    /// Monotonic id source for `readers`.
+    next_reader_id: u64,
 }
 
 impl RealHost {
@@ -47,6 +57,8 @@ impl RealHost {
             runtime,
             rng: lang_stdlib::random::DEFAULT_SEED,
             clock: 0,
+            readers: HashMap::new(),
+            next_reader_id: 0,
         })
     }
 
@@ -133,14 +145,39 @@ impl Host for RealHost {
             .map_err(|e| io_error(format!("cannot remove `{path}`: {e}")))
     }
 
-    fn fs_open_read(&mut self, path: &str) -> Result<lang_stdlib::ReadSource, StdError> {
-        // P-LAZY commit 1: still eager (whole-file snapshot), so behavior is unchanged while the seam
-        // lands. Commit 2 swaps this for a streaming reader.
-        Ok(lang_stdlib::ReadSource::Snapshot(self.fs_read(path)?))
+    fn fs_open_read(&mut self, path: &str) -> Result<ReadSource, StdError> {
+        // P-LAZY: stream the file instead of snapshotting it. Open it now (so a missing file is the
+        // same IO error as the old eager `fs_read`), register a buffered reader, and hand the handle
+        // an id to pull lines from — so a large file is never read past the cursor.
+        let file = self
+            .runtime
+            .block_on(File::open(path))
+            .map_err(|e| io_error(format!("cannot read `{path}`: {e}")))?;
+        let id = self.next_reader_id;
+        self.next_reader_id += 1;
+        self.readers.insert(id, BufReader::new(file));
+        Ok(ReadSource::Lazy(id))
     }
 
-    fn fs_read_more(&mut self, _id: u64) -> Result<Option<String>, StdError> {
-        unreachable!("RealHost does not yet open a lazy reader (P-LAZY commit 1)")
+    fn fs_read_more(&mut self, id: u64) -> Result<Option<String>, StdError> {
+        use tokio::io::AsyncBufReadExt;
+        let Some(reader) = self.readers.get_mut(&id) else {
+            // The stream was already drained (dropped at EOF); nothing more to give.
+            return Ok(None);
+        };
+        let mut line = String::new();
+        let read = self
+            .runtime
+            .block_on(reader.read_line(&mut line))
+            .map_err(|e| io_error(format!("cannot read line: {e}")))?;
+        if read == 0 {
+            // EOF — drop the stream so its descriptor is released promptly.
+            self.readers.remove(&id);
+            Ok(None)
+        } else {
+            // `read_line` keeps the trailing `\n`; the handle splits on it, so pass it through.
+            Ok(Some(line))
+        }
     }
 
     fn fs_list(&self) -> Result<Vec<String>, StdError> {
@@ -255,6 +292,45 @@ mod tests {
         assert!(!host.fs_is_dir(&format!("{root}/logs/a.txt")));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn real_host_reads_lazily_through_a_file_handle() {
+        let mut host = RealHost::new().unwrap();
+        let mut path = std::env::temp_dir();
+        path.push("lang_runtime_lazy_read_test.txt");
+        let path = path.to_string_lossy().into_owned();
+        let _ = host.fs_remove(&path);
+
+        // A multi-line file with a multibyte character and a final unterminated line.
+        let content = "alpha\nbéta\ngamma";
+        host.fs_write(&path, content).unwrap();
+
+        // Opening for read now hands out a lazy stream, not a whole-file snapshot.
+        let source = host.fs_open_read(&path).unwrap();
+        assert!(matches!(source, ReadSource::Lazy(_)));
+
+        // Streaming lines back through the handle matches the eager read, line for line; the
+        // trailing unterminated line is yielded, and EOF is sticky.
+        let mut handle = lang_stdlib::FileHandle::open_read(&path, source);
+        let mut lines = Vec::new();
+        while let Some(line) = handle.read_line(&mut host).unwrap() {
+            lines.push(line);
+        }
+        assert_eq!(lines, vec!["alpha", "béta", "gamma"]);
+
+        // A fresh lazy handle, char-wise: `read(n)` counts characters across the lazily-pulled
+        // lines (7 chars = "alpha\nb", stopping just before the multibyte `é`).
+        let source = host.fs_open_read(&path).unwrap();
+        let mut handle = lang_stdlib::FileHandle::open_read(&path, source);
+        assert_eq!(
+            handle.read(7, &mut host).unwrap(),
+            Some("alpha\nb".to_string())
+        );
+
+        assert!(host.fs_remove(&path).unwrap());
+        // Opening a now-missing file lazily is the same IO error as the old eager read.
+        assert_eq!(host.fs_open_read(&path).unwrap_err().kind, ErrorKind::Io);
     }
 
     #[test]

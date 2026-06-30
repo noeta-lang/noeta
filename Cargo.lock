@@ -824,6 +824,7 @@ dependencies = [
 name = "lang-runtime"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "lang-stdlib",
  "tokio",
 ]

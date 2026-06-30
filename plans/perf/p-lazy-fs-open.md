@@ -1,7 +1,43 @@
 # P-LAZY — lazy real-disk reads behind the `fs.open` handle
 
-Status: **planned** (sweep item #4, demand-driven). Source: deferred backlog "Lazy real-disk reads
-behind the `fs.open` handle (M2.5 snapshots the file at open; surface is final)".
+Status: **DONE** (2026-06-30, two commits on `main`). Source: deferred backlog "Lazy real-disk reads
+behind the `fs.open` handle (M2.5 snapshots the file at open; surface is final)". The gate (a real
+large-file workload) was waived by the user — done now while the M2.5 handle design is fresh.
+
+## What shipped
+
+A read handle no longer snapshots the whole file at open. The host decides delivery via a neutral
+`ReadSource` (returned by the new `Host::fs_open_read`): the deterministic `SandboxHost` always hands
+over a whole-file `Snapshot` (so the differential is byte-identical to before), while `RealHost` hands
+over a `Lazy(id)` stream the handle pulls from a line at a time via `Host::fs_read_more` (a
+`tokio::io::BufReader` per id, kept in a `RealHost` registry, dropped at EOF). The handle keeps all
+cursor/line/character logic and stays `Clone + PartialEq + Eq` — only an integer id crosses the seam,
+so `lang-value`'s `Payload::FileHandle` was untouched (no miri needed). `read_line`/`read` gained a
+`&mut dyn Host` parameter; both backends thread `self.host` in (the `recv`/`handle` value is
+independent of `self`, so the borrows don't conflict).
+
+- **Commit 1/2** `96d64be` — the seam: `ReadSource`, the two `Host` methods, the lazy-capable
+  `FileHandle` (refill loop + `fill_more`), both backends threaded. RealHost still eager. No behavior
+  change anywhere.
+- **Commit 2/2** — RealHost streams: registry + `fs_open_read`/`fs_read_more`, a host test, this bench.
+
+## Benchmark (validates the gain)
+
+`crates/lang-runtime/benches/lazy_fs.rs` — time-to-first-line on an ~8 MB / 200k-line file, the old
+whole-file snapshot vs the new lazy stream (fresh `RealHost` per iteration in both arms, so the delta
+is the read strategy alone):
+
+| arm | time-to-first-line |
+|---|---|
+| `snapshot` (read whole file, take line 1) | **~1.576 ms** |
+| `lazy` (`fs_open_read` + one `read_line`) | **~50.9 µs** |
+
+≈ **31× faster** to the first line, and peak memory is one buffered chunk instead of the whole file —
+the point of the change. The gap widens with file size (snapshot is O(file), lazy is O(first line)).
+
+---
+
+## Original plan (for context)
 
 ## The cost
 

@@ -10,5 +10,12 @@ rust-version.workspace = true
 lang-stdlib = { workspace = true }
 tokio = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "lazy_fs"
+harness = false
+
 [lints]
 workspace = true
