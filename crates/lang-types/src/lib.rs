@@ -325,6 +325,10 @@ impl Type {
             TypeRef::Tuple { elements, .. } => {
                 Type::Tuple(elements.iter().map(Type::from_ref).collect())
             }
+            TypeRef::Fn { params, ret, .. } => Type::Fn {
+                params: params.iter().map(Type::from_ref).collect(),
+                ret: Box::new(Type::from_ref(ret)),
+            },
             TypeRef::Optional { inner, .. } => Type::Option(Box::new(Type::from_ref(inner))),
             TypeRef::Named { name, args, .. } => {
                 let arg = |i: usize| args.get(i).map(Type::from_ref).unwrap_or(Type::Unknown);

@@ -785,5 +785,9 @@ fn type_ref_str(ty: &TypeRef) -> String {
             let elements: Vec<String> = elements.iter().map(type_ref_str).collect();
             format!("({})", elements.join(", "))
         }
+        TypeRef::Fn { params, ret, .. } => {
+            let params: Vec<String> = params.iter().map(type_ref_str).collect();
+            format!("({}) -> {}", params.join(", "), type_ref_str(ret))
+        }
     }
 }

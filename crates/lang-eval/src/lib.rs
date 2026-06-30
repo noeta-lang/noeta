@@ -3451,6 +3451,9 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         // A tuple target matches any tuple value — head-constructor only, arity/elements erased
         // (object-model slice 4), exactly like `List` ignoring its element type.
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),
+        // A function type is erased to a head-constructor "is callable" test (params/return dropped),
+        // matching the VM's `NarrowTarget::Fn` (type_name `"function"`).
+        TypeRef::Fn { .. } => matches!(value, Value::Function(_) | Value::Builtin(_)),
         TypeRef::Named { name, .. } => match name.as_str() {
             "int" => matches!(value, Value::Int(_)),
             "float" => matches!(value, Value::Float(_)),

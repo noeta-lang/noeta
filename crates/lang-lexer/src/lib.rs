@@ -190,6 +190,9 @@ pub enum TokenKind {
     RBracket,
     #[token("=>")]
     FatArrow,
+    /// The thin arrow `->`, used in function types (`(int) -> int`). Maximal-munch beats `-`/`-=`.
+    #[token("->")]
+    Arrow,
     #[token("|>")]
     PipeGt,
     #[token("===")]
@@ -319,6 +322,7 @@ impl TokenKind {
             TokenKind::LBracket => "LBracket",
             TokenKind::RBracket => "RBracket",
             TokenKind::FatArrow => "FatArrow",
+            TokenKind::Arrow => "Arrow",
             TokenKind::PipeGt => "PipeGt",
             TokenKind::EqEqEq => "EqEqEq",
             TokenKind::NotEqEq => "NotEqEq",
@@ -410,6 +414,7 @@ impl TokenKind {
             TokenKind::LBracket => "`[`",
             TokenKind::RBracket => "`]`",
             TokenKind::FatArrow => "`=>`",
+            TokenKind::Arrow => "`->`",
             TokenKind::PipeGt => "`|>`",
             TokenKind::EqEqEq => "`===`",
             TokenKind::NotEqEq => "`!==`",
@@ -659,6 +664,7 @@ fn is_leading_continuation(kind: TokenKind) -> bool {
             | TokenKind::Colon
             | TokenKind::ColonColon
             | TokenKind::FatArrow
+            | TokenKind::Arrow
             // A closing bracket finishing a multi-line construct.
             | TokenKind::RParen
             | TokenKind::RBrace

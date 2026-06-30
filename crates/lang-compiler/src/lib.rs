@@ -3273,6 +3273,10 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         }
         TypeRef::Optional { .. } => NarrowTarget::Named("Option".to_string()),
         TypeRef::Tuple { .. } => NarrowTarget::Tuple,
+        // Function types are erased: narrowing to one is a head-constructor "is callable" test
+        // (params/return dropped), matching any function/closure value — like `List` ignoring its
+        // element type.
+        TypeRef::Fn { .. } => NarrowTarget::Fn,
         TypeRef::Named { name, .. } => match name.as_str() {
             "int" => NarrowTarget::Int,
             "float" => NarrowTarget::Float,

@@ -431,5 +431,12 @@ fn type_ref(ty: &TypeRef) -> String {
                 elements.iter().map(type_ref).collect::<Vec<_>>().join(", ")
             )
         }
+        TypeRef::Fn { params, ret, .. } => {
+            format!(
+                "({}) -> {}",
+                params.iter().map(type_ref).collect::<Vec<_>>().join(", "),
+                type_ref(ret)
+            )
+        }
     }
 }

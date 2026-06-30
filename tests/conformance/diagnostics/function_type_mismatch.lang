@@ -1,0 +1,8 @@
+// Passing a value of the wrong type where a function type is expected is E0007, like any argument
+// mismatch — the `(int) -> int` annotation drives the check (function types are not erased to `dyn`).
+// expect: error E0007 at 8:6
+// expect: exit 1
+fn apply(f: (int) -> int, x: int): int {
+    return f(x);
+}
+echo apply(42, 1);

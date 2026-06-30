@@ -563,6 +563,14 @@ pub enum TypeRef {
     /// slice 4). Always ≥2 elements at the surface (`(T)` is just a parenthesized type, `()` is
     /// `unit`).
     Tuple { elements: Vec<TypeRef>, span: Span },
+    /// A function type `(A, B) -> R` — the surface for a closure/function value. `params` may be
+    /// empty (`() -> R`); `ret` is a full type, so it nests right-associatively (`(int) -> (int) ->
+    /// int`). Maps to the lattice's `Type::Fn` (contravariant params, covariant return).
+    Fn {
+        params: Vec<TypeRef>,
+        ret: Box<TypeRef>,
+        span: Span,
+    },
 }
 
 impl TypeRef {
@@ -571,7 +579,8 @@ impl TypeRef {
             TypeRef::Named { span, .. }
             | TypeRef::Optional { span, .. }
             | TypeRef::Union { span, .. }
-            | TypeRef::Tuple { span, .. } => *span,
+            | TypeRef::Tuple { span, .. }
+            | TypeRef::Fn { span, .. } => *span,
         }
     }
 }

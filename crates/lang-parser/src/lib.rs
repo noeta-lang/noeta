@@ -745,6 +745,23 @@ where
                 elements,
                 span: ctx.to_span(e.span()),
             });
+        // A function type `(A, B) -> R` — params (possibly empty: `() -> R`) in parens, then `->`,
+        // then a full return type, so it nests right-associatively (`(int) -> (int) -> int`) and a
+        // union may appear in the return. Ordered before `tuple_type` in the `base` choice so the
+        // required `->` disambiguates `(A, B) -> R` (a function) from `(A, B)` (a tuple).
+        let fn_type = type_
+            .clone()
+            .separated_by(just(T::Comma))
+            .collect::<Vec<_>>()
+            .delimited_by(just(T::LParen), just(T::RParen))
+            .then_ignore(just(T::Arrow))
+            .then(type_.clone())
+            .map_with(move |(params, ret), e| TypeRef::Fn {
+                params,
+                ret: Box::new(ret),
+                span: ctx.to_span(e.span()),
+            })
+            .boxed();
         // A "base" type binds `?` tighter than `|`, so `?A | B` is `(?A) | B`. The inner recursion
         // lets `?` nest (`??A`); generic arguments still use the full `type_`, so a union can appear
         // inside them (`List<A | B>`).
@@ -755,7 +772,7 @@ where
                     inner: Box::new(inner),
                     span: ctx.to_span(e.span()),
                 });
-            choice((optional, tuple_type.clone(), named.clone())).boxed()
+            choice((optional, fn_type.clone(), tuple_type.clone(), named.clone())).boxed()
         });
         // A union is the loosest type combinator: `base (| base)*`. A lone base is returned bare,
         // so any non-union annotation parses byte-identically to before.

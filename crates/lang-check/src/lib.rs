@@ -1751,6 +1751,12 @@ impl Checker {
                     self.check_type_ref(e);
                 }
             }
+            TypeRef::Fn { params, ret, .. } => {
+                for p in params {
+                    self.check_type_ref(p);
+                }
+                self.check_type_ref(ret);
+            }
             TypeRef::Optional { inner, .. } => self.check_type_ref(inner),
             TypeRef::Named { name, args, span } => {
                 if !Type::is_builtin_name(name)

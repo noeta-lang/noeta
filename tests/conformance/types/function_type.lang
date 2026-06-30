@@ -1,0 +1,21 @@
+// A function type `(A) -> R` is first-class surface syntax mapping to the lattice's `Type::Fn`, so a
+// function that returns or takes a function types precisely instead of `dyn`. `() -> R` (zero params)
+// and `is`-testing a function type both work; the type is erased at runtime (an `is` test checks only
+// "is callable", like `List` ignoring its element type).
+// expect: stdout "15"
+// expect: stdout "20"
+// expect: stdout "7"
+// expect: stdout "true"
+// expect: exit 0
+fn make_adder(n: int): (int) -> int {
+    return fn(x) => x + n;
+}
+fn apply(f: (int) -> int, x: int): int {
+    return f(x);
+}
+add5 = make_adder(5);
+echo add5(10);
+echo apply(add5, 15);
+seven = fn(): int => 7;
+echo seven();
+echo add5 is (int) -> int;
