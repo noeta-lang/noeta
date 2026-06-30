@@ -26,10 +26,14 @@ pub mod json;
 pub mod math;
 pub mod quat;
 pub mod random;
+pub mod registry;
 pub mod vec3;
 
 pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush};
 pub use host::{Host, SandboxHost};
+pub use registry::{
+    ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType, StdExtension,
+};
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the
 /// stdlib introspects. Each backend cheaply projects its own `Value` onto this; anything
