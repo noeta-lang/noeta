@@ -88,13 +88,38 @@ statement (no send-type). `return e;` in a generator is forbidden; bare `return;
   - Conformance: `generators/control_flow.lang` (infinite + `take`, bounded `while`, conditional
     yield, `break`, `continue`, wholesale `for`), `yield_in_for.lang` (the remaining gate). 348
     conformance / differential 339 / 0-skipped / leaks 0 both / clippy+fmt+workspace clean.
-- **G.4 — `for` across `yield`.** Lift the G.2 gate: a `for x in src { … yield … }` lowers to the
-  iterator protocol (`it = src.iter()`; the cursor `it` becomes a hoisted cell; the loop is a flattened
-  `while` over `it.next()`), so the source iterator's position is part of the machine state. (Numbered
-  after G.3 in spirit but independent — either order works.)
-- **G.3 — liveness (optimization) + coloring.** Replace the conservative hoist-everything with real
-  liveness (only locals live across a `yield` become cells); enforce the coloring rule (`yield` inside
-  a closure passed to a builtin → E0039).
+- **G.4 — `for` across `yield`. ✅ DONE** (2026-07-01, `85a6d7f`). The G.2 gate is lifted: a
+  `for <pat> in src { … yield … }` lowers to the iterator protocol in the flattener (`lower_one`'s new
+  `For`-with-yield arm). A hoisted cell holds the iterator — `src.iter()` for a collection, or `src`
+  directly when it is already an `Iterator<T>` (reusing the checker's `for_stream_sites` set) — and the
+  loop becomes a flattened `while` over `.next()`: `head` fetches `$next = $cursor.next()` and
+  `Branch`es on `match $next { some(_) => true, _ => false }`; the body binds the loop variable(s) from
+  `$next ?? none` (the `none` arm is unreachable) and routes `break`/`continue` to the after/head
+  states. Because the cursor is a cell, the source position survives every `yield`. Unlocks `for` over
+  collections/ranges/iterator-sources, nested loops, `break`/`continue` across the suspend, tuple
+  destructuring, and composition with the lazy adapters. The checker's `first_yield_under_for` gate and
+  helper are removed. Conformance `generators/for_across_yield.lang` (replaces `yield_in_for.lang`);
+  348 conformance / differential 339 / 0-skipped / leaks 0 both / clippy+fmt+workspace clean.
+- **G.3 — coloring + liveness. ✅ DONE** (2026-07-01, coloring `2afc84a`, liveness `6df8606`).
+  - **Coloring** was already enforced: the checker resets its yield context (`current_yield`) at every
+    closure boundary, so a `yield` inside a closure — including one passed to a builtin like `map` —
+    hits the "not inside a generator" path and reports E0039. Locked in by
+    `generators/yield_in_closure.lang`. (No code change; the reset landed back in G.1a.)
+  - **Liveness** replaces the flattener's hoist-everything: a local becomes a persistent captured cell
+    only when it is live across a suspend/jump (referenced in >1 state, via `ref_block_count` over the
+    conservative total `block_mentions`/`stmt_mentions`). A fresh declaration (`mut x`/for-var) used in
+    a single suspend-free segment stays a block-local, re-bound each entry. Behavior-preserving by
+    construction: only *declaring* names are eligible (a block-local and a cell shadow an outer
+    identically); a bare-`x =`-first name (may reassign an outer), a destructure/tuple target, and the
+    synthetic `for` cursor/next cells stay on the always-hoist path. Both backends consume the same IR
+    → invisible to `RunResult`. Locked in by `generators/liveness.lang` (cross-yield accumulators vs
+    single-segment temporaries). 350 conformance / differential 0-skipped / leaks 0 both /
+    clippy+fmt+workspace clean.
+
+**Track G is COMPLETE** (G.1a → G.1b → G.2 → G.4 → G.3). Generators (`yield`) are fully executable
+with control flow across the suspend, `for`-across-yield, coloring, and liveness-minimized cells. Next
+in the coroutines plan: **Track A** (async/await) — a later milestone (deterministic injected executor
+already decided in the parent doc).
 
 ## Verification (every sub-slice)
 
