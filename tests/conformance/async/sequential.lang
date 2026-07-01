@@ -1,0 +1,21 @@
+// Track A.1 — sequential async is executable. An `async fn` returns a lazy `Future<T>` (the body is
+// deferred into a thunk); `.await` runs it to completion. Awaits across locals, repeated awaits, and
+// nested async calls all work. Nothing suspends yet (A.2 adds suspension), so it runs straight through.
+// expect: stdout "11"
+// expect: stdout "30"
+// expect: exit 0
+async fn inner(): int {
+    return 5
+}
+async fn outer(): int {
+    x = inner().await
+    y = inner().await
+    return x + y + 1
+}
+echo outer().await
+
+async fn scaled(n: int): int {
+    base = inner().await
+    return base * n
+}
+echo scaled(6).await

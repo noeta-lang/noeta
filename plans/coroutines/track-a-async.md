@@ -102,18 +102,23 @@ re-poll; on `Ready(v)`, done; if `Pending` with nothing to advance → a determi
     type correctly), `.await` outside async (coloring), `.await` in a closure (coloring), `.await` on
     a non-future, and top-level `.await`. **DONE** (`3aa0e13`-follow-on): conformance 355 / differential
     0-skipped / leaks 0 both / clippy+fmt+workspace clean.
-- **A.1 — minimal executable *sequential* async/await** (revised split, at build). Rationale: a full
+- **A.1 — minimal executable *sequential* async/await. ✅ DONE.** (revised split, at build). Rationale: a full
   state machine with **no suspending leaf** (none exist until A.2) would leave the entire `Pending` path
   dead and untested — so A.1 ships the smallest end-to-end-*testable* async instead, and A.2 adds the
   state machine together with the leaf that exercises it. A.1 delivers: **`Payload::Future`/
   `Value::Future`** (both backends, miri) wrapping a **lazy thunk** (Rust-style: the body runs on await,
   not at the call); `Op::MakeFuture` (async fn call → `Future<T>`, body deferred into the thunk) +
-  `Op::RunFuture` (the executor's run-to-completion, used by `.await` and at the root); an
+  `Op::RunFuture` (run a future's thunk to completion, what `.await` lowers to); an
   `Executor`/`SandboxExecutor` seam is *deferred to A.2* (A.1's run-to-completion is a direct thunk
-  call — trivial, nothing suspends). Implicit async top-level (compile the module body as a root future
-  iff it has a top-level `.await` — reuse the checker's `Expr::has_await`/`block_has_await`). Removes the
-  A.0 gate. Both backends. Fully tested (no dead path: nothing suspends → no `Pending`). Conformance: a
-  drained async fn, awaits across locals, nested `async fn` calls, `?`-through-`.await`, top-level await.
+  call — trivial, nothing suspends). Implicit async top-level: the top level runs directly and its
+  top-level `.await`s lower to `RunFuture` (no root-future wrapping needed until A.2 introduces
+  suspension); the checker sets `current_async` for the top level via `block_has_await`. Removes the
+  A.0 gate. Both backends (the tree-walker mirrors `Payload::Future` as `Value::Future`; a
+  non-future operand passes through so evaluation stays total for the uncheck­ed property test).
+  Fully tested (no dead path: nothing suspends → no `Pending`). Conformance `tests/conformance/async/`:
+  `sequential` (awaits across locals, repeated awaits, nested async calls), `top_level_await`,
+  `try_through_await` (`?`-through-`.await`), plus the three A.0 error cases retained. Conformance 356 /
+  differential 347 matched 0-skipped / leaks 0 both / miri clean / clippy+fmt+workspace clean.
 - **A.2 — the real state machine + first suspending leaf (`sleep`/timer).** Replaces A.1's thunk with
   the CFG state-machine lowering (a `lower_async` mirroring `lower_generator`: `.await` → hoisted future
   cell + poll-state that advances on Ready / self-loops returning `Pending`), and adds the

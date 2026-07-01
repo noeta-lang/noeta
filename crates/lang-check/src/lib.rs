@@ -1099,19 +1099,8 @@ impl Checker {
         let mut env: Env = vec![HashMap::new()];
         // Implicit async top level (Track A): if the module body contains a top-level `.await` (one
         // not inside a nested `fn`/closure), the top level is itself an async context, so its awaits
-        // are legal. A.0 interim gate: emit E0040 "not yet executable" at the first such statement so
-        // no async program reaches lowering (the top level runs on the executor in A.1).
+        // are legal (executable since A.1 — a top-level `.await` runs its future to completion).
         self.current_async = block_has_await(&program.stmts);
-        if self.current_async
-            && let Some(stmt) = program.stmts.iter().find(|s| stmt_has_await(s))
-        {
-            self.diags.push(Diagnostic::error(
-                DiagnosticCode::AsyncMisuse,
-                stmt.span(),
-                "top-level `.await` (an async program) is not yet executable (Track A.1)"
-                    .to_string(),
-            ));
-        }
         for stmt in &program.stmts {
             self.check_stmt(stmt, &mut env);
         }
@@ -1574,16 +1563,6 @@ impl Checker {
         // wrapped `Future<T>` via the signature. Reset for a non-async function so an enclosing async
         // context does not leak into a nested ordinary function.
         let saved_async = std::mem::replace(&mut self.current_async, decl.is_async);
-        // A.0 interim gate: an `async fn` type-checks but is **not yet executable** — the async state
-        // machine + executor land in A.1. Emitting E0040 here keeps every async program from reaching
-        // lowering (the lowering-is-total invariant), mirroring the Track-G G.1a gate.
-        if decl.is_async {
-            self.diags.push(Diagnostic::error(
-                DiagnosticCode::AsyncMisuse,
-                decl.name_span,
-                "async functions are not yet executable (Track A.1)".to_string(),
-            ));
-        }
         let saved_ret = std::mem::replace(&mut self.current_ret, ret);
         // A function body is a fresh control-flow context: `break`/`continue` inside it cannot
         // target a loop the *enclosing* code is in, so reset the depth (restored after).

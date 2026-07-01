@@ -3565,6 +3565,36 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, result);
                     frames[top].pc += 1;
                 }
+                Op::MakeFuture { dst, src } => {
+                    // Wrap the lazy thunk closure into a future (Track A.1). `make_future` retains its
+                    // own reference to the closure; the source register's reference is released by the
+                    // register's normal end-of-life (like `Op::MakeGen`).
+                    let thunk = frames[top].regs[*src as usize];
+                    let result = Value::make_future(thunk);
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
+                Op::RunFuture { dst, src, span } => {
+                    // Run an awaited future to completion (Track A.1): call its thunk (one ignored
+                    // resume arg) and yield the completion value. `future_step` hands back a retained
+                    // reference to the thunk which `call_value` borrows; release it after the call. A
+                    // checked program only awaits a `Future`; a non-future is passed through so
+                    // execution stays total (unreachable for a checked program).
+                    let future = frames[top].regs[*src as usize];
+                    let value = match future.future_step() {
+                        Some(step) => {
+                            let result = self.call_value(step, vec![Value::unit()], *span);
+                            release(step);
+                            result?
+                        }
+                        None => {
+                            retain(future);
+                            future
+                        }
+                    };
+                    set_reg(&mut frames[top].regs, *dst, value);
+                    frames[top].pc += 1;
+                }
                 Op::AttributesOf { dst, type_name } => {
                     let result = self.materialize_attributes(type_name);
                     set_reg(&mut frames[top].regs, *dst, result);

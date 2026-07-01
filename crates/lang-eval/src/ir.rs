@@ -1137,6 +1137,23 @@ impl Interpreter {
                 let step = self.eval_ir_atom(step, frame)?;
                 Ok(Value::Iter(Rc::new(RefCell::new(IterState::Gen { step }))))
             }
+            // Wrap the lazy thunk into a future (Track A.1) — the tree-walker mirror of the VM's
+            // `Op::MakeFuture`. The thunk is not run until the future is awaited (`RunFuture`).
+            lang_ir::Rvalue::MakeFuture { thunk, .. } => {
+                let thunk = self.eval_ir_atom(thunk, frame)?;
+                Ok(Value::Future(Rc::new(thunk)))
+            }
+            // Run an awaited future to completion (Track A.1): call its thunk (one ignored resume arg,
+            // here unit) and yield the completion value. A checked program only awaits a `Future`; a
+            // non-future (only reachable via the uncheck­ed property test) passes straight through so
+            // evaluation stays total.
+            lang_ir::Rvalue::RunFuture { future, span } => {
+                let future = self.eval_ir_atom(future, frame)?;
+                match future {
+                    Value::Future(thunk) => self.call((*thunk).clone(), vec![Value::Unit], *span),
+                    other => Ok(other),
+                }
+            }
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
             lang_ir::Rvalue::Invoke {
                 recv,

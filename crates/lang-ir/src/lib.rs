@@ -329,6 +329,15 @@ pub enum Rvalue {
     /// `Iterator` that drives `step` once per element. Produced only by the generator desugar
     /// (`lower_generator`), never by surface syntax.
     MakeGen { step: Atom, span: Span },
+    /// Wrap a lazy thunk closure into a `Future` — the tail of a lowered `async fn` (Track A.1).
+    /// `thunk` is the lowered closure over the async fn's body (captures its params); the result is an
+    /// ordinary `Future` value that defers the body until it is run. Produced only by the async desugar
+    /// (`lower_async`), never by surface syntax.
+    MakeFuture { thunk: Atom, span: Span },
+    /// `expr.await` — run a `Future` to completion and yield its value (Track A.1). `future` is the
+    /// awaited value; A.1 drives its thunk straight to the result (no suspension). Produced by the
+    /// `.await` lowering.
+    RunFuture { future: Atom, span: Span },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).

@@ -302,7 +302,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::MakeGen { dst, src } => {
+        Op::MakeGen { dst, src } | Op::MakeFuture { dst, src } | Op::RunFuture { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
@@ -727,7 +727,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::MakeGen { dst, src } => {
+        Op::MakeGen { dst, src } | Op::MakeFuture { dst, src } | Op::RunFuture { dst, src, .. } => {
             m(dst);
             m(src);
         }

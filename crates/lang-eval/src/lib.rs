@@ -3620,7 +3620,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::Type(_)
         | Value::NativeModule(_)
         | Value::FileHandle(_)
-        | Value::Iter(_) => TypeRepr::Dyn,
+        | Value::Iter(_)
+        | Value::Future(_) => TypeRepr::Dyn,
     }
 }
 
@@ -4050,6 +4051,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
+        Value::Future(_) => NativeValue::Str("<future>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),
     }

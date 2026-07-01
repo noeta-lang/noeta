@@ -1,0 +1,15 @@
+// Track A.1 — `?` propagates through `.await`: `fetch(...).await?` is `Future<Result<..>>` → await →
+// `Result<..>` → `?`. On `Ok` it yields the value; the chain composes as the design doc specifies.
+// expect: stdout "Ok(8)"
+// expect: exit 0
+async fn fetch(ok: bool): Result<int, string> {
+    if ok {
+        return Ok(7)
+    }
+    return Err("nope")
+}
+async fn run(): Result<int, string> {
+    x = fetch(true).await?
+    return Ok(x + 1)
+}
+echo run().await

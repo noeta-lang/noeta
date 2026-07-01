@@ -618,6 +618,33 @@ impl Value {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Iter(_)))
     }
 
+    /// An async future (Track A): wraps `step`, the lazy thunk that runs the `async fn` body and
+    /// returns the completion value (A.1). Owns one reference to the closure.
+    pub fn make_future(step: Value) -> Value {
+        step.inc_ref();
+        heap::alloc(Payload::Future(step))
+    }
+
+    /// Whether this is a future.
+    pub fn is_future(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Future(_)))
+    }
+
+    /// The thunk/step closure a future wraps — a freshly-retained owning reference the caller drives
+    /// via the backend's call machinery (Track A). `None` if this is not a future.
+    pub fn future_step(self) -> Option<Value> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Future(step) => {
+                step.inc_ref();
+                Some(*step)
+            }
+            _ => None,
+        })
+    }
+
     /// Advance the iterator, returning the next element — a freshly-retained owning reference the
     /// caller takes ownership of — or `None` at end. The caller must have checked [`Value::is_iter`].
     ///
@@ -1530,6 +1557,8 @@ impl Value {
                 Payload::FileHandle(handle) => handle.display(),
                 // An iterator is an opaque reference value (like a file handle).
                 Payload::Iter { .. } => "<iterator>".to_string(),
+                // A future is an opaque reference value.
+                Payload::Future(_) => "<future>".to_string(),
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1608,6 +1637,8 @@ impl Value {
                 Payload::FileHandle(handle) => NativeValue::Str(handle.display()),
                 // An iterator has no JSON analog either — its opaque display form.
                 Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),
+                // A future has no JSON analog — its opaque display form.
+                Payload::Future(_) => NativeValue::Str("<future>".to_string()),
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -1661,6 +1692,8 @@ impl Value {
                 "file handle"
             } else if self.is_iter() {
                 "iterator"
+            } else if self.is_future() {
+                "future"
             } else if self.is_bytes() {
                 "bytes"
             } else {
@@ -2050,6 +2083,25 @@ mod tests {
         assert_eq!(boxed.list_len(), Some(1));
         assert_eq!(boxed.display(), "[V {x: 5, y: 6}]");
         boxed.release(); // frees the list and its owned element, so miri sees no leak
+    }
+
+    #[test]
+    fn future_wraps_and_frees_its_step() {
+        // Track A: a future owns one reference to its thunk/step closure (a list stands in for the
+        // closure here). Constructing retains the step; `future_step` hands back a fresh retained
+        // reference; releasing the future releases its held reference — all leak-clean under miri.
+        let step = Value::list(vec![Value::int(1), Value::int(2)]);
+        let fut = Value::make_future(step); // the future retains a second reference to `step`
+        assert!(fut.is_future());
+        assert_eq!(fut.type_name(), "future");
+        assert_eq!(fut.display(), "<future>");
+
+        let got = fut.future_step().expect("a future yields its step");
+        assert_eq!(got.display(), "[1, 2]"); // a freshly-retained reference to the wrapped step
+        got.release(); // drop the borrowed step reference
+
+        step.release(); // drop the caller's original reference; the future still holds one
+        fut.release(); // frees the future and its held step reference → step freed, no leak
     }
 
     #[test]

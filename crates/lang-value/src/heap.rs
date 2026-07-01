@@ -228,6 +228,12 @@ pub(crate) enum Payload {
     /// to each source it holds (a GC node like [`Self::Cell`]); the cursor mutation through `next()`
     /// is shared by every alias, exactly like a file handle. See [`IterState`].
     Iter(IterState),
+    /// An async future (Track A): a reference-semantic deferred computation. In A.1 it wraps a **lazy
+    /// thunk** — a zero-argument closure that runs the `async fn` body and returns the completion value
+    /// — which is not invoked until the future is awaited/run (Rust-style laziness). Owns **one
+    /// reference** to that closure (a GC node like [`Self::Cell`]). A.2 replaces the thunk with the
+    /// async state machine and this becomes a pollable future.
+    Future(Value),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -469,6 +475,8 @@ pub(crate) fn free(value: Value) {
                 release_child(child);
             }
         }
+        // A future owns one reference to its thunk/step closure (a node like `Cell`).
+        Payload::Future(step) => release_child(*step),
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
@@ -625,6 +633,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Cell(inner) => push(*inner),
         // An iterator owns one reference to each source it holds.
         Payload::Iter(state) => state.children().into_iter().flatten().for_each(&mut push),
+        // A future owns one reference to its thunk/step closure.
+        Payload::Future(step) => push(*step),
         // A packed list holds only primitive words (no child references) — a GC leaf.
         Payload::Str(_)
         | Payload::Bytes(_)

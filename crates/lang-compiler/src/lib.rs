@@ -2330,6 +2330,23 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::MakeGen { dst, src });
                 Ok(())
             }
+            Rvalue::MakeFuture { thunk, .. } => {
+                // Wrap the lowered lazy thunk closure into a future (Track A.1). The closure was
+                // produced by a preceding `Rvalue::Closure`, so `thunk` is already in a register.
+                let src = self.atom_reg(thunk)?;
+                self.code.push(Op::MakeFuture { dst, src });
+                Ok(())
+            }
+            Rvalue::RunFuture { future, span } => {
+                // Run an awaited future to completion, yielding its value (Track A.1).
+                let src = self.atom_reg(future)?;
+                self.code.push(Op::RunFuture {
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::FromBytes { blob, layout, span } => {
                 // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
                 // schema from the layout the checker recorded (the same channel list literals use). A

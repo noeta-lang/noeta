@@ -551,6 +551,21 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
+    /// `dst = make_future(src)` (Track A.1): wrap the lazy thunk closure in `src` into a `Future`.
+    /// The async desugar emits this as the tail of an `async fn` — the thunk defers the body until the
+    /// future is awaited/run. Cannot fail, so it carries no span.
+    MakeFuture {
+        dst: Reg,
+        src: Reg,
+    },
+    /// `dst = run_future(src)` (Track A.1): run the future in `src` to completion, yielding its value
+    /// (`expr.await`). A.1 drives the thunk straight to its result (no suspension). Carries a span for
+    /// the call boundary (the thunk body can fault).
+    RunFuture {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
     /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
     /// module manifest, each materialized into a `T` struct and paired with its target. `type_name`
     /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
@@ -1256,6 +1271,12 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         }
         Op::IsType { dst, src, target } => {
             format!("IsType      r{dst} <- r{src} is {target:?}")
+        }
+        Op::MakeFuture { dst, src } => {
+            format!("MakeFuture  r{dst} <- future r{src}")
+        }
+        Op::RunFuture { dst, src, .. } => {
+            format!("RunFuture   r{dst} <- await r{src}")
         }
         Op::MakeGen { dst, src } => {
             format!("MakeGen     r{dst} <- gen r{src}")

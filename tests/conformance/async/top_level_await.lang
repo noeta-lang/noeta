@@ -1,8 +1,9 @@
-// Track A.0 — the module top level is implicitly async when it contains a top-level `.await` (Track A
-// decision), so the `.await` is legal (not a coloring error). It is gated as not-yet-executable in
-// A.0; the top level runs on the executor in A.1.
-// expect: error E0040 at 7:1
-// expect: exit 1
-async fn work(): int { return 42 }
+// Track A.1 — the module top level is implicitly async when it contains a top-level `.await` (Track A
+// decision): the `.await` is legal and runs its future to completion, no `block_on` bridge needed.
+// expect: stdout "42"
+// expect: exit 0
+async fn work(): int {
+    return 42
+}
 result = work().await
 echo result

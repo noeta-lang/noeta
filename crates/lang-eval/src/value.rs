@@ -71,6 +71,10 @@ pub enum Value {
     /// twin of the VM's `Payload::Iter`. `Rc<RefCell<…>>` gives the shared interior-mutable cursor so
     /// every alias advances the same iterator, exactly like a file handle.
     Iter(Rc<RefCell<IterState>>),
+    /// An async future (Track A): the tree-walker twin of the VM's `Payload::Future`. In A.1 it wraps
+    /// a lazy thunk closure — run to completion when awaited, not at the `async fn` call. `Rc` keeps
+    /// copies cheap and matches the VM's shared heap object.
+    Future(Rc<Value>),
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -481,6 +485,7 @@ impl Value {
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
             Value::Iter(_) => "<iterator>".to_string(),
+            Value::Future(_) => "<future>".to_string(),
         }
     }
 
@@ -515,6 +520,7 @@ impl Value {
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
             Value::Iter(_) => "iterator",
+            Value::Future(_) => "future",
         }
     }
 }
@@ -542,6 +548,7 @@ impl fmt::Debug for Value {
             Value::NativeModule(module) => write!(f, "NativeModule({module})"),
             Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
             Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
+            Value::Future(thunk) => write!(f, "Future({thunk:?})"),
         }
     }
 }

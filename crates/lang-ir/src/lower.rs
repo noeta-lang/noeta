@@ -342,8 +342,13 @@ impl Lowerer<'_> {
                 Ok(())
             }
             AstStmt::Fn(decl) => {
-                let func =
-                    self.lower_func(&decl.params, BodyKind::Block(&decl.body), decl.span, true)?;
+                let func = self.lower_func(
+                    &decl.params,
+                    BodyKind::Block(&decl.body),
+                    decl.span,
+                    true,
+                    decl.is_async,
+                )?;
                 out.push(Stmt::Decl(Decl::Fn {
                     name: decl.name.clone(),
                     func: Rc::new(func),
@@ -354,8 +359,13 @@ impl Lowerer<'_> {
             AstStmt::Class(decl) => {
                 let mut methods = Vec::with_capacity(decl.methods.len());
                 for m in &decl.methods {
-                    let func =
-                        self.lower_func(&m.params, BodyKind::Block(&m.body), m.span, true)?;
+                    let func = self.lower_func(
+                        &m.params,
+                        BodyKind::Block(&m.body),
+                        m.span,
+                        true,
+                        m.is_async,
+                    )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
                 // The `destruct` block lowers to a parameterless block [`Func`] (fields resolve
@@ -365,6 +375,7 @@ impl Lowerer<'_> {
                         &[],
                         BodyKind::Block(body),
                         decl.span,
+                        false,
                         false,
                     )?)),
                     None => None,
@@ -385,8 +396,13 @@ impl Lowerer<'_> {
                 // data stays on the surface `decl`.
                 let mut methods = Vec::with_capacity(decl.methods.len());
                 for m in &decl.methods {
-                    let func =
-                        self.lower_func(&m.params, BodyKind::Block(&m.body), m.span, true)?;
+                    let func = self.lower_func(
+                        &m.params,
+                        BodyKind::Block(&m.body),
+                        m.span,
+                        true,
+                        m.is_async,
+                    )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
                 out.push(Stmt::Decl(Decl::Enum(EnumDef {
@@ -402,8 +418,13 @@ impl Lowerer<'_> {
                 // none). Field/derive data stays on the surface `decl`.
                 let mut methods = Vec::with_capacity(decl.methods.len());
                 for m in &decl.methods {
-                    let func =
-                        self.lower_func(&m.params, BodyKind::Block(&m.body), m.span, true)?;
+                    let func = self.lower_func(
+                        &m.params,
+                        BodyKind::Block(&m.body),
+                        m.span,
+                        true,
+                        m.is_async,
+                    )?;
                     methods.push((m.name.clone(), Rc::new(func)));
                 }
                 let field_defaults = self.lower_field_defaults(&decl.fields)?;
@@ -444,6 +465,7 @@ impl Lowerer<'_> {
         body: BodyKind<'_>,
         span: Span,
         generator: bool,
+        is_async: bool,
     ) -> Result<Func, Unsupported> {
         let outer = self.temps;
         self.temps = 0;
@@ -467,6 +489,11 @@ impl Lowerer<'_> {
             BodyKind::Block(stmts) if generator && body_has_yield(stmts) => {
                 self.lower_generator(stmts, span)?
             }
+            // An `async fn` (Track A) lowers to a lazy `Future` over its body — `make_future(thunk)` —
+            // not the body's statements directly (like a generator, but a single deferred computation
+            // rather than a per-element state machine). `is_async` is set only at named-`fn`/method
+            // sites, never a closure or the synthesized thunk, so the wrap applies exactly once.
+            BodyKind::Block(stmts) if is_async => self.lower_async(stmts, span)?,
             BodyKind::Block(stmts) => self.lower_body(stmts)?,
         };
         let temp_count = self.temps;
@@ -511,6 +538,42 @@ impl Lowerer<'_> {
         let generator = self.emit(&mut out, Rvalue::MakeGen { step, span }, span);
         out.push(Stmt::Return {
             value: Some(generator),
+            span,
+        });
+        Ok(Block::stmts(out))
+    }
+
+    /// Lower an **async** function body (Track A.1) into a lazy [`Future`]. The body becomes a
+    /// parameterless *thunk* closure and the function returns `make_future(thunk)`:
+    ///
+    /// ```text
+    /// return make_future(($resume) => { <original body> })
+    /// ```
+    ///
+    /// The thunk captures the function's parameters and is **not run when the async fn is called** —
+    /// only when the future is awaited/run (Rust-style laziness). The body's `return e` becomes the
+    /// thunk's return, i.e. the future's completion value; a `.await` inside the body lowers to
+    /// [`Rvalue::RunFuture`], which runs the awaited future to completion (A.1 has no suspension). The
+    /// ignored `$resume` parameter mirrors the generator step (and is forward-compatible with A.2's
+    /// state machine, which resumes with a real value).
+    fn lower_async(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
+        let thunk = Expr::Closure {
+            params: vec![Param {
+                name: RESUME_PARAM.to_string(),
+                name_span: span,
+                ty: None,
+                default: None,
+                span,
+            }],
+            ret: None,
+            body: ClosureBody::Block(stmts.to_vec()),
+            span,
+        };
+        let mut out = Vec::new();
+        let thunk = self.lower_expr(&thunk, &mut out)?;
+        let future = self.emit(&mut out, Rvalue::MakeFuture { thunk, span }, span);
+        out.push(Stmt::Return {
+            value: Some(future),
             span,
         });
         Ok(Block::stmts(out))
@@ -890,13 +953,21 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
-            // `.await` (Track A). A.0 gates every async program at *check* time (E0040 "not yet
-            // executable"), so a checked program never reaches this arm — but lowering must stay
-            // **total over the parsed language** (the tree-walker `expect`s it, and the property test
-            // lowers without checking). So A.0 lowers `.await` to its operand (identity): unreachable
-            // for real programs, total and deterministic for the uncheck­ed property test. A.1 replaces
-            // this with the real poll-state of the async state machine.
-            Expr::Await { expr, .. } => self.lower_expr(expr, out),
+            // `.await` (Track A.1): run the awaited future to completion and yield its value. A.1 has
+            // no suspension, so `run_future` drives the future's lazy thunk straight to its result;
+            // A.2 replaces this with the poll-state of the async state machine (which can park on a
+            // `Pending` leaf).
+            Expr::Await { expr, span } => {
+                let future = self.lower_expr(expr, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::RunFuture {
+                        future,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Coalesce {
                 value,
                 fallback,
@@ -1033,10 +1104,10 @@ impl Lowerer<'_> {
                     lang_ast::ClosureBody::Expr(e) => BodyKind::Arrow(e),
                     lang_ast::ClosureBody::Block(stmts) => BodyKind::Block(stmts),
                 };
-                // A closure is never a generator: `yield` resets at a callable boundary (the checker
-                // already rejects a `yield` inside a closure), and the generator desugar's own step
-                // closure must not be re-desugared. So `generator` is `false` here.
-                let func = self.lower_func(params, body_kind, *span, false)?;
+                // A closure is never a generator or an async fn: `yield`/`.await` reset at a callable
+                // boundary (the checker rejects them inside a closure), and the generator/async
+                // desugar's own thunk must not be re-desugared. So both flags are `false` here.
+                let func = self.lower_func(params, body_kind, *span, false, false)?;
                 Ok(self.emit(
                     out,
                     Rvalue::Closure {
