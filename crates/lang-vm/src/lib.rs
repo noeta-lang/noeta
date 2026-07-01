@@ -79,6 +79,18 @@ impl VmBackend {
         execute(module, host)
     }
 
+    /// Execute a module against a caller-provided host *and* async executor (Track A.4). The CLI
+    /// pairs a real host with a real wall-clock executor so `sleep`/`concurrent` run against real
+    /// time; the differential never calls this (it keeps the sandbox pair), so it is out-of-oracle.
+    pub fn run_module_with_host_and_executor(
+        &self,
+        module: &Module,
+        host: Box<dyn lang_stdlib::Host>,
+        executor: Box<dyn lang_stdlib::Executor>,
+    ) -> RunResult {
+        execute_with_collector(module, host, executor, lang_value::CollectorMode::Trace)
+    }
+
     /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths
     /// use the default [`CollectorMode::Trace`]; the head-to-head benchmark drives both.
     pub fn run_module_with_collector(
@@ -86,7 +98,12 @@ impl VmBackend {
         module: &Module,
         mode: lang_value::CollectorMode,
     ) -> RunResult {
-        execute_with_collector(module, Box::new(lang_stdlib::SandboxHost::new()), mode)
+        execute_with_collector(
+            module,
+            Box::new(lang_stdlib::SandboxHost::new()),
+            Box::new(lang_stdlib::SandboxExecutor::new()),
+            mode,
+        )
     }
 }
 
@@ -211,11 +228,12 @@ struct Vm<'m> {
     /// [`lang_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
     /// this struct. See the eval backend's field of the same name.
     host: Box<dyn lang_stdlib::Host>,
-    /// The async executor (Track A.2): the deterministic logical clock + pending-timer set that
-    /// `sleep(ms)` and drive-to-completion `.await` consult. Fresh per run, identical to the
-    /// tree-walker's by construction, so the differential holds. See the eval backend's field of the
-    /// same name.
-    executor: lang_stdlib::SandboxExecutor,
+    /// The async executor (Track A.2): the clock + pending-timer set that `sleep(ms)` and
+    /// drive-to-completion `.await` consult, behind the [`lang_stdlib::Executor`] seam. The
+    /// conformance harness keeps a deterministic [`lang_stdlib::SandboxExecutor`] (identical to the
+    /// tree-walker's by construction, so the differential holds); the CLI swaps in a real wall-clock
+    /// executor (Track A.4). See the eval backend's field of the same name.
+    executor: Box<dyn lang_stdlib::Executor>,
     /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
     /// each a list of the tasks `spawn`ed in it. The scope owns one reference to each task's future (and
     /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
@@ -302,7 +320,12 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.
 fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
-    execute_with_collector(module, host, lang_value::CollectorMode::Trace)
+    execute_with_collector(
+        module,
+        host,
+        Box::new(lang_stdlib::SandboxExecutor::new()),
+        lang_value::CollectorMode::Trace,
+    )
 }
 
 /// Execute a module under an explicit cycle-collector mode (Phase 6.4). The default path uses the
@@ -313,6 +336,7 @@ fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
 fn execute_with_collector(
     module: &Module,
     host: Box<dyn lang_stdlib::Host>,
+    executor: Box<dyn lang_stdlib::Executor>,
     mode: lang_value::CollectorMode,
 ) -> RunResult {
     lang_value::set_collector_mode(mode);
@@ -377,7 +401,7 @@ fn execute_with_collector(
         global_order: Vec::new(),
         next_id: 1,
         host,
-        executor: lang_stdlib::SandboxExecutor::new(),
+        executor,
         scopes: Vec::new(),
         stdout: String::new(),
         diagnostics: Vec::new(),

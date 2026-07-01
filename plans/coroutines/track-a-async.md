@@ -150,8 +150,9 @@ re-poll; on `Ready(v)`, done; if `Pending` with nothing to advance → a determi
   interleaving with outer siblings (a nested scope runs to completion within its task). Built in two
   green commits — **A.3b.1** front-end (surface + typing + E0041, gated "not yet executable") then
   **A.3b.2** the cooperative scheduler runtime.
-- **A.3 — structured concurrency: `concurrent { }` + `TaskScope` + `spawn` — AND the async state
-  machine (moved here from A.2).** The state machine is built here because concurrency is what makes it
+- **A.3 — structured concurrency + the async state machine — ✅ DONE** (A.3a `e0d408e` state machine;
+  A.3b.1 `ffd74a2` surface/typing/E0041 gated; A.3b.2 `8d2a23b` cooperative scheduler — executes). See
+  the settled-decisions block above and [[coroutines]] memory for the built shape.** The state machine is built here because concurrency is what makes it
   observable: the CFG state-machine lowering (a `lower_async` mirroring `lower_generator`: `.await` →
   hoisted future cell + poll-state that advances on Ready / self-loops returning `Pending`) + the
   `Op::PollFuture` single-poll op replace A.1's thunk so a task can suspend and yield to a sibling.

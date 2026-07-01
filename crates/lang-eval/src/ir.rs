@@ -101,6 +101,25 @@ impl TreeWalkBackend {
     ) -> RunResult {
         Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites)
     }
+
+    /// As [`TreeWalkBackend::run_ir_with_host`], but also swapping the async executor (Track A.4).
+    /// The CLI pairs a real host with a real wall-clock executor so `sleep`/`concurrent` run against
+    /// real time; conformance never calls this (it keeps the default [`lang_stdlib::SandboxExecutor`]),
+    /// so this path is out-of-oracle.
+    pub fn run_ir_with_host_and_executor(
+        &self,
+        ast: &Program,
+        ir: &lang_ir::Program,
+        host: Box<dyn lang_stdlib::Host>,
+        executor: Box<dyn lang_stdlib::Executor>,
+        type_of_sites: std::collections::HashMap<Span, lang_ast::reflect::TypeRepr>,
+    ) -> RunResult {
+        Interpreter::with_host_and_executor(self.seed, host, executor).run_ir(
+            ast,
+            ir,
+            type_of_sites,
+        )
+    }
 }
 
 impl Interpreter {

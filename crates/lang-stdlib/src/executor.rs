@@ -16,6 +16,34 @@
 
 use std::collections::BTreeSet;
 
+/// The async scheduler's clock + timer seam, injected into each backend exactly like [`crate::Host`].
+///
+/// The cooperative scheduler (round-robin polling of the tasks in a `concurrent` scope) lives in the
+/// backends; the executor owns only *time*. When a poll round makes no progress, the backend asks the
+/// executor to [`advance`](Executor::advance) — jump to the next scheduled event — and re-polls. Two
+/// impls back this: [`SandboxExecutor`] (deterministic logical time, the one the differential always
+/// runs → in-oracle) and the CLI-only `RealExecutor` in `lang-runtime` (real wall-clock time via a
+/// tokio timer → out-of-oracle). Both drive the *same* backend scheduler, so they agree on ordering
+/// by construction; only the meaning of "time" differs.
+///
+/// Object-safe on purpose: backends hold a `Box<dyn Executor>` so the real executor substitutes
+/// without touching their internals — the same discipline as `Box<dyn Host>`.
+pub trait Executor {
+    /// The current time in milliseconds. `sleep(ms)` reads this to compute its deadline; for the
+    /// sandbox it is logical time, for the real executor it is elapsed wall-clock time.
+    fn now(&self) -> u64;
+
+    /// Record that a timer is waiting until absolute time `deadline`. A deadline already reached is a
+    /// no-op (the poll that would register it reads ready instead).
+    fn register_timer(&mut self, deadline: u64);
+
+    /// Wait for the earliest pending timer to become ready, returning the new time. `None` means
+    /// nothing is pending — an awaited future is parked with no way to make progress, i.e. a
+    /// deterministic deadlock. The sandbox *jumps* logical time to the deadline; the real executor
+    /// *sleeps* real time until it.
+    fn advance(&mut self) -> Option<u64>;
+}
+
 /// The deterministic sandbox executor: a logical clock (milliseconds, starting at zero) and the set
 /// of pending timer deadlines. This is what the conformance corpus and `--differential` always run.
 #[derive(Debug, Default)]
@@ -32,24 +60,22 @@ impl SandboxExecutor {
     pub fn new() -> SandboxExecutor {
         SandboxExecutor::default()
     }
+}
 
-    /// The current logical time (ms). `sleep(ms)` reads this to compute its deadline.
-    pub fn now(&self) -> u64 {
+impl Executor for SandboxExecutor {
+    fn now(&self) -> u64 {
         self.now
     }
 
-    /// Record that a timer is waiting until `deadline`. A deadline already reached is dropped (the
-    /// poll that would register it reads ready instead), so the set only ever holds future deadlines.
-    pub fn register_timer(&mut self, deadline: u64) {
+    fn register_timer(&mut self, deadline: u64) {
         if deadline > self.now {
             self.timers.insert(deadline);
         }
     }
 
     /// Advance logical time to the earliest pending timer, clearing every timer that time reaches;
-    /// returns the new time. `None` means nothing is pending — an awaited future is parked with no
-    /// way to make progress, i.e. a deterministic deadlock.
-    pub fn advance(&mut self) -> Option<u64> {
+    /// returns the new time. `None` means nothing is pending — a deterministic deadlock.
+    fn advance(&mut self) -> Option<u64> {
         let next = *self.timers.iter().next()?;
         self.now = next;
         self.timers.retain(|&d| d > self.now);

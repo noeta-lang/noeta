@@ -989,10 +989,12 @@ struct Interpreter {
     /// [`lang_stdlib::SandboxHost`] so file IO, PRNG, and clock stay isolated and identical to
     /// the VM by construction; a real host (later M2 slices) swaps in without touching this struct.
     host: Box<dyn lang_stdlib::Host>,
-    /// The async executor (Track A.2): the deterministic logical clock + pending-timer set that
-    /// `sleep(ms)` and drive-to-completion `.await` consult. Fresh per run, identical to the VM's by
-    /// construction (both start at zero and advance the same way), so the differential holds.
-    executor: lang_stdlib::SandboxExecutor,
+    /// The async executor (Track A.2): the clock + pending-timer set that `sleep(ms)` and
+    /// drive-to-completion `.await` consult, behind the [`lang_stdlib::Executor`] seam. Conformance
+    /// and the differential get a deterministic [`lang_stdlib::SandboxExecutor`] (logical time, fresh
+    /// per run, identical to the VM's by construction); the CLI swaps in a real wall-clock executor
+    /// (Track A.4) without touching this struct — the same discipline as `host`.
+    executor: Box<dyn lang_stdlib::Executor>,
     /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
     /// each a list of the tasks `spawn`ed in it. `spawn` appends; `.await` inside the block and the
     /// join at `}` drive the tasks round-robin. A handle references a task by its `(scope, task)`
@@ -1015,9 +1017,24 @@ impl Interpreter {
         Interpreter::with_host(seed, Box::new(lang_stdlib::SandboxHost::new()))
     }
 
-    /// Build an interpreter against a caller-provided [`lang_stdlib::Host`] (M2.3). `new` uses the
-    /// deterministic sandbox (what the differential needs); the CLI/REPL pass a real host here.
+    /// Build an interpreter against a caller-provided [`lang_stdlib::Host`] (M2.3), keeping the
+    /// default deterministic executor. `new` uses the deterministic sandbox (what the differential
+    /// needs); the CLI/REPL pass a real host here.
     fn with_host(seed: u64, host: Box<dyn lang_stdlib::Host>) -> Interpreter {
+        Interpreter::with_host_and_executor(
+            seed,
+            host,
+            Box::new(lang_stdlib::SandboxExecutor::new()),
+        )
+    }
+
+    /// Build an interpreter against caller-provided host *and* executor (Track A.4). The CLI pairs a
+    /// real host with a real wall-clock executor; the differential always uses the sandbox pair.
+    fn with_host_and_executor(
+        seed: u64,
+        host: Box<dyn lang_stdlib::Host>,
+        executor: Box<dyn lang_stdlib::Executor>,
+    ) -> Interpreter {
         let global = Scope::global();
         for &builtin in Builtin::PRELUDE {
             global.declare(builtin.name().to_string(), Value::Builtin(builtin), false);
@@ -1054,7 +1071,7 @@ impl Interpreter {
             globals: Rc::clone(&global),
             scope: global,
             host,
-            executor: lang_stdlib::SandboxExecutor::new(),
+            executor,
             scopes: Vec::new(),
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
