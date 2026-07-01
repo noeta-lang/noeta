@@ -3279,32 +3279,41 @@ impl Interpreter {
         }
     }
 
-    /// Poll every not-yet-complete task in scope `si` once, storing any `Ready` results; returns
-    /// whether any task completed this round (used to decide whether to advance the clock). Re-reads the
-    /// task count each step, so tasks `spawn`ed mid-round are polled in the same round.
-    fn poll_scope_round(&mut self, si: usize, span: Span) -> Eval<bool> {
+    /// Poll every not-yet-complete task in **every open scope** once (Track A.7 — nested-`concurrent`
+    /// interleaving), storing any `Ready` results; returns whether any task completed this round.
+    /// Polling across all scope levels (not just the innermost) lets an outer scope's spawned siblings
+    /// make progress while an inner `concurrent` block is joined. Re-reads the scope/task counts each
+    /// step so mid-round `spawn`s are polled the same round; a nested `concurrent` in a task body pushes
+    /// and pops its own scope within that task's poll (balanced), so the stack is stable between polls.
+    fn poll_all_scopes_round(&mut self, span: Span) -> Eval<bool> {
         let mut completed = false;
-        let mut ti = 0;
-        while ti < self.scopes[si].len() {
-            if self.scopes[si][ti].result.is_none() {
-                let future = self.scopes[si][ti].future.clone();
-                if let Some(value) = self.poll_once(&future, span)? {
-                    self.scopes[si][ti].result = Some(value);
-                    completed = true;
+        let mut si = 0;
+        while si < self.scopes.len() {
+            let mut ti = 0;
+            while ti < self.scopes[si].len() {
+                if self.scopes[si][ti].result.is_none() {
+                    let future = self.scopes[si][ti].future.clone();
+                    if let Some(value) = self.poll_once(&future, span)? {
+                        self.scopes[si][ti].result = Some(value);
+                        completed = true;
+                    }
                 }
+                ti += 1;
             }
-            ti += 1;
+            si += 1;
         }
         Ok(completed)
     }
 
-    /// Join scope `si` (Track A.3b): drive its tasks round-robin until all complete. On a round where
-    /// nothing completed, advance the logical clock to the next timer; a pending scope with no timer to
-    /// advance is a deterministic deadlock.
+    /// Join the innermost scope (Track A.3b): drive tasks round-robin until the innermost scope's tasks
+    /// all complete. Each round polls **all** open scopes (A.7) so an outer scope's siblings interleave
+    /// with the inner join; the loop exits on the innermost scope alone. On a round where nothing
+    /// completed, advance the logical clock; a pending scope with no timer to advance is a deterministic
+    /// deadlock.
     fn join_scope(&mut self, span: Span) -> Eval<()> {
         let si = self.scopes.len() - 1;
         loop {
-            let progressed = self.poll_scope_round(si, span)?;
+            let progressed = self.poll_all_scopes_round(span)?;
             if self.scopes[si].iter().all(|t| t.result.is_some()) {
                 return Ok(());
             }
@@ -3320,21 +3329,21 @@ impl Interpreter {
     }
 
     /// Drive an awaited future to completion via the executor (Track A.2/A.3 — a `.await` in inlined
-    /// context: the top level or a `concurrent` block body). Polls the target; if a `concurrent` scope
-    /// is open, also drives that scope's sibling tasks one round each iteration so they interleave;
-    /// advances the logical clock when nothing progresses; deadlocks if nothing can advance.
+    /// context: the top level or a `concurrent` block body). Polls the target; each iteration also
+    /// drives every open `concurrent` scope's sibling tasks a round (A.7 — across all scope levels) so
+    /// they interleave; advances the logical clock when nothing progresses; deadlocks if nothing can
+    /// advance.
     fn drive_future(&mut self, future: Value, span: Span) -> Eval<Value> {
         loop {
             if let Some(value) = self.poll_once(&future, span)? {
                 return Ok(value);
             }
-            // Interleave: run the innermost open scope's tasks one round (so awaiting a handle — or a
-            // `sleep` — inside a `concurrent` block lets siblings make progress).
+            // Interleave: run every open scope's tasks one round (so awaiting a handle — or a `sleep` —
+            // inside a `concurrent` block lets siblings at all levels make progress).
             let progressed = if self.scopes.is_empty() {
                 false
             } else {
-                let si = self.scopes.len() - 1;
-                self.poll_scope_round(si, span)?
+                self.poll_all_scopes_round(span)?
             };
             if !progressed && self.executor.advance().is_none() {
                 return Err(self.runtime_error(

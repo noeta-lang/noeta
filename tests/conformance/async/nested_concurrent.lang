@@ -1,0 +1,38 @@
+// Track A.7 — a nested `concurrent` block interleaves with the OUTER scope's siblings. `slow` is
+// spawned in the outer scope, then an inner `concurrent { }` spawns `a`/`b`. The scheduler polls every
+// open scope each round, so `slow` starts and its long sleep advances *while* the inner block runs —
+// rather than the inner block completing atomically first. Deterministic under the sandbox clock: at
+// t=0 all three start; t=1 the short sleepers finish; the inner join returns; awaiting `s` advances to
+// t=3 and `slow` finishes. (Before A.7 `slow start` appeared only after `inner done`.)
+// expect: stdout "slow start"
+// expect: stdout "a start"
+// expect: stdout "b start"
+// expect: stdout "a end"
+// expect: stdout "b end"
+// expect: stdout "inner done"
+// expect: stdout "slow end"
+// expect: stdout "s=3"
+// expect: stdout "outer done"
+// expect: exit 0
+async fn slow(): int {
+    echo "slow start"
+    sleep(3).await
+    echo "slow end"
+    return 3
+}
+async fn quick(name: string): int {
+    echo name ~ " start"
+    sleep(1).await
+    echo name ~ " end"
+    return 1
+}
+concurrent {
+    s = spawn slow()
+    concurrent {
+        a = spawn quick("a")
+        b = spawn quick("b")
+    }
+    echo "inner done"
+    echo "s=" ~ s.await
+}
+echo "outer done"
