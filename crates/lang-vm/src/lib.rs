@@ -44,6 +44,11 @@ use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
 use lang_value::{Value, apply_binary, apply_unary, compare_primitive, structural_compare};
 
+// Wired into the real-thread `Op::SpawnIsolate` handler in the next I.4b step; the marshalling and its
+// round-trip tests land first (unused until then).
+#[allow(dead_code)]
+mod isolate;
+
 /// The bytecode-VM backend.
 #[derive(Debug, Clone, Default)]
 pub struct VmBackend;
