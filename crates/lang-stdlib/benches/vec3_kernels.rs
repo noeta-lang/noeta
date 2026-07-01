@@ -83,6 +83,44 @@ fn vec3_kernels(c: &mut Criterion) {
         });
     }
     soa.finish();
+
+    // P-SIMD C3 row-vs-column dispatch: the *realistic* end-to-end kernel path each `vec.*_all` takes.
+    // A `layout: row` list feeds the AoS `*_buffers` kernels (read the interleaved bytes directly). A
+    // `layout: column` list feeds the column path: the reductions (`dot`/`length`) read the three
+    // contiguous columns directly via `col_dot`/`col_length` (no decode — a per-call `SoaVec3` decode
+    // benched *slower* than AoS), and the element-wise `add` is layout-agnostic (`add_buffers` on the
+    // column bytes is a correct column result). This decides whether `column` is worth dispatching to.
+    // Numbers land in `plans/perf/p-simd-column-layout.md`.
+    let mut disp = c.benchmark_group("column_dispatch");
+    for &n in SIZES {
+        let a_aos = make_buffer(n);
+        let b_aos = make_buffer(n);
+        // Column-order buffers with the same values (`[x×n][y×n][z×n]`).
+        let a_col = vec3::soa_to_columns(&vec3::soa_from_packed(&a_aos));
+        let b_col = vec3::soa_to_columns(&vec3::soa_from_packed(&b_aos));
+
+        disp.bench_with_input(BenchmarkId::new("dot-row", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::dot_buffers(black_box(&a_aos), black_box(&b_aos))));
+        });
+        disp.bench_with_input(BenchmarkId::new("dot-col", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::col_dot(black_box(&a_col), black_box(&b_col))));
+        });
+        disp.bench_with_input(BenchmarkId::new("length-row", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::length_buffer(black_box(&a_aos))));
+        });
+        disp.bench_with_input(BenchmarkId::new("length-col", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::col_length(black_box(&a_col))));
+        });
+        // `add` is layout-agnostic (element-wise over the flat `f32` array), so the column path is
+        // just `add_buffers` on the column bytes — same kernel, same speed as row, correct result.
+        disp.bench_with_input(BenchmarkId::new("add-row", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::add_buffers(black_box(&a_aos), black_box(&b_aos))));
+        });
+        disp.bench_with_input(BenchmarkId::new("add-col", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::add_buffers(black_box(&a_col), black_box(&b_col))));
+        });
+    }
+    disp.finish();
 }
 
 criterion_group!(benches, vec3_kernels);

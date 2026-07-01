@@ -1,0 +1,30 @@
+// P-SIMD C3: the bulk `vec.*_all` kernels on a `@packed(layout: column)` Vec3 list. A column buffer's
+// bytes are already the SoA columns, so the kernels take the fast autovectorized `soa_*` path — but
+// the result is **bit-identical** to the row layout (element-wise per-lane; reductions keep the
+// `(x·bx + y·by) + z·bz` order). The producing kernels return a column list; the reducing kernels an
+// `f32` list. The differential pins the VM against the eval reference; the leak oracle pins residency.
+// expect: stdout "[5.0, 3.0]"
+// expect: stdout "[3.0, 14.0]"
+// expect: stdout "[V3 {x: 4.0, y: 4.0, z: 0.0}, V3 {x: 1.0, y: 5.0, z: 6.0}]"
+// expect: stdout "[V3 {x: 2.0, y: 4.0, z: 0.0}, V3 {x: 1.0, y: -1.0, z: -2.0}]"
+// expect: stdout "[V3 {x: 6.0, y: 8.0, z: 0.0}, V3 {x: 2.0, y: 4.0, z: 4.0}]"
+// expect: stdout "V3 {x: 4.0, y: 4.0, z: 0.0}"
+// expect: stdout "2"
+// expect: exit 0
+use std.{vec}
+
+@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+
+ps = [V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }, V3 { x: 1.0f32, y: 2.0f32, z: 2.0f32 }]
+qs = [V3 { x: 1.0f32, y: 0.0f32, z: 0.0f32 }, V3 { x: 0.0f32, y: 3.0f32, z: 4.0f32 }]
+
+echo vec.length_all(ps)        // reductions: SoA length kernel → f32 list
+echo vec.dot_all(ps, qs)       // SoA dot kernel → f32 list
+echo vec.add_all(ps, qs)       // producing: SoA add → a column V3 list
+echo vec.sub_all(ps, qs)
+echo vec.scale_all(ps, 2.0f32)
+
+// A produced column list is a real `List<V3>` — indexable and countable.
+totals = vec.add_all(ps, qs)
+echo totals[0]
+echo totals.count()

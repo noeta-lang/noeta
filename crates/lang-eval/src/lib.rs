@@ -2445,8 +2445,11 @@ impl Interpreter {
         match func {
             "add_all" | "sub_all" => {
                 self.expect_std_arity(func, args, 2, span)?;
+                // `add`/`sub` are element-wise over the flat `f32` array, so they are layout-agnostic:
+                // the same `*_buffers` kernel on two column buffers yields the correct column result
+                // (P-SIMD C3). Handle either layout uniformly — both operands must share it.
                 if let (Some((schema, a)), Some((_, b))) =
-                    (args[0].packed_vec3_data(), args[1].packed_vec3_data())
+                    (args[0].packed_vec3_any(), args[1].packed_vec3_any())
                 {
                     if a.len() != b.len() {
                         return Err(self.vec_len_error(func, span));
@@ -2463,13 +2466,24 @@ impl Interpreter {
             "scale_all" => {
                 self.expect_std_arity(func, args, 2, span)?;
                 let s = self.read_scalar_f32(func, &args[1], span)?;
-                if let Some((schema, a)) = args[0].packed_vec3_data() {
+                // Layout-agnostic like `add`/`sub` — `scale_buffer` on column bytes is a column result.
+                if let Some((schema, a)) = args[0].packed_vec3_any() {
                     return Ok(Value::packed_list_from(schema, vec3::scale_buffer(&a, s)));
                 }
                 self.vec_map_scalar(func, &args[0], span, |c| vec3::scale(c, s))
             }
             "dot_all" => {
                 self.expect_std_arity(func, args, 2, span)?;
+                // Column fast path (P-SIMD C3): read the three contiguous columns directly (no decode)
+                // — `col_dot` autovectorizes and is bit-identical to the AoS reduction.
+                if let (Some((_, a)), Some((_, b))) =
+                    (args[0].packed_vec3_columns(), args[1].packed_vec3_columns())
+                {
+                    if a.len() != b.len() {
+                        return Err(self.vec_len_error(func, span));
+                    }
+                    return Ok(f32_list(&vec3::col_dot(&a, &b)));
+                }
                 if let (Some((_, a)), Some((_, b))) =
                     (args[0].packed_vec3_data(), args[1].packed_vec3_data())
                 {
@@ -2482,6 +2496,9 @@ impl Interpreter {
             }
             "length_all" => {
                 self.expect_std_arity(func, args, 1, span)?;
+                if let Some((_, a)) = args[0].packed_vec3_columns() {
+                    return Ok(f32_list(&vec3::col_length(&a)));
+                }
                 if let Some((_, a)) = args[0].packed_vec3_data() {
                     return Ok(f32_list(&vec3::length_buffer(&a)));
                 }

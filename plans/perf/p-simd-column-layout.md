@@ -126,9 +126,12 @@ covers `Vec3` and the whole demonstrated win — and add nested flattening as a 
 | `packed_bytes` (`to_bytes`) | row-order buffer | column-order buffer |
 | `vec.*_all` kernels | AoS `*_buffers` | columnar kernels (S4) |
 
-**Kernels reused from S4.** `lang_stdlib::vec3`'s columnar reductions (`soa_dot`/`soa_length`, iterator-
-zipped, autovectorized) are the fast path; they read the contiguous column byte-ranges directly (each
-column is a contiguous `f32` run in the column-order buffer). No `wide`/intrinsics (they benched slower).
+**Kernels (as built in C3).** The column reductions (`col_dot`/`col_length`) reinterpret each
+contiguous column to a typed `&[f32]` via `bytemuck::try_cast_slice` (safe, alignment-checked) and
+reduce — that typed view is what autovectorizes, and it is the *actual* win (reading the same bytes
+*as bytes* benched no faster than AoS; see C3's course-correction). No `wide`/intrinsics (benched
+slower). The element-wise `add`/`sub`/`scale` need no column kernel — they run the existing `*_buffers`
+kernel on the column bytes unchanged (layout-agnostic).
 
 ## S5 → directive migration
 
@@ -204,9 +207,39 @@ milestone, which needs const generics.)
   dispatch is C3. **Nested `@packed` fields work generally** (kept as contiguous per-element chunks,
   so no primitive-only restriction was needed); leaf-flattening them into leaf columns is still C5.
   Conformance 387 (+`packed_column_ops`), differential 377 / 0 skipped / agree, leak 0, miri clean.
-- **C3 — fast `vec.*_all` column dispatch.** `add_all`/`sub_all`/`scale_all`/`dot_all`/`length_all` pick
-  the S4 columnar kernels on `layout: column` (a column Vec3 buffer's bytes *are* the SoA columns).
-  Bench row-vs-column, record here. Add `vec3_column.lang`.
+- **C3 — fast `vec.*_all` column dispatch. ✅ DONE (with a course-correction — see below).**
+  `dot_all`/`length_all` on a `layout: column` list dispatch to new reduction kernels (`col_dot`/
+  `col_length`) that reinterpret each contiguous column to a typed `&[f32]` and reduce (autovectorized);
+  `add_all`/`sub_all`/`scale_all` are **layout-agnostic** (element-wise over the flat `f32` array), so
+  they run the existing `*_buffers` kernel on the column bytes and return a column result — no special
+  path. Added `vec3_column.lang` (kernels on a column type, output bit-identical to row) + a
+  `column_dispatch` bench group + `col_dot`/`col_length` bit-identity unit tests. Conformance 388,
+  differential 378 / 0 skipped / agree, leak 0.
+
+  **The course-correction (a measured negative→positive result).** The doc's original premise — "a
+  column buffer's bytes *are* the SoA columns, so the kernels read them directly for the win" — was
+  **only half right**, and the bench caught it:
+  1. Reading the column bytes *as bytes* (`chunks_exact(4).map(from_le_bytes)`) autovectorizes **no
+     better than AoS** — `dot-col` == `dot-row` exactly (73 µs both at 100k). The layout alone buys
+     nothing; the S4 win came from reading a typed `&[f32]`, not from contiguity per se.
+  2. Decoding the column bytes to a `Vec<f32>` **per call** (`soa_from_columns`) is *worse* — the alloc
+     dominates (dot 190 µs, ~2.5× **slower** than AoS at 100k).
+  3. The fix: a **zero-copy `&[u8]`→`&[f32]` reinterpret** of the aligned column buffer via
+     `bytemuck::try_cast_slice` (safe, alignment-checked; unsafe encapsulated in the crate, so our
+     source stays `unsafe`-free under the workspace `unsafe_code = "forbid"`), with a byte-read fallback
+     for the rare misaligned (tiny) buffer. **This delivers the win** — and reaches it through the
+     column *directive* rather than S5's explicit `SoaVec3` value.
+
+  **Bench (this machine, `column_dispatch` group, row → column):**
+
+  | n | `dot_all` row→col | `length_all` row→col |
+  |---|---|---|
+  | 1 000 | 735 ns → 213 ns (**3.4×**) | 1.16 µs → 0.33 µs (**3.5×**) |
+  | 10 000 | 7.43 µs → 1.93 µs (**3.8×**) | 11.4 µs → 2.79 µs (**4.1×**) |
+  | 100 000 | 76.1 µs → 28.5 µs (**2.7×**) | 118 µs → 31.8 µs (**3.7×**) |
+
+  (`add_all` row vs column is equal by construction — same kernel.) Kept only where it wins: the
+  reductions get the typed-`&[f32]` path; the element-wise ops need no column kernel.
 - **C4 — retire S5.** Remove `vec.soa*` + `SoaVec3`/`Payload::SoaVec3` + `SOA_VEC3` + `vec3_soa.lang`.
 - **C5 (follow-on) — nested leaf-flattening** for structs with nested `@packed` fields (`Particle`).
 

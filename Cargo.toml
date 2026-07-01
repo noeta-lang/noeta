@@ -58,6 +58,9 @@ assert_cmd = "2"
 predicates = "3"
 criterion = { version = "0.5", default-features = false }
 toml = "0.9"
+# Safe (unsafe-free API) checked byte↔`f32` reinterpret for the P-SIMD column kernels — the aligned
+# `&[u8]`→`&[f32]` view that unlocks autovectorized reductions without `unsafe` in our source.
+bytemuck = "1"
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may

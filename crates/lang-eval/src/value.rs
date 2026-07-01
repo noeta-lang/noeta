@@ -344,6 +344,41 @@ impl PackedList {
         }
     }
 
+    /// If this is a **column-major** `List<Vec3<f32>>` (`@packed(layout: column)`), its schema and
+    /// column-order buffer — the direct input to the SoA reduction kernels (P-SIMD C3). `None` for a
+    /// row list (which takes `vec3_data`) or any other schema.
+    fn vec3_columns(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        if self.schema.column
+            && self.schema.fields.len() == 3
+            && self
+                .schema
+                .fields
+                .iter()
+                .all(|f| matches!(f.kind, SlotKind::F32))
+        {
+            Some((Rc::clone(&self.schema), (*self.bytes).clone()))
+        } else {
+            None
+        }
+    }
+
+    /// If this is a `List<Vec3<f32>>` of **either** layout, its schema and byte buffer — for the
+    /// layout-agnostic element-wise kernels (`add`/`sub`/`scale`, P-SIMD C3), which operate over the
+    /// flat `f32` array and so preserve whichever layout the input carries.
+    fn vec3_any(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        if self.schema.fields.len() == 3
+            && self
+                .schema
+                .fields
+                .iter()
+                .all(|f| matches!(f.kind, SlotKind::F32))
+        {
+            Some((Rc::clone(&self.schema), (*self.bytes).clone()))
+        } else {
+            None
+        }
+    }
+
     /// Pack one `element` onto the end of the buffer, extending it **in place** when uniquely owned
     /// (which it always is along the streaming-construction chain — the accumulator is an ANF temp).
     /// Returns `false` without modifying the buffer if the element fails to pack (a non-object, or a
@@ -545,6 +580,24 @@ impl Value {
     pub(crate) fn packed_vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
         match self {
             Value::List(ListRepr::Packed(p)) => p.vec3_data(),
+            _ => None,
+        }
+    }
+
+    /// If this is a **column-major** packed `List<Vec3<f32>>`, its schema and column-order buffer —
+    /// the direct input to the SoA reduction kernels (P-SIMD C3).
+    pub(crate) fn packed_vec3_columns(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        match self {
+            Value::List(ListRepr::Packed(p)) => p.vec3_columns(),
+            _ => None,
+        }
+    }
+
+    /// If this is a packed `List<Vec3<f32>>` of **either** layout, its schema and buffer — for the
+    /// layout-agnostic element-wise kernels (`add`/`sub`/`scale`, P-SIMD C3).
+    pub(crate) fn packed_vec3_any(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        match self {
+            Value::List(ListRepr::Packed(p)) => p.vec3_any(),
             _ => None,
         }
     }

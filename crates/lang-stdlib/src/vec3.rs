@@ -102,9 +102,11 @@ pub fn abs(a: [f32; 3]) -> [f32; 3] {
 // is a small but real win — ~1.5–3% on the packed `add_all` path (`vm_vec_add_all` bench, P-PACK 4.3);
 // modest because the kernel is a fraction of the op's cost (building the result list dominates). Both
 // backends store this layout identically, so they call these directly and agree by construction.
-// (`lang-stdlib` is `unsafe`-free and the buffer is `Vec<u8>` / 1-aligned, so a zero-copy `&[f32]`
-// reinterpret — the path to true aligned SIMD — is unavailable here without either `unsafe` in
-// `lang-value` (which would break the shared-kernel design) or an SoA layout; deferred.)
+// These **AoS/row** kernels stay byte-direct: an interleaved buffer has no contiguous per-component
+// run to reinterpret, so a typed `&[f32]` view would not help a reduction (the component stride is 12
+// bytes). The **column** layout does have contiguous per-component runs — see [`col_dot`]/[`col_length`]
+// below, which reinterpret each column to `&[f32]` via `bytemuck` (safe, checked) for the aligned-SIMD
+// win (P-SIMD C3). That is why the win needs the column *layout*, not just these kernels.
 
 /// Read one little-endian `f32` from the first 4 bytes of `c`.
 #[inline]
@@ -236,6 +238,123 @@ pub fn soa_to_packed(a: &SoaVec3) -> Vec<u8> {
     out
 }
 
+/// Serialize a [`SoaVec3`] to a **column-major** packed `List<Vec3>` byte buffer (`[x×n][y×n][z×n]`,
+/// P-SIMD C3) — so a batch (or a test) can produce a `layout: column` buffer. Each column is written
+/// as one contiguous `f32` run. (The reverse — reading a column buffer — is deliberately *not* a
+/// decode helper: the reduction kernels [`col_dot`]/[`col_length`] read the contiguous columns in
+/// place, since a per-call `SoaVec3` decode benched slower than the AoS kernels; see below.)
+pub fn soa_to_columns(a: &SoaVec3) -> Vec<u8> {
+    let mut out = Vec::with_capacity(a.len() * 12);
+    for &x in &a.xs {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    for &y in &a.ys {
+        out.extend_from_slice(&y.to_le_bytes());
+    }
+    for &z in &a.zs {
+        out.extend_from_slice(&z.to_le_bytes());
+    }
+    out
+}
+
+// --- Direct column-buffer reduction kernels (P-SIMD C3) ---
+//
+// The `dot`/`length` reductions over a `@packed(layout: column)` Vec3 buffer, reading the three
+// **contiguous** `f32` columns straight out of the byte buffer — **no** `SoaVec3` decode (that
+// per-call `Vec<f32>` allocation benched *slower* than the AoS kernels, wiping out the layout win).
+// Each column is a contiguous run, so the per-element products are three contiguous `f32` streams
+// LLVM autovectorizes across elements — the same lever as the `soa_*` kernels, without the alloc.
+// Bit-identical to the AoS kernels: each element keeps the `(x·bx + y·by) + z·bz` order.
+//
+// (`add`/`sub`/`scale` need **no** column kernel: they are element-wise over the flat `f32` array, so
+// the same permutation carries through — `add_buffers` on two column buffers already yields the
+// correct column result, at row speed. Only the reductions, which combine an element's three
+// components, care about the layout.)
+
+// The throughput lever is reading each column as a typed `&[f32]` — which LLVM autovectorizes across
+// elements — rather than a `&[u8]` decoded per element (benched: byte reads exactly match the AoS
+// kernel, no win; the layout alone buys nothing). `bytemuck::try_cast_slice` gives that `&[f32]` view
+// **zero-copy** when the buffer is `f32`-aligned (which a heap `Vec<u8>` of these sizes is), with the
+// unsafe reinterpret encapsulated behind its safe, checked API — so our source stays `unsafe`-free
+// (`unsafe_code = "forbid"` holds). If a buffer is ever misaligned (tiny lists), we fall back to the
+// per-element byte kernel — bit-identical, just not vectorized. This is the S4 win reached through
+// the column *directive* rather than an explicit SoA value type.
+
+/// View a column-major Vec3 byte buffer (`n` elements, `[x×n][y×n][z×n]`) as three typed `f32` column
+/// slices, or `None` if the buffer is not `f32`-aligned (then the caller uses the byte-read fallback).
+fn columns_f32(buf: &[u8], n: usize) -> Option<(&[f32], &[f32], &[f32])> {
+    let floats: &[f32] = bytemuck::try_cast_slice(buf).ok()?;
+    // `try_cast_slice` already guarantees `floats.len() == buf.len() / 4 == 3n`; slice into columns.
+    Some((&floats[..n], &floats[n..2 * n], &floats[2 * n..]))
+}
+
+/// The `k`-th contiguous `f32` column (`k` = 0/1/2 for x/y/z) of a column-major Vec3 buffer of `n`
+/// elements — a `4n`-byte sub-slice (byte-fallback view).
+fn column(buf: &[u8], k: usize, n: usize) -> &[u8] {
+    &buf[k * 4 * n..(k + 1) * 4 * n]
+}
+
+/// `dot_all` over two column-major Vec3 buffers → one `f32` per element. Fast path: read the three
+/// columns as typed `&[f32]` and reduce (autovectorized); fallback: per-element byte reads. Both keep
+/// the `(x·bx + y·by) + z·bz` order, so bit-identical to the AoS kernel.
+pub fn col_dot(a: &[u8], b: &[u8]) -> Vec<f32> {
+    let n = a.len() / 12;
+    match (columns_f32(a, n), columns_f32(b, n)) {
+        (Some((ax, ay, az)), Some((bx, by, bz))) => ax
+            .iter()
+            .zip(bx)
+            .zip(ay.iter().zip(by))
+            .zip(az.iter().zip(bz))
+            .map(|(((xa, xb), (ya, yb)), (za, zb))| xa * xb + ya * yb + za * zb)
+            .collect(),
+        _ => {
+            let xs = column(a, 0, n)
+                .chunks_exact(4)
+                .zip(column(b, 0, n).chunks_exact(4));
+            let ys = column(a, 1, n)
+                .chunks_exact(4)
+                .zip(column(b, 1, n).chunks_exact(4));
+            let zs = column(a, 2, n)
+                .chunks_exact(4)
+                .zip(column(b, 2, n).chunks_exact(4));
+            xs.zip(ys)
+                .zip(zs)
+                .map(|(((xa, xb), (ya, yb)), (za, zb))| {
+                    read_f32(xa) * read_f32(xb)
+                        + read_f32(ya) * read_f32(yb)
+                        + read_f32(za) * read_f32(zb)
+                })
+                .collect()
+        }
+    }
+}
+
+/// `length_all` over a column-major Vec3 buffer → one `f32` per element: `√((x·x + y·y) + z·z)`. Same
+/// fast-typed / byte-fallback split as [`col_dot`].
+pub fn col_length(a: &[u8]) -> Vec<f32> {
+    let n = a.len() / 12;
+    match columns_f32(a, n) {
+        Some((xs, ys, zs)) => xs
+            .iter()
+            .zip(ys)
+            .zip(zs)
+            .map(|((&x, &y), &z)| (x * x + y * y + z * z).sqrt())
+            .collect(),
+        None => {
+            let xs = column(a, 0, n).chunks_exact(4);
+            let ys = column(a, 1, n).chunks_exact(4);
+            let zs = column(a, 2, n).chunks_exact(4);
+            xs.zip(ys)
+                .zip(zs)
+                .map(|((px, py), pz)| {
+                    let (x, y, z) = (read_f32(px), read_f32(py), read_f32(pz));
+                    (x * x + y * y + z * z).sqrt()
+                })
+                .collect()
+        }
+    }
+}
+
 /// Component-wise sum of two batches → a new batch.
 pub fn soa_add(a: &SoaVec3, b: &SoaVec3) -> SoaVec3 {
     soa_zip(a, b, |x, y| x + y)
@@ -359,6 +478,27 @@ mod tests {
         assert_eq!(soa_length(&a), length_buffer(&a_aos));
         // The AoS→SoA→AoS transpose round-trips exactly.
         assert_eq!(soa_from_packed(&a_aos), a);
+
+        // P-SIMD C3: the direct column-buffer reductions read the same values from a `[x×n][y×n][z×n]`
+        // buffer and must be bit-identical to the AoS kernels too (they replace them on the column
+        // dispatch path). `add`/`sub`/`scale` are layout-agnostic: `add_buffers` on the *column*
+        // buffers equals the column-serialized SoA add.
+        let a_col = soa_to_columns(&a);
+        let b_col = soa_to_columns(&b);
+        assert_eq!(col_dot(&a_col, &b_col), dot_buffers(&a_aos, &b_aos));
+        assert_eq!(col_length(&a_col), length_buffer(&a_aos));
+        assert_eq!(
+            add_buffers(&a_col, &b_col),
+            soa_to_columns(&soa_add(&a, &b))
+        );
+        assert_eq!(
+            sub_buffers(&a_col, &b_col),
+            soa_to_columns(&soa_sub(&a, &b))
+        );
+        assert_eq!(
+            scale_buffer(&a_col, 2.5),
+            soa_to_columns(&soa_scale(&a, 2.5))
+        );
         // Element-wise ops: add/sub/scale agree with per-lane references.
         let sum = soa_add(&a, &b);
         let diff = soa_sub(&a, &b);

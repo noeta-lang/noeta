@@ -416,6 +416,44 @@ impl Value {
         })
     }
 
+    /// If this is a **column-major** packed `List<Vec3<f32>>` (`@packed(layout: column)`), its shared
+    /// schema and column-order byte buffer (`[x×n][y×n][z×n]`) — the direct input to the SoA reduction
+    /// kernels (P-SIMD C3), which read the three contiguous `f32` columns with no transpose. `None`
+    /// for a row list (which takes `packed_vec3_data`) or any other element schema.
+    pub fn packed_vec3_columns(self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        if !self.is_packed_list() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, bytes }
+                if schema.column
+                    && schema.fields.len() == 3
+                    && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
+            {
+                Some((Rc::clone(schema), bytes.clone()))
+            }
+            _ => None,
+        })
+    }
+
+    /// If this is a packed `List<Vec3<f32>>` of **either** layout, its schema and byte buffer — for
+    /// the layout-agnostic element-wise kernels (`add`/`sub`/`scale`, P-SIMD C3), which operate over
+    /// the flat `f32` array and so preserve whichever layout the input carries.
+    pub fn packed_vec3_any(self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
+        if !self.is_packed_list() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::PackedList { schema, bytes }
+                if schema.fields.len() == 3
+                    && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
+            {
+                Some((Rc::clone(schema), bytes.clone()))
+            }
+            _ => None,
+        })
+    }
+
     /// Allocate an opt-in columnar (SoA) Vec3 batch (P-SIMD) carrying its element `schema` (so
     /// `vec.soa_list` can rebuild the same-typed packed list). The caller owns the result (rc 1).
     pub fn soa_vec3(schema: Rc<PackedSchema>, cols: lang_stdlib::vec3::SoaVec3) -> Value {
