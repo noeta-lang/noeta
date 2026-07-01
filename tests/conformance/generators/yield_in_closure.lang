@@ -1,0 +1,12 @@
+// Track G.3 (coloring) — a `yield` belongs to the innermost enclosing generator, and a closure is a
+// fresh function boundary (its own return, not the generator's `Iterator<T>`). So a `yield` inside a
+// closure — here one passed to the `map` builtin — is not inside a generator and is rejected (E0039),
+// rather than silently suspending the wrong frame. The generator's own top-level `yield` is fine; it
+// is the one inside the callback that is colored out.
+// expect: error E0039 at 9:33
+// expect: exit 1
+fn g(): Iterator<int> {
+    ys = map([1, 2, 3], fn(n) { yield n; return n; });
+    yield 0
+}
+echo g().collect()
