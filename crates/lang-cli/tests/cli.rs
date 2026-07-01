@@ -121,6 +121,44 @@ fn run_does_real_disk_io() {
 }
 
 #[test]
+fn run_sleeps_in_real_time_on_the_real_executor() {
+    // Track A.4: `lang run` pairs the real host with the real wall-clock executor, so an awaited
+    // `sleep(ms)` genuinely takes real time (the sandbox executor would jump logical time and finish
+    // instantly). Two tasks in a `concurrent` block interleave — `b`'s shorter sleep finishes first —
+    // producing the *same* byte-for-byte output as the sandbox differential, but taking ~150ms of
+    // real time. We assert both: the interleaved output and a real-time lower bound.
+    let src = "async fn work(name: string, ms: int): int {\n\
+               \x20   echo name ~ \" start\"\n\
+               \x20   sleep(ms).await\n\
+               \x20   echo name ~ \" end\"\n\
+               \x20   return ms\n\
+               }\n\
+               concurrent {\n\
+               \x20   a = spawn work(\"a\", 150)\n\
+               \x20   b = spawn work(\"b\", 50)\n\
+               \x20   echo \"sum=\" ~ (a.await + b.await)\n\
+               }\n\
+               echo \"done\"\n";
+    let file = temp_program("run_real_sleep", src);
+    let start = std::time::Instant::now();
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        // `a` suspends at its 150ms sleep; `b` runs and finishes first (50ms); then `a`. The
+        // handles are awaited for their `int` results, summed to 200.
+        .stdout("a start\nb start\nb end\na end\nsum=200\ndone\n");
+    // The longer sleep (150ms) really elapsed — proof the executor is the real one, not the sandbox
+    // (which would return in well under this). A generous margin keeps the test non-flaky.
+    assert!(
+        start.elapsed() >= std::time::Duration::from_millis(120),
+        "the real executor should sleep ~150ms of wall-clock time, took {:?}",
+        start.elapsed()
+    );
+}
+
+#[test]
 fn run_orders_example_produces_the_headline_output() {
     lang()
         .current_dir(workspace())

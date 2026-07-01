@@ -21,6 +21,9 @@
 //! map onto `tokio::fs`'s `read_dir`/`create_dir_all` and `Path::is_dir`, mirroring the
 //! sandbox VFS's directory model.
 
+pub mod executor;
+pub use executor::RealExecutor;
+
 use lang_stdlib::{ErrorKind, Host, ReadSource, StdError};
 use std::collections::HashMap;
 use tokio::fs::File;

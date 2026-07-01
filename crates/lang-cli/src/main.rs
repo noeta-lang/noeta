@@ -175,6 +175,10 @@ fn execute_real_host(
 ) -> Result<lang_backend::RunResult, String> {
     let host =
         lang_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
+    // Pair the real host with a real wall-clock executor (Track A.4): `sleep`/`concurrent` run
+    // against real time on the CLI, out-of-oracle. The differential keeps the sandbox executor.
+    let executor = lang_runtime::RealExecutor::new()
+        .map_err(|err| format!("cannot start the async executor: {err}"))?;
     // Lower + insert the precise-RC drops exactly as the bytecode pipeline does (with the same
     // destructor-relevance annotation), so this matches the reference, then thread reuse tokens
     // (Phase 5).
@@ -195,10 +199,11 @@ fn execute_real_host(
     .expect("Core-IR lowering is total over the parsed language");
     let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
     let ir = lang_ir_passes::thread_reuse(&ir);
-    Ok(TreeWalkBackend::new().run_ir_with_host(
+    Ok(TreeWalkBackend::new().run_ir_with_host_and_executor(
         program,
         &ir,
         Box::new(host),
+        Box::new(executor),
         checked.type_of_sites.clone(),
     ))
 }
