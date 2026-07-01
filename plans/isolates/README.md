@@ -1,6 +1,6 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: DESIGN — for sign-off. No code yet.** This is the parallelism half of architecture §7 (the
+**Status: DESIGN SIGNED OFF (2026-07-01) — building. I.0 first.** This is the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -43,40 +43,73 @@ switch to B, …) is observationally faithful to real threads for any well-typed
 shared mutable state whose interleaving could differ. Determinism comes free from the shared-nothing
 model, the same way it did for generators (pull-based) and the async sandbox (logical clock).
 
-## Surface (proposed — the main thing to sign off)
+## Surface (settled with the user, 2026-07-01)
 
-Two primitives, both **library-shaped over a runtime seam** (like `spawn`/`sleep`), not new syntax
-where avoidable:
+Two primitives:
 
-1. **`Channel<T>`** — a typed, bounded (or unbounded, TBD) message queue.
-   - `channel::<T>()` → `(Sender<T>, Receiver<T>)` (or a single `Channel<T>` with `.send`/`.recv`).
-   - `tx.send(v)` — hand a value to the channel (moves/copies it across the boundary).
-   - `rx.recv(): Future<?T>` — **async** receive; `none` when the channel is closed and drained. Ties
-     into the async layer (you `await` a `recv` inside an async isolate).
-2. **Isolate spawn** — `isolate(fn, args)` (name TBD) runs `fn(args)` in a **fresh isolate** with its
-   own heap, returning a handle to await its result (itself a `Future<T>`, reusing Track A's handle
-   shape) *and/or* wired to channels. Structured by default: an isolate scope joins its children
-   (mirroring `concurrent { }`), so no orphaned isolates — the same "nothing dangles" rule §7.2 wants.
+1. **`Channel<T>` — bounded, both ends async (backpressure from the start).**
+   - `channel::<T>(capacity)` → `(Sender<T>, Receiver<T>)` — the split-endpoint pair (Rust/Go-typed
+     directions). Direction is unrepresentable-when-wrong (you can't `recv` from a `Sender`); "closed"
+     means concretely *all senders dropped*, so `recv` can terminate.
+   - `tx.send(v): Future<void>` — **async**; suspends when the buffer is full (backpressure).
+   - `rx.recv(): Future<?T>` — **async**; suspends when empty, `none` once closed **and** drained.
+   - The queue is **scheduler-owned**, never shared memory; endpoints are just ids (trivially `Send`).
+     Channel messages are **copied** into the queue (bounded by `capacity`, so memory is bounded).
+2. **`isolate f(args)` — a prefix keyword paralleling `spawn f(args)`.** Uniform with `spawn`: both are
+   prefix keywords on a call, both yield a `Future<T>` handle, both live in `concurrent { }`, both feed
+   `all`/`race`. The *only* differences: `isolate` runs the body in a **fresh isolate** (own heap, real
+   parallelism on the real executor) and so constrains `args`/result to `Send`. `spawn` stays general
+   (any future expr); `isolate` is restricted to a **direct call** `isolate f(args)` so it knows what
+   to ship. Orphan `isolate` (no owning scope) is **E0041**, same rule as `spawn`.
 
-The exact spelling (free fns vs a `Channel`/`Isolate` type, bounded vs unbounded, `send` blocking vs
-async) is what this design pass exists to settle **with the user** before any code.
+Isolate panic → **re-panics the parent at `.await`** (consistent with tasks; recoverable failures use
+`Result` returns as everywhere else).
 
-## The `Send` boundary (the type-system core of this milestone)
+## The `Send` boundary + cross-thread sharing (the type-system + memory core)
 
-Only **`Send` values may cross an isolate boundary** (as a channel message or an isolate argument/
-result). This is where the object model's deferred axis finally bites:
+Only **`Send` values may cross an isolate boundary**. This is where the object model's deferred axis
+finally bites, and — decided with the user — **the value/reference axis IS the shareability axis**:
 
-- **Value types** (`struct`, primitives, `bytes`, tuples, enums, `List`/`Map`/`Set` of `Send`) **are
-  `Send`** — they are copied across the boundary (deep copy / serialize), so each isolate owns its own
-  heap graph and non-atomic refcounts stay sound.
-- **Reference types** (`class` — identity, shared mutation) **are `!Send`**: sending one would either
-  share a heap object across isolates (breaks shared-nothing + non-atomic refcounts) or silently copy
-  away its identity. So a `class` value at a boundary is a **compile error** — the new diagnostic this
-  milestone adds (**E0042**, the next free code). This is the check the object-model arc parked here.
-- **Transfer mechanism:** reuse the existing deep marshalling. `to_bytes`/`from_bytes` (P-PACK) and the
-  `NativeValue` deep tree already serialize value graphs; a channel message is "deep-copy the value
-  into the receiver's heap." No new serialization format — the boundary is the existing marshalling
-  seam applied isolate-to-isolate.
+- **Value types** (`struct`, primitives, `bytes`, tuples, enums, `List`/`Map`/`Set`/`Option`/`Result`
+  of `Send`) **are `Send`**. A container is `Send` iff its elements are; a `struct`/`enum` iff all its
+  fields/payloads are (checked structurally against the type registry, with a visited-set for recursive
+  types).
+- **Reference types** (`class` — identity, shared mutation) **are `!Send`**: sending one would share a
+  mutable heap object across isolates (breaks shared-nothing + non-atomic refcounts) or silently copy
+  away its identity. A `class` value at a boundary is **E0042** (the new code — closes the object-model
+  arc's parked `!Send` deferral). Want to send a class's data? Convert it to a `struct` — explicit.
+- **`dyn`** is conservatively `!Send` for v1 (can't prove a `dyn` isn't a class); relaxable later.
+
+### Cross-thread sharing by *borrow*, not atomic refcounts (settled — built in this milestone)
+
+Immutable value types are race-free to *read*, but their refcount is mutable metadata — so naive
+cross-thread sharing would race the count, normally forcing atomic refcounts (the tax §7 avoids). We
+sidestep that entirely by leaning on structured concurrency's guarantee: **`concurrent { }` joins every
+isolate at `}`, so anything the scope shares outlives all of them.** That lifetime bound makes
+**borrowing without refcounting** safe across threads (the Rust scoped-threads / `rayon::scope` trick):
+
+- The scope owns a **shared-immutable region**; a value graph shared into it lives for the scope's life.
+- Cross-isolate references are **`shared`-tagged Values**, and `retain`/`release` on a shared-tagged
+  pointer are **no-ops** — nothing is ever written (not the data, not the count), so nothing races.
+  Lock-free by construction; no atomic ops.
+- At the scope join (a thread-join barrier → happens-before all isolates finished), the region is freed
+  wholesale.
+
+**Where each mechanism applies:** `isolate f(bigdata)` **borrow-shares** its argument graph across all
+isolates in the scope — **one** promotion-copy into the region, then zero-copy for N workers (the
+"share across threads" win). **Channel messages** are **copied** per message (they're streamed, not
+scope-lifetime-bounded; `capacity` bounds the memory).
+
+**Cost:** Values gain a local-vs-`shared` distinction and `retain`/`release` branch on it (miri-covered).
+Single-isolate programs never allocate in the shared region, so the branch always takes the local path —
+the whole conformance/differential corpus is unaffected. A later *move-promote* could make even the
+first copy zero-copy; one copy is the honest v1.
+
+**Oracle:** the sandbox is single-threaded and just **copies** (deterministic, in-oracle); the real
+executor **borrow-shares** across threads. For immutable value types these are observationally identical
+(value types have no identity and no mutation — `===`/mutation are class-only, and class is `!Send`), so
+the differential holds and sharing is a real-executor perf property (out-of-oracle), with the heap
+machinery exercised by the real path + miri.
 
 ## How it composes with async (Track A)
 
@@ -90,35 +123,27 @@ So most of the *consumer* surface (await, handles, all/race, structured join) is
 milestone adds the *producer* side (spawn an isolate, cross the Send boundary, channels) and the
 deterministic multi-isolate scheduler underneath.
 
-## Rough sub-slices (to be refined after sign-off)
+## Sub-slices (settled)
 
-- **I.0 — the `Send` boundary type check (E0042).** Front-end only: classify every type `Send`/`!Send`
-  (structural: a container is `Send` iff its elements are), and reject a `!Send` value at a
-  (not-yet-existing) boundary. Ship the *classifier* + diagnostic first, gated, so the object-model
-  deferral is closed and testable independent of the runtime.
-- **I.1 — `Channel<T>` value + the scheduler seam.** `SandboxScheduler` (deterministic FIFO queues +
-  runnable-isolate list) behind a trait; `channel()`/`send`/`recv` (recv async). Single-isolate first
-  (a channel used within one isolate — degenerate but exercises the value + async wiring in-oracle).
-- **I.2 — isolate spawn + deterministic multi-isolate interleaving.** The sandbox runs N isolates
-  cooperatively; message deep-copy across heaps; structured join. Fully in-oracle (deterministic).
-- **I.3 — `RealScheduler` (OS threads), CLI-only.** Real parallelism behind the CLI, integration-
-  tested like `RealHost`/`RealExecutor`, never in the differential.
-- **I.4 — finalize:** docs (§7 alignment), deferred rows (durable queues, worker pools, app-lifetime
-  `TaskScope` via DI — §7.2 framework patterns, explicitly *not* language constructs), mark complete.
+- **I.0 — `isolate` surface + the `Send` classifier + E0042; executable in-oracle as a task.** `isolate`
+  prefix keyword (a flag on `Expr::Spawn`), structural `Send`/`!Send` classifier (checker, visited-set
+  for recursion), E0042 on a non-`Send` arg/result of an `isolate` call, orphan-`isolate` → E0041. In
+  the **sandbox** an isolate is observationally a task (single-thread; `Send` value args copy-invisible),
+  so `isolate` lowers to the existing `Rvalue::Spawn` and is fully executable + differential-covered —
+  no gate. Real heap separation is I.4. Closes the object-model `!Send` deferral (E0042 ships here).
+- **I.1 — bounded `Channel<T>` + the `SandboxScheduler` seam.** `channel::<T>(capacity)` →
+  `(Sender<T>, Receiver<T>)`; async `send`/`recv` (copy semantics); deterministic FIFO + block-on-
+  full/empty in the sandbox. In-oracle.
+- **I.2 — deterministic multi-isolate interleaving polish.** Ensure N isolates + channels interleave
+  deterministically in the sandbox (block-points: `send`-full, `recv`-empty, `.await`); structured join.
+  In-oracle. (Much of the scheduling reuses Track A's cooperative scheduler.)
+- **I.3 — shared-immutable region + `shared`-tag heap change.** Borrow-share (no-op rc on shared
+  pointers), miri-covered. Sandbox still copies (in-oracle); the machinery lands here for I.4 to use.
+- **I.4 — `RealScheduler` (OS threads), CLI-only / out-of-oracle.** Real parallelism + real borrow-
+  sharing across threads; integration-tested like `RealHost`/`RealExecutor` (incl. a big-input-no-copy
+  check).
+- **I.5 — finalize:** docs (§7 alignment), deferred rows (durable queues, worker pools, app-lifetime
+  `TaskScope` via DI — §7.2 framework patterns, *not* language constructs), mark complete.
 
-## Open questions for sign-off
-
-1. **Channel surface:** `(Sender, Receiver)` pair vs a single `Channel<T>` object? Bounded (with
-   backpressure — `send` async) vs unbounded (`send` sync)? My lean: a single `Channel<T>` with async
-   `recv` and, initially, unbounded `send` (backpressure later), for the smallest first cut.
-2. **Isolate spawn spelling:** a free `isolate(fn, args)` returning a `Future`-handle, vs a `Worker`/
-   `Isolate` type, vs generalizing `spawn` with a target. My lean: a distinct keyword/fn so the
-   heap-boundary (and its cost) is *visible*, not conflated with intra-isolate `spawn`.
-3. **What crosses:** confirm value-types-copied / `class`-rejected (E0042). Any exception (e.g. an
-   explicitly `@shared`/atomic type) or is `!Send`-rejected absolute for v1? My lean: absolute for v1.
-4. **Scope discipline:** do isolates require an owning scope (like `spawn` needs `concurrent`)? My
-   lean: yes — same "nothing dangles" rule; app-lifetime workers are the §7.2 framework pattern, later.
-
-Nothing here is built. On sign-off I'll start with **I.0** (the `Send` classifier + E0042), the one
-piece that is pure front-end, in-oracle, and closes a standing object-model deferral regardless of how
-the runtime questions resolve.
+Starting point: **I.0** — pure front-end + in-oracle execution-as-task, closing the object-model
+deferral, independent of the channel/scheduler/real-thread work that follows.
