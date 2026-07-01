@@ -1743,8 +1743,14 @@ impl Checker {
                     visited.pop();
                     payloads_send && args_send
                 }
-                // A built-in `Named` type: the payload-free prelude `Ordering` enum is `Send`; the
-                // stateful/reference-like built-ins (`Future`/`Iterator`/`FileHandle`/…) are `!Send`.
+                // A built-in `Named` type: the payload-free prelude `Ordering` enum is `Send`. A
+                // channel endpoint (`Sender<T>`/`Receiver<T>`, isolates I.1) is a scheduler-owned id,
+                // `Send` iff its message type is — so a receiver of `Send` values can be shipped into
+                // an isolate. Other stateful/reference-like built-ins (`Future`/`Iterator`/
+                // `FileHandle`/…) are `!Send`.
+                None if name == stdlib::SENDER || name == stdlib::RECEIVER => {
+                    args.first().is_none_or(|t| self.is_send(t, visited))
+                }
                 None => name == "Ordering",
             },
             // Closures capture the heap; `dyn` can't be proven non-`class`; anything else is `!Send`.
@@ -3350,6 +3356,28 @@ impl Checker {
                 }
                 Type::List(Box::new(elem))
             }
+            Expr::Channel {
+                elem,
+                capacity,
+                span: _,
+            } => {
+                // The capacity is a buffer size — an `int` (gradual holes tolerated).
+                let cap_ty = self.synth(capacity, env);
+                if !matches!(cap_ty, Type::Int) && !cap_ty.defers_to_runtime() {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::TypeMismatch,
+                        capacity.span(),
+                        format!("`channel` expects an `int` capacity, found `{cap_ty}`"),
+                    ));
+                }
+                self.check_type_ref(elem);
+                let t = Type::from_ref(elem);
+                // The split-endpoint pair: a `Sender<T>` and a `Receiver<T>` over the message type.
+                Type::Tuple(vec![
+                    Type::Named(stdlib::SENDER.to_string(), vec![t.clone()]),
+                    Type::Named(stdlib::RECEIVER.to_string(), vec![t]),
+                ])
+            }
             Expr::TypedModuleCall {
                 recv,
                 func,
@@ -4727,6 +4755,10 @@ const PRELUDE_TYPES: &[&str] = &[
     // The async completion type (Track A): a writable annotation. Calling an `async fn f(): T`
     // produces a `Future<T>`; `expr.await` unwraps it back to `T`.
     "Future",
+    // The channel endpoint types (isolates I.1): writable annotations. `channel::<T>(cap)` yields a
+    // `(Sender<T>, Receiver<T>)`; `send`/`recv` dispatch on them.
+    "Sender",
+    "Receiver",
 ];
 
 /// The type a **call** to an `async fn f(): T` produces: `Future<T>` (Track A). The body writes
@@ -5154,6 +5186,7 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
         | Expr::TypeTest { expr, .. }
         | Expr::TypeOf { value: expr, .. }
         | Expr::FromBytes { blob: expr, .. } => conditional_await_span(expr),
+        Expr::Channel { capacity, .. } => conditional_await_span(capacity),
         Expr::Binary { lhs, rhs, .. }
         | Expr::Pipeline {
             left: lhs,

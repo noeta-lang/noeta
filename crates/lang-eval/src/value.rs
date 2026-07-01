@@ -91,6 +91,19 @@ pub enum Value {
     /// `Payload::AsyncIo`. The `Future<string>` `fs.read_async(path)` returns, carrying the id that
     /// tickets the pending read in the injected [`lang_stdlib::Executor`].
     AsyncIo(u64),
+    /// A **channel sender endpoint** (isolates I.1): the tree-walker twin of the VM's
+    /// `Payload::Sender`. The `Sender<T>` `channel::<T>(cap)` yields, carrying the channel's index
+    /// into the interpreter's channel table; `tx.send(v)`/`tx.close()` dispatch on it.
+    Sender(usize),
+    /// A **channel receiver endpoint** (isolates I.1): the twin of the VM's `Payload::Receiver`;
+    /// `rx.recv()` dispatches on it.
+    Receiver(usize),
+    /// A **leaf channel-send future** (isolates I.1): the twin of the VM's `Payload::ChannelSend`.
+    /// `tx.send(v)` produces one, carrying the channel index and the message `v` (held until enqueued).
+    ChannelSend(usize, Rc<Value>),
+    /// A **leaf channel-recv future** (isolates I.1): the twin of the VM's `Payload::ChannelRecv`.
+    /// `rx.recv()` produces one, carrying the channel index.
+    ChannelRecv(usize),
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -501,9 +514,14 @@ impl Value {
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
             Value::Iter(_) => "<iterator>".to_string(),
-            Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncIo(_) => {
-                "<future>".to_string()
-            }
+            Value::Future(_)
+            | Value::Timer(_)
+            | Value::Handle(..)
+            | Value::AsyncIo(_)
+            | Value::ChannelSend(..)
+            | Value::ChannelRecv(_) => "<future>".to_string(),
+            Value::Sender(_) => "<sender>".to_string(),
+            Value::Receiver(_) => "<receiver>".to_string(),
             Value::Pending => "<pending>".to_string(),
         }
     }
@@ -539,7 +557,14 @@ impl Value {
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
             Value::Iter(_) => "iterator",
-            Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncIo(_) => "future",
+            Value::Future(_)
+            | Value::Timer(_)
+            | Value::Handle(..)
+            | Value::AsyncIo(_)
+            | Value::ChannelSend(..)
+            | Value::ChannelRecv(_) => "future",
+            Value::Sender(_) => "sender",
+            Value::Receiver(_) => "receiver",
             Value::Pending => "pending",
         }
     }
@@ -573,6 +598,10 @@ impl fmt::Debug for Value {
             Value::Pending => write!(f, "Pending"),
             Value::Handle(scope, task) => write!(f, "Handle({scope}, {task})"),
             Value::AsyncIo(id) => write!(f, "AsyncIo({id})"),
+            Value::Sender(id) => write!(f, "Sender({id})"),
+            Value::Receiver(id) => write!(f, "Receiver({id})"),
+            Value::ChannelSend(id, value) => write!(f, "ChannelSend({id}, {value:?})"),
+            Value::ChannelRecv(id) => write!(f, "ChannelRecv({id})"),
         }
     }
 }

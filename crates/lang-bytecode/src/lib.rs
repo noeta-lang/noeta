@@ -613,6 +613,14 @@ pub enum Op {
     ScopeEnd {
         span: Span,
     },
+    /// `dst = channel(capacity)` (isolates I.1): create a bounded channel with the buffer size in
+    /// `capacity` and yield a `(Sender, Receiver)` tuple of endpoint ids. Carries a span (the capacity
+    /// must be a non-negative int).
+    MakeChannel {
+        dst: Reg,
+        capacity: Reg,
+        span: Span,
+    },
     /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
     /// module manifest, each materialized into a `T` struct and paired with its target. `type_name`
     /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
@@ -1336,6 +1344,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             format!("Spawn       r{dst} <- spawn r{src}")
         }
         Op::ScopeEnd { .. } => "ScopeEnd".to_string(),
+        Op::MakeChannel { dst, capacity, .. } => {
+            format!("MakeChannel r{dst} <- channel(r{capacity})")
+        }
         Op::MakeGen { dst, src } => {
             format!("MakeGen     r{dst} <- gen r{src}")
         }

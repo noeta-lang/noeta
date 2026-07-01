@@ -1008,6 +1008,17 @@ struct Task {
     cancelled: bool,
 }
 
+/// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
+/// capacity, and whether it has been closed (all senders done). Endpoints (`Sender`/`Receiver`) are
+/// just indices into the interpreter's `channels` table — the queue is never shared heap memory.
+/// Mirrors the VM's `Channel`; both backends run the identical FIFO + block-on-full/empty logic, so
+/// the differential holds by construction.
+struct Channel {
+    buffer: std::collections::VecDeque<Value>,
+    capacity: usize,
+    closed: bool,
+}
+
 /// One program's worth of evaluation state.
 struct Interpreter {
     stdout: String,
@@ -1035,6 +1046,13 @@ struct Interpreter {
     /// position here. Mirrors the VM's `scopes` field; both round-robin identically, so the differential
     /// holds by construction.
     scopes: Vec<Vec<Task>>,
+    /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoints
+    /// reference one by index. Never cleared during a run (indices stay stable), like `scopes` it
+    /// mirrors the VM exactly. `channel_progress` counts successful queue operations (a `send` push, a
+    /// `recv` pop, or a `close`) so the scheduler distinguishes real channel progress from a stalled
+    /// round — a channel op that unblocks a sibling is progress even when no task *completes*.
+    channels: Vec<Channel>,
+    channel_progress: u64,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `lang_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
@@ -1107,6 +1125,8 @@ impl Interpreter {
             host,
             executor,
             scopes: Vec::new(),
+            channels: Vec::new(),
+            channel_progress: 0,
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
         }
@@ -1975,6 +1995,33 @@ impl Interpreter {
         {
             let handle = Rc::clone(handle);
             return self.call_file_handle_method(method, &handle, name, &args, span);
+        }
+        // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender, `rx.recv()`
+        // on a receiver. `send`/`recv` return leaf futures (enqueue/dequeue when polled); `close` is
+        // synchronous. Endpoint validity was checked statically, so an unknown method here is a
+        // genuine miss (falls through to the unknown-method error below).
+        if let Value::Sender(id) = &receiver {
+            let id = *id;
+            match name {
+                "send" => {
+                    self.expect_std_arity(name, &args, 1, span)?;
+                    let value = args.into_iter().next().unwrap();
+                    return Ok(Value::ChannelSend(id, Rc::new(value)));
+                }
+                "close" => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    self.channels[id].closed = true;
+                    self.channel_progress += 1;
+                    return Ok(Value::Unit);
+                }
+                _ => {}
+            }
+        }
+        if let Value::Receiver(id) = &receiver
+            && name == "recv"
+        {
+            self.expect_std_arity(name, &args, 0, span)?;
+            return Ok(Value::ChannelRecv(*id));
         }
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file handle above.
         if let Value::Iter(state) = &receiver
@@ -3467,6 +3514,41 @@ impl Interpreter {
                     None => Ok(None),
                 }
             }
+            // `tx.send(v)` (isolates I.1): enqueue when the buffer has room (ready → unit), else
+            // suspend (pending) until a `recv` frees a slot. Sending on a closed channel is a bug
+            // (E0010) — the receiver would never see it.
+            Value::ChannelSend(id, value) => {
+                let id = *id;
+                let chan = &self.channels[id];
+                if chan.closed {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "cannot send on a closed channel".to_string(),
+                    ));
+                }
+                if chan.buffer.len() < chan.capacity {
+                    let value = (**value).clone();
+                    self.channels[id].buffer.push_back(value);
+                    self.channel_progress += 1;
+                    Ok(Some(Value::Unit))
+                } else {
+                    Ok(None)
+                }
+            }
+            // `rx.recv()` (isolates I.1): dequeue the next message (ready → `some(v)`), yield `none`
+            // once the channel is closed and drained, else suspend (pending) on an empty open buffer.
+            Value::ChannelRecv(id) => {
+                let id = *id;
+                if let Some(value) = self.channels[id].buffer.pop_front() {
+                    self.channel_progress += 1;
+                    Ok(Some(builtin_enum("Option", "some", vec![value])))
+                } else if self.channels[id].closed {
+                    Ok(Some(builtin_enum("Option", "none", vec![])))
+                } else {
+                    Ok(None)
+                }
+            }
             other => Ok(Some(other.clone())),
         }
     }
@@ -3518,6 +3600,7 @@ impl Interpreter {
     fn join_scope(&mut self, span: Span) -> Eval<()> {
         let si = self.scopes.len() - 1;
         loop {
+            let before = self.channel_progress;
             let progressed = self.poll_all_scopes_round(span)?;
             if self.scopes[si]
                 .iter()
@@ -3525,6 +3608,9 @@ impl Interpreter {
             {
                 return Ok(());
             }
+            // A channel op (a `send` unblocked, a `recv` drained) is progress even when no task
+            // completed this round — otherwise a producer/consumer pair would look deadlocked.
+            let progressed = progressed || self.channel_progress != before;
             if !progressed && self.executor.advance().is_none() {
                 return Err(self.runtime_error(
                     DiagnosticCode::Panic,
@@ -3543,6 +3629,7 @@ impl Interpreter {
     /// advance.
     fn drive_future(&mut self, future: Value, span: Span) -> Eval<Value> {
         loop {
+            let before = self.channel_progress;
             if let Some(value) = self.poll_once(&future, span)? {
                 return Ok(value);
             }
@@ -3553,6 +3640,8 @@ impl Interpreter {
             } else {
                 self.poll_all_scopes_round(span)?
             };
+            // A channel op during any poll this iteration is progress (see `join_scope`).
+            let progressed = progressed || self.channel_progress != before;
             if !progressed && self.executor.advance().is_none() {
                 return Err(self.runtime_error(
                     DiagnosticCode::Panic,
@@ -4037,7 +4126,11 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::Timer(_)
         | Value::Pending
         | Value::Handle(..)
-        | Value::AsyncIo(_) => TypeRepr::Dyn,
+        | Value::AsyncIo(_)
+        | Value::Sender(_)
+        | Value::Receiver(_)
+        | Value::ChannelSend(..)
+        | Value::ChannelRecv(_) => TypeRepr::Dyn,
     }
 }
 
@@ -4467,9 +4560,14 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
-        Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncIo(_) => {
-            NativeValue::Str("<future>".to_string())
-        }
+        Value::Future(_)
+        | Value::Timer(_)
+        | Value::Handle(..)
+        | Value::AsyncIo(_)
+        | Value::ChannelSend(..)
+        | Value::ChannelRecv(_) => NativeValue::Str("<future>".to_string()),
+        Value::Sender(_) => NativeValue::Str("<sender>".to_string()),
+        Value::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
         Value::Pending => NativeValue::Str("<pending>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),

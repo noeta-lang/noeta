@@ -250,6 +250,21 @@ pub(crate) enum Payload {
     /// executor resolves it synchronously; the real executor spawns it on tokio and harvests it in
     /// `advance`). A GC leaf — the id is a plain integer; the pending read lives in the executor.
     AsyncIo(u64),
+    /// A **channel sender endpoint** (isolates I.1): the `Sender<T>` `channel::<T>(cap)` yields. It
+    /// carries the channel's id into the backend's channel table; `tx.send(v)`/`tx.close()` dispatch
+    /// on it. A GC leaf — the id is a plain integer; the queue lives in the backend.
+    Sender(u32),
+    /// A **channel receiver endpoint** (isolates I.1): the `Receiver<T>` `channel::<T>(cap)` yields.
+    /// A GC leaf like [`Self::Sender`]; `rx.recv()` dispatches on it.
+    Receiver(u32),
+    /// A **leaf channel-send future** (isolates I.1): `tx.send(v)` produces one, carrying the channel
+    /// id and **owning one reference** to the message `v` (a GC node like [`Self::Cell`]). Polling it
+    /// enqueues `v` when the buffer has room (ready → unit) or reports pending on a full buffer.
+    ChannelSend(u32, Value),
+    /// A **leaf channel-recv future** (isolates I.1): `rx.recv()` produces one, carrying the channel
+    /// id. Polling it dequeues the next message (ready → `some(v)`), reports `none` once closed and
+    /// drained, or pending on an empty open buffer. A GC leaf — the queued messages live in the backend.
+    ChannelRecv(u32),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -493,6 +508,8 @@ pub(crate) fn free(value: Value) {
         }
         // A future owns one reference to its thunk/step closure (a node like `Cell`).
         Payload::Future(step) => release_child(*step),
+        // A channel-send future owns the message it is queuing until it is enqueued or dropped.
+        Payload::ChannelSend(_, value) => release_child(*value),
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
@@ -504,6 +521,9 @@ pub(crate) fn free(value: Value) {
         | Payload::Timer(_)
         | Payload::Handle(..)
         | Payload::AsyncIo(_)
+        | Payload::Sender(_)
+        | Payload::Receiver(_)
+        | Payload::ChannelRecv(_)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -654,6 +674,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Iter(state) => state.children().into_iter().flatten().for_each(&mut push),
         // A future owns one reference to its thunk/step closure.
         Payload::Future(step) => push(*step),
+        // A channel-send future owns one reference to the message it is queuing.
+        Payload::ChannelSend(_, value) => push(*value),
         // A packed list holds only primitive words (no child references) — a GC leaf; a timer holds
         // only its integer deadline.
         Payload::Str(_)
@@ -665,6 +687,9 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Timer(_)
         | Payload::Handle(..)
         | Payload::AsyncIo(_)
+        | Payload::Sender(_)
+        | Payload::Receiver(_)
+        | Payload::ChannelRecv(_)
         | Payload::FileHandle(_) => {}
     }
     out

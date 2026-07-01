@@ -24,6 +24,12 @@ pub(super) const ITERATOR: &str = "Iterator";
 /// carries its completion type as its single argument; `expr.await` unwraps it back to `T`.
 pub(super) const FUTURE: &str = "Future";
 
+/// Reserved built-in type names for the two channel endpoints (isolates I.1). `channel::<T>(cap)`
+/// yields a `(Sender<T>, Receiver<T>)`; each carries the message type as its single argument. A
+/// `Sender<T>` dispatches `send`/`close`, a `Receiver<T>` dispatches `recv`.
+pub(super) const SENDER: &str = "Sender";
+pub(super) const RECEIVER: &str = "Receiver";
+
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
@@ -92,8 +98,34 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Named(n, args) if n == ITERATOR => {
             iterator_method(name, args.first().unwrap_or(&Type::Dyn))
         }
+        Type::Named(n, args) if n == SENDER => {
+            sender_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
+        Type::Named(n, args) if n == RECEIVER => {
+            receiver_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
         _ => None,
     }
+}
+
+/// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
+/// returning `Future<void>`; `close()` marks the channel closed so a drained `recv` yields `none`.
+fn sender_method(name: &str, _elem: &Type) -> Option<Type> {
+    Some(match name {
+        "send" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
+        "close" => Type::Unit,
+        _ => return None,
+    })
+}
+
+/// A `Receiver<T>` endpoint (isolates I.1): `recv()` dequeues the next message (async — suspends on
+/// an empty buffer), returning `Future<?T>` — `some(v)` while values remain, `none` once the channel
+/// is closed and drained.
+fn receiver_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "recv" => Type::Named(FUTURE.to_string(), vec![opt(elem.clone())]),
+        _ => return None,
+    })
 }
 
 /// `iter()` (Track I.1a) — available on every iterable, returning an `Iterator<T>` over the element
@@ -213,6 +245,18 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
         }
+        Type::Named(n, args) if n == SENDER => {
+            let elem = args.first().cloned().unwrap_or(Type::Dyn);
+            Some(match name {
+                "send" => vec![elem],
+                "close" => vec![],
+                _ => return None,
+            })
+        }
+        Type::Named(n, _) if n == RECEIVER => Some(match name {
+            "recv" => vec![],
+            _ => return None,
+        }),
         _ => None,
     }
 }

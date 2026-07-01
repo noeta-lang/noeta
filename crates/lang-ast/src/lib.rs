@@ -757,6 +757,16 @@ pub enum Expr {
         blob: Box<Expr>,
         span: Span,
     },
+    /// `channel::<T>(capacity)` — construct a bounded, typed channel (isolates milestone I.1),
+    /// yielding the split-endpoint pair `(Sender<T>, Receiver<T>)`. `elem` is the message type `T`
+    /// (turbofish; carried only for the checker — the runtime channel is untyped), `capacity` the
+    /// buffer size (an `int` expression). Endpoints are scheduler-owned ids: `tx.send(v)`/`tx.close()`
+    /// on the sender, `rx.recv()` on the receiver.
+    Channel {
+        elem: TypeRef,
+        capacity: Box<Expr>,
+        span: Span,
+    },
     /// A call-site-typed native module call `module.func::<T>(args)` — a native function whose
     /// result type is named by the turbofish `T` (call-site-typed construction, Phase B). The only
     /// such function today is `json.parse::<T>(text)`: native code parses `text` and builds a `T`
@@ -947,6 +957,7 @@ impl Expr {
             | Expr::AttributesOf { span, .. }
             | Expr::TypeOf { span, .. }
             | Expr::FromBytes { span, .. }
+            | Expr::Channel { span, .. }
             | Expr::TypedModuleCall { span, .. }
             | Expr::RolesOf { span }
             | Expr::Invoke { span, .. }
@@ -1034,6 +1045,7 @@ impl Expr {
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.mentions(name),
+            Expr::Channel { capacity, .. } => capacity.mentions(name),
             Expr::Invoke {
                 recv,
                 name: n,
@@ -1113,6 +1125,7 @@ impl Expr {
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
             | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
+            Expr::Channel { capacity, .. } => capacity.has_await(),
             Expr::Invoke {
                 recv, name, args, ..
             } => recv.has_await() || name.has_await() || args.has_await(),

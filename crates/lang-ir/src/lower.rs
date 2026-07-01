@@ -1118,6 +1118,18 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            Expr::Channel { capacity, span, .. } => {
+                // The message type `T` is checker-only; only the buffer size reaches the runtime.
+                let capacity = self.lower_expr(capacity, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::MakeChannel {
+                        capacity,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::AttributesOf { ty, span } => Ok(self.emit(
                 out,
                 Rvalue::AttributesOf {
@@ -2345,6 +2357,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::TypeTest { expr, .. }
         | Expr::TypeOf { value: expr, .. }
         | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr),
+        Expr::Channel { capacity, .. } => hoist_in_expr(capacity, pre, ctr),
         Expr::Invoke {
             recv, name, args, ..
         } => {

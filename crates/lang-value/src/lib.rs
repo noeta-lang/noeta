@@ -655,6 +655,8 @@ impl Value {
                         | Payload::Timer(_)
                         | Payload::Handle(..)
                         | Payload::AsyncIo(_)
+                        | Payload::ChannelSend(..)
+                        | Payload::ChannelRecv(_)
                 )
             })
     }
@@ -680,6 +682,79 @@ impl Value {
     /// Whether this is a leaf timer future.
     pub fn is_timer(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Timer(_)))
+    }
+
+    /// A **channel sender endpoint** (isolates I.1): the `Sender<T>` `channel::<T>(cap)` yields,
+    /// carrying the channel's id into the backend's channel table. A GC leaf.
+    pub fn make_sender(id: u32) -> Value {
+        heap::alloc(Payload::Sender(id))
+    }
+
+    /// A **channel receiver endpoint** (isolates I.1). A GC leaf like [`Self::make_sender`].
+    pub fn make_receiver(id: u32) -> Value {
+        heap::alloc(Payload::Receiver(id))
+    }
+
+    /// The channel id of a sender endpoint, or `None` if this is not one.
+    pub fn sender_id(self) -> Option<u32> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Sender(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// The channel id of a receiver endpoint, or `None` if this is not one.
+    pub fn receiver_id(self) -> Option<u32> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Receiver(id) => Some(*id),
+            _ => None,
+        })
+    }
+
+    /// A **leaf channel-send future** (isolates I.1): `tx.send(v)` produces one, carrying the channel
+    /// `id` and **retaining its own reference** to the message `value` (like [`Self::make_future`] with
+    /// its closure) — held until the message is enqueued or the future is dropped. The caller's own
+    /// reference to `value` is released by its normal end-of-life.
+    pub fn make_channel_send(id: u32, value: Value) -> Value {
+        value.inc_ref();
+        heap::alloc(Payload::ChannelSend(id, value))
+    }
+
+    /// A **leaf channel-recv future** (isolates I.1): `rx.recv()` produces one, carrying the channel id.
+    pub fn make_channel_recv(id: u32) -> Value {
+        heap::alloc(Payload::ChannelRecv(id))
+    }
+
+    /// The channel id and a freshly-retained owning reference to the queued message of a channel-send
+    /// future, or `None` if this is not one. The caller takes ownership of the returned message.
+    pub fn channel_send_parts(self) -> Option<(u32, Value)> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::ChannelSend(id, value) => {
+                value.inc_ref();
+                Some((*id, *value))
+            }
+            _ => None,
+        })
+    }
+
+    /// The channel id of a channel-recv future, or `None` if this is not one.
+    pub fn channel_recv_id(self) -> Option<u32> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::ChannelRecv(id) => Some(*id),
+            _ => None,
+        })
     }
 
     /// A **task handle** (Track A.3b): the `Future<T>` `spawn e` returns, referencing a task by its
@@ -1647,11 +1722,17 @@ impl Value {
                 Payload::FileHandle(handle) => handle.display(),
                 // An iterator is an opaque reference value (like a file handle).
                 Payload::Iter { .. } => "<iterator>".to_string(),
-                // A future — step, leaf timer, task handle, or async-read — is an opaque reference.
+                // A future — step, leaf timer, task handle, async-read, or channel op — is an opaque
+                // reference.
                 Payload::Future(_)
                 | Payload::Timer(_)
                 | Payload::Handle(..)
-                | Payload::AsyncIo(_) => "<future>".to_string(),
+                | Payload::AsyncIo(_)
+                | Payload::ChannelSend(..)
+                | Payload::ChannelRecv(_) => "<future>".to_string(),
+                // Channel endpoints are opaque reference values (like an iterator/file handle).
+                Payload::Sender(_) => "<sender>".to_string(),
+                Payload::Receiver(_) => "<receiver>".to_string(),
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1734,7 +1815,12 @@ impl Value {
                 Payload::Future(_)
                 | Payload::Timer(_)
                 | Payload::Handle(..)
-                | Payload::AsyncIo(_) => NativeValue::Str("<future>".to_string()),
+                | Payload::AsyncIo(_)
+                | Payload::ChannelSend(..)
+                | Payload::ChannelRecv(_) => NativeValue::Str("<future>".to_string()),
+                // Channel endpoints have no JSON analog — their opaque display form.
+                Payload::Sender(_) => NativeValue::Str("<sender>".to_string()),
+                Payload::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -1790,6 +1876,10 @@ impl Value {
                 "iterator"
             } else if self.is_future() {
                 "future"
+            } else if self.sender_id().is_some() {
+                "sender"
+            } else if self.receiver_id().is_some() {
+                "receiver"
             } else if self.is_bytes() {
                 "bytes"
             } else {
@@ -2239,6 +2329,44 @@ mod tests {
         assert_eq!(io.type_name(), "future");
         assert_eq!(io.display(), "<future>");
         io.release(); // frees the node, no leak
+    }
+
+    #[test]
+    fn channel_endpoints_are_leaves_and_free_cleanly() {
+        // Isolates I.1: a sender/receiver endpoint is a GC leaf holding a channel id; it names itself
+        // "sender"/"receiver", displays opaquely, and frees as a plain node — leak-clean under miri.
+        let tx = Value::make_sender(3);
+        assert_eq!(tx.sender_id(), Some(3));
+        assert_eq!(tx.receiver_id(), None);
+        assert_eq!(tx.type_name(), "sender");
+        assert_eq!(tx.display(), "<sender>");
+        tx.release();
+
+        let rx = Value::make_receiver(3);
+        assert_eq!(rx.receiver_id(), Some(3));
+        assert_eq!(rx.type_name(), "receiver");
+        assert_eq!(rx.display(), "<receiver>");
+        rx.release();
+    }
+
+    #[test]
+    fn channel_send_future_owns_its_message_and_frees_cleanly() {
+        // Isolates I.1: a channel-send future is a future GC node owning one reference to its message
+        // (like `make_future`'s closure). Dropping the future must release that reference — no leak,
+        // no double-free — which miri verifies. `channel_send_parts` hands back a fresh owning ref.
+        let msg = Value::string("hi"); // refcount 1
+        let fut = Value::make_channel_send(5, msg); // retains msg → refcount 2
+        assert!(fut.is_future());
+        msg.release(); // drop the caller's original reference → refcount 1 (the future's)
+        let (id, borrowed) = fut.channel_send_parts().expect("a channel-send future");
+        assert_eq!(id, 5);
+        borrowed.release(); // channel_send_parts retained a fresh ref; balance it
+        fut.release(); // frees the future and its remaining message reference — no leak
+
+        let recv = Value::make_channel_recv(5);
+        assert!(recv.is_future());
+        assert_eq!(recv.channel_recv_id(), Some(5));
+        recv.release();
     }
 
     #[test]

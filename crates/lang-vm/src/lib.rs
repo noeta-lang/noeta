@@ -239,8 +239,26 @@ struct Vm<'m> {
     /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
     /// `scopes`; both round-robin identically, so the differential holds by construction.
     scopes: Vec<Vec<Task>>,
+    /// The channel table (isolates I.1): every `channel::<T>(cap)` appends a [`Channel`]; endpoint
+    /// values (`Sender`/`Receiver`) reference one by index. A queued message is owned by the channel
+    /// (retained on enqueue, transferred out on dequeue). `channel_progress` counts successful queue
+    /// operations (a `send` push, a `recv` pop, a `close`) so the scheduler treats a channel op that
+    /// unblocks a sibling as progress even when no task completes. Mirrors the tree-walker's fields.
+    channels: Vec<Channel>,
+    channel_progress: u64,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+}
+
+/// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
+/// capacity, and whether it has been closed. Endpoints are indices into [`Vm::channels`]; the queue is
+/// never shared heap memory. Mirrors the tree-walker's `Channel`, so the FIFO + block-on-full/empty
+/// behaviour is identical and the differential holds by construction. The channel owns one reference to
+/// each queued message (released if the channel is still holding it when the VM drops).
+struct Channel {
+    buffer: std::collections::VecDeque<Value>,
+    capacity: usize,
+    closed: bool,
 }
 
 /// A spawned task in a structured-concurrency scope (Track A.3b): its future (an `async fn` state
@@ -423,6 +441,8 @@ fn execute_with_collector(
         host,
         executor,
         scopes: Vec::new(),
+        channels: Vec::new(),
+        channel_progress: 0,
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -449,6 +469,13 @@ fn execute_with_collector(
         let roots: Vec<Value> = vm.globals.values().copied().collect();
         let garbage = collect_trace(&roots);
         vm.reclaim_cycle_garbage(garbage);
+    }
+    // Release any messages still buffered in channels at program end (isolates I.1) — undrained
+    // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor.
+    for chan in std::mem::take(&mut vm.channels) {
+        for msg in chan.buffer {
+            vm.release_value(msg);
+        }
     }
     // Destroy the globals at program end in reverse declaration order, running each
     // destructor on its last reference — the deterministic destruction the spec requires.
@@ -2760,6 +2787,38 @@ impl<'m> Vm<'m> {
                         frames[top].pc += 1;
                         continue;
                     }
+                    // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
+                    // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
+                    // polled); `close` is synchronous. Endpoint validity was checked statically.
+                    if let Some(id) = v.sender_id() {
+                        match method.as_str() {
+                            "send" => {
+                                let msg = frames[top].regs[args[0] as usize];
+                                // The future retains its own reference to the message; the arg
+                                // register's reference is released by its normal end-of-life.
+                                let future = Value::make_channel_send(id, msg);
+                                set_reg(&mut frames[top].regs, *dst, future);
+                                frames[top].pc += 1;
+                                continue;
+                            }
+                            "close" => {
+                                self.channels[id as usize].closed = true;
+                                self.channel_progress += 1;
+                                set_reg(&mut frames[top].regs, *dst, Value::unit());
+                                frames[top].pc += 1;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    if let Some(id) = v.receiver_id()
+                        && method == "recv"
+                    {
+                        let future = Value::make_channel_recv(id);
+                        set_reg(&mut frames[top].regs, *dst, future);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
                     // handle above.
                     if v.is_iter()
@@ -3719,6 +3778,44 @@ impl<'m> Vm<'m> {
                     }
                     frames[top].pc += 1;
                 }
+                Op::MakeChannel {
+                    dst,
+                    capacity,
+                    span,
+                } => {
+                    // Create a bounded channel and yield its `(Sender, Receiver)` endpoint tuple
+                    // (isolates I.1). The message type is checker-only; only the capacity reaches here.
+                    let cap = frames[top].regs[*capacity as usize];
+                    let Some(cap) = cap.as_int() else {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!(
+                                "`channel` expects an int capacity, found {}",
+                                cap.type_name()
+                            ),
+                        ));
+                    };
+                    if cap < 0 {
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            *span,
+                            format!("`channel` capacity must be non-negative, found {cap}"),
+                        ));
+                    }
+                    let id = self.channels.len() as u32;
+                    self.channels.push(Channel {
+                        buffer: std::collections::VecDeque::new(),
+                        capacity: cap as usize,
+                        closed: false,
+                    });
+                    // The two endpoints are fresh (refcount 1); `Value::tuple` takes ownership of
+                    // exactly those references, so no extra retain is needed.
+                    let tuple =
+                        Value::tuple(vec![Value::make_sender(id), Value::make_receiver(id)]);
+                    set_reg(&mut frames[top].regs, *dst, tuple);
+                    frames[top].pc += 1;
+                }
                 Op::AttributesOf { dst, type_name } => {
                     let result = self.materialize_attributes(type_name);
                     set_reg(&mut frames[top].regs, *dst, result);
@@ -4348,6 +4445,41 @@ impl<'m> Vm<'m> {
                 None => Ok(Poll::Pending),
             };
         }
+        // A channel-send future (isolates I.1): enqueue when the buffer has room (ready → unit), else
+        // suspend. `channel_send_parts` hands back the channel id and a **freshly-retained** message —
+        // transferred to the buffer on a push, released otherwise. Sending on a closed channel is a bug.
+        if let Some((id, msg)) = future.channel_send_parts() {
+            let id = id as usize;
+            if self.channels[id].closed {
+                release(msg);
+                return Err(self.error(
+                    DiagnosticCode::Panic,
+                    span,
+                    "cannot send on a closed channel".to_string(),
+                ));
+            }
+            if self.channels[id].buffer.len() < self.channels[id].capacity {
+                self.channels[id].buffer.push_back(msg); // ownership transfers to the queue
+                self.channel_progress += 1;
+                return Ok(Poll::Ready(Value::unit()));
+            }
+            release(msg);
+            return Ok(Poll::Pending);
+        }
+        // A channel-recv future (isolates I.1): dequeue the next message (ready → `some(v)`), yield
+        // `none` once closed and drained, else suspend on an empty open buffer. A dequeued message's
+        // reference transfers out of the queue into the `some(..)` wrapper.
+        if let Some(id) = future.channel_recv_id() {
+            let id = id as usize;
+            if let Some(msg) = self.channels[id].buffer.pop_front() {
+                self.channel_progress += 1;
+                return Ok(Poll::Ready(make_some(msg)));
+            }
+            if self.channels[id].closed {
+                return Ok(Poll::Ready(make_none()));
+            }
+            return Ok(Poll::Pending);
+        }
         match future.future_step() {
             Some(step) => {
                 let result = self.call_value(step, vec![Value::unit()], span);
@@ -4422,6 +4554,7 @@ impl<'m> Vm<'m> {
     fn join_scope(&mut self, span: Span) -> Result<(), Abort> {
         let si = self.scopes.len() - 1;
         loop {
+            let before = self.channel_progress;
             let progressed = self.poll_all_scopes_round(span)?;
             if self.scopes[si]
                 .iter()
@@ -4429,6 +4562,9 @@ impl<'m> Vm<'m> {
             {
                 return Ok(());
             }
+            // A channel op (a `send` unblocked, a `recv` drained) is progress even when no task
+            // completed this round — otherwise a producer/consumer pair would look deadlocked.
+            let progressed = progressed || self.channel_progress != before;
             if !progressed && self.executor.advance().is_none() {
                 return Err(self.error(
                     DiagnosticCode::Panic,
@@ -4447,6 +4583,7 @@ impl<'m> Vm<'m> {
     /// advance. Returns the completion value (owned). The caller's register keeps owning the future.
     fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
         loop {
+            let before = self.channel_progress;
             if let Poll::Ready(value) = self.poll_once(future, span)? {
                 return Ok(value);
             }
@@ -4455,6 +4592,8 @@ impl<'m> Vm<'m> {
             } else {
                 self.poll_all_scopes_round(span)?
             };
+            // A channel op during any poll this iteration is progress (see `join_scope`).
+            let progressed = progressed || self.channel_progress != before;
             if !progressed && self.executor.advance().is_none() {
                 return Err(self.error(
                     DiagnosticCode::Panic,

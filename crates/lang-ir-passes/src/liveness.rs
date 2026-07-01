@@ -570,6 +570,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::PollFuture { future, .. } => f(future),
         Rvalue::Pending { .. } => {}
         Rvalue::Spawn { future, .. } => f(future),
+        // `channel::<T>(capacity)` reads its capacity operand (isolates I.1).
+        Rvalue::MakeChannel { capacity, .. } => f(capacity),
         // `from_bytes::<T>(blob)` reads its byte operand (P-PACK 4.4).
         Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {

@@ -1,6 +1,6 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: BUILDING — I.0 DONE (`baa72ab`), I.1 next.** This is the parallelism half of architecture §7 (the
+**Status: BUILDING — I.0 + I.1 DONE, I.2 next.** This is the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -134,9 +134,24 @@ deterministic multi-isolate scheduler underneath.
   so `isolate` lowers to the existing `Rvalue::Spawn` and is fully executable + differential-covered — no
   gate. Real heap separation is I.4. Closed the object-model `!Send` deferral (E0042 ships here).
   Conformance 376 (isolate/isolate_not_send/isolate_orphan). Next free diag **E0043**.
-- **I.1 — bounded `Channel<T>` + the `SandboxScheduler` seam.** `channel::<T>(capacity)` →
-  `(Sender<T>, Receiver<T>)`; async `send`/`recv` (copy semantics); deterministic FIFO + block-on-
-  full/empty in the sandbox. In-oracle.
+- **I.1 — bounded `Channel<T>` + async `send`/`recv`/`close`. ✅ DONE.** `channel::<T>(capacity)` is a
+  turbofish keyword (an `Expr::Channel` → `Rvalue::MakeChannel`/`Op::MakeChannel`, message type
+  checker-only, capacity the only runtime operand) yielding a `(Sender<T>, Receiver<T>)` tuple of
+  scheduler-owned endpoint ids (`Value::Sender`/`Receiver`). `tx.send(v): Future<void>` (async — leaf
+  `Value::ChannelSend` future, enqueues on a poll when the buffer has room, else suspends → backpressure),
+  `rx.recv(): Future<?T>` (async — leaf `Value::ChannelRecv`, dequeues → `some(v)`, `none` once closed and
+  drained, else suspends), `tx.close(): void` (synchronous). Messages pass **by copy** (the queue owns its
+  own reference); deterministic FIFO. The channel table lives in each backend (`channels: Vec<Channel>`,
+  mirrored, like `scopes`) — no `SandboxScheduler` *trait* yet: with a trivial VecDeque queue the seam
+  buys nothing until `RealScheduler` (I.4), so the trait extraction is deferred there (consistent with how
+  the codebase extracts a trait at the second impl). A `channel_progress` counter distinguishes a
+  channel op that unblocks a sibling from a stalled round (a `send`/`recv`/`close` is progress even when no
+  task *completes*), so the deadlock detector doesn't misfire on a producer/consumer pair. Endpoint
+  `Send`-ness propagates its message type (`Sender<T>`/`Receiver<T>` is `Send` iff `T` is), so a
+  `Receiver<class>` is `!Send` → E0042 at an isolate boundary. In-oracle: differential 100% / leak 0 /
+  miri-clean. Conformance 378 (`channel`, `channel_endpoint_not_send`). **Deferred:** capacity-0
+  rendezvous (a 0-cap channel deadlocks — send never finds room); auto-close on all-senders-dropped
+  (needs endpoint drop-tracking — `close()` is explicit for now); a `SandboxScheduler` trait (I.4).
 - **I.2 — deterministic multi-isolate interleaving polish.** Ensure N isolates + channels interleave
   deterministically in the sandbox (block-points: `send`-full, `recv`-empty, `.await`); structured join.
   In-oracle. (Much of the scheduling reuses Track A's cooperative scheduler.)

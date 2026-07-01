@@ -1,0 +1,16 @@
+// Isolates milestone I.1 — a channel endpoint is `Send` iff its message type is (the endpoint is a
+// scheduler-owned id, but shipping it into an isolate means shipping its messages). A `Receiver<Conn>`
+// over a `class` (reference type: identity) is therefore `!Send` and cannot cross an isolate boundary
+// — E0042, the same rule an ordinary `class` argument hits. (A `Receiver<int>` would be fine.)
+// expect: error E0042 at 12:13
+// expect: exit 1
+class Conn { pub id: int }
+async fn drain(rx: Receiver<Conn>): int { return 0 }
+async fn run(): int {
+    (tx, rx) = channel::<Conn>(1)
+    concurrent {
+        h = isolate drain(rx)
+        return h.await
+    }
+}
+echo run().await

@@ -744,6 +744,15 @@ impl Pretty for Expr {
                 blob.pretty(out, level + 1);
                 out.push(')');
             }
+            Expr::Channel {
+                elem,
+                capacity,
+                span: s,
+            } => {
+                out.push_str(&format!("(channel {} {}\n", type_ref_str(elem), span(*s)));
+                capacity.pretty(out, level + 1);
+                out.push(')');
+            }
             Expr::RolesOf { span: s } => {
                 out.push_str(&format!("(roles_of {})", span(*s)));
             }

@@ -1335,6 +1335,18 @@ where
                 span: ctx.to_span(e.span()),
             });
 
+        // `channel::<T>(capacity)` — construct a bounded, typed channel (isolates I.1). Same shape as
+        // `from_bytes`: a turbofish message type followed by a parenthesized operand (the buffer size).
+        let channel = just(T::ChannelKw)
+            .ignore_then(just(T::ColonColon))
+            .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+            .then(sub.clone().delimited_by(just(T::LParen), just(T::RParen)))
+            .map_with(move |(elem, capacity), e| Expr::Channel {
+                elem,
+                capacity: Box::new(capacity),
+                span: ctx.to_span(e.span()),
+            });
+
         // `module.func::<T>(args)` — a call-site-typed native module call (`json.parse::<T>(s)`).
         // The receiver is always a bare module name (never an arbitrary expression), so this is an
         // atom — `ident . ident ::< T > ( args )` — rather than a postfix; that keeps it off the
@@ -1412,6 +1424,7 @@ where
             attributes_of,
             type_of,
             from_bytes,
+            channel,
             roles_of,
             invoke,
             typed_module_call,

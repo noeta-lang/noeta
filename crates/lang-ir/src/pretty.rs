@@ -329,6 +329,7 @@ impl Printer<'_> {
             Rvalue::PollFuture { future, .. } => format!("poll_future({})", atom(future)),
             Rvalue::Pending { .. } => "pending".to_string(),
             Rvalue::Spawn { future, .. } => format!("spawn({})", atom(future)),
+            Rvalue::MakeChannel { capacity, .. } => format!("channel({})", atom(capacity)),
             Rvalue::FromBytes { blob, layout, .. } => {
                 let ty = layout.as_ref().map(|l| l.type_name.as_str()).unwrap_or("?");
                 format!("from_bytes<{}>({})", ty, atom(blob))

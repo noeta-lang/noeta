@@ -1212,6 +1212,39 @@ impl Interpreter {
                 });
                 Ok(Value::Handle(scope_idx, task_idx))
             }
+            // `channel::<T>(cap)` (isolates I.1): register a new bounded channel and yield its
+            // `(Sender, Receiver)` endpoint pair. The message type is checker-only; only the capacity
+            // reaches here. A negative capacity is a runtime error (E0010), like other bad arguments.
+            lang_ir::Rvalue::MakeChannel { capacity, span } => {
+                let cap = self.eval_ir_atom(capacity, frame)?;
+                let Value::Int(cap) = cap else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        format!(
+                            "`channel` expects an int capacity, found {}",
+                            cap.type_name()
+                        ),
+                    ));
+                };
+                if cap < 0 {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::Panic,
+                        *span,
+                        format!("`channel` capacity must be non-negative, found {cap}"),
+                    ));
+                }
+                let id = self.channels.len();
+                self.channels.push(crate::Channel {
+                    buffer: std::collections::VecDeque::new(),
+                    capacity: cap as usize,
+                    closed: false,
+                });
+                Ok(Value::Tuple(Rc::new(vec![
+                    Value::Sender(id),
+                    Value::Receiver(id),
+                ])))
+            }
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
             lang_ir::Rvalue::Invoke {
                 recv,

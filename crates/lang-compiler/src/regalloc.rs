@@ -310,6 +310,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
+        Op::MakeChannel { dst, capacity, .. } => {
+            f.def = Some(*dst);
+            f.uses.push(*capacity);
+        }
         Op::LoadPending { dst } => f.def = Some(*dst),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => f.def = Some(*dst),
@@ -740,6 +744,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         | Op::Spawn { dst, src, .. } => {
             m(dst);
             m(src);
+        }
+        Op::MakeChannel { dst, capacity, .. } => {
+            m(dst);
+            m(capacity);
         }
         Op::LoadPending { dst } => m(dst),
         Op::ScopeBegin | Op::ScopeEnd { .. } => {}

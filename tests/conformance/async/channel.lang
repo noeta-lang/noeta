@@ -1,0 +1,41 @@
+// Isolates milestone I.1 — a bounded, typed channel. `channel::<T>(cap)` yields the split-endpoint
+// pair `(Sender<T>, Receiver<T>)`; `tx.send(v)` (async, backpressure on a full buffer) and
+// `rx.recv()` (async, `?T` — `none` once closed and drained) pass messages by copy. A producer task
+// fills a capacity-2 channel while a consumer drains it; the cooperative scheduler interleaves them
+// deterministically, so both backends agree. Sum 0+1+2+3+4 = 10.
+// expect: stdout "10"
+// expect: exit 0
+async fn produce(tx: Sender<int>): void {
+    for i in 0..5 {
+        tx.send(i).await
+    }
+    tx.close()
+}
+
+async fn consume(rx: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (delta, keep) = match r {
+            some(v) => (v, true),
+            none => (0, false),
+        }
+        total = total + delta
+        running = keep
+    }
+    return total
+}
+
+async fn run(): int {
+    (tx, rx) = channel::<int>(2)
+    mut result = 0
+    concurrent {
+        spawn produce(tx)
+        h = spawn consume(rx)
+        result = h.await
+    }
+    return result
+}
+
+echo run().await

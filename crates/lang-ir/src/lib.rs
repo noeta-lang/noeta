@@ -363,6 +363,10 @@ pub enum Rvalue {
         layout: Option<lang_ast::reflect::PackedLayout>,
         span: Span,
     },
+    /// `channel::<T>(capacity)` — construct a bounded channel (isolates I.1), yielding a
+    /// `(Sender, Receiver)` tuple of scheduler-owned endpoint ids. The message type `T` is a
+    /// checker-only concern (the runtime channel is untyped), so only `capacity` reaches here.
+    MakeChannel { capacity: Atom, span: Span },
     /// `attributes_of::<T>()` — the manifest's `#[T(...)]` attributes.
     AttributesOf { ty: TypeRef, span: Span },
     /// `roles_of()` — the `(declaration, Role)` index.

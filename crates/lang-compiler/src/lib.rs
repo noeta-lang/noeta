@@ -2380,6 +2380,16 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            Rvalue::MakeChannel { capacity, span } => {
+                // Create a bounded channel, yielding a `(Sender, Receiver)` endpoint tuple (I.1).
+                let capacity = self.atom_reg(capacity)?;
+                self.code.push(Op::MakeChannel {
+                    dst,
+                    capacity,
+                    span: *span,
+                });
+                Ok(())
+            }
             Rvalue::FromBytes { blob, layout, span } => {
                 // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4). Intern element T's
                 // schema from the layout the checker recorded (the same channel list literals use). A
