@@ -1,0 +1,43 @@
+// Track G.3 (liveness) — a generator hoists a local into a persistent captured cell only when it is
+// live across a `yield` (referenced in more than one state of the flattened machine); a local used
+// within a single suspend-free segment stays an ordinary block-local, re-bound on each entry. This is
+// a pure optimization — behavior must be identical either way — so this test pins the outputs at both
+// ends of the boundary.
+// expect: stdout "[1, 3, 6, 10]"
+// expect: stdout "[1, 4, 9]"
+// expect: stdout "[1, 3, 6]"
+// expect: exit 0
+
+// `sum`/`n` are read and written across the suspend on every iteration → hoisted to cells, so the
+// running total accumulates rather than resetting.
+fn running(): Iterator<int> {
+    mut sum = 0
+    mut n = 1
+    while true {
+        sum = sum + n
+        n = n + 1
+        yield sum
+    }
+}
+echo running().take(4).collect()
+
+// `sq` is computed and yielded within one segment (it never survives past its `yield`) → a
+// block-local, freshly bound each iteration.
+fn squares(): Iterator<int> {
+    for x in [1, 2, 3] {
+        mut sq = x * x
+        yield sq
+    }
+}
+echo squares().collect()
+
+// `total` is declared before the loop and updated across each suspend → hoisted; the loop variable
+// `x` lives only within the body segment → block-local.
+fn acc(): Iterator<int> {
+    mut total = 0
+    for x in [1, 2, 3] {
+        total = total + x
+        yield total
+    }
+}
+echo acc().collect()

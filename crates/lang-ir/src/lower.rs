@@ -1276,13 +1276,22 @@ fn desugar_generator(
 ) -> GeneratorDesugar {
     let mut flat = Flattener {
         blocks: Vec::new(),
-        hoisted: Vec::new(),
+        binds: Vec::new(),
+        declaring: HashSet::new(),
+        disqualified: HashSet::new(),
         stream_sites,
         tmp: 0,
     };
     let entry = flat.new_block();
     let exit = flat.lower_seq(body, entry, None);
     flat.blocks[exit].term = Term::Done;
+
+    // Liveness (G.3): a candidate name that is eligible (a fresh `mut`/for-var declaration) and
+    // referenced within a single state stays a block-local; everything else is hoisted to a captured
+    // cell. Then rewrite every hoisted binding to a bare assignment against its prelude cell.
+    let hoisted = flat.compute_hoisted();
+    let hoisted_set: HashSet<&str> = hoisted.iter().map(String::as_str).collect();
+    flat.rewrite_hoisted(&hoisted_set);
 
     // Render each state as `if $state == idx { <stmts> <terminator> }`, wrapped in a `while true`
     // dispatch loop; the trailing `return none` fires once `$state` reaches the terminal sentinel.
@@ -1324,7 +1333,7 @@ fn desugar_generator(
         value: Expr::Int { value: 0, span },
         span,
     }];
-    for name in &flat.hoisted {
+    for name in &hoisted {
         prelude.push(AstStmt::Binding {
             mut_decl: true,
             name: name.clone(),
@@ -1395,8 +1404,20 @@ struct BlockBuf {
 /// [`desugar_generator`].
 struct Flattener<'a> {
     blocks: Vec<BlockBuf>,
-    /// Flattened-level locals to hoist into captured cells (deduped, in first-seen order).
-    hoisted: Vec<String>,
+    /// Every flattened-level binding name, deduped in first-seen order — the candidates for hoisting
+    /// into captured cells. Which of these actually become cells is decided by liveness (G.3): a name
+    /// referenced in more than one state must persist across a suspend/jump, so it is hoisted; a
+    /// genuinely-fresh local (`mut x`/for-var) used within a single state stays a block-local.
+    binds: Vec<String>,
+    /// Candidate names that *declare* a fresh local (a `mut x = …` scalar or a single `for`-var) — the
+    /// only names eligible to stay a block-local, since a block-local and a cell both shadow any outer
+    /// binding identically, making the optimization behavior-preserving.
+    declaring: HashSet<String>,
+    /// Candidate names disqualified from the block-local optimization — kept on the always-hoist path
+    /// (the pre-G.3 behavior) to avoid any semantic change. A name is disqualified when its first
+    /// binding is a bare `x = …` (which may reassign an outer, so hoisting must keep shadowing it), or
+    /// when it is a destructure/tuple target or a synthetic cursor (`$for`/`$next`).
+    disqualified: HashSet<String>,
     /// The `for`-loop spans whose source is statically an `Iterator<T>` (Track I.2, computed by the
     /// checker). A `for` across a `yield` (G.4) uses its source directly when it is already an
     /// iterator, or calls `.iter()` on it when it is a collection.
@@ -1424,16 +1445,76 @@ impl Flattener<'_> {
         idx
     }
 
-    fn hoist(&mut self, name: &str) {
-        if !self.hoisted.iter().any(|n| n == name) {
-            self.hoisted.push(name.to_string());
+    /// Record a flattened-level binding of `name`. `scalar` is false for destructure/tuple targets and
+    /// synthetic cursors (always hoisted); `mutable` marks a `mut`-declared scalar. A scalar's *first*
+    /// binding decides eligibility: a `mut` declaration is `declaring` (block-local-eligible), a bare
+    /// assignment is `disqualified` (may reassign an outer — keep hoisting to preserve shadowing).
+    fn record(&mut self, name: &str, mutable: bool, scalar: bool) {
+        let first = !self.binds.iter().any(|n| n == name);
+        if first {
+            self.binds.push(name.to_string());
+        }
+        if !scalar {
+            self.disqualified.insert(name.to_string());
+        } else if first {
+            if mutable {
+                self.declaring.insert(name.to_string());
+            } else {
+                self.disqualified.insert(name.to_string());
+            }
+        }
+    }
+
+    /// Decide which candidate names become captured cells (G.3 liveness). A name is hoisted unless it
+    /// is *eligible* (a fresh `mut`/for-var declaration, not disqualified) **and** referenced within a
+    /// single state — in which case it stays a block-local, re-declared on each entry to its state.
+    /// Preserves `binds`' first-seen order so the prelude is deterministic (both backends agree).
+    fn compute_hoisted(&self) -> Vec<String> {
+        self.binds
+            .iter()
+            .filter(|name| {
+                let eligible = self.declaring.contains(*name) && !self.disqualified.contains(*name);
+                !eligible || self.ref_block_count(name) > 1
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// The number of distinct states that reference `name` (read or written). A name referenced in
+    /// more than one state must persist across a suspend/jump and so must be a cell.
+    fn ref_block_count(&self, name: &str) -> usize {
+        self.blocks
+            .iter()
+            .filter(|block| block_mentions(block, name))
+            .count()
+    }
+
+    /// Rewrite every hoisted name's flattened-level `Binding`/`Destructure` to a bare assignment
+    /// (`mut_decl: false`), so it reassigns the prelude cell rather than shadowing it. Non-hoisted
+    /// (block-local) bindings keep their declaration form untouched.
+    fn rewrite_hoisted(&mut self, hoisted: &HashSet<&str>) {
+        for block in &mut self.blocks {
+            for stmt in &mut block.stmts {
+                match stmt {
+                    AstStmt::Binding { mut_decl, name, .. } if hoisted.contains(name.as_str()) => {
+                        *mut_decl = false
+                    }
+                    AstStmt::Destructure {
+                        mut_decl, targets, ..
+                    } if targets.iter().any(|(n, _)| hoisted.contains(n.as_str())) => {
+                        *mut_decl = false
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
     /// Emit the binding(s) of a flattened `for` loop's pattern into state `block`, from the
-    /// already-unwrapped `element` expression: a single name binds directly; a tuple pattern
-    /// destructures positionally (reusing the `Destructure` machinery). Each bound name is hoisted to
-    /// a captured cell (`mut_decl: false` reassigns it), so it survives a `yield` in the loop body.
+    /// already-unwrapped `element` expression: a single name binds directly (a fresh declaration —
+    /// block-local-eligible); a tuple pattern destructures positionally (always hoisted). A bound name
+    /// used across a `yield` in the loop body is hoisted to a cell by liveness; one used within a
+    /// single state stays a block-local (the loop re-binds it each iteration).
     fn bind_for_pattern(
         &mut self,
         block: usize,
@@ -1443,14 +1524,14 @@ impl Flattener<'_> {
     ) {
         match pattern {
             AstForPattern::Single { name, name_span } => {
-                self.hoist(name);
+                self.record(name, true, true);
                 self.blocks[block]
                     .stmts
-                    .push(bare_assign_expr(name, element, *name_span));
+                    .push(decl_expr(name, element, *name_span));
             }
             AstForPattern::Tuple { names, .. } => {
                 for (name, _) in names {
-                    self.hoist(name);
+                    self.record(name, true, false);
                 }
                 self.blocks[block].stmts.push(AstStmt::Destructure {
                     mut_decl: false,
@@ -1508,15 +1589,20 @@ impl Flattener<'_> {
                 };
                 self.new_block()
             }
-            // A flattened-level local: hoist it to a captured cell and rewrite its declaration to a
-            // bare assignment (the prelude already declares the cell, so this reassigns it — including
-            // a `mut`-declared local, which must not re-shadow the cell).
+            // A flattened-level local: record it as a hoist candidate, preserving its original
+            // declaration form (`mut x` vs bare `x =`). Liveness later decides whether it becomes a
+            // captured cell (used across a state) or stays a block-local (used within one state); a
+            // hoisted binding is then rewritten to a bare assignment against the prelude cell.
             AstStmt::Binding {
-                name, value, span, ..
+                mut_decl,
+                name,
+                value,
+                span,
+                ..
             } => {
-                self.hoist(name);
+                self.record(name, *mut_decl, true);
                 self.blocks[cur].stmts.push(AstStmt::Binding {
-                    mut_decl: false,
+                    mut_decl: *mut_decl,
                     name: name.clone(),
                     name_span: *span,
                     ty: None,
@@ -1532,7 +1618,7 @@ impl Flattener<'_> {
                 ..
             } => {
                 for (name, _) in targets {
-                    self.hoist(name);
+                    self.record(name, true, false);
                 }
                 self.blocks[cur].stmts.push(AstStmt::Destructure {
                     mut_decl: false,
@@ -1584,8 +1670,9 @@ impl Flattener<'_> {
             } if body_has_yield(body) => {
                 let cursor = format!("$for{}", self.fresh());
                 let next = format!("$next{}", self.fresh());
-                self.hoist(&cursor);
-                self.hoist(&next);
+                // The cursor and next-element cells are always hoisted (they span the loop's states).
+                self.record(&cursor, true, false);
+                self.record(&next, true, false);
                 // Initialize the cursor cell: a collection needs `.iter()`; a source that is already an
                 // `Iterator<T>` (a stream site) is used directly (calling `.iter()` on it is not valid).
                 let source = if self.stream_sites.contains(span) {
@@ -1713,6 +1800,77 @@ fn bare_assign_expr(name: &str, value: Expr, span: Span) -> AstStmt {
         ty: None,
         value,
         span,
+    }
+}
+
+/// `mut name = value` — a fresh declaration (used for a block-local-eligible binding, e.g. a `for`
+/// loop variable). If liveness later hoists the name, [`Flattener::rewrite_hoisted`] turns this back
+/// into a bare assignment against the prelude cell.
+fn decl_expr(name: &str, value: Expr, span: Span) -> AstStmt {
+    AstStmt::Binding {
+        mut_decl: true,
+        name: name.to_string(),
+        name_span: span,
+        ty: None,
+        value,
+        span,
+    }
+}
+
+/// Whether a flattened state references `name` — in any of its statements or its terminator's
+/// condition/yielded expression. Conservative: never under-reports a reference (an over-report only
+/// forgoes the block-local optimization for that name, never miscompiles). See [`stmt_mentions`].
+fn block_mentions(block: &BlockBuf, name: &str) -> bool {
+    block.stmts.iter().any(|s| stmt_mentions(s, name))
+        || match &block.term {
+            Term::Yield(e, _) | Term::Branch(e, _, _) => e.mentions(name),
+            Term::Goto(_) | Term::Done => false,
+        }
+}
+
+/// Whether a statement references `name` — as a binding target or anywhere in a contained expression,
+/// descending into nested statement bodies. Total over `AstStmt` and **conservative**: any construct
+/// that could carry a reference this walker does not fully traverse (a nested declaration) reports
+/// `true`, so a reference is never missed (which would be a miscompile); over-reporting only skips the
+/// optimization. Built on [`Expr::mentions`], which is itself conservative for closure bodies.
+fn stmt_mentions(stmt: &AstStmt, name: &str) -> bool {
+    match stmt {
+        AstStmt::Echo { value, .. } | AstStmt::Expr { expr: value, .. } => value.mentions(name),
+        AstStmt::Binding {
+            name: target,
+            value,
+            ..
+        } => target == name || value.mentions(name),
+        AstStmt::Destructure { targets, value, .. } => {
+            targets.iter().any(|(t, _)| t == name) || value.mentions(name)
+        }
+        AstStmt::Return { value, .. } => value.as_ref().is_some_and(|v| v.mentions(name)),
+        AstStmt::Yield { value, .. } => value.mentions(name),
+        AstStmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            cond.mentions(name)
+                || then_body.iter().any(|s| stmt_mentions(s, name))
+                || else_body
+                    .as_deref()
+                    .is_some_and(|b| b.iter().any(|s| stmt_mentions(s, name)))
+        }
+        AstStmt::While { cond, body, .. } => {
+            cond.mentions(name) || body.iter().any(|s| stmt_mentions(s, name))
+        }
+        AstStmt::For { iterable, body, .. } => {
+            iterable.mentions(name) || body.iter().any(|s| stmt_mentions(s, name))
+        }
+        AstStmt::Break { .. }
+        | AstStmt::Continue { .. }
+        | AstStmt::Namespace { .. }
+        | AstStmt::Use { .. } => false,
+        // Nested declarations (`fn`/`class`/…/tier blocks) are not fully walked; conservatively assume
+        // they may reference `name` so it stays hoisted.
+        _ => true,
     }
 }
 
