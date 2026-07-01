@@ -1,6 +1,14 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: BUILDING — I.0 + I.1 + I.2 + I.3 + I.4 (a/b/c) DONE, I.5 (finalize) next.** This is the parallelism half of architecture §7 (the
+**Status: ✅ COMPLETE — I.0–I.5 all done.** The isolates milestone realizes architecture §7's parallelism
+half: `isolate f(args)` + bounded `Channel<T>`, deterministic in the sandbox (differential-covered) and
+running with real multi-core parallelism + cross-thread channels on the CLI. Copy-at-the-boundary is the
+honest v1; zero-copy borrow-share (the built-but-unused I.3 `SharedRegion`) waits on `Rc<Shape>→Arc<Shape>`
+— see `plans/deferred.md`. Sub-slices: I.0 surface+`Send`/E0042; I.1 bounded channels; I.2 deterministic
+multi-isolate interleave; I.3 shared-region+`shared`-tag heap (miri); I.4a route real→VM; I.4b real
+OS-thread isolates (fork-join); I.4c cross-thread channels; I.5 finalize (this).
+
+This was the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -290,8 +298,20 @@ deterministic multi-isolate scheduler underneath.
     - **Seam:** a `parallel_isolates` flag set by the real entry point (`run_module_with_host_and_
       executor`); the sandbox path leaves it false (cooperative, unchanged). Integration-tested
       out-of-oracle (real threads actually run in parallel; results/messages round-trip).
-- **I.5 — finalize:** docs (§7 alignment), deferred rows (durable queues, worker pools, app-lifetime
-  `TaskScope` via DI — §7.2 framework patterns, *not* language constructs), mark complete.
+- **I.5 — finalize. ✅ DONE.** Milestone marked complete; the `plans/deferred.md` "inter-isolate
+  parallelism / channels (§7 CPU-bound story)" row is closed, with the residual work split into explicit
+  deferred rows there: **zero-copy borrow-share** (needs `Rc<Shape>→Arc<Shape>`, then wire the I.3
+  `SharedRegion` into the real spawn path + the big-input-no-copy check); **channel v1 limits**
+  (capacity-0 rendezvous, auto-close on all-senders-dropped, real-path deadlock hangs rather than
+  errors); **real-worker environment limits** (marshallable globals only; no isolate-teardown cycle
+  collection). Architecture §7 needs no change — it is the design north-star and this milestone realizes
+  its parallelism half (async §7.1 already shipped as Track A; the §7.2 `TaskScope`/workers/durable
+  queues/schedulers remain framework/first-party-extension patterns, not language constructs).
 
-Starting point: **I.0** — pure front-end + in-oracle execution-as-task, closing the object-model
-deferral, independent of the channel/scheduler/real-thread work that follows.
+**What shipped (commits):** I.0 `baa72ab` · I.1 `f541f72` · I.2 `9562a10` · I.3 `4a6b09f` · I.4a
+`a756781` · I.4b `5d53605`/`c0eadf4`/`8e3c482`/`1e65d6e` · I.4c `11825cd`. Deterministic sandbox
+byte-identical throughout (differential 374 / 100% / agree, leak 0 both); real path out-of-oracle,
+integration-tested (CLI 50, incl. proven parallelism + cross-thread backpressure).
+
+Starting point (historical): **I.0** — pure front-end + in-oracle execution-as-task, closing the
+object-model deferral, independent of the channel/scheduler/real-thread work that followed.
