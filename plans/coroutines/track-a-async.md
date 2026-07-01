@@ -161,9 +161,33 @@ re-poll; on `Ready(v)`, done; if `Pending` with nothing to advance → a determi
   ready-queue ordering in `SandboxExecutor`. `TaskScope` value. **Decide:** does an implicitly-async
   root count as an owning scope for a top-level `spawn`? (settle here). `all`/`race` deferred to a
   library.
-- **A.4 — real executor (tokio) + async IO leaves (CLI-only, out-of-oracle).** Wire `.await` to the
-  per-isolate tokio `current_thread` runtime in `RealHost`; make fs IO **suspend** (`await`) instead of
-  `block_on` at the leaf. `RealExecutor` behind the CLI, integration-tested like `RealHost`.
+- **A.4 — real executor (tokio) + async IO leaves (CLI-only, out-of-oracle). ✅ DONE** (A.4a `15fce0e`;
+  A.4b `cf716c1`; A.4c `9874ed9`). Three sub-slices:
+  - **A.4a** — extracted the concrete `SandboxExecutor` into a `lang_stdlib::Executor` trait
+    (`now`/`register_timer`/`advance`), mirroring the `Host` seam. Both backends now hold a
+    `Box<dyn Executor>` defaulting to `SandboxExecutor`; new injection entry points
+    (`run_ir_with_host_and_executor` / `run_module_with_host_and_executor`) let the CLI swap in a real
+    executor without touching the (backend-side, shared) cooperative scheduler. Pure refactor,
+    byte-identical.
+  - **A.4b** — `RealExecutor` in `lang-runtime`: `now()` reads real elapsed wall-clock time,
+    `advance()` genuinely *sleeps* on a per-isolate tokio `current_thread` runtime's time driver until
+    the earliest pending timer. `lang run` (and the shared `@test` path) pairs `RealHost` with
+    `RealExecutor`, so `sleep`/`concurrent` run against real time on the CLI while the differential
+    keeps the sandbox pair. `register_timer` inserts unconditionally (real time can cross a deadline
+    between the "not ready" poll and registration; `advance` clears already-past deadlines rather than
+    dead-locking). CLI integration test: a two-task `concurrent` block prints the same byte-for-byte
+    interleaving as the sandbox but takes ~150ms of real time. Added tokio's `time` feature.
+  - **A.4c** — additive async IO leaf (chosen with the user over converting the sync fs surface):
+    `fs.read_async(path): Future<string>`, sync `fs.read` untouched. New leaf-future value kind
+    `AsyncRead(id)` (both backends, miri-covered) mirroring `Timer`/`Handle` — a GC leaf carrying an
+    executor ticket. The `Executor` trait grows `spawn_read`/`poll_read`: the **sandbox** reads the VFS
+    synchronously at spawn (ready on first poll → deterministic → *in-oracle*, differential-covered by
+    `async/read_async.lang`); the **real** executor spawns on tokio (reads run concurrently on the
+    blocking pool; `advance` harvests one and pumps the runtime so siblings finish; genuine IO
+    concurrency, out-of-oracle). Both backends intercept `fs.read_async` ahead of the synchronous
+    registry dispatch and build the leaf; polling resolves to the contents or aborts E0021 at the
+    `.await`. Typing via a new `SigType::Future`; no new op, no IR/compiler change. CLI-tested (two
+    concurrent real-disk reads; missing file → E0021). Conformance 367, differential 358 matched.
 - **A.5 — finalize.** Coloring cleanup, `?`-through-`.await` + error/cancellation typing (§7.1), docs
   refresh (`resources/01,02`, this dir's README + memory), `plans/deferred.md` rows, mark Track A
   complete.
