@@ -55,16 +55,17 @@ check before scoping). Deferred until its value is demonstrated by a workload.
 
 ## Per-track detail
 
-### P-SIMD — SIMD kernels over flat packed buffers
-- **Goal:** `std::simd` (portable-SIMD, no FFI seam — recommended in the P-PACK Phase 4 plan) for the
-  hot 3D-math kernels over contiguous `List<f32>`/`List<Vec3>` (batch add/scale/dot/normalize), behind
-  the *same* scalar results both backends produce today.
-- **Oracle posture:** scalar semantics stay the spec; SIMD is an internal Rust detail of the `lang-stdlib`
-  registry kernels. Differential can't see it. Gate on a criterion bench (batch op over n, parameterized).
-- **Prereq:** none for the internal kernels. A *user-visible* `Simd<T,N>` type is explicitly out of scope
-  here (that's P-BITS Tier P + const generics).
-- **First slice:** pick one kernel (e.g. `List<Vec3>` component-wise add), add a parameterized bench,
-  swap its inner loop to `std::simd`, record before/after.
+### P-SIMD — SIMD kernels over flat packed buffers → **ready-to-execute slice doc: [`p-simd.md`](p-simd.md)**
+- **Goal:** SIMD the bulk 3D-math kernels (`vec.add_all/sub_all/scale_all/dot_all/length_all` over a flat
+  packed `List<Vec3>`, impls `lang_stdlib::vec3::*_buffers`), behind the *same* scalar results.
+- **Toolchain note (found on inspection):** the build is **stable** (rustc 1.96.0), so portable
+  `std::simd` (nightly-only) is unavailable — use the **`wide`** crate (stable portable SIMD), not
+  `std::simd` as the older P-PACK Phase 4 plan assumed. Keeps the `unsafe`-forbidden rule intact.
+- **Consumer/workload confirmed:** `vec.*_all` bulk ops + `tests/conformance/std/vec3_bulk.lang` already
+  exist — a real consumer to bench (build a large `List<Vec3>`, time `add_all`/`dot_all`).
+- **Oracle posture:** scalar semantics stay the spec; SIMD is internal to the kernels; the differential
+  can't see it (both backends call the one kernel). One watch: keep f32 reduction order matching scalar.
+- **Prereq:** none. A user-visible `Simd<T,N>` type is out of scope (P-BITS Tier P + const generics).
 
 ### P-SHARE — zero-copy borrow-share for isolate args
 - **Prereq slice:** `Rc<Shape>`→`Arc<Shape>` across `lang-object`/`lang-value`/`lang-vm` (or store shapes
