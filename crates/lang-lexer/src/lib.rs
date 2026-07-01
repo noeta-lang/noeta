@@ -46,6 +46,14 @@ pub enum TokenKind {
     /// suspend rather than a field access.
     #[token("await")]
     AwaitKw,
+    /// `concurrent { … }` — a structured-concurrency scope (Track A.3). Tasks spawned inside it are
+    /// joined at the closing brace; nothing outlives the block.
+    #[token("concurrent")]
+    ConcurrentKw,
+    /// `spawn e` — schedule the future `e` as a task in the enclosing `concurrent` scope (Track A.3),
+    /// yielding a handle (`Future<T>`) whose `.await` produces the task's result.
+    #[token("spawn")]
+    SpawnKw,
     #[token("if")]
     IfKw,
     /// The conditional-expression keyword: `if cond then a else b`. Forks the grammar from the
@@ -288,6 +296,8 @@ impl TokenKind {
             TokenKind::YieldKw => "YieldKw",
             TokenKind::AsyncKw => "AsyncKw",
             TokenKind::AwaitKw => "AwaitKw",
+            TokenKind::ConcurrentKw => "ConcurrentKw",
+            TokenKind::SpawnKw => "SpawnKw",
             TokenKind::IfKw => "IfKw",
             TokenKind::ThenKw => "ThenKw",
             TokenKind::ElseKw => "ElseKw",
@@ -383,6 +393,8 @@ impl TokenKind {
             TokenKind::YieldKw => "`yield`",
             TokenKind::AsyncKw => "`async`",
             TokenKind::AwaitKw => "`await`",
+            TokenKind::ConcurrentKw => "`concurrent`",
+            TokenKind::SpawnKw => "`spawn`",
             TokenKind::IfKw => "`if`",
             TokenKind::ThenKw => "`then`",
             TokenKind::ElseKw => "`else`",

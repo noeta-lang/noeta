@@ -479,6 +479,10 @@ struct Checker {
     /// around each function and reset to `false` when entering a closure (so `.await` cannot cross a
     /// closure boundary — the same coloring rule as `yield`).
     current_async: bool,
+    /// The number of enclosing `concurrent { }` scopes around the statement being checked (Track A.3b).
+    /// A `spawn` is only valid when this is non-zero; otherwise it is an orphan task (E0041). Reset at a
+    /// closure boundary (a closure is a fresh callable — a `concurrent` scope does not cross into it).
+    concurrent_depth: u32,
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
@@ -1176,7 +1180,11 @@ impl Checker {
         // after the body.
         let saved_yield = self.current_yield.take();
         let saved_async = std::mem::replace(&mut self.current_async, false);
+        // A `concurrent` scope likewise does not cross into a closure — a `spawn` inside a closure
+        // passed to a builtin is an orphan (E0041), the same coloring rule.
+        let saved_concurrent = std::mem::replace(&mut self.concurrent_depth, 0);
         let result = self.closure_body_type_inner(body, expected, env);
+        self.concurrent_depth = saved_concurrent;
         self.current_async = saved_async;
         self.current_yield = saved_yield;
         result
@@ -1444,6 +1452,40 @@ impl Checker {
                 self.loop_depth += 1;
                 self.check_block(body, env);
                 self.loop_depth -= 1;
+            }
+            Stmt::Concurrent { body, span } => {
+                // `concurrent { }` is a structured-concurrency scope (Track A.3b). It is async-only —
+                // joining spawned tasks needs suspend machinery — so it is illegal in a sync context
+                // (the coloring rule, E0040), exactly like `.await`.
+                if !self.current_async {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::AsyncMisuse,
+                            *span,
+                            "`concurrent { }` is only allowed inside an `async fn` (or the async top \
+                             level)"
+                                .to_string(),
+                        )
+                        .with_help(
+                            "mark the enclosing function `async fn`; structured concurrency needs an \
+                             async context to join its tasks",
+                        ),
+                    );
+                }
+                // A.3b.1 interim gate: the surface + typing land here, but the cooperative scheduler
+                // is A.3b.2 — so a well-formed `concurrent` block type-checks yet cannot run yet.
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::AsyncMisuse,
+                        *span,
+                        "`concurrent { }` is not yet executable (Track A.3b.2)".to_string(),
+                    )
+                    .with_help("structured-concurrency execution lands in the next slice"),
+                );
+                // Inside the scope, `spawn` is legal; check the body with the depth raised.
+                self.concurrent_depth += 1;
+                self.check_block(body, env);
+                self.concurrent_depth -= 1;
             }
             Stmt::Break { span } | Stmt::Continue { span } => {
                 // A loop-control statement is only meaningful inside a `for`/`while` body.
@@ -3007,6 +3049,45 @@ impl Checker {
                             .with_help("`.await` unwraps a `Future<T>` produced by an `async fn`"),
                         );
                         Type::Unknown
+                    }
+                }
+            }
+            Expr::Spawn { future, span } => {
+                let inner = self.synth(future, env);
+                // Structured concurrency (Track A.3b): `spawn` is legal only inside a `concurrent { }`
+                // scope. An orphan `spawn` (no enclosing scope — incl. one in a closure, where the depth
+                // was reset) is E0041 by construction, so a spawned task can never outlive a scope.
+                if self.concurrent_depth == 0 {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::OrphanSpawn,
+                            *span,
+                            "`spawn` is only allowed inside a `concurrent { }` scope".to_string(),
+                        )
+                        .with_help(
+                            "wrap the `spawn` in a `concurrent { }` block; a task must have an owning \
+                             scope that joins it",
+                        ),
+                    );
+                }
+                // `spawn e` takes a `Future<T>` (an `async fn` call) and yields a handle that is itself
+                // a `Future<T>` — so `spawn f().await` produces the result. A non-future operand is
+                // E0041 (a hole/`dyn` defers to runtime).
+                match &inner {
+                    Type::Named(n, _) if n == stdlib::FUTURE => inner.clone(),
+                    t if t.defers_to_runtime() => {
+                        Type::Named(stdlib::FUTURE.to_string(), vec![t.clone()])
+                    }
+                    other => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::OrphanSpawn,
+                                *span,
+                                format!("`spawn` expects a `Future`, found `{other}`"),
+                            )
+                            .with_help("`spawn` an `async fn` call, e.g. `spawn fetch(url)`"),
+                        );
+                        Type::Named(stdlib::FUTURE.to_string(), vec![Type::Unknown])
                     }
                 }
             }
@@ -4680,6 +4761,9 @@ fn stmt_has_await(stmt: &Stmt) -> bool {
         }
         Stmt::For { iterable, body, .. } => iterable.has_await() || block_has_await(body),
         Stmt::While { cond, body, .. } => cond.has_await() || block_has_await(body),
+        // A `concurrent { }` requires (and thus establishes) an async context at this level, so the
+        // top level is async when it contains one — even with no `.await` directly in its body.
+        Stmt::Concurrent { .. } => true,
         // A nested `fn` is its own callable; declarations, imports, and stripped tier blocks carry no
         // top-level-level `.await`.
         _ => false,

@@ -47,6 +47,15 @@ enum DotKeyword {
     Await,
 }
 
+/// A prefix operator, folded into one pratt entry: `-x`/`!x` and the Track-A `spawn e`. Kept together
+/// because chumsky's pratt op-tuple caps at 26 entries; all three are prefix at the same precedence.
+#[derive(Clone, Copy)]
+enum PrefixOp {
+    Neg,
+    Not,
+    Spawn,
+}
+
 /// The built-in **decorator** directives — the closed set of `@`-directives that prefix a *type*
 /// declaration (`@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`). Everything else after
 /// `@` is a **tier** directive (`@test`/`@bench`/…, an open set). The statement parser dispatches on
@@ -1538,16 +1547,36 @@ where
                 expr: Box::new(operand),
                 span: ctx.to_span(e.span()),
             }),
-            prefix(9, just(T::Minus), move |_, operand, e| Expr::Unary {
-                op: UnaryOp::Neg,
-                operand: Box::new(operand),
-                span: ctx.to_span(e.span()),
-            }),
-            prefix(9, just(T::Bang), move |_, operand, e| Expr::Unary {
-                op: UnaryOp::Not,
-                operand: Box::new(operand),
-                span: ctx.to_span(e.span()),
-            }),
+            // `-x` / `!x` — unary negation/not — and `spawn e` (Track A.3), all prefix at the same
+            // precedence, folded into one pratt entry (chumsky's op-tuple caps at 26). `spawn` binds
+            // looser than call/postfix, so `spawn f()` is `spawn (f())`.
+            prefix(
+                9,
+                choice((
+                    just(T::Minus).to(PrefixOp::Neg),
+                    just(T::Bang).to(PrefixOp::Not),
+                    just(T::SpawnKw).to(PrefixOp::Spawn),
+                )),
+                move |op, operand, e| {
+                    let span = ctx.to_span(e.span());
+                    match op {
+                        PrefixOp::Neg => Expr::Unary {
+                            op: UnaryOp::Neg,
+                            operand: Box::new(operand),
+                            span,
+                        },
+                        PrefixOp::Not => Expr::Unary {
+                            op: UnaryOp::Not,
+                            operand: Box::new(operand),
+                            span,
+                        },
+                        PrefixOp::Spawn => Expr::Spawn {
+                            future: Box::new(operand),
+                            span,
+                        },
+                    }
+                },
+            ),
             infix(left(8), just(T::Star), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Mul, l, r, e)
             }),
@@ -1807,6 +1836,16 @@ where
                 body,
                 span: ctx.to_span(e.span()),
             });
+
+        // `concurrent { body }` — a structured-concurrency scope (Track A.3). `concurrent` is followed
+        // directly by a brace block, so there is no head-expression ambiguity.
+        let concurrent_ =
+            just(T::ConcurrentKw)
+                .ignore_then(block.clone())
+                .map_with(move |body, e| Stmt::Concurrent {
+                    body,
+                    span: ctx.to_span(e.span()),
+                });
 
         // `else if` is an `else` whose body is a single nested `if`.
         let if_expr = head_expr.clone();
@@ -2770,6 +2809,7 @@ where
             if_,
             for_,
             while_,
+            concurrent_,
             break_,
             continue_,
             fn_decl,

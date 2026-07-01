@@ -196,6 +196,15 @@ impl Pretty for Stmt {
                 }
                 out.push(')');
             }
+            Stmt::Concurrent { body, span: s } => {
+                indent(out, level);
+                out.push_str(&format!("(concurrent {}", span(*s)));
+                for stmt in body {
+                    out.push('\n');
+                    stmt.pretty(out, level + 1);
+                }
+                out.push(')');
+            }
             Stmt::Break { span: s } => {
                 indent(out, level);
                 out.push_str(&format!("(break {})", span(*s)));
@@ -685,6 +694,11 @@ impl Pretty for Expr {
             Expr::Await { expr, span: s } => {
                 out.push_str(&format!("(await {}\n", span(*s)));
                 expr.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Spawn { future, span: s } => {
+                out.push_str(&format!("(spawn {}\n", span(*s)));
+                future.pretty(out, level + 1);
                 out.push(')');
             }
             Expr::Coalesce {

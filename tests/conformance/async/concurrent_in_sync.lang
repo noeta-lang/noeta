@@ -1,0 +1,12 @@
+// Track A.3b — `concurrent { }` is async-only: joining spawned tasks needs suspend machinery, which a
+// synchronous `fn` does not have. A `concurrent` block in a sync fn is E0040 (the coloring rule).
+// expect: error E0040 at 7:5
+// expect: exit 1
+async fn work(n: int): int { return n }
+fn g(): int {
+    concurrent {
+        spawn work(1)
+    }
+    return 0
+}
+echo "unreached"

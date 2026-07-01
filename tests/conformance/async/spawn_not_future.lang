@@ -1,0 +1,9 @@
+// Track A.3b — `spawn` takes a `Future<T>` (an `async fn` call). Spawning a non-future (here an `int`)
+// is E0041. (The `concurrent` block is also gated as not-yet-executable in A.3b.1 — a separate E0040.)
+// expect: error E0041 at 6:9
+// expect: exit 1
+concurrent {
+    x = spawn 5
+    echo x.await
+}
+echo "unreached"

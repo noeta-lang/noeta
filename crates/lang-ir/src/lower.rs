@@ -447,6 +447,15 @@ impl Lowerer<'_> {
             // A standalone `impl` and a `namespace` have no runtime effect in the tree-walker
             // (both are `Ok(Flow::Normal)` no-ops), so they lower to nothing.
             AstStmt::Impl(_) | AstStmt::Namespace { .. } => Ok(()),
+            // `concurrent { }` (Track A.3b) is gated as "not yet executable" at check (A.3b.1), so a
+            // clean program never lowers one. To keep lowering total (the property test lowers without
+            // checking), lower the body statements inline — replaced by the real scope ops in A.3b.2.
+            AstStmt::Concurrent { body, .. } => {
+                for s in body {
+                    self.lower_stmt(s, out)?;
+                }
+                Ok(())
+            }
             // A dev-tier block reaching lowering is an *inactive* residual (object-model slice 6):
             // the tier-strip pass already spliced any *active* block's items into the statement
             // stream and dropped the inactive ones, so an inactive block lowers to nothing (stripped
@@ -987,6 +996,11 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            // `spawn e` (Track A.3b) is gated as "not yet executable" at check (A.3b.1), so a clean
+            // program never lowers one. To keep lowering total, lower the future operand and pass it
+            // through (identity) — replaced by the real `Op::Spawn` (register a task, return a handle)
+            // in A.3b.2.
+            Expr::Spawn { future, .. } => self.lower_expr(future, out),
             Expr::Coalesce {
                 value,
                 fallback,

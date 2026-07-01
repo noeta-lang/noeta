@@ -82,6 +82,10 @@ pub enum Stmt {
     /// `yield <expr>;` — produce the next element of a generator (Track G). Only valid in a generator
     /// body (a function containing `yield`); checked, then desugared into the state machine.
     Yield { value: Expr, span: Span },
+    /// `concurrent { ... }` — a structured-concurrency scope (Track A.3). Tasks `spawn`ed inside the
+    /// body are joined at the closing brace: the block cannot be exited until every spawned task has
+    /// finished, so nothing outlives the scope. Legal only in an async context.
+    Concurrent { body: Vec<Stmt>, span: Span },
     /// `if cond { ... } else if cond { ... } else { ... }`. An `else if` is represented
     /// as an `else_body` containing a single nested `If`.
     If {
@@ -145,6 +149,7 @@ impl Stmt {
             | Stmt::Use { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::Yield { span, .. }
+            | Stmt::Concurrent { span, .. }
             | Stmt::If { span, .. }
             | Stmt::For { span, .. }
             | Stmt::While { span, .. }
@@ -708,6 +713,10 @@ pub enum Expr {
     /// (not desugared here — the IR lowering turns it into a poll-state of the async state machine) so
     /// the checker types it (`Future<T>` → `T`) and points diagnostics at the `.await`.
     Await { expr: Box<Expr>, span: Span },
+    /// `spawn e` (Track A.3): schedule the future `e` as a task in the enclosing `concurrent` scope,
+    /// yielding a handle that is itself a `Future<T>` (so `spawn f().await` produces the result). Legal
+    /// only inside a `concurrent { }` block (an orphan `spawn` is E0041).
+    Spawn { future: Box<Expr>, span: Span },
     /// The `??` fallback operator: `value ?? fallback`. On `Ok(x)`/`some(x)` it yields
     /// `x`; on `Err(_)`/`none` it evaluates and yields `fallback`.
     Coalesce {
@@ -924,6 +933,7 @@ impl Expr {
             | Expr::Match { span, .. }
             | Expr::Try { span, .. }
             | Expr::Await { span, .. }
+            | Expr::Spawn { span, .. }
             | Expr::Coalesce { span, .. }
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
@@ -1011,6 +1021,7 @@ impl Expr {
             }
             Expr::Try { expr, .. }
             | Expr::Await { expr, .. }
+            | Expr::Spawn { future: expr, .. }
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
@@ -1089,6 +1100,7 @@ impl Expr {
                     || lit.spread.as_ref().is_some_and(|s| s.has_await())
             }
             Expr::Try { expr, .. }
+            | Expr::Spawn { future: expr, .. }
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }

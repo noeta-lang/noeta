@@ -162,6 +162,10 @@ pub enum DiagnosticCode {
     /// non-`Future` value, an `async fn`'s body is otherwise malformed, or a well-formed async
     /// program is not yet executable (the A.0 interim gate, lifted in A.1).
     AsyncMisuse,
+    /// A structured-concurrency construct is misused (Track A.3b): a `spawn` appears outside any
+    /// `concurrent { }` scope (an orphan task, forbidden by construction), a `spawn` operand is not a
+    /// `Future`, or a `concurrent`/`spawn` is otherwise malformed.
+    OrphanSpawn,
 }
 
 impl DiagnosticCode {
@@ -208,6 +212,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidPackedType,
         DiagnosticCode::GeneratorMisuse,
         DiagnosticCode::AsyncMisuse,
+        DiagnosticCode::OrphanSpawn,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -254,6 +259,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidPackedType => "E0038",
             DiagnosticCode::GeneratorMisuse => "E0039",
             DiagnosticCode::AsyncMisuse => "E0040",
+            DiagnosticCode::OrphanSpawn => "E0041",
         }
     }
 

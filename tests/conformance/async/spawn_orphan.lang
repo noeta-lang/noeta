@@ -1,0 +1,10 @@
+// Track A.3b — explicit-only structured concurrency: a `spawn` is legal only inside a `concurrent { }`
+// scope. An orphan `spawn` (no owning scope) is E0041 — a task can never outlive a scope by construction.
+// expect: error E0041 at 7:9
+// expect: exit 1
+async fn work(n: int): int { return n }
+async fn g(): int {
+    h = spawn work(1)
+    return h.await
+}
+echo "unreached"

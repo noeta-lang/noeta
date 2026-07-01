@@ -134,6 +134,22 @@ re-poll; on `Ready(v)`, done; if `Pending` with nothing to advance → a determi
     without A.3's `concurrent`/`spawn`. Building it in A.2 would leave that path dead/untested (the exact
     anti-pattern the A.1/A.2 split avoided), so the state machine moves to A.3, where it is finally
     testable. A.1's tests still pass unchanged (single-task drive-to-completion regardless of mechanism).
+- **A.3 settled decisions (with the user, 2026-07-01):** **explicit-only** structured concurrency —
+  `spawn` is legal *only* inside a `concurrent { }` block (an orphan `spawn` is **E0041**); there is no
+  bare top-level `spawn` (write `concurrent { }`, which may itself sit at the top level). `concurrent`
+  is what guarantees nothing dangles: the block cannot be exited until every task spawned in it has
+  finished (joined at `}`), and a child's failure propagates at that boundary. `concurrent`/`spawn` are
+  async-only (a sync fn has no suspend machinery). `spawn e` takes a `Future<T>` (an `async fn` call)
+  and returns a **handle that is itself a `Future<T>`** — `h.await` yields the result; a richer `Task`
+  type (cancel/status) is deferred. Execution model: the `concurrent` block body runs inline
+  (`ScopeBegin`; body; `ScopeEnd`); `spawn` registers a task in the current scope (lazy — not run until
+  first drive); a `.await` **inside the block body** drives the scope (round-robin poll of sibling
+  tasks + the target, advancing the logical clock) so siblings interleave, while a spawned task's *own*
+  `.await`s are the A.3a poll-suspends (it yields to the scheduler); `}` joins all remaining tasks.
+  Deferred: `all`/`race`/bounded `map`, cancellation beyond abandon-on-error, a nested `concurrent`
+  interleaving with outer siblings (a nested scope runs to completion within its task). Built in two
+  green commits — **A.3b.1** front-end (surface + typing + E0041, gated "not yet executable") then
+  **A.3b.2** the cooperative scheduler runtime.
 - **A.3 — structured concurrency: `concurrent { }` + `TaskScope` + `spawn` — AND the async state
   machine (moved here from A.2).** The state machine is built here because concurrency is what makes it
   observable: the CFG state-machine lowering (a `lower_async` mirroring `lower_generator`: `.await` →
