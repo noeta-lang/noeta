@@ -1,0 +1,21 @@
+// Isolates I.2 — a channel that can never make progress deadlocks *deterministically* rather than
+// hanging. The consumer blocks on recv-empty; nothing is ever sent and the channel is never closed, so
+// no task completes, no channel op makes progress, and no timer can advance the logical clock. The
+// cooperative scheduler detects this stall and aborts with E0010 (same block-point/progress machinery
+// that keeps a live producer/consumer pair from false-positiving). Both backends detect it identically.
+// expect: error E0010 at 17:18
+// expect: exit 1
+async fn stuck(rx: Receiver<int>): int {
+    r = rx.recv().await
+    return match r { some(x) => x, none => 0 }
+}
+async fn run(): int {
+    (tx, rx) = channel::<int>(1)
+    mut result = 0
+    concurrent {
+        h = spawn stuck(rx)
+        result = h.await
+    }
+    return result
+}
+echo run().await

@@ -1,6 +1,6 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: BUILDING — I.0 + I.1 DONE, I.2 next.** This is the parallelism half of architecture §7 (the
+**Status: BUILDING — I.0 + I.1 + I.2 DONE, I.3 next.** This is the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -152,9 +152,20 @@ deterministic multi-isolate scheduler underneath.
   miri-clean. Conformance 378 (`channel`, `channel_endpoint_not_send`). **Deferred:** capacity-0
   rendezvous (a 0-cap channel deadlocks — send never finds room); auto-close on all-senders-dropped
   (needs endpoint drop-tracking — `close()` is explicit for now); a `SandboxScheduler` trait (I.4).
-- **I.2 — deterministic multi-isolate interleaving polish.** Ensure N isolates + channels interleave
-  deterministically in the sandbox (block-points: `send`-full, `recv`-empty, `.await`); structured join.
-  In-oracle. (Much of the scheduling reuses Track A's cooperative scheduler.)
+- **I.2 — deterministic multi-isolate interleaving polish. ✅ DONE.** Verified N isolates + N channels
+  interleave deterministically in the sandbox across the block-points (`send`-full, `recv`-empty,
+  `.await`) with structured join — and proved **no scheduler code change was needed**: the A.7 cross-scope
+  round-robin (`poll_all_scopes_round` walks every open scope in order, so siblings at all levels advance)
+  composed with I.1's channel block-points + progress-aware deadlock detection already delivers it. A
+  verification slice (5 conformance tests, no source change): `channel_pipeline` (3-stage `source →
+  square → sink` over two capacity-1 channels — backpressure both directions, close propagates down the
+  chain), `channel_fanin` (two producers share one `Sender`, a cross-scope consumer drains, inner scope
+  joins producers before an explicit close), `channel_interleave` (a capacity-1 channel forces strict
+  producer/consumer alternation — pins the exact **observable side-effect order**, the sharpest cross-
+  backend determinism test), `isolate_channel` (three worker **isolates** report squares over a channel,
+  structured join, `Send`-checked endpoints), `channel_deadlock` (a never-fed/never-closed `recv`
+  deadlocks *deterministically* — E0010, exit 1, no hang, both backends). Differential 374 / leak 0 both
+  / conformance passes. (Much of the scheduling reused Track A's cooperative scheduler, as predicted.)
 - **I.3 — shared-immutable region + `shared`-tag heap change.** Borrow-share (no-op rc on shared
   pointers), miri-covered. Sandbox still copies (in-oracle); the machinery lands here for I.4 to use.
 - **I.4 — `RealScheduler` (OS threads), CLI-only / out-of-oracle.** Real parallelism + real borrow-

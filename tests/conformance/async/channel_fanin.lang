@@ -1,0 +1,39 @@
+// Isolates I.2 — fan-in: two producers share one `Sender` and a single consumer drains the channel.
+// The consumer is spawned in the outer scope; an inner `concurrent` block joins both producers (so all
+// sends complete), then the channel is closed and the consumer's total awaited. Because the consumer
+// runs in the outer scope it interleaves with the inner producers (cross-scope polling, A.7), draining
+// as they fill. Sum = (10+11+12) + (20+21+22) = 96 — order-independent, so a deterministic total both
+// backends agree on regardless of the exact interleaving.
+// expect: stdout "96"
+// expect: exit 0
+async fn producer(tx: Sender<int>, base: int, n: int): void {
+    for i in 0..n {
+        tx.send(base + i).await
+    }
+}
+async fn consumer(rx: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        total = total + v
+        running = keep
+    }
+    return total
+}
+async fn run(): int {
+    (tx, rx) = channel::<int>(2)
+    mut result = 0
+    concurrent {
+        h = spawn consumer(rx)
+        concurrent {
+            spawn producer(tx, 10, 3)
+            spawn producer(tx, 20, 3)
+        }
+        tx.close()
+        result = h.await
+    }
+    return result
+}
+echo run().await

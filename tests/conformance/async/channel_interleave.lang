@@ -1,0 +1,38 @@
+// Isolates I.2 — observable interleaving order. A capacity-1 channel forces the producer to block on
+// send-full and the consumer on recv-empty, so the two tasks strictly alternate. This pins the exact
+// interleaving of side effects (the `echo`s), not just a final total — the sharpest test that both
+// backends drive the cooperative scheduler identically. The producer gets one send ahead (buffer holds
+// one), the consumer trails by one, so the order is: send 0, send 1 (buffer full), recv 0, send 2,
+// recv 1, recv 2.
+// expect: stdout "send 0"
+// expect: stdout "send 1"
+// expect: stdout "recv 0"
+// expect: stdout "send 2"
+// expect: stdout "recv 1"
+// expect: stdout "recv 2"
+// expect: stdout "done"
+// expect: exit 0
+async fn producer(tx: Sender<int>): void {
+    for i in 0..3 {
+        echo "send " ~ i
+        tx.send(i).await
+    }
+    tx.close()
+}
+async fn consumer(rx: Receiver<int>): void {
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0 - 1, false) }
+        if keep {
+            echo "recv " ~ v
+        }
+        running = keep
+    }
+}
+concurrent {
+    (tx, rx) = channel::<int>(1)
+    spawn producer(tx)
+    spawn consumer(rx)
+}
+echo "done"

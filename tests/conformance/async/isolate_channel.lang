@@ -1,0 +1,38 @@
+// Isolates I.2 — N isolates + a channel + structured join. Three worker isolates each compute a square
+// and report it over a shared channel; a spawned collector drains the channel. The inner `concurrent`
+// block joins the three isolates (all sends land in the capacity-4 buffer), then the channel is closed
+// and the collector's total awaited. Isolates are `Send`-checked at the boundary (`int` args, `int`
+// result, `Sender<int>` — all Send) and, in the deterministic sandbox, interleave as tasks. 2²+3²+4² =
+// 29 — a genuine isolate/channel composition both backends agree on.
+// expect: stdout "29"
+// expect: exit 0
+async fn worker(tx: Sender<int>, n: int): void {
+    tx.send(n * n).await
+}
+async fn collector(rx: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = rx.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        total = total + v
+        running = keep
+    }
+    return total
+}
+async fn run(): int {
+    (tx, rx) = channel::<int>(4)
+    mut result = 0
+    concurrent {
+        h = spawn collector(rx)
+        concurrent {
+            isolate worker(tx, 2)
+            isolate worker(tx, 3)
+            isolate worker(tx, 4)
+        }
+        tx.close()
+        result = h.await
+    }
+    return result
+}
+echo run().await

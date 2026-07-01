@@ -1,0 +1,50 @@
+// Isolates I.2 — a three-stage pipeline (`source → square → sink`) wired by two capacity-1 channels.
+// The tight buffers force every stage to alternate: `source` blocks on send-full until `square` drains
+// a slot, `square` blocks on recv-empty until `source` produces and on send-full until `sink` drains,
+// `sink` blocks on recv-empty. Close propagates down the chain (each stage closes its output once its
+// input is drained), so the whole pipeline terminates deterministically. 1²+2²+3²+4² = 30 — the
+// cooperative scheduler interleaves all three stages across the two channels and both backends agree.
+// expect: stdout "30"
+// expect: exit 0
+async fn source(out: Sender<int>): void {
+    for i in 1..5 {
+        out.send(i).await
+    }
+    out.close()
+}
+async fn square(inp: Receiver<int>, out: Sender<int>): void {
+    mut running = true
+    while running {
+        r = inp.recv().await
+        (v, keep) = match r { some(x) => (x * x, true), none => (0, false) }
+        if keep {
+            out.send(v).await
+        }
+        running = keep
+    }
+    out.close()
+}
+async fn sink(inp: Receiver<int>): int {
+    mut total = 0
+    mut running = true
+    while running {
+        r = inp.recv().await
+        (v, keep) = match r { some(x) => (x, true), none => (0, false) }
+        total = total + v
+        running = keep
+    }
+    return total
+}
+async fn run(): int {
+    (tx1, rx1) = channel::<int>(1)
+    (tx2, rx2) = channel::<int>(1)
+    mut result = 0
+    concurrent {
+        spawn source(tx1)
+        spawn square(rx1, tx2)
+        h = spawn sink(rx2)
+        result = h.await
+    }
+    return result
+}
+echo run().await
