@@ -1,6 +1,6 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: BUILDING — I.0 + I.1 + I.2 + I.3 + I.4a DONE, I.4b next.** This is the parallelism half of architecture §7 (the
+**Status: BUILDING — I.0 + I.1 + I.2 + I.3 + I.4a + I.4b DONE, I.4c (cross-thread channels) next.** This is the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -211,7 +211,37 @@ deterministic multi-isolate scheduler underneath.
     to the out-of-oracle real executor) and the `args` binary-path harness artifact. CLI tests 45+8,
     conformance/differential/leak unchanged (374/100%/0 both), clippy+fmt clean. Also dropped the CLI's
     now-dead `lang-ir`/`lang-ir-passes` deps (it goes through `lang-compiler` now).
-  - **I.4b — real OS-thread isolates via copy-at-the-boundary (Approach A, decided with the user).**
+  - **I.4b — real OS-thread isolates via copy-at-the-boundary. ✅ DONE (fork-join).** A channel-free
+    `isolate f(args)` runs on its own OS thread with true multi-core parallelism (verified: two 300ms
+    isolates finish in ~365ms, not ~600ms). Built as four steps: (1) `5d53605` `SpawnIsolate`
+    infrastructure (inert, `real_isolates` compile flag — sandbox lowers `isolate`→`Spawn`, byte-
+    identical); (2) `c0eadf4` the `IsolateFuture` leaf value; (3) `8e3c482` the `Wire` marshalling
+    (`marshal`/`rebuild`, shapes by `Module.shapes` index, round-trip + miri tested); (4) `1e65d6e` the
+    handler + CLI flip. **Decided with the user (mid-build, after finding the cross-thread-channel ×
+    cooperative-scheduler deadlock hazard): land fork-join now, defer channels to I.4c.** The handler:
+    real thread when the VM is parallel and no arg ships a channel endpoint, else a cooperative task
+    (`call_value` builds the future + register — identical to `spawn`, so `@test`/`bench` and
+    channel-shipping isolates never regress); the worker builds its own VM (`Vm::load`, no `main`
+    side-effects) with its own heap/host/executor from an injected `IsolateFactory`, seeds globals from
+    the parent's marshalled snapshot, runs the callee to completion, marshals the result back over an
+    mpsc; the parent registers an `IsolateFuture` task harvested by `try_recv`, with `inflight_isolates`
+    keeping a pending isolate from false-deadlocking. Soundness: no `Value`/`Rc` crosses a thread — only
+    `Arc<Module>` (Send+Sync) is shared; args/results deep-copied via `Wire`. Sandbox/differential
+    untouched (374/100%/agree, leak 0). **v1 limitations (→ later):** a worker snapshots only
+    marshallable globals (functions + value-type constants; a class-instance global is skipped, so an
+    isolate referencing one fails at use); isolate teardown skips cycle collection (a shared-nothing
+    isolate forming a global cycle is out of scope). Original I.4b design (copy-not-borrow rationale):
+    runtime `Value`s carry a non-atomic `Rc<Shape>` (`Value::shape()` clones it), so *borrow*-sharing
+    structs/enums across threads is unsound until shapes are thread-safe — I.3's `shared` tag covers the
+    object refcount but not the inner `Rc<Shape>`. Zero-copy borrow-share is a later slice (needs
+    `Rc<Shape>→Arc<Shape>` + the big-input-no-copy check).
+  - **I.4c — cross-thread channels.** Shipping a `Sender`/`Receiver` into a real isolate: the channel
+    becomes a shared `Arc<ChannelCore>` (blocking bounded queue of `Wire` messages), and `send`/`recv`
+    must interoperate with the in-isolate cooperative scheduler (cooperative suspend on full/empty, not
+    a thread block that stalls sibling tasks — the deadlock hazard that motivated splitting this out).
+    `marshal` already rejects an endpoint (distinct "channel" error) so the spawn site falls back to a
+    cooperative task until this lands. Out-of-oracle.
+  - **I.4b (original bundled description, retained for reference):**
     Runtime `Value`s carry a non-atomic `Rc<Shape>` (every Object/Enum; `Value::shape()` does
     `shape.clone()`), so *borrow-sharing structs/enums across real threads is unsound* until shapes are
     made thread-safe — and I.3's `shared` tag covers only the object's own refcount, not the inner
