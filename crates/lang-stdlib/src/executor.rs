@@ -17,6 +17,27 @@
 use crate::{Host, StdError};
 use std::collections::{BTreeSet, HashMap};
 
+/// An asynchronous host-IO request (Track A.4c/A.10) — the neutral description an `fs.*_async` leaf
+/// hands the executor. Adding a new async IO leaf is adding a variant here plus its sandbox/real
+/// handling; the backends stay data-driven (they build the result value from the [`IoOutcome`]).
+#[derive(Debug, Clone)]
+pub enum IoRequest {
+    /// `fs.read_async(path)` → the file's text.
+    Read(String),
+    /// `fs.write_async(path, content)` → unit.
+    Write(String, String),
+    /// `fs.append_async(path, content)` → unit.
+    Append(String, String),
+}
+
+/// The result of a completed [`IoRequest`] — the neutral value the backend materializes (text → a
+/// `string`, unit → the unit value). Extensible (e.g. `Bytes` for a future `read_bytes_async`).
+#[derive(Debug, Clone)]
+pub enum IoOutcome {
+    Text(String),
+    Unit,
+}
+
 /// The async scheduler's clock + timer seam, injected into each backend exactly like [`crate::Host`].
 ///
 /// The cooperative scheduler (round-robin polling of the tasks in a `concurrent` scope) lives in the
@@ -44,16 +65,26 @@ pub trait Executor {
     /// time to the deadline; the real executor *sleeps* real time until it, or drives a pending read.
     fn advance(&mut self) -> Option<u64>;
 
-    /// Begin an async file read (Track A.4c: `fs.read_async(path)`), returning a ticket id to poll it
-    /// with via [`Self::poll_read`]. The sandbox executor performs the read **synchronously** through
-    /// `host` and caches the result, so it is ready on the first poll (deterministic, in-oracle); the
-    /// real executor spawns it on its tokio runtime and harvests it in [`Self::advance`] (real
-    /// concurrency, out-of-oracle). `host` is consulted only by the sandbox.
-    fn spawn_read(&mut self, host: &mut dyn Host, path: &str) -> u64;
+    /// Begin an async host-IO request (Track A.4c/A.10: `fs.read_async`/`write_async`/`append_async`),
+    /// returning a ticket id to poll it with via [`Self::poll_io`]. The sandbox executor performs the
+    /// IO **synchronously** through `host` and caches the outcome, so it is ready on the first poll
+    /// (deterministic, in-oracle); the real executor spawns it on its tokio runtime and harvests it in
+    /// [`Self::advance`] (real concurrency, out-of-oracle). `host` is consulted only by the sandbox.
+    fn spawn_io(&mut self, host: &mut dyn Host, req: IoRequest) -> u64;
 
-    /// Poll a read begun by [`Self::spawn_read`]: `Some(result)` once it has completed (the ticket is
-    /// then spent), `None` while it is still pending. A ticket is polled at most once to `Some`.
-    fn poll_read(&mut self, id: u64) -> Option<Result<String, StdError>>;
+    /// Poll an IO request begun by [`Self::spawn_io`]: `Some(outcome)` once it has completed (the
+    /// ticket is then spent), `None` while pending. A ticket is polled at most once to `Some`.
+    fn poll_io(&mut self, id: u64) -> Option<Result<IoOutcome, StdError>>;
+}
+
+/// Run an [`IoRequest`] synchronously against a [`Host`] — the sandbox's IO path, and the body the
+/// real executor's spawned task runs too (shared so both perform identical operations).
+pub fn run_io_sync(host: &mut dyn Host, req: &IoRequest) -> Result<IoOutcome, StdError> {
+    match req {
+        IoRequest::Read(path) => host.fs_read(path).map(IoOutcome::Text),
+        IoRequest::Write(path, content) => host.fs_write(path, content).map(|()| IoOutcome::Unit),
+        IoRequest::Append(path, content) => host.fs_append(path, content).map(|()| IoOutcome::Unit),
+    }
 }
 
 /// The deterministic sandbox executor: a logical clock (milliseconds, starting at zero) and the set
@@ -65,12 +96,12 @@ pub struct SandboxExecutor {
     /// Deadlines (absolute logical times) of timers that have been polled while pending. Ordered, so
     /// [`Self::advance`] deterministically picks the earliest.
     timers: BTreeSet<u64>,
-    /// Results of `fs.read_async` reads, keyed by ticket id. The sandbox performs each read
-    /// synchronously at `spawn_read` (deterministic), so the result is cached here and returned ready
-    /// on the first `poll_read`. Kept tiny — a ticket is removed once polled.
-    reads: HashMap<u64, Result<String, StdError>>,
-    /// Monotonic ticket source for `reads`.
-    next_read_id: u64,
+    /// Outcomes of `fs.*_async` requests, keyed by ticket id. The sandbox performs each request
+    /// synchronously at `spawn_io` (deterministic), so the outcome is cached here and returned ready
+    /// on the first `poll_io`. Kept tiny — a ticket is removed once polled.
+    io: HashMap<u64, Result<IoOutcome, StdError>>,
+    /// Monotonic ticket source for `io`.
+    next_io_id: u64,
 }
 
 impl SandboxExecutor {
@@ -101,17 +132,17 @@ impl Executor for SandboxExecutor {
         Some(self.now)
     }
 
-    fn spawn_read(&mut self, host: &mut dyn Host, path: &str) -> u64 {
-        // Deterministic: read the sandbox VFS now and cache the result, ready on the first poll.
-        let id = self.next_read_id;
-        self.next_read_id += 1;
-        self.reads.insert(id, host.fs_read(path));
+    fn spawn_io(&mut self, host: &mut dyn Host, req: IoRequest) -> u64 {
+        // Deterministic: perform the IO now against the sandbox VFS and cache it, ready on first poll.
+        let id = self.next_io_id;
+        self.next_io_id += 1;
+        self.io.insert(id, run_io_sync(host, &req));
         id
     }
 
-    fn poll_read(&mut self, id: u64) -> Option<Result<String, StdError>> {
-        // Always ready — the read completed at `spawn_read`.
-        self.reads.remove(&id)
+    fn poll_io(&mut self, id: u64) -> Option<Result<IoOutcome, StdError>> {
+        // Always ready — the IO completed at `spawn_io`.
+        self.io.remove(&id)
     }
 }
 

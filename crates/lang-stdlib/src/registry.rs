@@ -893,13 +893,23 @@ const FS_FNS: &[ExtFn] = &[
         params: &[Str],
         ret: Concrete(Str),
     },
-    // Track A.4c: the async twin of `read` — returns a `Future<string>` an async context `.await`s.
-    // On the sandbox it resolves deterministically (in-oracle); on the real executor it suspends and
-    // the read runs concurrently on tokio (CLI-only, out-of-oracle).
+    // Track A.4c/A.10: the async twins of `read`/`write`/`append` — each returns a `Future<T>` an
+    // async context `.await`s. On the sandbox they resolve deterministically (in-oracle); on the real
+    // executor they suspend and the IO runs concurrently on tokio (CLI-only, out-of-oracle).
     ExtFn {
         name: "read_async",
         params: &[Str],
         ret: Concrete(SigType::Future(&Str)),
+    },
+    ExtFn {
+        name: "write_async",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Future(&SigType::Unit)),
+    },
+    ExtFn {
+        name: "append_async",
+        params: &[Str, Str],
+        ret: Concrete(SigType::Future(&SigType::Unit)),
     },
     ExtFn {
         name: "read_lines",

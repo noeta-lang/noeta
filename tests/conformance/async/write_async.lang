@@ -1,0 +1,12 @@
+// Track A.10 — `fs.write_async` / `fs.append_async` are the async twins of `fs.write`/`fs.append`,
+// each a `Future<void>` an async context awaits; `fs.read_async` reads it back. On the sandbox VFS
+// they resolve deterministically (in-oracle, both backends agree). A write/append/read round-trip.
+// expect: stdout "contents=hello world"
+// expect: exit 0
+use std.{fs}
+async fn run(): void {
+    fs.write_async("f.txt", "hello").await
+    fs.append_async("f.txt", " world").await
+    echo "contents=" ~ fs.read_async("f.txt").await
+}
+run().await

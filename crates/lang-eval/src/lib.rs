@@ -94,6 +94,22 @@ impl Backend for TreeWalkBackend {
     }
 }
 
+/// Build the [`lang_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
+/// `func` is not an async fs op. Mirrors the VM's `vm_fs_async_request`.
+fn eval_fs_async_request(func: &str, args: &[Value]) -> Option<lang_stdlib::IoRequest> {
+    use lang_stdlib::IoRequest;
+    let text = |v: Option<&Value>| match v {
+        Some(Value::Str(s)) => Some(s.clone()),
+        _ => None,
+    };
+    Some(match func {
+        "read_async" => IoRequest::Read(text(args.first())?),
+        "write_async" => IoRequest::Write(text(args.first())?, text(args.get(1))?),
+        "append_async" => IoRequest::Append(text(args.first())?, text(args.get(1))?),
+        _ => return None,
+    })
+}
+
 /// The drop pass's relevance form, copied from the checker's (identical sets) — the lang-eval
 /// counterpart to `lang-conformance`'s `to_relevance` and the compiler's `passes_relevance`, so the
 /// `Backend::run` entry point annotates drops identically to the production reference and the VM.
@@ -2329,19 +2345,14 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
-        // `fs.read_async` (Track A.4c) is not a synchronous dispatch: it produces a leaf async-read
-        // *future* (ticketed in the executor) that `.await` later resolves to the file contents. It is
-        // intercepted here, ahead of the normal registry dispatch (which is synchronous, value-only).
-        if module == "fs" && func == "read_async" {
-            let Some(Value::Str(path)) = args.first() else {
-                return Err(self.runtime_error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    "`fs.read_async` expects a `string` path".to_string(),
-                ));
-            };
-            let id = self.executor.spawn_read(&mut *self.host, path);
-            return Ok(Value::AsyncRead(id));
+        // `fs.*_async` (Track A.4c/A.10) are not synchronous dispatch: each produces a leaf async-IO
+        // *future* (ticketed in the executor) that `.await` later resolves. Intercepted here, ahead of
+        // the normal registry dispatch (which is synchronous, value-only).
+        if module == "fs"
+            && let Some(req) = eval_fs_async_request(func, args)
+        {
+            let id = self.executor.spawn_io(&mut *self.host, req);
+            return Ok(Value::AsyncIo(id));
         }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
@@ -3439,13 +3450,17 @@ impl Interpreter {
                     None => Ok(Some(Value::Unit)),
                 }
             }
-            // A leaf async-read (Track A.4c): ask the executor whether the read has completed. Ready →
-            // the file contents (a `string`); an IO failure aborts (E0021) at the `.await`, matching
-            // synchronous `fs.read`; pending → `None` (the sandbox always resolves on the first poll).
-            Value::AsyncRead(id) => {
+            // A leaf async-IO future (Track A.4c/A.10): ask the executor whether the request completed.
+            // Ready → the outcome as a value (read → `string`, write/append → unit); an IO failure
+            // aborts (E0021) at the `.await`, matching the synchronous `fs.*`; pending → `None` (the
+            // sandbox always resolves on the first poll).
+            Value::AsyncIo(id) => {
                 let id = *id;
-                match self.executor.poll_read(id) {
-                    Some(Ok(contents)) => Ok(Some(Value::Str(contents))),
+                match self.executor.poll_io(id) {
+                    Some(Ok(lang_stdlib::IoOutcome::Text(contents))) => {
+                        Ok(Some(Value::Str(contents)))
+                    }
+                    Some(Ok(lang_stdlib::IoOutcome::Unit)) => Ok(Some(Value::Unit)),
                     Some(Err(error)) => {
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
                     }
@@ -4022,7 +4037,7 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::Timer(_)
         | Value::Pending
         | Value::Handle(..)
-        | Value::AsyncRead(_) => TypeRepr::Dyn,
+        | Value::AsyncIo(_) => TypeRepr::Dyn,
     }
 }
 
@@ -4452,7 +4467,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
-        Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncRead(_) => {
+        Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncIo(_) => {
             NativeValue::Str("<future>".to_string())
         }
         Value::Pending => NativeValue::Str("<pending>".to_string()),

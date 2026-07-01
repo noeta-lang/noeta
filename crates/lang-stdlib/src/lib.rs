@@ -33,7 +33,7 @@ pub mod random;
 pub mod registry;
 pub mod vec3;
 
-pub use executor::{Executor, SandboxExecutor};
+pub use executor::{Executor, IoOutcome, IoRequest, SandboxExecutor, run_io_sync};
 pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush, ReadSource};
 pub use host::{Host, SandboxHost};
 pub use iter::IterMethod;

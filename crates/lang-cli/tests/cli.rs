@@ -154,6 +154,36 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
 }
 
 #[test]
+fn run_writes_files_asynchronously_on_the_real_executor() {
+    // Track A.10: `fs.write_async`/`append_async` hit the REAL disk via the real executor's tokio
+    // runtime, awaited like any future. A write/append/read round-trip lands on disk.
+    let dir = std::env::temp_dir().join("lang_cli_async_write_dir");
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    let _ = std::fs::remove_file(dir.join("w.txt"));
+    let src = "use std.{fs}\n\
+               async fn run(): void {\n\
+               \x20   fs.write_async(\"w.txt\", \"hello\").await\n\
+               \x20   fs.append_async(\"w.txt\", \" world\").await\n\
+               \x20   echo fs.read_async(\"w.txt\").await\n\
+               }\n\
+               run().await\n";
+    let file = temp_program("run_async_write", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .stdout("hello world\n");
+    // The bytes really landed on disk.
+    assert_eq!(
+        std::fs::read_to_string(dir.join("w.txt")).expect("file on disk"),
+        "hello world"
+    );
+    let _ = std::fs::remove_file(dir.join("w.txt"));
+}
+
+#[test]
 fn run_async_read_of_a_missing_file_is_an_io_error() {
     // An IO failure surfaces at the `.await` as an E0021 abort — the same error channel synchronous
     // `fs.read` uses, just deferred to when the async read is polled to completion.

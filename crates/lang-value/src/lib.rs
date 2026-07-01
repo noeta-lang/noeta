@@ -645,7 +645,7 @@ impl Value {
 
     /// Whether this is a future — a step/thunk future ([`Payload::Future`]), a leaf timer
     /// ([`Payload::Timer`]), a task handle ([`Payload::Handle`]), or a leaf async-read
-    /// ([`Payload::AsyncRead`]). All name their type "future" and display opaquely.
+    /// ([`Payload::AsyncIo`]). All name their type "future" and display opaquely.
     pub fn is_future(self) -> bool {
         self.is_pointer()
             && heap::with_payload(self, |p| {
@@ -654,25 +654,25 @@ impl Value {
                     Payload::Future(_)
                         | Payload::Timer(_)
                         | Payload::Handle(..)
-                        | Payload::AsyncRead(_)
+                        | Payload::AsyncIo(_)
                 )
             })
     }
 
     /// A **leaf async-read future** (Track A.4c): `fs.read_async(path)` produces one, carrying the id
     /// that tickets the pending read in the injected [`lang_stdlib::Executor`]. Polled by consulting
-    /// the executor (see [`Self::async_read_id`]); it wraps no closure.
-    pub fn make_async_read(id: u64) -> Value {
-        heap::alloc(Payload::AsyncRead(id))
+    /// the executor (see [`Self::async_io_id`]); it wraps no closure.
+    pub fn make_async_io(id: u64) -> Value {
+        heap::alloc(Payload::AsyncIo(id))
     }
 
     /// The executor ticket id of a leaf async-read future, or `None` if this is not one.
-    pub fn async_read_id(self) -> Option<u64> {
+    pub fn async_io_id(self) -> Option<u64> {
         if !self.is_pointer() {
             return None;
         }
         heap::with_payload(self, |p| match p {
-            Payload::AsyncRead(id) => Some(*id),
+            Payload::AsyncIo(id) => Some(*id),
             _ => None,
         })
     }
@@ -1651,7 +1651,7 @@ impl Value {
                 Payload::Future(_)
                 | Payload::Timer(_)
                 | Payload::Handle(..)
-                | Payload::AsyncRead(_) => "<future>".to_string(),
+                | Payload::AsyncIo(_) => "<future>".to_string(),
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1734,7 +1734,7 @@ impl Value {
                 Payload::Future(_)
                 | Payload::Timer(_)
                 | Payload::Handle(..)
-                | Payload::AsyncRead(_) => NativeValue::Str("<future>".to_string()),
+                | Payload::AsyncIo(_) => NativeValue::Str("<future>".to_string()),
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -2228,17 +2228,17 @@ mod tests {
     }
 
     #[test]
-    fn async_read_carries_its_ticket_and_frees_cleanly() {
-        // Track A.4c: a leaf async-read future is a GC leaf holding the executor ticket id; it names
+    fn async_io_carries_its_ticket_and_frees_cleanly() {
+        // Track A.4c/A.10: a leaf async-IO future is a GC leaf holding the executor ticket id; it names
         // itself "future", displays opaquely, and frees as a plain node — leak-clean under miri.
-        let read = Value::make_async_read(7);
-        assert!(read.is_future());
-        assert_eq!(read.async_read_id(), Some(7));
-        assert!(read.future_step().is_none()); // it wraps no closure
-        assert!(!read.is_timer() && !read.is_handle());
-        assert_eq!(read.type_name(), "future");
-        assert_eq!(read.display(), "<future>");
-        read.release(); // frees the node, no leak
+        let io = Value::make_async_io(7);
+        assert!(io.is_future());
+        assert_eq!(io.async_io_id(), Some(7));
+        assert!(io.future_step().is_none()); // it wraps no closure
+        assert!(!io.is_timer() && !io.is_handle());
+        assert_eq!(io.type_name(), "future");
+        assert_eq!(io.display(), "<future>");
+        io.release(); // frees the node, no leak
     }
 
     #[test]

@@ -325,6 +325,19 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
     v.type_name() == kind
 }
 
+/// Build the [`lang_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
+/// `func` is not an async fs op. A checked program always supplies string arguments; malformed args
+/// fall through to `None` (the registry dispatch then reports the unknown function).
+fn vm_fs_async_request(func: &str, args: &[Value]) -> Option<lang_stdlib::IoRequest> {
+    use lang_stdlib::IoRequest;
+    Some(match func {
+        "read_async" => IoRequest::Read(args.first()?.as_string()?),
+        "write_async" => IoRequest::Write(args.first()?.as_string()?, args.get(1)?.as_string()?),
+        "append_async" => IoRequest::Append(args.first()?.as_string()?, args.get(1)?.as_string()?),
+        _ => return None,
+    })
+}
+
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.
 fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
     execute_with_collector(
@@ -858,16 +871,14 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
-        // `fs.read_async` (Track A.4c) is not a synchronous dispatch: it produces a leaf async-read
-        // *future* (ticketed in the executor) that `.await` later resolves to the file contents. It is
-        // intercepted here, ahead of the normal registry dispatch (which is synchronous, value-only).
-        if module == "fs" && func == "read_async" {
-            let Some(path) = args.first().and_then(|a| a.as_string()) else {
-                let error = lang_stdlib::no_function_error("fs", func);
-                return Err(self.error(stdlib_error_code(error.kind), span, error.message));
-            };
-            let id = self.executor.spawn_read(&mut *self.host, &path);
-            return Ok(Value::make_async_read(id));
+        // `fs.*_async` (Track A.4c/A.10) are not synchronous dispatch: each produces a leaf async-IO
+        // *future* (ticketed in the executor) that `.await` later resolves. Intercepted here, ahead of
+        // the normal registry dispatch (which is synchronous, value-only).
+        if module == "fs"
+            && let Some(req) = vm_fs_async_request(func, args)
+        {
+            let id = self.executor.spawn_io(&mut *self.host, req);
+            return Ok(Value::make_async_io(id));
         }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
@@ -4321,12 +4332,16 @@ impl<'m> Vm<'m> {
                 None => Poll::Ready(Value::unit()),
             });
         }
-        // A leaf async-read (Track A.4c): ask the executor whether the read has completed. Ready → the
-        // file contents (a fresh `string`); an IO failure aborts (E0021) at the `.await`, matching
-        // synchronous `fs.read`; pending → `Poll::Pending` (the sandbox always resolves on first poll).
-        if let Some(id) = future.async_read_id() {
-            return match self.executor.poll_read(id) {
-                Some(Ok(contents)) => Ok(Poll::Ready(Value::string(&contents))),
+        // A leaf async-IO future (Track A.4c/A.10): ask the executor whether the request completed.
+        // Ready → the outcome as a value (read → a fresh `string`, write/append → unit); an IO failure
+        // aborts (E0021) at the `.await`, matching the synchronous `fs.*`; pending → `Poll::Pending`
+        // (the sandbox always resolves on the first poll).
+        if let Some(id) = future.async_io_id() {
+            return match self.executor.poll_io(id) {
+                Some(Ok(lang_stdlib::IoOutcome::Text(contents))) => {
+                    Ok(Poll::Ready(Value::string(&contents)))
+                }
+                Some(Ok(lang_stdlib::IoOutcome::Unit)) => Ok(Poll::Ready(Value::unit())),
                 Some(Err(error)) => {
                     Err(self.error(stdlib_error_code(error.kind), span, error.message))
                 }

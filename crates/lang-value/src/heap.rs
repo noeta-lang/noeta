@@ -249,7 +249,7 @@ pub(crate) enum Payload {
     /// It carries an id ticketing the read in the injected [`lang_stdlib::Executor`] (the sandbox
     /// executor resolves it synchronously; the real executor spawns it on tokio and harvests it in
     /// `advance`). A GC leaf — the id is a plain integer; the pending read lives in the executor.
-    AsyncRead(u64),
+    AsyncIo(u64),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -503,7 +503,7 @@ pub(crate) fn free(value: Value) {
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
-        | Payload::AsyncRead(_)
+        | Payload::AsyncIo(_)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -664,7 +664,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
-        | Payload::AsyncRead(_)
+        | Payload::AsyncIo(_)
         | Payload::FileHandle(_) => {}
     }
     out
