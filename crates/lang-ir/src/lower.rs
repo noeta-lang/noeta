@@ -890,6 +890,13 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
+            // `.await` (Track A). A.0 gates every async program at *check* time (E0040 "not yet
+            // executable"), so a checked program never reaches this arm — but lowering must stay
+            // **total over the parsed language** (the tree-walker `expect`s it, and the property test
+            // lowers without checking). So A.0 lowers `.await` to its operand (identity): unreachable
+            // for real programs, total and deterministic for the uncheck­ed property test. A.1 replaces
+            // this with the real poll-state of the async state machine.
+            Expr::Await { expr, .. } => self.lower_expr(expr, out),
             Expr::Coalesce {
                 value,
                 fallback,

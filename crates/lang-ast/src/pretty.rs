@@ -237,7 +237,8 @@ impl Pretty for FnDecl {
     fn pretty(&self, out: &mut String, level: usize) {
         indent(out, level);
         out.push_str(&format!(
-            "(fn {}{}{} [{}] {}",
+            "({}fn {}{}{} [{}] {}",
+            if self.is_async { "async " } else { "" },
             pub_str(self.is_public),
             self.name,
             type_params_str(&self.type_params),
@@ -678,6 +679,11 @@ impl Pretty for Expr {
             Expr::Object(lit) => lit.pretty(out, level),
             Expr::Try { expr, span: s } => {
                 out.push_str(&format!("(try {}\n", span(*s)));
+                expr.pretty(out, level + 1);
+                out.push(')');
+            }
+            Expr::Await { expr, span: s } => {
+                out.push_str(&format!("(await {}\n", span(*s)));
                 expr.pretty(out, level + 1);
                 out.push(')');
             }

@@ -473,6 +473,12 @@ struct Checker {
     /// generator, so a stray `yield` is `E0039`. Saved/restored around each function and reset to
     /// `None` when entering a closure (so `yield` cannot cross a closure boundary — the coloring rule).
     current_yield: Option<Type>,
+    /// Whether the checker is inside an **async context** (Track A): the body of an `async fn`, or the
+    /// implicitly-async module top level (a top-level body containing a `.await`). Each `expr.await`
+    /// is only valid when this is `true`; otherwise it is `E0040` (the coloring rule). Saved/restored
+    /// around each function and reset to `false` when entering a closure (so `.await` cannot cross a
+    /// closure boundary — the same coloring rule as `yield`).
+    current_async: bool,
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
@@ -921,7 +927,10 @@ impl Checker {
                         .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
                     for m in methods {
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
-                        let raw_ret = m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                        let raw_ret = async_return(
+                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            m.is_async,
+                        );
                         let params = raw_params
                             .iter()
                             .cloned()
@@ -989,7 +998,10 @@ impl Checker {
                         .collect();
                     for m in &e.methods {
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
-                        let raw_ret = m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                        let raw_ret = async_return(
+                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            m.is_async,
+                        );
                         let params = raw_params
                             .iter()
                             .cloned()
@@ -1020,7 +1032,12 @@ impl Checker {
                     let tps: HashSet<String> =
                         f.type_params.iter().map(|p| p.name.clone()).collect();
                     let raw_params: Vec<Type> = f.params.iter().map(param_type).collect();
-                    let raw_ret = f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown);
+                    // An `async fn f(): T` call produces `Future<T>` (Track A); wrap before erasure so
+                    // the erased signature and the generic instantiation both carry the future.
+                    let raw_ret = async_return(
+                        f.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                        f.is_async,
+                    );
                     let params = raw_params
                         .iter()
                         .cloned()
@@ -1080,9 +1097,25 @@ impl Checker {
     /// Pass 2: check every top-level statement with a fresh global scope.
     fn check_program(&mut self, program: &Program) {
         let mut env: Env = vec![HashMap::new()];
+        // Implicit async top level (Track A): if the module body contains a top-level `.await` (one
+        // not inside a nested `fn`/closure), the top level is itself an async context, so its awaits
+        // are legal. A.0 interim gate: emit E0040 "not yet executable" at the first such statement so
+        // no async program reaches lowering (the top level runs on the executor in A.1).
+        self.current_async = block_has_await(&program.stmts);
+        if self.current_async
+            && let Some(stmt) = program.stmts.iter().find(|s| stmt_has_await(s))
+        {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::AsyncMisuse,
+                stmt.span(),
+                "top-level `.await` (an async program) is not yet executable (Track A.1)"
+                    .to_string(),
+            ));
+        }
         for stmt in &program.stmts {
             self.check_stmt(stmt, &mut env);
         }
+        self.current_async = false;
         self.check_unrefined_muts(&program.stmts);
     }
 
@@ -1149,9 +1182,13 @@ impl Checker {
         env: &mut Env,
     ) -> Type {
         // A closure is a fresh callable: an enclosing generator's `yield` context does not cross into
-        // it (a `yield` inside a closure is E0039 — the coloring rule). Restored after the body.
+        // it (a `yield` inside a closure is E0039 — the coloring rule), and neither does an enclosing
+        // async context (a `.await` inside a closure is E0040 — the same coloring rule). Restored
+        // after the body.
         let saved_yield = self.current_yield.take();
+        let saved_async = std::mem::replace(&mut self.current_async, false);
         let result = self.closure_body_type_inner(body, expected, env);
+        self.current_async = saved_async;
         self.current_yield = saved_yield;
         result
     }
@@ -1532,6 +1569,21 @@ impl Checker {
             None
         };
         let saved_yield = std::mem::replace(&mut self.current_yield, yield_elem);
+        // An `async fn` body is an async context: its `.await`s are legal (Track A). `current_ret`
+        // stays the *inner* declared type `T` (the body writes `return t`); a call site sees the
+        // wrapped `Future<T>` via the signature. Reset for a non-async function so an enclosing async
+        // context does not leak into a nested ordinary function.
+        let saved_async = std::mem::replace(&mut self.current_async, decl.is_async);
+        // A.0 interim gate: an `async fn` type-checks but is **not yet executable** — the async state
+        // machine + executor land in A.1. Emitting E0040 here keeps every async program from reaching
+        // lowering (the lowering-is-total invariant), mirroring the Track-G G.1a gate.
+        if decl.is_async {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::AsyncMisuse,
+                decl.name_span,
+                "async functions are not yet executable (Track A.1)".to_string(),
+            ));
+        }
         let saved_ret = std::mem::replace(&mut self.current_ret, ret);
         // A function body is a fresh control-flow context: `break`/`continue` inside it cannot
         // target a loop the *enclosing* code is in, so reset the depth (restored after).
@@ -1557,6 +1609,7 @@ impl Checker {
         env.pop();
         self.in_dev_tier = saved_dev_tier;
         self.current_ret = saved_ret;
+        self.current_async = saved_async;
         self.current_yield = saved_yield;
         self.loop_depth = saved_loop_depth;
         self.type_params = saved_type_params;
@@ -2852,6 +2905,45 @@ impl Checker {
                             .with_help(
                                 "`?` only propagates `Result`/`Option`; this value is neither",
                             ),
+                        );
+                        Type::Unknown
+                    }
+                }
+            }
+            Expr::Await { expr, span } => {
+                let inner = self.synth(expr, env);
+                // Coloring (Track A): `.await` is legal only inside an async context (an `async fn`
+                // body or the implicitly-async top level). A `.await` in a sync `fn` — or in a closure
+                // passed to a builtin, where `current_async` was reset at the boundary — is E0040.
+                if !self.current_async {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::AsyncMisuse,
+                            *span,
+                            "`.await` is only allowed inside an `async fn` (or the async top level)"
+                                .to_string(),
+                        )
+                        .with_help(
+                            "mark the enclosing function `async fn`; `.await` cannot be used in a \
+                             synchronous function or in a closure passed to a builtin",
+                        ),
+                    );
+                }
+                // `Future<T>.await` yields `T`; a hole/`dyn` defers to runtime; anything else is a
+                // `.await` on a non-future.
+                match &inner {
+                    Type::Named(n, args) if n == stdlib::FUTURE => {
+                        args.first().cloned().unwrap_or(Type::Unknown)
+                    }
+                    t if t.defers_to_runtime() => t.clone(),
+                    other => {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::AsyncMisuse,
+                                *span,
+                                format!("`.await` expects a `Future`, found `{other}`"),
+                            )
+                            .with_help("`.await` unwraps a `Future<T>` produced by an `async fn`"),
                         );
                         Type::Unknown
                     }
@@ -4353,7 +4445,21 @@ const PRELUDE_TYPES: &[&str] = &[
     // The lazy-iterator type (Track I): a writable annotation now that `iter()`/adapters and
     // generator returns produce `Iterator<T>` values.
     "Iterator",
+    // The async completion type (Track A): a writable annotation. Calling an `async fn f(): T`
+    // produces a `Future<T>`; `expr.await` unwraps it back to `T`.
+    "Future",
 ];
+
+/// The type a **call** to an `async fn f(): T` produces: `Future<T>` (Track A). The body writes
+/// `return t` (checked against the inner `T`), but a call site sees the wrapped future; `.await`
+/// unwraps it again. A non-async function's return type is returned unchanged.
+fn async_return(inner: Type, is_async: bool) -> Type {
+    if is_async {
+        Type::Named(stdlib::FUTURE.to_string(), vec![inner])
+    } else {
+        inner
+    }
+}
 
 /// The built-in trait an operand of `op` must satisfy, for the trait-backed operators: arithmetic
 /// (`+ - * /` → `Add`/`Sub`/`Mul`/`Div`) and ordering (`< <= > >=` → `Comparable`). `%` (no trait —
@@ -4483,6 +4589,40 @@ fn apply_subst(ty: &Type, subst: &HashMap<String, Type>) -> Type {
 /// function declarations or closures — a `yield` there belongs to that inner callable, not this one.
 fn body_has_yield(stmts: &[Stmt]) -> bool {
     stmts.iter().any(stmt_has_yield)
+}
+
+/// Whether `stmts` contain a `.await` at **this callable level** (Track A): inspecting each
+/// statement's expressions with [`Expr::has_await`] (which stops at closures) and recursing through
+/// control flow, but NOT into a nested `fn` declaration (its own callable) or a stripped tier block.
+/// Decides whether a function body or the module top level is an async context.
+fn block_has_await(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_has_await)
+}
+
+fn stmt_has_await(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Echo { value, .. }
+        | Stmt::Binding { value, .. }
+        | Stmt::Destructure { value, .. }
+        | Stmt::Yield { value, .. }
+        | Stmt::Expr { expr: value, .. } => value.has_await(),
+        Stmt::Return { value, .. } => value.as_ref().is_some_and(Expr::has_await),
+        Stmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            cond.has_await()
+                || block_has_await(then_body)
+                || else_body.as_deref().is_some_and(block_has_await)
+        }
+        Stmt::For { iterable, body, .. } => iterable.has_await() || block_has_await(body),
+        Stmt::While { cond, body, .. } => cond.has_await() || block_has_await(body),
+        // A nested `fn` is its own callable; declarations, imports, and stripped tier blocks carry no
+        // top-level-level `.await`.
+        _ => false,
+    }
 }
 
 fn stmt_has_yield(stmt: &Stmt) -> bool {

@@ -86,20 +86,31 @@ re-poll; on `Ready(v)`, done; if `Pending` with nothing to advance → a determi
     `.await` in a sync `fn` → E0040; the yield-style reset at closure boundaries so `.await` inside a
     closure passed to a builtin → E0040. `?` typing through `.await` (`Result` unwrap) — spec now,
     enforce as the surface lands.
-  - Executor seam: `Executor`/scheduler trait + `SandboxExecutor` in lang-stdlib; `Box<dyn Executor>`
-    per interpreter (`with_host`-style constructor), sandbox default so the differential is unchanged.
-  - Runtime: `Payload::Future`/`Value::Future` + constructor + `Op::PollFuture` arm in both backends,
-    validated by a lang-value **miri** unit test (a hand-written step stand-in). Dead until A.1.
-  - **Interim gate:** a well-formed async fn gets a clean E0040 *"not yet executable (Track A.1)"* — it
-    type-checks but can't run yet (lowering-is-total invariant preserved).
-  - Conformance (`tests/conformance/async/`): error cases only — `await` outside async, `await` in a
-    closure (coloring), the not-yet-executable gate, wrong async return typing.
-- **A.1 — straight-line executable async/await.** Mirrors G.1b→G.2 (reuse the Flattener). The `.await`
-  lowering (hoisted future cell + poll-state) via a `lower_async` mirroring `lower_generator`; implicit
-  async top-level (compile the module body as a root future iff it has a top-level `.await`); executor
-  run-to-completion with **no suspending leaves yet** (await on async-fn futures that complete without
-  parking). Both backends. Conformance: a drained async fn, awaits across locals, nested `async fn`
-  calls, `?`-through-`.await`.
+  - **Scope decision (revised at build): A.0 is FRONT-END ONLY** — the `Future` runtime value
+    (`Payload::Future`/`Op::PollFuture`) and the `Executor`/`SandboxExecutor` seam moved to **A.1**,
+    where they are actually driven end-to-end (and miri runs on the real usage) rather than added as
+    dead code now. Rationale: the A.0 gate blocks every async program at *check* time, so no runtime
+    code is reachable in A.0 — unlike G.1a (which pre-added `IterState::Gen` because iterators were
+    brand-new infra), async reuses the proven state-machine substrate, so the value kind is best
+    introduced with its driver. A.0 therefore touches no `lang-value` → miri not required this slice.
+  - **Interim gate (`E0040`):** every `async fn` and an implicitly-async top level (a top-level body
+    with a `.await`) emit a clean *"not yet executable (Track A.1)"* — the program type-checks but
+    cannot run yet, so no async program reaches lowering (lowering-is-total invariant preserved). The
+    `Expr::Await` lowering arm returns `Unsupported` as a belt-and-braces backstop.
+  - Conformance (`tests/conformance/async/`): error cases only — the not-yet-executable gate on a
+    well-formed async fn (which also proves `call → Future<T>`, `.await → T`, and `.await?` chaining
+    type correctly), `.await` outside async (coloring), `.await` in a closure (coloring), `.await` on
+    a non-future, and top-level `.await`. **DONE** (`3aa0e13`-follow-on): conformance 355 / differential
+    0-skipped / leaks 0 both / clippy+fmt+workspace clean.
+- **A.1 — straight-line executable async/await.** Mirrors G.1b→G.2 (reuse the Flattener). **Adds the
+  deferred A.0 runtime:** `Payload::Future`/`Value::Future` + `Op::PollFuture` (both backends, miri) and
+  the `Executor`/`SandboxExecutor` injected seam (`Box<dyn Executor>` per interpreter, sandbox default
+  so the differential is unchanged). The `.await` lowering (hoisted future cell + poll-state) via a
+  `lower_async` mirroring `lower_generator`; implicit async top-level (compile the module body as a root
+  future iff it has a top-level `.await` — reuse the checker's `Expr::has_await`/`block_has_await`);
+  executor run-to-completion with **no suspending leaves yet** (await on async-fn futures that complete
+  without parking). Both backends. Conformance: a drained async fn, awaits across locals, nested
+  `async fn` calls, `?`-through-`.await`.
 - **A.2 — first suspending leaf: logical-time `sleep`/timer.** A `sleep(ms)` leaf future returning
   `Pending` until the deterministic logical clock reaches its deadline; the executor's timer wheel
   advances logical time to the next event and re-polls. Proves real suspend/resume + determinism.

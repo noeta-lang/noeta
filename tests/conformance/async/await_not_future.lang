@@ -1,0 +1,9 @@
+// Track A.0 — `.await` unwraps a `Future<T>`; applying it to a non-future value (here an `int`) is
+// E0040. (The enclosing `async fn` is also gated as not-yet-executable, a separate E0040.)
+// expect: error E0040 at 6:9
+// expect: exit 1
+async fn a(): int {
+    y = 5.await
+    return y
+}
+echo "unreached"

@@ -157,6 +157,11 @@ pub enum DiagnosticCode {
     /// is not `Iterator<T>`, or a `return` with a value appears in a generator (only bare `return;`
     /// ends iteration — there is no completion value under pure-pull `next() -> ?T`).
     GeneratorMisuse,
+    /// An async construct is misused (Track A): `.await` appears outside an async context (a sync
+    /// `fn`, or a closure passed to a builtin — the coloring rule), `.await` is applied to a
+    /// non-`Future` value, an `async fn`'s body is otherwise malformed, or a well-formed async
+    /// program is not yet executable (the A.0 interim gate, lifted in A.1).
+    AsyncMisuse,
 }
 
 impl DiagnosticCode {
@@ -202,6 +207,7 @@ impl DiagnosticCode {
         DiagnosticCode::InvalidDirectiveArgument,
         DiagnosticCode::InvalidPackedType,
         DiagnosticCode::GeneratorMisuse,
+        DiagnosticCode::AsyncMisuse,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -247,6 +253,7 @@ impl DiagnosticCode {
             DiagnosticCode::InvalidDirectiveArgument => "E0037",
             DiagnosticCode::InvalidPackedType => "E0038",
             DiagnosticCode::GeneratorMisuse => "E0039",
+            DiagnosticCode::AsyncMisuse => "E0040",
         }
     }
 

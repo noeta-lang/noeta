@@ -528,6 +528,10 @@ pub struct FnDecl {
     /// separate test-tier file seeing only `pub` — lands with the package/test-file system; today
     /// every tier block is in-source, so program-wide access is same-module access.)
     pub is_dev_tier: bool,
+    /// Whether the declaration is `async fn` (Track A). An async function returns a `Future<T>` where
+    /// `T` is the declared inner return type; its body may use the postfix `.await` suspend operator.
+    /// `false` for an ordinary function, method, or generator.
+    pub is_async: bool,
     pub body: Vec<Stmt>,
     pub span: Span,
 }
@@ -699,6 +703,11 @@ pub enum Expr {
     /// `Err(e)`/`none` it early-returns that value from the enclosing function. Kept as
     /// its own node (not desugared) so M1 diagnostics can point at the `?`.
     Try { expr: Box<Expr>, span: Span },
+    /// The postfix suspend operator `expr.await` (Track A): given `expr : Future<T>`, it suspends the
+    /// enclosing async function until the future resolves and yields the `T`. Kept as its own node
+    /// (not desugared here — the IR lowering turns it into a poll-state of the async state machine) so
+    /// the checker types it (`Future<T>` → `T`) and points diagnostics at the `.await`.
+    Await { expr: Box<Expr>, span: Span },
     /// The `??` fallback operator: `value ?? fallback`. On `Ok(x)`/`some(x)` it yields
     /// `x`; on `Err(_)`/`none` it evaluates and yields `fallback`.
     Coalesce {
@@ -914,6 +923,7 @@ impl Expr {
             | Expr::Interp { span, .. }
             | Expr::Match { span, .. }
             | Expr::Try { span, .. }
+            | Expr::Await { span, .. }
             | Expr::Coalesce { span, .. }
             | Expr::As { span, .. }
             | Expr::AttributesOf { span, .. }
@@ -1000,6 +1010,7 @@ impl Expr {
                     || lit.spread.as_ref().is_some_and(|s| s.mentions(name))
             }
             Expr::Try { expr, .. }
+            | Expr::Await { expr, .. }
             | Expr::As { expr, .. }
             | Expr::TypeTest { expr, .. }
             | Expr::TypeOf { value: expr, .. }
@@ -1014,6 +1025,81 @@ impl Expr {
             Expr::FieldSet {
                 receiver, value, ..
             } => receiver.mentions(name) || value.mentions(name),
+        }
+    }
+
+    /// Whether this expression contains a `.await` reachable **at this callable level** (Track A):
+    /// recurses through every sub-expression **except a closure body/defaults** — a closure is its
+    /// own callable, so a `.await` inside it belongs to that closure's async coloring, not the
+    /// enclosing one. Used to decide whether a function or the module top level is async, and to
+    /// enforce the coloring rule. Total over `Expr` so it can never miss an await.
+    pub fn has_await(&self) -> bool {
+        let any = |exprs: &[Expr]| exprs.iter().any(Expr::has_await);
+        match self {
+            Expr::Await { .. } => true,
+            Expr::Str { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::F32 { .. }
+            | Expr::Bool { .. }
+            | Expr::Ident { .. }
+            | Expr::AttributesOf { .. }
+            | Expr::RolesOf { .. }
+            // A closure is a separate callable: its own `.await`s are not this level's (they are
+            // E0040 unless the closure is itself async, which builtins' callbacks are not).
+            | Expr::Closure { .. } => false,
+            Expr::Unary { operand, .. } => operand.has_await(),
+            Expr::Binary { lhs, rhs, .. }
+            | Expr::Pipeline {
+                left: lhs,
+                right: rhs,
+                ..
+            }
+            | Expr::Coalesce {
+                value: lhs,
+                fallback: rhs,
+                ..
+            }
+            | Expr::Index {
+                receiver: lhs,
+                index: rhs,
+                ..
+            }
+            | Expr::Range {
+                start: lhs,
+                end: rhs,
+                ..
+            } => lhs.has_await() || rhs.has_await(),
+            Expr::Call { callee, args, .. } => callee.has_await() || any(args),
+            Expr::List { items, .. } | Expr::Tuple { items, .. } => any(items),
+            Expr::TupleIndex { receiver, .. } => receiver.has_await(),
+            Expr::Map { entries, .. } => {
+                entries.iter().any(|(k, v)| k.has_await() || v.has_await())
+            }
+            Expr::Member { receiver, .. } => receiver.has_await(),
+            Expr::Interp { parts, .. } => parts.iter().any(|part| match part {
+                StrPart::Literal(_) => false,
+                StrPart::Hole(e) => e.has_await(),
+            }),
+            Expr::Match {
+                scrutinee, arms, ..
+            } => scrutinee.has_await() || arms.iter().any(|arm| arm.body.has_await()),
+            Expr::Object(lit) => {
+                lit.fields.iter().any(|f| f.value.has_await())
+                    || lit.spread.as_ref().is_some_and(|s| s.has_await())
+            }
+            Expr::Try { expr, .. }
+            | Expr::As { expr, .. }
+            | Expr::TypeTest { expr, .. }
+            | Expr::TypeOf { value: expr, .. }
+            | Expr::FromBytes { blob: expr, .. } => expr.has_await(),
+            Expr::Invoke {
+                recv, name, args, ..
+            } => recv.has_await() || name.has_await() || args.has_await(),
+            Expr::TypedModuleCall { recv, args, .. } => recv.has_await() || any(args),
+            Expr::FieldSet {
+                receiver, value, ..
+            } => receiver.has_await() || value.has_await(),
         }
     }
 }

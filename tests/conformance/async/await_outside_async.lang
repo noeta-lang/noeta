@@ -1,0 +1,10 @@
+// Track A.0 (coloring) — `.await` is only legal inside an async context. A `.await` in a synchronous
+// `fn` is E0040: a sync function has no suspend machinery (stackless async), so it cannot await.
+// expect: error E0040 at 7:9
+// expect: exit 1
+async fn producer(): int { return 1 }
+fn consumer(): int {
+    x = producer().await
+    return x
+}
+echo consumer()

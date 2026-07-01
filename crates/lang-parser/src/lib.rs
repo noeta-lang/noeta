@@ -38,6 +38,15 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
 use lang_span::{Source, SourceId, Span};
 
+/// A `.`-then-keyword postfix operator, folded into one pratt entry: `receiver.as<T>()` (checked
+/// narrowing) and `receiver.await` (the Track-A suspend). Kept together because chumsky's pratt
+/// op-tuple caps at 26 entries and both share the `.` + keyword shape.
+#[derive(Clone)]
+enum DotKeyword {
+    As(TypeRef),
+    Await,
+}
+
 /// The built-in **decorator** directives — the closed set of `@`-directives that prefix a *type*
 /// declaration (`@derive(...)`, `@attribute(...)`, `@role(...)`, `@semantic`). Everything else after
 /// `@` is a **tier** directive (`@test`/`@bench`/…, an open set). The statement parser dispatches on
@@ -1426,21 +1435,34 @@ where
                 args,
                 span: ctx.to_span(e.span()),
             }),
-            // `receiver.as<T>()` — checked narrowing of a `dyn` value to `?T`. `as` is a keyword,
-            // so this never collides with the member-access postfix below (which matches an
-            // identifier after the dot, not the keyword); the turbofish `<T>` is therefore
-            // unambiguous here. The trailing `()` mirrors a method-call surface.
+            // `receiver.as<T>()` — checked narrowing of a `dyn` value to `?T` — and `receiver.await`,
+            // the postfix suspend operator (Track A). Both are `.` followed by a keyword, so they are
+            // folded into one postfix (chumsky's pratt op-tuple caps at 26 entries); `as`/`await` are
+            // keywords, so neither collides with the `.ident` member-access postfix below. Binds as
+            // tightly as call/member, so `f().await`, `f().await?`, and `f().await.g()` all chain.
             postfix(
                 10,
-                just(T::Dot)
-                    .ignore_then(just(T::AsKw))
-                    .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
-                    .then_ignore(just(T::LParen))
-                    .then_ignore(just(T::RParen)),
-                move |receiver, ty, e| Expr::As {
-                    expr: Box::new(receiver),
-                    ty,
-                    span: ctx.to_span(e.span()),
+                just(T::Dot).ignore_then(choice((
+                    just(T::AsKw)
+                        .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
+                        .then_ignore(just(T::LParen))
+                        .then_ignore(just(T::RParen))
+                        .map(DotKeyword::As),
+                    just(T::AwaitKw).to(DotKeyword::Await),
+                ))),
+                move |receiver, kw, e| {
+                    let span = ctx.to_span(e.span());
+                    match kw {
+                        DotKeyword::As(ty) => Expr::As {
+                            expr: Box::new(receiver),
+                            ty,
+                            span,
+                        },
+                        DotKeyword::Await => Expr::Await {
+                            expr: Box::new(receiver),
+                            span,
+                        },
+                    }
                 },
             ),
             // `operand is T` — the type-test, a `bool`. A postfix consuming a type, at the
@@ -1907,6 +1929,7 @@ where
             .repeated()
             .collect::<Vec<_>>()
             .then(just(T::PubKw).or_not())
+            .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
             .then(type_params.clone())
@@ -1914,7 +1937,11 @@ where
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
-                move |((((((attrs, pub_kw), name_pair), type_params), params), ret), body), e| {
+                move |(
+                    ((((((attrs, pub_kw), async_kw), name_pair), type_params), params), ret),
+                    body,
+                ),
+                      e| {
                     Stmt::Fn(FnDecl {
                         name: name_pair.0,
                         name_span: name_pair.1,
@@ -1924,6 +1951,7 @@ where
                         ret,
                         attrs,
                         is_dev_tier: false,
+                        is_async: async_kw.is_some(),
                         body,
                         span: ctx.to_span(e.span()),
                     })
@@ -1991,13 +2019,14 @@ where
             .clone()
             .repeated()
             .collect::<Vec<_>>()
+            .then(just(T::AsyncKw).or_not())
             .then_ignore(just(T::FnKw))
             .then(id.clone())
             .then(params_parser(ctx, expr.clone(), true))
             .then(just(T::Colon).ignore_then(type_parser(ctx)).or_not())
             .then(block.clone())
             .map_with(
-                move |((((attrs, name_pair), params), ret), body), e| FnDecl {
+                move |(((((attrs, async_kw), name_pair), params), ret), body), e| FnDecl {
                     name: name_pair.0,
                     name_span: name_pair.1,
                     is_public: false,
@@ -2010,6 +2039,7 @@ where
                     // type's privates; the dev-tier white-box relaxation is only for lifted top-level
                     // fns.
                     is_dev_tier: false,
+                    is_async: async_kw.is_some(),
                     body,
                     span: ctx.to_span(e.span()),
                 },

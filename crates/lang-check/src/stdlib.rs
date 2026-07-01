@@ -20,6 +20,10 @@ pub(super) const FILE_HANDLE: &str = "FileHandle";
 /// element type as its single argument; a receiver of this `Named` type dispatches `next`/`collect`.
 pub(super) const ITERATOR: &str = "Iterator";
 
+/// Reserved built-in type name for the value an `async fn` call produces (Track A). `Future<T>`
+/// carries its completion type as its single argument; `expr.await` unwraps it back to `T`.
+pub(super) const FUTURE: &str = "Future";
+
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.

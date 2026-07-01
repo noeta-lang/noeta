@@ -37,6 +37,15 @@ pub enum TokenKind {
     /// contains `yield` is a generator returning an `Iterator<T>`.
     #[token("yield")]
     YieldKw,
+    /// `async fn f(): T` — declares an asynchronous function (Track A). Calling it produces a
+    /// `Future<T>` rather than running the body; the completion value has the declared inner type.
+    #[token("async")]
+    AsyncKw,
+    /// The postfix suspend operator `expr.await` (Track A). Chains with `?` and further calls
+    /// (`fetch(url).await?.text().await?`). A keyword so `.await` parses unambiguously as a postfix
+    /// suspend rather than a field access.
+    #[token("await")]
+    AwaitKw,
     #[token("if")]
     IfKw,
     /// The conditional-expression keyword: `if cond then a else b`. Forks the grammar from the
@@ -277,6 +286,8 @@ impl TokenKind {
             TokenKind::FnKw => "FnKw",
             TokenKind::ReturnKw => "ReturnKw",
             TokenKind::YieldKw => "YieldKw",
+            TokenKind::AsyncKw => "AsyncKw",
+            TokenKind::AwaitKw => "AwaitKw",
             TokenKind::IfKw => "IfKw",
             TokenKind::ThenKw => "ThenKw",
             TokenKind::ElseKw => "ElseKw",
@@ -370,6 +381,8 @@ impl TokenKind {
             TokenKind::FnKw => "`fn`",
             TokenKind::ReturnKw => "`return`",
             TokenKind::YieldKw => "`yield`",
+            TokenKind::AsyncKw => "`async`",
+            TokenKind::AwaitKw => "`await`",
             TokenKind::IfKw => "`if`",
             TokenKind::ThenKw => "`then`",
             TokenKind::ElseKw => "`else`",
@@ -630,6 +643,7 @@ fn is_statement_ending(kind: TokenKind) -> bool {
             | TokenKind::RBrace
             | TokenKind::RBracket
             | TokenKind::Question
+            | TokenKind::AwaitKw
             | TokenKind::ReturnKw
             | TokenKind::BreakKw
             | TokenKind::ContinueKw

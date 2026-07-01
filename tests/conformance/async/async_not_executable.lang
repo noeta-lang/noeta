@@ -1,0 +1,13 @@
+// Track A.0 — a well-formed `async fn` type-checks (its `.await` on another async call unwraps the
+// `Future<int>` to `int`), but async is not yet executable: the state machine + executor land in A.1.
+// The A.0 interim gate emits E0040 at the declaration so no async program reaches lowering.
+// expect: error E0040 at 6:10
+// expect: exit 1
+async fn inner(): int {
+    return 5
+}
+async fn outer(): int {
+    x = inner().await
+    return x + 1
+}
+echo "unreached"

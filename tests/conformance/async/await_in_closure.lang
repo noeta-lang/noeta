@@ -1,0 +1,11 @@
+// Track A.0 (coloring) — `.await` belongs to the innermost enclosing async function, and a closure is
+// a fresh callable boundary (a builtin's callback is not async). So a `.await` inside a closure passed
+// to `map` is not inside an async context and is rejected (E0040), the same coloring rule as `yield`.
+// expect: error E0040 at 8:37
+// expect: exit 1
+async fn one(): int { return 1 }
+async fn g(): int {
+    xs = map([1, 2, 3], fn(n) { y = one().await; return n; });
+    return 0
+}
+echo "unreached"
