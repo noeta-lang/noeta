@@ -1,14 +1,21 @@
 # P-SIMD — SIMD kernels over the flat packed `List<Vec3>` buffers
 
-**Status: BLOCKED on a layout change (measured negative result — S2 did not land).** S1 (bench + scalar
-baseline) shipped. S2 attempted the `wide`-crate swap and **measured it a 1.8×–9× regression** in both
-default and AVX2 builds, so it was reverted (a measured regression can't ship under the bench-gated
-mandate). Root cause and the unblock condition are in [Results](#results) below. Branch: `perf-simd`.
+**Status: DELIVERED via an opt-in SoA type (not via explicit SIMD).** The throughput win is real —
+**2.7×–4× on `dot`/`length`** — but it comes from a **struct-of-arrays layout that unlocks LLVM
+autovectorization**, not from SIMD intrinsics. The `wide`-crate approach was tried twice (on the AoS
+buffer and again on SoA columns) and was **not** faster than the autovectorized scalar loop either
+time, so it was dropped. Branch: `perf-simd`.
 
-**One-line finding:** the scalar byte-direct kernels are *already* LLVM-autovectorized; manual portable
-SIMD can't beat them because the 1-aligned `Vec<u8>` **AoS** buffer forces a scalar gather/scatter to
-get lanes in/out (no zero-copy `&[f32]` reinterpret without `unsafe` or an SoA layout — both out of
-scope here). Real SIMD needs the deferred layout change (SoA or aligned buffers), not a kernel swap.
+**The arc in one paragraph.** S1 recorded the scalar AoS baseline. S2 swapped the AoS kernels to
+`wide` `f32x8` and **measured a 1.8×–9× regression** (both default and AVX2 builds), reverted. The
+finding: the AoS `chunks_exact` loop is already autovectorized, and the 1-aligned `Vec<u8>` **AoS**
+buffer forces a scalar gather/scatter to fill a lane register that no SIMD width pays for. The user
+then directed implementing the deferred **SoA** layout. Rather than re-layout the general packed list
+(which would revert P-COW's O(n²)→O(n) append — appends become mid-buffer column inserts), we added an
+**opt-in [`SoaVec3`] columnar type** the user explicitly builds for bulk math. On its contiguous
+columns the reduction kernels autovectorize *across elements* (the AoS stride-12 layout could not),
+giving the win. Explicit `wide` SIMD on those same columns was **still not faster** than the scalar
+loop — so the shipped kernels are plain scalar; the lever is the layout, not the intrinsics.
 
 ## Goal
 
@@ -110,11 +117,36 @@ lanes/step with `wide::f32x8` + a scalar remainder tail, bit-identical to scalar
   overhead against a scalar `dot` LLVM already vectorizes well (and AVX2 speeds the *scalar* `dot` up
   further, 74.6→52.3 µs, widening the gap).
 
-**Unblock condition:** a real SIMD win here requires a **layout change**, not a kernel swap — either an
-**SoA** packed layout (`xxxx…yyyy…zzzz…`, so a component of N elements is one contiguous vector load) or
-**aligned** buffers enabling a zero-copy `&[f32]` reinterpret (needs `unsafe`/`bytemuck` in a value crate).
-Both are explicitly deferred (see the P-PACK Phase 4 note in `crates/lang-stdlib/src/vec3.rs` and the
-"Out of scope" list below). The `vec3_kernels` bench stays as the gate that will validate any such attempt.
+**Unblock condition:** a real win here requires a **layout change**, not a kernel swap — a **SoA**
+layout (`xxxx…yyyy…zzzz…`) so a whole reduction runs over a contiguous same-type column. See the SoA
+result next.
+
+**S4 — opt-in SoA columnar type (the win).** Added [`SoaVec3`] (`crates/lang-stdlib/src/vec3.rs`): three
+contiguous `f32` columns, built once from a `List<Vec3>` (an O(n) transpose) and reduced many times. On
+its columns each reduction is a contiguous same-type `f32` loop LLVM **autovectorizes across elements**.
+`soa_reductions` bench, n=100k (criterion median, default build):
+
+| reduction | AoS (shipped scalar kernel) | **SoA (opt-in columns)** | speedup |
+|---|---|---|---|
+| `dot`    | 75.6 µs | **28.0 µs** | **2.7×** |
+| `length` | 117 µs  | **29.5 µs** | **4.0×** |
+
+(Consistent 2.7×–3.8× / 3.6×–4.0× across n=1k/10k/100k.) One-time `build` (AoS→SoA transpose) at n=100k
+is ~126 µs — one transpose amortizes over repeated reductions. Two guardrails learned here:
+- **It's the layout, not intrinsics.** Explicit `wide` `f32x8` over the *same* SoA columns benched
+  ~10% **slower** than the autovectorized scalar loop (`soa_dot` 28.0 µs vs a `wide` 31.3 µs), so the
+  shipped kernels are scalar and the `wide` dep was dropped. LLVM autovectorizes the clean column loop
+  better than hand-rolled lane marshaling — the same lesson as S2, now with the layout that lets it.
+- **Bounds checks dominated the first cut.** An indexed SoA loop (`a.xs[i]…`, 6 bounds checks/step)
+  was *2.7× slower* than AoS; rewriting to zipped iterators (bounds-check-free, like AoS's
+  `chunks_exact`) is what exposed the 2.7×–4× win. The AoS kernels were already bounds-check-free — the
+  fair comparison is iterator-vs-iterator.
+
+Kernels are **bit-identical to the AoS kernels** (unit-tested: `soa_dot`/`soa_length` equal
+`dot_buffers`/`length_buffer` on the transposed buffer; the reductions keep per-element
+`(x·bx + y·by) + z·bz` order). The general packed `List<Vec3>` is untouched (keeps O(1) append); SoA is
+a separate value type. Language surface: `vec.soa(list)` → an opaque batch, `vec.soa_dot`/`soa_length`
+(→ `List<f32>`), `vec.soa_add`/`soa_sub`/`soa_scale` (→ batch), `vec.soa_list`/`soa_count`.
 
 ## Oracle posture / risk
 

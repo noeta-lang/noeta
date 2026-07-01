@@ -165,6 +165,125 @@ pub fn length_buffer(a: &[u8]) -> Vec<f32> {
         .collect()
 }
 
+// --- Opt-in columnar (SoA) Vec3 batch (P-SIMD) ---
+//
+// The AoS packed `List<Vec3>` above interleaves components (`x0,y0,z0,x1,…`), which is right for O(1)
+// append and contiguous per-element access but defeats manual SIMD: a component of N elements is
+// strided, so a reduction (dot/length) needs a scalar gather to fill a lane register (benched
+// 1.8×–9× *slower* than the autovectorized scalar loop — see `plans/perf/p-simd.md`).
+//
+// [`SoaVec3`] is the opt-in alternative a user builds explicitly for bulk math: three **contiguous**
+// `f32` columns. Now a whole reduction runs over each column independently, so `x[i]*bx[i]` is a
+// contiguous same-type `f32` loop LLVM **autovectorizes across elements** — which the AoS stride-12
+// layout could not (each AoS step is a horizontal 3-wide combine that stays scalar). That is the
+// actual throughput lever: on `dot`/`length` the SoA scalar kernels run **2.7×–4× faster** than the
+// AoS kernels (`plans/perf/p-simd.md`, `soa_reductions` bench). Explicit `wide` SIMD was tried on
+// these same columns and was *not* faster than the autovectorized scalar loop (it added marshaling
+// over what LLVM already does), so these stay scalar. It is a separate value type (not the general
+// packed list), so the general list keeps its O(1) append; the SoA batch is built once (an O(n)
+// transpose) and reduced many times.
+//
+// The kernels stay **bit-identical to the AoS kernels**: element-wise ops are per-lane IEEE, and the
+// reductions keep the scalar left-to-right order per element (`(x·bx + y·by) + z·bz`), so there is no
+// float-add reorder — the differential and the AoS conformance expectations hold by construction.
+
+/// A columnar batch of Vec3s: three contiguous `f32` columns of equal length. The opt-in SoA layout
+/// for bulk 3D math (see the module note above). Immutable and value-semantic; the bulk ops return a
+/// fresh batch or a `Vec<f32>`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SoaVec3 {
+    pub xs: Vec<f32>,
+    pub ys: Vec<f32>,
+    pub zs: Vec<f32>,
+}
+
+impl SoaVec3 {
+    /// The number of elements (one per column entry).
+    pub fn len(&self) -> usize {
+        self.xs.len()
+    }
+
+    /// Whether the batch has no elements.
+    pub fn is_empty(&self) -> bool {
+        self.xs.is_empty()
+    }
+}
+
+/// Build a [`SoaVec3`] from an AoS packed `List<Vec3>` byte buffer (12 bytes/element, `x,y,z`
+/// interleaved) — the one-time O(n) transpose that pays for the fast reductions afterward.
+pub fn soa_from_packed(bytes: &[u8]) -> SoaVec3 {
+    let n = bytes.len() / 12;
+    let mut xs = Vec::with_capacity(n);
+    let mut ys = Vec::with_capacity(n);
+    let mut zs = Vec::with_capacity(n);
+    for c in bytes.chunks_exact(12) {
+        xs.push(read_f32(&c[0..]));
+        ys.push(read_f32(&c[4..]));
+        zs.push(read_f32(&c[8..]));
+    }
+    SoaVec3 { xs, ys, zs }
+}
+
+/// Serialize a [`SoaVec3`] back to an AoS packed `List<Vec3>` byte buffer — the inverse transpose,
+/// so a result batch can re-enter the packed-list machinery (`vec.soa_list`).
+pub fn soa_to_packed(a: &SoaVec3) -> Vec<u8> {
+    let mut out = Vec::with_capacity(a.len() * 12);
+    for i in 0..a.len() {
+        out.extend_from_slice(&a.xs[i].to_le_bytes());
+        out.extend_from_slice(&a.ys[i].to_le_bytes());
+        out.extend_from_slice(&a.zs[i].to_le_bytes());
+    }
+    out
+}
+
+/// Component-wise sum of two batches → a new batch.
+pub fn soa_add(a: &SoaVec3, b: &SoaVec3) -> SoaVec3 {
+    soa_zip(a, b, |x, y| x + y)
+}
+
+/// Component-wise difference of two batches → a new batch.
+pub fn soa_sub(a: &SoaVec3, b: &SoaVec3) -> SoaVec3 {
+    soa_zip(a, b, |x, y| x - y)
+}
+
+/// Scale every component of a batch by `s` → a new batch.
+pub fn soa_scale(a: &SoaVec3, s: f32) -> SoaVec3 {
+    SoaVec3 {
+        xs: a.xs.iter().map(|&v| v * s).collect(),
+        ys: a.ys.iter().map(|&v| v * s).collect(),
+        zs: a.zs.iter().map(|&v| v * s).collect(),
+    }
+}
+
+/// Element-wise binary op over each column (contiguous `f32`, so LLVM autovectorizes each column).
+fn soa_zip(a: &SoaVec3, b: &SoaVec3, op: impl Fn(f32, f32) -> f32 + Copy) -> SoaVec3 {
+    let col = |u: &[f32], v: &[f32]| u.iter().zip(v).map(|(&x, &y)| op(x, y)).collect();
+    SoaVec3 {
+        xs: col(&a.xs, &b.xs),
+        ys: col(&a.ys, &b.ys),
+        zs: col(&a.zs, &b.zs),
+    }
+}
+
+/// `dot` over an SoA batch → one `f32` per element. Iterator-zipped (bounds-check-free) so the three
+/// contiguous column products autovectorize; each element keeps the `(x·bx + y·by) + z·bz` order.
+pub fn soa_dot(a: &SoaVec3, b: &SoaVec3) -> Vec<f32> {
+    let xy = a.xs.iter().zip(&b.xs).zip(a.ys.iter().zip(&b.ys));
+    xy.zip(a.zs.iter().zip(&b.zs))
+        .map(|(((xa, xb), (ya, yb)), (za, zb))| xa * xb + ya * yb + za * zb)
+        .collect()
+}
+
+/// `length` over an SoA batch → one `f32` per element: `√((x·x + y·y) + z·z)`, per element (matching
+/// the AoS `length_buffer` order). Iterator-zipped so the contiguous columns autovectorize.
+pub fn soa_length(a: &SoaVec3) -> Vec<f32> {
+    a.xs.iter()
+        .zip(&a.ys)
+        .zip(&a.zs)
+        .map(|((&x, &y), &z)| (x * x + y * y + z * z).sqrt())
+        .collect()
+}
+
 /// Encode an `f32` slice to a little-endian byte buffer — the packed-list representation. Used to
 /// build test inputs and to check kernel outputs.
 #[cfg(test)]
@@ -209,6 +328,46 @@ mod tests {
         // dot: [1·10+2·20+3·30, 4·40+5·50+6·60] = [140, 770]
         assert_eq!(dot_buffers(&a, &b), [140.0, 770.0]);
         assert_eq!(length_buffer(&buf(&[3.0, 4.0, 0.0])), [5.0]);
+    }
+
+    #[test]
+    fn soa_reductions_match_aos_and_roundtrip() {
+        // The SoA reductions must be byte-identical to the AoS kernels (they pin the same conformance
+        // expectations), and the AoS↔SoA transpose must round-trip. 19 elements, values spanning
+        // negatives/fractions/zero so any reduction-order change would surface as a mismatch.
+        let n = 19;
+        let xs: Vec<f32> = (0..n)
+            .map(|i| (i as f32) * 0.3125 - 3.0 + (i as f32).sin())
+            .collect();
+        let ys: Vec<f32> = (0..n).map(|i| (i as f32).cos() * 1.75 - 2.5).collect();
+        let zs: Vec<f32> = (0..n).map(|i| (i as f32) * -0.5 + 0.125).collect();
+        let a = SoaVec3 {
+            xs: xs.clone(),
+            ys: ys.clone(),
+            zs: zs.clone(),
+        };
+        let b = SoaVec3 {
+            xs: ys,
+            ys: zs,
+            zs: xs,
+        };
+
+        // SoA reductions == AoS reductions on the transposed buffers (bit-identical).
+        let a_aos = soa_to_packed(&a);
+        let b_aos = soa_to_packed(&b);
+        assert_eq!(soa_dot(&a, &b), dot_buffers(&a_aos, &b_aos));
+        assert_eq!(soa_length(&a), length_buffer(&a_aos));
+        // The AoS→SoA→AoS transpose round-trips exactly.
+        assert_eq!(soa_from_packed(&a_aos), a);
+        // Element-wise ops: add/sub/scale agree with per-lane references.
+        let sum = soa_add(&a, &b);
+        let diff = soa_sub(&a, &b);
+        let scaled = soa_scale(&a, 2.5);
+        for i in 0..n as usize {
+            assert_eq!(sum.xs[i], a.xs[i] + b.xs[i]);
+            assert_eq!(diff.ys[i], a.ys[i] - b.ys[i]);
+            assert_eq!(scaled.zs[i], a.zs[i] * 2.5);
+        }
     }
 
     #[test]

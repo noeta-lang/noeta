@@ -53,6 +53,36 @@ fn vec3_kernels(c: &mut Criterion) {
         });
     }
     group.finish();
+
+    // SoA head-to-head: the two reductions (`dot`/`length`) over the opt-in contiguous columns vs the
+    // shipped AoS kernels. The SoA layout lets LLVM autovectorize each column across elements (the AoS
+    // stride-12 layout cannot), so the SoA *scalar* kernels win — explicit `wide` SIMD on the same
+    // columns was benched and was not faster, so it was dropped. `build` is the one-time AoS→SoA
+    // transpose the opt-in batch pays at construction (amortized over repeated reductions).
+    let mut soa = c.benchmark_group("soa_reductions");
+    for &n in SIZES {
+        let a_aos = make_buffer(n);
+        let b_aos = make_buffer(n);
+        let a = vec3::soa_from_packed(&a_aos);
+        let b = vec3::soa_from_packed(&b_aos);
+
+        soa.bench_with_input(BenchmarkId::new("dot-aos", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::dot_buffers(black_box(&a_aos), black_box(&b_aos))));
+        });
+        soa.bench_with_input(BenchmarkId::new("dot-soa", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::soa_dot(black_box(&a), black_box(&b))));
+        });
+        soa.bench_with_input(BenchmarkId::new("length-aos", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::length_buffer(black_box(&a_aos))));
+        });
+        soa.bench_with_input(BenchmarkId::new("length-soa", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::soa_length(black_box(&a))));
+        });
+        soa.bench_with_input(BenchmarkId::new("build", n), &n, |bch, _| {
+            bch.iter(|| black_box(vec3::soa_from_packed(black_box(&a_aos))));
+        });
+    }
+    soa.finish();
 }
 
 criterion_group!(benches, vec3_kernels);
