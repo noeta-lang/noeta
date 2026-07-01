@@ -234,6 +234,12 @@ pub(crate) enum Payload {
     /// reference** to that closure (a GC node like [`Self::Cell`]). A.2 replaces the thunk with the
     /// async state machine and this becomes a pollable future.
     Future(Value),
+    /// A **leaf timer future** (Track A.2): `sleep(ms)` produces one, carrying the absolute logical
+    /// deadline (ms) at which it becomes ready. It holds no heap children — the deadline is a plain
+    /// integer — so it needs no `release`/`children` handling beyond freeing its own node. Polling it
+    /// consults the injected [`lang_stdlib::SandboxExecutor`]'s clock; it reports `Pending` until the
+    /// clock reaches the deadline. This is the first future that can actually suspend.
+    Timer(u64),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -485,6 +491,7 @@ pub(crate) fn free(value: Value) {
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
+        | Payload::Timer(_)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -635,13 +642,15 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Iter(state) => state.children().into_iter().flatten().for_each(&mut push),
         // A future owns one reference to its thunk/step closure.
         Payload::Future(step) => push(*step),
-        // A packed list holds only primitive words (no child references) — a GC leaf.
+        // A packed list holds only primitive words (no child references) — a GC leaf; a timer holds
+        // only its integer deadline.
         Payload::Str(_)
         | Payload::Bytes(_)
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
+        | Payload::Timer(_)
         | Payload::FileHandle(_) => {}
     }
     out

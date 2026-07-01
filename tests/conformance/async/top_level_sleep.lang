@@ -1,0 +1,6 @@
+// Track A.2 — a `sleep` awaited at the implicitly-async top level drives the executor clock directly
+// (no `block_on` bridge): poll → `Pending` → advance to the deadline → ready.
+// expect: stdout "tick"
+// expect: exit 0
+sleep(5).await
+echo "tick"

@@ -49,6 +49,9 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive the test runner's `@test` blocks (object-model slice 6) rest on.
     Assert,
+    /// `sleep(ms)` — produce a leaf timer future (Track A.2) that becomes ready once the executor's
+    /// logical clock reaches `now + ms`. The first future that can actually report `Pending`.
+    Sleep,
 }
 
 impl Builtin {
@@ -60,6 +63,7 @@ impl Builtin {
             Builtin::Filter => "filter",
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
+            Builtin::Sleep => "sleep",
         }
     }
 
@@ -71,6 +75,7 @@ impl Builtin {
             "filter" => Some(Builtin::Filter),
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
+            "sleep" => Some(Builtin::Sleep),
             _ => None,
         }
     }

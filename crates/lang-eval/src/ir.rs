@@ -1143,16 +1143,13 @@ impl Interpreter {
                 let thunk = self.eval_ir_atom(thunk, frame)?;
                 Ok(Value::Future(Rc::new(thunk)))
             }
-            // Run an awaited future to completion (Track A.1): call its thunk (one ignored resume arg,
-            // here unit) and yield the completion value. A checked program only awaits a `Future`; a
-            // non-future (only reachable via the uncheck­ed property test) passes straight through so
-            // evaluation stays total.
+            // Run an awaited future to completion (Track A.2): a step/thunk future runs to its value;
+            // a leaf timer suspends until the executor clock reaches its deadline. See
+            // [`Interpreter::drive_future`]. A non-future (only reachable via the uncheck­ed property
+            // test) passes straight through so evaluation stays total.
             lang_ir::Rvalue::RunFuture { future, span } => {
                 let future = self.eval_ir_atom(future, frame)?;
-                match future {
-                    Value::Future(thunk) => self.call((*thunk).clone(), vec![Value::Unit], *span),
-                    other => Ok(other),
-                }
+                self.drive_future(future, *span)
             }
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
             lang_ir::Rvalue::Invoke {

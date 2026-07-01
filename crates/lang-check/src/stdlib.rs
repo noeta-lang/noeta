@@ -336,6 +336,9 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         "panic" => Type::Unknown,
         // `assert(cond)` / `assert(cond, msg)` — checked for effect, yields nothing.
         "assert" => Type::Unit,
+        // `sleep(ms)` — a leaf timer future (Track A.2). Returns `Future<void>`, so `sleep(ms).await`
+        // yields `void`; awaiting it suspends until the executor clock reaches the deadline.
+        "sleep" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
         _ => return None,
     })
 }

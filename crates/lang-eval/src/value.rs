@@ -75,6 +75,10 @@ pub enum Value {
     /// a lazy thunk closure — run to completion when awaited, not at the `async fn` call. `Rc` keeps
     /// copies cheap and matches the VM's shared heap object.
     Future(Rc<Value>),
+    /// A **leaf timer future** (Track A.2): the tree-walker twin of the VM's `Payload::Timer`.
+    /// `sleep(ms)` produces one carrying the absolute logical deadline (ms) at which it is ready;
+    /// polling it consults the executor clock and reports `Pending` until then.
+    Timer(u64),
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -485,7 +489,7 @@ impl Value {
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
             Value::Iter(_) => "<iterator>".to_string(),
-            Value::Future(_) => "<future>".to_string(),
+            Value::Future(_) | Value::Timer(_) => "<future>".to_string(),
         }
     }
 
@@ -520,7 +524,7 @@ impl Value {
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
             Value::Iter(_) => "iterator",
-            Value::Future(_) => "future",
+            Value::Future(_) | Value::Timer(_) => "future",
         }
     }
 }
@@ -549,6 +553,7 @@ impl fmt::Debug for Value {
             Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
             Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
+            Value::Timer(deadline) => write!(f, "Timer({deadline})"),
         }
     }
 }

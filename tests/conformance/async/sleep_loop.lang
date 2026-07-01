@@ -1,0 +1,16 @@
+// Track A.2 — awaiting a `sleep` inside a loop: each iteration parks on a fresh timer and resumes,
+// advancing the logical clock (0 → 1 → 2 → 3). Exercises repeated `Pending`; the loop runs to
+// completion in deterministic order.
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "2"
+// expect: exit 0
+async fn ticks(n: int): void {
+    mut i = 0
+    while i < n {
+        sleep(1).await
+        echo i
+        i = i + 1
+    }
+}
+ticks(3).await

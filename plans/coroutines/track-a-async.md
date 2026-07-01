@@ -119,19 +119,31 @@ re-poll; on `Ready(v)`, done; if `Pending` with nothing to advance → a determi
   `sequential` (awaits across locals, repeated awaits, nested async calls), `top_level_await`,
   `try_through_await` (`?`-through-`.await`), plus the three A.0 error cases retained. Conformance 356 /
   differential 347 matched 0-skipped / leaks 0 both / miri clean / clippy+fmt+workspace clean.
-- **A.2 — the real state machine + first suspending leaf (`sleep`/timer).** Replaces A.1's thunk with
-  the CFG state-machine lowering (a `lower_async` mirroring `lower_generator`: `.await` → hoisted future
-  cell + poll-state that advances on Ready / self-loops returning `Pending`), and adds the
-  `Executor`/`SandboxExecutor` injected seam + `Op::PollFuture`. A `sleep(ms)` leaf future returns
-  `Pending` until the deterministic logical clock reaches its deadline; the executor's timer wheel
-  advances logical time to the next event and re-polls. Now `Pending` is exercised by real suspension.
-  A.1's tests still pass (sequential async runs to completion regardless of mechanism), so upgrading the
-  mechanism is safe. In-oracle (reuse the `Host` logical-clock discipline).
-- **A.3 — structured concurrency: `concurrent { }` + `TaskScope` + `spawn`.** `concurrent { }`
-  block-lifetime scope; `spawn` legal only inside a scope (orphan `spawn` → a new diagnostic code);
-  block joins at `}`; child errors propagate at the boundary; deterministic ready-queue ordering in
-  `SandboxExecutor`. `TaskScope` value. **Decide:** does an implicitly-async root count as an owning
-  scope for a top-level `spawn`? (settle here, not in A.0). `all`/`race` deferred to a library.
+- **A.2 — first suspending leaf (`sleep`/timer) + executor. NO state machine (regrouped with user
+  2026-07-01).** Adds the `Executor`/`SandboxExecutor` injected seam (a deterministic logical clock +
+  a timer set) and a `sleep(ms)` leaf future that returns `Pending` until the clock reaches its
+  deadline. A.1's `RunFuture` (drive-to-completion, used by every `.await`) is upgraded to **advance the
+  clock on `Pending` and re-poll** — so a `sleep` awaited anywhere completes by advancing logical time.
+  `Pending` is genuinely exercised (the timer pends at the leaf; the executor advances; a pending with
+  no timer is a deterministic deadlock error). In-oracle.
+  - **Why no state machine here (the regrouping):** in *single-task* async — all we have until A.3 —
+    every `.await` must complete before execution proceeds (no sibling task to yield to), so "drive the
+    awaited future to completion inline, advancing the clock on `Pending`" is **observationally
+    identical** to "suspend the async fn as a state machine and let the executor re-poll it." The state
+    machine's one distinctive behavior — suspending a task so a **sibling** runs — is unobservable
+    without A.3's `concurrent`/`spawn`. Building it in A.2 would leave that path dead/untested (the exact
+    anti-pattern the A.1/A.2 split avoided), so the state machine moves to A.3, where it is finally
+    testable. A.1's tests still pass unchanged (single-task drive-to-completion regardless of mechanism).
+- **A.3 — structured concurrency: `concurrent { }` + `TaskScope` + `spawn` — AND the async state
+  machine (moved here from A.2).** The state machine is built here because concurrency is what makes it
+  observable: the CFG state-machine lowering (a `lower_async` mirroring `lower_generator`: `.await` →
+  hoisted future cell + poll-state that advances on Ready / self-loops returning `Pending`) + the
+  `Op::PollFuture` single-poll op replace A.1's thunk so a task can suspend and yield to a sibling.
+  `concurrent { }` block-lifetime scope; `spawn` legal only inside a scope (orphan `spawn` → a new
+  diagnostic code); block joins at `}`; child errors propagate at the boundary; deterministic
+  ready-queue ordering in `SandboxExecutor`. `TaskScope` value. **Decide:** does an implicitly-async
+  root count as an owning scope for a top-level `spawn`? (settle here). `all`/`race` deferred to a
+  library.
 - **A.4 — real executor (tokio) + async IO leaves (CLI-only, out-of-oracle).** Wire `.await` to the
   per-isolate tokio `current_thread` runtime in `RealHost`; make fs IO **suspend** (`await`) instead of
   `block_on` at the leaf. `RealExecutor` behind the CLI, integration-tested like `RealHost`.

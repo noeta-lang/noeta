@@ -211,6 +211,11 @@ struct Vm<'m> {
     /// [`lang_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
     /// this struct. See the eval backend's field of the same name.
     host: Box<dyn lang_stdlib::Host>,
+    /// The async executor (Track A.2): the deterministic logical clock + pending-timer set that
+    /// `sleep(ms)` and drive-to-completion `.await` consult. Fresh per run, identical to the
+    /// tree-walker's by construction, so the differential holds. See the eval backend's field of the
+    /// same name.
+    executor: lang_stdlib::SandboxExecutor,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
 }
@@ -353,6 +358,7 @@ fn execute_with_collector(
         global_order: Vec::new(),
         next_id: 1,
         host,
+        executor: lang_stdlib::SandboxExecutor::new(),
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -3575,23 +3581,12 @@ impl<'m> Vm<'m> {
                     frames[top].pc += 1;
                 }
                 Op::RunFuture { dst, src, span } => {
-                    // Run an awaited future to completion (Track A.1): call its thunk (one ignored
-                    // resume arg) and yield the completion value. `future_step` hands back a retained
-                    // reference to the thunk which `call_value` borrows; release it after the call. A
-                    // checked program only awaits a `Future`; a non-future is passed through so
-                    // execution stays total (unreachable for a checked program).
+                    // Run an awaited future to completion (Track A.2). See `drive_future`: a step/thunk
+                    // future runs to its value; a leaf timer suspends until the executor clock reaches
+                    // its deadline. The source register keeps owning the future; `drive_future` returns
+                    // an owned result.
                     let future = frames[top].regs[*src as usize];
-                    let value = match future.future_step() {
-                        Some(step) => {
-                            let result = self.call_value(step, vec![Value::unit()], *span);
-                            release(step);
-                            result?
-                        }
-                        None => {
-                            retain(future);
-                            future
-                        }
-                    };
+                    let value = self.drive_future(future, *span)?;
                     set_reg(&mut frames[top].regs, *dst, value);
                     frames[top].pc += 1;
                 }
@@ -4175,6 +4170,49 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Drive an awaited future to completion (Track A.2 — the VM twin of the tree-walker's
+    /// `Interpreter::drive_future`). A step/thunk future runs to its value (its own inner awaits drive
+    /// the clock inline, so one call completes it); `future_step` hands back a retained reference the
+    /// call borrows, released after. A leaf timer suspends until the executor clock reaches its
+    /// deadline — on `Pending` the executor advances logical time to the next timer and the poll
+    /// retries; a pending future with nothing to advance is a deterministic deadlock. A non-future is
+    /// passed through, freshly retained (totality; unreachable for a checked program). The caller's
+    /// register keeps owning the input future. Single-task only (A.2): the suspend-to-sibling state
+    /// machine arrives with concurrency in A.3.
+    fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
+        loop {
+            if future.is_timer() {
+                let deadline = future
+                    .timer_deadline()
+                    .expect("a timer carries its deadline");
+                if self.executor.now() >= deadline {
+                    return Ok(Value::unit());
+                }
+                self.executor.register_timer(deadline);
+                if self.executor.advance().is_none() {
+                    return Err(self.error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "async deadlock: awaited a pending future with no pending timers"
+                            .to_string(),
+                    ));
+                }
+                continue;
+            }
+            return match future.future_step() {
+                Some(step) => {
+                    let result = self.call_value(step, vec![Value::unit()], span);
+                    release(step);
+                    result
+                }
+                None => {
+                    retain(future);
+                    Ok(future)
+                }
+            };
+        }
+    }
+
     /// Call a value with already-owned arguments (each carrying one reference transferred to
     /// the callee), re-entering the VM on a fresh frame stack. Only closures are callable in
     /// this slice — builtins are never first-class values. Used by `map`/`filter`.
@@ -4593,6 +4631,27 @@ impl<'m> Vm<'m> {
                     };
                     Err(self.error(DiagnosticCode::Panic, span, message))
                 }
+            }
+            // `sleep(ms)` — a leaf timer future (Track A.2), ready once the executor clock reaches
+            // `now + ms`. Mirrors the tree-walker's `Builtin::Sleep`: the deadline is fixed at
+            // creation from the current logical clock. A non-int or negative `ms` is a `TypeMismatch`.
+            Builtin::Sleep => {
+                self.check_arity(builtin, args, 1, span)?;
+                let Some(ms) = args[0].as_int() else {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`sleep` expects an int (ms), found {}", args[0].display()),
+                    ));
+                };
+                if ms < 0 {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`sleep` expects a non-negative duration, found {ms}"),
+                    ));
+                }
+                Ok(Value::make_timer(self.executor.now() + ms as u64))
             }
         }
     }

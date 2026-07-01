@@ -21,6 +21,7 @@
 //! arguments/results across the neutral [`registry::NativeValue`]/[`registry::NativeOut`] seam.
 
 pub mod env;
+pub mod executor;
 pub mod fs;
 pub mod handle;
 pub mod host;
@@ -32,6 +33,7 @@ pub mod random;
 pub mod registry;
 pub mod vec3;
 
+pub use executor::SandboxExecutor;
 pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush, ReadSource};
 pub use host::{Host, SandboxHost};
 pub use iter::IterMethod;

@@ -331,6 +331,9 @@ pub enum Builtin {
     /// `assert(cond)` / `assert(cond, msg)` — abort (a `Panic` diagnostic) when `cond` is false.
     /// The assertion primitive `@test` blocks rest on (object-model slice 6).
     Assert,
+    /// `sleep(ms)` — a leaf timer future (Track A.2) ready once the executor clock reaches
+    /// `now + ms`. The first future that can report `Pending`.
+    Sleep,
 }
 
 impl Builtin {
@@ -346,6 +349,7 @@ impl Builtin {
             Builtin::MakeSome => "some",
             Builtin::Panic => "panic",
             Builtin::Assert => "assert",
+            Builtin::Sleep => "sleep",
         }
     }
 
@@ -362,6 +366,7 @@ impl Builtin {
         Builtin::MakeSome,
         Builtin::Panic,
         Builtin::Assert,
+        Builtin::Sleep,
     ];
 }
 
@@ -976,6 +981,10 @@ struct Interpreter {
     /// [`lang_stdlib::SandboxHost`] so file IO, PRNG, and clock stay isolated and identical to
     /// the VM by construction; a real host (later M2 slices) swaps in without touching this struct.
     host: Box<dyn lang_stdlib::Host>,
+    /// The async executor (Track A.2): the deterministic logical clock + pending-timer set that
+    /// `sleep(ms)` and drive-to-completion `.await` consult. Fresh per run, identical to the VM's by
+    /// construction (both start at zero and advance the same way), so the differential holds.
+    executor: lang_stdlib::SandboxExecutor,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `lang_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
@@ -1031,6 +1040,7 @@ impl Interpreter {
             globals: Rc::clone(&global),
             scope: global,
             host,
+            executor: lang_stdlib::SandboxExecutor::new(),
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
         }
@@ -3148,6 +3158,57 @@ impl Interpreter {
                     Err(self.runtime_error(DiagnosticCode::Panic, span, message))
                 }
             }
+            // `sleep(ms)` — a leaf timer future (Track A.2). Its deadline is fixed at creation from the
+            // current logical clock; awaiting it advances the clock to that deadline. A negative or
+            // non-int `ms` is a `TypeMismatch` (checked identically in the VM).
+            Builtin::Sleep => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                let Value::Int(ms) = args[0] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`sleep` expects an int (ms), found {}", args[0].display()),
+                    ));
+                };
+                if ms < 0 {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("`sleep` expects a non-negative duration, found {ms}"),
+                    ));
+                }
+                Ok(Value::Timer(self.executor.now() + ms as u64))
+            }
+        }
+    }
+
+    /// Drive an awaited future to completion (Track A.2 — the tree-walker twin of the VM's
+    /// `Vm::drive_future`). A step/thunk future runs to its value (its own inner awaits drive the
+    /// clock inline, so one call completes it). A leaf timer suspends until the executor clock reaches
+    /// its deadline — on `Pending` the executor advances logical time to the next timer and the poll
+    /// retries; a pending future with nothing to advance is a deterministic deadlock. A non-future
+    /// passes through (totality for the uncheck­ed property test). Single-task only (A.2): concurrency
+    /// and the suspend-to-sibling state machine arrive in A.3.
+    fn drive_future(&mut self, future: Value, span: Span) -> Eval<Value> {
+        loop {
+            let deadline = match &future {
+                Value::Timer(d) => *d,
+                Value::Future(thunk) => {
+                    return self.call((**thunk).clone(), vec![Value::Unit], span);
+                }
+                other => return Ok(other.clone()),
+            };
+            if self.executor.now() >= deadline {
+                return Ok(Value::Unit);
+            }
+            self.executor.register_timer(deadline);
+            if self.executor.advance().is_none() {
+                return Err(self.runtime_error(
+                    DiagnosticCode::Panic,
+                    span,
+                    "async deadlock: awaited a pending future with no pending timers".to_string(),
+                ));
+            }
         }
     }
 
@@ -3621,7 +3682,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::NativeModule(_)
         | Value::FileHandle(_)
         | Value::Iter(_)
-        | Value::Future(_) => TypeRepr::Dyn,
+        | Value::Future(_)
+        | Value::Timer(_) => TypeRepr::Dyn,
     }
 }
 
@@ -4051,7 +4113,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
-        Value::Future(_) => NativeValue::Str("<future>".to_string()),
+        Value::Future(_) | Value::Timer(_) => NativeValue::Str("<future>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),
     }

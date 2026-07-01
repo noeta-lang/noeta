@@ -625,9 +625,36 @@ impl Value {
         heap::alloc(Payload::Future(step))
     }
 
-    /// Whether this is a future.
+    /// A **leaf timer future** (Track A.2): `sleep(ms)` produces one, carrying the absolute logical
+    /// deadline (ms) at which it becomes ready. Unlike [`Self::make_future`] it wraps no closure — it
+    /// is polled by consulting the executor clock (see [`Self::timer_deadline`]).
+    pub fn make_timer(deadline: u64) -> Value {
+        heap::alloc(Payload::Timer(deadline))
+    }
+
+    /// Whether this is a future — a step/thunk future ([`Payload::Future`]) or a leaf timer
+    /// ([`Payload::Timer`]). Both name their type "future" and display opaquely.
     pub fn is_future(self) -> bool {
-        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Future(_)))
+        self.is_pointer()
+            && heap::with_payload(self, |p| {
+                matches!(p, Payload::Future(_) | Payload::Timer(_))
+            })
+    }
+
+    /// Whether this is a leaf timer future.
+    pub fn is_timer(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Timer(_)))
+    }
+
+    /// The absolute logical deadline (ms) of a leaf timer future, or `None` if this is not a timer.
+    pub fn timer_deadline(self) -> Option<u64> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Timer(deadline) => Some(*deadline),
+            _ => None,
+        })
     }
 
     /// The thunk/step closure a future wraps — a freshly-retained owning reference the caller drives
@@ -1557,8 +1584,8 @@ impl Value {
                 Payload::FileHandle(handle) => handle.display(),
                 // An iterator is an opaque reference value (like a file handle).
                 Payload::Iter { .. } => "<iterator>".to_string(),
-                // A future is an opaque reference value.
-                Payload::Future(_) => "<future>".to_string(),
+                // A future — step or leaf timer — is an opaque reference value.
+                Payload::Future(_) | Payload::Timer(_) => "<future>".to_string(),
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1638,7 +1665,7 @@ impl Value {
                 // An iterator has no JSON analog either — its opaque display form.
                 Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),
                 // A future has no JSON analog — its opaque display form.
-                Payload::Future(_) => NativeValue::Str("<future>".to_string()),
+                Payload::Future(_) | Payload::Timer(_) => NativeValue::Str("<future>".to_string()),
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -2102,6 +2129,20 @@ mod tests {
 
         step.release(); // drop the caller's original reference; the future still holds one
         fut.release(); // frees the future and its held step reference → step freed, no leak
+    }
+
+    #[test]
+    fn timer_carries_its_deadline_and_frees_cleanly() {
+        // Track A.2: a leaf timer future carries only its integer deadline (no heap children), names
+        // itself "future", displays opaquely, and frees as a plain node — leak-clean under miri.
+        let timer = Value::make_timer(42);
+        assert!(timer.is_future());
+        assert!(timer.is_timer());
+        assert!(!timer.is_future() || timer.future_step().is_none()); // a timer wraps no closure
+        assert_eq!(timer.timer_deadline(), Some(42));
+        assert_eq!(timer.type_name(), "future");
+        assert_eq!(timer.display(), "<future>");
+        timer.release(); // frees the node, no leak
     }
 
     #[test]

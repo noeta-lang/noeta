@@ -1,0 +1,15 @@
+// Track A.2 — `sleep(ms)` is a leaf future that suspends (reports `Pending`) until the executor's
+// logical clock reaches its deadline. Awaiting it advances the clock and resumes. Single-task, so
+// awaiting drives to completion; the program still prints in order and exits 0 (a broken suspend/
+// advance would deadlock instead). This is the first future that genuinely parks on `Pending`.
+// expect: stdout "before"
+// expect: stdout "after"
+// expect: stdout "done"
+// expect: exit 0
+async fn nap(): void {
+    echo "before"
+    sleep(10).await
+    echo "after"
+}
+nap().await
+echo "done"
