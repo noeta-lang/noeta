@@ -317,6 +317,11 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.as_native_fn(), right.as_native_fn()) {
         return a == b;
     }
+    // SoA Vec3 batches compare by their `f32` columns (value semantics), matching the tree-walker's
+    // `Value::SoaVec3` equality by construction.
+    if left.is_soa_vec3() && right.is_soa_vec3() {
+        return left.soa_data().map(|(_, c)| c) == right.soa_data().map(|(_, c)| c);
+    }
     false
 }
 

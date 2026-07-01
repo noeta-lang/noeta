@@ -16,6 +16,7 @@ use std::fmt;
 use std::rc::Rc;
 
 use lang_stdlib::FileHandle;
+use lang_stdlib::vec3::SoaVec3 as SoaColumns;
 
 use crate::{Builtin, Closure, EnumDef, EnumValue, ObjectValue, TypeDef};
 
@@ -67,6 +68,10 @@ pub enum Value {
     /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
     /// same shared type both backends advance, so behavior is identical by construction.
     FileHandle(Rc<RefCell<FileHandle>>),
+    /// An opt-in columnar (SoA) Vec3 batch (P-SIMD): the tree-walker twin of the VM's
+    /// `Payload::SoaVec3`. Immutable columnar `f32` data + the element schema (to rebuild a
+    /// `List<Vec3>`); `Rc` keeps clones cheap. Built via `vec.soa(list)`.
+    SoaVec3(Rc<SoaBatch>),
     /// A lazy iterator (Track I.1a): a reference-semantic cursor over a list value — the tree-walker
     /// twin of the VM's `Payload::Iter`. `Rc<RefCell<…>>` gives the shared interior-mutable cursor so
     /// every alias advances the same iterator, exactly like a file handle.
@@ -221,6 +226,22 @@ impl fmt::Debug for PackedList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Debug as the boxed list it represents, never exposing the flat layout.
         write!(f, "{:?}", self.materialize())
+    }
+}
+
+/// An opt-in columnar (SoA) Vec3 batch (P-SIMD): the shared `f32` columns plus the element `schema`
+/// (kept so `vec.soa_list` can rebuild the same-typed packed `List<Vec3>`). The tree-walker twin of
+/// the VM's `Payload::SoaVec3`; the columnar data + kernels are the shared `lang_stdlib::vec3` type,
+/// so both backends compute identically.
+pub struct SoaBatch {
+    pub(crate) schema: Rc<PackedSchema>,
+    pub(crate) cols: SoaColumns,
+}
+
+impl fmt::Debug for SoaBatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Opaque, like the value's display — the schema graph is not worth printing.
+        write!(f, "SoaBatch([{}])", self.cols.len())
     }
 }
 
@@ -469,6 +490,19 @@ impl Value {
         Value::List(ListRepr::Packed(PackedList::from_bytes(schema, bytes)))
     }
 
+    /// Build an opt-in columnar (SoA) Vec3 batch value (P-SIMD).
+    pub(crate) fn soa_vec3(schema: Rc<PackedSchema>, cols: SoaColumns) -> Value {
+        Value::SoaVec3(Rc::new(SoaBatch { schema, cols }))
+    }
+
+    /// The SoA batch behind this value, or `None` if it is not one.
+    pub(crate) fn as_soa(&self) -> Option<&SoaBatch> {
+        match self {
+            Value::SoaVec3(batch) => Some(batch),
+            _ => None,
+        }
+    }
+
     /// The display form used by `echo`, `~` concatenation, and (later) interpolation.
     /// In M1 this becomes `Display` trait dispatch; in M0 it is built in per value kind.
     pub fn display(&self) -> String {
@@ -513,6 +547,8 @@ impl Value {
             Value::NativeModule(module) => format!("<module {module}>"),
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
+            // Opaque count summary (matches the VM's `Payload::SoaVec3` display exactly).
+            Value::SoaVec3(batch) => format!("<soa Vec3 [{}]>", batch.cols.len()),
             Value::Iter(_) => "<iterator>".to_string(),
             Value::Future(_)
             | Value::Timer(_)
@@ -556,6 +592,7 @@ impl Value {
             Value::Object(_) => "object",
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
+            Value::SoaVec3(_) => "soa vec3",
             Value::Iter(_) => "iterator",
             Value::Future(_)
             | Value::Timer(_)
@@ -592,6 +629,7 @@ impl fmt::Debug for Value {
             Value::Object(object) => write!(f, "Object({})", object.display()),
             Value::NativeModule(module) => write!(f, "NativeModule({module})"),
             Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
+            Value::SoaVec3(batch) => write!(f, "SoaVec3([{}])", batch.cols.len()),
             Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
             Value::Timer(deadline) => write!(f, "Timer({deadline})"),
@@ -625,6 +663,7 @@ impl PartialEq for Value {
             (Value::NativeModule(a), Value::NativeModule(b)) => a == b,
             // File handles compare by their full shared state, matching the VM by construction.
             (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
+            (Value::SoaVec3(a), Value::SoaVec3(b)) => a.cols == b.cols,
             // Functions and types are not structurally comparable.
             _ => false,
         }

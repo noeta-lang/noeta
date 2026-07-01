@@ -2491,6 +2491,64 @@ impl Interpreter {
                 }
                 Ok(f32_list(&scalars))
             }
+            // --- Opt-in columnar (SoA) batch (P-SIMD) ---
+            "soa" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                match args[0].packed_vec3_data() {
+                    Some((schema, bytes)) => {
+                        Ok(Value::soa_vec3(schema, vec3::soa_from_packed(&bytes)))
+                    }
+                    None => Err(self.soa_packed_error(span)),
+                }
+            }
+            "soa_add" | "soa_sub" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let a = self.expect_soa(&args[0], func, span)?;
+                let b = self.expect_soa(&args[1], func, span)?;
+                if a.cols.len() != b.cols.len() {
+                    return Err(self.vec_len_error(func, span));
+                }
+                let cols = if func == "soa_add" {
+                    vec3::soa_add(&a.cols, &b.cols)
+                } else {
+                    vec3::soa_sub(&a.cols, &b.cols)
+                };
+                Ok(Value::soa_vec3(Rc::clone(&a.schema), cols))
+            }
+            "soa_scale" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let s = self.read_scalar_f32(func, &args[1], span)?;
+                let a = self.expect_soa(&args[0], func, span)?;
+                Ok(Value::soa_vec3(
+                    Rc::clone(&a.schema),
+                    vec3::soa_scale(&a.cols, s),
+                ))
+            }
+            "soa_dot" => {
+                self.expect_std_arity(func, args, 2, span)?;
+                let a = self.expect_soa(&args[0], func, span)?;
+                let b = self.expect_soa(&args[1], func, span)?;
+                if a.cols.len() != b.cols.len() {
+                    return Err(self.vec_len_error(func, span));
+                }
+                Ok(f32_list(&vec3::soa_dot(&a.cols, &b.cols)))
+            }
+            "soa_length" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let a = self.expect_soa(&args[0], func, span)?;
+                Ok(f32_list(&vec3::soa_length(&a.cols)))
+            }
+            "soa_count" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let a = self.expect_soa(&args[0], func, span)?;
+                Ok(Value::Int(a.cols.len() as i64))
+            }
+            "soa_list" => {
+                self.expect_std_arity(func, args, 1, span)?;
+                let a = self.expect_soa(&args[0], func, span)?;
+                let bytes = vec3::soa_to_packed(&a.cols);
+                Ok(Value::packed_list_from(Rc::clone(&a.schema), bytes))
+            }
             _ => {
                 let error = lang_stdlib::no_function_error("vec", func);
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -2504,6 +2562,33 @@ impl Interpreter {
             span,
             format!("`vec.{func}` expects two lists of equal length"),
         )
+    }
+
+    /// `vec.soa` requires a packed `List<Vec3<f32>>` (three `f32` fields, `@packed`).
+    fn soa_packed_error(&mut self, span: Span) -> Unwind {
+        self.runtime_error(
+            DiagnosticCode::TypeMismatch,
+            span,
+            "`vec.soa` expects a packed `List<Vec3<f32>>` (an `@packed` struct with three `f32` fields)"
+                .to_string(),
+        )
+    }
+
+    /// Borrow the SoA batch behind `v`, or raise a type error naming `func`.
+    fn expect_soa<'a>(
+        &mut self,
+        v: &'a Value,
+        func: &str,
+        span: Span,
+    ) -> Eval<&'a crate::value::SoaBatch> {
+        match v.as_soa() {
+            Some(batch) => Ok(batch),
+            None => Err(self.runtime_error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("`vec.{func}` expects an SoA Vec3 batch (from `vec.soa`)"),
+            )),
+        }
     }
 
     /// Scalar fallback for `add_all`/`sub_all` on boxed/demoted operands.
@@ -4121,6 +4206,7 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::Type(_)
         | Value::NativeModule(_)
         | Value::FileHandle(_)
+        | Value::SoaVec3(_)
         | Value::Iter(_)
         | Value::Future(_)
         | Value::Timer(_)
@@ -4558,6 +4644,8 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::Function(_) | Value::Builtin(_) => NativeValue::Str("<fn>".to_string()),
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
+        // An SoA batch has no JSON analog — its opaque count summary, matching the VM.
+        Value::SoaVec3(batch) => NativeValue::Str(format!("<soa Vec3 [{}]>", batch.cols.len())),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
         Value::Future(_)

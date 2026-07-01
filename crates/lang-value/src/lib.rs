@@ -400,6 +400,29 @@ impl Value {
         })
     }
 
+    /// Allocate an opt-in columnar (SoA) Vec3 batch (P-SIMD) carrying its element `schema` (so
+    /// `vec.soa_list` can rebuild the same-typed packed list). The caller owns the result (rc 1).
+    pub fn soa_vec3(schema: Rc<PackedSchema>, cols: lang_stdlib::vec3::SoaVec3) -> Value {
+        heap::alloc(Payload::SoaVec3 { schema, cols })
+    }
+
+    /// Whether this is an SoA Vec3 batch.
+    pub fn is_soa_vec3(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::SoaVec3 { .. }))
+    }
+
+    /// Read an SoA batch's `(schema, columns)` (both cloned — the schema is an `Rc` bump), or `None`
+    /// if this is not an SoA batch.
+    pub fn soa_data(self) -> Option<(Rc<PackedSchema>, lang_stdlib::vec3::SoaVec3)> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::SoaVec3 { schema, cols } => Some((Rc::clone(schema), cols.clone())),
+            _ => None,
+        })
+    }
+
     /// Build a new flat packed list from selected element `indices` of this one, copying each
     /// selected element's word-block verbatim — no per-element materialization (P-PACK 2.6). The
     /// schema is shared (an `Rc` clone). This keeps a `List<packed>` *flat* through the selection
@@ -1754,6 +1777,9 @@ impl Value {
                 // Channel endpoints are opaque reference values (like an iterator/file handle).
                 Payload::Sender(_) => "<sender>".to_string(),
                 Payload::Receiver(_) => "<receiver>".to_string(),
+                // An SoA batch renders as an opaque count summary (like `<N bytes>`) — identical on
+                // both backends; its contents are observed via `vec.soa_list`/`soa_dot`, not display.
+                Payload::SoaVec3 { cols, .. } => format!("<soa Vec3 [{}]>", cols.len()),
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1830,6 +1856,10 @@ impl Value {
                 Payload::NativeModule(name) => NativeValue::Str(format!("<module {name}>")),
                 // A handle has no JSON analog; its quoted display form, like a closure.
                 Payload::FileHandle(handle) => NativeValue::Str(handle.display()),
+                // An SoA batch has no JSON analog — its opaque count summary, like a byte buffer.
+                Payload::SoaVec3 { cols, .. } => {
+                    NativeValue::Str(format!("<soa Vec3 [{}]>", cols.len()))
+                }
                 // An iterator has no JSON analog either — its opaque display form.
                 Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),
                 // A future has no JSON analog — its opaque display form.
@@ -1894,6 +1924,8 @@ impl Value {
                 "module"
             } else if self.is_file_handle() {
                 "file handle"
+            } else if self.is_soa_vec3() {
+                "soa vec3"
             } else if self.is_iter() {
                 "iterator"
             } else if self.is_future() {
