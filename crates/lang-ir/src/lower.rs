@@ -529,7 +529,7 @@ impl Lowerer<'_> {
     /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
     /// through the interim discard arm, keeping lowering total.
     fn lower_generator(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar = desugar_generator(stmts, span, self.for_stream_sites);
+        let desugar = desugar_state_machine(stmts, span, self.for_stream_sites, SuspendMode::Gen);
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -543,35 +543,31 @@ impl Lowerer<'_> {
         Ok(Block::stmts(out))
     }
 
-    /// Lower an **async** function body (Track A.1) into a lazy [`Future`]. The body becomes a
-    /// parameterless *thunk* closure and the function returns `make_future(thunk)`:
+    /// Lower an **async** function body (Track A.3) into a pollable [`Future`] state machine — the
+    /// exact same stackless CFG desugar as a generator ([`desugar_state_machine`]), but polled instead
+    /// of pulled. The body becomes a step closure wrapped in `make_future`:
     ///
     /// ```text
-    /// return make_future(($resume) => { <original body> })
+    /// mut $state = 0
+    /// mut <hoisted cells> = none        // locals live across a suspend + the awaited-future cells
+    /// ...
+    /// let $step = ($resume) => { <dispatch> }
+    /// return make_future($step)
     /// ```
     ///
-    /// The thunk captures the function's parameters and is **not run when the async fn is called** —
-    /// only when the future is awaited/run (Rust-style laziness). The body's `return e` becomes the
-    /// thunk's return, i.e. the future's completion value; a `.await` inside the body lowers to
-    /// [`Rvalue::RunFuture`], which runs the awaited future to completion (A.1 has no suspension). The
-    /// ignored `$resume` parameter mirrors the generator step (and is forward-compatible with A.2's
-    /// state machine, which resumes with a real value).
+    /// Each statement-position `.await` becomes a poll-state: poll the awaited future once; if ready,
+    /// bind the value and advance; if pending, stay and `return $pending` so the caller re-polls here.
+    /// `return e` completes the future with the raw `e` (so `?`'s injected error-return propagates
+    /// unchanged); the driver/`.await` wraps completion vs pending. Unlike A.1's thunk, this can suspend
+    /// mid-body and resume — the mechanism A.3b's concurrency needs to run a sibling while one task waits.
     fn lower_async(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let thunk = Expr::Closure {
-            params: vec![Param {
-                name: RESUME_PARAM.to_string(),
-                name_span: span,
-                ty: None,
-                default: None,
-                span,
-            }],
-            ret: None,
-            body: ClosureBody::Block(stmts.to_vec()),
-            span,
-        };
+        let desugar = desugar_state_machine(stmts, span, self.for_stream_sites, SuspendMode::Async);
         let mut out = Vec::new();
-        let thunk = self.lower_expr(&thunk, &mut out)?;
-        let future = self.emit(&mut out, Rvalue::MakeFuture { thunk, span }, span);
+        for stmt in &desugar.prelude {
+            self.lower_stmt(stmt, &mut out)?;
+        }
+        let step = self.lower_expr(&desugar.step, &mut out)?;
+        let future = self.emit(&mut out, Rvalue::MakeFuture { thunk: step, span }, span);
         out.push(Stmt::Return {
             value: Some(future),
             span,
@@ -630,6 +626,12 @@ impl Lowerer<'_> {
             Expr::Float { value, .. } => Ok(Atom::Const(Const::Float(*value))),
             Expr::F32 { value, .. } => Ok(Atom::Const(Const::F32(*value))),
             Expr::Bool { value, .. } => Ok(Atom::Const(Const::Bool(*value))),
+            // The async desugar's pending sentinel (`$pending`, Track A.3) — a synthetic name (the
+            // lexer forbids `$`, so it can never collide with a source identifier) the state machine
+            // returns to signal it suspended at an `.await`. Lowers to the dedicated rvalue.
+            Expr::Ident { name, span } if name == PENDING_IDENT => {
+                Ok(self.emit(out, Rvalue::Pending { span: *span }, *span))
+            }
             Expr::Ident { name, span } => Ok(Atom::Var {
                 name: name.clone(),
                 span: *span,
@@ -812,6 +814,23 @@ impl Lowerer<'_> {
                 ))
             }
             Expr::Call { callee, args, span } => {
+                // The async desugar's single-poll primitive (`$poll(future)`, Track A.3) — a synthetic
+                // name (lexer-forbidden `$`, no source collision) the state machine emits at each
+                // `.await`. Lowers to the dedicated poll rvalue (`some(v)`/`none`).
+                if let Expr::Ident { name, .. } = callee.as_ref()
+                    && name == POLL_FN
+                    && let [arg] = args.as_slice()
+                {
+                    let future = self.lower_expr(arg, out)?;
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::PollFuture {
+                            future,
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
                 // A call whose callee is a member access is a method call; otherwise an
                 // ordinary call. Evaluation order matches the tree-walker's `eval_call`:
                 // receiver/callee first, then arguments left-to-right.
@@ -1317,17 +1336,32 @@ impl Lowerer<'_> {
     }
 }
 
-/// The synthetic dispatch discriminant cell of a desugared generator. `$`-prefixed, so it can never
-/// collide with a source name (the lexer forbids `$` in identifiers).
+/// The synthetic dispatch discriminant cell of a desugared generator/async state machine. `$`-prefixed,
+/// so it can never collide with a source name (the lexer forbids `$` in identifiers).
 const STATE_VAR: &str = "$state";
-/// The ignored resume parameter of the step closure (one argument, forward-compatible with Track A's
-/// real resume value).
+/// The ignored resume parameter of the step closure (one argument; the poll driver passes unit).
 const RESUME_PARAM: &str = "$resume";
+/// The async desugar's single-poll primitive: `$poll(future)` → `some(v)` (ready) / `none` (pending).
+/// The IR lowering (`Expr::Call` arm) turns this synthetic call into [`Rvalue::PollFuture`].
+const POLL_FN: &str = "$poll";
+/// The async desugar's pending sentinel: a state-machine step returns `$pending` when it suspends at
+/// an `.await`. The IR lowering (`Expr::Ident` arm) turns it into [`Rvalue::Pending`].
+const PENDING_IDENT: &str = "$pending";
 
-/// The AST product of the generator desugar ([`Lowerer::lower_generator`]): the hoisted-local prelude
-/// and the state-machine step closure. Kept as ordinary AST so the existing lowering paths produce the
-/// IR — only the final `make_gen` wrapper is a dedicated rvalue.
-struct GeneratorDesugar {
+/// Which suspend primitive a state-machine desugar is built for — a generator's `yield` (pull) or an
+/// async fn's `.await` (poll). Selects the terminator flavours and the completion protocol: a generator
+/// step returns `some(elem)`/`none`(exhausted); an async step returns the raw completion value (so
+/// `return e` and `?` work unchanged) or the `$pending` sentinel.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SuspendMode {
+    Gen,
+    Async,
+}
+
+/// The AST product of a state-machine desugar ([`Lowerer::lower_generator`] / [`Lowerer::lower_async`]):
+/// the hoisted-local prelude and the state-machine step closure. Kept as ordinary AST so the existing
+/// lowering paths produce the IR — only the final `make_gen`/`make_future` wrapper is a dedicated rvalue.
+struct StateMachineDesugar {
     prelude: Vec<AstStmt>,
     step: Expr,
 }
@@ -1347,22 +1381,29 @@ struct GeneratorDesugar {
 /// prelude declares it; its in-body `let x = …` is rewritten to a bare assignment that reassigns the
 /// cell), so a value computed before a `yield` survives into the next state. G.3 narrows this with
 /// real liveness. All synthesized nodes carry the generator's `span`; reused source nodes keep theirs.
-fn desugar_generator(
+fn desugar_state_machine(
     body: &[AstStmt],
     span: Span,
     stream_sites: &HashSet<Span>,
-) -> GeneratorDesugar {
+    mode: SuspendMode,
+) -> StateMachineDesugar {
     let mut flat = Flattener {
         blocks: Vec::new(),
         binds: Vec::new(),
         declaring: HashSet::new(),
         disqualified: HashSet::new(),
         stream_sites,
+        mode,
         tmp: 0,
     };
     let entry = flat.new_block();
     let exit = flat.lower_seq(body, entry, None);
-    flat.blocks[exit].term = Term::Done;
+    // Falling off the end: a generator is exhausted (`Done` → `return none`); an async fn completes
+    // with unit (`Complete(None)` → `return` = unit, wrapped into `some` at the future value level).
+    flat.blocks[exit].term = match mode {
+        SuspendMode::Gen => Term::Done,
+        SuspendMode::Async => Term::Complete(None),
+    };
 
     // Liveness (G.3): a candidate name that is eligible (a fresh `mut`/for-var declaration) and
     // referenced within a single state stays a block-local; everything else is hoisted to a captured
@@ -1372,16 +1413,21 @@ fn desugar_generator(
     flat.rewrite_hoisted(&hoisted_set);
 
     // Render each state as `if $state == idx { <stmts> <terminator> }`, wrapped in a `while true`
-    // dispatch loop; the trailing `return none` fires once `$state` reaches the terminal sentinel.
+    // dispatch loop. The trailing statement fires once `$state` reaches the terminal sentinel: a
+    // generator returns `none` (exhausted); an async step returns `$pending` (unreachable — a completed
+    // future is never re-polled — but fail-loud rather than silently mis-complete).
     let terminal = flat.blocks.len();
     let mut chain: Vec<AstStmt> = Vec::with_capacity(flat.blocks.len() + 1);
     for (idx, block) in flat.blocks.iter().enumerate() {
         let mut stmts = block.stmts.clone();
-        block.term.render(&mut stmts, terminal, span);
+        block.term.render(&mut stmts, idx, terminal, span);
         chain.push(state_arm(idx as i64, stmts, span));
     }
     chain.push(AstStmt::Return {
-        value: Some(none_expr(span)),
+        value: Some(match mode {
+            SuspendMode::Gen => none_expr(span),
+            SuspendMode::Async => pending_expr(span),
+        }),
         span,
     });
     let dispatch = AstStmt::While {
@@ -1422,24 +1468,39 @@ fn desugar_generator(
         });
     }
 
-    GeneratorDesugar { prelude, step }
+    StateMachineDesugar { prelude, step }
 }
 
-/// A state's terminator in the flattened generator CFG — how control leaves the state.
+/// A state's terminator in the flattened CFG — how control leaves the state.
 enum Term {
     /// Jump to another state and re-enter the dispatch loop (`$state = k; continue`).
     Goto(usize),
-    /// Suspend: `$state = k; return some(<expr>)` — the next step resumes at state `k`.
+    /// Generator suspend: `$state = k; return some(<expr>)` — the next step resumes at state `k`.
     Yield(Expr, usize),
     /// Two-way branch on a condition (`if cond { $state = t } else { $state = e } continue`).
     Branch(Expr, usize, usize),
-    /// End of iteration: `$state = <terminal>; return none` (every later step also returns `none`).
+    /// End of iteration (generator): `$state = <terminal>; return none`.
     Done,
+    /// Async completion: `$state = <terminal>; return <value>` — the raw completion value (or unit for a
+    /// bare fall-off/`return;`), which `make_future` presents as a resolved `Future`. Left un-`some`-wrapped
+    /// so `return e` and `?`'s injected error-return both flow through as the completion value.
+    Complete(Option<Expr>),
+    /// Async await suspend point (poll-state). `future` is the hoisted cell holding the awaited future;
+    /// `result` is the hoisted cell the ready value binds to; `next` is the state to resume at once
+    /// ready. Renders (at its own state `idx`): poll the future once; if `some(v)`, bind `result = v`,
+    /// advance to `next`, and continue; if `none`, stay at `idx` and `return $pending` — so the next poll
+    /// re-enters here and re-polls the same (state-preserving) future.
+    AwaitPoll {
+        future: String,
+        result: String,
+        next: usize,
+    },
 }
 
 impl Term {
-    /// Emit the statements that realize this terminator, appended after a state's own statements.
-    fn render(&self, out: &mut Vec<AstStmt>, terminal: usize, span: Span) {
+    /// Emit the statements that realize this terminator, appended after a state's own statements. `idx`
+    /// is this state's own index (an `AwaitPoll` re-enters itself while pending).
+    fn render(&self, out: &mut Vec<AstStmt>, idx: usize, terminal: usize, span: Span) {
         match self {
             Term::Goto(k) => {
                 out.push(assign_state(*k as i64, span));
@@ -1465,6 +1526,51 @@ impl Term {
                 out.push(assign_state(terminal as i64, span));
                 out.push(AstStmt::Return {
                     value: Some(none_expr(span)),
+                    span,
+                });
+            }
+            Term::Complete(value) => {
+                out.push(assign_state(terminal as i64, span));
+                out.push(AstStmt::Return {
+                    value: value.clone(),
+                    span,
+                });
+            }
+            Term::AwaitPoll {
+                future,
+                result,
+                next,
+            } => {
+                // $pollN = $poll($future)   (block-local to this state)
+                let poll_var = format!("$poll{idx}");
+                out.push(bare_assign_expr(
+                    &poll_var,
+                    poll_call(ident(future, span), span),
+                    span,
+                ));
+                // if is_some($pollN) { $result = $pollN ?? none; $state = next; continue }
+                out.push(AstStmt::If {
+                    cond: is_some_test(ident(&poll_var, span), span),
+                    then_body: vec![
+                        bare_assign_expr(
+                            result,
+                            Expr::Coalesce {
+                                value: Box::new(ident(&poll_var, span)),
+                                fallback: Box::new(none_expr(span)),
+                                span,
+                            },
+                            span,
+                        ),
+                        assign_state(*next as i64, span),
+                        AstStmt::Continue { span },
+                    ],
+                    else_body: None,
+                    span,
+                });
+                // pending: stay here and yield control up as `$pending`.
+                out.push(assign_state(idx as i64, span));
+                out.push(AstStmt::Return {
+                    value: Some(pending_expr(span)),
                     span,
                 });
             }
@@ -1500,16 +1606,29 @@ struct Flattener<'a> {
     /// checker). A `for` across a `yield` (G.4) uses its source directly when it is already an
     /// iterator, or calls `.iter()` on it when it is a collection.
     stream_sites: &'a HashSet<Span>,
-    /// Counter for the synthetic `$for`/`$next` cell names a flattened `for` introduces.
+    /// Which suspend primitive this machine is built for (generator `yield` vs async `.await`) — selects
+    /// terminator flavours and the completion protocol. See [`SuspendMode`].
+    mode: SuspendMode,
+    /// Counter for the synthetic `$for`/`$next`/`$fut`/`$aw` cell names the flattener introduces.
     tmp: usize,
 }
 
 impl Flattener<'_> {
-    /// A fresh index for a synthetic generator cell name (`$for{n}`, `$next{n}`).
+    /// A fresh index for a synthetic cell name (`$for{n}`, `$next{n}`, `$fut{n}`, `$aw{n}`).
     fn fresh(&mut self) -> usize {
         let n = self.tmp;
         self.tmp += 1;
         n
+    }
+
+    /// The terminator for "the machine ends here" — generator exhaustion (`Done`) or async completion
+    /// with unit (`Complete(None)`). Used where control leaves with no explicit value (a `break`/
+    /// `continue` outside any loop — itself an E0024 the checker rejects, so unreachable in practice).
+    fn end_term(&self) -> Term {
+        match self.mode {
+            SuspendMode::Gen => Term::Done,
+            SuspendMode::Async => Term::Complete(None),
+        }
     }
 
     /// Allocate a fresh empty state (terminator filled in by the caller; `Done` is a safe default for
@@ -1639,31 +1758,63 @@ impl Flattener<'_> {
 
     /// Lower one statement into the CFG at state `cur`, returning the state control continues at.
     fn lower_one(&mut self, stmt: &AstStmt, cur: usize, loop_ctx: Option<(usize, usize)>) -> usize {
+        let mode = self.mode;
+        // Async (Track A.3): a statement whose value is an `.await` (optionally under `?`) is a suspend
+        // point. Evaluate the awaited future into a hoisted cell, add a poll-state that parks on
+        // `Pending`, then rebuild the statement with the `.await` replaced by the ready value and lower
+        // that (so an async `return e.await` still becomes a `Complete`, a `?` still propagates, etc.).
+        // Awaits in non-statement position are rejected by the checker (E0040), so they never reach here
+        // through a clean program.
+        if mode == SuspendMode::Async
+            && let Some(future) = stmt_await_future(stmt)
+        {
+            let fspan = future.span();
+            let aw = format!("$aw{}", self.fresh());
+            let futc = format!("$fut{}", self.fresh());
+            self.record(&futc, true, false);
+            self.record(&aw, true, false);
+            self.blocks[cur]
+                .stmts
+                .push(bare_assign_expr(&futc, future, fspan));
+            let poll = self.new_block();
+            self.blocks[cur].term = Term::Goto(poll);
+            let next = self.new_block();
+            self.blocks[poll].term = Term::AwaitPoll {
+                future: futc,
+                result: aw.clone(),
+                next,
+            };
+            let rebuilt = rebuild_stmt_await(stmt, &aw);
+            return self.lower_one(&rebuilt, next, loop_ctx);
+        }
         match stmt {
             AstStmt::Yield { value, .. } => {
                 let next = self.new_block();
                 self.blocks[cur].term = Term::Yield(value.clone(), next);
                 next
             }
-            // Bare `return;` ends iteration; `return e;` is checker-rejected (E0039) — treat both as
-            // end-of-iteration so lowering stays total. Statements after it are unreachable.
-            AstStmt::Return { .. } => {
-                self.blocks[cur].term = Term::Done;
+            // Generator: bare `return;` ends iteration; `return e;` is checker-rejected (E0039). Async:
+            // `return e` completes the future with `e` (raw — `make_future` presents it as resolved).
+            AstStmt::Return { value, .. } => {
+                self.blocks[cur].term = match mode {
+                    SuspendMode::Gen => Term::Done,
+                    SuspendMode::Async => Term::Complete(value.clone()),
+                };
                 self.new_block()
             }
             AstStmt::Break { .. } => {
-                // `break` to the enclosing flattened loop's exit (or end iteration if there is none —
+                // `break` to the enclosing flattened loop's exit (or end the machine if there is none —
                 // a `break` outside a loop is already a checker error E0024, so this never runs).
                 self.blocks[cur].term = match loop_ctx {
                     Some((_, brk)) => Term::Goto(brk),
-                    None => Term::Done,
+                    None => self.end_term(),
                 };
                 self.new_block()
             }
             AstStmt::Continue { .. } => {
                 self.blocks[cur].term = match loop_ctx {
                     Some((cont, _)) => Term::Goto(cont),
-                    None => Term::Done,
+                    None => self.end_term(),
                 };
                 self.new_block()
             }
@@ -1711,7 +1862,7 @@ impl Flattener<'_> {
                 then_body,
                 else_body,
                 ..
-            } if needs_flatten_if(then_body, else_body.as_deref()) => {
+            } if needs_flatten_if(then_body, else_body.as_deref(), mode) => {
                 let then_entry = self.new_block();
                 let else_entry = self.new_block();
                 let join = self.new_block();
@@ -1723,7 +1874,7 @@ impl Flattener<'_> {
                 self.blocks[else_exit].term = Term::Goto(join);
                 join
             }
-            AstStmt::While { cond, body, .. } if body_has_yield(body) => {
+            AstStmt::While { cond, body, .. } if has_suspend(body, mode) => {
                 let head = self.new_block();
                 self.blocks[cur].term = Term::Goto(head);
                 let body_entry = self.new_block();
@@ -1745,7 +1896,7 @@ impl Flattener<'_> {
                 iterable,
                 body,
                 span,
-            } if body_has_yield(body) => {
+            } if has_suspend(body, mode) => {
                 let cursor = format!("$for{}", self.fresh());
                 let next = format!("$next{}", self.fresh());
                 // The cursor and next-element cells are always hoisted (they span the loop's states).
@@ -1796,14 +1947,157 @@ impl Flattener<'_> {
     }
 }
 
-/// Whether an `if` must be flattened into the state machine: it carries a `yield`, or a `break`/
-/// `continue` that **escapes** the `if` (targeting an enclosing flattened loop) — emitting it verbatim
-/// would make that jump a real `break`/`continue` of the dispatch loop.
-fn needs_flatten_if(then_body: &[AstStmt], else_body: Option<&[AstStmt]>) -> bool {
-    let yields = body_has_yield(then_body) || else_body.is_some_and(body_has_yield);
+/// Whether an `if` must be flattened into the state machine: it carries a suspend point (a `yield` in a
+/// generator, an `.await` in an async fn), or a `break`/`continue` that **escapes** the `if` (targeting
+/// an enclosing flattened loop) — emitting it verbatim would make that jump a real `break`/`continue`
+/// of the dispatch loop.
+fn needs_flatten_if(
+    then_body: &[AstStmt],
+    else_body: Option<&[AstStmt]>,
+    mode: SuspendMode,
+) -> bool {
+    let suspends = has_suspend(then_body, mode) || else_body.is_some_and(|b| has_suspend(b, mode));
     let escapes =
         body_has_escaping_ctrl(then_body) || else_body.is_some_and(body_has_escaping_ctrl);
-    yields || escapes
+    suspends || escapes
+}
+
+/// Whether a statement sequence contains a suspend point at this flattening level — a `yield`
+/// (generator) or an `.await` (async fn). Descends control-flow bodies but not nested callables (a
+/// closure resets both colorings), mirroring the checker's detection so the flattener desugars exactly
+/// the bodies the checker treats as generators/async.
+fn has_suspend(stmts: &[AstStmt], mode: SuspendMode) -> bool {
+    match mode {
+        SuspendMode::Gen => body_has_yield(stmts),
+        SuspendMode::Async => body_has_await(stmts),
+    }
+}
+
+/// Whether a statement sequence contains an `.await` at this callable level (Track A.3). Built on
+/// [`Expr::has_await`], which already stops at closure boundaries.
+fn body_has_await(stmts: &[AstStmt]) -> bool {
+    stmts.iter().any(stmt_has_await)
+}
+
+fn stmt_has_await(stmt: &AstStmt) -> bool {
+    match stmt {
+        AstStmt::Echo { value, .. } | AstStmt::Expr { expr: value, .. } => value.has_await(),
+        AstStmt::Binding { value, .. } | AstStmt::Destructure { value, .. } => value.has_await(),
+        AstStmt::Return { value, .. } => value.as_ref().is_some_and(Expr::has_await),
+        AstStmt::Yield { value, .. } => value.has_await(),
+        AstStmt::If {
+            cond,
+            then_body,
+            else_body,
+            ..
+        } => {
+            cond.has_await()
+                || body_has_await(then_body)
+                || else_body.as_deref().is_some_and(body_has_await)
+        }
+        AstStmt::While { cond, body, .. } => cond.has_await() || body_has_await(body),
+        AstStmt::For { iterable, body, .. } => iterable.has_await() || body_has_await(body),
+        _ => false,
+    }
+}
+
+/// The awaited future of a **statement-position** `.await` (Track A.3): the operand of an `.await` that
+/// is the whole value of a `Binding`/`Expr`/`Return`/`Echo`, optionally under one `?`. `None` for any
+/// other statement (including one whose `.await` is buried in a sub-expression — the checker rejects
+/// those with E0040, so they never reach the flattener through a clean program).
+fn stmt_await_future(stmt: &AstStmt) -> Option<Expr> {
+    let value = stmt_value(stmt)?;
+    value_await_future(value)
+}
+
+/// Rebuild a statement-position-await statement with the `.await` replaced by a reference to `aw` (the
+/// hoisted cell the poll-state binds the ready value into). The `?` wrapper, if any, is preserved, so
+/// `x = e.await?` becomes `x = aw?` (still propagating on error) and `return e.await` becomes
+/// `return aw` (still an async `Complete`). Assumes [`stmt_await_future`] returned `Some` for `stmt`.
+fn rebuild_stmt_await(stmt: &AstStmt, aw: &str) -> AstStmt {
+    let rebuilt = |v: &Expr| value_replace_await(v, aw);
+    match stmt {
+        AstStmt::Binding {
+            mut_decl,
+            name,
+            name_span,
+            value,
+            span,
+            ty,
+        } => AstStmt::Binding {
+            mut_decl: *mut_decl,
+            name: name.clone(),
+            name_span: *name_span,
+            ty: ty.clone(),
+            value: rebuilt(value),
+            span: *span,
+        },
+        AstStmt::Expr { expr, span } => AstStmt::Expr {
+            expr: rebuilt(expr),
+            span: *span,
+        },
+        AstStmt::Return { value, span } => AstStmt::Return {
+            value: value.as_ref().map(rebuilt),
+            span: *span,
+        },
+        AstStmt::Echo { value, span } => AstStmt::Echo {
+            value: rebuilt(value),
+            span: *span,
+        },
+        // `stmt_await_future` only returns `Some` for the four kinds above.
+        other => other.clone(),
+    }
+}
+
+/// The value expression of a statement that can carry a statement-position `.await`, if any.
+fn stmt_value(stmt: &AstStmt) -> Option<&Expr> {
+    match stmt {
+        AstStmt::Binding { value, .. }
+        | AstStmt::Expr { expr: value, .. }
+        | AstStmt::Echo { value, .. } => Some(value),
+        AstStmt::Return { value, .. } => value.as_ref(),
+        _ => None,
+    }
+}
+
+/// The operand of an `.await` at the head of `value` (`e.await` → `e`), or under a single `?`
+/// (`e.await?` → `e`); `None` otherwise.
+fn value_await_future(value: &Expr) -> Option<Expr> {
+    match value {
+        Expr::Await { expr, .. } => Some((**expr).clone()),
+        Expr::Try { expr, .. } => match expr.as_ref() {
+            Expr::Await { expr, .. } => Some((**expr).clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// `value` with a head `.await` replaced by a reference to `aw`, preserving a `?` wrapper. Assumes
+/// [`value_await_future`] returned `Some` for `value`.
+fn value_replace_await(value: &Expr, aw: &str) -> Expr {
+    match value {
+        Expr::Await { span, .. } => ident(aw, *span),
+        Expr::Try { expr, span } if matches!(expr.as_ref(), Expr::Await { .. }) => Expr::Try {
+            expr: Box::new(ident(aw, *span)),
+            span: *span,
+        },
+        other => other.clone(),
+    }
+}
+
+/// `$poll(future)` — the async desugar's single-poll call (lowered to [`Rvalue::PollFuture`]).
+fn poll_call(future: Expr, span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(ident(POLL_FN, span)),
+        args: vec![future],
+        span,
+    }
+}
+
+/// `$pending` — the async pending sentinel reference (lowered to [`Rvalue::Pending`]).
+fn pending_expr(span: Span) -> Expr {
+    ident(PENDING_IDENT, span)
 }
 
 /// Whether a statement sequence contains a `break`/`continue` that escapes to an **enclosing** loop —
@@ -1902,6 +2196,10 @@ fn block_mentions(block: &BlockBuf, name: &str) -> bool {
     block.stmts.iter().any(|s| stmt_mentions(s, name))
         || match &block.term {
             Term::Yield(e, _) | Term::Branch(e, _, _) => e.mentions(name),
+            Term::Complete(value) => value.as_ref().is_some_and(|e| e.mentions(name)),
+            // A poll-state reads its awaited-future cell and writes its result cell — so both are
+            // referenced here (they also span states, which keeps them hoisted).
+            Term::AwaitPoll { future, result, .. } => name == future || name == result,
             Term::Goto(_) | Term::Done => false,
         }
 }

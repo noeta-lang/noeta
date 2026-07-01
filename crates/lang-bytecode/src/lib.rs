@@ -563,13 +563,26 @@ pub enum Op {
         dst: Reg,
         src: Reg,
     },
-    /// `dst = run_future(src)` (Track A.1): run the future in `src` to completion, yielding its value
-    /// (`expr.await`). A.1 drives the thunk straight to its result (no suspension). Carries a span for
-    /// the call boundary (the thunk body can fault).
+    /// `dst = run_future(src)` (Track A.2/A.3): drive the future in `src` to completion via the
+    /// executor, yielding its value — the top-level `expr.await`. Polls; on pending advances the
+    /// logical clock and re-polls. Carries a span for the call boundary (the step body can fault).
     RunFuture {
         dst: Reg,
         src: Reg,
         span: Span,
+    },
+    /// `dst = poll_future(src)` (Track A.3): poll the future in `src` once — `some(v)` if ready, `none`
+    /// if pending. The single-step primitive the async state machine emits at each `.await`. Carries a
+    /// span (the step body can fault).
+    PollFuture {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
+    /// `dst = pending` (Track A.3): the async pending sentinel — what a state-machine step returns to
+    /// signal it suspended at an `.await`. Cannot fail, so it carries no span.
+    LoadPending {
+        dst: Reg,
     },
     /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
     /// module manifest, each materialized into a `T` struct and paired with its target. `type_name`
@@ -1282,6 +1295,12 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         }
         Op::RunFuture { dst, src, .. } => {
             format!("RunFuture   r{dst} <- await r{src}")
+        }
+        Op::PollFuture { dst, src, .. } => {
+            format!("PollFuture  r{dst} <- poll r{src}")
+        }
+        Op::LoadPending { dst } => {
+            format!("LoadPending r{dst} <- pending")
         }
         Op::MakeGen { dst, src } => {
             format!("MakeGen     r{dst} <- gen r{src}")

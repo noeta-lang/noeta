@@ -1,0 +1,35 @@
+// Track A.3a — the async state machine: `.await` inside control flow, with a local (`total`) live
+// across the suspend, plus nested async (`after` awaits a `sleep`). Proves the CFG flattener resumes
+// mid-body correctly: `total` computed before an await survives into the state after it.
+// expect: stdout "3"
+// expect: stdout "2"
+// expect: stdout "10"
+// expect: exit 0
+async fn after(ms: int, v: int): int {
+    sleep(ms).await
+    return v
+}
+async fn choose(flag: bool): int {
+    mut total = 0
+    if flag {
+        a = after(10, 1).await
+        total = total + a
+    }
+    b = after(5, 2).await
+    return total + b
+}
+echo choose(true).await
+echo choose(false).await
+
+// A loop whose body awaits, accumulating across every suspend.
+async fn total_after(n: int): int {
+    mut sum = 0
+    mut i = 0
+    while i < n {
+        step = after(1, i).await
+        sum = sum + step
+        i = i + 1
+    }
+    return sum
+}
+echo total_after(5).await

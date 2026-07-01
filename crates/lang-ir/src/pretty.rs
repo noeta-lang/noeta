@@ -324,6 +324,8 @@ impl Printer<'_> {
             Rvalue::MakeGen { step, .. } => format!("make_gen({})", atom(step)),
             Rvalue::MakeFuture { thunk, .. } => format!("make_future({})", atom(thunk)),
             Rvalue::RunFuture { future, .. } => format!("run_future({})", atom(future)),
+            Rvalue::PollFuture { future, .. } => format!("poll_future({})", atom(future)),
+            Rvalue::Pending { .. } => "pending".to_string(),
             Rvalue::FromBytes { blob, layout, .. } => {
                 let ty = layout.as_ref().map(|l| l.type_name.as_str()).unwrap_or("?");
                 format!("from_bytes<{}>({})", ty, atom(blob))

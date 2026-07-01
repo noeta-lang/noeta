@@ -79,6 +79,10 @@ pub enum Value {
     /// `sleep(ms)` produces one carrying the absolute logical deadline (ms) at which it is ready;
     /// polling it consults the executor clock and reports `Pending` until then.
     Timer(u64),
+    /// The async **pending** sentinel (Track A.3): the tree-walker twin of the VM's `Value::pending`
+    /// immediate — what an async state-machine step returns when it suspends at an `.await`. Never
+    /// escapes to user code (every poll site catches it), so it has no surface type.
+    Pending,
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -490,6 +494,7 @@ impl Value {
             Value::FileHandle(handle) => handle.borrow().display(),
             Value::Iter(_) => "<iterator>".to_string(),
             Value::Future(_) | Value::Timer(_) => "<future>".to_string(),
+            Value::Pending => "<pending>".to_string(),
         }
     }
 
@@ -525,6 +530,7 @@ impl Value {
             Value::FileHandle(_) => "file handle",
             Value::Iter(_) => "iterator",
             Value::Future(_) | Value::Timer(_) => "future",
+            Value::Pending => "pending",
         }
     }
 }
@@ -554,6 +560,7 @@ impl fmt::Debug for Value {
             Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
             Value::Timer(deadline) => write!(f, "Timer({deadline})"),
+            Value::Pending => write!(f, "Pending"),
         }
     }
 }

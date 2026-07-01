@@ -562,6 +562,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::MakeGen { step, .. } => f(step),
         Rvalue::MakeFuture { thunk, .. } => f(thunk),
         Rvalue::RunFuture { future, .. } => f(future),
+        Rvalue::PollFuture { future, .. } => f(future),
+        Rvalue::Pending { .. } => {}
         // `from_bytes::<T>(blob)` reads its byte operand (P-PACK 4.4).
         Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {

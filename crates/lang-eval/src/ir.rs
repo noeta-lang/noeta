@@ -1151,6 +1151,17 @@ impl Interpreter {
                 let future = self.eval_ir_atom(future, frame)?;
                 self.drive_future(future, *span)
             }
+            // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if pending —
+            // the tree-walker mirror of the VM's `Op::PollFuture`.
+            lang_ir::Rvalue::PollFuture { future, span } => {
+                let future = self.eval_ir_atom(future, frame)?;
+                Ok(match self.poll_once(&future, *span)? {
+                    Some(value) => crate::builtin_enum("Option", "some", vec![value]),
+                    None => crate::builtin_enum("Option", "none", vec![]),
+                })
+            }
+            // The async pending sentinel (Track A.3) — what a step returns when it suspends.
+            lang_ir::Rvalue::Pending { .. } => Ok(Value::Pending),
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
             lang_ir::Rvalue::Invoke {
                 recv,

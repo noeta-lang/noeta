@@ -329,15 +329,26 @@ pub enum Rvalue {
     /// `Iterator` that drives `step` once per element. Produced only by the generator desugar
     /// (`lower_generator`), never by surface syntax.
     MakeGen { step: Atom, span: Span },
-    /// Wrap a lazy thunk closure into a `Future` — the tail of a lowered `async fn` (Track A.1).
-    /// `thunk` is the lowered closure over the async fn's body (captures its params); the result is an
-    /// ordinary `Future` value that defers the body until it is run. Produced only by the async desugar
-    /// (`lower_async`), never by surface syntax.
+    /// Wrap a step closure into a `Future` — the tail of a lowered `async fn` (Track A.3). `thunk` is
+    /// the async state-machine step closure (its `mut`-captured cells hold `$state` + the hoisted
+    /// locals + the awaited-future cells); polling it runs one segment and returns the completion value
+    /// or the pending sentinel. Produced only by the async desugar (`lower_async`), never by surface
+    /// syntax. (Field still named `thunk` — the wrapper is unchanged since A.1; only the closure's
+    /// calling convention became a poll.)
     MakeFuture { thunk: Atom, span: Span },
-    /// `expr.await` — run a `Future` to completion and yield its value (Track A.1). `future` is the
-    /// awaited value; A.1 drives its thunk straight to the result (no suspension). Produced by the
-    /// `.await` lowering.
+    /// `expr.await` at the async **top level** — drive a `Future` to completion via the executor and
+    /// yield its value (Track A.2/A.3): poll; on pending, advance the logical clock and re-poll. Inside
+    /// an `async fn` body the `.await` is instead compiled into a poll-suspend state of the state
+    /// machine (see [`Self::PollFuture`]); this rvalue is only the root driver.
     RunFuture { future: Atom, span: Span },
+    /// Poll a `Future` once (Track A.3): returns `some(v)` if it is ready with `v`, or `none` if it is
+    /// pending. The single-step primitive the async state machine uses at each `.await` — produced only
+    /// by the async desugar (the synthetic `$poll(f)` call), never by surface syntax.
+    PollFuture { future: Atom, span: Span },
+    /// The async **pending** sentinel (Track A.3) — the value a state-machine step returns to signal it
+    /// suspended at an `.await`. Produced only by the async desugar (the synthetic `$pending`), never by
+    /// surface syntax; always caught at a poll site, never bound to a user value.
+    Pending { span: Span },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).

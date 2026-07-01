@@ -1581,6 +1581,12 @@ impl Checker {
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
         }
+        // An `async fn` body compiles to the async state machine (Track A.3a), which supports `.await`
+        // only in statement position. Reject an `.await` buried in a sub-expression (E0040) rather than
+        // silently driving it to completion — which would fail to yield to a sibling under concurrency.
+        if decl.is_async {
+            self.check_await_positions(&decl.body);
+        }
         // A generator desugars into a full state machine (Track G): `yield` runs at the top level and
         // inside any nesting of `if`/`while`/`for` — a `for x in src { … yield … }` lowers to the
         // iterator protocol with the source cursor held as machine state (G.4), so no control-flow
@@ -1592,6 +1598,82 @@ impl Checker {
         self.current_yield = saved_yield;
         self.loop_depth = saved_loop_depth;
         self.type_params = saved_type_params;
+    }
+
+    /// Track A.3a: an `.await` inside an `async fn` is compiled into a poll-state of the state machine
+    /// only when it is in **statement position** — the whole value of a binding / expression-statement /
+    /// `return` / `echo`, optionally under one `?`. An `.await` buried in a sub-expression (a call
+    /// argument, an operand, a condition, a `match` arm, …) is not yet supported (E0040): flag it rather
+    /// than let it compile to a drive-to-completion, which would not yield to a sibling under
+    /// concurrency (A.3b). Recurses into control-flow bodies; a closure resets async coloring, so its
+    /// `.await`s are already rejected by the ordinary E0040 rule.
+    fn check_await_positions(&mut self, stmts: &[Stmt]) {
+        for stmt in stmts {
+            match stmt {
+                Stmt::Binding { value, .. }
+                | Stmt::Expr { expr: value, .. }
+                | Stmt::Echo { value, .. } => self.check_value_await(value),
+                Stmt::Return {
+                    value: Some(value), ..
+                } => self.check_value_await(value),
+                Stmt::If {
+                    cond,
+                    then_body,
+                    else_body,
+                    ..
+                } => {
+                    self.reject_nested_await(cond);
+                    self.check_await_positions(then_body);
+                    if let Some(body) = else_body {
+                        self.check_await_positions(body);
+                    }
+                }
+                Stmt::While { cond, body, .. } => {
+                    self.reject_nested_await(cond);
+                    self.check_await_positions(body);
+                }
+                Stmt::For { iterable, body, .. } => {
+                    self.reject_nested_await(iterable);
+                    self.check_await_positions(body);
+                }
+                // Destructuring an awaited tuple / awaiting into a `yield` are not supported yet.
+                Stmt::Destructure { value, .. } => self.reject_nested_await(value),
+                Stmt::Yield { value, .. } => self.reject_nested_await(value),
+                _ => {}
+            }
+        }
+    }
+
+    /// A statement value may host one head `.await` (optionally under `?`) — its operand must be
+    /// await-free; any other await in it is a nested await (E0040).
+    fn check_value_await(&mut self, value: &Expr) {
+        match value {
+            Expr::Await { expr, .. } => self.reject_nested_await(expr),
+            Expr::Try { expr, .. } if matches!(expr.as_ref(), Expr::Await { .. }) => {
+                if let Expr::Await { expr, .. } = expr.as_ref() {
+                    self.reject_nested_await(expr);
+                }
+            }
+            other => self.reject_nested_await(other),
+        }
+    }
+
+    /// Flag `expr` (E0040) if it contains any `.await` at this callable level — used where no await is
+    /// permitted. [`Expr::has_await`] already stops at closure boundaries.
+    fn reject_nested_await(&mut self, expr: &Expr) {
+        if expr.has_await() {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::AsyncMisuse,
+                    expr.span(),
+                    "`.await` is only supported in statement position".to_string(),
+                )
+                .with_help(
+                    "bind the awaited value to a variable first, e.g. `x = f().await`, then use `x` \
+                     — an `.await` nested in a larger expression is not yet supported",
+                ),
+            );
+        }
     }
 
     /// Validate a callable's parameter defaults. Two rules: defaults must be **trailing-only** — a

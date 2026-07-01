@@ -2338,13 +2338,28 @@ impl<'m> FnCompiler<'m> {
                 Ok(())
             }
             Rvalue::RunFuture { future, span } => {
-                // Run an awaited future to completion, yielding its value (Track A.1).
+                // Drive an awaited future to completion, yielding its value (Track A.2/A.3 top-level).
                 let src = self.atom_reg(future)?;
                 self.code.push(Op::RunFuture {
                     dst,
                     src,
                     span: *span,
                 });
+                Ok(())
+            }
+            Rvalue::PollFuture { future, span } => {
+                // Poll a future once — `some(v)`/`none` (Track A.3 state machine).
+                let src = self.atom_reg(future)?;
+                self.code.push(Op::PollFuture {
+                    dst,
+                    src,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::Pending { .. } => {
+                // The async pending sentinel (Track A.3).
+                self.code.push(Op::LoadPending { dst });
                 Ok(())
             }
             Rvalue::FromBytes { blob, layout, span } => {

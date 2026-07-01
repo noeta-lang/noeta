@@ -1,0 +1,11 @@
+// Track A.3a — the async state machine supports `.await` only in statement position. A `.await` nested
+// in a larger expression (here a call argument) is E0040; bind it to a variable first.
+// expect: error E0040 at 8:9
+// expect: exit 1
+async fn one(): int { return 1 }
+fn double(n: int): int { return n * 2 }
+async fn g(): int {
+    x = double(one().await)
+    return x
+}
+echo "unreached"

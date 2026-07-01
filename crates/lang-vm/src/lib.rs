@@ -220,6 +220,12 @@ struct Vm<'m> {
     diagnostics: Vec<Diagnostic>,
 }
 
+/// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
+enum Poll {
+    Ready(Value),
+    Pending,
+}
+
 /// How a value behaves under `?`/`??`: the unwrapped success payload, or the empty case.
 enum TryOutcome {
     Success(Value),
@@ -3581,13 +3587,28 @@ impl<'m> Vm<'m> {
                     frames[top].pc += 1;
                 }
                 Op::RunFuture { dst, src, span } => {
-                    // Run an awaited future to completion (Track A.2). See `drive_future`: a step/thunk
-                    // future runs to its value; a leaf timer suspends until the executor clock reaches
-                    // its deadline. The source register keeps owning the future; `drive_future` returns
-                    // an owned result.
+                    // Drive an awaited future to completion (Track A.2/A.3 top-level). See
+                    // `drive_future`: poll; on pending advance the clock and re-poll. The source
+                    // register keeps owning the future; `drive_future` returns an owned result.
                     let future = frames[top].regs[*src as usize];
                     let value = self.drive_future(future, *span)?;
                     set_reg(&mut frames[top].regs, *dst, value);
+                    frames[top].pc += 1;
+                }
+                Op::PollFuture { dst, src, span } => {
+                    // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if
+                    // pending. The source register keeps owning the future.
+                    let future = frames[top].regs[*src as usize];
+                    let result = match self.poll_once(future, *span)? {
+                        Poll::Ready(value) => make_some(value),
+                        Poll::Pending => make_none(),
+                    };
+                    set_reg(&mut frames[top].regs, *dst, result);
+                    frames[top].pc += 1;
+                }
+                Op::LoadPending { dst } => {
+                    // The async pending sentinel (Track A.3) — what a step returns when it suspends.
+                    set_reg(&mut frames[top].regs, *dst, Value::pending());
                     frames[top].pc += 1;
                 }
                 Op::AttributesOf { dst, type_name } => {
@@ -4170,46 +4191,60 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Drive an awaited future to completion (Track A.2 — the VM twin of the tree-walker's
-    /// `Interpreter::drive_future`). A step/thunk future runs to its value (its own inner awaits drive
-    /// the clock inline, so one call completes it); `future_step` hands back a retained reference the
-    /// call borrows, released after. A leaf timer suspends until the executor clock reaches its
-    /// deadline — on `Pending` the executor advances logical time to the next timer and the poll
-    /// retries; a pending future with nothing to advance is a deterministic deadlock. A non-future is
-    /// passed through, freshly retained (totality; unreachable for a checked program). The caller's
-    /// register keeps owning the input future. Single-task only (A.2): the suspend-to-sibling state
-    /// machine arrives with concurrency in A.3.
+    /// Poll a future once (Track A.3 — the VM twin of the tree-walker's `Interpreter::poll_once`).
+    /// A leaf timer is ready once the executor clock reaches its deadline, else it registers the
+    /// deadline and reports `Pending`. A step future's poll runs the state machine to its next suspend:
+    /// the step returns the raw completion value (`Ready`) or the pending sentinel (`Pending`).
+    /// `future_step` hands back a retained reference the call borrows, released after. A non-future is
+    /// passed through, freshly retained (totality; unreachable for a checked program).
+    fn poll_once(&mut self, future: Value, span: Span) -> Result<Poll, Abort> {
+        if future.is_timer() {
+            let deadline = future
+                .timer_deadline()
+                .expect("a timer carries its deadline");
+            if self.executor.now() >= deadline {
+                return Ok(Poll::Ready(Value::unit()));
+            }
+            self.executor.register_timer(deadline);
+            return Ok(Poll::Pending);
+        }
+        match future.future_step() {
+            Some(step) => {
+                let result = self.call_value(step, vec![Value::unit()], span);
+                release(step);
+                let result = result?;
+                if result.is_pending() {
+                    Ok(Poll::Pending)
+                } else {
+                    Ok(Poll::Ready(result))
+                }
+            }
+            None => {
+                retain(future);
+                Ok(Poll::Ready(future))
+            }
+        }
+    }
+
+    /// Drive an awaited future to completion via the executor (Track A.2/A.3 — top-level `.await`).
+    /// Polls; on `Pending`, advances logical time to the next timer and re-polls; a pending future with
+    /// nothing to advance is a deterministic deadlock. Returns the completion value (owned). The
+    /// caller's register keeps owning the input future.
     fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
         loop {
-            if future.is_timer() {
-                let deadline = future
-                    .timer_deadline()
-                    .expect("a timer carries its deadline");
-                if self.executor.now() >= deadline {
-                    return Ok(Value::unit());
+            match self.poll_once(future, span)? {
+                Poll::Ready(value) => return Ok(value),
+                Poll::Pending => {
+                    if self.executor.advance().is_none() {
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: awaited a pending future with no pending timers"
+                                .to_string(),
+                        ));
+                    }
                 }
-                self.executor.register_timer(deadline);
-                if self.executor.advance().is_none() {
-                    return Err(self.error(
-                        DiagnosticCode::Panic,
-                        span,
-                        "async deadlock: awaited a pending future with no pending timers"
-                            .to_string(),
-                    ));
-                }
-                continue;
             }
-            return match future.future_step() {
-                Some(step) => {
-                    let result = self.call_value(step, vec![Value::unit()], span);
-                    release(step);
-                    result
-                }
-                None => {
-                    retain(future);
-                    Ok(future)
-                }
-            };
         }
     }
 

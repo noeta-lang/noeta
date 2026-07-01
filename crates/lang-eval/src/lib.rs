@@ -3182,26 +3182,42 @@ impl Interpreter {
         }
     }
 
-    /// Drive an awaited future to completion (Track A.2 — the tree-walker twin of the VM's
-    /// `Vm::drive_future`). A step/thunk future runs to its value (its own inner awaits drive the
-    /// clock inline, so one call completes it). A leaf timer suspends until the executor clock reaches
-    /// its deadline — on `Pending` the executor advances logical time to the next timer and the poll
-    /// retries; a pending future with nothing to advance is a deterministic deadlock. A non-future
-    /// passes through (totality for the uncheck­ed property test). Single-task only (A.2): concurrency
-    /// and the suspend-to-sibling state machine arrive in A.3.
+    /// Poll a future once (Track A.3 — the tree-walker twin of the VM's `Vm::poll_once`). A leaf timer
+    /// is ready once the executor clock reaches its deadline, else it registers the deadline and reports
+    /// `None` (pending). A step future's poll runs the state machine to its next suspend: the step
+    /// returns the raw completion value (ready) or the pending sentinel (`None`). A non-future passes
+    /// through as ready (totality for the uncheck­ed property test).
+    fn poll_once(&mut self, future: &Value, span: Span) -> Eval<Option<Value>> {
+        match future {
+            Value::Timer(deadline) => {
+                let deadline = *deadline;
+                if self.executor.now() >= deadline {
+                    Ok(Some(Value::Unit))
+                } else {
+                    self.executor.register_timer(deadline);
+                    Ok(None)
+                }
+            }
+            Value::Future(step) => {
+                let result = self.call((**step).clone(), vec![Value::Unit], span)?;
+                if matches!(result, Value::Pending) {
+                    Ok(None)
+                } else {
+                    Ok(Some(result))
+                }
+            }
+            other => Ok(Some(other.clone())),
+        }
+    }
+
+    /// Drive an awaited future to completion via the executor (Track A.2/A.3 — top-level `.await`).
+    /// Polls; on pending, advances logical time to the next timer and re-polls; a pending future with
+    /// nothing to advance is a deterministic deadlock.
     fn drive_future(&mut self, future: Value, span: Span) -> Eval<Value> {
         loop {
-            let deadline = match &future {
-                Value::Timer(d) => *d,
-                Value::Future(thunk) => {
-                    return self.call((**thunk).clone(), vec![Value::Unit], span);
-                }
-                other => return Ok(other.clone()),
-            };
-            if self.executor.now() >= deadline {
-                return Ok(Value::Unit);
+            if let Some(value) = self.poll_once(&future, span)? {
+                return Ok(value);
             }
-            self.executor.register_timer(deadline);
             if self.executor.advance().is_none() {
                 return Err(self.runtime_error(
                     DiagnosticCode::Panic,
@@ -3683,7 +3699,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::FileHandle(_)
         | Value::Iter(_)
         | Value::Future(_)
-        | Value::Timer(_) => TypeRepr::Dyn,
+        | Value::Timer(_)
+        | Value::Pending => TypeRepr::Dyn,
     }
 }
 
@@ -4114,6 +4131,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
         Value::Future(_) | Value::Timer(_) => NativeValue::Str("<future>".to_string()),
+        Value::Pending => NativeValue::Str("<pending>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),
     }

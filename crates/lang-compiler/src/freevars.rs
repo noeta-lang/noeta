@@ -512,6 +512,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::MakeGen { step, .. } => f(step),
         Rvalue::MakeFuture { thunk, .. } => f(thunk),
         Rvalue::RunFuture { future, .. } => f(future),
+        Rvalue::PollFuture { future, .. } => f(future),
+        Rvalue::Pending { .. } => {}
         Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {
             recv, name, args, ..

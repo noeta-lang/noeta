@@ -75,6 +75,11 @@ impl Value {
     const TAG_UNIT: u64 = 0;
     const TAG_FALSE: u64 = 1;
     const TAG_TRUE: u64 = 2;
+    /// The async **pending** sentinel (Track A.3): the singleton an async state-machine step returns
+    /// when it suspends at an `.await`. A distinct immediate so it can never be confused with any user
+    /// value (including `unit`, a valid completion). It never escapes to user code — every poll site
+    /// catches it — so it has no surface type; it displays opaquely purely defensively.
+    const TAG_PENDING: u64 = 3;
     /// Largest immediate small-int magnitude (48-bit signed payload).
     const INT_MIN: i64 = -(1 << 47);
     const INT_MAX: i64 = (1 << 47) - 1;
@@ -88,6 +93,12 @@ impl Value {
 
     pub fn bool(b: bool) -> Value {
         Value(Self::QNAN | if b { Self::TAG_TRUE } else { Self::TAG_FALSE })
+    }
+
+    /// The async **pending** sentinel (Track A.3) — the value an async step returns to signal it
+    /// suspended at an `.await`. An immediate singleton; never refcounted, never user-visible.
+    pub fn pending() -> Value {
+        Value(Self::QNAN | Self::TAG_PENDING)
     }
 
     /// A float. Any NaN is canonicalized to the standard quiet NaN so it can never collide
@@ -965,6 +976,11 @@ impl Value {
     /// Whether this is the unit value.
     pub fn is_unit(self) -> bool {
         self.0 == Value::unit().0
+    }
+
+    /// Whether this is the async pending sentinel (Track A.3).
+    pub fn is_pending(self) -> bool {
+        self.0 == Value::pending().0
     }
 
     /// The boolean payload, if this is `true`/`false`.
