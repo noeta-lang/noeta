@@ -1212,6 +1212,27 @@ impl Interpreter {
                 });
                 Ok(Value::Handle(scope_idx, task_idx))
             }
+            // `isolate f(args)` (isolates I.4b). The tree-walker only ever runs the deterministic
+            // sandbox, where an isolate is observationally a cooperative task: build the future by
+            // calling `callee(args)` and register it exactly as `spawn` does (identical to the old
+            // lowering, which pre-built `f(args)` and `Spawn`ed it) — so the differential is unchanged.
+            // Real OS-thread execution is a VM-only, out-of-oracle path.
+            lang_ir::Rvalue::SpawnIsolate { callee, args, span } => {
+                let callee = self.eval_ir_atom(callee, frame)?;
+                let values = self.eval_ir_atoms(args, frame)?;
+                let future = self.call(callee, values, *span)?;
+                if self.scopes.is_empty() {
+                    return Ok(future);
+                }
+                let scope_idx = self.scopes.len() - 1;
+                let task_idx = self.scopes[scope_idx].len();
+                self.scopes[scope_idx].push(crate::Task {
+                    future,
+                    result: None,
+                    cancelled: false,
+                });
+                Ok(Value::Handle(scope_idx, task_idx))
+            }
             // `channel::<T>(cap)` (isolates I.1): register a new bounded channel and yield its
             // `(Sender, Receiver)` endpoint pair. The message type is checker-only; only the capacity
             // reaches here. A negative capacity is a runtime error (E0010), like other bad arguments.

@@ -608,6 +608,18 @@ pub enum Op {
         src: Reg,
         span: Span,
     },
+    /// `dst = isolate callee(args)` (isolates I.4b): spawn the call as a concurrent unit in a fresh
+    /// isolate, yielding a handle (`Future<T>`). Unlike [`Self::Spawn`] the callee and arguments are
+    /// carried **unbuilt** (like a [`Self::Call`]) so a real-thread isolate can copy-marshal the args and
+    /// reconstruct the callee on the worker — a pre-built future captures its args in the parent heap and
+    /// cannot cross a thread. In the deterministic sandbox this is identical to building `callee(args)`
+    /// and `Spawn`ing it (a cooperative task), so the differential is unchanged. Carries a span.
+    SpawnIsolate {
+        dst: Reg,
+        callee: Reg,
+        args: Box<[Reg]>,
+        span: Span,
+    },
     /// Close the current concurrency scope (Track A.3b): drive every task spawned in it to completion
     /// (the join), then pop the scope. Carries a span (a task body can fault at the join).
     ScopeEnd {
@@ -1340,6 +1352,16 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             format!("LoadPending r{dst} <- pending")
         }
         Op::ScopeBegin => "ScopeBegin".to_string(),
+        Op::SpawnIsolate {
+            dst, callee, args, ..
+        } => {
+            let args = args
+                .iter()
+                .map(|r| format!("r{r}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("SpawnIsolate r{dst} <- isolate r{callee}({args})")
+        }
         Op::Spawn { dst, src, .. } => {
             format!("Spawn       r{dst} <- spawn r{src}")
         }

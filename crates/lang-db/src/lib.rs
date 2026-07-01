@@ -227,6 +227,7 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
         ext,
         checked.for_stream_sites.clone(),
         &checked.destructor_relevance,
+        false,
     ))
 }
 
@@ -367,6 +368,7 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
                 ext,
                 checked.for_stream_sites.clone(),
                 &checked.destructor_relevance,
+                false,
             ))
         }
         Err(_) => Bytecode(lang_compiler::compile(&Program {

@@ -48,7 +48,7 @@ pub use lang_ast::{BinaryOp, ForPattern, Pattern, TypeRef, UnaryOp};
 
 mod lower;
 mod pretty;
-pub use lower::{Unsupported, lower, lower_with_sites};
+pub use lower::{Unsupported, lower, lower_with_sites, lower_with_sites_opts};
 pub use pretty::dump;
 
 /// A whole lowered program: the top-level statement stream plus the size of its temporary
@@ -352,6 +352,19 @@ pub enum Rvalue {
     /// `spawn e` (Track A.3b): register the future `future` as a task in the current concurrency scope
     /// and yield a handle (itself a `Future<T>`). Legal only inside a `ScopeBegin`/`ScopeEnd` region.
     Spawn { future: Atom, span: Span },
+    /// `isolate f(args)` (isolates I.4b): spawn the call as a concurrent unit in a **fresh isolate**.
+    /// Unlike [`Self::Spawn`], the callee and arguments are carried **unbuilt** — an isolate can run on
+    /// a real OS thread (out-of-oracle), where a pre-built future (which captures its args in the parent
+    /// heap) could not cross the boundary; the arguments are copy-marshalled and the callee is
+    /// reconstructed on the worker from its prototype. In the deterministic sandbox this is
+    /// observationally identical to `spawn f(args)`: the backend calls `callee(args)` to build the
+    /// future and registers it as a cooperative task, so the differential holds. Legal only inside a
+    /// `ScopeBegin`/`ScopeEnd` region (orphan `isolate` is E0041).
+    SpawnIsolate {
+        callee: Atom,
+        args: Vec<Atom>,
+        span: Span,
+    },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).

@@ -107,6 +107,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.ext_call_sites,
         checked.for_stream_sites,
         &checked.destructor_relevance,
+        false,
     )
 }
 
@@ -136,6 +137,7 @@ pub fn compile_with_sites(
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
     relevance: &lang_check::DestructorRelevance,
+    real_isolates: bool,
 ) -> Result<Module, Unsupported> {
     compile_inner(
         program,
@@ -147,6 +149,7 @@ pub fn compile_with_sites(
         for_stream_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
+        real_isolates,
     )
 }
 
@@ -165,6 +168,9 @@ fn compile_inner(
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
     destruct_reachable: Vec<String>,
+    // Whether `isolate f(args)` lowers to `Rvalue::SpawnIsolate` (real OS-thread path, I.4b). Only the
+    // CLI's real (VM) execution passes true; the differential/salsa keep false (byte-identical sandbox).
+    real_isolates: bool,
 ) -> Result<Module, Unsupported> {
     // Lower the surface program to the shared Core IR, then compile *that* to bytecode. The same
     // lowering the IR interpreter consumes, so both backends execute one program (Phase 2). The
@@ -175,12 +181,13 @@ fn compile_inner(
     // flat buffer (P-PACK 2.5; the resolved layout rides on the IR rvalue, so the bytecode compiler
     // reads it from there at `PackedListNew` and needs no separate span map of its own), and the
     // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+).
-    let ir = lang_ir::lower_with_sites(
+    let ir = lang_ir::lower_with_sites_opts(
         program,
         &packed_list_sites,
         &index_field_sites,
         &ext_call_sites,
         &for_stream_sites,
+        real_isolates,
     )
     .map_err(|u| Unsupported {
         reason: format!("not yet lowered to the Core IR: {}", u.feature),
@@ -2376,6 +2383,20 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::Spawn {
                     dst,
                     src,
+                    span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::SpawnIsolate { callee, args, span } => {
+                // Spawn a call as a fresh isolate (I.4b): carry the callee + unbuilt args so a real
+                // isolate can copy-marshal them; the sandbox builds `callee(args)` and registers a
+                // cooperative task, identical to `spawn`.
+                let callee = self.atom_reg(callee)?;
+                let args = self.atom_regs(args)?;
+                self.code.push(Op::SpawnIsolate {
+                    dst,
+                    callee,
+                    args,
                     span: *span,
                 });
                 Ok(())

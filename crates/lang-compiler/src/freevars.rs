@@ -521,6 +521,10 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::PollFuture { future, .. } => f(future),
         Rvalue::Pending { .. } => {}
         Rvalue::Spawn { future, .. } => f(future),
+        Rvalue::SpawnIsolate { callee, args, .. } => {
+            f(callee);
+            args.iter().for_each(f);
+        }
         Rvalue::MakeChannel { capacity, .. } => f(capacity),
         Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {

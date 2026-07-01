@@ -184,6 +184,10 @@ fn compile_real(
         checked.ext_call_sites.clone(),
         checked.for_stream_sites.clone(),
         &checked.destructor_relevance,
+        // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
+        // The differential/salsa paths pass false (byte-identical cooperative sandbox).
+        // TEMP(I.4b): false until the real-thread `Op::SpawnIsolate` handler is wired; flip to true then.
+        false,
     )
     .map_err(|u| {
         format!(

@@ -375,6 +375,13 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*callee);
             f.uses.extend(args.iter().copied());
         }
+        Op::SpawnIsolate {
+            dst, callee, args, ..
+        } => {
+            f.def = Some(*dst);
+            f.uses.push(*callee);
+            f.uses.extend(args.iter().copied());
+        }
         Op::ExtCall { dst, args, .. } => {
             f.def = Some(*dst);
             f.uses.extend(args.iter().copied());
@@ -786,6 +793,15 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         }
         Op::MatchFail { src, .. } => m(src),
         Op::Call {
+            dst, callee, args, ..
+        } => {
+            m(dst);
+            m(callee);
+            for r in args.iter_mut() {
+                m(r);
+            }
+        }
+        Op::SpawnIsolate {
             dst, callee, args, ..
         } => {
             m(dst);

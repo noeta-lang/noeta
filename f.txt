@@ -1,3 +1,1 @@
-alpha
-beta
-gamma
+hello world

@@ -3764,6 +3764,17 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, handle);
                     frames[top].pc += 1;
                 }
+                Op::SpawnIsolate { span, .. } => {
+                    // Real OS-thread isolate (I.4b). Only the CLI's real (VM) path emits this op; the
+                    // differential/salsa sandbox lowers `isolate` to `Call`+`Spawn` (cooperative), so
+                    // this is never reached in-oracle. The real-thread handler is wired next.
+                    return Err(self.error(
+                        DiagnosticCode::Panic,
+                        *span,
+                        "internal error: real-thread isolate handler not yet wired (I.4b)"
+                            .to_string(),
+                    ));
+                }
                 Op::ScopeEnd { span } => {
                     // Join the scope (drive every task to completion), then pop it and release the
                     // tasks' owned futures and results.

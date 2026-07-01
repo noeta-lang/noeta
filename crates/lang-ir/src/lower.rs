@@ -96,12 +96,37 @@ pub fn lower_with_sites(
     ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: &HashSet<Span>,
 ) -> Result<Program, Unsupported> {
+    lower_with_sites_opts(
+        program,
+        packed_list_sites,
+        index_field_sites,
+        ext_call_sites,
+        for_stream_sites,
+        false,
+    )
+}
+
+/// As [`lower_with_sites`], but with `real_isolates` selecting the isolate lowering (isolates I.4b):
+/// when **true**, `isolate f(args)` lowers to [`Rvalue::SpawnIsolate`] (callee + unbuilt args, for the
+/// real OS-thread path); when **false** (every in-oracle path — the differential, the salsa graph, the
+/// REPL), it lowers to a plain [`Rvalue::Spawn`] of the pre-built future, exactly as `spawn f(args)`,
+/// so the sandbox and the whole differential corpus are byte-identical and never see the new op. Only
+/// the CLI's real (VM) execution path passes `true`.
+pub fn lower_with_sites_opts(
+    program: &AstProgram,
+    packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
+    index_field_sites: &HashSet<Span>,
+    ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
+    for_stream_sites: &HashSet<Span>,
+    real_isolates: bool,
+) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
         temps: 0,
         packed_list_sites,
         index_field_sites,
         ext_call_sites,
         for_stream_sites,
+        real_isolates,
     };
     let top = lowerer.lower_body(&program.stmts)?;
     Ok(Program {
@@ -129,6 +154,10 @@ struct Lowerer<'a> {
     /// The checker's streaming-`for` set (keyed by the `for` statement's span): the iterable is
     /// statically an `Iterator<T>`, so the lowered [`Stmt::For`] gets `stream: true` (Track I.2).
     for_stream_sites: &'a HashSet<Span>,
+    /// Whether `isolate f(args)` lowers to [`Rvalue::SpawnIsolate`] (real OS-thread path, I.4b) rather
+    /// than a plain [`Rvalue::Spawn`] of a pre-built future. Only the CLI's real (VM) execution path
+    /// sets this; every in-oracle path leaves it false, so the differential never sees the new rvalue.
+    real_isolates: bool,
 }
 
 impl Lowerer<'_> {
@@ -1005,11 +1034,34 @@ impl Lowerer<'_> {
             // `spawn e` (Track A.3b): register the future `e` as a task in the current scope and yield
             // a handle (itself a `Future<T>`). The future operand is evaluated first (an `async fn`
             // call producing the lazy state machine), then handed to `Rvalue::Spawn`.
-            // `spawn e` and `isolate f(args)` lower identically for now (isolates milestone I.0): in the
-            // deterministic sandbox an isolate is observationally a task (single-thread; `Send` value
-            // args copy-invisible), so both become `Rvalue::Spawn`. Real heap separation is a later,
-            // out-of-oracle slice (I.4) that will read the `isolate` flag; the checker already enforces
-            // the `Send` boundary (E0042).
+            // `isolate f(args)` (isolates I.4b) lowers to `Rvalue::SpawnIsolate`, carrying the callee and
+            // arguments **unbuilt** so a real-thread isolate can copy-marshal the args (a pre-built
+            // future captures them in the parent heap and cannot cross a thread). The checker restricts
+            // `isolate` to a direct call (E0042), so the future is an `Expr::Call`; if for any reason it
+            // is not, fall back to the plain `Spawn` path. In the deterministic sandbox `SpawnIsolate`
+            // behaves exactly like `spawn f(args)`, so both backends and the differential are unchanged.
+            Expr::Spawn {
+                future,
+                isolate: true,
+                span,
+            } if self.real_isolates && matches!(future.as_ref(), Expr::Call { .. }) => {
+                let Expr::Call { callee, args, .. } = future.as_ref() else {
+                    unreachable!("guarded by the match arm");
+                };
+                let callee = self.lower_expr(callee, out)?;
+                let arg_atoms = self.lower_args(args, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::SpawnIsolate {
+                        callee,
+                        args: arg_atoms,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
+            // `spawn e` (Track A.3b) — and any `isolate` that is not a direct call (defensive; the
+            // checker rejects that with E0042) — register the pre-built future `e` as a task.
             Expr::Spawn { future, span, .. } => {
                 let future = self.lower_expr(future, out)?;
                 Ok(self.emit(

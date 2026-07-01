@@ -211,11 +211,40 @@ deterministic multi-isolate scheduler underneath.
     to the out-of-oracle real executor) and the `args` binary-path harness artifact. CLI tests 45+8,
     conformance/differential/leak unchanged (374/100%/0 both), clippy+fmt clean. Also dropped the CLI's
     now-dead `lang-ir`/`lang-ir-passes` deps (it goes through `lang-compiler` now).
-  - **I.4b — `RealScheduler` + OS threads.** Spawn an OS thread per isolate (own VM interpreter +
-    thread-local heap); an `unsafe Send` wrapper over VM `Value` (sound *only* because cross-thread
-    values are I.3 `shared`-tagged — borrowed, never refcounted — and the region outlives all workers);
-    real cross-thread channels (std `mpsc`/`crossbeam`) for the real path; borrow-share args via
-    `SharedRegion`. Integration-tested out-of-oracle, incl. a big-input-no-copy check.
+  - **I.4b — real OS-thread isolates via copy-at-the-boundary (Approach A, decided with the user).**
+    Runtime `Value`s carry a non-atomic `Rc<Shape>` (every Object/Enum; `Value::shape()` does
+    `shape.clone()`), so *borrow-sharing structs/enums across real threads is unsound* until shapes are
+    made thread-safe — and I.3's `shared` tag covers only the object's own refcount, not the inner
+    `Rc<Shape>`. So I.4b crosses the thread boundary by **faithful copy**, not borrow: no `Value` and no
+    `Rc` ever crosses a thread; the only shared thing is `Arc<Module>` (the compiled `Module` is
+    `Send + Sync` — fully index-based, no `Rc`), which is safe. Zero-copy borrow-share is deferred to
+    **I.4c** (where the `Rc<Shape>→Arc<Shape>` thread-safety change, the `unsafe Send`, `SharedRegion`
+    wiring, and the big-input-no-copy check live). "Copy is the honest v1" — exactly the plan's framing.
+    Concrete pieces (one slice, full Approach A incl. cross-thread channels):
+    - **Lowering rework (enabler).** `isolate f(args)` pre-builds its future (`f(args)` captures args in
+      the *parent* heap) and lowers to `Rvalue::Spawn`, dropping `is_isolate`. A pre-built future can't
+      move to a thread, so split it: a dedicated `Rvalue::SpawnIsolate { callee, args, span }` +
+      `Op::SpawnIsolate` carrying the **unbuilt** callee + arg atoms (isolate is already the restricted
+      direct-call form). Sandbox interprets it exactly as `Spawn` (build the future, cooperative task) →
+      differential byte-identical, never threads. `spawn e` keeps lowering to `Rvalue::Spawn`.
+    - **Wire form** (`lang-vm`, `Send`): a faithful `enum Wire` (primitives, str/bytes, list/tuple/set/
+      map, `Struct`/`Enum` keyed by shape *name* [+ variant], channel endpoints as `Arc<ChannelCore>`).
+      `marshal(Value)->Wire` on the source thread; `rebuild(Wire)->Value` on the dest thread (allocs in
+      the dest heap using the dest's own `Rc<Shape>` looked up by name). A `!Send` payload is
+      `unreachable!` (E0042 guarantees it can't reach a boundary).
+    - **Cross-thread channels:** a `channel::<T>(cap)` entry becomes a shared `Arc<ChannelCore>` (bounded
+      `Mutex<VecDeque<Wire>>` + `Condvar` + close flag) in the real path; endpoints stay `Value::Sender/
+      Receiver(index)` per-VM but the table entry holds the `Arc`, so shipping an endpoint into an
+      isolate marshals to `Wire::Sender(Arc-clone)` and the worker registers it locally. `send`/`recv`
+      block the (real) worker thread on full/empty — no cooperative poll needed cross-isolate.
+    - **Thread lifecycle:** `Op::SpawnIsolate` (real) marshals args, clones `Arc<Module>`, spawns a
+      `std::thread` that builds its own `RealHost`+`RealExecutor`+`Vm`, rebuilds args, runs the callee,
+      marshals the result back over a oneshot. The handle is a leaf future polled by `try_recv`
+      (Ready→rebuild result / Pending); the scheduler tracks `inflight_isolates` so a pending isolate is
+      *progress* (a thread is working), not a false deadlock; `concurrent {}` joins the threads at `}`.
+    - **Seam:** a `parallel_isolates` flag set by the real entry point (`run_module_with_host_and_
+      executor`); the sandbox path leaves it false (cooperative, unchanged). Integration-tested
+      out-of-oracle (real threads actually run in parallel; results/messages round-trip).
 - **I.5 — finalize:** docs (§7 alignment), deferred rows (durable queues, worker pools, app-lifetime
   `TaskScope` via DI — §7.2 framework patterns, *not* language constructs), mark complete.
 
