@@ -1,11 +1,23 @@
-// Track A.3a — the async state machine supports `.await` only in statement position. A `.await` nested
-// in a larger expression (here a call argument) is E0040; bind it to a variable first.
-// expect: error E0040 at 8:9
-// expect: exit 1
-async fn one(): int { return 1 }
-fn double(n: int): int { return n * 2 }
-async fn g(): int {
-    x = double(one().await)
-    return x
+// Track A.6 — mid-expression `.await`. An `.await` in an unconditionally-evaluated sub-expression (a
+// call argument, an arithmetic operand) is hoisted to statement position by the IR lowering, left to
+// right, so evaluation order is preserved. Both backends agree by construction (the hoist is a shared
+// AST pre-pass run before the state machine).
+// expect: stdout "eval a"
+// expect: stdout "eval b"
+// expect: stdout "x=3"
+// expect: stdout "eval c"
+// expect: stdout "sum=6"
+// expect: stdout "total=7"
+// expect: exit 0
+async fn tap(name: string, v: int): int {
+    echo "eval " ~ name
+    return v
 }
-echo "unreached"
+fn add(a: int, b: int): int { return a + b }
+async fn run(): int {
+    x = add(tap("a", 1).await, tap("b", 2).await)
+    echo "x=" ~ x
+    echo "sum=" ~ (tap("c", 3).await + x)
+    return x + add(x, 1)
+}
+echo "total=" ~ run().await

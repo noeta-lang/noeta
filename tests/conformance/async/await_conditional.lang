@@ -1,0 +1,8 @@
+// Track A.6 — a mid-expression `.await` in a *conditionally*-evaluated position (here the right side of
+// `&&`) is still rejected (E0040): hoisting it to statement position would run it unconditionally,
+// changing short-circuit semantics. Bind it to a variable first. (Lifting this restriction is A.6b.)
+// expect: error E0040 at 7:39
+// expect: exit 1
+async fn flag(): bool { return true }
+async fn run(): bool { return true && flag().await }
+echo run().await

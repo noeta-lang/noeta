@@ -1425,6 +1425,15 @@ fn desugar_state_machine(
         mode,
         tmp: 0,
     };
+    // Track A.6: hoist mid-expression awaits to statement position before flattening (async only —
+    // a generator has no awaits). After this the flattener only ever sees head/hoisted-binding awaits.
+    let hoisted_body;
+    let body = if mode == SuspendMode::Async {
+        hoisted_body = hoist_await_body(body);
+        &hoisted_body[..]
+    } else {
+        body
+    };
     let entry = flat.new_block();
     let exit = flat.lower_seq(body, entry, None);
     // Falling off the end: a generator is exhausted (`Done` → `return none`); an async fn completes
@@ -2112,6 +2121,255 @@ fn value_replace_await(value: &Expr, aw: &str) -> Expr {
             span: *span,
         },
         other => other.clone(),
+    }
+}
+
+/// Track A.6 — the mid-expression-`.await` pre-pass. Rewrites an async fn body so that every `.await`
+/// in an **unconditionally-evaluated** sub-expression position is hoisted to a preceding
+/// statement-position `$hwN = <sub>.await`, left-to-right (evaluation order), and replaced by a
+/// reference to `$hwN`. After this pass, every remaining `.await` is either such a hoisted binding or
+/// the head await of a value-bearing statement — both of which the flattener already turns into
+/// poll-states. The checker (E0040) has already rejected awaits in conditionally-evaluated positions
+/// (short-circuit `&&`/`||`/`??` operands, `match`/`if…then…else` arm bodies) and in condition/loop
+/// heads, so those never reach here; this pass mirrors that by not recursing into them.
+fn hoist_await_body(stmts: &[AstStmt]) -> Vec<AstStmt> {
+    let mut ctr = 0u32;
+    let mut out = Vec::new();
+    for stmt in stmts {
+        hoist_await_stmt(stmt, &mut ctr, &mut out);
+    }
+    out
+}
+
+/// Rewrite one statement, appending its hoisted-await preludes and then the rewritten statement to
+/// `out`. Recurses into control-flow bodies so a mid-expression await deep inside an `if`/`while`/
+/// `for`/`concurrent` is hoisted within that body.
+fn hoist_await_stmt(stmt: &AstStmt, ctr: &mut u32, out: &mut Vec<AstStmt>) {
+    let mut pre = Vec::new();
+    let rewritten = match stmt {
+        AstStmt::Binding {
+            mut_decl,
+            name,
+            name_span,
+            ty,
+            value,
+            span,
+        } => {
+            let mut value = value.clone();
+            hoist_value_keep_head(&mut value, &mut pre, ctr);
+            AstStmt::Binding {
+                mut_decl: *mut_decl,
+                name: name.clone(),
+                name_span: *name_span,
+                ty: ty.clone(),
+                value,
+                span: *span,
+            }
+        }
+        AstStmt::Expr { expr, span } => {
+            let mut expr = expr.clone();
+            hoist_value_keep_head(&mut expr, &mut pre, ctr);
+            AstStmt::Expr { expr, span: *span }
+        }
+        AstStmt::Echo { value, span } => {
+            let mut value = value.clone();
+            hoist_value_keep_head(&mut value, &mut pre, ctr);
+            AstStmt::Echo { value, span: *span }
+        }
+        AstStmt::Return {
+            value: Some(v),
+            span,
+        } => {
+            let mut v = v.clone();
+            hoist_value_keep_head(&mut v, &mut pre, ctr);
+            AstStmt::Return {
+                value: Some(v),
+                span: *span,
+            }
+        }
+        // A destructure has no head-await fast path in the flattener, so hoist *every* await in its
+        // value (a bare `(a, b) = e.await` becomes `$hw = e.await; (a, b) = $hw`).
+        AstStmt::Destructure {
+            mut_decl,
+            targets,
+            value,
+            span,
+        } => {
+            let mut value = value.clone();
+            hoist_in_expr(&mut value, &mut pre, ctr);
+            AstStmt::Destructure {
+                mut_decl: *mut_decl,
+                targets: targets.clone(),
+                value,
+                span: *span,
+            }
+        }
+        AstStmt::If {
+            cond,
+            then_body,
+            else_body,
+            span,
+        } => AstStmt::If {
+            cond: cond.clone(),
+            then_body: hoist_await_body(then_body),
+            else_body: else_body.as_deref().map(hoist_await_body),
+            span: *span,
+        },
+        AstStmt::While { cond, body, span } => AstStmt::While {
+            cond: cond.clone(),
+            body: hoist_await_body(body),
+            span: *span,
+        },
+        AstStmt::For {
+            pattern,
+            iterable,
+            body,
+            span,
+        } => AstStmt::For {
+            pattern: pattern.clone(),
+            iterable: iterable.clone(),
+            body: hoist_await_body(body),
+            span: *span,
+        },
+        AstStmt::Concurrent { body, span } => AstStmt::Concurrent {
+            body: hoist_await_body(body),
+            span: *span,
+        },
+        other => other.clone(),
+    };
+    out.append(&mut pre);
+    out.push(rewritten);
+}
+
+/// Hoist mid-expression awaits in a value-bearing statement's value, **keeping a head `.await`**
+/// (optionally under `?`) in place — the flattener turns that head await into the statement's own
+/// poll-state, so only awaits *nested below* the head need hoisting.
+fn hoist_value_keep_head(value: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+    match value {
+        Expr::Await { expr, .. } => hoist_in_expr(expr, pre, ctr),
+        Expr::Try { expr, .. } if matches!(expr.as_ref(), Expr::Await { .. }) => {
+            if let Expr::Await { expr, .. } = expr.as_mut() {
+                hoist_in_expr(expr, pre, ctr);
+            }
+        }
+        other => hoist_in_expr(other, pre, ctr),
+    }
+}
+
+/// Hoist **every** `.await` in `e` (in unconditionally-evaluated positions) into `pre` as a
+/// `$hwN = <inner>.await` binding, replacing the await with a reference to `$hwN`. Inner awaits are
+/// hoisted before their enclosing one and children are visited left-to-right, so the emitted bindings
+/// run in source evaluation order. Conditionally-evaluated operands (short-circuit RHS, `??` fallback,
+/// `match` arm bodies) and closures are not descended into (the checker guarantees no await there).
+fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+    if let Expr::Await { .. } = e {
+        if let Expr::Await { expr, .. } = e {
+            hoist_in_expr(expr, pre, ctr);
+        }
+        let span = e.span();
+        let name = format!("$hw{}", *ctr);
+        *ctr += 1;
+        let awaited = std::mem::replace(e, ident(&name, span));
+        pre.push(bare_assign_expr(&name, awaited, span));
+        return;
+    }
+    match e {
+        Expr::Unary { operand, .. } => hoist_in_expr(operand, pre, ctr),
+        Expr::Binary { op, lhs, rhs, .. } => {
+            hoist_in_expr(lhs, pre, ctr);
+            // The RHS of `&&`/`||` is conditional; every other binary evaluates both operands.
+            if !matches!(op, BinaryOp::And | BinaryOp::Or) {
+                hoist_in_expr(rhs, pre, ctr);
+            }
+        }
+        Expr::Pipeline { left, right, .. } => {
+            hoist_in_expr(left, pre, ctr);
+            hoist_in_expr(right, pre, ctr);
+        }
+        // `??`: the value is unconditional; the fallback is conditional (skip).
+        Expr::Coalesce { value, .. } => hoist_in_expr(value, pre, ctr),
+        Expr::Index {
+            receiver, index, ..
+        } => {
+            hoist_in_expr(receiver, pre, ctr);
+            hoist_in_expr(index, pre, ctr);
+        }
+        Expr::Range { start, end, .. } => {
+            hoist_in_expr(start, pre, ctr);
+            hoist_in_expr(end, pre, ctr);
+        }
+        Expr::Call { callee, args, .. } => {
+            hoist_in_expr(callee, pre, ctr);
+            for a in args {
+                hoist_in_expr(a, pre, ctr);
+            }
+        }
+        Expr::List { items, .. } | Expr::Tuple { items, .. } => {
+            for it in items {
+                hoist_in_expr(it, pre, ctr);
+            }
+        }
+        Expr::TupleIndex { receiver, .. } => hoist_in_expr(receiver, pre, ctr),
+        Expr::Map { entries, .. } => {
+            for (k, v) in entries {
+                hoist_in_expr(k, pre, ctr);
+                hoist_in_expr(v, pre, ctr);
+            }
+        }
+        Expr::Member { receiver, .. } => hoist_in_expr(receiver, pre, ctr),
+        Expr::Interp { parts, .. } => {
+            for part in parts {
+                if let StrPart::Hole(h) = part {
+                    hoist_in_expr(h, pre, ctr);
+                }
+            }
+        }
+        // The scrutinee is unconditional; arm bodies are conditional (skip).
+        Expr::Match { scrutinee, .. } => hoist_in_expr(scrutinee, pre, ctr),
+        Expr::Object(lit) => {
+            for f in &mut lit.fields {
+                hoist_in_expr(&mut f.value, pre, ctr);
+            }
+            if let Some(s) = &mut lit.spread {
+                hoist_in_expr(s, pre, ctr);
+            }
+        }
+        Expr::Try { expr, .. }
+        | Expr::Spawn { future: expr, .. }
+        | Expr::As { expr, .. }
+        | Expr::TypeTest { expr, .. }
+        | Expr::TypeOf { value: expr, .. }
+        | Expr::FromBytes { blob: expr, .. } => hoist_in_expr(expr, pre, ctr),
+        Expr::Invoke {
+            recv, name, args, ..
+        } => {
+            hoist_in_expr(recv, pre, ctr);
+            hoist_in_expr(name, pre, ctr);
+            hoist_in_expr(args, pre, ctr);
+        }
+        Expr::TypedModuleCall { recv, args, .. } => {
+            hoist_in_expr(recv, pre, ctr);
+            for a in args {
+                hoist_in_expr(a, pre, ctr);
+            }
+        }
+        Expr::FieldSet {
+            receiver, value, ..
+        } => {
+            hoist_in_expr(receiver, pre, ctr);
+            hoist_in_expr(value, pre, ctr);
+        }
+        // A closure is a separate callable; leaves have no sub-expressions; `Await` is handled above.
+        Expr::Closure { .. }
+        | Expr::Await { .. }
+        | Expr::Str { .. }
+        | Expr::Int { .. }
+        | Expr::Float { .. }
+        | Expr::F32 { .. }
+        | Expr::Bool { .. }
+        | Expr::Ident { .. }
+        | Expr::AttributesOf { .. }
+        | Expr::RolesOf { .. } => {}
     }
 }
 
