@@ -502,7 +502,7 @@ impl Lowerer<'_> {
     /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
     /// through the interim discard arm, keeping lowering total.
     fn lower_generator(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar = desugar_generator(stmts, span);
+        let desugar = desugar_generator(stmts, span, self.for_stream_sites);
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -1269,10 +1269,16 @@ struct GeneratorDesugar {
 /// prelude declares it; its in-body `let x = …` is rewritten to a bare assignment that reassigns the
 /// cell), so a value computed before a `yield` survives into the next state. G.3 narrows this with
 /// real liveness. All synthesized nodes carry the generator's `span`; reused source nodes keep theirs.
-fn desugar_generator(body: &[AstStmt], span: Span) -> GeneratorDesugar {
+fn desugar_generator(
+    body: &[AstStmt],
+    span: Span,
+    stream_sites: &HashSet<Span>,
+) -> GeneratorDesugar {
     let mut flat = Flattener {
         blocks: Vec::new(),
         hoisted: Vec::new(),
+        stream_sites,
+        tmp: 0,
     };
     let entry = flat.new_block();
     let exit = flat.lower_seq(body, entry, None);
@@ -1387,13 +1393,26 @@ struct BlockBuf {
 
 /// Flattens a generator body into a CFG of [`BlockBuf`] states (Track G.2). See
 /// [`desugar_generator`].
-struct Flattener {
+struct Flattener<'a> {
     blocks: Vec<BlockBuf>,
     /// Flattened-level locals to hoist into captured cells (deduped, in first-seen order).
     hoisted: Vec<String>,
+    /// The `for`-loop spans whose source is statically an `Iterator<T>` (Track I.2, computed by the
+    /// checker). A `for` across a `yield` (G.4) uses its source directly when it is already an
+    /// iterator, or calls `.iter()` on it when it is a collection.
+    stream_sites: &'a HashSet<Span>,
+    /// Counter for the synthetic `$for`/`$next` cell names a flattened `for` introduces.
+    tmp: usize,
 }
 
-impl Flattener {
+impl Flattener<'_> {
+    /// A fresh index for a synthetic generator cell name (`$for{n}`, `$next{n}`).
+    fn fresh(&mut self) -> usize {
+        let n = self.tmp;
+        self.tmp += 1;
+        n
+    }
+
     /// Allocate a fresh empty state (terminator filled in by the caller; `Done` is a safe default for
     /// an unreachable continuation).
     fn new_block(&mut self) -> usize {
@@ -1408,6 +1427,38 @@ impl Flattener {
     fn hoist(&mut self, name: &str) {
         if !self.hoisted.iter().any(|n| n == name) {
             self.hoisted.push(name.to_string());
+        }
+    }
+
+    /// Emit the binding(s) of a flattened `for` loop's pattern into state `block`, from the
+    /// already-unwrapped `element` expression: a single name binds directly; a tuple pattern
+    /// destructures positionally (reusing the `Destructure` machinery). Each bound name is hoisted to
+    /// a captured cell (`mut_decl: false` reassigns it), so it survives a `yield` in the loop body.
+    fn bind_for_pattern(
+        &mut self,
+        block: usize,
+        pattern: &AstForPattern,
+        element: Expr,
+        span: Span,
+    ) {
+        match pattern {
+            AstForPattern::Single { name, name_span } => {
+                self.hoist(name);
+                self.blocks[block]
+                    .stmts
+                    .push(bare_assign_expr(name, element, *name_span));
+            }
+            AstForPattern::Tuple { names, .. } => {
+                for (name, _) in names {
+                    self.hoist(name);
+                }
+                self.blocks[block].stmts.push(AstStmt::Destructure {
+                    mut_decl: false,
+                    targets: names.clone(),
+                    value: element,
+                    span,
+                });
+            }
         }
     }
 
@@ -1520,6 +1571,55 @@ impl Flattener {
                 self.blocks[body_exit].term = Term::Goto(head);
                 after
             }
+            // A `for` whose body suspends (Track G.4) lowers to the iterator protocol so the source's
+            // cursor becomes part of the machine state: a hoisted cell holds the iterator, and the loop
+            // becomes a flattened `while` over `.next()`. `head` fetches the next element and branches
+            // on `some`/`none`; the body binds the loop variable(s) from the unwrapped element. A `for`
+            // with no `yield` is emitted verbatim (the catch-all below), running whole within one state.
+            AstStmt::For {
+                pattern,
+                iterable,
+                body,
+                span,
+            } if body_has_yield(body) => {
+                let cursor = format!("$for{}", self.fresh());
+                let next = format!("$next{}", self.fresh());
+                self.hoist(&cursor);
+                self.hoist(&next);
+                // Initialize the cursor cell: a collection needs `.iter()`; a source that is already an
+                // `Iterator<T>` (a stream site) is used directly (calling `.iter()` on it is not valid).
+                let source = if self.stream_sites.contains(span) {
+                    iterable.clone()
+                } else {
+                    method_call(iterable.clone(), "iter", *span)
+                };
+                self.blocks[cur]
+                    .stmts
+                    .push(bare_assign_expr(&cursor, source, *span));
+                let head = self.new_block();
+                self.blocks[cur].term = Term::Goto(head);
+                let body_entry = self.new_block();
+                let after = self.new_block();
+                // head: `$next = $cursor.next()`; branch on whether an element remains.
+                self.blocks[head].stmts.push(bare_assign_expr(
+                    &next,
+                    method_call(ident(&cursor, *span), "next", *span),
+                    *span,
+                ));
+                self.blocks[head].term =
+                    Term::Branch(is_some_test(ident(&next, *span), *span), body_entry, after);
+                // body_entry: bind the loop variable(s) from the unwrapped element (the `none` arm of
+                // the `??` is unreachable — we only branch here on `some`), then run the body.
+                let element = Expr::Coalesce {
+                    value: Box::new(ident(&next, *span)),
+                    fallback: Box::new(none_expr(*span)),
+                    span: *span,
+                };
+                self.bind_for_pattern(body_entry, pattern, element, *span);
+                let body_exit = self.lower_seq(body, body_entry, Some((head, after)));
+                self.blocks[body_exit].term = Term::Goto(head);
+                after
+            }
             // No `yield` and no escaping control flow: emit verbatim — it runs whole within this state
             // (a `match`, a self-contained `for`/`while`/`if`). Its own `break`/`continue` target
             // itself, so it needs no state interaction.
@@ -1591,6 +1691,68 @@ fn assign_state(k: i64, span: Span) -> AstStmt {
         name_span: span,
         ty: None,
         value: Expr::Int { value: k, span },
+        span,
+    }
+}
+
+/// `name` — an identifier reference (a hoisted generator cell).
+fn ident(name: &str, span: Span) -> Expr {
+    Expr::Ident {
+        name: name.to_string(),
+        span,
+    }
+}
+
+/// `name = value` — a bare assignment to a hoisted cell (`mut_decl: false`, so it reassigns the
+/// pre-declared binding rather than shadowing it).
+fn bare_assign_expr(name: &str, value: Expr, span: Span) -> AstStmt {
+    AstStmt::Binding {
+        mut_decl: false,
+        name: name.to_string(),
+        name_span: span,
+        ty: None,
+        value,
+        span,
+    }
+}
+
+/// `receiver.method()` — a no-argument method call (used for `.iter()`/`.next()` in a flattened
+/// `for`).
+fn method_call(receiver: Expr, method: &str, span: Span) -> Expr {
+    Expr::Call {
+        callee: Box::new(Expr::Member {
+            receiver: Box::new(receiver),
+            name: method.to_string(),
+            name_span: span,
+            span,
+        }),
+        args: Vec::new(),
+        span,
+    }
+}
+
+/// `match opt { some(_) => true, _ => false }` — whether an `?T` iterator result holds an element. A
+/// generator's flattened `for` branches on this to decide whether to run the body or exit the loop.
+fn is_some_test(opt: Expr, span: Span) -> Expr {
+    Expr::Match {
+        scrutinee: Box::new(opt),
+        arms: vec![
+            lang_ast::MatchArm {
+                pattern: lang_ast::Pattern::Variant {
+                    type_name: None,
+                    variant: "some".to_string(),
+                    bindings: vec![lang_ast::Pattern::Wildcard { span }],
+                    span,
+                },
+                body: Expr::Bool { value: true, span },
+                span,
+            },
+            lang_ast::MatchArm {
+                pattern: lang_ast::Pattern::Wildcard { span },
+                body: Expr::Bool { value: false, span },
+                span,
+            },
+        ],
         span,
     }
 }

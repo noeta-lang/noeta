@@ -1,0 +1,77 @@
+// Track G.4 — a `for` loop may span a `yield`. The loop lowers to the iterator protocol with the
+// source's cursor held as generator machine state (a hoisted cell), so the loop resumes mid-iteration
+// on each pull. Works over a collection (`.iter()` inserted), an already-iterator source (used
+// directly), nested loops, `break`/`continue` across the suspend, tuple destructuring, and composition
+// with the lazy adapters.
+// expect: stdout "[2, 4, 6]"
+// expect: stdout "[0, 2, 4]"
+// expect: stdout "[11, 21, 12, 22]"
+// expect: stdout "[5, 6]"
+// expect: stdout "[0, 2, 4, 6, 99]"
+// expect: stdout "[\"0=a\", \"1=b\"]"
+// expect: stdout "[100, 101, 200, 201]"
+// expect: exit 0
+
+// for over a collection, yielding each element doubled
+fn doubled(xs: List<int>): Iterator<int> {
+    for x in xs {
+        yield x * 2
+    }
+}
+echo doubled([1, 2, 3]).collect()
+
+// for over a range with a conditional yield straddling the suspend
+fn evens(n: int): Iterator<int> {
+    for x in 0..n {
+        if x % 2 == 0 {
+            yield x
+        }
+    }
+}
+echo evens(6).collect()
+
+// nested for across yield — the outer cursor survives the inner loop's suspensions
+fn pairs(): Iterator<int> {
+    for a in [1, 2] {
+        for b in [10, 20] {
+            yield a + b
+        }
+    }
+}
+echo pairs().collect()
+
+// early `break` across the suspend, over an iterator source (used directly, no `.iter()`)
+fn firsts(): Iterator<int> {
+    for x in [5, 6, 7, 8].iter() {
+        if x == 7 { break }
+        yield x
+    }
+}
+echo firsts().collect()
+
+// `continue` across the suspend, plus a trailing yield after the loop
+fn evens_then_99(): Iterator<int> {
+    for x in 0..8 {
+        if x % 2 == 1 { continue }
+        yield x
+    }
+    yield 99
+}
+echo evens_then_99().collect()
+
+// tuple destructuring in a for across yield
+fn keyed(): Iterator<string> {
+    for (i, v) in ["a", "b"].iter().enumerate() {
+        yield "${i}=${v}"
+    }
+}
+echo keyed().collect()
+
+// two yields per iteration, drained lazily by `take` (the for pauses between pulls)
+fn counted(): Iterator<int> {
+    for x in [100, 200, 300] {
+        yield x
+        yield x + 1
+    }
+}
+echo counted().take(4).collect()
