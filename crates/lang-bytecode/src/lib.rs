@@ -52,6 +52,12 @@ pub enum Builtin {
     /// `sleep(ms)` — produce a leaf timer future (Track A.2) that becomes ready once the executor's
     /// logical clock reaches `now + ms`. The first future that can actually report `Pending`.
     Sleep,
+    /// `all(list)` — await every future in `list` concurrently, returning a `List<T>` of their
+    /// results in order (Track A.9). Drives the scheduler until all are ready.
+    All,
+    /// `race(list)` — await the futures in `list` concurrently, returning the first result and
+    /// **cancelling** the losing tasks (Track A.9 + cooperative cancellation A.8).
+    Race,
 }
 
 impl Builtin {
@@ -64,6 +70,8 @@ impl Builtin {
             Builtin::Sum => "sum",
             Builtin::Assert => "assert",
             Builtin::Sleep => "sleep",
+            Builtin::All => "all",
+            Builtin::Race => "race",
         }
     }
 
@@ -76,6 +84,8 @@ impl Builtin {
             "sum" => Some(Builtin::Sum),
             "assert" => Some(Builtin::Assert),
             "sleep" => Some(Builtin::Sleep),
+            "all" => Some(Builtin::All),
+            "race" => Some(Builtin::Race),
             _ => None,
         }
     }

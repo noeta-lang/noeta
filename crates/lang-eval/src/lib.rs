@@ -334,6 +334,12 @@ pub enum Builtin {
     /// `sleep(ms)` — a leaf timer future (Track A.2) ready once the executor clock reaches
     /// `now + ms`. The first future that can report `Pending`.
     Sleep,
+    /// `all(list)` — await every future concurrently, returning their results as a `List<T>` in
+    /// order (Track A.9).
+    All,
+    /// `race(list)` — await concurrently, returning the first result and cancelling the losers
+    /// (Track A.9 + cooperative cancellation A.8).
+    Race,
 }
 
 impl Builtin {
@@ -350,6 +356,8 @@ impl Builtin {
             Builtin::Panic => "panic",
             Builtin::Assert => "assert",
             Builtin::Sleep => "sleep",
+            Builtin::All => "all",
+            Builtin::Race => "race",
         }
     }
 
@@ -367,6 +375,8 @@ impl Builtin {
         Builtin::Panic,
         Builtin::Assert,
         Builtin::Sleep,
+        Builtin::All,
+        Builtin::Race,
     ];
 }
 
@@ -972,6 +982,9 @@ enum Flow {
 struct Task {
     future: Value,
     result: Option<Value>,
+    /// Set when the task is **cancelled** (Track A.8) — e.g. a `race` loser. Cancelled tasks are never
+    /// polled again and count as done for the join; the tree-walker mirror of the VM's flag.
+    cancelled: bool,
 }
 
 /// One program's worth of evaluation state.
@@ -3225,6 +3238,94 @@ impl Interpreter {
                 }
                 Ok(Value::Timer(self.executor.now() + ms as u64))
             }
+            // `all(list)` — await every future concurrently, results as a `List<T>` in order (A.9).
+            Builtin::All => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                let Value::List(repr) = &args[0] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`all` expects a list of futures, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                };
+                let handles: Vec<Value> = (0..repr.len())
+                    .map(|i| repr.get(i).expect("in bounds"))
+                    .collect();
+                let n = handles.len();
+                let mut results: Vec<Option<Value>> = vec![None; n];
+                loop {
+                    for i in 0..n {
+                        if results[i].is_none()
+                            && let Some(v) = self.poll_once(&handles[i], span)?
+                        {
+                            results[i] = Some(v);
+                        }
+                    }
+                    if results.iter().all(Option::is_some) {
+                        let items: Vec<Value> =
+                            results.into_iter().map(|r| r.expect("all ready")).collect();
+                        return Ok(Value::List(ListRepr::Boxed(Rc::new(items))));
+                    }
+                    let progressed = self.poll_all_scopes_round(span)?;
+                    if !progressed && self.executor.advance().is_none() {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `all` awaited futures with no pending timers"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            // `race(list)` — await concurrently, first result wins, losers cancelled (A.9 + A.8).
+            Builtin::Race => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                let Value::List(repr) = &args[0] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`race` expects a list of futures, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                };
+                let handles: Vec<Value> = (0..repr.len())
+                    .map(|i| repr.get(i).expect("in bounds"))
+                    .collect();
+                let n = handles.len();
+                if n == 0 {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "`race` requires at least one future".to_string(),
+                    ));
+                }
+                loop {
+                    for i in 0..n {
+                        if let Some(v) = self.poll_once(&handles[i], span)? {
+                            for (j, hj) in handles.iter().enumerate() {
+                                if j != i {
+                                    self.cancel_task(hj);
+                                }
+                            }
+                            return Ok(v);
+                        }
+                    }
+                    let progressed = self.poll_all_scopes_round(span)?;
+                    if !progressed && self.executor.advance().is_none() {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `race` awaited futures with no pending timers"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
         }
     }
 
@@ -3291,8 +3392,9 @@ impl Interpreter {
         while si < self.scopes.len() {
             let mut ti = 0;
             while ti < self.scopes[si].len() {
-                if self.scopes[si][ti].result.is_none() {
-                    let future = self.scopes[si][ti].future.clone();
+                let task = &self.scopes[si][ti];
+                if task.result.is_none() && !task.cancelled {
+                    let future = task.future.clone();
                     if let Some(value) = self.poll_once(&future, span)? {
                         self.scopes[si][ti].result = Some(value);
                         completed = true;
@@ -3305,6 +3407,18 @@ impl Interpreter {
         Ok(completed)
     }
 
+    /// Cancel the task a handle references (Track A.8) — a `race` loser. Already-completed tasks keep
+    /// their result; otherwise the task is marked cancelled so it is never polled again and counts as
+    /// done for the join. The tree-walker mirror of the VM's `cancel_task`.
+    fn cancel_task(&mut self, handle: &Value) {
+        if let Value::Handle(si, ti) = handle
+            && let Some(task) = self.scopes.get_mut(*si).and_then(|s| s.get_mut(*ti))
+            && task.result.is_none()
+        {
+            task.cancelled = true;
+        }
+    }
+
     /// Join the innermost scope (Track A.3b): drive tasks round-robin until the innermost scope's tasks
     /// all complete. Each round polls **all** open scopes (A.7) so an outer scope's siblings interleave
     /// with the inner join; the loop exits on the innermost scope alone. On a round where nothing
@@ -3314,7 +3428,10 @@ impl Interpreter {
         let si = self.scopes.len() - 1;
         loop {
             let progressed = self.poll_all_scopes_round(span)?;
-            if self.scopes[si].iter().all(|t| t.result.is_some()) {
+            if self.scopes[si]
+                .iter()
+                .all(|t| t.result.is_some() || t.cancelled)
+            {
                 return Ok(());
             }
             if !progressed && self.executor.advance().is_none() {

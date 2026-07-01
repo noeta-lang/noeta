@@ -1,0 +1,22 @@
+// Track A.9 — `all(list)` awaits every future concurrently and returns their results as a `List<T>`
+// **in list order** (not completion order). The tasks run concurrently: at t=0 all three start; the
+// shorter sleeps finish first (b at t=1, a at t=2, c at t=3), but the returned list keeps input order.
+// expect: stdout "a start"
+// expect: stdout "b start"
+// expect: stdout "c start"
+// expect: stdout "b end"
+// expect: stdout "a end"
+// expect: stdout "c end"
+// expect: stdout "all=2,1,3"
+// expect: exit 0
+async fn work(name: string, ms: int): int {
+    echo name ~ " start"
+    sleep(ms).await
+    echo name ~ " end"
+    return ms
+}
+concurrent {
+    hs = [spawn work("a", 2), spawn work("b", 1), spawn work("c", 3)]
+    xs = all(hs)
+    echo "all=" ~ xs.join(",")
+}

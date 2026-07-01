@@ -249,6 +249,13 @@ struct Vm<'m> {
 struct Task {
     future: Value,
     result: Option<Value>,
+    /// Set when the task is **cancelled** (Track A.8) — e.g. a `race` loser. A cancelled task is
+    /// never polled again and counts as done for the join; its future is reclaimed by `ScopeEnd`
+    /// exactly like a completed task's, so cancellation frees no differently than a normal join (the
+    /// leak oracle confirms residency 0). It stops cooperatively at its last suspension. (Running user
+    /// `destruct` on an async task's captured locals is a separate, pre-existing gap — see
+    /// `plans/deferred.md` — that affects completed and cancelled tasks alike.)
+    cancelled: bool,
 }
 
 /// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
@@ -3680,6 +3687,7 @@ impl<'m> Vm<'m> {
                         self.scopes[scope_idx].push(Task {
                             future,
                             result: None,
+                            cancelled: false,
                         });
                         Value::make_handle(scope_idx as u32, task_idx as u32)
                     };
@@ -4359,8 +4367,9 @@ impl<'m> Vm<'m> {
         while si < self.scopes.len() {
             let mut ti = 0;
             while ti < self.scopes[si].len() {
-                if self.scopes[si][ti].result.is_none() {
-                    let future = self.scopes[si][ti].future;
+                let task = &self.scopes[si][ti];
+                if task.result.is_none() && !task.cancelled {
+                    let future = task.future;
                     if let Poll::Ready(value) = self.poll_once(future, span)? {
                         self.scopes[si][ti].result = Some(value);
                         completed = true;
@@ -4373,6 +4382,23 @@ impl<'m> Vm<'m> {
         Ok(completed)
     }
 
+    /// Cancel the task a handle references (Track A.8) — a `race` loser. A task that has already
+    /// completed keeps its result; otherwise it is marked cancelled so the scheduler stops polling it
+    /// and the join treats it as done. Its future is *not* released here — `ScopeEnd` reclaims it with
+    /// the rest (so cancellation frees identically to a normal join, keeping both backends and the leak
+    /// oracle in agreement). Cooperative: the task never resumes past its last suspension.
+    fn cancel_task(&mut self, handle: Value) {
+        if let Some((si, ti)) = handle.handle_parts()
+            && let Some(task) = self
+                .scopes
+                .get_mut(si as usize)
+                .and_then(|s| s.get_mut(ti as usize))
+            && task.result.is_none()
+        {
+            task.cancelled = true;
+        }
+    }
+
     /// Join the innermost scope (Track A.3b): drive tasks round-robin until the innermost scope's tasks
     /// all complete. Each round polls **all** open scopes (A.7) so an outer scope's siblings interleave
     /// with the inner join; the loop exits on the *innermost* scope alone (outer scopes are joined by
@@ -4382,7 +4408,10 @@ impl<'m> Vm<'m> {
         let si = self.scopes.len() - 1;
         loop {
             let progressed = self.poll_all_scopes_round(span)?;
-            if self.scopes[si].iter().all(|t| t.result.is_some()) {
+            if self.scopes[si]
+                .iter()
+                .all(|t| t.result.is_some() || t.cancelled)
+            {
                 return Ok(());
             }
             if !progressed && self.executor.advance().is_none() {
@@ -4860,6 +4889,101 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 Ok(Value::make_timer(self.executor.now() + ms as u64))
+            }
+            // `all(list)` — await every future concurrently, returning a `List<T>` of results in order
+            // (Track A.9). Drives the scheduler until each element is ready, collecting its (retained)
+            // result; the collected list is a fresh owned value.
+            Builtin::All => {
+                self.check_arity(builtin, args, 1, span)?;
+                if !args[0].is_list() {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`all` expects a list of futures, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                }
+                let list = args[0];
+                let n = list.list_len().expect("a list has a length");
+                let mut results: Vec<Option<Value>> = vec![None; n];
+                loop {
+                    let mut i = 0;
+                    while i < n {
+                        if results[i].is_none() {
+                            let h = list.list_get(i).expect("in bounds");
+                            if let Poll::Ready(v) = self.poll_once(h, span)? {
+                                results[i] = Some(v);
+                            }
+                        }
+                        i += 1;
+                    }
+                    if results.iter().all(Option::is_some) {
+                        let items = results.into_iter().map(|r| r.expect("all ready")).collect();
+                        return Ok(Value::list(items));
+                    }
+                    let progressed = self.poll_all_scopes_round(span)?;
+                    if !progressed && self.executor.advance().is_none() {
+                        for v in results.into_iter().flatten() {
+                            release(v);
+                        }
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `all` awaited futures with no pending timers"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            // `race(list)` — await concurrently, returning the first ready result and cancelling the
+            // losing tasks (Track A.9 + A.8). Ties break deterministically by list order, so both
+            // backends agree.
+            Builtin::Race => {
+                self.check_arity(builtin, args, 1, span)?;
+                if !args[0].is_list() {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`race` expects a list of futures, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                }
+                let list = args[0];
+                let n = list.list_len().expect("a list has a length");
+                if n == 0 {
+                    return Err(self.error(
+                        DiagnosticCode::Panic,
+                        span,
+                        "`race` requires at least one future".to_string(),
+                    ));
+                }
+                loop {
+                    for i in 0..n {
+                        let h = list.list_get(i).expect("in bounds");
+                        if let Poll::Ready(v) = self.poll_once(h, span)? {
+                            for j in 0..n {
+                                if j != i {
+                                    let hj = list.list_get(j).expect("in bounds");
+                                    self.cancel_task(hj);
+                                }
+                            }
+                            return Ok(v);
+                        }
+                    }
+                    let progressed = self.poll_all_scopes_round(span)?;
+                    if !progressed && self.executor.advance().is_none() {
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `race` awaited futures with no pending timers"
+                                .to_string(),
+                        ));
+                    }
+                }
             }
         }
     }

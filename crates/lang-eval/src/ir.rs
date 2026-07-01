@@ -1208,6 +1208,7 @@ impl Interpreter {
                 self.scopes[scope_idx].push(crate::Task {
                     future,
                     result: None,
+                    cancelled: false,
                 });
                 Ok(Value::Handle(scope_idx, task_idx))
             }

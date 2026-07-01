@@ -1,0 +1,21 @@
+// Track A.9 + A.8 — `race(list)` awaits concurrently, returns the FIRST result, and cancels the
+// losers. `y` (sleep 1) finishes first at t=1 and wins; `x` (sleep 3) and `z` (sleep 2) are cancelled
+// — cooperatively, so they never resume past their `sleep` and their "end" lines never print. Ties
+// break by list order, so the sandbox is deterministic and both backends agree.
+// expect: stdout "x start"
+// expect: stdout "y start"
+// expect: stdout "z start"
+// expect: stdout "y end"
+// expect: stdout "winner=1"
+// expect: exit 0
+async fn work(name: string, ms: int): int {
+    echo name ~ " start"
+    sleep(ms).await
+    echo name ~ " end"
+    return ms
+}
+concurrent {
+    rs = [spawn work("x", 3), spawn work("y", 1), spawn work("z", 2)]
+    w = race(rs)
+    echo "winner=" ~ w
+}

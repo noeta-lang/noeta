@@ -61,6 +61,19 @@ fn opt(t: Type) -> Type {
     Type::Option(Box::new(t))
 }
 
+/// Given the type of an `all`/`race` argument — expected to be `List<Future<T>>` — extract `T`
+/// (Track A.9). A hole for anything that is not a list of futures (the prelude stays permissive; a
+/// genuine misuse surfaces at runtime, as with the other prelude builtins).
+fn future_elem(arg: Option<&Type>) -> Type {
+    match arg {
+        Some(Type::List(elem)) => match elem.as_ref() {
+            Type::Named(n, targs) if n == FUTURE => targs.first().cloned().unwrap_or(Type::Unknown),
+            _ => Type::Unknown,
+        },
+        _ => Type::Unknown,
+    }
+}
+
 /// The return type of a method call on a **built-in** receiver kind (`receiver.name(args)`), or
 /// `None` if `name` is not a known built-in method on that kind. User-defined method returns are
 /// resolved by the checker itself (it owns the class→method table).
@@ -340,6 +353,10 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         // `sleep(ms)` — a leaf timer future (Track A.2). Returns `Future<void>`, so `sleep(ms).await`
         // yields `void`; awaiting it suspends until the executor clock reaches the deadline.
         "sleep" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
+        // `all(List<Future<T>>) -> List<T>` — await every future, results in order (Track A.9).
+        "all" => list(future_elem(args.first())),
+        // `race(List<Future<T>>) -> T` — the first result; the losers are cancelled (Track A.9).
+        "race" => future_elem(args.first()),
         _ => return None,
     })
 }
