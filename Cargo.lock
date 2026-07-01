@@ -842,6 +842,7 @@ dependencies = [
 name = "lang-stdlib"
 version = "0.0.0"
 dependencies = [
+ "criterion",
  "serde_json",
 ]
 

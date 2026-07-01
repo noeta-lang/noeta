@@ -9,5 +9,12 @@ rust-version.workspace = true
 [dependencies]
 serde_json = { workspace = true }
 
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[bench]]
+name = "vec3_kernels"
+harness = false
+
 [lints]
 workspace = true

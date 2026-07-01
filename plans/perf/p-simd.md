@@ -58,6 +58,23 @@ record before/after in this doc.
 analogous bulk kernel, apply the same swap; otherwise note it out of scope. The differential is
 unaffected by construction (both backends call the one kernel).
 
+## Results
+
+Bench: `crates/lang-stdlib/benches/vec3_kernels.rs` — the kernels timed **directly** on flat `f32`
+byte buffers (the clearest SIMD signal; the language-level `vm_vec_add_all` bench is dominated by
+list-build/marshal cost, so a kernel win is diluted there). `n` = element count (each element = 3
+`f32` = 12 bytes). Criterion median, `cargo bench -p lang-stdlib --bench vec3_kernels`.
+
+**S1 — scalar baseline** (rustc 1.96.0, `-O`, LLVM autovectorization only):
+
+| kernel | n=1k | n=10k | n=100k |
+|---|---|---|---|
+| `add_buffers`    | 2.68 µs | 30.1 µs | 311 µs |
+| `sub_buffers`    | 2.90 µs | 29.6 µs | 328 µs |
+| `scale_buffer`   | 1.72 µs | 16.9 µs | 174 µs |
+| `dot_buffers`    | 0.729 µs | 7.49 µs | 74.6 µs |
+| `length_buffer`  | 1.12 µs | 12.0 µs | 113 µs |
+
 ## Oracle posture / risk
 
 - **Behaviour invisible:** the kernel's output bytes are unchanged; `RunResult` identical; differential
