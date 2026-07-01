@@ -1,0 +1,19 @@
+// Track A.3b — fire-and-join: tasks `spawn`ed for effect (handles discarded) are still joined at the
+// closing `}` — the block cannot be exited until both finish, so nothing dangles. They interleave by
+// deadline (b's shorter sleep completes first).
+// expect: stdout "a start"
+// expect: stdout "b start"
+// expect: stdout "b end"
+// expect: stdout "a end"
+// expect: stdout "all done"
+// expect: exit 0
+async fn work(name: string, ms: int): void {
+    echo name ~ " start"
+    sleep(ms).await
+    echo name ~ " end"
+}
+concurrent {
+    spawn work("a", 2)
+    spawn work("b", 1)
+}
+echo "all done"

@@ -1217,6 +1217,14 @@ impl<'m> FnCompiler<'m> {
                     .push(site);
                 Ok(())
             }
+            Stmt::ScopeBegin { .. } => {
+                self.code.push(Op::ScopeBegin);
+                Ok(())
+            }
+            Stmt::ScopeEnd { span } => {
+                self.code.push(Op::ScopeEnd { span: *span });
+                Ok(())
+            }
             Stmt::Match {
                 scrutinee,
                 arms,
@@ -2360,6 +2368,16 @@ impl<'m> FnCompiler<'m> {
             Rvalue::Pending { .. } => {
                 // The async pending sentinel (Track A.3).
                 self.code.push(Op::LoadPending { dst });
+                Ok(())
+            }
+            Rvalue::Spawn { future, span } => {
+                // Register the future as a task in the current scope, yielding a handle (Track A.3b).
+                let src = self.atom_reg(future)?;
+                self.code.push(Op::Spawn {
+                    dst,
+                    src,
+                    span: *span,
+                });
                 Ok(())
             }
             Rvalue::FromBytes { blob, layout, span } => {

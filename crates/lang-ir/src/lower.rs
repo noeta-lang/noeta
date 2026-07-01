@@ -447,13 +447,16 @@ impl Lowerer<'_> {
             // A standalone `impl` and a `namespace` have no runtime effect in the tree-walker
             // (both are `Ok(Flow::Normal)` no-ops), so they lower to nothing.
             AstStmt::Impl(_) | AstStmt::Namespace { .. } => Ok(()),
-            // `concurrent { }` (Track A.3b) is gated as "not yet executable" at check (A.3b.1), so a
-            // clean program never lowers one. To keep lowering total (the property test lowers without
-            // checking), lower the body statements inline — replaced by the real scope ops in A.3b.2.
-            AstStmt::Concurrent { body, .. } => {
+            // `concurrent { }` (Track A.3b) lowers to a scope-bracketed body: `ScopeBegin`, the body
+            // statements (their `spawn`s register tasks; their `.await`s drive the scope), then
+            // `ScopeEnd` (which joins every remaining task). The body runs inline in the enclosing
+            // frame — the scope is a runtime stack, not a new callable.
+            AstStmt::Concurrent { body, span } => {
+                out.push(Stmt::ScopeBegin { span: *span });
                 for s in body {
                     self.lower_stmt(s, out)?;
                 }
+                out.push(Stmt::ScopeEnd { span: *span });
                 Ok(())
             }
             // A dev-tier block reaching lowering is an *inactive* residual (object-model slice 6):
@@ -996,11 +999,20 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
-            // `spawn e` (Track A.3b) is gated as "not yet executable" at check (A.3b.1), so a clean
-            // program never lowers one. To keep lowering total, lower the future operand and pass it
-            // through (identity) — replaced by the real `Op::Spawn` (register a task, return a handle)
-            // in A.3b.2.
-            Expr::Spawn { future, .. } => self.lower_expr(future, out),
+            // `spawn e` (Track A.3b): register the future `e` as a task in the current scope and yield
+            // a handle (itself a `Future<T>`). The future operand is evaluated first (an `async fn`
+            // call producing the lazy state machine), then handed to `Rvalue::Spawn`.
+            Expr::Spawn { future, span } => {
+                let future = self.lower_expr(future, out)?;
+                Ok(self.emit(
+                    out,
+                    Rvalue::Spawn {
+                        future,
+                        span: *span,
+                    },
+                    *span,
+                ))
+            }
             Expr::Coalesce {
                 value,
                 fallback,

@@ -305,11 +305,13 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::MakeGen { dst, src }
         | Op::MakeFuture { dst, src }
         | Op::RunFuture { dst, src, .. }
-        | Op::PollFuture { dst, src, .. } => {
+        | Op::PollFuture { dst, src, .. }
+        | Op::Spawn { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
         Op::LoadPending { dst } => f.def = Some(*dst),
+        Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => f.def = Some(*dst),
         Op::RolesOf { dst } => f.def = Some(*dst),
         Op::TypeOf { dst, src } => {
@@ -734,11 +736,13 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::MakeGen { dst, src }
         | Op::MakeFuture { dst, src }
         | Op::RunFuture { dst, src, .. }
-        | Op::PollFuture { dst, src, .. } => {
+        | Op::PollFuture { dst, src, .. }
+        | Op::Spawn { dst, src, .. } => {
             m(dst);
             m(src);
         }
         Op::LoadPending { dst } => m(dst),
+        Op::ScopeBegin | Op::ScopeEnd { .. } => {}
         Op::AttributesOf { dst, .. } => m(dst),
         Op::RolesOf { dst } => m(dst),
         Op::TypeOf { dst, src } => {

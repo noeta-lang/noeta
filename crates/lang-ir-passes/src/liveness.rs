@@ -159,12 +159,15 @@ fn analyze_stmt(stmt: &Stmt, live: &mut VarSet) -> StmtLiveness {
         }
         // `break`/`continue` use no variables; the loop's structural analysis routes liveness. A
         // `Drop`/`DropVar` is a release, not a use (and the analysis runs before drops are inserted).
-        Stmt::Break { .. } | Stmt::Continue { .. } | Stmt::Drop(_) | Stmt::DropVar { .. } => {
-            StmtLiveness {
-                dies_here: VarSet::new(),
-                sub: Vec::new(),
-            }
-        }
+        Stmt::Break { .. }
+        | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
+        | Stmt::Drop(_)
+        | Stmt::DropVar { .. } => StmtLiveness {
+            dies_here: VarSet::new(),
+            sub: Vec::new(),
+        },
         Stmt::If {
             cond,
             then_block,
@@ -472,6 +475,8 @@ fn collect_stmt_vars(stmt: &Stmt, out: &mut VarSet) {
         Stmt::Decl(_)
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
         | Stmt::Drop(_)
         | Stmt::DropVar { .. } => {}
     }
@@ -564,6 +569,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::RunFuture { future, .. } => f(future),
         Rvalue::PollFuture { future, .. } => f(future),
         Rvalue::Pending { .. } => {}
+        Rvalue::Spawn { future, .. } => f(future),
         // `from_bytes::<T>(blob)` reads its byte operand (P-PACK 4.4).
         Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {

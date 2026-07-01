@@ -1472,16 +1472,6 @@ impl Checker {
                         ),
                     );
                 }
-                // A.3b.1 interim gate: the surface + typing land here, but the cooperative scheduler
-                // is A.3b.2 — so a well-formed `concurrent` block type-checks yet cannot run yet.
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::AsyncMisuse,
-                        *span,
-                        "`concurrent { }` is not yet executable (Track A.3b.2)".to_string(),
-                    )
-                    .with_help("structured-concurrency execution lands in the next slice"),
-                );
                 // Inside the scope, `spawn` is legal; check the body with the depth raised.
                 self.concurrent_depth += 1;
                 self.check_block(body, env);

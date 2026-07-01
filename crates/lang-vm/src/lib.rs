@@ -216,8 +216,21 @@ struct Vm<'m> {
     /// tree-walker's by construction, so the differential holds. See the eval backend's field of the
     /// same name.
     executor: lang_stdlib::SandboxExecutor,
+    /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
+    /// each a list of the tasks `spawn`ed in it. The scope owns one reference to each task's future (and
+    /// its result once ready), released when the scope is joined and popped. Mirrors the tree-walker's
+    /// `scopes`; both round-robin identically, so the differential holds by construction.
+    scopes: Vec<Vec<Task>>,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+}
+
+/// A spawned task in a structured-concurrency scope (Track A.3b): its future (an `async fn` state
+/// machine) and its completion result once driven to ready (`None` while pending). The scope owns a
+/// reference to `future`, and to `result` once set; both are released when the scope is joined+popped.
+struct Task {
+    future: Value,
+    result: Option<Value>,
 }
 
 /// The outcome of polling a future once (Track A.3): ready with a value, or still pending.
@@ -365,6 +378,7 @@ fn execute_with_collector(
         next_id: 1,
         host,
         executor: lang_stdlib::SandboxExecutor::new(),
+        scopes: Vec::new(),
         stdout: String::new(),
         diagnostics: Vec::new(),
     };
@@ -3611,6 +3625,46 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, Value::pending());
                     frames[top].pc += 1;
                 }
+                Op::ScopeBegin => {
+                    // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
+                    self.scopes.push(Vec::new());
+                    frames[top].pc += 1;
+                }
+                Op::Spawn { dst, src, .. } => {
+                    // Register the future as a task in the current scope (retaining the scope's own
+                    // reference), yielding a handle that references it by `(scope, task)`. A `spawn`
+                    // outside any scope is E0041 at check, so `self.scopes` is non-empty here.
+                    let future = frames[top].regs[*src as usize];
+                    let handle = if self.scopes.is_empty() {
+                        retain(future);
+                        future
+                    } else {
+                        retain(future);
+                        let scope_idx = self.scopes.len() - 1;
+                        let task_idx = self.scopes[scope_idx].len();
+                        self.scopes[scope_idx].push(Task {
+                            future,
+                            result: None,
+                        });
+                        Value::make_handle(scope_idx as u32, task_idx as u32)
+                    };
+                    set_reg(&mut frames[top].regs, *dst, handle);
+                    frames[top].pc += 1;
+                }
+                Op::ScopeEnd { span } => {
+                    // Join the scope (drive every task to completion), then pop it and release the
+                    // tasks' owned futures and results.
+                    self.join_scope(*span)?;
+                    if let Some(scope) = self.scopes.pop() {
+                        for task in scope {
+                            release(task.future);
+                            if let Some(result) = task.result {
+                                release(result);
+                            }
+                        }
+                    }
+                    frames[top].pc += 1;
+                }
                 Op::AttributesOf { dst, type_name } => {
                     let result = self.materialize_attributes(type_name);
                     set_reg(&mut frames[top].regs, *dst, result);
@@ -4208,6 +4262,22 @@ impl<'m> Vm<'m> {
             self.executor.register_timer(deadline);
             return Ok(Poll::Pending);
         }
+        // A task handle (Track A.3b): ready iff its task has a stored result — polling a handle only
+        // *reads* the task (the scheduler polls the task itself), so it retains and hands back the
+        // stored result. A stale handle (its scope popped) reads as ready-unit, defensively.
+        if let Some((si, ti)) = future.handle_parts() {
+            let (si, ti) = (si as usize, ti as usize);
+            return Ok(match self.scopes.get(si).and_then(|s| s.get(ti)) {
+                Some(task) => match task.result {
+                    Some(result) => {
+                        retain(result);
+                        Poll::Ready(result)
+                    }
+                    None => Poll::Pending,
+                },
+                None => Poll::Ready(Value::unit()),
+            });
+        }
         match future.future_step() {
             Some(step) => {
                 let result = self.call_value(step, vec![Value::unit()], span);
@@ -4226,24 +4296,68 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Drive an awaited future to completion via the executor (Track A.2/A.3 — top-level `.await`).
-    /// Polls; on `Pending`, advances logical time to the next timer and re-polls; a pending future with
-    /// nothing to advance is a deterministic deadlock. Returns the completion value (owned). The
-    /// caller's register keeps owning the input future.
+    /// Poll every not-yet-complete task in scope `si` once, storing any ready results; returns whether
+    /// any task completed this round. Re-reads the task count each step, so tasks `spawn`ed mid-round
+    /// are polled in the same round. The stored result carries the scope's owning reference.
+    fn poll_scope_round(&mut self, si: usize, span: Span) -> Result<bool, Abort> {
+        let mut completed = false;
+        let mut ti = 0;
+        while ti < self.scopes[si].len() {
+            if self.scopes[si][ti].result.is_none() {
+                let future = self.scopes[si][ti].future;
+                if let Poll::Ready(value) = self.poll_once(future, span)? {
+                    self.scopes[si][ti].result = Some(value);
+                    completed = true;
+                }
+            }
+            ti += 1;
+        }
+        Ok(completed)
+    }
+
+    /// Join the innermost scope (Track A.3b): drive its tasks round-robin until all complete. On a
+    /// round where nothing completed, advance the logical clock; a pending scope with no timer to
+    /// advance is a deterministic deadlock.
+    fn join_scope(&mut self, span: Span) -> Result<(), Abort> {
+        let si = self.scopes.len() - 1;
+        loop {
+            let progressed = self.poll_scope_round(si, span)?;
+            if self.scopes[si].iter().all(|t| t.result.is_some()) {
+                return Ok(());
+            }
+            if !progressed && self.executor.advance().is_none() {
+                return Err(self.error(
+                    DiagnosticCode::Panic,
+                    span,
+                    "async deadlock: a `concurrent` task is stuck with no pending timers"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    /// Drive an awaited future to completion via the executor (Track A.2/A.3 — a `.await` in inlined
+    /// context: the top level or a `concurrent` block body). Polls the target; if a `concurrent` scope
+    /// is open, also drives that scope's sibling tasks one round each iteration so they interleave;
+    /// advances the logical clock when nothing progresses; deadlocks if nothing can advance. Returns the
+    /// completion value (owned). The caller's register keeps owning the input future.
     fn drive_future(&mut self, future: Value, span: Span) -> Result<Value, Abort> {
         loop {
-            match self.poll_once(future, span)? {
-                Poll::Ready(value) => return Ok(value),
-                Poll::Pending => {
-                    if self.executor.advance().is_none() {
-                        return Err(self.error(
-                            DiagnosticCode::Panic,
-                            span,
-                            "async deadlock: awaited a pending future with no pending timers"
-                                .to_string(),
-                        ));
-                    }
-                }
+            if let Poll::Ready(value) = self.poll_once(future, span)? {
+                return Ok(value);
+            }
+            let progressed = if self.scopes.is_empty() {
+                false
+            } else {
+                let si = self.scopes.len() - 1;
+                self.poll_scope_round(si, span)?
+            };
+            if !progressed && self.executor.advance().is_none() {
+                return Err(self.error(
+                    DiagnosticCode::Panic,
+                    span,
+                    "async deadlock: awaited a pending future with no pending timers".to_string(),
+                ));
             }
         }
     }

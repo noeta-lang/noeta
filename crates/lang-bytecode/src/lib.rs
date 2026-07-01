@@ -584,6 +584,20 @@ pub enum Op {
     LoadPending {
         dst: Reg,
     },
+    /// Open a structured-concurrency scope (Track A.3b) — the start of a lowered `concurrent { }`.
+    ScopeBegin,
+    /// `dst = spawn(src)` (Track A.3b): register the future in `src` as a task in the current scope and
+    /// yield a handle (a `Future<T>`). Carries a span (the operand must be a future).
+    Spawn {
+        dst: Reg,
+        src: Reg,
+        span: Span,
+    },
+    /// Close the current concurrency scope (Track A.3b): drive every task spawned in it to completion
+    /// (the join), then pop the scope. Carries a span (a task body can fault at the join).
+    ScopeEnd {
+        span: Span,
+    },
     /// `attributes_of::<T>()`: `dst = List<Attributed<T>>` — the `#[T(...)]` attributes from the
     /// module manifest, each materialized into a `T` struct and paired with its target. `type_name`
     /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
@@ -1302,6 +1316,11 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::LoadPending { dst } => {
             format!("LoadPending r{dst} <- pending")
         }
+        Op::ScopeBegin => "ScopeBegin".to_string(),
+        Op::Spawn { dst, src, .. } => {
+            format!("Spawn       r{dst} <- spawn r{src}")
+        }
+        Op::ScopeEnd { .. } => "ScopeEnd".to_string(),
         Op::MakeGen { dst, src } => {
             format!("MakeGen     r{dst} <- gen r{src}")
         }

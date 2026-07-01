@@ -190,6 +190,8 @@ fn collect_bindings_stmt(stmt: &Stmt, outer: &HashSet<String>, local: &mut HashS
         | Stmt::Return { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
         | Stmt::Drop(_)
         | Stmt::DropVar { .. }
         | Stmt::Decl(_) => {}
@@ -321,6 +323,8 @@ fn collect_refs_stmt(
         Stmt::Decl(_)
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
         | Stmt::Drop(_)
         | Stmt::DropVar { .. } => {}
     }
@@ -413,6 +417,8 @@ fn collect_nested_frees_stmt(
         | Stmt::Return { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
         | Stmt::Drop(_)
         | Stmt::DropVar { .. }
         | Stmt::Decl(_) => {}
@@ -514,6 +520,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::RunFuture { future, .. } => f(future),
         Rvalue::PollFuture { future, .. } => f(future),
         Rvalue::Pending { .. } => {}
+        Rvalue::Spawn { future, .. } => f(future),
         Rvalue::FromBytes { blob, .. } => f(blob),
         Rvalue::Invoke {
             recv, name, args, ..

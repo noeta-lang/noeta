@@ -240,6 +240,11 @@ pub(crate) enum Payload {
     /// consults the injected [`lang_stdlib::SandboxExecutor`]'s clock; it reports `Pending` until the
     /// clock reaches the deadline. This is the first future that can actually suspend.
     Timer(u64),
+    /// A **task handle** (Track A.3b): the `Future<T>` `spawn e` returns. It references a task by its
+    /// `(scope index, task index)` position in the backend's concurrency-scope stack; polling it reads
+    /// the task's stored result (ready) or reports pending. A GC leaf — the two indices are plain
+    /// integers; the task's future/result are owned by the scope, not the handle.
+    Handle(u32, u32),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -492,6 +497,7 @@ pub(crate) fn free(value: Value) {
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
         | Payload::Timer(_)
+        | Payload::Handle(..)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -651,6 +657,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
         | Payload::Timer(_)
+        | Payload::Handle(..)
         | Payload::FileHandle(_) => {}
     }
     out

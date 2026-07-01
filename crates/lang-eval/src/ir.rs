@@ -215,6 +215,18 @@ impl Interpreter {
             }
             lang_ir::Stmt::Break { .. } => Ok(Flow::Break),
             lang_ir::Stmt::Continue { .. } => Ok(Flow::Continue),
+            // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
+            lang_ir::Stmt::ScopeBegin { .. } => {
+                self.scopes.push(Vec::new());
+                Ok(Flow::Normal)
+            }
+            // Close the scope: drive every remaining task to completion (the join), then pop it —
+            // releasing the tasks' futures and results (automatic under `Rc`).
+            lang_ir::Stmt::ScopeEnd { span } => {
+                self.join_scope(*span)?;
+                self.scopes.pop();
+                Ok(Flow::Normal)
+            }
             lang_ir::Stmt::If {
                 cond,
                 then_block,
@@ -1162,6 +1174,24 @@ impl Interpreter {
             }
             // The async pending sentinel (Track A.3) — what a step returns when it suspends.
             lang_ir::Rvalue::Pending { .. } => Ok(Value::Pending),
+            // `spawn e` (Track A.3b): register the future as a task in the current scope, yielding a
+            // handle referencing it by `(scope, task)`. Lazy — the task is not polled until the scope
+            // is driven (a `.await` inside the block or the join at `}`). A `spawn` outside any scope is
+            // E0041 at check, so `self.scopes` is non-empty here for a clean program.
+            lang_ir::Rvalue::Spawn { future, .. } => {
+                let future = self.eval_ir_atom(future, frame)?;
+                if self.scopes.is_empty() {
+                    // Unreachable for a checked program (E0041); keep evaluation total.
+                    return Ok(future);
+                }
+                let scope_idx = self.scopes.len() - 1;
+                let task_idx = self.scopes[scope_idx].len();
+                self.scopes[scope_idx].push(crate::Task {
+                    future,
+                    result: None,
+                });
+                Ok(Value::Handle(scope_idx, task_idx))
+            }
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),
             lang_ir::Rvalue::Invoke {
                 recv,

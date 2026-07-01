@@ -451,6 +451,8 @@ fn rewrite_stmt(
         | Stmt::Return { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
         | Stmt::Drop(_)
         | Stmt::DropVar { .. } => stmt.clone(),
     }
@@ -809,6 +811,8 @@ fn count_binds_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>, excluded: &m
         | Stmt::Return { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
         | Stmt::Drop(_)
         | Stmt::DropVar { .. }
         | Stmt::Decl(_) => {}

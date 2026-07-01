@@ -966,6 +966,14 @@ enum Flow {
     Continue,
 }
 
+/// A spawned task in a structured-concurrency scope (Track A.3b): its future (an `async fn` state
+/// machine) and its completion result once driven to `Ready` (`None` while still pending). A handle
+/// referencing this task reads `result`; the scheduler polls `future` and fills `result`.
+struct Task {
+    future: Value,
+    result: Option<Value>,
+}
+
 /// One program's worth of evaluation state.
 struct Interpreter {
     stdout: String,
@@ -985,6 +993,12 @@ struct Interpreter {
     /// `sleep(ms)` and drive-to-completion `.await` consult. Fresh per run, identical to the VM's by
     /// construction (both start at zero and advance the same way), so the differential holds.
     executor: lang_stdlib::SandboxExecutor,
+    /// The structured-concurrency scope stack (Track A.3b): one entry per open `concurrent { }` block,
+    /// each a list of the tasks `spawn`ed in it. `spawn` appends; `.await` inside the block and the
+    /// join at `}` drive the tasks round-robin. A handle references a task by its `(scope, task)`
+    /// position here. Mirrors the VM's `scopes` field; both round-robin identically, so the differential
+    /// holds by construction.
+    scopes: Vec<Vec<Task>>,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `lang_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
@@ -1041,6 +1055,7 @@ impl Interpreter {
             scope: global,
             host,
             executor: lang_stdlib::SandboxExecutor::new(),
+            scopes: Vec::new(),
             reflection: lang_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
         }
@@ -3206,19 +3221,78 @@ impl Interpreter {
                     Ok(Some(result))
                 }
             }
+            // A task handle (Track A.3b): ready iff its task has a stored result — polling a handle only
+            // *reads* the task (the scheduler polls the task itself). A stale handle (its scope popped)
+            // reads as ready-unit, defensively (structured use awaits within the scope).
+            Value::Handle(si, ti) => {
+                let (si, ti) = (*si, *ti);
+                match self.scopes.get(si).and_then(|s| s.get(ti)) {
+                    Some(task) => Ok(task.result.clone()),
+                    None => Ok(Some(Value::Unit)),
+                }
+            }
             other => Ok(Some(other.clone())),
         }
     }
 
-    /// Drive an awaited future to completion via the executor (Track A.2/A.3 — top-level `.await`).
-    /// Polls; on pending, advances logical time to the next timer and re-polls; a pending future with
-    /// nothing to advance is a deterministic deadlock.
+    /// Poll every not-yet-complete task in scope `si` once, storing any `Ready` results; returns
+    /// whether any task completed this round (used to decide whether to advance the clock). Re-reads the
+    /// task count each step, so tasks `spawn`ed mid-round are polled in the same round.
+    fn poll_scope_round(&mut self, si: usize, span: Span) -> Eval<bool> {
+        let mut completed = false;
+        let mut ti = 0;
+        while ti < self.scopes[si].len() {
+            if self.scopes[si][ti].result.is_none() {
+                let future = self.scopes[si][ti].future.clone();
+                if let Some(value) = self.poll_once(&future, span)? {
+                    self.scopes[si][ti].result = Some(value);
+                    completed = true;
+                }
+            }
+            ti += 1;
+        }
+        Ok(completed)
+    }
+
+    /// Join scope `si` (Track A.3b): drive its tasks round-robin until all complete. On a round where
+    /// nothing completed, advance the logical clock to the next timer; a pending scope with no timer to
+    /// advance is a deterministic deadlock.
+    fn join_scope(&mut self, span: Span) -> Eval<()> {
+        let si = self.scopes.len() - 1;
+        loop {
+            let progressed = self.poll_scope_round(si, span)?;
+            if self.scopes[si].iter().all(|t| t.result.is_some()) {
+                return Ok(());
+            }
+            if !progressed && self.executor.advance().is_none() {
+                return Err(self.runtime_error(
+                    DiagnosticCode::Panic,
+                    span,
+                    "async deadlock: a `concurrent` task is stuck with no pending timers"
+                        .to_string(),
+                ));
+            }
+        }
+    }
+
+    /// Drive an awaited future to completion via the executor (Track A.2/A.3 — a `.await` in inlined
+    /// context: the top level or a `concurrent` block body). Polls the target; if a `concurrent` scope
+    /// is open, also drives that scope's sibling tasks one round each iteration so they interleave;
+    /// advances the logical clock when nothing progresses; deadlocks if nothing can advance.
     fn drive_future(&mut self, future: Value, span: Span) -> Eval<Value> {
         loop {
             if let Some(value) = self.poll_once(&future, span)? {
                 return Ok(value);
             }
-            if self.executor.advance().is_none() {
+            // Interleave: run the innermost open scope's tasks one round (so awaiting a handle — or a
+            // `sleep` — inside a `concurrent` block lets siblings make progress).
+            let progressed = if self.scopes.is_empty() {
+                false
+            } else {
+                let si = self.scopes.len() - 1;
+                self.poll_scope_round(si, span)?
+            };
+            if !progressed && self.executor.advance().is_none() {
                 return Err(self.runtime_error(
                     DiagnosticCode::Panic,
                     span,
@@ -3700,7 +3774,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::Iter(_)
         | Value::Future(_)
         | Value::Timer(_)
-        | Value::Pending => TypeRepr::Dyn,
+        | Value::Pending
+        | Value::Handle(..) => TypeRepr::Dyn,
     }
 }
 
@@ -4130,7 +4205,9 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
-        Value::Future(_) | Value::Timer(_) => NativeValue::Str("<future>".to_string()),
+        Value::Future(_) | Value::Timer(_) | Value::Handle(..) => {
+            NativeValue::Str("<future>".to_string())
+        }
         Value::Pending => NativeValue::Str("<pending>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),

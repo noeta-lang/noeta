@@ -349,6 +349,9 @@ pub enum Rvalue {
     /// suspended at an `.await`. Produced only by the async desugar (the synthetic `$pending`), never by
     /// surface syntax; always caught at a poll site, never bound to a user value.
     Pending { span: Span },
+    /// `spawn e` (Track A.3b): register the future `future` as a task in the current concurrency scope
+    /// and yield a handle (itself a `Future<T>`). Legal only inside a `ScopeBegin`/`ScopeEnd` region.
+    Spawn { future: Atom, span: Span },
     /// `type_of(value)` — the runtime `Type` descriptor of a value.
     TypeOf { operand: Atom, span: Span },
     /// `from_bytes::<T>(blob)` — deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4).
@@ -421,6 +424,12 @@ pub enum Stmt {
     Break { span: Span },
     /// `continue;`.
     Continue { span: Span },
+    /// Open a structured-concurrency scope (Track A.3b) — the start of a lowered `concurrent { }`.
+    /// Subsequent `Rvalue::Spawn`s register tasks in this scope; [`Self::ScopeEnd`] joins them.
+    ScopeBegin { span: Span },
+    /// Close the current concurrency scope: drive every task spawned in it to completion (the join),
+    /// then pop the scope. The end of a lowered `concurrent { }`.
+    ScopeEnd { span: Span },
     /// A statement `if cond { then } else { else_ }`. The condition is a pre-computed bool
     /// atom; each arm is a statement-context block. (The `if … then … else` *expression* is
     /// desugared to a `match` in the parser, so it arrives as [`Stmt::Match`], not here.)

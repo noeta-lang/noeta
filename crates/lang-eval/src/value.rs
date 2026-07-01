@@ -83,6 +83,10 @@ pub enum Value {
     /// immediate — what an async state-machine step returns when it suspends at an `.await`. Never
     /// escapes to user code (every poll site catches it), so it has no surface type.
     Pending,
+    /// A **task handle** (Track A.3b): the tree-walker twin of the VM's `Payload::Handle`. The
+    /// `Future<T>` `spawn e` returns, referencing a task by its `(scope index, task index)` in the
+    /// interpreter's concurrency-scope stack.
+    Handle(usize, usize),
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -493,7 +497,7 @@ impl Value {
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
             Value::Iter(_) => "<iterator>".to_string(),
-            Value::Future(_) | Value::Timer(_) => "<future>".to_string(),
+            Value::Future(_) | Value::Timer(_) | Value::Handle(..) => "<future>".to_string(),
             Value::Pending => "<pending>".to_string(),
         }
     }
@@ -529,7 +533,7 @@ impl Value {
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
             Value::Iter(_) => "iterator",
-            Value::Future(_) | Value::Timer(_) => "future",
+            Value::Future(_) | Value::Timer(_) | Value::Handle(..) => "future",
             Value::Pending => "pending",
         }
     }
@@ -561,6 +565,7 @@ impl fmt::Debug for Value {
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
             Value::Timer(deadline) => write!(f, "Timer({deadline})"),
             Value::Pending => write!(f, "Pending"),
+            Value::Handle(scope, task) => write!(f, "Handle({scope}, {task})"),
         }
     }
 }

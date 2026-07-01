@@ -1,0 +1,23 @@
+// Track A.3b — real structured concurrency. Two tasks run in a `concurrent { }` scope: `a` sleeps 2,
+// `b` sleeps 1. `a` suspends at its `sleep`, `b` runs, `b` finishes first (shorter sleep), then `a` —
+// deterministic interleaving that only the async state machine's yield-to-sibling can produce. The
+// handles are awaited for their results (`Future<int>` → `int`).
+// expect: stdout "a start"
+// expect: stdout "b start"
+// expect: stdout "b end"
+// expect: stdout "a end"
+// expect: stdout "sum=3"
+// expect: stdout "done"
+// expect: exit 0
+async fn work(name: string, ms: int): int {
+    echo name ~ " start"
+    sleep(ms).await
+    echo name ~ " end"
+    return ms
+}
+concurrent {
+    a = spawn work("a", 2)
+    b = spawn work("b", 1)
+    echo "sum=" ~ (a.await + b.await)
+}
+echo "done"

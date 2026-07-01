@@ -66,6 +66,8 @@ impl Printer<'_> {
             },
             Stmt::Break { .. } => self.line(indent, "break"),
             Stmt::Continue { .. } => self.line(indent, "continue"),
+            Stmt::ScopeBegin { .. } => self.line(indent, "scope_begin"),
+            Stmt::ScopeEnd { .. } => self.line(indent, "scope_end"),
             Stmt::Drop(t) => self.line(indent, &format!("drop %{}", t.0)),
             Stmt::DropVar { name, .. } => self.line(indent, &format!("drop {name}")),
             Stmt::If {
@@ -326,6 +328,7 @@ impl Printer<'_> {
             Rvalue::RunFuture { future, .. } => format!("run_future({})", atom(future)),
             Rvalue::PollFuture { future, .. } => format!("poll_future({})", atom(future)),
             Rvalue::Pending { .. } => "pending".to_string(),
+            Rvalue::Spawn { future, .. } => format!("spawn({})", atom(future)),
             Rvalue::FromBytes { blob, layout, .. } => {
                 let ty = layout.as_ref().map(|l| l.type_name.as_str()).unwrap_or("?");
                 format!("from_bytes<{}>({})", ty, atom(blob))

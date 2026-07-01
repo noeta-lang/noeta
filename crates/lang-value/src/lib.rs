@@ -643,18 +643,44 @@ impl Value {
         heap::alloc(Payload::Timer(deadline))
     }
 
-    /// Whether this is a future — a step/thunk future ([`Payload::Future`]) or a leaf timer
-    /// ([`Payload::Timer`]). Both name their type "future" and display opaquely.
+    /// Whether this is a future — a step/thunk future ([`Payload::Future`]), a leaf timer
+    /// ([`Payload::Timer`]), or a task handle ([`Payload::Handle`]). All name their type "future" and
+    /// display opaquely.
     pub fn is_future(self) -> bool {
         self.is_pointer()
             && heap::with_payload(self, |p| {
-                matches!(p, Payload::Future(_) | Payload::Timer(_))
+                matches!(
+                    p,
+                    Payload::Future(_) | Payload::Timer(_) | Payload::Handle(..)
+                )
             })
     }
 
     /// Whether this is a leaf timer future.
     pub fn is_timer(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Timer(_)))
+    }
+
+    /// A **task handle** (Track A.3b): the `Future<T>` `spawn e` returns, referencing a task by its
+    /// `(scope index, task index)` in the backend's concurrency-scope stack. A GC leaf.
+    pub fn make_handle(scope: u32, task: u32) -> Value {
+        heap::alloc(Payload::Handle(scope, task))
+    }
+
+    /// Whether this is a task handle.
+    pub fn is_handle(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Handle(..)))
+    }
+
+    /// The `(scope index, task index)` a task handle references, or `None` if this is not a handle.
+    pub fn handle_parts(self) -> Option<(u32, u32)> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::Handle(scope, task) => Some((*scope, *task)),
+            _ => None,
+        })
     }
 
     /// The absolute logical deadline (ms) of a leaf timer future, or `None` if this is not a timer.
@@ -1600,8 +1626,10 @@ impl Value {
                 Payload::FileHandle(handle) => handle.display(),
                 // An iterator is an opaque reference value (like a file handle).
                 Payload::Iter { .. } => "<iterator>".to_string(),
-                // A future — step or leaf timer — is an opaque reference value.
-                Payload::Future(_) | Payload::Timer(_) => "<future>".to_string(),
+                // A future — step, leaf timer, or task handle — is an opaque reference value.
+                Payload::Future(_) | Payload::Timer(_) | Payload::Handle(..) => {
+                    "<future>".to_string()
+                }
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1681,7 +1709,9 @@ impl Value {
                 // An iterator has no JSON analog either — its opaque display form.
                 Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),
                 // A future has no JSON analog — its opaque display form.
-                Payload::Future(_) | Payload::Timer(_) => NativeValue::Str("<future>".to_string()),
+                Payload::Future(_) | Payload::Timer(_) | Payload::Handle(..) => {
+                    NativeValue::Str("<future>".to_string())
+                }
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -2159,6 +2189,19 @@ mod tests {
         assert_eq!(timer.type_name(), "future");
         assert_eq!(timer.display(), "<future>");
         timer.release(); // frees the node, no leak
+    }
+
+    #[test]
+    fn handle_carries_its_indices_and_frees_cleanly() {
+        // Track A.3b: a task handle is a GC leaf holding `(scope, task)` indices; it names itself
+        // "future", displays opaquely, and frees as a plain node — leak-clean under miri.
+        let handle = Value::make_handle(2, 5);
+        assert!(handle.is_future());
+        assert!(handle.is_handle());
+        assert_eq!(handle.handle_parts(), Some((2, 5)));
+        assert_eq!(handle.type_name(), "future");
+        assert_eq!(handle.display(), "<future>");
+        handle.release(); // frees the node, no leak
     }
 
     #[test]

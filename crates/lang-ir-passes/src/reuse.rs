@@ -531,6 +531,8 @@ fn rewrite_stmt(stmt: &Stmt, od: &HashSet<String>, bound: &HashSet<String>) -> S
         | Stmt::Return { .. }
         | Stmt::Break { .. }
         | Stmt::Continue { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
         | Stmt::Drop(_)
         | Stmt::DropVar { .. } => stmt.clone(),
     }
