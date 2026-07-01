@@ -10,7 +10,7 @@
 //! is shared-nothing per isolate, so no value crosses a thread boundary.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ptr;
 use std::rc::Rc;
 
@@ -104,6 +104,15 @@ struct ObjHeader {
     color: Color,
     /// Whether the object is currently in the collector's candidate-root buffer.
     buffered: bool,
+    /// **Borrow-share tag** (isolates I.3): a shared-immutable object promoted into a
+    /// [`SharedRegion`], reachable read-only from other isolates. `retain`/`release` are **no-ops**
+    /// on it — its refcount is never written, so no atomic ops and no cross-thread count race (the
+    /// §7 borrow-not-refcount trick). Set **once** at promotion, before the graph is published to any
+    /// worker, and never written again — so concurrent non-atomic *reads* of it are not a data race.
+    /// Shared objects are owned solely by their region (freed wholesale at the scope join), so they
+    /// live outside the refcount *and* the cycle collector (never registered, never buffered). `false`
+    /// for every ordinary (local) object; single-isolate programs never set it.
+    shared: bool,
 }
 
 /// The cycle collector's object colors (Bacon–Rajan synchronous trial deletion). `Black` =
@@ -375,6 +384,7 @@ pub(crate) fn alloc(payload: Payload) -> Value {
             seq,
             color: Color::Black,
             buffered: false,
+            shared: false,
         },
         payload,
     }));
@@ -390,6 +400,36 @@ pub(crate) fn alloc(payload: Payload) -> Value {
         REGISTRY.with(|r| r.borrow_mut().insert(value.0));
     }
     value
+}
+
+/// Allocate a **shared-immutable** object (isolates I.3): the `shared` tag set at birth, and
+/// deliberately **not** entered in the cycle-collector [`REGISTRY`]. A shared object is owned by a
+/// [`SharedRegion`] and freed wholesale at the scope join — never by refcount and never by the GC —
+/// so it must stay out of the collector's world. It still counts toward [`live_count`] (the leak
+/// oracle sees the region balance: +N at promotion, −N at `free_all`). Used only by [`SharedRegion`].
+fn alloc_shared(payload: Payload) -> Value {
+    live_inc();
+    let seq = NEXT_SEQ.with(|c| {
+        let s = c.get();
+        c.set(s.wrapping_add(1));
+        s
+    });
+    let raw = Box::into_raw(Box::new(Obj {
+        header: ObjHeader {
+            refcount: 1,
+            seq,
+            color: Color::Black,
+            buffered: false,
+            shared: true,
+        },
+        payload,
+    }));
+    let addr = raw.expose_provenance();
+    debug_assert!(
+        addr & !Value::PTR_MASK as usize == 0,
+        "heap address does not fit the 48-bit NaN-box payload"
+    );
+    Value(Value::SIGN_BIT | Value::QNAN | (addr as u64 & Value::PTR_MASK))
 }
 
 /// Drop `value` from the live-object registry — called by every free path so the registry tracks
@@ -453,18 +493,36 @@ pub(crate) fn seq(value: Value) -> u32 {
     obj.header.seq
 }
 
-/// Increment the refcount of a pointer value. No-op enforced by the caller for immediates.
+/// Whether a pointer value is a **shared-immutable** (borrow-shared) object (isolates I.3). The
+/// caller must have checked `value.is_pointer()`. A shared object's refcount is never written.
+pub(crate) fn is_shared(value: Value) -> bool {
+    // SAFETY: live object allocated by this module; single-threaded read of a write-once flag.
+    let obj = unsafe { &*obj_ptr(value) };
+    obj.header.shared
+}
+
+/// Increment the refcount of a pointer value. No-op enforced by the caller for immediates, and a
+/// no-op on a **shared** object (isolates I.3): a borrow-shared graph is never refcounted, so no
+/// count is written and nothing races across isolates.
 pub(crate) fn inc_ref(value: Value) {
     // SAFETY: live object allocated by this module; single-threaded so the read-modify-write
     // is not racy.
     let obj = unsafe { &mut *obj_ptr(value) };
+    if obj.header.shared {
+        return;
+    }
     obj.header.refcount += 1;
 }
 
-/// Decrement the refcount; return `true` when it reaches zero (the caller then [`free`]s).
+/// Decrement the refcount; return `true` when it reaches zero (the caller then [`free`]s). A no-op
+/// returning `false` on a **shared** object (isolates I.3) — a borrow-shared object is freed
+/// wholesale by its region, never at a refcount of zero, so its count is left untouched.
 pub(crate) fn dec_ref(value: Value) -> bool {
     // SAFETY: as `inc_ref`.
     let obj = unsafe { &mut *obj_ptr(value) };
+    if obj.header.shared {
+        return false;
+    }
     obj.header.refcount -= 1;
     obj.header.refcount == 0
 }
@@ -544,6 +602,11 @@ fn release_child(value: Value) {
 /// candidate buffer never holds a freed pointer). A no-op for immediates.
 pub(crate) fn release(value: Value) {
     if !value.is_pointer() {
+        return;
+    }
+    // A borrow-shared object (isolates I.3) is owned by its region and freed wholesale at the scope
+    // join — release touches neither its count nor the cycle collector, so there is nothing to race.
+    if is_shared(value) {
         return;
     }
     match MODE.with(|m| m.get()) {
@@ -811,4 +874,177 @@ pub(crate) fn replace_slot(object: Value, index: usize, value: Value) -> Value {
     };
     value.inc_ref();
     std::mem::replace(&mut slots[index], value)
+}
+
+/// Free a shared-immutable object's own allocation (isolates I.3). Its children are freed on their
+/// own [`SharedRegion`] entries, so — like the cycle collector's [`free_shallow`] — this does **not**
+/// release them. A shared object was never registered with the collector, so there is no registry
+/// entry to drop; only the live counter is decremented (balancing the [`alloc_shared`] at promotion).
+fn free_shared(value: Value) {
+    // SAFETY: `value` is a shared object this module allocated via `alloc_shared`, owned solely by the
+    // region freeing it now, and freed exactly once (each region object appears once).
+    let boxed = unsafe { Box::from_raw(obj_ptr(value)) };
+    live_dec();
+    drop(boxed);
+}
+
+/// What a payload needs from its source object to be deep-copied into a shared region: leaves clone
+/// their data outright; aggregates carry their child `Value`s so [`SharedRegion::promote_value`] can
+/// promote each recursively **after** the short borrow of the source object is dropped (never holding
+/// a borrow across the recursive allocation). Only `Send` (value-type) payloads are representable —
+/// a `!Send` payload cannot reach an isolate boundary (the checker's E0042 classifier), so promotion
+/// never sees one.
+enum PromoteJob {
+    Leaf(Payload),
+    List(Vec<Value>),
+    Tuple(Vec<Value>),
+    Set(Vec<Value>),
+    Map(Vec<(String, Value)>),
+    Object(Rc<Shape>, Vec<Value>),
+    Enum(Rc<Shape>, Vec<Value>),
+}
+
+/// A **shared-immutable region** (isolates I.3): the borrow-shared heap a `concurrent { }` scope owns.
+/// A value graph is [`promote`](SharedRegion::promote)d into it **once** (a single deep copy into
+/// `shared`-tagged objects), then borrowed zero-copy by every isolate in the scope — `retain`/`release`
+/// no-op on those objects, so no refcount is written and nothing races across threads. The scope
+/// outlives every isolate (structured join), so the borrow is sound; at the join the region is
+/// [`free_all`](SharedRegion::free_all)ed **wholesale**, reclaiming the whole graph at once.
+///
+/// This is the machinery the **real** multi-thread scheduler (I.4) uses. The deterministic sandbox
+/// keeps copying per isolate (in-oracle), so neither backend constructs a region yet — it is exercised
+/// by `miri` here and wired to real threads in I.4.
+pub struct SharedRegion {
+    /// Every object promoted into the region, each recorded exactly once (promotion dedups shared
+    /// subgraphs through a memo). `free_all` frees each shallowly — children are separate entries.
+    objects: Vec<Value>,
+}
+
+impl std::fmt::Debug for SharedRegion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SharedRegion")
+            .field("objects", &self.objects.len())
+            .finish()
+    }
+}
+
+impl Default for SharedRegion {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl SharedRegion {
+    /// An empty region. The owning scope creates one at entry and `free_all`s it at the join.
+    pub fn new() -> Self {
+        SharedRegion {
+            objects: Vec::new(),
+        }
+    }
+
+    /// The number of objects currently promoted into the region (for tests/diagnostics).
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    /// Whether the region holds no promoted objects.
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    /// Promote a value graph into the region: deep-copy it into fresh `shared`-tagged objects and
+    /// return the new root. Immediates pass through unchanged (they carry no refcount). Shared
+    /// subgraphs (a DAG — the same object reached by two paths) are copied **once** via a memo, so the
+    /// promoted graph preserves the original's sharing structure. The original is left untouched and
+    /// independently owned — this is a copy, not a move — so the caller's value stays local and the
+    /// promoted copy alone is shared.
+    ///
+    /// Only `Send` value-type graphs are promotable; a `!Send` payload cannot reach here (the checker
+    /// rejects a non-`Send` isolate argument with E0042), so encountering one is a bug, not input.
+    pub fn promote(&mut self, root: Value) -> Value {
+        let mut memo: HashMap<u64, Value> = HashMap::new();
+        self.promote_value(root, &mut memo)
+    }
+
+    fn promote_value(&mut self, value: Value, memo: &mut HashMap<u64, Value>) -> Value {
+        if !value.is_pointer() {
+            return value;
+        }
+        if let Some(&existing) = memo.get(&value.0) {
+            return existing;
+        }
+        // Snapshot what the source object needs under a *short* borrow — cloning leaf data and copying
+        // out child `Value`s — then drop the borrow before recursing (which allocates). A shared graph
+        // is acyclic (cycles need identity + mutation, which are `class`-only, and `class` is `!Send`),
+        // so promoting children before recording this node cannot loop.
+        let job = {
+            // SAFETY: `value` is a live pointer this module allocated; a shared read that does not
+            // escape this block, and promotion (below) never mutates this object.
+            let obj = unsafe { &*obj_ptr(value) };
+            match &obj.payload {
+                Payload::Str(s) => PromoteJob::Leaf(Payload::Str(s.clone())),
+                Payload::Bytes(b) => PromoteJob::Leaf(Payload::Bytes(b.clone())),
+                Payload::Int(i) => PromoteJob::Leaf(Payload::Int(*i)),
+                Payload::PackedList { schema, bytes } => PromoteJob::Leaf(Payload::PackedList {
+                    schema: Rc::clone(schema),
+                    bytes: bytes.clone(),
+                }),
+                Payload::List(items) => PromoteJob::List(items.clone()),
+                Payload::Tuple(items) => PromoteJob::Tuple(items.clone()),
+                Payload::Set(items) => PromoteJob::Set(items.clone()),
+                Payload::Map(entries) => {
+                    PromoteJob::Map(entries.iter().map(|(k, &v)| (k.clone(), v)).collect())
+                }
+                Payload::Object { shape, slots } => {
+                    PromoteJob::Object(Rc::clone(shape), slots.clone())
+                }
+                Payload::Enum { shape, data } => PromoteJob::Enum(Rc::clone(shape), data.clone()),
+                _ => unreachable!(
+                    "a non-Send payload cannot be promoted into a shared region — the checker's \
+                     E0042 Send classifier rejects a non-Send isolate argument before it reaches here"
+                ),
+            }
+        };
+        let payload = match job {
+            PromoteJob::Leaf(payload) => payload,
+            PromoteJob::List(items) => Payload::List(self.promote_each(&items, memo)),
+            PromoteJob::Tuple(items) => Payload::Tuple(self.promote_each(&items, memo)),
+            PromoteJob::Set(items) => Payload::Set(self.promote_each(&items, memo)),
+            PromoteJob::Map(entries) => Payload::Map(
+                entries
+                    .into_iter()
+                    .map(|(k, v)| (k, self.promote_value(v, memo)))
+                    .collect(),
+            ),
+            PromoteJob::Object(shape, slots) => Payload::Object {
+                shape,
+                slots: self.promote_each(&slots, memo),
+            },
+            PromoteJob::Enum(shape, data) => Payload::Enum {
+                shape,
+                data: self.promote_each(&data, memo),
+            },
+        };
+        let promoted = alloc_shared(payload);
+        self.objects.push(promoted);
+        memo.insert(value.0, promoted);
+        promoted
+    }
+
+    fn promote_each(&mut self, items: &[Value], memo: &mut HashMap<u64, Value>) -> Vec<Value> {
+        items
+            .iter()
+            .map(|&child| self.promote_value(child, memo))
+            .collect()
+    }
+
+    /// Free the whole region at the scope join (isolates I.3): reclaim every promoted object at once.
+    /// Consumes the region — it cannot outlive this call. Each object is freed shallowly (its children
+    /// are separate region entries freed by their own iteration), so the live count returns exactly to
+    /// its pre-promotion value (the leak oracle's zero-residency balance).
+    pub fn free_all(self) {
+        for value in self.objects {
+            free_shared(value);
+        }
+    }
 }

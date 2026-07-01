@@ -1,6 +1,6 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: BUILDING — I.0 + I.1 + I.2 DONE, I.3 next.** This is the parallelism half of architecture §7 (the
+**Status: BUILDING — I.0 + I.1 + I.2 + I.3 DONE, I.4 next.** This is the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -166,8 +166,32 @@ deterministic multi-isolate scheduler underneath.
   structured join, `Send`-checked endpoints), `channel_deadlock` (a never-fed/never-closed `recv`
   deadlocks *deterministically* — E0010, exit 1, no hang, both backends). Differential 374 / leak 0 both
   / conformance passes. (Much of the scheduling reused Track A's cooperative scheduler, as predicted.)
-- **I.3 — shared-immutable region + `shared`-tag heap change.** Borrow-share (no-op rc on shared
-  pointers), miri-covered. Sandbox still copies (in-oracle); the machinery lands here for I.4 to use.
+- **I.3 — shared-immutable region + `shared`-tag heap change. ✅ DONE.** The borrow-not-refcount
+  machinery, entirely in `lang-value`, `miri`-proven, and (by design) called by neither backend yet —
+  the sandbox keeps copying per isolate (in-oracle), so the whole conformance/differential/leak corpus
+  is byte-identical; I.4 wires it to real threads. Decided with the user: a **runtime header bit**, not
+  a `@shared` directive (shared-ness is dynamic and per-value-per-scope — the same type has local and
+  shared instances at once — and it's an observationally-invisible perf optimization, so it must not be
+  a declaration-site annotation; a directive would only name the boundary root and would compile *down
+  to* the tag anyway, since retain/release fire at arbitrary interior alias sites where only an
+  object-carried flag can answer "is this shared?"). Pieces: (1) a `shared: bool` on `ObjHeader`, set
+  **once at promotion** before publication and never rewritten (so concurrent non-atomic *reads* are
+  race-free); `inc_ref`/`dec_ref`/`release` **no-op** on a shared object — its count is never written,
+  so no atomics and no cross-thread count race. Shared objects live **outside** the refcount *and* the
+  cycle collector (a dedicated `alloc_shared` skips the GC registry; never buffered as a cycle root —
+  shared graphs are acyclic since cycles need identity+mutation, which are `class`-only, and `class` is
+  `!Send`). (2) `SharedRegion { objects: Vec<Value> }` — the explicit struct the scope owns (chosen over
+  a thread-local for borrow-checked lifetime + clean miri isolation): `promote(root)` deep-copies a
+  value graph into fresh `shared`-tagged objects (memoized by NaN-box word, so a DAG is copied **once**
+  and sharing structure is preserved; immediates pass through; a `!Send` payload is `unreachable!` — the
+  E0042 classifier guarantees it can't arrive), the original left independent (a copy, not a move);
+  `free_all(self)` reclaims the whole graph wholesale at the join (shallow per-object free, children are
+  separate entries) — leak-balanced (+N at promote, −N at free_all). 4 miri tests (no-op rc storm,
+  deep-copy independence after freeing the original, DAG dedup, immediate pass-through); full lang-value
+  miri suite 43/43. Public API: `SharedRegion`, `Value::is_shared`. Conformance/differential/leak
+  unchanged (374/100%/0-both). **Deferred to I.4:** move-promote (make even the first copy zero-copy);
+  a range-check region-arena alternative to the per-object bit; region interaction with a mid-scope
+  backup GC pass (shared objects are already outside the registry, so this is a non-issue in practice).
 - **I.4 — `RealScheduler` (OS threads), CLI-only / out-of-oracle.** Real parallelism + real borrow-
   sharing across threads; integration-tested like `RealHost`/`RealExecutor` (incl. a big-input-no-copy
   check).

@@ -24,8 +24,8 @@ mod heap;
 mod ops;
 
 pub use heap::{
-    CollectorMode, Color, collector_mode, live_count, live_objects, live_peak, reset_peak,
-    set_collector_mode, take_candidates,
+    CollectorMode, Color, SharedRegion, collector_mode, live_count, live_objects, live_peak,
+    reset_peak, set_collector_mode, take_candidates,
 };
 pub use ops::{OpError, apply_binary, apply_unary, compare_primitive, structural_compare};
 
@@ -1903,7 +1903,14 @@ impl Value {
         }
     }
 
-    /// Increment the refcount (no-op for immediates).
+    /// Whether this is a **borrow-shared** heap object (isolates I.3) — one promoted into a
+    /// [`SharedRegion`] and reachable read-only from other isolates, on which `retain`/`release`
+    /// no-op. `false` for immediates and ordinary (local) objects.
+    pub fn is_shared(self) -> bool {
+        self.is_pointer() && heap::is_shared(self)
+    }
+
+    /// Increment the refcount (no-op for immediates, and for a borrow-shared object).
     pub fn inc_ref(self) {
         if self.is_pointer() {
             heap::inc_ref(self);
@@ -2367,6 +2374,137 @@ mod tests {
         assert!(recv.is_future());
         assert_eq!(recv.channel_recv_id(), Some(5));
         recv.release();
+    }
+
+    /// Build a `Point { x: int; y: int }` struct value on a shared shape (helper for the I.3 tests).
+    fn point(shape: &Rc<Shape>, x: i64, y: i64) -> Value {
+        Value::object(Rc::clone(shape), vec![Value::int(x), Value::int(y)])
+    }
+
+    #[test]
+    fn shared_object_retain_release_are_noops() {
+        // Isolates I.3: a promoted (borrow-shared) object's refcount is never written — `inc_ref`/
+        // `release` no-op on it, so a storm of them across "isolates" touches no count and frees
+        // nothing. The region alone owns it and frees it wholesale. miri verifies no use-after-free.
+        let base = live_count();
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "Point",
+            vec!["x".into(), "y".into()],
+        ));
+        let local = point(&shape, 3, 4); // an ordinary local object, refcount 1
+
+        let mut region = SharedRegion::new();
+        let shared = region.promote(local);
+        assert!(shared.is_shared());
+        assert!(!local.is_shared()); // the original stays local — promotion is a copy, not a move
+        assert_eq!(shared.refcount(), 1);
+
+        // Simulate N isolates each borrowing the shared object: retain/release many times. On a shared
+        // object these are no-ops, so the count stays put and the object is never reclaimed.
+        for _ in 0..1000 {
+            shared.inc_ref();
+            shared.release();
+        }
+        assert_eq!(
+            shared.refcount(),
+            1,
+            "a shared object's count is never written"
+        );
+        // Still fully readable after the storm (never freed).
+        assert_eq!(shared.display(), "Point {x: 3, y: 4}");
+
+        local.release(); // the local original frees normally (refcount → 0)
+        region.free_all(); // the region frees the shared graph wholesale
+        assert_eq!(live_count(), base, "region balance: promoted N, freed N");
+    }
+
+    #[test]
+    fn shared_region_deep_copies_and_is_independent() {
+        // Isolates I.3: promotion deep-copies the whole graph into shared objects. The copy equals the
+        // original structurally, yet is independent — freeing the entire original leaves the shared
+        // copy intact and readable (it shares no allocation with the original). Then `free_all` returns
+        // the live count exactly to baseline (leak-clean, both allocations balanced).
+        let base = live_count();
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "Point",
+            vec!["x".into(), "y".into()],
+        ));
+        // A nested value graph: a list of two structs, each holding boxed ints (and the list itself).
+        let original = Value::list(vec![point(&shape, 1, 2), point(&shape, 3, 4)]);
+
+        let mut region = SharedRegion::new();
+        let shared = region.promote(original);
+        assert_ne!(
+            shared.bits(),
+            original.bits(),
+            "a copy, not the same allocation"
+        );
+        assert!(shared.is_shared());
+        assert!(
+            apply_binary(lang_ast::BinaryOp::Eq, shared, original)
+                .unwrap()
+                .as_bool()
+                .unwrap(),
+            "the promoted copy equals the original structurally"
+        );
+
+        // Free the entire original graph. If promotion had aliased any of its allocations, the shared
+        // copy would now dangle — miri would catch a use-after-free on the read below.
+        original.release();
+        assert_eq!(
+            shared.display(),
+            "[Point {x: 1, y: 2}, Point {x: 3, y: 4}]",
+            "the shared copy is unaffected by freeing the original"
+        );
+
+        region.free_all();
+        assert_eq!(live_count(), base);
+    }
+
+    #[test]
+    fn promotion_preserves_dag_sharing() {
+        // Isolates I.3: when the same object is reachable by two paths (a DAG — value semantics let two
+        // slots hold one allocation), promotion copies it **once** via its memo, so the promoted graph
+        // preserves that sharing rather than duplicating. Freeing the region then frees the shared node
+        // exactly once — miri would flag a double-free otherwise.
+        let base = live_count();
+        let shape = Rc::new(Shape::object(ShapeKind::Struct, "P", vec!["x".into()]));
+        let p = Value::object(Rc::clone(&shape), vec![Value::int(7)]); // refcount 1
+        // A tuple *transfers* one reference per slot in, so to alias `p` in both slots we owe it two
+        // references: bump the count once more, then hand both to the tuple (refcount 2).
+        p.inc_ref();
+        let pair = Value::tuple(vec![p, p]); // both slots point at the SAME object → refcount 2
+
+        let mut region = SharedRegion::new();
+        let shared = region.promote(pair);
+        let a = shared.tuple_field(0).unwrap();
+        let b = shared.tuple_field(1).unwrap();
+        assert_eq!(
+            a.bits(),
+            b.bits(),
+            "the shared subgraph is promoted once, not twice"
+        );
+        assert!(a.is_shared());
+        // region holds: the tuple + the single shared `P` (deduped) = 2 objects.
+        assert_eq!(region.len(), 2);
+
+        pair.release();
+        region.free_all();
+        assert_eq!(live_count(), base);
+    }
+
+    #[test]
+    fn promote_passes_immediates_through() {
+        // Isolates I.3: an immediate (a small int) carries no refcount and no heap identity, so
+        // promoting it returns it unchanged and adds nothing to the region.
+        let mut region = SharedRegion::new();
+        let promoted = region.promote(Value::int(42));
+        assert_eq!(promoted.as_int(), Some(42));
+        assert!(!promoted.is_shared());
+        assert!(region.is_empty());
+        region.free_all();
     }
 
     #[test]
