@@ -133,18 +133,21 @@ reduce — that typed view is what autovectorizes, and it is the *actual* win (r
 slower). The element-wise `add`/`sub`/`scale` need no column kernel — they run the existing `*_buffers`
 kernel on the column bytes unchanged (layout-agnostic).
 
-## S5 → directive migration
+## S5 → directive migration (done in C4)
 
-The shipped S5 surface is reworked into this cleaner shape:
-- **Remove** the `vec.soa*` free functions, the `SoaVec3`/`SoaBatch` value type in both backends, the
+The shipped S5 surface was reworked into this cleaner shape:
+- **Removed** the `vec.soa*` free functions, the `SoaVec3`/`SoaBatch` value type in both backends, the
   `Payload::SoaVec3` variant, the `SOA_VEC3` checker name, and `vec3_soa.lang`.
-- **Keep** the S4 columnar *kernels* (`soa_dot`/`soa_length`/…) — they become the internal column
-  kernels the `vec.*_all` dispatch calls. (They may be renamed `column_*` to drop the `soa` term.)
-- The `vec3_soa.lang` behaviour is re-expressed as `vec3_column.lang`: same `vec.dot_all` etc., but on a
+- **Kept** the S4 columnar *kernels* (`soa_dot`/`soa_length`/…) as `lang_stdlib::vec3` bench/test
+  infrastructure — but note they are **not** the dispatch's fast path: C3's course-correction showed the
+  win needs reading the *column byte buffer* as typed `&[f32]` (`col_dot`/`col_length` via `bytemuck`),
+  not the `SoaVec3` (`Vec<f32>`) kernels, which would require a per-call decode. So the `soa_*` kernels
+  survive only as the `soa_reductions` pure-kernel baseline and the bit-identity reference.
+- `vec3_soa.lang`'s behaviour is re-expressed as `vec3_column.lang`: same `vec.dot_all` etc. on a
   `@packed(layout: column)` type, asserting identical output to the row-layout version.
 
-Net: less surface than S5 (one directive arg vs eight `soa_*` functions + a value type), and the win is
-reachable through the *existing* `vec` API.
+Net: less language surface than S5 (one directive arg vs eight `soa_*` functions + a value type), and
+the win is reachable through the *existing* `vec` API.
 
 ## Tradeoffs (what `column` optimizes, and its cost)
 
@@ -240,7 +243,16 @@ milestone, which needs const generics.)
 
   (`add_all` row vs column is equal by construction — same kernel.) Kept only where it wins: the
   reductions get the typed-`&[f32]` path; the element-wise ops need no column kernel.
-- **C4 — retire S5.** Remove `vec.soa*` + `SoaVec3`/`Payload::SoaVec3` + `SOA_VEC3` + `vec3_soa.lang`.
+- **C4 — retire S5. ✅ DONE.** Removed the language-visible SoA surface: the `vec.soa*` free functions
+  (both backends), the `Payload::SoaVec3` variant + eval `Value::SoaVec3`/`SoaBatch` value type + all
+  their display/type-name/equality/native arms, the `SOA_VEC3` checker name + signatures, and
+  `vec3_soa.lang`. **Kept** `lang_stdlib::vec3::SoaVec3` + the `soa_*` kernels as bench/test
+  infrastructure (the `soa_reductions` pure-kernel baseline + the bit-identity unit test + the
+  `column_dispatch` bench's column-buffer builder `soa_to_columns`) — they are no longer reachable from
+  the language, but the column win is delivered by `col_dot`/`col_length` (C3), not these. The win now
+  lives entirely in the `@packed(layout: column)` directive; nothing external depended on `vec.soa*`
+  (it only shipped this session). Conformance 387 (−`vec3_soa`), differential 377 / 0 skipped / agree,
+  leak 0.
 - **C5 (follow-on) — nested leaf-flattening** for structs with nested `@packed` fields (`Particle`).
 
 ## Verification (every slice)

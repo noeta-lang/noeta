@@ -1208,99 +1208,11 @@ impl<'m> Vm<'m> {
                     None => Ok(self.f32_list(&scalars)),
                 }
             }
-            // --- Opt-in columnar (SoA) batch (P-SIMD) ---
-            "soa" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                match args[0].packed_vec3_data() {
-                    Some((schema, bytes)) => {
-                        Ok(Value::soa_vec3(schema, vec3::soa_from_packed(&bytes)))
-                    }
-                    None => Err(self.soa_packed_error(span)),
-                }
-            }
-            "soa_add" | "soa_sub" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let (schema, a) = self.expect_soa(func, args[0], span)?;
-                let (_, b) = self.expect_soa(func, args[1], span)?;
-                if a.len() != b.len() {
-                    return Err(self.vec_len_error(func, span));
-                }
-                let cols = if func == "soa_add" {
-                    vec3::soa_add(&a, &b)
-                } else {
-                    vec3::soa_sub(&a, &b)
-                };
-                Ok(Value::soa_vec3(schema, cols))
-            }
-            "soa_scale" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let s = self.read_scalar_f32(func, args[1], span)?;
-                let (schema, a) = self.expect_soa(func, args[0], span)?;
-                Ok(Value::soa_vec3(schema, vec3::soa_scale(&a, s)))
-            }
-            "soa_dot" => {
-                self.stdlib_arity(func, args, 2, span)?;
-                let (_, a) = self.expect_soa(func, args[0], span)?;
-                let (_, b) = self.expect_soa(func, args[1], span)?;
-                if a.len() != b.len() {
-                    return Err(self.vec_len_error(func, span));
-                }
-                let scalars = vec3::soa_dot(&a, &b);
-                Ok(self.f32_list(&scalars))
-            }
-            "soa_length" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let (_, a) = self.expect_soa(func, args[0], span)?;
-                let scalars = vec3::soa_length(&a);
-                Ok(self.f32_list(&scalars))
-            }
-            "soa_count" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let (_, a) = self.expect_soa(func, args[0], span)?;
-                Ok(Value::int(a.len() as i64))
-            }
-            "soa_list" => {
-                self.stdlib_arity(func, args, 1, span)?;
-                let (schema, a) = self.expect_soa(func, args[0], span)?;
-                Ok(Value::packed_list(schema, vec3::soa_to_packed(&a)))
-            }
             _ => {
                 let error = lang_stdlib::no_function_error("vec", func);
                 Err(self.error(stdlib_error_code(error.kind), span, error.message))
             }
         }
-    }
-
-    /// `vec.soa` requires a packed `List<Vec3<f32>>` (three `f32` fields, `@packed`).
-    fn soa_packed_error(&mut self, span: Span) -> Abort {
-        self.error(
-            DiagnosticCode::TypeMismatch,
-            span,
-            "`vec.soa` expects a packed `List<Vec3<f32>>` (an `@packed` struct with three `f32` fields)"
-                .to_string(),
-        )
-    }
-
-    /// Read the SoA batch behind `value` as `(schema, columns)`, or raise a type error naming `func`.
-    fn expect_soa(
-        &mut self,
-        func: &str,
-        value: Value,
-        span: Span,
-    ) -> Result<
-        (
-            std::rc::Rc<lang_object::PackedSchema>,
-            lang_stdlib::vec3::SoaVec3,
-        ),
-        Abort,
-    > {
-        value.soa_data().ok_or_else(|| {
-            self.error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!("`vec.{func}` expects an SoA Vec3 batch (from `vec.soa`)"),
-            )
-        })
     }
 
     /// Read a Vec3 argument — a struct value with exactly three `f32` fields — into `[f32; 3]`, or a

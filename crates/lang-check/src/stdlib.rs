@@ -16,10 +16,6 @@ use lang_types::Type;
 /// receiver of this `Named` type dispatches the file-handle methods.
 pub(super) const FILE_HANDLE: &str = "FileHandle";
 
-/// Reserved built-in type name for the opt-in columnar Vec3 batch `vec.soa` returns (P-SIMD). An
-/// opaque value threaded through the `vec.soa_*` bulk kernels.
-pub(super) const SOA_VEC3: &str = "SoaVec3";
-
 /// Reserved built-in type name for the value `iter()` returns (Track I.1a). `Iterator<T>` carries its
 /// element type as its single argument; a receiver of this `Named` type dispatches `next`/`collect`.
 pub(super) const ITERATOR: &str = "Iterator";
@@ -357,18 +353,8 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
     Some(match (module, name) {
         ("vec", "add_all" | "sub_all" | "dot_all" | "scale_all") => vec![Type::Dyn, Type::Dyn],
         ("vec", "length_all") => vec![Type::Dyn],
-        // Opt-in SoA batch (P-SIMD): `soa` builds from a `List<Vec3>`; the rest take the batch.
-        ("vec", "soa") => vec![Type::Dyn],
-        ("vec", "soa_add" | "soa_sub" | "soa_dot") => vec![soa_vec3(), soa_vec3()],
-        ("vec", "soa_scale") => vec![soa_vec3(), Type::Dyn],
-        ("vec", "soa_length" | "soa_count" | "soa_list") => vec![soa_vec3()],
         _ => return None,
     })
-}
-
-/// The reserved `Named` type of an SoA Vec3 batch (`vec.soa`'s result).
-fn soa_vec3() -> Type {
-    Type::Named(SOA_VEC3.to_string(), vec![])
 }
 
 /// The return type of a prelude free-function call `name(args)`, given the argument types — or
@@ -461,11 +447,6 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
     Some(match (module, name) {
         ("vec", "add_all" | "sub_all" | "scale_all") => args.first().cloned().unwrap_or(Type::Dyn),
         ("vec", "dot_all" | "length_all") => list(Type::F32),
-        // Opt-in SoA batch (P-SIMD): builders/element-wise ops yield a batch; reductions a `List<f32>`.
-        ("vec", "soa" | "soa_add" | "soa_sub" | "soa_scale") => soa_vec3(),
-        ("vec", "soa_dot" | "soa_length") => list(Type::F32),
-        ("vec", "soa_count") => Type::Int,
-        ("vec", "soa_list") => list(Type::Dyn),
         _ => return None,
     })
 }

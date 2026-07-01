@@ -17,7 +17,6 @@ use std::rc::Rc;
 use lang_bytecode::Builtin;
 use lang_object::{PackedSchema, Shape};
 use lang_stdlib::FileHandle;
-use lang_stdlib::vec3::SoaVec3;
 
 use crate::Value;
 
@@ -212,15 +211,6 @@ pub(crate) enum Payload {
     PackedList {
         schema: Rc<PackedSchema>,
         bytes: Vec<u8>,
-    },
-    /// An opt-in columnar (SoA) batch of Vec3s (P-SIMD): three contiguous `f32` columns for bulk
-    /// 3D math, built explicitly via `vec.soa(list)`. Distinct from `PackedList` (which is AoS,
-    /// interleaved) — the columnar layout lets the reduction kernels autovectorize across elements
-    /// (2.7×–4× on `dot`/`length`). A GC **leaf**: owns only the primitive `f32` columns and a shared
-    /// `schema` (kept so `vec.soa_list` can rebuild the same-typed `List<Vec3>`). Immutable.
-    SoaVec3 {
-        schema: Rc<PackedSchema>,
-        cols: SoaVec3,
     },
     Object {
         shape: Rc<Shape>,
@@ -591,7 +581,6 @@ pub(crate) fn free(value: Value) {
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
-        | Payload::SoaVec3 { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
         | Payload::AsyncIo(_)
@@ -764,7 +753,6 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::PackedList { .. }
-        | Payload::SoaVec3 { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
         | Payload::AsyncIo(_)
