@@ -212,6 +212,15 @@ The typed `Op::ExtCall` path still name-matches `json.parse` rather than going t
 
 - **Extension types** — `ExtType` impl (native `Vec3`/`Quat`, replacing item 4); then a real native type
   like `Image`.
+- **Columnar kernels via extensions** (P-SIMD tier 3, `plans/perf/p-simd-column-layout.md`) — let a
+  package register a native **column-buffer kernel** for its own type, keyed `(module/type, operation)`
+  in the registry, so any `@packed(layout: column)` type (not just Vec3/quat) gets a fast bulk op.
+  **Blocked on an ABI capability:** the neutral `NativeValue` seam does not hand raw buffers to native
+  functions — which is why the bulk `vec.*_all` kernels are a per-backend special case today. Needs a
+  *"give me field `f`'s contiguous column buffer"* accessor on the `lang-native` ABI (below), plus a
+  `register_column_kernel`-style seam. **Trigger:** the `lang-native` extraction / package-manager
+  milestone. Until then, column layout ships with tier-1 generic per-column primitives + the per-backend
+  Vec3/quat kernels only.
 - **Package / dependency manager** — third-party crates, cross-package providers (ties to the deferred
   object-model package system). This is what finally lets `vec`/`quat` physically leave core.
 

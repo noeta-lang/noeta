@@ -47,23 +47,52 @@ observes `to_bytes` via **length / self-equality / `from_bytes` round-trip** (ne
 display is opaque `<N bytes>`), and `to_bytes`/`from_bytes` are mutually consistent per type — so even
 serialization stays invisible. This is the same posture that let packed lists exist at all.
 
-## No batch type, no new methods — fold into the normal API
+## No batch type, no new methods — ops fold into the normal API (in three tiers)
 
-The bulk ops already have homes: `vec.add_all` / `sub_all` / `scale_all` / `dot_all` / `length_all` take
-a `List<Vec3>` today. They stay the API; they just **dispatch on `schema.layout`** to pick the kernel:
+There is **no batch value type and no `soa_*` method surface**. Layout is storage only; operations are
+the ordinary list/`vec` API. But the operations are *not* one uniform "fold into `vec.*_all`" — the
+directive is **general** (any packed struct can be `column`) while the useful operations sit in three
+tiers, only some of which are general:
 
-```
-@packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
-ps = load_points()
-d  = vec.dot_all(ps, qs)   // 2.7× faster *because* ps/qs are column-layout. Same call, same result.
-```
+1. **Generic per-column primitives** (stdlib; work on *any* `column` list because they are field-indexed,
+   not type-specific): sum a field, field-wise `add`/`scale` two lists, map a field with a native op.
+   Any numeric struct gets these for free — this is the general fast surface.
+2. **Domain kernels** (`vec`/`quat` modules): `dot_all`, `length_all`, `cross`, quaternion mul. These are
+   **shape-specific** — `dot`/`length` interpret three `f32`s as a vector, so they only accept a
+   Vec3-shaped list (row *or* column) and simply run **faster** on `column`. They do **not** become
+   general; the directive being general does not make `dot_all` general, and does not need to.
+   ```
+   @packed(layout: column) struct V3 { x: f32; y: f32; z: f32 }
+   d = vec.dot_all(ps, qs)   // Vec3-only op; column is its fast path. Same call, same result.
+   ```
+3. **Type-specific kernels via the extension registry** — anything else (a `Particle` integrator, a
+   user's own numeric struct). See [Kernels via extensions](#kernels-via-extensions-the-general-answer)
+   — the general answer, gated on the native-extension ABI.
 
-The user never writes `soa` anything. Per-element access (`ps[i]`) and append (`ps ~= [p]`) still work —
-they just pay a gather / O(n)-rebuild cost under column layout (see the tradeoff table). It remains a
-real `List<T>`; only the performance profile changes.
+Per-element access (`ps[i]`) and append (`ps ~= [p]`) still work on a `column` list — they just pay a
+gather / O(n)-rebuild cost (see the tradeoff table). It remains a real `List<T>`; only performance
+changes. The user never writes `soa` anything.
 
-The only genuinely-*new* functions would be general per-column ops that don't exist yet (e.g. "sum the
-`mass` field across all elements") — and those are ordinary `vec`/list functions, **not** a batch API.
+## Kernels via extensions (the general answer)
+
+Tiers 1–2 cover the type-agnostic field ops and the Vec3/quat domain. The *general* way an arbitrary
+type gets a fast column kernel is to **register it in the native-extension registry**, keyed by
+`(module/type, operation)` — the same seam that already registers `vec.add`/`json.parse`. Two rules:
+
+- **Register the kernel; do not attach it to the directive.** `@packed(layout: column)` declares layout
+  only. A package registers *many* ops for a type separately (`register_column_kernel(Particle,
+  "advance", native_fn)`), keeping type-declaration and behaviour decoupled. Putting a kernel *in* the
+  directive would bind one type-declaration to one function — strictly less flexible.
+- **Blocker (why this is deferred, not built now):** the registry's neutral value seam (`NativeValue`)
+  does not hand raw buffers to native functions — which is exactly why the bulk `vec.*_all` kernels are
+  a **per-backend special case today** (they reach for `packed_vec3_data`'s raw bytes directly, outside
+  the registry). Registering columnar kernels generically needs a new ABI capability: *"give me field
+  `f`'s contiguous column buffer."* That is the **`lang-native` ABI extraction** the native-extensions
+  track already defers to the package-manager milestone (`plans/native-extensions/README.md`).
+
+So: **this arc ships tiers 1–2** (column layout + generic per-column primitives + the per-backend
+Vec3/quat kernels); **tier 3 (third-party registered column kernels) is tracked as deferred** against the
+`lang-native` ABI work — see `plans/native-extensions/README.md` and `plans/deferred.md`.
 
 ## Storage & implementation
 
@@ -137,20 +166,26 @@ milestone, which needs const generics.)
 - **Bench-gated:** each op that gains a column path is benched row-vs-column; we keep the column path
   only where it wins (reductions) or is required for correctness (get/append/…), and record numbers here.
 
+## Decisions (settled)
+
+1. **Arg is an enum.** `layout` takes an enum value, variants `row | column` (an internal
+   `PackedLayout { Row, Column }`), validated by the typed-directive-arg path (E0037
+   `InvalidDirectiveArgument`) — `@packed(layout: colunm)` is a hard error, not a silent fallback. The
+   parser's `@packed` arm (`lang-parser` ~2678, currently *rejects* all args) gains a small addition to
+   accept the named enum arg. Future knobs (`aligned`?) slot in as more `@packed(...)` args.
+2. **`dot_all`/`length_all` stay Vec3-specific** (tier 2, above) — accelerated by `column`, not made
+   general. General column speed comes from tier-1 primitives and tier-3 registered kernels.
+3. **S5 is hard-cut** (not aliased) — the `vec.soa*` surface only landed this session; nothing external
+   depends on it. See the migration section.
+
 ## Open decisions (settle before coding)
 
-1. **Arg values:** `layout: row | column` (recommended). The typed-directive-arg path (E0037
-   `InvalidDirectiveArgument`, the `bind_tier_args` schema in `lang-check`) validates it; the parser's
-   `@packed` arm (`lang-parser` ~2678, currently *rejects* all args) needs a small addition to accept an
-   identifier-valued named arg. Any other future knobs (`aligned`?) slot in as more `@packed(...)` args.
-2. **Leaf-flatten vs top-level columns:** recommend leaf-flatten (fully general — any numeric field
+1. **Leaf-flatten vs top-level columns:** recommend leaf-flatten (fully general — any numeric field
    contiguous), but **slice 1 restricts to primitive-only structs** (covers `Vec3`); nested flattening
-   is a follow-on slice.
-3. **Which ops get a *fast* column kernel vs just a correct one:** reductions/field-math get fast native
+   is a follow-on slice (C5).
+2. **Which ops get a *fast* column kernel vs just a correct one:** reductions/field-math get fast native
    kernels; `get`/`push`/`concat`/`select`/`set` get *correct* column paths (not necessarily faster than
    row — column is not meant for per-element/append-heavy use). Bench decides if any need tuning.
-4. **Do we keep any `vec.soa*` alias** for a deprecation window, or hard-cut to the directive? (Nothing
-   external depends on it; recommend hard-cut — it only landed this session.)
 
 ## Slice plan
 
