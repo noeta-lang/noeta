@@ -58,6 +58,9 @@ pub enum Builtin {
     /// `race(list)` — await the futures in `list` concurrently, returning the first result and
     /// **cancelling** the losing tasks (Track A.9 + cooperative cancellation A.8).
     Race,
+    /// `map_bounded(items, n, f)` — apply the async `f` to each item, at most `n` in flight at once,
+    /// returning the results as a `List<B>` in item order (Track A.9, bounded-parallelism map).
+    MapBounded,
 }
 
 impl Builtin {
@@ -72,6 +75,7 @@ impl Builtin {
             Builtin::Sleep => "sleep",
             Builtin::All => "all",
             Builtin::Race => "race",
+            Builtin::MapBounded => "map_bounded",
         }
     }
 
@@ -86,6 +90,7 @@ impl Builtin {
             "sleep" => Some(Builtin::Sleep),
             "all" => Some(Builtin::All),
             "race" => Some(Builtin::Race),
+            "map_bounded" => Some(Builtin::MapBounded),
             _ => None,
         }
     }

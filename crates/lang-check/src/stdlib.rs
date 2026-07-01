@@ -357,6 +357,17 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         "all" => list(future_elem(args.first())),
         // `race(List<Future<T>>) -> T` — the first result; the losers are cancelled (Track A.9).
         "race" => future_elem(args.first()),
+        // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (Track A.9). The element type is
+        // the closure's return future's `B`.
+        "map_bounded" => match args.get(2) {
+            Some(Type::Fn { ret, .. }) => match ret.as_ref() {
+                Type::Named(n, targs) if n == FUTURE => {
+                    list(targs.first().cloned().unwrap_or(Type::Unknown))
+                }
+                _ => list(Type::Unknown),
+            },
+            _ => list(Type::Unknown),
+        },
         _ => return None,
     })
 }

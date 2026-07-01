@@ -340,6 +340,9 @@ pub enum Builtin {
     /// `race(list)` — await concurrently, returning the first result and cancelling the losers
     /// (Track A.9 + cooperative cancellation A.8).
     Race,
+    /// `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` concurrently, results
+    /// as a `List<B>` in item order (Track A.9).
+    MapBounded,
 }
 
 impl Builtin {
@@ -358,6 +361,7 @@ impl Builtin {
             Builtin::Sleep => "sleep",
             Builtin::All => "all",
             Builtin::Race => "race",
+            Builtin::MapBounded => "map_bounded",
         }
     }
 
@@ -377,6 +381,7 @@ impl Builtin {
         Builtin::Sleep,
         Builtin::All,
         Builtin::Race,
+        Builtin::MapBounded,
     ];
 }
 
@@ -3321,6 +3326,77 @@ impl Interpreter {
                             DiagnosticCode::Panic,
                             span,
                             "async deadlock: `race` awaited futures with no pending timers"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+            // `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` in flight, results
+            // in item order (Track A.9). The tree-walker mirror of the VM's sliding window.
+            Builtin::MapBounded => {
+                self.expect_arity(builtin, &args, 3, span)?;
+                let Value::List(repr) = &args[0] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`map_bounded` expects a list, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                };
+                let Value::Int(limit) = args[1] else {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`map_bounded` expects an int concurrency limit, found {}",
+                            args[1].type_name()
+                        ),
+                    ));
+                };
+                let items: Vec<Value> = (0..repr.len())
+                    .map(|i| repr.get(i).expect("in bounds"))
+                    .collect();
+                let f = args[2].clone();
+                let window = limit.max(1) as usize;
+                let count = items.len();
+                let mut results: Vec<Option<Value>> = vec![None; count];
+                let mut in_flight: Vec<(usize, Value)> = Vec::new();
+                let mut next = 0usize;
+                let mut done = 0usize;
+                loop {
+                    while in_flight.len() < window && next < count {
+                        let fut = self.call(f.clone(), vec![items[next].clone()], span)?;
+                        in_flight.push((next, fut));
+                        next += 1;
+                    }
+                    if done == count {
+                        let out: Vec<Value> =
+                            results.into_iter().map(|r| r.expect("all done")).collect();
+                        return Ok(Value::List(ListRepr::Boxed(Rc::new(out))));
+                    }
+                    let mut progressed = false;
+                    let mut k = 0;
+                    while k < in_flight.len() {
+                        let (idx, fut) = (in_flight[k].0, in_flight[k].1.clone());
+                        if let Some(v) = self.poll_once(&fut, span)? {
+                            results[idx] = Some(v);
+                            in_flight.remove(k);
+                            done += 1;
+                            progressed = true;
+                        } else {
+                            k += 1;
+                        }
+                    }
+                    if !self.scopes.is_empty() {
+                        progressed |= self.poll_all_scopes_round(span)?;
+                    }
+                    if !progressed && self.executor.advance().is_none() {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `map_bounded` stalled with no pending timers"
                                 .to_string(),
                         ));
                     }

@@ -1,0 +1,24 @@
+// Track A.9 — `map_bounded(items, n, f)` applies the async `f` to each item with at most `n` futures
+// in flight, returning results in item order. With n=2 over five items, items 1&2 run first, then 3&4,
+// then 5 — never more than two "start"s before an "end". Results keep input order regardless of
+// completion order. Deterministic under the sandbox clock; both backends agree.
+// expect: stdout "start 1"
+// expect: stdout "start 2"
+// expect: stdout "end 1"
+// expect: stdout "end 2"
+// expect: stdout "start 3"
+// expect: stdout "start 4"
+// expect: stdout "end 3"
+// expect: stdout "end 4"
+// expect: stdout "start 5"
+// expect: stdout "end 5"
+// expect: stdout "result=2,4,6,8,10"
+// expect: exit 0
+async fn dbl(n: int): int {
+    echo "start " ~ n
+    sleep(1).await
+    echo "end " ~ n
+    return n * 2
+}
+xs = map_bounded([1, 2, 3, 4, 5], 2, dbl)
+echo "result=" ~ xs.join(",")

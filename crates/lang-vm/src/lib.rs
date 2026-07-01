@@ -4985,6 +4985,101 @@ impl<'m> Vm<'m> {
                     }
                 }
             }
+            // `map_bounded(items, n, f)` — apply async `f` to each item with at most `n` futures in
+            // flight, collecting results in item order (Track A.9). Keeps a sliding window: fill up to
+            // `n`, poll them (each first poll starts f's body), collect completions and top the window
+            // back up. Also drives any open `concurrent` scope so it composes with A.7.
+            Builtin::MapBounded => {
+                self.check_arity(builtin, args, 3, span)?;
+                if !args[0].is_list() {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`map_bounded` expects a list, found {}",
+                            args[0].type_name()
+                        ),
+                    ));
+                }
+                let Some(limit) = args[1].as_int() else {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`map_bounded` expects an int concurrency limit, found {}",
+                            args[1].type_name()
+                        ),
+                    ));
+                };
+                let items = args[0];
+                let f = args[2];
+                let window = limit.max(1) as usize;
+                let count = items.list_len().expect("a list has a length");
+                let mut results: Vec<Option<Value>> = vec![None; count];
+                let mut in_flight: Vec<(usize, Value)> = Vec::new();
+                let mut next = 0usize;
+                let mut done = 0usize;
+                // Release everything owned so far, for the early-exit paths.
+                macro_rules! cleanup {
+                    ($in_flight:expr, $results:expr) => {{
+                        for (_, fut) in $in_flight {
+                            release(fut);
+                        }
+                        for v in $results.into_iter().flatten() {
+                            release(v);
+                        }
+                    }};
+                }
+                loop {
+                    while in_flight.len() < window && next < count {
+                        let item = items.list_get(next).expect("in bounds");
+                        retain(item);
+                        match self.call_value(f, vec![item], span) {
+                            Ok(fut) => in_flight.push((next, fut)),
+                            Err(abort) => {
+                                cleanup!(in_flight, results);
+                                return Err(abort);
+                            }
+                        }
+                        next += 1;
+                    }
+                    if done == count {
+                        let out = results.into_iter().map(|r| r.expect("all done")).collect();
+                        return Ok(Value::list(out));
+                    }
+                    let mut progressed = false;
+                    let mut k = 0;
+                    while k < in_flight.len() {
+                        let (idx, fut) = in_flight[k];
+                        match self.poll_once(fut, span) {
+                            Ok(Poll::Ready(v)) => {
+                                results[idx] = Some(v);
+                                release(fut);
+                                in_flight.remove(k);
+                                done += 1;
+                                progressed = true;
+                            }
+                            Ok(Poll::Pending) => k += 1,
+                            Err(abort) => {
+                                cleanup!(in_flight, results);
+                                return Err(abort);
+                            }
+                        }
+                    }
+                    if !self.scopes.is_empty() {
+                        progressed |= self.poll_all_scopes_round(span)?;
+                    }
+                    if !progressed && self.executor.advance().is_none() {
+                        cleanup!(in_flight, results);
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "async deadlock: `map_bounded` stalled with no pending timers"
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
         }
     }
 
