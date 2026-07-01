@@ -657,8 +657,28 @@ impl Value {
                         | Payload::AsyncIo(_)
                         | Payload::ChannelSend(..)
                         | Payload::ChannelRecv(_)
+                        | Payload::IsolateFuture(_)
                 )
             })
+    }
+
+    /// A **leaf isolate-result future** (isolates I.4b): a real-thread `isolate f(args)` yields one,
+    /// carrying an id into the backend's isolate table (the worker's join handle + result receiver).
+    /// Polled by harvesting the worker's marshalled result. VM-real path only.
+    pub fn make_isolate_future(id: u32) -> Value {
+        heap::alloc(Payload::IsolateFuture(id))
+    }
+
+    /// The backend isolate-table id of an [`Self::make_isolate_future`], if this is one.
+    pub fn isolate_future_id(self) -> Option<u32> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::IsolateFuture(id) => Some(*id),
+                _ => None,
+            })
+        } else {
+            None
+        }
     }
 
     /// A **leaf async-read future** (Track A.4c): `fs.read_async(path)` produces one, carrying the id
@@ -1729,7 +1749,8 @@ impl Value {
                 | Payload::Handle(..)
                 | Payload::AsyncIo(_)
                 | Payload::ChannelSend(..)
-                | Payload::ChannelRecv(_) => "<future>".to_string(),
+                | Payload::ChannelRecv(_)
+                | Payload::IsolateFuture(_) => "<future>".to_string(),
                 // Channel endpoints are opaque reference values (like an iterator/file handle).
                 Payload::Sender(_) => "<sender>".to_string(),
                 Payload::Receiver(_) => "<receiver>".to_string(),
@@ -1817,7 +1838,8 @@ impl Value {
                 | Payload::Handle(..)
                 | Payload::AsyncIo(_)
                 | Payload::ChannelSend(..)
-                | Payload::ChannelRecv(_) => NativeValue::Str("<future>".to_string()),
+                | Payload::ChannelRecv(_)
+                | Payload::IsolateFuture(_) => NativeValue::Str("<future>".to_string()),
                 // Channel endpoints have no JSON analog — their opaque display form.
                 Payload::Sender(_) => NativeValue::Str("<sender>".to_string()),
                 Payload::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
@@ -2354,6 +2376,15 @@ mod tests {
         assert_eq!(rx.type_name(), "receiver");
         assert_eq!(rx.display(), "<receiver>");
         rx.release();
+
+        // Isolates I.4b: an isolate-result future is a GC leaf carrying a backend isolate-table id;
+        // it reports as a "future", displays opaquely, and frees as a plain node.
+        let h = Value::make_isolate_future(9);
+        assert_eq!(h.isolate_future_id(), Some(9));
+        assert!(h.is_future());
+        assert_eq!(h.type_name(), "future");
+        assert_eq!(h.display(), "<future>");
+        h.release();
     }
 
     #[test]

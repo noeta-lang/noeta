@@ -274,6 +274,11 @@ pub(crate) enum Payload {
     /// id. Polling it dequeues the next message (ready → `some(v)`), reports `none` once closed and
     /// drained, or pending on an empty open buffer. A GC leaf — the queued messages live in the backend.
     ChannelRecv(u32),
+    /// A **leaf isolate-result future** (isolates I.4b): the `Future<T>` a real-thread `isolate f(args)`
+    /// yields, carrying an id into the backend's isolate table (the worker thread's join handle + result
+    /// receiver). Polling it harvests the marshalled result once the worker finishes, else pending. A GC
+    /// leaf — the id is a plain integer; the worker's state lives in the backend. VM-real path only.
+    IsolateFuture(u32),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -582,6 +587,7 @@ pub(crate) fn free(value: Value) {
         | Payload::Sender(_)
         | Payload::Receiver(_)
         | Payload::ChannelRecv(_)
+        | Payload::IsolateFuture(_)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -753,6 +759,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Sender(_)
         | Payload::Receiver(_)
         | Payload::ChannelRecv(_)
+        | Payload::IsolateFuture(_)
         | Payload::FileHandle(_) => {}
     }
     out
