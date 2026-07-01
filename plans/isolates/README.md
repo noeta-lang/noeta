@@ -1,6 +1,6 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: DESIGN SIGNED OFF (2026-07-01) — building. I.0 first.** This is the parallelism half of architecture §7 (the
+**Status: BUILDING — I.0 DONE (`baa72ab`), I.1 next.** This is the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -125,12 +125,15 @@ deterministic multi-isolate scheduler underneath.
 
 ## Sub-slices (settled)
 
-- **I.0 — `isolate` surface + the `Send` classifier + E0042; executable in-oracle as a task.** `isolate`
-  prefix keyword (a flag on `Expr::Spawn`), structural `Send`/`!Send` classifier (checker, visited-set
-  for recursion), E0042 on a non-`Send` arg/result of an `isolate` call, orphan-`isolate` → E0041. In
+- **I.0 — `isolate` surface + the `Send` classifier + E0042; executable in-oracle as a task. ✅ DONE
+  (`baa72ab`).** `isolate` prefix keyword (a flag on `Expr::Spawn`), structural `Send`/`!Send` classifier
+  (`Checker::is_send`, visited-set for recursion; struct/enum = `Send` iff fields/payloads are, class =
+  `!Send`, `Future`/`Iterator`/`FileHandle`/closures/`dyn` = `!Send`, inference hole permissive), E0042 on
+  a non-`Send` arg/result of an `isolate` call (or `isolate` on a non-call), orphan-`isolate` → E0041. In
   the **sandbox** an isolate is observationally a task (single-thread; `Send` value args copy-invisible),
-  so `isolate` lowers to the existing `Rvalue::Spawn` and is fully executable + differential-covered —
-  no gate. Real heap separation is I.4. Closes the object-model `!Send` deferral (E0042 ships here).
+  so `isolate` lowers to the existing `Rvalue::Spawn` and is fully executable + differential-covered — no
+  gate. Real heap separation is I.4. Closed the object-model `!Send` deferral (E0042 ships here).
+  Conformance 376 (isolate/isolate_not_send/isolate_orphan). Next free diag **E0043**.
 - **I.1 — bounded `Channel<T>` + the `SandboxScheduler` seam.** `channel::<T>(capacity)` →
   `(Sender<T>, Receiver<T>)`; async `send`/`recv` (copy semantics); deterministic FIFO + block-on-
   full/empty in the sandbox. In-oracle.
