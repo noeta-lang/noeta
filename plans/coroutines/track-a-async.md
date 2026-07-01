@@ -2,7 +2,7 @@
 
 Parent: `plans/coroutines/README.md` (the substrate + the executor decision are settled there);
 architecture `docs/resources/01-architecture.md` §7 (isolates) and §7.1–§7.2 (async + structured
-concurrency). **Status: PLANNED — for build** (branch `main`, per repo convention). Builds directly on
+concurrency). **Status: ✅ COMPLETE (A.0 → A.5)** (branch `main`, per repo convention). Built directly on
 the completed Track G (the stackless state-machine lowering in `lang-ir/lower.rs`) and on M2's
 per-isolate tokio runtime (`lang-runtime`, `RealHost`).
 
@@ -188,9 +188,28 @@ re-poll; on `Ready(v)`, done; if `Pending` with nothing to advance → a determi
     registry dispatch and build the leaf; polling resolves to the contents or aborts E0021 at the
     `.await`. Typing via a new `SigType::Future`; no new op, no IR/compiler change. CLI-tested (two
     concurrent real-disk reads; missing file → E0021). Conformance 367, differential 358 matched.
-- **A.5 — finalize.** Coloring cleanup, `?`-through-`.await` + error/cancellation typing (§7.1), docs
-  refresh (`resources/01,02`, this dir's README + memory), `plans/deferred.md` rows, mark Track A
-  complete.
+- **A.5 — finalize. ✅ DONE.** No behavior change — the run→reject migration and the executable
+  surface all landed incrementally per feature slice, so finalize was verification + bookkeeping:
+  - **Coloring + `?`-through-`.await`** verified and locked in by the async conformance suite
+    (`await_outside_async`, `await_in_closure`, `concurrent_in_sync`, `spawn_orphan` for E0040/E0041;
+    `try_through_await` for `?`-through-`.await` in statement position; `await_nested_expr` for the
+    mid-expression gate). No code change needed — coloring resets at closure boundaries and
+    `check_await_positions` were already in place.
+  - **Stale-comment cleanup:** corrected the `lang-ir/lower.rs` `Expr::Await` arm comment (it claimed
+    A.2 "replaces" the `RunFuture` drive path; in fact both coexist — statement-position awaits in an
+    async-fn body become `$poll` poll-states via `desugar_state_machine`, while the implicit-async top
+    level and inline contexts still lower to `RunFuture` → `drive_future`).
+  - **Docs + deferred backlog:** this dir's README status → COMPLETE; a "Coroutines / async" section
+    added to `plans/deferred.md` (mid-expression `.await`, `all`/`race`/bounded `map`, explicit typed
+    cancellation, nested-`concurrent` outer interleaving, more async IO leaves, app-lifetime
+    `TaskScope`/DI, inter-isolate channels); [[coroutines]] memory updated. Architecture §7.1/§7.2 is
+    the authoritative spec and already matches the built surface — left as is.
+  - **Cancellation typing** (§7.1 "cancellation is a typed outcome") is beyond today's abandon-on-error
+    at the join boundary → recorded as a deferred follow-on, not built here.
+  - **Mid-expression `.await`** stays deferred (a lowering slice comparable to A.3a — expression-ANF
+    with short-circuit-aware await hoisting — not finalize cleanup); recorded in `plans/deferred.md`.
+
+## Track A is COMPLETE (A.0 → A.5). The coroutines arc (Tracks I, G, A) is done.
 
 ## Diagnostics
 

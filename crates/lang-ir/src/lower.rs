@@ -984,10 +984,13 @@ impl Lowerer<'_> {
                     *span,
                 ))
             }
-            // `.await` (Track A.1): run the awaited future to completion and yield its value. A.1 has
-            // no suspension, so `run_future` drives the future's lazy thunk straight to its result;
-            // A.2 replaces this with the poll-state of the async state machine (which can park on a
-            // `Pending` leaf).
+            // `.await` — the **drive-to-completion** path. Statement-position awaits *inside an async
+            // fn body* are rewritten by `desugar_state_machine` into `$poll` poll-states before they
+            // reach here, so this arm handles the awaits that are *not* part of a caller's state
+            // machine: the implicit-async top level and any inline drive context. `run_future` lowers
+            // to `drive_future` (both backends), which polls the future — advancing the executor clock
+            // on a `Pending` timer/read leaf and driving any open `concurrent` scope's sibling tasks a
+            // round each iteration — until it is ready. (Tracks A.1→A.4.)
             Expr::Await { expr, span } => {
                 let future = self.lower_expr(expr, out)?;
                 Ok(self.emit(

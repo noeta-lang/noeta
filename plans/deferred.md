@@ -73,6 +73,23 @@ All recorded in `m1/slice-08-traits.md` under "Todo (deferred past M1.8)". None 
 | Monomorphic shape specialization + bounded type parameters (`<T: Comparable>`) — generics are erased-for-storage today | M1.8 | **Bounded params fold into the inferred-static type-system track** (enforced statically, not at runtime); monomorphic specialization is the packed/perf reification path it then unlocks (M2 "packed value types"). **Also carries:** reflection cross-`dyn` element recovery — once type args ride in shapes, `type_of` recovers `List<int>`'s `int` after a `dyn` boundary (attribute-system pass 2, "P2.9", folded here) |
 | Richer `#[attr(...)]` arguments (identifiers only previously) | M1.8 | **Done for literals (attribute-system pass 1, A2)** — positional + named literal args (string/int/float/bool/ident) survive into `Module.manifest` (`AttributeArg`/`AttributeValue`), verified by lang-compiler manifest tests (not `RunResult` — intrinsic). **Still deferred:** nested record-valued args (`#[Foo(inner: Bar { .. })]`) and how the manifest feeds the agentic/MCP tooling — both belong to pass 2 (the runtime reflection read-back) |
 
+## Coroutines / async (Track A tail — the track is COMPLETE, these are follow-ons)
+
+Track A (`plans/coroutines/track-a-async.md`) shipped `async`/`await`, a deterministic sandbox
+executor + real tokio executor, suspending `sleep`/`fs.read_async` leaves, and structured concurrency
+(`concurrent { }`/`spawn`). None of the rows below reach `RunResult` incorrectly today — each is a
+missing *capability*, cleanly gated (E0040) or simply absent, not a latent bug.
+
+| Item | Source | Trigger |
+|---|---|---|
+| **Mid-expression `.await`** (an `.await` in a call argument / operand / condition / `match` scrutinee, not just statement position) | A.3a | Today E0040 with a "bind it to a variable first" help. Needs an **expression-ANF pre-pass** in `lang-ir/lower.rs` that hoists each awaited sub-expression to a preceding synthetic statement-position `.await` **left-to-right, honoring short-circuit** (`&&`/`\|\|`/`??`, `if…then…else`) before `desugar_state_machine` runs — a lowering slice comparable in size to A.3a, not a cleanup. `?`-through-`.await` already works in statement position (`try_through_await.lang`). |
+| `all` / `race` / bounded-parallelism `map` over a `concurrent` scope | A.3b | Library functions over `TaskScope` (architecture §7.1), once the scope value is first-class beyond the block sugar |
+| **Explicit cooperative cancellation**, typed (§7.1 "cancellation is a typed outcome") | A.3b | Beyond today's abandon-on-error at the join boundary — a cancellation token/outcome type and cascade-to-children |
+| Nested `concurrent` interleaving with **outer** siblings | A.3b | A nested scope currently runs atomically within its task; interleaving it with the outer scope's siblings needs the scheduler to flatten scope levels |
+| More async IO leaves — `fs.write_async` / `append_async` / directory ops; network/DB leaves | A.4c | Each mirrors `fs.read_async` (a leaf + `Executor` spawn/poll pair; sandbox synchronous/in-oracle, real on tokio/out-of-oracle). Network/DB await the respective stdlib surfaces |
+| App-lifetime `TaskScope` via DI, workers, durable queues, schedulers (§7.2) | A (design) | Framework/first-party-extension patterns over the `TaskScope` primitive, not language constructs |
+| Inter-isolate parallelism / channels (§7 CPU-bound story) | A (design) | Track A is intra-isolate async only |
+
 ## Reflection (attribute-system pass 2) — pieces folded into prerequisite milestones
 
 Pass 2 (the runtime reflection read-back) is planned in `plans/attributes/pass-2-reflection.md` as slices P2.0–P2.7 (shared artifact, `attributes_of`, `type_of` with full + head-constructor fidelity, method attributes, `AttachableTo`, by-name invocation, `SemanticRole`). Two of its pieces have hard prerequisites in other milestones and are built **there**, not as orphaned reflection slices:

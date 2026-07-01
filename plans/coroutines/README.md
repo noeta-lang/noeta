@@ -1,10 +1,13 @@
 # Coroutines — lazy iterators → generators → async/await (one substrate, three tracks)
 
-**Status: NOT STARTED — design plan, for sign-off.** Branch suggestion `coroutines`. Standard commit
-trailers. This is a *new track*. Provenance: a 2026-06-30 design discussion (generators as a
+**Status: ✅ COMPLETE (all three tracks) — built on `main`, per-slice commits.** Track I (lazy
+iterators), Track G (generators, `yield`), and Track A (`async`/`await` + structured concurrency) are
+all shipped; see `track-a-async.md` for Track A's slice log and [[coroutines]] memory for the built
+shape. Follow-ons (mid-expression `.await`, `all`/`race`, explicit cancellation, more async IO leaves)
+are recorded in `plans/deferred.md`. Provenance: a 2026-06-30 design discussion (generators as a
 performance feature; "how do other languages do it; Rust nightly chose coroutines"). The conclusion
-was that generators and `async`/`await` share one compile-time machine and should be **designed
-together but shipped as separate tracks** with very different cost and determinism profiles.
+was that generators and `async`/`await` share one compile-time machine and were **designed together
+but shipped as separate tracks** with very different cost and determinism profiles — as they now are.
 
 ## Why this exists
 
