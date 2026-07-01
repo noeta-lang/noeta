@@ -19,10 +19,11 @@ use clap::{Parser, Subcommand};
 use lang_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
 use lang_check::TierFn;
 use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
-use lang_eval::{Session, SessionOutput, TreeWalkBackend};
+use lang_eval::{Session, SessionOutput};
 use lang_lexer::{TokenKind, lex};
 use lang_parser::parse;
 use lang_span::{Source, SourceId, SourceMap, Span};
+use lang_vm::VmBackend;
 
 mod manifest;
 
@@ -161,14 +162,46 @@ fn run_program(program: &lang_ast::Program, sources: &SourceMap) -> i32 {
     }
 }
 
+/// Compile an already-typechecked program straight to a bytecode [`Module`] for the real (VM)
+/// execution path (isolates I.4a). This runs the *same* Core-IR lowering + precise-RC drop + reuse
+/// passes the differential and the eval reference use, then continues IR → bytecode (the extra stage
+/// the VM needs); reusing `checked`'s site maps keeps the checker to a single run.
+///
+/// Every program that parses and type-checks compiles to bytecode — the differential holds the VM at
+/// 100% coverage *by construction* (each language feature lands in both backends together). So an
+/// `Err` here does not mean "ordinary unsupported user program"; it means that invariant broke, and
+/// we surface it rather than silently downgrading to a different backend.
+fn compile_real(
+    program: &lang_ast::Program,
+    checked: &lang_check::Checked,
+) -> Result<lang_bytecode::Module, String> {
+    lang_compiler::compile_with_sites(
+        program,
+        checked.type_of_sites.clone(),
+        checked.packed_list_sites.clone(),
+        checked.map_packed_sites.clone(),
+        checked.index_field_sites.clone(),
+        checked.ext_call_sites.clone(),
+        checked.for_stream_sites.clone(),
+        &checked.destructor_relevance,
+    )
+    .map_err(|u| {
+        format!(
+            "internal error: the VM cannot compile this program: {}",
+            u.reason
+        )
+    })
+}
+
 /// Execute an already-checked program against the **real host** (real `env`/`args`, real-disk IO)
-/// on a per-isolate tokio runtime (M2.3), returning its [`RunResult`]. It runs the **Core-IR** path
-/// — the same drop-annotated IR the conformance reference and the VM execute — so a user's program
-/// gets the migration's last-use destruction semantics, not the superseded AST-walk timing. The
-/// conformance differential keeps the deterministic sandbox, so this real-host path is never
-/// compared backend-to-backend. Shared by `lang run` and the `@test` runner so both execute a
-/// program identically. Lowering is total over the parsed language (never `Unsupported`) and purely
-/// syntactic, so every loaded program lowers; an `Err` here is only a failure to start the runtime.
+/// on a per-isolate tokio runtime (M2.3), returning its [`RunResult`].
+///
+/// Real execution runs on the **VM** backend (isolates I.4a). The tree-walker's `Rc`-based values are
+/// `!Send`, so it can never carry real inter-isolate parallelism (isolates I.4); the VM's NaN-boxed,
+/// thread-local heap is the one the shared-region borrow-sharing (I.3) and the coming `RealScheduler`
+/// (I.4b) build on. The conformance differential still runs *both* backends over the deterministic
+/// sandbox, so this real-host path is never compared backend-to-backend. Shared by `lang run` and the
+/// `@test` runner so both execute a program identically.
 fn execute_real_host(
     program: &lang_ast::Program,
     checked: &lang_check::Checked,
@@ -179,32 +212,11 @@ fn execute_real_host(
     // against real time on the CLI, out-of-oracle. The differential keeps the sandbox executor.
     let executor = lang_runtime::RealExecutor::new()
         .map_err(|err| format!("cannot start the async executor: {err}"))?;
-    // Lower + insert the precise-RC drops exactly as the bytecode pipeline does (with the same
-    // destructor-relevance annotation), so this matches the reference, then thread reuse tokens
-    // (Phase 5).
-    let relevance = lang_ir_passes::Relevance {
-        locals: checked.destructor_relevance.locals.clone(),
-        params: checked.destructor_relevance.params.clone(),
-    };
-    // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
-    // and `list[i].field` reads fuse to `Rvalue::IndexField` (P-PACK 2.5+); both ride on the IR, so
-    // `run_ir_with_host` needs no separate map.
-    let ir = lang_ir::lower_with_sites(
-        program,
-        &checked.packed_list_sites,
-        &checked.index_field_sites,
-        &checked.ext_call_sites,
-        &checked.for_stream_sites,
-    )
-    .expect("Core-IR lowering is total over the parsed language");
-    let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
-    let ir = lang_ir_passes::thread_reuse(&ir);
-    Ok(TreeWalkBackend::new().run_ir_with_host_and_executor(
-        program,
-        &ir,
+    let module = compile_real(program, checked)?;
+    Ok(VmBackend::new().run_module_with_host_and_executor(
+        &module,
         Box::new(host),
         Box::new(executor),
-        checked.type_of_sites.clone(),
     ))
 }
 
@@ -924,27 +936,11 @@ fn bench_execute(
 ) -> Result<(lang_backend::RunResult, std::time::Duration), String> {
     let host =
         lang_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
-    let relevance = lang_ir_passes::Relevance {
-        locals: checked.destructor_relevance.locals.clone(),
-        params: checked.destructor_relevance.params.clone(),
-    };
-    let ir = lang_ir::lower_with_sites(
-        program,
-        &checked.packed_list_sites,
-        &checked.index_field_sites,
-        &checked.ext_call_sites,
-        &checked.for_stream_sites,
-    )
-    .expect("Core-IR lowering is total over the parsed language");
-    let ir = lang_ir_passes::insert_drops(&ir, Some(&relevance));
-    let ir = lang_ir_passes::thread_reuse(&ir);
+    // Compile to bytecode untimed (isolates I.4a — the real path is the VM), then time execution
+    // alone, so the measurement excludes both lowering and bytecode generation.
+    let module = compile_real(program, checked)?;
     let start = Instant::now();
-    let result = TreeWalkBackend::new().run_ir_with_host(
-        program,
-        &ir,
-        Box::new(host),
-        checked.type_of_sites.clone(),
-    );
+    let result = VmBackend::new().run_module_with_host(&module, Box::new(host));
     Ok((result, start.elapsed()))
 }
 

@@ -1,6 +1,6 @@
 # Isolates & channels — inter-isolate parallelism (the CPU-bound layer)
 
-**Status: BUILDING — I.0 + I.1 + I.2 + I.3 DONE, I.4 next.** This is the parallelism half of architecture §7 (the
+**Status: BUILDING — I.0 + I.1 + I.2 + I.3 + I.4a DONE, I.4b next.** This is the parallelism half of architecture §7 (the
 async half — intra-isolate `async`/`await` + structured concurrency — is complete: see
 `plans/coroutines/track-a-async.md`). It is a **milestone**, not a slice, and the successor track the
 object-model redesign explicitly deferred `!Send` enforcement to ("the concurrency milestone … which
@@ -194,7 +194,28 @@ deterministic multi-isolate scheduler underneath.
   backup GC pass (shared objects are already outside the registry, so this is a non-issue in practice).
 - **I.4 — `RealScheduler` (OS threads), CLI-only / out-of-oracle.** Real parallelism + real borrow-
   sharing across threads; integration-tested like `RealHost`/`RealExecutor` (incl. a big-input-no-copy
-  check).
+  check). **Split into I.4a (backend routing) + I.4b (real threading)** — the eval tree-walker's `Value`
+  is `Rc`-based (`!Send`), so it can never carry cross-thread parallelism; only the VM (NaN-boxed heap,
+  thread-local accounting, the home of I.3's `SharedRegion`) can. Decided with the user: **switch the
+  CLI's real-run path to the VM entirely** (eval stays the differential reference + sandbox).
+  - **I.4a — route real execution through the VM. ✅ DONE.** `lang run`/`@test`/`bench` now compile to a
+    bytecode `Module` (`lang_compiler::compile_with_sites` off the already-`checked` program — the same
+    Core-IR lowering + drop/reuse passes the eval path open-coded, then IR → bytecode) and run it on
+    `VmBackend::run_module_with_host{,_and_executor}` with `RealHost` + `RealExecutor`. No eval fallback:
+    every program that parses+checks compiles (the differential holds VM coverage at 100% *by
+    construction*), so a compile `Err` is surfaced as an internal error, not a silent downgrade to a
+    second backend. The REPL keeps eval (stateful `Session`; isolates typed there stay cooperative — a
+    documented limitation). Verified behavior-neutral: a full old-CLI(eval) vs new-CLI(VM) sweep over
+    387 corpus programs found **zero backend-logic divergences** — the only differences were real-clock
+    timing nondeterminism in sleep-interleaving programs (nondeterministic on *both* backends, inherent
+    to the out-of-oracle real executor) and the `args` binary-path harness artifact. CLI tests 45+8,
+    conformance/differential/leak unchanged (374/100%/0 both), clippy+fmt clean. Also dropped the CLI's
+    now-dead `lang-ir`/`lang-ir-passes` deps (it goes through `lang-compiler` now).
+  - **I.4b — `RealScheduler` + OS threads.** Spawn an OS thread per isolate (own VM interpreter +
+    thread-local heap); an `unsafe Send` wrapper over VM `Value` (sound *only* because cross-thread
+    values are I.3 `shared`-tagged — borrowed, never refcounted — and the region outlives all workers);
+    real cross-thread channels (std `mpsc`/`crossbeam`) for the real path; borrow-share args via
+    `SharedRegion`. Integration-tested out-of-oracle, incl. a big-input-no-copy check.
 - **I.5 — finalize:** docs (§7 alignment), deferred rows (durable queues, worker pools, app-lifetime
   `TaskScope` via DI — §7.2 framework patterns, *not* language constructs), mark complete.
 
