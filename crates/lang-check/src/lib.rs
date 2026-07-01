@@ -67,8 +67,8 @@ use std::collections::{HashMap, HashSet};
 
 use lang_ast::{
     AttrValue, Attribute, BinaryOp, ClassDecl, DeriveSpec, EnumDecl, Expr, FieldDecl, FnDecl,
-    ForPattern, ImplBlock, ImplDecl, MatchArm, Param, Pattern, Program, Stmt, StrPart, StructDecl,
-    TypeParam, TypeRef, UnaryOp,
+    ForPattern, ImplBlock, ImplDecl, MatchArm, PackedDirective, Param, Pattern, Program, Stmt,
+    StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
@@ -4227,8 +4227,9 @@ impl Checker {
 
     /// Flag a `@packed` directive on a non-struct declaration (`E0038`): it is a value-`struct` layout
     /// marker and has no meaning on a class or enum.
-    fn check_misplaced_packed(&mut self, packed: Option<Span>, name: &str, kind: &str) {
-        if let Some(span) = packed {
+    fn check_misplaced_packed(&mut self, packed: Option<PackedDirective>, name: &str, kind: &str) {
+        if let Some(directive) = packed {
+            let span = directive.span;
             self.diags.push(
                 Diagnostic::error(
                     DiagnosticCode::InvalidPackedType,

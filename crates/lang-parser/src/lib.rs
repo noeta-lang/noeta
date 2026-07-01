@@ -31,8 +31,9 @@ use chumsky::pratt::{infix, left, postfix, prefix};
 use chumsky::prelude::*;
 use lang_ast::{
     AttrValue, Attribute, BinaryOp, ClassDecl, ClosureBody, DeriveSpec, EnumDecl, Expr, FieldDecl,
-    FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, Param, Pattern, Program,
-    RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp, UseName, VariantDecl,
+    FieldInit, FnDecl, ForPattern, ImplBlock, MatchArm, ObjectLit, PackedDirective, PackedLayout,
+    Param, Pattern, Program, RoleTag, Stmt, StrPart, StructDecl, TypeParam, TypeRef, UnaryOp,
+    UseName, VariantDecl,
 };
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_lexer::{Token, TokenKind as T, lex};
@@ -143,6 +144,10 @@ enum Decorator {
 enum DirectiveSuffix {
     Dotted((String, Span)),
     Generic(Vec<TypeRef>),
+    /// A `: value` named-argument suffix (`@packed(layout: column)`): the head is the parameter name,
+    /// this carries the identifier value. Only `@packed` interprets it today; other directives ignore
+    /// it (their handlers match on `Dotted`/`Generic`), so a stray `x: y` on them is inert.
+    Named((String, Span)),
 }
 
 /// One argument of a `@name(...)` directive: a head identifier plus an optional [`DirectiveSuffix`].
@@ -301,6 +306,57 @@ fn set_sugar_items(callee: &Expr) -> Option<&[Expr]> {
 
 /// Project a directive's arguments onto their head identifiers (dropping any suffix), for the
 /// directives that take plain names (`@attribute`).
+/// Parse `@packed`'s optional `layout: row|column` argument (P-SIMD). Bare `@packed` (no args) is
+/// [`PackedLayout::Row`]. Any malformed argument — unknown name, missing/wrong value, extra args —
+/// emits `E0037` and falls back to `Row` so parsing continues.
+fn parse_packed_layout(args: &[DirectiveArg], _directive_span: Span, ctx: &Ctx) -> PackedLayout {
+    let reject = |span: Span, msg: String| {
+        ctx.diags.borrow_mut().push(
+            Diagnostic::error(DiagnosticCode::InvalidDirectiveArgument, span, msg)
+                .with_help("`@packed` takes at most `layout: row` or `layout: column`"),
+        );
+    };
+    let Some(((head, head_span), suffix)) = args.first() else {
+        return PackedLayout::Row; // bare `@packed`
+    };
+    if let Some(extra) = args.get(1) {
+        reject(
+            extra.0.1,
+            "`@packed` takes a single `layout` argument".to_string(),
+        );
+    }
+    if head.as_str() != "layout" {
+        reject(
+            *head_span,
+            format!(
+                "unknown `@packed` argument `{head}`; the only argument is `layout: row|column`"
+            ),
+        );
+        return PackedLayout::Row;
+    }
+    match suffix {
+        Some(DirectiveSuffix::Named((value, value_span))) => match value.as_str() {
+            "row" => PackedLayout::Row,
+            "column" => PackedLayout::Column,
+            other => {
+                reject(
+                    *value_span,
+                    format!("unknown layout `{other}`; expected `row` or `column`"),
+                );
+                PackedLayout::Row
+            }
+        },
+        _ => {
+            reject(
+                *head_span,
+                "`@packed(layout: …)` needs a value — `layout: row` or `layout: column`"
+                    .to_string(),
+            );
+            PackedLayout::Row
+        }
+    }
+}
+
 fn directive_heads(args: Vec<DirectiveArg>) -> Vec<(String, Span)> {
     args.into_iter().map(|(head, _suffix)| head).collect()
 }
@@ -351,7 +407,7 @@ fn attach_decorators(
     attribute: Option<Vec<(String, Span)>>,
     role: Option<Vec<RoleTag>>,
     semantic: Option<Span>,
-    packed: Option<Span>,
+    packed: Option<PackedDirective>,
 ) -> Stmt {
     if derives.is_empty()
         && attrs.is_empty()
@@ -2594,6 +2650,10 @@ where
             just(T::Dot)
                 .ignore_then(id.clone())
                 .map(DirectiveSuffix::Dotted),
+            // A `: value` named argument (`@packed(layout: column)`); only `@packed` reads it.
+            just(T::Colon)
+                .ignore_then(id.clone())
+                .map(DirectiveSuffix::Named),
             type_parser(ctx)
                 .separated_by(just(T::Comma))
                 .at_least(1)
@@ -2640,7 +2700,7 @@ where
                 let mut attribute: Option<Vec<(String, Span)>> = None;
                 let mut role: Option<Vec<RoleTag>> = None;
                 let mut semantic: Option<Span> = None;
-                let mut packed: Option<Span> = None;
+                let mut packed: Option<PackedDirective> = None;
                 for decorator in decorators {
                     match decorator {
                         Decorator::Derive {
@@ -2676,22 +2736,15 @@ where
                                 semantic = Some(name_span);
                             }
                             "packed" => {
-                                // `@packed` (P-PACK) — the struct-only flat-layout marker; takes no
-                                // arguments (rejected like `@semantic`, E0037). The checker validates
+                                // `@packed` (P-PACK) — the struct-only flat-layout marker. Its one
+                                // optional argument is `layout: row|column` (P-SIMD): the storage
+                                // layout its lists use. Anything else is E0037. The checker validates
                                 // placement (struct-only) and the all-primitive field constraint.
-                                if let Some(arg) = args.first() {
-                                    ctx.diags.borrow_mut().push(
-                                        Diagnostic::error(
-                                            DiagnosticCode::InvalidDirectiveArgument,
-                                            arg.0.1,
-                                            "`@packed` takes no arguments".to_string(),
-                                        )
-                                        .with_help(
-                                            "`@packed` marks a struct of primitives for unboxed flat layout",
-                                        ),
-                                    );
-                                }
-                                packed = Some(name_span);
+                                let layout = parse_packed_layout(&args, name_span, &ctx);
+                                packed = Some(PackedDirective {
+                                    span: name_span,
+                                    layout,
+                                });
                             }
                             _ => ctx.diags.borrow_mut().push(Diagnostic::error(
                                 DiagnosticCode::UnexpectedToken,
@@ -3458,23 +3511,48 @@ mod tests {
     #[test]
     fn packed_directive_marks_a_struct() {
         // P-PACK Phase 0: `@packed` is a fifth decorator directive (name-based dispatch), marking a
-        // struct; it coexists with `@derive(...)` and takes no arguments.
+        // struct; it coexists with `@derive(...)`. Bare `@packed` is the default `layout: row`.
         let parsed = parse_str("@derive(Equatable)\n@packed\nstruct Vec3 { x: float; y: float }\n");
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
         let Stmt::Struct(s) = &parsed.program.stmts[0] else {
             panic!("expected struct, got {:?}", parsed.program.stmts[0]);
         };
-        assert!(s.packed.is_some(), "struct should be marked @packed");
+        assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Row));
         assert_eq!(s.derives.len(), 1); // @packed coexists with @derive
-        // `@packed` takes no arguments.
-        let bad = parse_str("@packed(x)\nstruct V { a: int }\n");
-        assert!(
-            bad.diagnostics
-                .iter()
-                .any(|d| d.code == DiagnosticCode::InvalidDirectiveArgument),
-            "{:?}",
-            bad.diagnostics
-        );
+    }
+
+    #[test]
+    fn packed_layout_argument() {
+        // P-SIMD: `@packed(layout: column)` selects the column-major storage layout; `row` is the
+        // explicit default.
+        let col = parse_str("@packed(layout: column)\nstruct V { a: int }\n");
+        assert!(col.diagnostics.is_empty(), "{:?}", col.diagnostics);
+        let Stmt::Struct(s) = &col.program.stmts[0] else {
+            panic!("expected struct");
+        };
+        assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Column));
+
+        let row = parse_str("@packed(layout: row)\nstruct V { a: int }\n");
+        let Stmt::Struct(s) = &row.program.stmts[0] else {
+            panic!("expected struct");
+        };
+        assert_eq!(s.packed.map(|p| p.layout), Some(PackedLayout::Row));
+
+        // Unknown value, unknown arg name, and a value-less `layout` are each E0037.
+        for src in [
+            "@packed(layout: bogus)\nstruct V { a: int }\n",
+            "@packed(x)\nstruct V { a: int }\n",
+            "@packed(layout)\nstruct V { a: int }\n",
+        ] {
+            let bad = parse_str(src);
+            assert!(
+                bad.diagnostics
+                    .iter()
+                    .any(|d| d.code == DiagnosticCode::InvalidDirectiveArgument),
+                "expected E0037 for `{src}`, got {:?}",
+                bad.diagnostics
+            );
+        }
     }
 
     #[test]

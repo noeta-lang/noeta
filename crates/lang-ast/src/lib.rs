@@ -212,8 +212,31 @@ pub struct StructDecl {
     /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
     /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
     /// an ordinary declaration.
-    pub packed: Option<Span>,
+    pub packed: Option<PackedDirective>,
     pub span: Span,
+}
+
+/// The storage layout a `@packed` struct's lists use (P-SIMD `plans/perf/p-simd-column-layout.md`).
+/// A per-type performance attribute — **invisible to behaviour**; it only changes which kernel/offset
+/// math the runtime uses. Set by `@packed(layout: row|column)`; bare `@packed` is [`Row`](Self::Row).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PackedLayout {
+    /// Row-major: each element's fields are contiguous (AoS). The default, and today's `@packed`.
+    /// O(1) append, contiguous per-element access.
+    #[default]
+    Row,
+    /// Column-major: each field's values are contiguous across elements (SoA). Optimized for
+    /// whole-collection field math (autovectorized bulk kernels), at the cost of per-element access
+    /// and append.
+    Column,
+}
+
+/// The resolved `@packed` directive: its span (for diagnostics) plus the chosen [`PackedLayout`].
+/// `None` on a declaration means not `@packed`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PackedDirective {
+    pub span: Span,
+    pub layout: PackedLayout,
 }
 
 /// One `@role(Enum.Variant)` tag: the enum and variant naming an architectural role an attribute
@@ -390,7 +413,7 @@ pub struct ClassDecl {
     /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
     /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
     /// an ordinary declaration.
-    pub packed: Option<Span>,
+    pub packed: Option<PackedDirective>,
     /// The optional `destruct { ... }` block — the runtime-invoked destructor. It is *not* a
     /// method (no call site, not directly callable); the GC runs it when the last reference to
     /// an instance drops. Its statements run with the instance's fields in scope.
@@ -462,7 +485,7 @@ pub struct EnumDecl {
     /// contiguous flat layout. A misplacement on a class/enum is a checker error (`E0038`); on a
     /// struct, every field must be a primitive or another packed struct (also `E0038`). `None` for
     /// an ordinary declaration.
-    pub packed: Option<Span>,
+    pub packed: Option<PackedDirective>,
     pub span: Span,
 }
 

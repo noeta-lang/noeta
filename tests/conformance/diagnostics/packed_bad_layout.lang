@@ -1,0 +1,6 @@
+// `@packed(layout: X)` rejects an unknown layout value (E0037); the two layouts are `row` and
+// `column`.
+// expect: error E0037 at 5:17
+// expect: exit 1
+@packed(layout: bogus) struct V { a: int }
+echo "unreached"
