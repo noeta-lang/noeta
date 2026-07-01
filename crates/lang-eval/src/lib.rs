@@ -2311,6 +2311,20 @@ impl Interpreter {
         args: &[Value],
         span: Span,
     ) -> Eval<Value> {
+        // `fs.read_async` (Track A.4c) is not a synchronous dispatch: it produces a leaf async-read
+        // *future* (ticketed in the executor) that `.await` later resolves to the file contents. It is
+        // intercepted here, ahead of the normal registry dispatch (which is synchronous, value-only).
+        if module == "fs" && func == "read_async" {
+            let Some(Value::Str(path)) = args.first() else {
+                return Err(self.runtime_error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "`fs.read_async` expects a `string` path".to_string(),
+                ));
+            };
+            let id = self.executor.spawn_read(&mut *self.host, path);
+            return Ok(Value::AsyncRead(id));
+        }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
@@ -3248,6 +3262,19 @@ impl Interpreter {
                     None => Ok(Some(Value::Unit)),
                 }
             }
+            // A leaf async-read (Track A.4c): ask the executor whether the read has completed. Ready →
+            // the file contents (a `string`); an IO failure aborts (E0021) at the `.await`, matching
+            // synchronous `fs.read`; pending → `None` (the sandbox always resolves on the first poll).
+            Value::AsyncRead(id) => {
+                let id = *id;
+                match self.executor.poll_read(id) {
+                    Some(Ok(contents)) => Ok(Some(Value::Str(contents))),
+                    Some(Err(error)) => {
+                        Err(self.runtime_error(std_error_code(error.kind), span, error.message))
+                    }
+                    None => Ok(None),
+                }
+            }
             other => Ok(Some(other.clone())),
         }
     }
@@ -3792,7 +3819,8 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         | Value::Future(_)
         | Value::Timer(_)
         | Value::Pending
-        | Value::Handle(..) => TypeRepr::Dyn,
+        | Value::Handle(..)
+        | Value::AsyncRead(_) => TypeRepr::Dyn,
     }
 }
 
@@ -4222,7 +4250,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
-        Value::Future(_) | Value::Timer(_) | Value::Handle(..) => {
+        Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncRead(_) => {
             NativeValue::Str("<future>".to_string())
         }
         Value::Pending => NativeValue::Str("<pending>".to_string()),

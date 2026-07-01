@@ -46,6 +46,7 @@ fn sig_to_type(sig: &registry::SigType) -> Type {
         SigType::List(t) => list(sig_to_type(t)),
         SigType::Option(t) => opt(sig_to_type(t)),
         SigType::Map(k, v) => Type::Map(Box::new(sig_to_type(k)), Box::new(sig_to_type(v))),
+        SigType::Future(t) => Type::Named(FUTURE.to_string(), vec![sig_to_type(t)]),
         SigType::Named(n) => Type::Named((*n).to_string(), vec![]),
     }
 }

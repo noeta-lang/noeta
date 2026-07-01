@@ -118,6 +118,9 @@ pub enum SigType {
     List(&'static SigType),
     Option(&'static SigType),
     Map(&'static SigType, &'static SigType),
+    /// An async future (Track A.4c) — `fs.read_async(path): Future<string>`. The checker maps it onto
+    /// `Type::Named("Future", [inner])` and `.await` unwraps it.
+    Future(&'static SigType),
     /// A named type — an extension type or a user-declared type.
     Named(&'static str),
 }
@@ -889,6 +892,14 @@ const FS_FNS: &[ExtFn] = &[
         name: "read",
         params: &[Str],
         ret: Concrete(Str),
+    },
+    // Track A.4c: the async twin of `read` — returns a `Future<string>` an async context `.await`s.
+    // On the sandbox it resolves deterministically (in-oracle); on the real executor it suspends and
+    // the read runs concurrently on tokio (CLI-only, out-of-oracle).
+    ExtFn {
+        name: "read_async",
+        params: &[Str],
+        ret: Concrete(SigType::Future(&Str)),
     },
     ExtFn {
         name: "read_lines",

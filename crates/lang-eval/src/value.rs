@@ -87,6 +87,10 @@ pub enum Value {
     /// `Future<T>` `spawn e` returns, referencing a task by its `(scope index, task index)` in the
     /// interpreter's concurrency-scope stack.
     Handle(usize, usize),
+    /// A **leaf async-read future** (Track A.4c): the tree-walker twin of the VM's
+    /// `Payload::AsyncRead`. The `Future<string>` `fs.read_async(path)` returns, carrying the id that
+    /// tickets the pending read in the injected [`lang_stdlib::Executor`].
+    AsyncRead(u64),
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -497,7 +501,9 @@ impl Value {
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
             Value::Iter(_) => "<iterator>".to_string(),
-            Value::Future(_) | Value::Timer(_) | Value::Handle(..) => "<future>".to_string(),
+            Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncRead(_) => {
+                "<future>".to_string()
+            }
             Value::Pending => "<pending>".to_string(),
         }
     }
@@ -533,7 +539,9 @@ impl Value {
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
             Value::Iter(_) => "iterator",
-            Value::Future(_) | Value::Timer(_) | Value::Handle(..) => "future",
+            Value::Future(_) | Value::Timer(_) | Value::Handle(..) | Value::AsyncRead(_) => {
+                "future"
+            }
             Value::Pending => "pending",
         }
     }
@@ -566,6 +574,7 @@ impl fmt::Debug for Value {
             Value::Timer(deadline) => write!(f, "Timer({deadline})"),
             Value::Pending => write!(f, "Pending"),
             Value::Handle(scope, task) => write!(f, "Handle({scope}, {task})"),
+            Value::AsyncRead(id) => write!(f, "AsyncRead({id})"),
         }
     }
 }

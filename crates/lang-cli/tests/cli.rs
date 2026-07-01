@@ -121,6 +121,55 @@ fn run_does_real_disk_io() {
 }
 
 #[test]
+fn run_reads_files_asynchronously_on_the_real_executor() {
+    // Track A.4c: `fs.read_async(path)` returns a `Future<string>` the async context awaits. On the
+    // CLI's real executor the reads hit the REAL disk and run concurrently on tokio; here two files
+    // are read in a `concurrent` block and awaited for their contents. (Conformance covers the
+    // deterministic sandbox path; this proves the real-disk, real-executor path.)
+    let dir = std::env::temp_dir().join("lang_cli_async_read_dir");
+    std::fs::create_dir_all(&dir).expect("create work dir");
+    std::fs::write(dir.join("a.txt"), "alpha").expect("write a");
+    std::fs::write(dir.join("b.txt"), "beta").expect("write b");
+    let src = "use std.{fs}\n\
+               async fn load(path: string): string {\n\
+               \x20   return fs.read_async(path).await\n\
+               }\n\
+               concurrent {\n\
+               \x20   a = spawn load(\"a.txt\")\n\
+               \x20   b = spawn load(\"b.txt\")\n\
+               \x20   echo \"a=\" ~ a.await\n\
+               \x20   echo \"b=\" ~ b.await\n\
+               }\n\
+               echo \"done\"\n";
+    let file = temp_program("run_async_read", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .current_dir(&dir)
+        .assert()
+        .success()
+        .stdout("a=alpha\nb=beta\ndone\n");
+    let _ = std::fs::remove_file(dir.join("a.txt"));
+    let _ = std::fs::remove_file(dir.join("b.txt"));
+}
+
+#[test]
+fn run_async_read_of_a_missing_file_is_an_io_error() {
+    // An IO failure surfaces at the `.await` as an E0021 abort — the same error channel synchronous
+    // `fs.read` uses, just deferred to when the async read is polled to completion.
+    let src = "use std.{fs}\n\
+               async fn load(path: string): string { return fs.read_async(path).await }\n\
+               echo load(\"definitely_missing_async.txt\").await\n";
+    let file = temp_program("run_async_read_missing", src);
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicates::str::contains("E0021"));
+}
+
+#[test]
 fn run_sleeps_in_real_time_on_the_real_executor() {
     // Track A.4: `lang run` pairs the real host with the real wall-clock executor, so an awaited
     // `sleep(ms)` genuinely takes real time (the sandbox executor would jump logical time and finish

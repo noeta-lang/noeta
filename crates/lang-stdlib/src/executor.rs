@@ -14,7 +14,8 @@
 //! the same discipline as [`crate::SandboxHost`]'s logical clock — so the differential holds. A real
 //! tokio-backed executor (Track A.4, CLI-only) will offer the same surface, out-of-oracle.
 
-use std::collections::BTreeSet;
+use crate::{Host, StdError};
+use std::collections::{BTreeSet, HashMap};
 
 /// The async scheduler's clock + timer seam, injected into each backend exactly like [`crate::Host`].
 ///
@@ -37,11 +38,22 @@ pub trait Executor {
     /// no-op (the poll that would register it reads ready instead).
     fn register_timer(&mut self, deadline: u64);
 
-    /// Wait for the earliest pending timer to become ready, returning the new time. `None` means
-    /// nothing is pending — an awaited future is parked with no way to make progress, i.e. a
-    /// deterministic deadlock. The sandbox *jumps* logical time to the deadline; the real executor
-    /// *sleeps* real time until it.
+    /// Wait for the earliest pending event (a timer, or a pending async read on the real executor) to
+    /// become ready, returning the new time. `None` means nothing is pending — an awaited future is
+    /// parked with no way to make progress, i.e. a deterministic deadlock. The sandbox *jumps* logical
+    /// time to the deadline; the real executor *sleeps* real time until it, or drives a pending read.
     fn advance(&mut self) -> Option<u64>;
+
+    /// Begin an async file read (Track A.4c: `fs.read_async(path)`), returning a ticket id to poll it
+    /// with via [`Self::poll_read`]. The sandbox executor performs the read **synchronously** through
+    /// `host` and caches the result, so it is ready on the first poll (deterministic, in-oracle); the
+    /// real executor spawns it on its tokio runtime and harvests it in [`Self::advance`] (real
+    /// concurrency, out-of-oracle). `host` is consulted only by the sandbox.
+    fn spawn_read(&mut self, host: &mut dyn Host, path: &str) -> u64;
+
+    /// Poll a read begun by [`Self::spawn_read`]: `Some(result)` once it has completed (the ticket is
+    /// then spent), `None` while it is still pending. A ticket is polled at most once to `Some`.
+    fn poll_read(&mut self, id: u64) -> Option<Result<String, StdError>>;
 }
 
 /// The deterministic sandbox executor: a logical clock (milliseconds, starting at zero) and the set
@@ -53,6 +65,12 @@ pub struct SandboxExecutor {
     /// Deadlines (absolute logical times) of timers that have been polled while pending. Ordered, so
     /// [`Self::advance`] deterministically picks the earliest.
     timers: BTreeSet<u64>,
+    /// Results of `fs.read_async` reads, keyed by ticket id. The sandbox performs each read
+    /// synchronously at `spawn_read` (deterministic), so the result is cached here and returned ready
+    /// on the first `poll_read`. Kept tiny — a ticket is removed once polled.
+    reads: HashMap<u64, Result<String, StdError>>,
+    /// Monotonic ticket source for `reads`.
+    next_read_id: u64,
 }
 
 impl SandboxExecutor {
@@ -74,12 +92,26 @@ impl Executor for SandboxExecutor {
     }
 
     /// Advance logical time to the earliest pending timer, clearing every timer that time reaches;
-    /// returns the new time. `None` means nothing is pending — a deterministic deadlock.
+    /// returns the new time. `None` means nothing is pending — a deterministic deadlock. (Sandbox
+    /// reads resolve at `spawn_read`, so they never keep the scheduler waiting here.)
     fn advance(&mut self) -> Option<u64> {
         let next = *self.timers.iter().next()?;
         self.now = next;
         self.timers.retain(|&d| d > self.now);
         Some(self.now)
+    }
+
+    fn spawn_read(&mut self, host: &mut dyn Host, path: &str) -> u64 {
+        // Deterministic: read the sandbox VFS now and cache the result, ready on the first poll.
+        let id = self.next_read_id;
+        self.next_read_id += 1;
+        self.reads.insert(id, host.fs_read(path));
+        id
+    }
+
+    fn poll_read(&mut self, id: u64) -> Option<Result<String, StdError>> {
+        // Always ready — the read completed at `spawn_read`.
+        self.reads.remove(&id)
     }
 }
 

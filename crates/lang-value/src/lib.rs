@@ -644,16 +644,37 @@ impl Value {
     }
 
     /// Whether this is a future — a step/thunk future ([`Payload::Future`]), a leaf timer
-    /// ([`Payload::Timer`]), or a task handle ([`Payload::Handle`]). All name their type "future" and
-    /// display opaquely.
+    /// ([`Payload::Timer`]), a task handle ([`Payload::Handle`]), or a leaf async-read
+    /// ([`Payload::AsyncRead`]). All name their type "future" and display opaquely.
     pub fn is_future(self) -> bool {
         self.is_pointer()
             && heap::with_payload(self, |p| {
                 matches!(
                     p,
-                    Payload::Future(_) | Payload::Timer(_) | Payload::Handle(..)
+                    Payload::Future(_)
+                        | Payload::Timer(_)
+                        | Payload::Handle(..)
+                        | Payload::AsyncRead(_)
                 )
             })
+    }
+
+    /// A **leaf async-read future** (Track A.4c): `fs.read_async(path)` produces one, carrying the id
+    /// that tickets the pending read in the injected [`lang_stdlib::Executor`]. Polled by consulting
+    /// the executor (see [`Self::async_read_id`]); it wraps no closure.
+    pub fn make_async_read(id: u64) -> Value {
+        heap::alloc(Payload::AsyncRead(id))
+    }
+
+    /// The executor ticket id of a leaf async-read future, or `None` if this is not one.
+    pub fn async_read_id(self) -> Option<u64> {
+        if !self.is_pointer() {
+            return None;
+        }
+        heap::with_payload(self, |p| match p {
+            Payload::AsyncRead(id) => Some(*id),
+            _ => None,
+        })
     }
 
     /// Whether this is a leaf timer future.
@@ -1626,10 +1647,11 @@ impl Value {
                 Payload::FileHandle(handle) => handle.display(),
                 // An iterator is an opaque reference value (like a file handle).
                 Payload::Iter { .. } => "<iterator>".to_string(),
-                // A future — step, leaf timer, or task handle — is an opaque reference value.
-                Payload::Future(_) | Payload::Timer(_) | Payload::Handle(..) => {
-                    "<future>".to_string()
-                }
+                // A future — step, leaf timer, task handle, or async-read — is an opaque reference.
+                Payload::Future(_)
+                | Payload::Timer(_)
+                | Payload::Handle(..)
+                | Payload::AsyncRead(_) => "<future>".to_string(),
                 // Handled by the early return at the top of `display`.
                 Payload::PackedList { .. } => unreachable!("packed list demoted before display"),
             })
@@ -1709,9 +1731,10 @@ impl Value {
                 // An iterator has no JSON analog either — its opaque display form.
                 Payload::Iter { .. } => NativeValue::Str("<iterator>".to_string()),
                 // A future has no JSON analog — its opaque display form.
-                Payload::Future(_) | Payload::Timer(_) | Payload::Handle(..) => {
-                    NativeValue::Str("<future>".to_string())
-                }
+                Payload::Future(_)
+                | Payload::Timer(_)
+                | Payload::Handle(..)
+                | Payload::AsyncRead(_) => NativeValue::Str("<future>".to_string()),
                 // Handled by the early return at the top.
                 Payload::PackedList { .. } => {
                     unreachable!("packed list demoted before to_native_deep")
@@ -2202,6 +2225,20 @@ mod tests {
         assert_eq!(handle.type_name(), "future");
         assert_eq!(handle.display(), "<future>");
         handle.release(); // frees the node, no leak
+    }
+
+    #[test]
+    fn async_read_carries_its_ticket_and_frees_cleanly() {
+        // Track A.4c: a leaf async-read future is a GC leaf holding the executor ticket id; it names
+        // itself "future", displays opaquely, and frees as a plain node — leak-clean under miri.
+        let read = Value::make_async_read(7);
+        assert!(read.is_future());
+        assert_eq!(read.async_read_id(), Some(7));
+        assert!(read.future_step().is_none()); // it wraps no closure
+        assert!(!read.is_timer() && !read.is_handle());
+        assert_eq!(read.type_name(), "future");
+        assert_eq!(read.display(), "<future>");
+        read.release(); // frees the node, no leak
     }
 
     #[test]

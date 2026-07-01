@@ -851,6 +851,17 @@ impl<'m> Vm<'m> {
         args: &[Value],
         span: Span,
     ) -> Result<Value, Abort> {
+        // `fs.read_async` (Track A.4c) is not a synchronous dispatch: it produces a leaf async-read
+        // *future* (ticketed in the executor) that `.await` later resolves to the file contents. It is
+        // intercepted here, ahead of the normal registry dispatch (which is synchronous, value-only).
+        if module == "fs" && func == "read_async" {
+            let Some(path) = args.first().and_then(|a| a.as_string()) else {
+                let error = lang_stdlib::no_function_error("fs", func);
+                return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+            };
+            let id = self.executor.spawn_read(&mut *self.host, &path);
+            return Ok(Value::make_async_read(id));
+        }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the
@@ -4301,6 +4312,18 @@ impl<'m> Vm<'m> {
                 },
                 None => Poll::Ready(Value::unit()),
             });
+        }
+        // A leaf async-read (Track A.4c): ask the executor whether the read has completed. Ready → the
+        // file contents (a fresh `string`); an IO failure aborts (E0021) at the `.await`, matching
+        // synchronous `fs.read`; pending → `Poll::Pending` (the sandbox always resolves on first poll).
+        if let Some(id) = future.async_read_id() {
+            return match self.executor.poll_read(id) {
+                Some(Ok(contents)) => Ok(Poll::Ready(Value::string(&contents))),
+                Some(Err(error)) => {
+                    Err(self.error(stdlib_error_code(error.kind), span, error.message))
+                }
+                None => Ok(Poll::Pending),
+            };
         }
         match future.future_step() {
             Some(step) => {

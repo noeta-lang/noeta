@@ -13,23 +13,34 @@
 //! to IO) extended to scheduling. It is constructed only by the CLI/REPL/server and is **never** run
 //! in the differential, so it stays out-of-oracle.
 
-use lang_stdlib::Executor;
-use std::collections::BTreeSet;
+use lang_stdlib::{Executor, Host, StdError};
+use std::collections::{BTreeSet, HashMap};
 use std::time::{Duration, Instant};
 use tokio::runtime::Runtime;
+use tokio::task::JoinHandle;
 
-/// The real executor: a wall-clock reading (`now` = ms elapsed since construction) and a set of
-/// pending timer deadlines, with `advance` sleeping real time on a tokio runtime.
+/// The real executor: a wall-clock reading (`now` = ms elapsed since construction), a set of pending
+/// timer deadlines, and a set of in-flight async reads — with `advance` sleeping real time or driving
+/// a read to completion on a tokio runtime.
 #[derive(Debug)]
 pub struct RealExecutor {
     /// The instant this executor was built; `now()` is the milliseconds elapsed since it.
     start: Instant,
     /// A `current_thread` runtime with the time driver enabled — `advance` blocks on
-    /// `tokio::time::sleep` here. One per isolate, matching the shared-nothing isolate model.
+    /// `tokio::time::sleep` (or on a pending read's `JoinHandle`) here. One per isolate, matching the
+    /// shared-nothing isolate model.
     runtime: Runtime,
     /// Absolute deadlines (ms since `start`) of timers polled while pending. Ordered, so `advance`
     /// deterministically picks the earliest — though "deterministic" here still races real time.
     timers: BTreeSet<u64>,
+    /// In-flight `fs.read_async` reads spawned onto `runtime`, keyed by ticket id. Each runs on the
+    /// tokio blocking pool concurrently; `advance` harvests one (driving the runtime, which also lets
+    /// the others finish), and `poll_read` returns a finished one.
+    reads: HashMap<u64, JoinHandle<Result<String, StdError>>>,
+    /// Reads harvested by `advance` but not yet returned by `poll_read`, keyed by ticket id.
+    resolved: HashMap<u64, Result<String, StdError>>,
+    /// Monotonic ticket source for `reads`/`resolved`.
+    next_read_id: u64,
 }
 
 impl RealExecutor {
@@ -43,6 +54,9 @@ impl RealExecutor {
             start: Instant::now(),
             runtime,
             timers: BTreeSet::new(),
+            reads: HashMap::new(),
+            resolved: HashMap::new(),
+            next_read_id: 0,
         })
     }
 
@@ -66,6 +80,18 @@ impl Executor for RealExecutor {
     }
 
     fn advance(&mut self) -> Option<u64> {
+        // A pending read is the more urgent progress: drive one to completion on the runtime. Blocking
+        // on its handle also pumps the runtime, so the *other* in-flight reads (running on the blocking
+        // pool) get polled too and may finish in the same pass — genuine IO concurrency.
+        if let Some(&id) = self.reads.keys().min() {
+            let handle = self.reads.remove(&id).expect("id came from the map");
+            let result = self
+                .runtime
+                .block_on(handle)
+                .unwrap_or_else(|join_err| Err(join_error(join_err)));
+            self.resolved.insert(id, result);
+            return Some(self.elapsed_ms());
+        }
         let next = *self.timers.iter().next()?;
         let now = self.elapsed_ms();
         if next > now {
@@ -82,6 +108,56 @@ impl Executor for RealExecutor {
         self.timers.retain(|&d| d > now);
         Some(now)
     }
+
+    fn spawn_read(&mut self, _host: &mut dyn Host, path: &str) -> u64 {
+        // Spawn the real read onto the runtime; it proceeds on the blocking pool concurrently with the
+        // rest of the isolate's cooperative scheduling. The host is unused — the real host reads disk.
+        let id = self.next_read_id;
+        self.next_read_id += 1;
+        let path = path.to_string();
+        let handle = self.runtime.spawn(async move {
+            tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| io_error(format!("cannot read `{path}`: {e}")))
+        });
+        self.reads.insert(id, handle);
+        id
+    }
+
+    fn poll_read(&mut self, id: u64) -> Option<Result<String, StdError>> {
+        // Harvested by a prior `advance`?
+        if let Some(result) = self.resolved.remove(&id) {
+            return Some(result);
+        }
+        // Otherwise ready only if the spawned task has finished (it needs the runtime driven — which
+        // `advance` does — before `is_finished` flips, so pending is the normal answer here).
+        let handle = self.reads.get(&id)?;
+        if handle.is_finished() {
+            let handle = self.reads.remove(&id).expect("just checked present");
+            Some(
+                self.runtime
+                    .block_on(handle)
+                    .unwrap_or_else(|join_err| Err(join_error(join_err))),
+            )
+        } else {
+            None
+        }
+    }
+}
+
+/// Build an `ErrorKind::Io` (`E0021`) error from a real-disk read failure — the read-async
+/// counterpart of [`crate::io_error`] (kept local so the executor module is self-contained).
+fn io_error(message: String) -> StdError {
+    StdError {
+        kind: lang_stdlib::ErrorKind::Io,
+        message,
+    }
+}
+
+/// A read task that panicked or was cancelled surfaces as an IO error (`E0021`) rather than tearing
+/// down the isolate — the same error channel a real disk failure uses.
+fn join_error(err: tokio::task::JoinError) -> StdError {
+    io_error(format!("async read task failed: {err}"))
 }
 
 #[cfg(test)]

@@ -245,6 +245,11 @@ pub(crate) enum Payload {
     /// the task's stored result (ready) or reports pending. A GC leaf — the two indices are plain
     /// integers; the task's future/result are owned by the scope, not the handle.
     Handle(u32, u32),
+    /// A **leaf async-read future** (Track A.4c): the `Future<string>` `fs.read_async(path)` returns.
+    /// It carries an id ticketing the read in the injected [`lang_stdlib::Executor`] (the sandbox
+    /// executor resolves it synchronously; the real executor spawns it on tokio and harvests it in
+    /// `advance`). A GC leaf — the id is a plain integer; the pending read lives in the executor.
+    AsyncRead(u64),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -498,6 +503,7 @@ pub(crate) fn free(value: Value) {
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
+        | Payload::AsyncRead(_)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -658,6 +664,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
+        | Payload::AsyncRead(_)
         | Payload::FileHandle(_) => {}
     }
     out

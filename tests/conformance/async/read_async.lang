@@ -1,0 +1,21 @@
+// Track A.4c — the async file-read leaf. `fs.read_async(path)` returns a `Future<string>` an async
+// context awaits. On the sandbox VFS it resolves deterministically (in-oracle, both backends agree);
+// on the real executor (CLI) the read runs concurrently on tokio. Here two files are written, then
+// read back concurrently in a `concurrent` block and awaited for their contents.
+// expect: stdout "a=alpha"
+// expect: stdout "b=beta"
+// expect: stdout "done"
+// expect: exit 0
+use std.{fs}
+async fn load(path: string): string {
+    return fs.read_async(path).await
+}
+fs.write("a.txt", "alpha")
+fs.write("b.txt", "beta")
+concurrent {
+    a = spawn load("a.txt")
+    b = spawn load("b.txt")
+    echo "a=" ~ a.await
+    echo "b=" ~ b.await
+}
+echo "done"
