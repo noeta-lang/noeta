@@ -166,6 +166,79 @@ fn run_real_isolates_actually_run_in_parallel() {
     );
 }
 
+#[test]
+fn run_real_isolate_channel_producer_consumer() {
+    // Isolates I.4c: a producer runs as a real isolate on its own thread and streams over a channel
+    // the parent (consumer) drains — the channel crosses the thread boundary as a shared queue. A
+    // capacity-2 buffer means the two threads genuinely hand messages back and forth; 1+2+3+4 = 10.
+    let file = temp_program(
+        "isolate_xchan",
+        "async fn produce(tx: Sender<int>): void {\n\
+         for i in 1..5 { tx.send(i).await }\n\
+         tx.close()\n\
+         }\n\
+         async fn run(): int {\n\
+         (tx, rx) = channel::<int>(2)\n\
+         mut total = 0\n\
+         concurrent {\n\
+         isolate produce(tx)\n\
+         mut running = true\n\
+         while running {\n\
+         r = rx.recv().await\n\
+         (v, keep) = match r { some(x) => (x, true), none => (0, false) }\n\
+         total = total + v\n\
+         running = keep\n\
+         }\n\
+         }\n\
+         return total\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("10\n");
+}
+
+#[test]
+fn run_real_isolate_channel_backpressure_capacity_one() {
+    // A capacity-1 cross-thread channel forces the producer isolate and the parent consumer to
+    // alternate (send blocks the producer's cooperative scheduler until the parent drains a slot).
+    // Completing correctly proves the shared channel's cooperative poll interoperates across threads
+    // without deadlocking — the hazard that motivated splitting channels into I.4c. 0+1+2 = 3.
+    let file = temp_program(
+        "isolate_backpressure",
+        "async fn produce(tx: Sender<int>): void {\n\
+         for i in 0..3 { tx.send(i).await }\n\
+         tx.close()\n\
+         }\n\
+         async fn run(): int {\n\
+         (tx, rx) = channel::<int>(1)\n\
+         mut total = 0\n\
+         concurrent {\n\
+         isolate produce(tx)\n\
+         mut running = true\n\
+         while running {\n\
+         r = rx.recv().await\n\
+         (v, keep) = match r { some(x) => (x, true), none => (0, false) }\n\
+         total = total + v\n\
+         running = keep\n\
+         }\n\
+         }\n\
+         return total\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("3\n");
+}
+
 // --- M2.3: `lang run` uses the real host (real env/args + real-disk IO) ------------
 
 #[test]

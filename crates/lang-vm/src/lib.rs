@@ -305,10 +305,21 @@ struct IsolateSlot {
 /// never shared heap memory. Mirrors the tree-walker's `Channel`, so the FIFO + block-on-full/empty
 /// behaviour is identical and the differential holds by construction. The channel owns one reference to
 /// each queued message (released if the channel is still holding it when the VM drops).
-struct Channel {
-    buffer: std::collections::VecDeque<Value>,
-    capacity: usize,
-    closed: bool,
+/// A channel's backing (isolates I.1 + I.4c). `Local` is the cooperative, in-VM FIFO the sandbox
+/// (and any non-parallel VM) uses — a `VecDeque` of heap `Value`s, block-on-full/empty via the
+/// cooperative scheduler; identical to the tree-walker's, so the differential holds. `Shared` is the
+/// cross-thread channel a parallel VM (CLI real path, I.4c) uses: an `Arc<ChannelCore>` whose
+/// `Mutex`-guarded queue of `Wire` messages is reachable from every isolate that holds an endpoint,
+/// so shipping a `Sender`/`Receiver` into a worker shares one queue. Send/recv still *poll*
+/// cooperatively (Pending on full/empty), never blocking a thread — a producer/consumer across
+/// isolate threads makes progress by each thread's scheduler re-polling the shared queue.
+enum Channel {
+    Local {
+        buffer: std::collections::VecDeque<Value>,
+        capacity: usize,
+        closed: bool,
+    },
+    Shared(Arc<isolate::ChannelCore>),
 }
 
 /// A spawned task in a structured-concurrency scope (Track A.3b): its future (an `async fn` state
@@ -549,10 +560,13 @@ fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
         vm.reclaim_cycle_garbage(garbage);
     }
     // Release any messages still buffered in channels at program end (isolates I.1) — undrained
-    // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor.
+    // `send`s. Draining here keeps residency at zero; `release_value` runs any message destructor. A
+    // `Shared` channel (I.4c) holds `Wire` copies, not heap `Value`s, so dropping it frees cleanly.
     for chan in std::mem::take(&mut vm.channels) {
-        for msg in chan.buffer {
-            vm.release_value(msg);
+        if let Channel::Local { buffer, .. } = chan {
+            for msg in buffer {
+                vm.release_value(msg);
+            }
         }
     }
     // Destroy the globals at program end in reverse declaration order, running each
@@ -616,13 +630,13 @@ fn run_isolate_worker(
     // Seed the worker's globals from the parent's snapshot so the isolate body can call other
     // top-level functions (and read value-type constants).
     for (name, wire) in &wire_globals {
-        let value = isolate::rebuild(wire, &wvm.shapes);
+        let value = isolate::rebuild(wire, &wvm.shapes, &mut wvm.channels);
         wvm.globals.insert(name.clone(), value);
         wvm.global_order.push(name.clone());
     }
     let arg_vals: Vec<Value> = wire_args
         .iter()
-        .map(|w| isolate::rebuild(w, &wvm.shapes))
+        .map(|w| isolate::rebuild(w, &wvm.shapes, &mut wvm.channels))
         .collect();
     let callee = Value::closure(proto, Vec::new());
     let outcome = match wvm.call_value(callee, arg_vals, span) {
@@ -636,7 +650,7 @@ fn run_isolate_worker(
     release(callee);
     let message = match outcome {
         Ok(result) => {
-            let marshalled = isolate::marshal(result, &wvm.shapes)
+            let marshalled = isolate::marshal(result, &wvm.shapes, &wvm.channels)
                 .map_err(|e| format!("isolate result is not shippable: {e}"));
             wvm.release_value(result);
             marshalled
@@ -655,8 +669,10 @@ fn run_isolate_worker(
         }
     }
     for chan in std::mem::take(&mut wvm.channels) {
-        for msg in chan.buffer {
-            wvm.release_value(msg);
+        if let Channel::Local { buffer, .. } = chan {
+            for msg in buffer {
+                wvm.release_value(msg);
+            }
         }
     }
     message
@@ -2957,7 +2973,10 @@ impl<'m> Vm<'m> {
                                 continue;
                             }
                             "close" => {
-                                self.channels[id as usize].closed = true;
+                                match &mut self.channels[id as usize] {
+                                    Channel::Local { closed, .. } => *closed = true,
+                                    Channel::Shared(core) => core.close(),
+                                }
                                 self.channel_progress += 1;
                                 set_reg(&mut frames[top].regs, *dst, Value::unit());
                                 frames[top].pc += 1;
@@ -3977,11 +3996,19 @@ impl<'m> Vm<'m> {
                         ));
                     }
                     let id = self.channels.len() as u32;
-                    self.channels.push(Channel {
-                        buffer: std::collections::VecDeque::new(),
-                        capacity: cap as usize,
-                        closed: false,
-                    });
+                    // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
+                    // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
+                    // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
+                    let channel = if self.parallel_isolates {
+                        Channel::Shared(isolate::ChannelCore::new(cap as usize))
+                    } else {
+                        Channel::Local {
+                            buffer: std::collections::VecDeque::new(),
+                            capacity: cap as usize,
+                            closed: false,
+                        }
+                    };
+                    self.channels.push(channel);
                     // The two endpoints are fresh (refcount 1); `Value::tuple` takes ownership of
                     // exactly those references, so no extra retain is needed.
                     let tuple =
@@ -4583,7 +4610,11 @@ impl<'m> Vm<'m> {
         match self.isolates[id as usize].result.try_recv() {
             Ok(Ok(wire)) => {
                 self.finish_isolate(id);
-                Ok(Poll::Ready(isolate::rebuild(&wire, &self.shapes)))
+                Ok(Poll::Ready(isolate::rebuild(
+                    &wire,
+                    &self.shapes,
+                    &mut self.channels,
+                )))
             }
             Ok(Err(message)) => {
                 self.finish_isolate(id);
@@ -4613,13 +4644,19 @@ impl<'m> Vm<'m> {
         self.inflight_isolates = self.inflight_isolates.saturating_sub(1);
     }
 
-    /// At a scheduler stall (no task completed, no channel op, no timer to advance): if a real isolate
-    /// worker (I.4b) is still running on another thread, its result may yet arrive — briefly yield and
-    /// report `true` ("keep looping") rather than declaring a deadlock. `false` when nothing is in
-    /// flight, so the caller raises the deterministic deadlock. Always `false` in the sandbox (no real
-    /// isolates), so the cooperative deadlock detection is unchanged in-oracle.
+    /// At a scheduler stall (no task completed, no channel op, no timer to advance): if another isolate
+    /// thread could still make this VM progress — a real isolate worker (I.4b) is still running, or an
+    /// open *shared* channel (I.4c) could yet be fed/drained by a worker — briefly yield and report
+    /// `true` ("keep looping") rather than declaring a deadlock. `false` when no cross-thread work is
+    /// outstanding, so the caller raises the deterministic deadlock. Always `false` in the sandbox (no
+    /// real isolates, all channels `Local`), so cooperative deadlock detection is unchanged in-oracle.
     fn isolate_in_flight_wait(&self) -> bool {
-        if self.inflight_isolates > 0 {
+        let cross_thread_pending = self.inflight_isolates > 0
+            || self
+                .channels
+                .iter()
+                .any(|c| matches!(c, Channel::Shared(core) if core.is_open()));
+        if cross_thread_pending {
             std::thread::sleep(std::time::Duration::from_micros(100));
             true
         } else {
@@ -4679,35 +4716,105 @@ impl<'m> Vm<'m> {
         // transferred to the buffer on a push, released otherwise. Sending on a closed channel is a bug.
         if let Some((id, msg)) = future.channel_send_parts() {
             let id = id as usize;
-            if self.channels[id].closed {
-                release(msg);
-                return Err(self.error(
-                    DiagnosticCode::Panic,
-                    span,
-                    "cannot send on a closed channel".to_string(),
-                ));
+            match &self.channels[id] {
+                Channel::Local {
+                    buffer,
+                    capacity,
+                    closed,
+                } => {
+                    if *closed {
+                        release(msg);
+                        return Err(self.error(
+                            DiagnosticCode::Panic,
+                            span,
+                            "cannot send on a closed channel".to_string(),
+                        ));
+                    }
+                    if buffer.len() < *capacity {
+                        let Channel::Local { buffer, .. } = &mut self.channels[id] else {
+                            unreachable!("just matched Local");
+                        };
+                        buffer.push_back(msg); // ownership transfers to the queue
+                        self.channel_progress += 1;
+                        return Ok(Poll::Ready(Value::unit()));
+                    }
+                    release(msg);
+                    return Ok(Poll::Pending);
+                }
+                // Shared cross-thread channel (I.4c): check room cheaply first (no marshalling on a
+                // full-buffer poll), then marshal the message to `Wire` and push. A `Send` message
+                // graph is copied across the thread boundary; the original reference is released once
+                // it lands in the queue.
+                Channel::Shared(core) => {
+                    let core = Arc::clone(core);
+                    match core.send_state() {
+                        isolate::SendState::Closed => {
+                            release(msg);
+                            return Err(self.error(
+                                DiagnosticCode::Panic,
+                                span,
+                                "cannot send on a closed channel".to_string(),
+                            ));
+                        }
+                        isolate::SendState::Full => return Ok(Poll::Pending),
+                        isolate::SendState::Room => {
+                            let wire = match isolate::marshal(msg, &self.shapes, &self.channels) {
+                                Ok(w) => w,
+                                Err(e) => {
+                                    release(msg);
+                                    return Err(self.error(
+                                        DiagnosticCode::Panic,
+                                        span,
+                                        format!("channel message is not shippable: {e}"),
+                                    ));
+                                }
+                            };
+                            if core.try_send(wire) {
+                                release(msg);
+                                self.channel_progress += 1;
+                                return Ok(Poll::Ready(Value::unit()));
+                            }
+                            // Lost the race (filled/closed between the check and the push) — retry.
+                            return Ok(Poll::Pending);
+                        }
+                    }
+                }
             }
-            if self.channels[id].buffer.len() < self.channels[id].capacity {
-                self.channels[id].buffer.push_back(msg); // ownership transfers to the queue
-                self.channel_progress += 1;
-                return Ok(Poll::Ready(Value::unit()));
-            }
-            release(msg);
-            return Ok(Poll::Pending);
         }
         // A channel-recv future (isolates I.1): dequeue the next message (ready → `some(v)`), yield
         // `none` once closed and drained, else suspend on an empty open buffer. A dequeued message's
         // reference transfers out of the queue into the `some(..)` wrapper.
         if let Some(id) = future.channel_recv_id() {
             let id = id as usize;
-            if let Some(msg) = self.channels[id].buffer.pop_front() {
-                self.channel_progress += 1;
-                return Ok(Poll::Ready(make_some(msg)));
+            match &self.channels[id] {
+                Channel::Local { buffer, closed, .. } => {
+                    if !buffer.is_empty() {
+                        let Channel::Local { buffer, .. } = &mut self.channels[id] else {
+                            unreachable!("just matched Local");
+                        };
+                        let msg = buffer.pop_front().expect("non-empty");
+                        self.channel_progress += 1;
+                        return Ok(Poll::Ready(make_some(msg)));
+                    }
+                    if *closed {
+                        return Ok(Poll::Ready(make_none()));
+                    }
+                    return Ok(Poll::Pending);
+                }
+                // Shared cross-thread channel (I.4c): dequeue a `Wire` and rebuild it into this heap.
+                Channel::Shared(core) => {
+                    let core = Arc::clone(core);
+                    match core.try_recv() {
+                        isolate::RecvState::Got(wire) => {
+                            let value = isolate::rebuild(&wire, &self.shapes, &mut self.channels);
+                            self.channel_progress += 1;
+                            return Ok(Poll::Ready(make_some(value)));
+                        }
+                        isolate::RecvState::ClosedEmpty => return Ok(Poll::Ready(make_none())),
+                        isolate::RecvState::Empty => return Ok(Poll::Pending),
+                    }
+                }
             }
-            if self.channels[id].closed {
-                return Ok(Poll::Ready(make_none()));
-            }
-            return Ok(Poll::Pending);
         }
         match future.future_step() {
             Some(step) => {
@@ -4781,12 +4888,10 @@ impl<'m> Vm<'m> {
     fn spawn_isolate(&mut self, callee: Value, args: &[Value], span: Span) -> Result<Value, Abort> {
         let real = self.parallel_isolates
             && self.isolate_module.is_some()
-            && self.isolate_factory.is_some()
-            && !args
-                .iter()
-                .any(|v| v.sender_id().is_some() || v.receiver_id().is_some());
-        // On the real path a channel/unshippable argument makes `try_spawn_isolate_real` decline
-        // (`None`); either way fall through to a cooperative task.
+            && self.isolate_factory.is_some();
+        // Channel endpoints over *shared* channels ship into a real isolate (I.4c); an unshippable
+        // argument makes `try_spawn_isolate_real` decline (`None`), and either way we fall through to a
+        // cooperative task.
         if real && let Some(handle) = self.try_spawn_isolate_real(callee, args, span)? {
             return Ok(handle);
         }
@@ -4847,9 +4952,9 @@ impl<'m> Vm<'m> {
         };
         let mut wire_args = Vec::with_capacity(args.len());
         for &v in args {
-            match isolate::marshal(v, &self.shapes) {
+            match isolate::marshal(v, &self.shapes, &self.channels) {
                 Ok(w) => wire_args.push(w),
-                Err(_) => return Ok(None), // channel/unshippable — cooperative fallback
+                Err(_) => return Ok(None), // unshippable arg — cooperative fallback
             }
         }
         // Snapshot the globals the worker can see (functions + value-type constants); skip any that are
@@ -4857,7 +4962,7 @@ impl<'m> Vm<'m> {
         // referenced one would then fail at use rather than silently observing parent state.
         let mut wire_globals: Vec<(String, isolate::Wire)> = Vec::new();
         for (name, &v) in &self.globals {
-            if let Ok(w) = isolate::marshal(v, &self.shapes) {
+            if let Ok(w) = isolate::marshal(v, &self.shapes, &self.channels) {
                 wire_globals.push((name.clone(), w));
             }
         }
