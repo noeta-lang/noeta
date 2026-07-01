@@ -18,7 +18,7 @@ by construction and an optimization may land in **one backend first** (perf asym
 
 | Tag | Item | Source | Blocked by | Size |
 |---|---|---|---|---|
-| **P-SIMD** | ~~Real SIMD kernels over the flat packed buffers~~ **→ tried, reverted (bench: 1.8×–9× *slower*). Blocked on a layout change (SoA / aligned buffers); see [`p-simd.md`](p-simd.md).** Scalar kernels already LLVM-autovectorized; the AoS/1-aligned `Vec<u8>` layout defeats manual SIMD. | P-PACK Phase 4 | **SoA or aligned buffers** | Medium |
+| **P-SIMD** | ✅ **DONE (via an opt-in SoA type, not intrinsics).** Explicit `wide` SIMD benched *slower* twice (AoS & SoA); the win is the **SoA layout unlocking autovectorization** — an opt-in `vec.soa*` columnar Vec3 type is **2.7×–4× on `dot`/`length`**. General packed list untouched (keeps O(1) append). See [`p-simd.md`](p-simd.md). | P-PACK Phase 4 | — (done) | Medium |
 | **P-SHARE** | Zero-copy borrow-share for isolate args — wire the built-but-unused I.3 `SharedRegion` into the real spawn path | isolates I.3/I.4 | `Rc<Shape>`→`Arc<Shape>` (a prereq slice) | Medium–large |
 | **P-BITS** | Bit-level arc: Tier B (bitwise/shift ops on `int`) → Tier W (fixed-width ints) → Tier P (`Simd<T,N>` + const generics) | backlog (`plans/bitwise/`) | B: none · W: none · P: const generics | Large (3 tiers) |
 | **P-MONO** | Monomorphic shape specialization + reflection cross-`dyn` element recovery (`type_of` recovers `List<int>`'s `int` after a `dyn` boundary once type args ride in shapes) | M1.8 / deferred "P2.9" | verify current type-arg-in-shape state (S4.5) | Medium |
@@ -26,14 +26,15 @@ by construction and an optimization may land in **one backend first** (perf asym
 
 ## Sequencing — value × independence, ascending in risk (the sweep's spine)
 
-**1. P-SIMD first. → DONE, negative result (see [`p-simd.md`](p-simd.md)).** Was picked first for
-highest value-per-risk (zero differential risk — a perf-only swap behind byte-identical scalar). The
-oracle posture held perfectly (bit-identical, differential green), but the *perf* thesis failed: a
-`wide`-crate `f32x8` swap benched **1.8×–9× slower** than the scalar kernels, which LLVM already
-autovectorizes, because the AoS/1-aligned `Vec<u8>` layout forces scalar gather/scatter marshaling that
-no SIMD width can pay for. Reverted. **The real P-SIMD win is now blocked on an SoA/aligned layout
-change** — reclassified above. The `vec3_kernels` bench remains as the gate for that future attempt. So
-the next *unblocked* track to pick is **P-BITS Tier B** or **P-SHARE** (per their rows).
+**1. P-SIMD first. → DONE (see [`p-simd.md`](p-simd.md)).** Picked first for highest value-per-risk.
+The oracle posture held perfectly throughout (bit-identical, differential green). The *intrinsics*
+thesis failed twice — a `wide` `f32x8` swap benched **1.8×–9× slower** on the AoS buffer (scalar gather
+defeats it) *and* ~10% slower again on SoA columns (autovectorization already wins). But the underlying
+goal — faster bulk `dot`/`length` — **was delivered by the layout**: an opt-in **`vec.soa*` columnar
+Vec3 type** whose contiguous columns let LLVM autovectorize across elements, **2.7×–4×** on the two
+reductions. The general packed list stays AoS (keeps P-COW's O(1) append). Net lesson for the remaining
+tracks: reach for a *layout* that the compiler can vectorize, not hand-rolled intrinsics. Next unblocked
+track: **P-BITS Tier B** or **P-SHARE**.
 
 **2. P-SHARE.** The item that makes I.3 pay off: real isolates currently **copy** args (`Wire`); a big
 shared input (`isolate score(bigCorpus)` fanned to N workers) copies N times. The prereq is the one
@@ -68,10 +69,11 @@ check before scoping). Deferred until its value is demonstrated by a workload.
   exist — a real consumer to bench (build a large `List<Vec3>`, time `add_all`/`dot_all`).
 - **Oracle posture:** scalar semantics stay the spec; SIMD is internal to the kernels; the differential
   can't see it (both backends call the one kernel). One watch: keep f32 reduction order matching scalar.
-- **Prereq:** ~~none~~ **an SoA or aligned-buffer layout change** — the flat AoS/1-aligned `Vec<u8>`
-  buffer defeats manual SIMD (the scalar kernels are already autovectorized; `wide` benched 1.8×–9×
-  *slower*, S2 reverted). A user-visible `Simd<T,N>` type is separately out of scope (P-BITS Tier P +
-  const generics). **Outcome + full analysis: [`p-simd.md`](p-simd.md).**
+- **Outcome:** ✅ delivered via an **opt-in SoA type** (`vec.soa*`), not intrinsics. `wide` SIMD
+  benched *slower* on both AoS and SoA; the SoA *layout* is what unlocks autovectorization (2.7×–4× on
+  `dot`/`length`). The general packed list stays AoS (O(1) append preserved). A user-visible
+  `Simd<T,N>` type is separately out of scope (P-BITS Tier P + const generics). **Full analysis +
+  bench tables: [`p-simd.md`](p-simd.md).**
 
 ### P-SHARE — zero-copy borrow-share for isolate args
 - **Prereq slice:** `Rc<Shape>`→`Arc<Shape>` across `lang-object`/`lang-value`/`lang-vm` (or store shapes

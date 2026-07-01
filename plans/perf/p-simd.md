@@ -1,10 +1,12 @@
 # P-SIMD — SIMD kernels over the flat packed `List<Vec3>` buffers
 
-**Status: DELIVERED via an opt-in SoA type (not via explicit SIMD).** The throughput win is real —
-**2.7×–4× on `dot`/`length`** — but it comes from a **struct-of-arrays layout that unlocks LLVM
+**Status: DONE — delivered via an opt-in SoA type (not via explicit SIMD).** The throughput win is real
+— **2.7×–4× on `dot`/`length`** — but it comes from a **struct-of-arrays layout that unlocks LLVM
 autovectorization**, not from SIMD intrinsics. The `wide`-crate approach was tried twice (on the AoS
-buffer and again on SoA columns) and was **not** faster than the autovectorized scalar loop either
-time, so it was dropped. Branch: `perf-simd`.
+buffer and again on SoA columns) and was **not** faster than the autovectorized scalar loop either time,
+so it was dropped. Shipped surface (S5): the opt-in `vec.soa*` family — `soa`/`soa_dot`/`soa_length`/
+`soa_add`/`soa_sub`/`soa_scale`/`soa_list`/`soa_count` — over a new native `SoaVec3` batch value in both
+backends (`tests/conformance/std/vec3_soa.lang`). Branch: `perf-simd`.
 
 **The arc in one paragraph.** S1 recorded the scalar AoS baseline. S2 swapped the AoS kernels to
 `wide` `f32x8` and **measured a 1.8×–9× regression** (both default and AVX2 builds), reverted. The
