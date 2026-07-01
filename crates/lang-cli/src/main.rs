@@ -186,8 +186,7 @@ fn compile_real(
         &checked.destructor_relevance,
         // Real execution runs isolates on OS threads (I.4b): lower `isolate f(args)` to `SpawnIsolate`.
         // The differential/salsa paths pass false (byte-identical cooperative sandbox).
-        // TEMP(I.4b): false until the real-thread `Op::SpawnIsolate` handler is wired; flip to true then.
-        false,
+        true,
     )
     .map_err(|u| {
         format!(
@@ -210,18 +209,27 @@ fn execute_real_host(
     program: &lang_ast::Program,
     checked: &lang_check::Checked,
 ) -> Result<lang_backend::RunResult, String> {
-    let host =
-        lang_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
-    // Pair the real host with a real wall-clock executor (Track A.4): `sleep`/`concurrent` run
-    // against real time on the CLI, out-of-oracle. The differential keeps the sandbox executor.
-    let executor = lang_runtime::RealExecutor::new()
-        .map_err(|err| format!("cannot start the async executor: {err}"))?;
-    let module = compile_real(program, checked)?;
-    Ok(VmBackend::new().run_module_with_host_and_executor(
-        &module,
-        Box::new(host),
-        Box::new(executor),
-    ))
+    let module = std::sync::Arc::new(compile_real(program, checked)?);
+    // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
+    // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
+    // clock / async state is independent. Injected here (not in `lang-vm`) so the VM crate needs no
+    // `lang-runtime`/tokio dependency. A worker that cannot start its runtime panics the worker thread,
+    // which surfaces as an isolate failure at the `.await`.
+    let factory: lang_vm::IsolateFactory = std::sync::Arc::new(|| {
+        let host: Box<dyn lang_stdlib::Host> =
+            Box::new(lang_runtime::RealHost::new().expect("cannot start an isolate's runtime"));
+        let executor: Box<dyn lang_stdlib::Executor> = Box::new(
+            lang_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
+        );
+        (host, executor)
+    });
+    let (host, executor) = factory();
+    // Real isolates run on OS threads (out-of-oracle); channel-shipping isolates fall back to
+    // cooperative tasks (cross-thread channels are I.4c). The differential keeps the sandbox pair.
+    Ok(
+        VmBackend::new()
+            .run_module_with_host_and_executor_parallel(module, host, executor, factory),
+    )
 }
 
 fn emit_diagnostics<'a>(source: &Source, diagnostics: impl Iterator<Item = &'a Diagnostic>) {

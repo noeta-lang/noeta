@@ -652,6 +652,7 @@ dependencies = [
  "lang-parser",
  "lang-runtime",
  "lang-span",
+ "lang-stdlib",
  "lang-vm",
  "predicates",
  "toml",

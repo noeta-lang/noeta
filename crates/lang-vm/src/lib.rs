@@ -33,6 +33,7 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::rc::Rc;
+use std::sync::Arc;
 
 use lang_ast::{BinaryOp, Program};
 use lang_backend::{Backend, RunResult};
@@ -44,9 +45,6 @@ use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
 use lang_value::{Value, apply_binary, apply_unary, compare_primitive, structural_compare};
 
-// Wired into the real-thread `Op::SpawnIsolate` handler in the next I.4b step; the marshalling and its
-// round-trip tests land first (unused until then).
-#[allow(dead_code)]
 mod isolate;
 
 /// The bytecode-VM backend.
@@ -94,6 +92,27 @@ impl VmBackend {
         executor: Box<dyn lang_stdlib::Executor>,
     ) -> RunResult {
         execute_with_collector(module, host, executor, lang_value::CollectorMode::Trace)
+    }
+
+    /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
+    /// `module` is an `Arc` (the compiled module is `Send + Sync`) so worker threads can own it; each
+    /// `isolate f(args)` with `Send`, channel-free arguments runs on its own thread with a fresh VM +
+    /// host + executor from `factory`, communicating by copied [`isolate::Wire`] values. Channel-shipping
+    /// isolates fall back to cooperative tasks (cross-thread channels are I.4c). The differential never
+    /// calls this (it keeps the deterministic cooperative sandbox), so it stays out-of-oracle.
+    pub fn run_module_with_host_and_executor_parallel(
+        &self,
+        module: Arc<Module>,
+        host: Box<dyn lang_stdlib::Host>,
+        executor: Box<dyn lang_stdlib::Executor>,
+        factory: IsolateFactory,
+    ) -> RunResult {
+        lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
+        let mut vm = Vm::load(&module, host, executor);
+        vm.parallel_isolates = true;
+        vm.isolate_module = Some(Arc::clone(&module));
+        vm.isolate_factory = Some(factory);
+        run_and_teardown(&mut vm, lang_value::CollectorMode::Trace)
     }
 
     /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths
@@ -251,8 +270,34 @@ struct Vm<'m> {
     /// unblocks a sibling as progress even when no task completes. Mirrors the tree-walker's fields.
     channels: Vec<Channel>,
     channel_progress: u64,
+    /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
+    /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
+    /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
+    /// worker thread can own the module for its lifetime; `isolate_factory` builds a fresh host +
+    /// executor per worker (injected by the CLI so `lang-vm` needs no `lang-runtime`/tokio dependency);
+    /// `isolates` holds each spawned worker's result channel + join handle; `inflight_isolates` counts
+    /// workers whose result has not yet been harvested (so the scheduler treats a pending isolate as
+    /// progress, not a deadlock). All inert in the sandbox (`parallel_isolates` false).
+    parallel_isolates: bool,
+    isolate_module: Option<Arc<Module>>,
+    isolate_factory: Option<IsolateFactory>,
+    isolates: Vec<IsolateSlot>,
+    inflight_isolates: usize,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+}
+
+/// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
+/// `RealHost` + `RealExecutor`), so `lang-vm` stays free of `lang-runtime`/tokio. `Send + Sync` so the
+/// worker closure can carry a clone across the thread boundary.
+pub type IsolateFactory =
+    Arc<dyn Fn() -> (Box<dyn lang_stdlib::Host>, Box<dyn lang_stdlib::Executor>) + Send + Sync>;
+
+/// A spawned worker isolate (isolates I.4b): the channel its result (a marshalled [`isolate::Wire`], or
+/// an abort message) arrives on, and the thread's join handle (taken to join at teardown).
+struct IsolateSlot {
+    result: std::sync::mpsc::Receiver<Result<isolate::Wire, String>>,
+    handle: Option<std::thread::JoinHandle<()>>,
 }
 
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
@@ -383,74 +428,102 @@ fn execute_with_collector(
     mode: lang_value::CollectorMode,
 ) -> RunResult {
     lang_value::set_collector_mode(mode);
-    let methods = module
-        .methods
-        .iter()
-        .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
-        .collect();
-    let destructors = module.destructors.iter().cloned().collect();
-    let field_defaults = module
-        .field_defaults
-        .iter()
-        .map(|(t, f, proto)| ((t.clone(), f.clone()), *proto))
-        .collect();
-    let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
-    let comparable_derives = module.comparable_derives.iter().cloned().collect();
-    let tojson_derives = module.tojson_derives.iter().cloned().collect();
-    // One shared `Rc<Shape>` per shape-table entry, then resolve each packed-list layout against it.
-    // Schemas are interned inner-before-outer, so a nested struct's schema (a lower index) is always
-    // built before the parent that references it.
-    let shapes: Vec<Rc<Shape>> = module.shapes.iter().cloned().map(Rc::new).collect();
-    let mut packed_schemas: Vec<Rc<lang_object::PackedSchema>> =
-        Vec::with_capacity(module.packed_schemas.len());
-    for def in &module.packed_schemas {
-        let fields = def
-            .fields
+    let mut vm = Vm::load(module, host, executor);
+    run_and_teardown(&mut vm, mode)
+}
+
+impl<'m> Vm<'m> {
+    /// Build a VM ready to run `module` — resolving every derived table (shapes, packed schemas,
+    /// methods, destructors, defaults, derives) but **without running `main`** (isolates I.4b). The
+    /// normal entry points run `main` right after; a worker isolate instead seeds its globals from the
+    /// parent's marshalled snapshot and calls one function, so it must be able to load the module
+    /// without triggering the top-level program's side effects.
+    fn load(
+        module: &'m Module,
+        host: Box<dyn lang_stdlib::Host>,
+        executor: Box<dyn lang_stdlib::Executor>,
+    ) -> Vm<'m> {
+        let methods = module
+            .methods
             .iter()
-            .map(|f| match f {
-                lang_bytecode::PackedFieldDef::Int => lang_object::PackedKind::Int,
-                lang_bytecode::PackedFieldDef::Float => lang_object::PackedKind::Float,
-                lang_bytecode::PackedFieldDef::F32 => lang_object::PackedKind::F32,
-                lang_bytecode::PackedFieldDef::Bool => lang_object::PackedKind::Bool,
-                lang_bytecode::PackedFieldDef::Struct(idx) => {
-                    lang_object::PackedKind::Struct(Rc::clone(&packed_schemas[*idx as usize]))
-                }
-            })
+            .map(|m| ((m.type_name.clone(), m.method.clone()), m.proto))
             .collect();
-        packed_schemas.push(Rc::new(lang_object::PackedSchema {
-            shape: Rc::clone(&shapes[def.shape as usize]),
-            fields,
-            byte_size: def.byte_size as usize,
-        }));
+        let destructors = module.destructors.iter().cloned().collect();
+        let field_defaults = module
+            .field_defaults
+            .iter()
+            .map(|(t, f, proto)| ((t.clone(), f.clone()), *proto))
+            .collect();
+        let destruct_reachable = module.destruct_reachable.iter().cloned().collect();
+        let comparable_derives = module.comparable_derives.iter().cloned().collect();
+        let tojson_derives = module.tojson_derives.iter().cloned().collect();
+        // One shared `Rc<Shape>` per shape-table entry, then resolve each packed-list layout against it.
+        // Schemas are interned inner-before-outer, so a nested struct's schema (a lower index) is always
+        // built before the parent that references it.
+        let shapes: Vec<Rc<Shape>> = module.shapes.iter().cloned().map(Rc::new).collect();
+        let mut packed_schemas: Vec<Rc<lang_object::PackedSchema>> =
+            Vec::with_capacity(module.packed_schemas.len());
+        for def in &module.packed_schemas {
+            let fields = def
+                .fields
+                .iter()
+                .map(|f| match f {
+                    lang_bytecode::PackedFieldDef::Int => lang_object::PackedKind::Int,
+                    lang_bytecode::PackedFieldDef::Float => lang_object::PackedKind::Float,
+                    lang_bytecode::PackedFieldDef::F32 => lang_object::PackedKind::F32,
+                    lang_bytecode::PackedFieldDef::Bool => lang_object::PackedKind::Bool,
+                    lang_bytecode::PackedFieldDef::Struct(idx) => {
+                        lang_object::PackedKind::Struct(Rc::clone(&packed_schemas[*idx as usize]))
+                    }
+                })
+                .collect();
+            packed_schemas.push(Rc::new(lang_object::PackedSchema {
+                shape: Rc::clone(&shapes[def.shape as usize]),
+                fields,
+                byte_size: def.byte_size as usize,
+            }));
+        }
+        // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
+        let map_packed: HashMap<Span, Rc<lang_object::PackedSchema>> = module
+            .map_packed_sites
+            .iter()
+            .map(|(span, idx)| (*span, Rc::clone(&packed_schemas[*idx as usize])))
+            .collect();
+        Vm {
+            module,
+            shapes,
+            packed_schemas,
+            map_packed,
+            methods,
+            destructors,
+            field_defaults,
+            destruct_reachable,
+            comparable_derives,
+            tojson_derives,
+            globals: HashMap::new(),
+            global_order: Vec::new(),
+            next_id: 1,
+            host,
+            executor,
+            scopes: Vec::new(),
+            channels: Vec::new(),
+            channel_progress: 0,
+            parallel_isolates: false,
+            isolate_module: None,
+            isolate_factory: None,
+            isolates: Vec::new(),
+            inflight_isolates: 0,
+            stdout: String::new(),
+            diagnostics: Vec::new(),
+        }
     }
-    // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).
-    let map_packed: HashMap<Span, Rc<lang_object::PackedSchema>> = module
-        .map_packed_sites
-        .iter()
-        .map(|(span, idx)| (*span, Rc::clone(&packed_schemas[*idx as usize])))
-        .collect();
-    let mut vm = Vm {
-        module,
-        shapes,
-        packed_schemas,
-        map_packed,
-        methods,
-        destructors,
-        field_defaults,
-        destruct_reachable,
-        comparable_derives,
-        tojson_derives,
-        globals: HashMap::new(),
-        global_order: Vec::new(),
-        next_id: 1,
-        host,
-        executor,
-        scopes: Vec::new(),
-        channels: Vec::new(),
-        channel_progress: 0,
-        stdout: String::new(),
-        diagnostics: Vec::new(),
-    };
+}
+
+/// Run `main` and tear the VM down (globals, cycle collection, channel drain), returning the program's
+/// [`RunResult`]. Split from [`Vm::load`] so a worker isolate can load the module without running
+/// `main` (isolates I.4b). The teardown is unchanged from the original single-function entry.
+fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
+    let module = vm.module;
     let top = Frame {
         proto: 0,
         regs: vec![Value::unit(); module.main().num_registers as usize],
@@ -504,12 +577,89 @@ fn execute_with_collector(
         vm.reclaim_cycle_garbage(garbage);
     }
 
+    // Join any isolate worker threads not already harvested (a structured scope harvests + joins its
+    // isolates at `}`, so this is normally empty — defensive against an early exit).
+    for slot in std::mem::take(&mut vm.isolates) {
+        if let Some(h) = slot.handle {
+            let _ = h.join();
+        }
+    }
+
     let exit_code = if vm.diagnostics.is_empty() { 0 } else { 1 };
     RunResult {
-        stdout: vm.stdout,
+        stdout: std::mem::take(&mut vm.stdout),
         exit_code,
-        diagnostics: vm.diagnostics,
+        diagnostics: std::mem::take(&mut vm.diagnostics),
     }
+}
+
+/// Run one real-thread isolate to completion (isolates I.4b), on its own thread. Builds a fresh VM with
+/// its own heap (thread-local), host, and executor from `factory`, seeds globals from the parent's
+/// marshalled snapshot, rebuilds the arguments, calls `callee(args)` and drives the resulting future to
+/// completion, then marshals the result back to `Send` [`isolate::Wire`]. An abort inside the isolate
+/// (a panic) comes back as `Err(message)`, which the parent re-raises at the `.await`. The worker tears
+/// down its own globals/channels so its thread-local heap returns to zero residency.
+fn run_isolate_worker(
+    module: &Arc<Module>,
+    factory: &IsolateFactory,
+    proto: u32,
+    wire_args: Vec<isolate::Wire>,
+    wire_globals: Vec<(String, isolate::Wire)>,
+    span: Span,
+) -> Result<isolate::Wire, String> {
+    lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
+    let (host, executor) = factory();
+    let mut wvm = Vm::load(module, host, executor);
+    wvm.parallel_isolates = true;
+    wvm.isolate_module = Some(Arc::clone(module));
+    wvm.isolate_factory = Some(factory.clone());
+    // Seed the worker's globals from the parent's snapshot so the isolate body can call other
+    // top-level functions (and read value-type constants).
+    for (name, wire) in &wire_globals {
+        let value = isolate::rebuild(wire, &wvm.shapes);
+        wvm.globals.insert(name.clone(), value);
+        wvm.global_order.push(name.clone());
+    }
+    let arg_vals: Vec<Value> = wire_args
+        .iter()
+        .map(|w| isolate::rebuild(w, &wvm.shapes))
+        .collect();
+    let callee = Value::closure(proto, Vec::new());
+    let outcome = match wvm.call_value(callee, arg_vals, span) {
+        Ok(future) => {
+            let result = wvm.drive_future(future, span);
+            release(future);
+            result
+        }
+        Err(abort) => Err(abort),
+    };
+    release(callee);
+    let message = match outcome {
+        Ok(result) => {
+            let marshalled = isolate::marshal(result, &wvm.shapes)
+                .map_err(|e| format!("isolate result is not shippable: {e}"));
+            wvm.release_value(result);
+            marshalled
+        }
+        Err(_abort) => Err(wvm
+            .diagnostics
+            .last()
+            .map(|d| d.message.clone())
+            .unwrap_or_else(|| "isolate aborted".to_string())),
+    };
+    // Tear the worker down so its thread-local heap returns to zero residency: destroy globals in
+    // reverse declaration order, then drain any channel buffers.
+    for name in wvm.global_order.clone().into_iter().rev() {
+        if let Some(value) = wvm.globals.get(&name).copied() {
+            wvm.release_value(value);
+        }
+    }
+    for chan in std::mem::take(&mut wvm.channels) {
+        for msg in chan.buffer {
+            wvm.release_value(msg);
+        }
+    }
+    message
 }
 
 impl<'m> Vm<'m> {
@@ -3769,16 +3919,23 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, handle);
                     frames[top].pc += 1;
                 }
-                Op::SpawnIsolate { span, .. } => {
-                    // Real OS-thread isolate (I.4b). Only the CLI's real (VM) path emits this op; the
-                    // differential/salsa sandbox lowers `isolate` to `Call`+`Spawn` (cooperative), so
-                    // this is never reached in-oracle. The real-thread handler is wired next.
-                    return Err(self.error(
-                        DiagnosticCode::Panic,
-                        *span,
-                        "internal error: real-thread isolate handler not yet wired (I.4b)"
-                            .to_string(),
-                    ));
+                Op::SpawnIsolate {
+                    dst,
+                    callee,
+                    args,
+                    span,
+                } => {
+                    // `isolate f(args)` (I.4b). Only the CLI's real (VM) path emits this op; the
+                    // differential/salsa sandbox lowers `isolate` to `Call`+`Spawn`, so it is never
+                    // reached in-oracle. Runs on a real OS thread when the VM is parallel and no
+                    // argument ships a channel; otherwise falls back to a cooperative task (so a
+                    // non-parallel VM — `@test`/`bench` — and channel-shipping isolates never regress).
+                    let callee_val = frames[top].regs[*callee as usize];
+                    let arg_vals: Vec<Value> =
+                        args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                    let handle = self.spawn_isolate(callee_val, &arg_vals, *span)?;
+                    set_reg(&mut frames[top].regs, *dst, handle);
+                    frames[top].pc += 1;
                 }
                 Op::ScopeEnd { span } => {
                     // Join the scope (drive every task to completion), then pop it and release the
@@ -4418,7 +4575,63 @@ impl<'m> Vm<'m> {
     /// the step returns the raw completion value (`Ready`) or the pending sentinel (`Pending`).
     /// `future_step` hands back a retained reference the call borrows, released after. A non-future is
     /// passed through, freshly retained (totality; unreachable for a checked program).
+    /// Poll a real-thread isolate future (isolates I.4b): non-blocking `try_recv` on the worker's
+    /// result channel. A landed `Ok` rebuilds the marshalled result into this heap; an `Err` (the
+    /// worker panicked) re-raises at this `.await`, consistent with a task; `Empty` is pending.
+    fn poll_isolate(&mut self, id: u32, span: Span) -> Result<Poll, Abort> {
+        use std::sync::mpsc::TryRecvError;
+        match self.isolates[id as usize].result.try_recv() {
+            Ok(Ok(wire)) => {
+                self.finish_isolate(id);
+                Ok(Poll::Ready(isolate::rebuild(&wire, &self.shapes)))
+            }
+            Ok(Err(message)) => {
+                self.finish_isolate(id);
+                Err(self.error(
+                    DiagnosticCode::Panic,
+                    span,
+                    format!("isolate panicked: {message}"),
+                ))
+            }
+            Err(TryRecvError::Empty) => Ok(Poll::Pending),
+            Err(TryRecvError::Disconnected) => {
+                self.finish_isolate(id);
+                Err(self.error(
+                    DiagnosticCode::Panic,
+                    span,
+                    "isolate worker terminated without a result".to_string(),
+                ))
+            }
+        }
+    }
+
+    /// Join a finished isolate's worker thread and drop it from the in-flight count.
+    fn finish_isolate(&mut self, id: u32) {
+        if let Some(handle) = self.isolates[id as usize].handle.take() {
+            let _ = handle.join();
+        }
+        self.inflight_isolates = self.inflight_isolates.saturating_sub(1);
+    }
+
+    /// At a scheduler stall (no task completed, no channel op, no timer to advance): if a real isolate
+    /// worker (I.4b) is still running on another thread, its result may yet arrive — briefly yield and
+    /// report `true` ("keep looping") rather than declaring a deadlock. `false` when nothing is in
+    /// flight, so the caller raises the deterministic deadlock. Always `false` in the sandbox (no real
+    /// isolates), so the cooperative deadlock detection is unchanged in-oracle.
+    fn isolate_in_flight_wait(&self) -> bool {
+        if self.inflight_isolates > 0 {
+            std::thread::sleep(std::time::Duration::from_micros(100));
+            true
+        } else {
+            false
+        }
+    }
+
     fn poll_once(&mut self, future: Value, span: Span) -> Result<Poll, Abort> {
+        // A real-thread isolate future (I.4b): harvest the worker's marshalled result if it has landed.
+        if let Some(id) = future.isolate_future_id() {
+            return self.poll_isolate(id, span);
+        }
         if future.is_timer() {
             let deadline = future
                 .timer_deadline()
@@ -4562,6 +4775,116 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Spawn `isolate callee(args)` (isolates I.4b) and return its handle. Runs on a real OS thread
+    /// when the VM is parallel and no argument ships a channel endpoint; otherwise a cooperative task
+    /// (a non-parallel VM, or a channel-shipping isolate whose cross-thread support is I.4c).
+    fn spawn_isolate(&mut self, callee: Value, args: &[Value], span: Span) -> Result<Value, Abort> {
+        let real = self.parallel_isolates
+            && self.isolate_module.is_some()
+            && self.isolate_factory.is_some()
+            && !args
+                .iter()
+                .any(|v| v.sender_id().is_some() || v.receiver_id().is_some());
+        // On the real path a channel/unshippable argument makes `try_spawn_isolate_real` decline
+        // (`None`); either way fall through to a cooperative task.
+        if real && let Some(handle) = self.try_spawn_isolate_real(callee, args, span)? {
+            return Ok(handle);
+        }
+        self.spawn_isolate_coop(callee, args, span)
+    }
+
+    /// Register `future` as a task in the innermost scope (or hand it back bare if there is no scope —
+    /// an orphan, already E0041 at check). The shared tail of the cooperative-spawn paths.
+    fn register_task(&mut self, future: Value) -> Value {
+        if self.scopes.is_empty() {
+            return future;
+        }
+        let scope_idx = self.scopes.len() - 1;
+        let task_idx = self.scopes[scope_idx].len();
+        self.scopes[scope_idx].push(Task {
+            future,
+            result: None,
+            cancelled: false,
+        });
+        Value::make_handle(scope_idx as u32, task_idx as u32)
+    }
+
+    /// The cooperative isolate path: build the future by calling `callee(args)` (a lazy `async fn`
+    /// call constructs the state machine without running the body), then register it as a task —
+    /// observationally identical to `spawn callee(args)`.
+    fn spawn_isolate_coop(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // `call_value` takes ownership of its arguments; the values live in our caller's registers, so
+        // retain one reference each to transfer.
+        let owned: Vec<Value> = args
+            .iter()
+            .map(|&v| {
+                retain(v);
+                v
+            })
+            .collect();
+        let future = self.call_value(callee, owned, span)?;
+        Ok(self.register_task(future))
+    }
+
+    /// The real-thread isolate path: marshal the arguments (and the current globals) into `Send` wire
+    /// form, spawn an OS thread with its own VM + host + executor to run `callee(args)` to completion
+    /// and marshal the result back, and register an [`Value::make_isolate_future`] task the scheduler
+    /// harvests. Returns `Ok(None)` if an argument is unshippable (a channel endpoint), so the caller
+    /// falls back to a cooperative task.
+    fn try_spawn_isolate_real(
+        &mut self,
+        callee: Value,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Option<Value>, Abort> {
+        let Some(proto) = callee.as_closure() else {
+            return Ok(None); // not a plain function value — cooperative fallback
+        };
+        let mut wire_args = Vec::with_capacity(args.len());
+        for &v in args {
+            match isolate::marshal(v, &self.shapes) {
+                Ok(w) => wire_args.push(w),
+                Err(_) => return Ok(None), // channel/unshippable — cooperative fallback
+            }
+        }
+        // Snapshot the globals the worker can see (functions + value-type constants); skip any that are
+        // unshippable (e.g. a class instance) — a v1 limitation, documented, since an isolate body that
+        // referenced one would then fail at use rather than silently observing parent state.
+        let mut wire_globals: Vec<(String, isolate::Wire)> = Vec::new();
+        for (name, &v) in &self.globals {
+            if let Ok(w) = isolate::marshal(v, &self.shapes) {
+                wire_globals.push((name.clone(), w));
+            }
+        }
+        let module = Arc::clone(
+            self.isolate_module
+                .as_ref()
+                .expect("parallel VM has a module"),
+        );
+        let factory = self
+            .isolate_factory
+            .as_ref()
+            .expect("parallel VM has a factory")
+            .clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let thread_handle = std::thread::spawn(move || {
+            let msg = run_isolate_worker(&module, &factory, proto, wire_args, wire_globals, span);
+            let _ = tx.send(msg);
+        });
+        let id = self.isolates.len() as u32;
+        self.isolates.push(IsolateSlot {
+            result: rx,
+            handle: Some(thread_handle),
+        });
+        self.inflight_isolates += 1;
+        Ok(Some(self.register_task(Value::make_isolate_future(id))))
+    }
+
     /// Join the innermost scope (Track A.3b): drive tasks round-robin until the innermost scope's tasks
     /// all complete. Each round polls **all** open scopes (A.7) so an outer scope's siblings interleave
     /// with the inner join; the loop exits on the *innermost* scope alone (outer scopes are joined by
@@ -4581,7 +4904,7 @@ impl<'m> Vm<'m> {
             // A channel op (a `send` unblocked, a `recv` drained) is progress even when no task
             // completed this round — otherwise a producer/consumer pair would look deadlocked.
             let progressed = progressed || self.channel_progress != before;
-            if !progressed && self.executor.advance().is_none() {
+            if !progressed && self.executor.advance().is_none() && !self.isolate_in_flight_wait() {
                 return Err(self.error(
                     DiagnosticCode::Panic,
                     span,
@@ -4610,7 +4933,7 @@ impl<'m> Vm<'m> {
             };
             // A channel op during any poll this iteration is progress (see `join_scope`).
             let progressed = progressed || self.channel_progress != before;
-            if !progressed && self.executor.advance().is_none() {
+            if !progressed && self.executor.advance().is_none() && !self.isolate_in_flight_wait() {
                 return Err(self.error(
                     DiagnosticCode::Panic,
                     span,
@@ -5094,7 +5417,10 @@ impl<'m> Vm<'m> {
                         return Ok(Value::list(items));
                     }
                     let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed && self.executor.advance().is_none() {
+                    if !progressed
+                        && self.executor.advance().is_none()
+                        && !self.isolate_in_flight_wait()
+                    {
                         for v in results.into_iter().flatten() {
                             release(v);
                         }
@@ -5145,7 +5471,10 @@ impl<'m> Vm<'m> {
                         }
                     }
                     let progressed = self.poll_all_scopes_round(span)?;
-                    if !progressed && self.executor.advance().is_none() {
+                    if !progressed
+                        && self.executor.advance().is_none()
+                        && !self.isolate_in_flight_wait()
+                    {
                         return Err(self.error(
                             DiagnosticCode::Panic,
                             span,
@@ -5239,7 +5568,10 @@ impl<'m> Vm<'m> {
                     if !self.scopes.is_empty() {
                         progressed |= self.poll_all_scopes_round(span)?;
                     }
-                    if !progressed && self.executor.advance().is_none() {
+                    if !progressed
+                        && self.executor.advance().is_none()
+                        && !self.isolate_in_flight_wait()
+                    {
                         cleanup!(in_flight, results);
                         return Err(self.error(
                             DiagnosticCode::Panic,

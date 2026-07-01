@@ -78,6 +78,94 @@ fn run_missing_file_exits_2() {
         .stderr(predicate::str::contains("cannot read"));
 }
 
+// --- real OS-thread isolates (isolates I.4b, out-of-oracle) ------------------------
+//
+// These run on the CLI's real (VM) path, where a channel-free `isolate f(args)` executes on its own
+// OS thread with args/result copy-marshalled across the boundary. Correctness here exercises the
+// whole real path — thread spawn, `Wire` marshal/rebuild of value-type args and results (incl. a
+// `struct` and a marshalled global function), and the structured join — which the deterministic
+// differential (cooperative sandbox) never covers.
+
+#[test]
+fn run_real_isolate_returns_marshalled_result() {
+    // A struct argument in, an int result back — the value-type graph round-trips across the thread.
+    let file = temp_program(
+        "isolate_struct",
+        "struct Point { x: int; y: int }\n\
+         async fn dist2(p: Point): int { return p.x * p.x + p.y * p.y }\n\
+         async fn run(): int {\n\
+         mut r = 0\n\
+         concurrent { d = isolate dist2(Point { x: 3, y: 4 }); r = d.await }\n\
+         return r\n\
+         }\n\
+         echo run().await",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("25\n");
+}
+
+#[test]
+fn run_real_isolates_fan_out_and_join() {
+    // Three isolates run in parallel and their results are summed after the structured join; the
+    // isolate body calls a *global* function, exercising the marshalled-globals snapshot.
+    let file = temp_program(
+        "isolate_fanout",
+        "fn sq(n: int): int { return n * n }\n\
+         async fn work(n: int): int { return sq(n) }\n\
+         async fn run(): int {\n\
+         mut total = 0\n\
+         concurrent {\n\
+         a = isolate work(2)\n\
+         b = isolate work(3)\n\
+         c = isolate work(4)\n\
+         total = a.await + b.await + c.await\n\
+         }\n\
+         return total\n\
+         }\n\
+         echo run().await",
+    );
+    // 2²+3²+4² = 29.
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("29\n");
+}
+
+#[test]
+fn run_real_isolates_actually_run_in_parallel() {
+    // Two isolates each sleep 300ms of real wall-clock time on their own thread. Run in parallel the
+    // program finishes in well under the ~600ms a sequential run would take; a generous 550ms ceiling
+    // keeps the test robust on a loaded machine while still failing if the isolates serialized.
+    let file = temp_program(
+        "isolate_parallel",
+        "async fn work(ms: int): int { sleep(ms).await; return ms }\n\
+         async fn run(): int {\n\
+         mut total = 0\n\
+         concurrent { a = isolate work(300); b = isolate work(300); total = a.await + b.await }\n\
+         return total\n\
+         }\n\
+         echo run().await",
+    );
+    let start = std::time::Instant::now();
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .success()
+        .stdout("600\n");
+    let elapsed = start.elapsed();
+    assert!(
+        elapsed < std::time::Duration::from_millis(550),
+        "two 300ms isolates should run in parallel (<550ms), took {elapsed:?} — did they serialize?"
+    );
+}
+
 // --- M2.3: `lang run` uses the real host (real env/args + real-disk IO) ------------
 
 #[test]
