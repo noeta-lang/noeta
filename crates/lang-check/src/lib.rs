@@ -1632,6 +1632,126 @@ impl Checker {
         self.type_params = saved_type_params;
     }
 
+    /// Check an `isolate f(args)` boundary (isolates milestone, E0042): the call's result crosses back
+    /// and its arguments cross into a fresh heap, so both must be `Send`. `isolate` also requires a
+    /// **direct call** so it knows what to ship. `result` is the already-synthesized `Future<T>`.
+    fn check_isolate_send(&mut self, future: &Expr, result: &Type, span: Span) {
+        let Expr::Call { callee, .. } = future else {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::NotSend,
+                    span,
+                    "`isolate` expects a direct call, e.g. `isolate work(x)`".to_string(),
+                )
+                .with_help(
+                    "the argument to `isolate` must be a function call so the arguments and \
+                            the function to run can be shipped to the fresh isolate",
+                ),
+            );
+            return;
+        };
+        // The result `T` (from `Future<T>`) crosses back to this isolate.
+        if let Type::Named(n, targs) = result
+            && n == stdlib::FUTURE
+        {
+            let t = targs.first().cloned().unwrap_or(Type::Unknown);
+            if !self.is_send(&t, &mut Vec::new()) {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::NotSend,
+                        span,
+                        format!("an isolate's result type `{t}` is not `Send`"),
+                    )
+                    .with_help(
+                        "only value types cross an isolate boundary; a `class` (reference type) has \
+                         identity and cannot — return a `struct` instead",
+                    ),
+                );
+            }
+        }
+        // The arguments cross into the fresh isolate — check the called function's declared parameter
+        // types (a direct-call callee), so a `class` argument is rejected without re-synthesizing args.
+        if let Expr::Ident { name, .. } = callee.as_ref()
+            && let Some(sig) = self.functions.get(name)
+        {
+            for param in sig.params.clone() {
+                if !self.is_send(&param, &mut Vec::new()) {
+                    self.diags.push(
+                        Diagnostic::error(
+                            DiagnosticCode::NotSend,
+                            span,
+                            format!("an isolate argument of type `{param}` is not `Send`"),
+                        )
+                        .with_help(
+                            "only value types cross an isolate boundary; a `class` (reference type) \
+                             has identity and cannot — pass a `struct` instead",
+                        ),
+                    );
+                }
+            }
+        }
+    }
+
+    /// Whether a value of type `ty` may cross an isolate boundary (isolates milestone). Value types are
+    /// `Send` (copied, or borrow-shared under the scope lifetime); reference `class`es and the stateful
+    /// built-ins (`Future`/`Iterator`/`FileHandle`/closures) are `!Send`. Structural — a container /
+    /// `struct` / `enum` is `Send` iff its elements / fields / payloads are — with a `visited` set so a
+    /// recursive value type terminates. `dyn` is conservatively `!Send` (can't prove it isn't a class);
+    /// an inference hole (`Unknown`) is permissive (it will resolve; blocking it would be spurious).
+    fn is_send(&self, ty: &Type, visited: &mut Vec<String>) -> bool {
+        match ty {
+            Type::Int
+            | Type::Float
+            | Type::F32
+            | Type::Bool
+            | Type::String
+            | Type::Bytes
+            | Type::Unit
+            | Type::Unknown => true,
+            Type::List(e) | Type::Set(e) | Type::Option(e) => self.is_send(e, visited),
+            Type::Map(k, v) | Type::Result(k, v) => {
+                self.is_send(k, visited) && self.is_send(v, visited)
+            }
+            Type::Tuple(elems) | Type::Union(elems) => {
+                elems.iter().all(|e| self.is_send(e, visited))
+            }
+            Type::Named(name, args) => match self.type_kinds.get(name) {
+                Some(lang_types::TypeKind::Class) => false,
+                Some(lang_types::TypeKind::Struct) => {
+                    if visited.iter().any(|v| v == name) {
+                        return true; // recursive struct — its fields are covered by the outer frame
+                    }
+                    visited.push(name.clone());
+                    let fields_send = self
+                        .records
+                        .get(name)
+                        .is_none_or(|fs| fs.iter().all(|(_, t)| self.is_send(t, visited)));
+                    let args_send = args.iter().all(|a| self.is_send(a, visited));
+                    visited.pop();
+                    fields_send && args_send
+                }
+                Some(lang_types::TypeKind::Enum) => {
+                    if visited.iter().any(|v| v == name) {
+                        return true;
+                    }
+                    visited.push(name.clone());
+                    let payloads_send = self.enums.get(name).is_none_or(|vs| {
+                        vs.iter()
+                            .all(|v| v.fields.iter().all(|t| self.is_send(t, visited)))
+                    });
+                    let args_send = args.iter().all(|a| self.is_send(a, visited));
+                    visited.pop();
+                    payloads_send && args_send
+                }
+                // A built-in `Named` type: the payload-free prelude `Ordering` enum is `Send`; the
+                // stateful/reference-like built-ins (`Future`/`Iterator`/`FileHandle`/…) are `!Send`.
+                None => name == "Ordering",
+            },
+            // Closures capture the heap; `dyn` can't be proven non-`class`; anything else is `!Send`.
+            _ => false,
+        }
+    }
+
     /// Track A.3a: an `.await` inside an `async fn` is compiled into a poll-state of the state machine
     /// only when it is in **statement position** — the whole value of a binding / expression-statement /
     /// `return` / `echo`, optionally under one `?`. An `.await` buried in a sub-expression (a call
@@ -3055,28 +3175,34 @@ impl Checker {
                     }
                 }
             }
-            Expr::Spawn { future, span } => {
+            Expr::Spawn {
+                future,
+                isolate,
+                span,
+            } => {
+                let kw = if *isolate { "isolate" } else { "spawn" };
                 let inner = self.synth(future, env);
-                // Structured concurrency (Track A.3b): `spawn` is legal only inside a `concurrent { }`
-                // scope. An orphan `spawn` (no enclosing scope — incl. one in a closure, where the depth
-                // was reset) is E0041 by construction, so a spawned task can never outlive a scope.
+                // Structured concurrency (Track A.3b): `spawn`/`isolate` are legal only inside a
+                // `concurrent { }` scope. An orphan one (no enclosing scope — incl. one in a closure,
+                // where the depth was reset) is E0041 by construction, so a spawned unit can never
+                // outlive a scope.
                 if self.concurrent_depth == 0 {
                     self.diags.push(
                         Diagnostic::error(
                             DiagnosticCode::OrphanSpawn,
                             *span,
-                            "`spawn` is only allowed inside a `concurrent { }` scope".to_string(),
+                            format!("`{kw}` is only allowed inside a `concurrent {{ }}` scope"),
                         )
-                        .with_help(
-                            "wrap the `spawn` in a `concurrent { }` block; a task must have an owning \
-                             scope that joins it",
-                        ),
+                        .with_help(format!(
+                            "wrap the `{kw}` in a `concurrent {{ }}` block; a task must have an owning \
+                             scope that joins it"
+                        )),
                     );
                 }
-                // `spawn e` takes a `Future<T>` (an `async fn` call) and yields a handle that is itself
-                // a `Future<T>` — so `spawn f().await` produces the result. A non-future operand is
-                // E0041 (a hole/`dyn` defers to runtime).
-                match &inner {
+                // `spawn e`/`isolate f(args)` take a `Future<T>` (an `async fn` call) and yield a handle
+                // that is itself a `Future<T>` — so `spawn f().await` produces the result. A non-future
+                // operand is E0041 (a hole/`dyn` defers to runtime).
+                let result = match &inner {
                     Type::Named(n, _) if n == stdlib::FUTURE => inner.clone(),
                     t if t.defers_to_runtime() => {
                         Type::Named(stdlib::FUTURE.to_string(), vec![t.clone()])
@@ -3086,13 +3212,21 @@ impl Checker {
                             Diagnostic::error(
                                 DiagnosticCode::OrphanSpawn,
                                 *span,
-                                format!("`spawn` expects a `Future`, found `{other}`"),
+                                format!("`{kw}` expects a `Future`, found `{other}`"),
                             )
-                            .with_help("`spawn` an `async fn` call, e.g. `spawn fetch(url)`"),
+                            .with_help(format!(
+                                "`{kw}` an `async fn` call, e.g. `{kw} fetch(url)`"
+                            )),
                         );
                         Type::Named(stdlib::FUTURE.to_string(), vec![Type::Unknown])
                     }
+                };
+                // `isolate` runs in a fresh heap, so its arguments and result must be `Send` (E0042) —
+                // the check the object-model arc parked here. `spawn` (same heap) has no such limit.
+                if *isolate {
+                    self.check_isolate_send(future, &result, *span);
                 }
+                result
             }
             Expr::Coalesce {
                 value, fallback, ..

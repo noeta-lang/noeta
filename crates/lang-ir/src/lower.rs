@@ -1005,7 +1005,12 @@ impl Lowerer<'_> {
             // `spawn e` (Track A.3b): register the future `e` as a task in the current scope and yield
             // a handle (itself a `Future<T>`). The future operand is evaluated first (an `async fn`
             // call producing the lazy state machine), then handed to `Rvalue::Spawn`.
-            Expr::Spawn { future, span } => {
+            // `spawn e` and `isolate f(args)` lower identically for now (isolates milestone I.0): in the
+            // deterministic sandbox an isolate is observationally a task (single-thread; `Send` value
+            // args copy-invisible), so both become `Rvalue::Spawn`. Real heap separation is a later,
+            // out-of-oracle slice (I.4) that will read the `isolate` flag; the checker already enforces
+            // the `Send` boundary (E0042).
+            Expr::Spawn { future, span, .. } => {
                 let future = self.lower_expr(future, out)?;
                 Ok(self.emit(
                     out,

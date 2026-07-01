@@ -1,0 +1,10 @@
+// Isolates milestone I.0 — like `spawn`, an `isolate` needs an owning `concurrent { }` scope that joins
+// it; an orphan `isolate` is E0041 (nothing dangles, by construction).
+// expect: error E0041 at 7:9
+// expect: exit 1
+async fn work(n: int): int { return n }
+async fn run(): int {
+    h = isolate work(1)
+    return h.await
+}
+echo run().await

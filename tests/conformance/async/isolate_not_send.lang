@@ -1,0 +1,11 @@
+// Isolates milestone I.0 — a `class` (reference type: identity, shared mutation) is `!Send`, so it may
+// not cross an isolate boundary. Passing one as an `isolate` argument is E0042 — the check the object
+// model parked for the concurrency milestone. (Convert to a `struct` to send its data.)
+// expect: error E0042 at 9:9
+// expect: exit 1
+class Conn { pub id: int }
+async fn use_conn(c: Conn): int { return c.id }
+concurrent {
+    h = isolate use_conn(Conn { id: 1 })
+    echo h.await
+}

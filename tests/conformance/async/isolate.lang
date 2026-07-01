@@ -1,0 +1,25 @@
+// Isolates milestone I.0 — `isolate f(args)` runs a call as a concurrent unit like `spawn`, but in a
+// fresh isolate (own heap) and constrained to `Send` args/result. In the deterministic sandbox an
+// isolate is observationally a task (single thread; value-type args copy-invisible), so it executes
+// and both backends agree. Value-type args (`string`, `int`, and a `struct`) are `Send`, so this is
+// well-typed; it computes 3²+4² and a struct distance.
+// expect: stdout "a computing"
+// expect: stdout "b computing"
+// expect: stdout "sum=25"
+// expect: stdout "d=25"
+// expect: stdout "done"
+// expect: exit 0
+struct Point { x: int; y: int }
+async fn work(name: string, n: int): int {
+    echo name ~ " computing"
+    return n * n
+}
+async fn dist2(p: Point): int { return p.x * p.x + p.y * p.y }
+concurrent {
+    a = isolate work("a", 3)
+    b = isolate work("b", 4)
+    echo "sum=" ~ (a.await + b.await)
+    d = isolate dist2(Point { x: 3, y: 4 })
+    echo "d=" ~ d.await
+}
+echo "done"

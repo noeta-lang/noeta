@@ -696,8 +696,13 @@ impl Pretty for Expr {
                 expr.pretty(out, level + 1);
                 out.push(')');
             }
-            Expr::Spawn { future, span: s } => {
-                out.push_str(&format!("(spawn {}\n", span(*s)));
+            Expr::Spawn {
+                future,
+                isolate,
+                span: s,
+            } => {
+                let kw = if *isolate { "isolate" } else { "spawn" };
+                out.push_str(&format!("({kw} {}\n", span(*s)));
                 future.pretty(out, level + 1);
                 out.push(')');
             }

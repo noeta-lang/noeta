@@ -54,6 +54,7 @@ enum PrefixOp {
     Neg,
     Not,
     Spawn,
+    Isolate,
 }
 
 /// The built-in **decorator** directives — the closed set of `@`-directives that prefix a *type*
@@ -1556,6 +1557,7 @@ where
                     just(T::Minus).to(PrefixOp::Neg),
                     just(T::Bang).to(PrefixOp::Not),
                     just(T::SpawnKw).to(PrefixOp::Spawn),
+                    just(T::IsolateKw).to(PrefixOp::Isolate),
                 )),
                 move |op, operand, e| {
                     let span = ctx.to_span(e.span());
@@ -1572,6 +1574,12 @@ where
                         },
                         PrefixOp::Spawn => Expr::Spawn {
                             future: Box::new(operand),
+                            isolate: false,
+                            span,
+                        },
+                        PrefixOp::Isolate => Expr::Spawn {
+                            future: Box::new(operand),
+                            isolate: true,
                             span,
                         },
                     }

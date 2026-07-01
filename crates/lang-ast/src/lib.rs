@@ -716,7 +716,15 @@ pub enum Expr {
     /// `spawn e` (Track A.3): schedule the future `e` as a task in the enclosing `concurrent` scope,
     /// yielding a handle that is itself a `Future<T>` (so `spawn f().await` produces the result). Legal
     /// only inside a `concurrent { }` block (an orphan `spawn` is E0041).
-    Spawn { future: Box<Expr>, span: Span },
+    /// `spawn e` (task, `isolate: false`) or `isolate f(args)` (fresh isolate, `isolate: true`) — both
+    /// schedule a concurrent unit in the enclosing `concurrent` scope and yield a `Future<T>` handle.
+    /// The `isolate` flavor runs in its own heap (real parallelism) and is `Send`-constrained (E0042);
+    /// the two share this node because they differ only in the heap boundary + that constraint.
+    Spawn {
+        future: Box<Expr>,
+        isolate: bool,
+        span: Span,
+    },
     /// The `??` fallback operator: `value ?? fallback`. On `Ok(x)`/`some(x)` it yields
     /// `x`; on `Err(_)`/`none` it evaluates and yields `fallback`.
     Coalesce {

@@ -166,6 +166,11 @@ pub enum DiagnosticCode {
     /// `concurrent { }` scope (an orphan task, forbidden by construction), a `spawn` operand is not a
     /// `Future`, or a `concurrent`/`spawn` is otherwise malformed.
     OrphanSpawn,
+    /// A `!Send` value would cross an isolate boundary (isolates milestone): an `isolate f(args)`
+    /// argument or result is a `class` (reference type — has identity, can't be copied or shared) or
+    /// otherwise not `Send`, or `isolate` is applied to something that is not a direct call. Only value
+    /// types (`struct`/primitives/`bytes`/tuples/enums and `Send` containers) may cross.
+    NotSend,
 }
 
 impl DiagnosticCode {
@@ -213,6 +218,7 @@ impl DiagnosticCode {
         DiagnosticCode::GeneratorMisuse,
         DiagnosticCode::AsyncMisuse,
         DiagnosticCode::OrphanSpawn,
+        DiagnosticCode::NotSend,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -260,6 +266,7 @@ impl DiagnosticCode {
             DiagnosticCode::GeneratorMisuse => "E0039",
             DiagnosticCode::AsyncMisuse => "E0040",
             DiagnosticCode::OrphanSpawn => "E0041",
+            DiagnosticCode::NotSend => "E0042",
         }
     }
 

@@ -23,21 +23,21 @@ expression: out
 ───╯
 
 ================ E0003 unexpected token ================
-[E0003] Error: found '`;`' expected '`-`', '`!`', '`spawn`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+[E0003] Error: found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
    ╭─[ snippet.lang:1:6 ]
    │
  1 │ echo ;
    │      ┬  
-   │      ╰── found '`;`' expected '`-`', '`!`', '`spawn`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+   │      ╰── found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
 ───╯
 
 ================ E0004 unexpected end of input ================
-[E0004] Error: found end of input expected '`-`', '`!`', '`spawn`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+[E0004] Error: found end of input expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
    ╭─[ snippet.lang:1:8 ]
    │
  1 │ x = 1 +
    │        │ 
-   │        ╰─ found end of input expected '`-`', '`!`', '`spawn`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+   │        ╰─ found end of input expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
 ───╯
 
 ================ E0005 unknown name ================

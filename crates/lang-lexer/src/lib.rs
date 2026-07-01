@@ -54,6 +54,10 @@ pub enum TokenKind {
     /// yielding a handle (`Future<T>`) whose `.await` produces the task's result.
     #[token("spawn")]
     SpawnKw,
+    /// `isolate f(args)` — run the call in a fresh isolate (own heap, real parallelism), yielding a
+    /// handle (`Future<T>`) like `spawn` but constrained to `Send` args/result (isolates milestone).
+    #[token("isolate")]
+    IsolateKw,
     #[token("if")]
     IfKw,
     /// The conditional-expression keyword: `if cond then a else b`. Forks the grammar from the
@@ -298,6 +302,7 @@ impl TokenKind {
             TokenKind::AwaitKw => "AwaitKw",
             TokenKind::ConcurrentKw => "ConcurrentKw",
             TokenKind::SpawnKw => "SpawnKw",
+            TokenKind::IsolateKw => "IsolateKw",
             TokenKind::IfKw => "IfKw",
             TokenKind::ThenKw => "ThenKw",
             TokenKind::ElseKw => "ElseKw",
@@ -395,6 +400,7 @@ impl TokenKind {
             TokenKind::AwaitKw => "`await`",
             TokenKind::ConcurrentKw => "`concurrent`",
             TokenKind::SpawnKw => "`spawn`",
+            TokenKind::IsolateKw => "`isolate`",
             TokenKind::IfKw => "`if`",
             TokenKind::ThenKw => "`then`",
             TokenKind::ElseKw => "`else`",
