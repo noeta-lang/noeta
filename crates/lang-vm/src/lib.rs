@@ -492,6 +492,7 @@ impl<'m> Vm<'m> {
                 shape: Rc::clone(&shapes[def.shape as usize]),
                 fields,
                 byte_size: def.byte_size as usize,
+                column: def.column,
             }));
         }
         // Resolve each packed `map(...)` result site to its shared schema (P-PACK 2.6 category B).

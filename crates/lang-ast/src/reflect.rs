@@ -501,6 +501,10 @@ pub struct PackedLayout {
     pub type_name: String,
     /// The fields in declared (slot) order.
     pub fields: Vec<PackedField>,
+    /// Whether lists of this element are stored **column-major** — the `@packed(layout: column)`
+    /// attribute (P-SIMD C2). A performance-only property (see `lang_object::PackedSchema::column`);
+    /// carried here so the compiler can thread it into the runtime schema both backends read.
+    pub column: bool,
 }
 
 /// One field of a [`PackedLayout`]: its name (for materializing the boxed value) and its kind.

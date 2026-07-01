@@ -1670,6 +1670,7 @@ impl Interpreter {
             def,
             fields,
             byte_size,
+            column: layout.column,
         }))
     }
 

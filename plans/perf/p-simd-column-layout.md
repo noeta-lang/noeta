@@ -192,11 +192,21 @@ milestone, which needs const generics.)
 - **C1 — directive surface.** `@packed(layout: row|column)` parses (parser arm + AST carries
   `PackedLayout`), checker validates (E0037), `PackedSchema.layout` is populated. No storage change yet
   (column falls back to row internally) — pure front-end, conformance green.
-- **C2 — column storage + correct ops.** `MakePackedList` writes column-order for `layout: column`;
-  `packed_get`/`field`/`select`/`set`/`push`/`concat`/`bytes` gain column paths. Differential + leak green
-  (behaviour-invisible). Restrict to primitive-only structs.
+- **C2 — column storage + correct ops. ✅ DONE.** `PackedSchema` carries a `column` flag (threaded
+  reflect → bytecode `PackedSchemaDef` → both runtime schemas), populated from the directive via the
+  checker's `column_structs` set. All packed ops gained a column path through one shared offset
+  helper, `PackedSchema::field_offset(i, slot, count)` (row = `i·byte_size + prefix`; column =
+  `count·prefix + i·width`): `packed_get`/`field`/`items` gather across columns, `push`/`concat`/
+  `extend` rebuild (O(n), as designed), `select`/`set`/`set_in_place` scatter per column, `to_bytes`
+  returns the column-order buffer (round-trip self-consistent). **Correctness, not yet speed:** the
+  `vec.*_all` fast path (`packed_vec3_data`) *declines* a column list, so the kernels fall back to the
+  element-wise scalar loop — correct on either layout (differential-pinned). The fast columnar SoA
+  dispatch is C3. **Nested `@packed` fields work generally** (kept as contiguous per-element chunks,
+  so no primitive-only restriction was needed); leaf-flattening them into leaf columns is still C5.
+  Conformance 387 (+`packed_column_ops`), differential 377 / 0 skipped / agree, leak 0, miri clean.
 - **C3 — fast `vec.*_all` column dispatch.** `add_all`/`sub_all`/`scale_all`/`dot_all`/`length_all` pick
-  the S4 columnar kernels on `layout: column`. Bench row-vs-column, record here. Add `vec3_column.lang`.
+  the S4 columnar kernels on `layout: column` (a column Vec3 buffer's bytes *are* the SoA columns).
+  Bench row-vs-column, record here. Add `vec3_column.lang`.
 - **C4 — retire S5.** Remove `vec.soa*` + `SoaVec3`/`Payload::SoaVec3` + `SOA_VEC3` + `vec3_soa.lang`.
 - **C5 (follow-on) — nested leaf-flattening** for structs with nested `@packed` fields (`Particle`).
 

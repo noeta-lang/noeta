@@ -924,6 +924,9 @@ pub struct PackedSchemaDef {
     /// Bytes per element (the per-element stride into the flat byte buffer; P-PACK 3.2b — an `f32`
     /// field is 4 bytes, the other primitives 8).
     pub byte_size: u32,
+    /// Whether the list is stored column-major (`@packed(layout: column)`, P-SIMD C2). Pure-data
+    /// mirror of `lang_object::PackedSchema::column`.
+    pub column: bool,
 }
 
 /// A compiled packed field's kind — the pure-data form of a `lang_object::PackedKind`. A nested

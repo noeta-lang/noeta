@@ -302,7 +302,12 @@ impl Value {
             Payload::PackedList { schema, bytes } => {
                 let mut staged = Vec::with_capacity(schema.byte_size);
                 if element.pack_element(schema, &mut staged) {
-                    bytes.extend(staged);
+                    if schema.column {
+                        // Column-major append rebuilds the buffer (O(n)); see `column_append`.
+                        *bytes = column_append(schema, bytes, &staged);
+                    } else {
+                        bytes.extend(staged);
+                    }
                     true
                 } else {
                     false
@@ -334,8 +339,17 @@ impl Value {
         let (schema, elem) = heap::with_payload(self, |p| match p {
             Payload::PackedList { schema, bytes } => {
                 let stride = schema.byte_size;
-                let offset = index * stride;
-                (Rc::clone(schema), bytes[offset..offset + stride].to_vec())
+                // Gather the element into row order first (a plain byte copy, no allocation), so the
+                // materialization below is layout-agnostic. Row-major is a contiguous stride; column-
+                // major scatters the element across its columns (P-SIMD C2).
+                let elem = if schema.column {
+                    let count = schema.count(bytes.len());
+                    gather_row(schema, bytes, index, count)
+                } else {
+                    let offset = index * stride;
+                    bytes[offset..offset + stride].to_vec()
+                };
+                (Rc::clone(schema), elem)
             }
             _ => unreachable!("packed_get on a non-packed list"),
         });
@@ -351,16 +365,13 @@ impl Value {
     pub fn packed_field(self, index: usize, field: &str) -> Option<Value> {
         let (kind, slice) = heap::with_payload(self, |p| match p {
             Payload::PackedList { schema, bytes } => {
-                let count = bytes.len() / schema.byte_size;
+                let count = schema.count(bytes.len());
                 if index >= count {
                     return None;
                 }
                 let slot = schema.shape.slot_of(field)?;
-                // Field `slot`'s byte offset within the element is the sum of the prior fields' widths.
-                let mut at = index * schema.byte_size;
-                for kind in &schema.fields[..slot] {
-                    at += kind.byte_width();
-                }
+                // The field's byte offset resolves through the layout axis (row vs column, P-SIMD C2).
+                let at = schema.field_offset(index, slot, count);
                 let width = schema.fields[slot].byte_width();
                 Some((schema.fields[slot].clone(), bytes[at..at + width].to_vec()))
             }
@@ -390,8 +401,13 @@ impl Value {
             return None;
         }
         heap::with_payload(self, |p| match p {
+            // Only a *row-major* (AoS) Vec3 buffer feeds the interleaved bulk kernels. A column
+            // (`layout: column`) list declines this fast path (P-SIMD C2) so the kernels fall back to
+            // the element-wise scalar loop — correct on either layout; the fast columnar SoA path is
+            // wired in C3.
             Payload::PackedList { schema, bytes }
-                if schema.fields.len() == 3
+                if !schema.column
+                    && schema.fields.len() == 3
                     && schema.fields.iter().all(|k| matches!(k, PackedKind::F32)) =>
             {
                 Some((Rc::clone(schema), bytes.clone()))
@@ -432,12 +448,18 @@ impl Value {
     pub fn packed_select(self, indices: &[usize]) -> Value {
         let (schema, buf) = heap::with_payload(self, |p| match p {
             Payload::PackedList { schema, bytes } => {
-                let stride = schema.byte_size;
-                let mut out = Vec::with_capacity(indices.len() * stride);
-                for &i in indices {
-                    out.extend_from_slice(&bytes[i * stride..i * stride + stride]);
-                }
-                (Rc::clone(schema), out)
+                let buf = if schema.column {
+                    let count = schema.count(bytes.len());
+                    column_select(schema, bytes, indices, count)
+                } else {
+                    let stride = schema.byte_size;
+                    let mut out = Vec::with_capacity(indices.len() * stride);
+                    for &i in indices {
+                        out.extend_from_slice(&bytes[i * stride..i * stride + stride]);
+                    }
+                    out
+                };
+                (Rc::clone(schema), buf)
             }
             _ => unreachable!("packed_select on a non-packed list"),
         });
@@ -457,7 +479,12 @@ impl Value {
         if !element.pack_element(&schema, &mut staged) {
             return None;
         }
-        buf[index * stride..index * stride + stride].copy_from_slice(&staged);
+        if schema.column {
+            let count = schema.count(buf.len());
+            column_set(&schema, &mut buf, index, count, &staged);
+        } else {
+            buf[index * stride..index * stride + stride].copy_from_slice(&staged);
+        }
         Some(Value::packed_list(schema, buf))
     }
 
@@ -477,7 +504,12 @@ impl Value {
                 let stride = schema.byte_size;
                 let mut staged = Vec::with_capacity(stride);
                 if element.pack_element(schema, &mut staged) {
-                    bytes[index * stride..index * stride + stride].copy_from_slice(&staged);
+                    if schema.column {
+                        let count = schema.count(bytes.len());
+                        column_set(schema, bytes, index, count, &staged);
+                    } else {
+                        bytes[index * stride..index * stride + stride].copy_from_slice(&staged);
+                    }
                     true
                 } else {
                     false
@@ -505,7 +537,12 @@ impl Value {
             } => Rc::ptr_eq(&schema.shape, &s2.shape).then(|| b2.clone()),
             _ => None,
         })?;
-        buf.extend_from_slice(&other_bytes);
+        // Same shape ⇒ same layout. Row appends the buffers; column interleaves per column (P-SIMD C2).
+        if schema.column {
+            buf = column_concat(&schema, &buf, &other_bytes);
+        } else {
+            buf.extend_from_slice(&other_bytes);
+        }
         Some(Value::packed_list(schema, buf))
     }
 
@@ -530,7 +567,12 @@ impl Value {
             Payload::PackedList { schema, bytes }
                 if Rc::ptr_eq(&schema.shape, &other_schema.shape) =>
             {
-                bytes.extend_from_slice(&other_bytes);
+                if schema.column {
+                    // Column layout must rebuild (each column grows in the middle of the buffer).
+                    *bytes = column_concat(schema, bytes, &other_bytes);
+                } else {
+                    bytes.extend_from_slice(&other_bytes);
+                }
                 true
             }
             _ => false,
@@ -545,13 +587,21 @@ impl Value {
             Payload::PackedList { schema, bytes } => (Rc::clone(schema), bytes.clone()),
             _ => unreachable!("packed_items on a non-packed list"),
         });
-        let count = bytes.len() / schema.byte_size;
+        let count = schema.count(bytes.len());
         let mut out = Vec::with_capacity(count);
-        let mut at = 0;
-        for _ in 0..count {
-            let (value, next) = unpack_element(&schema, &bytes, at);
-            out.push(value);
-            at = next;
+        if schema.column {
+            // Column-major: each element is scattered across columns — gather it to row order first.
+            for i in 0..count {
+                let row = gather_row(&schema, &bytes, i, count);
+                out.push(unpack_element(&schema, &row, 0).0);
+            }
+        } else {
+            let mut at = 0;
+            for _ in 0..count {
+                let (value, next) = unpack_element(&schema, &bytes, at);
+                out.push(value);
+                at = next;
+            }
         }
         out
     }
@@ -2188,6 +2238,87 @@ fn unpack_element(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value,
     (Value::object(Rc::clone(&schema.shape), slots), at)
 }
 
+/// Gather element `index`'s fields (a buffer of `count` elements) into a fresh **row-order** byte
+/// vector (fields contiguous, slot order) — the inverse of the column scatter (P-SIMD C2). For a
+/// row-major buffer this simply copies the element's contiguous stride; for a column-major one it
+/// pulls each field from its column. The row-order result feeds [`unpack_element`], so materializing
+/// an element is layout-agnostic once gathered. Pure byte copies — no `Value` allocation, so it is
+/// safe to call while a heap payload is borrowed.
+fn gather_row(schema: &PackedSchema, bytes: &[u8], index: usize, count: usize) -> Vec<u8> {
+    let mut row = Vec::with_capacity(schema.byte_size);
+    for (slot, kind) in schema.fields.iter().enumerate() {
+        let off = schema.field_offset(index, slot, count);
+        row.extend_from_slice(&bytes[off..off + kind.byte_width()]);
+    }
+    row
+}
+
+/// Append one packed `row` (`byte_size` bytes, slot order) to a column-major buffer, rebuilding it so
+/// each field's column gains the new element at its end (P-SIMD C2). O(n) — column layout trades
+/// cheap append for fast bulk field math.
+fn column_append(schema: &PackedSchema, buf: &[u8], row: &[u8]) -> Vec<u8> {
+    let n = schema.count(buf.len());
+    let mut out = Vec::with_capacity(buf.len() + schema.byte_size);
+    let mut row_at = 0;
+    for (slot, kind) in schema.fields.iter().enumerate() {
+        let w = kind.byte_width();
+        let base = n * schema.field_prefix(slot);
+        out.extend_from_slice(&buf[base..base + n * w]);
+        out.extend_from_slice(&row[row_at..row_at + w]);
+        row_at += w;
+    }
+    out
+}
+
+/// Build a new column-major buffer holding the selected `indices` of a column-major buffer of `count`
+/// elements (P-SIMD C2) — each field's column is the gather of that field across the selected
+/// elements. Mirrors [`Value::packed_select`]'s row-block copy for the column layout.
+fn column_select(schema: &PackedSchema, buf: &[u8], indices: &[usize], count: usize) -> Vec<u8> {
+    let m = indices.len();
+    let mut out = vec![0u8; m * schema.byte_size];
+    for (slot, kind) in schema.fields.iter().enumerate() {
+        let w = kind.byte_width();
+        let new_base = m * schema.field_prefix(slot);
+        for (j, &i) in indices.iter().enumerate() {
+            let src = schema.field_offset(i, slot, count);
+            out[new_base + j * w..new_base + j * w + w].copy_from_slice(&buf[src..src + w]);
+        }
+    }
+    out
+}
+
+/// Overwrite element `index`'s fields in a column-major buffer of `count` elements with one packed
+/// `row` (slot order), writing each field into its column (P-SIMD C2).
+fn column_set(schema: &PackedSchema, buf: &mut [u8], index: usize, count: usize, row: &[u8]) {
+    let mut row_at = 0;
+    for (slot, kind) in schema.fields.iter().enumerate() {
+        let w = kind.byte_width();
+        let dst = schema.field_offset(index, slot, count);
+        buf[dst..dst + w].copy_from_slice(&row[row_at..row_at + w]);
+        row_at += w;
+    }
+}
+
+/// Concatenate two column-major buffers of the same schema into a new one (P-SIMD C2): each field's
+/// output column is `a`'s column followed by `b`'s. Mirrors the row path's buffer append.
+fn column_concat(schema: &PackedSchema, a: &[u8], b: &[u8]) -> Vec<u8> {
+    let na = schema.count(a.len());
+    let nb = schema.count(b.len());
+    let total = na + nb;
+    let mut out = vec![0u8; total * schema.byte_size];
+    for (slot, kind) in schema.fields.iter().enumerate() {
+        let w = kind.byte_width();
+        let prefix = schema.field_prefix(slot);
+        let a_base = na * prefix;
+        let b_base = nb * prefix;
+        let out_base = total * prefix;
+        out[out_base..out_base + na * w].copy_from_slice(&a[a_base..a_base + na * w]);
+        out[out_base + na * w..out_base + (na + nb) * w]
+            .copy_from_slice(&b[b_base..b_base + nb * w]);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2243,6 +2374,7 @@ mod tests {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
+            column: false,
         });
 
         // Pack two `V { x, y }` instances into one flat buffer (the source objects are freed after).
@@ -2307,6 +2439,7 @@ mod tests {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
+            column: false,
         });
 
         let list = Value::packed_list(Rc::clone(&schema), Vec::new());
@@ -2330,6 +2463,87 @@ mod tests {
         assert_eq!(boxed.list_len(), Some(1));
         assert_eq!(boxed.display(), "[V {x: 5, y: 6}]");
         boxed.release(); // frees the list and its owned element, so miri sees no leak
+    }
+
+    #[test]
+    fn packed_column_layout_round_trips_and_frees() {
+        // P-SIMD C2: a `@packed(layout: column)` list stores each field contiguously across elements
+        // (`[x×n][y×n]`) yet observes identically to a row list. Build it by streaming push (exercising
+        // `column_append`'s O(n) rebuild), then check get / field / select / set / concat all read the
+        // right values through the column offset math — and free clean under miri. Mixed field widths
+        // (`int` 8 + `bool` 1) stress the non-uniform column strides.
+        let shape = Rc::new(Shape::object(
+            ShapeKind::Struct,
+            "P",
+            vec!["v".into(), "flag".into()],
+        ));
+        let schema = Rc::new(PackedSchema {
+            shape: Rc::clone(&shape),
+            fields: vec![PackedKind::Int, PackedKind::Bool],
+            byte_size: 9,
+            column: true,
+        });
+
+        // Stream three elements in — each `column_append` rebuilds the buffer in column order.
+        let list = Value::packed_list(Rc::clone(&schema), Vec::new());
+        for (v, flag) in [(10_i64, true), (20, false), (30, true)] {
+            let obj = Value::object(Rc::clone(&shape), vec![Value::int(v), Value::bool(flag)]);
+            assert!(list.packed_push(obj));
+            obj.release();
+        }
+        assert_eq!(list.list_len(), Some(3));
+        // Buffer is column-major: `[v0 v1 v2 (24 bytes)][flag0 flag1 flag2 (3 bytes)]`.
+        let raw = list.packed_bytes().unwrap();
+        assert_eq!(raw.len(), 27);
+        assert_eq!(&raw[0..8], &10_i64.to_le_bytes());
+        assert_eq!(&raw[8..16], &20_i64.to_le_bytes());
+        assert_eq!(&raw[24..27], &[1u8, 0, 1]); // the bool column, contiguous
+
+        // Per-element gather and per-field read both resolve through the column offsets.
+        let mid = list.packed_get(1);
+        assert_eq!(mid.display(), "P {v: 20, flag: false}");
+        mid.release();
+        assert_eq!(list.packed_field(2, "v").unwrap().as_int(), Some(30));
+        assert_eq!(list.packed_field(0, "flag").unwrap().as_bool(), Some(true));
+
+        // Whole-list display equals the boxed equivalent (materialize gathers every column).
+        assert_eq!(
+            list.display(),
+            "[P {v: 10, flag: true}, P {v: 20, flag: false}, P {v: 30, flag: true}]"
+        );
+
+        // `select` (reverse) and `set` keep the column layout and the right values.
+        let rev = list.packed_select(&[2, 1, 0]);
+        assert_eq!(
+            rev.display(),
+            "[P {v: 30, flag: true}, P {v: 20, flag: false}, P {v: 10, flag: true}]"
+        );
+        rev.release();
+
+        let repl = Value::object(Rc::clone(&shape), vec![Value::int(99), Value::bool(false)]);
+        let set = list.packed_set(1, repl).unwrap();
+        assert_eq!(
+            set.display(),
+            "[P {v: 10, flag: true}, P {v: 99, flag: false}, P {v: 30, flag: true}]"
+        );
+        repl.release();
+        set.release();
+
+        // `concat` of two column lists interleaves per column.
+        let other = Value::packed_list(Rc::clone(&schema), Vec::new());
+        let tail = Value::object(Rc::clone(&shape), vec![Value::int(40), Value::bool(false)]);
+        assert!(other.packed_push(tail));
+        tail.release();
+        let joined = list.packed_concat(other).unwrap();
+        assert_eq!(joined.list_len(), Some(4));
+        assert_eq!(joined.packed_field(3, "v").unwrap().as_int(), Some(40));
+        let head = joined.packed_get(0);
+        assert_eq!(head.display(), "P {v: 10, flag: true}");
+        head.release();
+        joined.release();
+        other.release();
+
+        list.release(); // a leaf — frees the column buffer, no child release; miri sees no leak
     }
 
     #[test]
@@ -2610,6 +2824,7 @@ mod tests {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::F32, PackedKind::Int],
             byte_size: 12,
+            column: false,
         });
         let mut bytes = Vec::new();
         for (a, b) in [(0.1f32 + 0.2, 7_i64), (-1.5, 1_000_000)] {
@@ -2653,6 +2868,7 @@ mod tests {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
+            column: false,
         });
         // Two elements: (3, 1) and (7, 9).
         let list = Value::packed_list(Rc::clone(&schema), ibytes(&[3, 1, 7, 9]));
@@ -2682,6 +2898,7 @@ mod tests {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
+            column: false,
         });
         // Three elements: (3,1), (1,2), (7,9).
         let list = Value::packed_list(Rc::clone(&schema), ibytes(&[3, 1, 1, 2, 7, 9]));
@@ -2720,6 +2937,7 @@ mod tests {
             shape: Rc::clone(&shape),
             fields: vec![PackedKind::Int, PackedKind::Int],
             byte_size: 16,
+            column: false,
         });
         let mk = |vals: &[i64]| Value::packed_list(Rc::clone(&schema), ibytes(vals));
         let elem =

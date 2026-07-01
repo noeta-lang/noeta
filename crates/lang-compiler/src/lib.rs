@@ -799,6 +799,7 @@ impl ModuleCompiler {
             shape,
             fields,
             byte_size: layout.byte_size() as u32,
+            column: layout.column,
         };
         if let Some(i) = self.packed_schemas.iter().position(|s| *s == def) {
             return i as u32;

@@ -257,6 +257,36 @@ pub(crate) struct PackedSchema {
     /// Bytes per element — the sum of each field's [`SlotKind::byte_width`] (P-PACK 3.2b: a byte-
     /// addressed buffer, so an `f32` field is 4 bytes, not 8).
     pub(crate) byte_size: usize,
+    /// Whether the list buffer is stored column-major (`@packed(layout: column)`, P-SIMD C2) — the
+    /// eval mirror of `lang_object::PackedSchema::column`. Performance-only; observed values are
+    /// identical either way (the differential pins that both backends agree).
+    pub(crate) column: bool,
+}
+
+impl PackedSchema {
+    /// The byte offset of field `slot` within a single row — the sum of the prior fields' widths.
+    fn field_prefix(&self, slot: usize) -> usize {
+        self.fields[..slot]
+            .iter()
+            .map(|s| s.kind.byte_width())
+            .sum()
+    }
+
+    /// The number of elements a buffer of `len` bytes holds.
+    fn count(&self, len: usize) -> usize {
+        len.checked_div(self.byte_size).unwrap_or(0)
+    }
+
+    /// The byte offset of element `i`'s field `slot` in a buffer holding `count` elements — the one
+    /// place the row/column layout axis is interpreted (mirrors `lang_object::PackedSchema`).
+    fn field_offset(&self, i: usize, slot: usize, count: usize) -> usize {
+        let prefix = self.field_prefix(slot);
+        if self.column {
+            count * prefix + i * self.fields[slot].kind.byte_width()
+        } else {
+            i * self.byte_size + prefix
+        }
+    }
 }
 
 /// One field of a [`PackedSchema`].
@@ -297,7 +327,11 @@ impl PackedList {
     /// If this is a `List<Vec3<f32>>` (element schema = exactly three `f32` fields), its shared
     /// schema and a copy of its byte buffer — the input to the bulk `vec` kernels (P-PACK 4.2).
     pub(crate) fn vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
-        if self.schema.fields.len() == 3
+        // A column (`layout: column`) list declines the interleaved bulk-kernel fast path (P-SIMD C2)
+        // so the kernels fall back to the element-wise scalar loop — correct on either layout; the
+        // fast columnar SoA path is wired in C3.
+        if !self.schema.column
+            && self.schema.fields.len() == 3
             && self
                 .schema
                 .fields
@@ -321,7 +355,15 @@ impl PackedList {
         if pack_object(element, &self.schema, &mut staged).is_none() {
             return false;
         }
-        Rc::make_mut(&mut self.bytes).extend(staged);
+        let buf = Rc::make_mut(&mut self.bytes);
+        if self.schema.column {
+            // Column-major append (P-SIMD C2): the new element joins the *end of every column*, so
+            // the whole buffer is rebuilt (O(n)) — column layout trades cheap append for fast bulk
+            // field math, as designed. `staged` is one row (fields in slot order).
+            *buf = column_append(&self.schema, buf, &staged);
+        } else {
+            buf.extend(staged);
+        }
         true
     }
 
@@ -337,13 +379,20 @@ impl PackedList {
     }
 
     /// Materialize the element at `index` into a boxed `Value::Object`, or `None` if out of range.
+    /// Reads each field at its layout-resolved offset ([`PackedSchema::field_offset`]), so a row and
+    /// a column list yield an identical element (differing only in *where* the bytes were read from).
     fn get(&self, index: usize) -> Option<Value> {
-        if index >= self.len() {
+        let n = self.len();
+        if index >= n {
             return None;
         }
-        let offset = index * self.schema.byte_size;
-        let (value, _) = unpack_object(&self.schema, &self.bytes, offset);
-        Some(value)
+        let mut slots = Vec::with_capacity(self.schema.fields.len());
+        for (slot, s) in self.schema.fields.iter().enumerate() {
+            let off = self.schema.field_offset(index, slot, n);
+            slots.push(decode_slot(&s.kind, &self.bytes, off));
+        }
+        let object = ObjectValue::new(Rc::clone(&self.schema.def), slots);
+        Some(Value::Object(Rc::new(object)))
     }
 
     /// Read a single field of the element at `index` (P-PACK 2.5+ fused `list[i].field`), decoding
@@ -351,15 +400,12 @@ impl PackedList {
     /// of range or `name` is not a field (the checker only fuses real field reads on a packed type, so
     /// a hit is the norm; the caller falls back on `None`).
     pub(crate) fn field(&self, index: usize, name: &str) -> Option<Value> {
-        if index >= self.len() {
+        let n = self.len();
+        if index >= n {
             return None;
         }
         let slot = self.schema.def.slot_of(name)?;
-        // Field `slot`'s byte offset within the element is the sum of the prior fields' widths.
-        let mut at = index * self.schema.byte_size;
-        for s in &self.schema.fields[..slot] {
-            at += s.kind.byte_width();
-        }
+        let at = self.schema.field_offset(index, slot, n);
         Some(decode_slot(&self.schema.fields[slot].kind, &self.bytes, at))
     }
 
@@ -430,6 +476,24 @@ fn pack_object(value: &Value, schema: &PackedSchema, out: &mut Vec<u8>) -> Optio
         }
     }
     Some(())
+}
+
+/// Append one packed `row` (`byte_size` bytes, fields in slot order) to a column-major buffer,
+/// returning the rebuilt buffer with each field's column extended by the new element (P-SIMD C2).
+/// O(n): column layout stores each field contiguously, so a new element inserts into the middle of
+/// the buffer at every column's end. Used only on the `layout: column` path.
+fn column_append(schema: &PackedSchema, buf: &[u8], row: &[u8]) -> Vec<u8> {
+    let n = schema.count(buf.len());
+    let mut out = Vec::with_capacity(buf.len() + schema.byte_size);
+    let mut row_at = 0;
+    for (slot, s) in schema.fields.iter().enumerate() {
+        let w = s.kind.byte_width();
+        let base = n * schema.field_prefix(slot);
+        out.extend_from_slice(&buf[base..base + n * w]);
+        out.extend_from_slice(&row[row_at..row_at + w]);
+        row_at += w;
+    }
+    out
 }
 
 /// Materialize one element from `bytes` starting at byte `offset`, returning the value and the offset

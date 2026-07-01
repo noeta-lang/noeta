@@ -442,6 +442,10 @@ struct Checker {
     /// Collected in pass 1 so a packed struct's field-type validation (a field may be another packed
     /// struct declared later) sees the full set, and so `List<Packed>` specialization can consult it.
     packed_structs: HashSet<String>,
+    /// Every `@packed(layout: column)` struct (P-SIMD C2) — a subset of [`Self::packed_structs`]
+    /// whose lists are stored column-major. Collected alongside `packed_structs` so `packed_layout`
+    /// can flag the runtime schema; layout is a performance-only property (behaviour-invisible).
+    column_structs: HashSet<String>,
     /// An attribute's optional placement restriction from `@attribute(Method, Function, …)`:
     /// attribute name → the declaration kinds a `#[ThisType(...)]` use may attach to. An attribute
     /// *absent* from this map (bare `@attribute`) is unrestricted. Enforced per use site (E0030);
@@ -820,8 +824,11 @@ impl Checker {
                         .map(|f| (f.name.clone(), field_type(&f.ty)))
                         .collect();
                     self.records.insert(r.name.clone(), fields);
-                    if r.packed.is_some() {
+                    if let Some(directive) = &r.packed {
                         self.packed_structs.insert(r.name.clone());
+                        if directive.layout == lang_ast::PackedLayout::Column {
+                            self.column_structs.insert(r.name.clone());
+                        }
                     }
                     // A struct's `mut` fields are assignable via `x.f = v` (value-semantic, so the
                     // write is a copy-on-write rebind). Register them exactly as for a class; the
@@ -4179,6 +4186,7 @@ impl Checker {
         Some(PackedLayout {
             type_name: name.clone(),
             fields,
+            column: self.column_structs.contains(name),
         })
     }
 

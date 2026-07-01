@@ -145,6 +145,40 @@ pub struct PackedSchema {
     /// **Bytes** per element — the sum of each field's [`PackedKind::byte_width`] (P-PACK 3.2b: the
     /// VM stores a `List<packed>` as a byte buffer so an `f32` field is 4 bytes, not 8).
     pub byte_size: usize,
+    /// Whether the list buffer is stored **column-major** (SoA: `[f0×n][f1×n]…`) rather than
+    /// row-major (AoS: each element's fields contiguous) — the `@packed(layout: column)` attribute
+    /// (P-SIMD C2). A pure *performance* property: every op reads it to pick the byte offset, but the
+    /// observed value is identical either way (differential holds by construction). Top-level fields
+    /// become columns; a nested `@packed` field stays a contiguous per-element chunk until leaf-
+    /// flattening (C5) splits it into leaf columns.
+    pub column: bool,
+}
+
+impl PackedSchema {
+    /// The byte offset of field `slot` within a single row — the sum of the prior fields' widths.
+    /// Shared by the row and column offset math.
+    pub fn field_prefix(&self, slot: usize) -> usize {
+        self.fields[..slot].iter().map(|k| k.byte_width()).sum()
+    }
+
+    /// The number of elements a buffer of `len` bytes holds (`len / byte_size`; 0 for a zero-width
+    /// element, which never occurs for a real packed struct).
+    pub fn count(&self, len: usize) -> usize {
+        len.checked_div(self.byte_size).unwrap_or(0)
+    }
+
+    /// The byte offset of element `i`'s field `slot` in a buffer holding `count` elements. Row-major
+    /// packs each element contiguously (`i·byte_size + prefix`); column-major packs each field's
+    /// values contiguously across all elements (`count·prefix + i·width`). This is the one place the
+    /// layout axis is interpreted for per-field access — `get`/`field`/`set` all route through it.
+    pub fn field_offset(&self, i: usize, slot: usize, count: usize) -> usize {
+        let prefix = self.field_prefix(slot);
+        if self.column {
+            count * prefix + i * self.fields[slot].byte_width()
+        } else {
+            i * self.byte_size + prefix
+        }
+    }
 }
 
 /// A packed field's storage: a primitive occupying a fixed run of bytes, or a nested packed struct
