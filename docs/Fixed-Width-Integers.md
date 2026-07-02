@@ -77,13 +77,65 @@ Conversions are total (`to_i8`, `to_u8`, …, `to_i64`, `to_u64`, `to_int`), wit
 echo (300).to_u8()    // 44   (300 mod 256)
 ```
 
-## Packed value types and `bytes`
+## Packed value types — `@packed`
 
-Fixed-width fields let you define **packed value types** — structs stored as a flat, unboxed, cache-friendly numeric buffer rather than an array of pointers. A `List` of a packed type serializes to and from an opaque `bytes` buffer:
+The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored as a flat, unboxed, contiguous numeric buffer rather than an array of heap-object pointers. This is a pure *representation* change — the flat layout is invisible to program behavior (a packed list `==`, displays, and iterates exactly like a boxed one), but it is dramatically more cache-friendly and unlocks vectorized bulk math.
 
-```lang ignore
-blob = packed_list.to_bytes()          // -> bytes
-back = from_bytes::<Vec3>(blob)         // -> List<Vec3>
+```lang
+@packed struct V { x: int  y: int }
+
+mut acc = [V { x: 0, y: 0 }, V { x: 1, y: 1 }, V { x: 2, y: 2 }]
+acc = acc.set(1, V { x: 9, y: 9 })     // in-place flat-slot overwrite when uniquely owned
+echo acc                                // [V {x: 0, y: 0}, V {x: 9, y: 9}, V {x: 2, y: 2}]
+echo acc.count()                        // 3
 ```
 
-`bytes` is an opaque binary buffer (`b.count()` gives its length, it compares by content, and `type_of(b)` is `Type.Bytes`). This flat layout is also what makes the vector-math kernels fast — see [Standard-Library Modules](Standard-Library-Modules#vec--quat) for `vec`/`quat`, and [Performance Techniques](Performance-Techniques) for how the layout unlocks autovectorization.
+Rules:
+
+- `@packed` marks a **struct** only. On a class it is E0038 (a class has identity; a packed value type is a value).
+- Fields must be packable — fixed-width ints, `int`, `f32`, `bool`, or a nested `@packed` struct. A non-primitive field is rejected.
+- Every list operation (index, field read, iteration, `set`, `~`/concat, `slice`/`reverse`/`filter`/`map`) yields exactly what the boxed layout would.
+
+## Column (SoA) layout — `@packed(layout: column)`
+
+By default a packed list is *row-major* (array-of-structs). `@packed(layout: column)` stores it **column-major** (struct-of-arrays) — each field in its own contiguous column. This is, again, a pure performance attribute invisible to results, but it is the layout the autovectorized bulk kernels reduce fastest.
+
+```lang
+@packed(layout: column) struct P { r: int  g: int  b: int  opaque: bool }
+
+ps = [P { r: 255, g: 0, b: 128, opaque: true }, P { r: 1, g: 2, b: 3, opaque: false }]
+echo ps[1]              // P {r: 1, g: 2, b: 3, opaque: false}  (gather one element from its columns)
+echo ps[0].r           // 255  (a fused single-column field read)
+echo ps.reverse()      // [P {r: 1, ...}, P {r: 255, ...}]
+```
+
+## `bytes` — serialize a packed list
+
+A `List` of a packed type round-trips through an opaque `bytes` buffer with `.to_bytes()` and `from_bytes::<T>(...)`:
+
+```lang
+@packed struct V3 { x: f32  y: f32  z: f32 }
+
+xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
+blob = xs.to_bytes()                    // -> bytes
+ys = from_bytes::<V3>(blob)             // -> List<V3>
+echo ys == xs                           // true
+echo blob.count()                       // 24  (2 elements × 3 × 4-byte f32)
+```
+
+`bytes` is an opaque binary buffer: `b.count()` gives its length, it compares by content, and `type_of(b)` is `Type.Bytes`.
+
+## Bulk vector kernels
+
+The flat/column layout is what makes the `vec.*_all` bulk kernels fast — they take the autovectorized struct-of-arrays path over a column buffer:
+
+```lang
+use std.{vec}
+@packed(layout: column) struct V3 { x: f32  y: f32  z: f32 }
+
+ps = [V3 { x: 3.0f32, y: 4.0f32, z: 0.0f32 }, V3 { x: 1.0f32, y: 2.0f32, z: 2.0f32 }]
+echo vec.length_all(ps)                 // [5.0, 3.0]     (reduction → f32 list)
+echo vec.add_all(ps, ps)                // a column V3 list, element-wise doubled
+```
+
+See [Standard-Library Modules](Standard-Library-Modules#vec--quat) for the full `vec`/`quat` surface, and [Performance Techniques](Performance-Techniques) for *why* the column layout beats hand-written SIMD here (LLVM autovectorization).

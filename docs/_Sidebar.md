@@ -20,7 +20,7 @@
 - [The Type System](Type-System)
 - [Error Handling](Error-Handling)
 - [Modules & Visibility](Modules)
-- [Fixed-Width Integers](Fixed-Width-Integers)
+- [Fixed-Width Ints & Packed Types](Fixed-Width-Integers)
 - [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Standard Library](Standard-Library)

@@ -55,6 +55,13 @@ Marks an **enum** (only) as a source of role variants. The language ships a buil
 
 Applying `@role`/`@semantic` to the wrong declaration kind is E0031.
 
+### Other `@` directives
+
+Two more directive families use the `@` sigil but are not decorators in this four-set:
+
+- **`@packed` / `@packed(layout: column)`** — a *layout* directive marking a struct as a packed value type (flat or column-major storage). See [Fixed-Width Integers & Packed Types](Fixed-Width-Integers#packed-value-types--packed).
+- **`@test` / `@bench` / `@doc` / `@debug`** — *dev-tier* blocks that gate co-located content. See [Documentation & Dev Tiers](Documentation-and-Tiers).
+
 ## The reflection surface
 
 A handful of prelude functions expose type and metadata at runtime.

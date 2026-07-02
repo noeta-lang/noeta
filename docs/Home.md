@@ -45,7 +45,7 @@ The exhaustive reference for syntax, semantics, and the stdlib.
 - [The Type System](Type-System)
 - [Error Handling](Error-Handling)
 - [Modules & Visibility](Modules)
-- [Fixed-Width Integers & Bitwise](Fixed-Width-Integers)
+- [Fixed-Width Integers, Bitwise & Packed Types](Fixed-Width-Integers)
 - [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
 - [Standard Library](Standard-Library)
