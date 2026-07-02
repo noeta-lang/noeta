@@ -191,12 +191,14 @@ fn compile_inner(
     // index-field set fuses `list[i].field` reads into `Rvalue::IndexField` (P-PACK 2.5+).
     let ir = lang_ir::lower_with_sites_opts(
         program,
-        &packed_list_sites,
-        &index_field_sites,
-        &ext_call_sites,
-        &for_stream_sites,
-        &width_sites,
-        &construction_sites,
+        lang_ir::LoweringSites {
+            packed_list_sites: &packed_list_sites,
+            index_field_sites: &index_field_sites,
+            ext_call_sites: &ext_call_sites,
+            for_stream_sites: &for_stream_sites,
+            width_sites: &width_sites,
+            construction_sites: &construction_sites,
+        },
         real_isolates,
     )
     .map_err(|u| Unsupported {

@@ -65,54 +65,68 @@ enum BodyKind<'a> {
     Block(&'a [AstStmt]),
 }
 
+/// The checker's **lowering-site maps**, bundled so the lowering takes one reference rather than six
+/// span-keyed side channels. Every field is a pure function of the program, so the representation
+/// choices they drive stay invisible to `RunResult`; the REPL / IR-corpus path passes an all-empty
+/// set (see [`lower`]) and stays on the boxed/unfused path.
+/// `Copy` — it is a bundle of shared references.
+#[derive(Clone, Copy, Debug)]
+pub struct LoweringSites<'a> {
+    /// A list literal whose span is here lowers to a **streaming** flat build (a
+    /// [`Rvalue::PackedListNew`] then one [`Rvalue::PackedListPush`] per element) instead of a boxed
+    /// [`Rvalue::List`] — its element is a `@packed` struct with this flat
+    /// [`lang_ast::reflect::PackedLayout`].
+    pub packed_list_sites: &'a HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// A `list[i].field` member read whose span is here (the index receiver is a built-in `List`) fuses
+    /// to a single [`Rvalue::IndexField`], reading a packed element's field without materializing it.
+    pub index_field_sites: &'a HashSet<Span>,
+    /// Call-site-typed native-call recipes (`json.parse::<T>`), baked into [`Rvalue::ExtCall`].
+    pub ext_call_sites: &'a HashMap<Span, lang_stdlib::TypeRecipe>,
+    /// `for` spans whose iterable is statically an `Iterator<T>` → the lowered [`Stmt::For`] streams
+    /// via `next()` rather than snapshotting a list (Track I.2).
+    pub for_stream_sites: &'a HashSet<Span>,
+    /// Fixed-width arithmetic sites (Tier W) → the result's `(signed, bits)`, wrapping the op's result
+    /// in [`Rvalue::MaskWidth`] so the erased i64 is masked back into the declared width.
+    pub width_sites: &'a HashMap<Span, (bool, u8)>,
+    /// Collection-construction sites → the resolved element [`lang_ast::reflect::TypeRepr`] baked onto
+    /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder (R1 reflection).
+    pub construction_sites: &'a HashMap<Span, lang_ast::reflect::TypeRepr>,
+}
+
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
 /// currently-supported subset. List literals lower to the boxed [`Rvalue::List`] and `list[i].f`
 /// reads to the unfused [`Rvalue::Index`] + [`Rvalue::Field`]; see [`lower_with_sites`] to also
 /// stream `List<packed>` literals into a flat buffer and fuse indexed field reads.
 pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
+    // The no-hints path: an all-empty site set (kept live for the call).
+    let packed = HashMap::new();
+    let index = HashSet::new();
+    let ext = HashMap::new();
+    let stream = HashSet::new();
+    let width = HashMap::new();
+    let construction = HashMap::new();
     lower_with_sites(
         program,
-        &HashMap::new(),
-        &HashSet::new(),
-        &HashMap::new(),
-        &HashSet::new(),
-        &HashMap::new(),
-        &HashMap::new(),
+        LoweringSites {
+            packed_list_sites: &packed,
+            index_field_sites: &index,
+            ext_call_sites: &ext,
+            for_stream_sites: &stream,
+            width_sites: &width,
+            construction_sites: &construction,
+        },
     )
 }
 
-/// As [`lower`], but driven by the checker's lowering-site maps (both pure functions of the program,
-/// so the optimizations they enable stay invisible to `RunResult`):
-///
-/// * A list literal whose span appears in `packed_list_sites` (the `List<@packed struct>` map,
-///   [`lang_ast::reflect::PackedLayout`]) lowers to a **streaming** flat build —
-///   [`Rvalue::PackedListNew`] then one [`Rvalue::PackedListPush`] per element — instead of a boxed
-///   [`Rvalue::List`].
-/// * A `list[i].field` member read whose span appears in `index_field_sites` (the checker's set of
-///   member accesses whose index receiver is a built-in `List`) fuses to a single
-///   [`Rvalue::IndexField`], so a packed element's field is read without materializing the element.
-///
-/// The production execution paths (`lang run`, the conformance reference, the bytecode compiler) pass
-/// the maps; the REPL and IR corpus pass empty ones and stay on the boxed/unfused path.
+/// As [`lower`], but driven by the checker's [`LoweringSites`] (all pure functions of the program, so
+/// the optimizations they enable stay invisible to `RunResult`). The production execution paths
+/// (`lang run`, the conformance reference, the bytecode compiler) pass real maps; the REPL and IR
+/// corpus pass empty ones and stay on the boxed/unfused path.
 pub fn lower_with_sites(
     program: &AstProgram,
-    packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
-    index_field_sites: &HashSet<Span>,
-    ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
-    for_stream_sites: &HashSet<Span>,
-    width_sites: &HashMap<Span, (bool, u8)>,
-    construction_sites: &HashMap<Span, lang_ast::reflect::TypeRepr>,
+    sites: LoweringSites,
 ) -> Result<Program, Unsupported> {
-    lower_with_sites_opts(
-        program,
-        packed_list_sites,
-        index_field_sites,
-        ext_call_sites,
-        for_stream_sites,
-        width_sites,
-        construction_sites,
-        false,
-    )
+    lower_with_sites_opts(program, sites, false)
 }
 
 /// As [`lower_with_sites`], but with `real_isolates` selecting the isolate lowering (isolates I.4b):
@@ -121,25 +135,14 @@ pub fn lower_with_sites(
 /// REPL), it lowers to a plain [`Rvalue::Spawn`] of the pre-built future, exactly as `spawn f(args)`,
 /// so the sandbox and the whole differential corpus are byte-identical and never see the new op. Only
 /// the CLI's real (VM) execution path passes `true`.
-#[allow(clippy::too_many_arguments)]
 pub fn lower_with_sites_opts(
     program: &AstProgram,
-    packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
-    index_field_sites: &HashSet<Span>,
-    ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
-    for_stream_sites: &HashSet<Span>,
-    width_sites: &HashMap<Span, (bool, u8)>,
-    construction_sites: &HashMap<Span, lang_ast::reflect::TypeRepr>,
+    sites: LoweringSites,
     real_isolates: bool,
 ) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
         temps: 0,
-        packed_list_sites,
-        index_field_sites,
-        ext_call_sites,
-        for_stream_sites,
-        width_sites,
-        construction_sites,
+        sites,
         real_isolates,
     };
     let top = lowerer.lower_body(&program.stmts)?;
@@ -156,26 +159,9 @@ pub fn lower_with_sites_opts(
 struct Lowerer<'a> {
     /// The next free temporary index in the current frame; also the running frame size.
     temps: u32,
-    /// The checker's `List<packed>` construction-site map (keyed by list-literal span). Empty on
-    /// the boxed-only paths; non-empty enables streaming flat-buffer construction in `Expr::List`.
-    packed_list_sites: &'a HashMap<Span, lang_ast::reflect::PackedLayout>,
-    /// The checker's fusable `list[i].field` set (keyed by the member-access span). Empty on the
-    /// unfused paths; a hit enables emitting [`Rvalue::IndexField`] in the `Expr::Member` arm.
-    index_field_sites: &'a HashSet<Span>,
-    /// The checker's call-site-typed native-call recipes (`json.parse::<T>`), keyed by the
-    /// `Expr::TypedModuleCall` span. Baked into [`Rvalue::ExtCall`]; empty on the bare `lower` path.
-    ext_call_sites: &'a HashMap<Span, lang_stdlib::TypeRecipe>,
-    /// The checker's streaming-`for` set (keyed by the `for` statement's span): the iterable is
-    /// statically an `Iterator<T>`, so the lowered [`Stmt::For`] gets `stream: true` (Track I.2).
-    for_stream_sites: &'a HashSet<Span>,
-    /// The checker's fixed-width arithmetic sites (Tier W), keyed by the `Expr::Binary`/`Expr::Unary`
-    /// span → the result's `(signed, bits)`. A hit wraps the op's result in [`Rvalue::MaskWidth`] so
-    /// the erased i64 is masked back into the declared width. Empty on the boxed/REPL path.
-    width_sites: &'a HashMap<Span, (bool, u8)>,
-    /// The checker's collection-construction-site map (runtime type-argument reflection, R1), keyed by
-    /// the list-literal span → its resolved element [`TypeRepr`]. A hit bakes the type onto
-    /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder. Empty on the boxed/REPL path.
-    construction_sites: &'a HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// The checker's lowering-site maps (see [`LoweringSites`]) — the span-keyed hints that drive
+    /// packed/fused/streamed lowering. Empty on the boxed/unfused REPL/IR-corpus path.
+    sites: LoweringSites<'a>,
     /// Whether `isolate f(args)` lowers to [`Rvalue::SpawnIsolate`] (real OS-thread path, I.4b) rather
     /// than a plain [`Rvalue::Spawn`] of a pre-built future. Only the CLI's real (VM) execution path
     /// sets this; every in-oracle path leaves it false, so the differential never sees the new rvalue.
@@ -303,7 +289,7 @@ impl Lowerer<'_> {
                 body,
                 span,
             } => {
-                let stream = self.for_stream_sites.contains(span);
+                let stream = self.sites.for_stream_sites.contains(span);
                 let iterable = self.lower_expr(iterable, out)?;
                 match pattern {
                     AstForPattern::Single { .. } => {
@@ -592,7 +578,8 @@ impl Lowerer<'_> {
     /// one survives in a check-failed program it stays a `Stmt::Yield` inside a segment and lowers
     /// through the interim discard arm, keeping lowering total.
     fn lower_generator(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar = desugar_state_machine(stmts, span, self.for_stream_sites, SuspendMode::Gen);
+        let desugar =
+            desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Gen);
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -624,7 +611,8 @@ impl Lowerer<'_> {
     /// unchanged); the driver/`.await` wraps completion vs pending. Unlike A.1's thunk, this can suspend
     /// mid-body and resume — the mechanism A.3b's concurrency needs to run a sibling while one task waits.
     fn lower_async(&mut self, stmts: &[AstStmt], span: Span) -> Result<Block, Unsupported> {
-        let desugar = desugar_state_machine(stmts, span, self.for_stream_sites, SuspendMode::Async);
+        let desugar =
+            desugar_state_machine(stmts, span, self.sites.for_stream_sites, SuspendMode::Async);
         let mut out = Vec::new();
         for stmt in &desugar.prelude {
             self.lower_stmt(stmt, &mut out)?;
@@ -729,7 +717,7 @@ impl Lowerer<'_> {
                 // arithmetically/logically per signedness for `>>`) rather than a plain `Binary`. The
                 // sign-agnostic `+ - *` and `<<` fall through to `Binary` + a `MaskWidth`; `& | ^`
                 // (no `width_sites` entry) stay a plain `Binary`.
-                if let Some(&(signed, bits)) = self.width_sites.get(span)
+                if let Some(&(signed, bits)) = self.sites.width_sites.get(span)
                     && matches!(
                         op,
                         BinaryOp::Div
@@ -772,7 +760,7 @@ impl Lowerer<'_> {
                 // flat buffer: allocate, then build-and-push each element in turn so only one element
                 // object is ever live (P-PACK 2.5). Any other list builds the boxed `Rvalue::List`,
                 // materializing all element atoms first.
-                if let Some(layout) = self.packed_list_sites.get(span) {
+                if let Some(layout) = self.sites.packed_list_sites.get(span) {
                     let mut acc = self.emit(
                         out,
                         Rvalue::PackedListNew {
@@ -807,7 +795,7 @@ impl Lowerer<'_> {
                         // The checker-resolved element type for this literal (R1), so `type_of` can
                         // recover it after the value is laundered through `dyn`. Empty on the
                         // boxed/REPL path (no construction-site map) → the list stays untagged.
-                        reflect: self.construction_sites.get(span).cloned(),
+                        reflect: self.sites.construction_sites.get(span).cloned(),
                         span: *span,
                     },
                     *span,
@@ -875,7 +863,7 @@ impl Lowerer<'_> {
                         entries: pairs,
                         // The checker-resolved `Map(K, V)` type for this literal (R1); empty on the
                         // boxed/REPL path → the map stays untagged and reflects head-only.
-                        reflect: self.construction_sites.get(span).cloned(),
+                        reflect: self.sites.construction_sites.get(span).cloned(),
                         span: *span,
                     },
                     *span,
@@ -956,7 +944,7 @@ impl Lowerer<'_> {
                     // backends compute within the width via `int_method_width`, rather than the generic
                     // `Method` (which would compute on the full erased i64). A `Convert` (`to_*`) is not
                     // width-relative — it stays an ordinary method.
-                    if let Some(&(_, bits)) = self.width_sites.get(span)
+                    if let Some(&(_, bits)) = self.sites.width_sites.get(span)
                         && let Some(method) = lang_stdlib::IntMethod::from_name(name)
                         && !matches!(method, lang_stdlib::IntMethod::Convert { .. })
                     {
@@ -982,7 +970,7 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.construction_sites.get(span).cloned(),
+                            reflect: self.sites.construction_sites.get(span).cloned(),
                             span: *span,
                         },
                         *span,
@@ -1011,7 +999,7 @@ impl Lowerer<'_> {
                 // `List`) lowers to one [`Rvalue::IndexField`] over the list and index atoms, so a
                 // packed element's field is read without materializing the element (P-PACK 2.5+). Any
                 // other member access lowers to the ordinary field load.
-                if self.index_field_sites.contains(span)
+                if self.sites.index_field_sites.contains(span)
                     && let Expr::Index {
                         receiver: list,
                         index,
@@ -1220,7 +1208,7 @@ impl Lowerer<'_> {
                 // The element layout was recorded by the checker at this span in the same channel
                 // list literals use (`packed_list_sites`); `None` means T was not packable (already
                 // a checker error), and the backend then fails cleanly rather than mis-decoding.
-                let layout = self.packed_list_sites.get(span).cloned();
+                let layout = self.sites.packed_list_sites.get(span).cloned();
                 Ok(self.emit(
                     out,
                     Rvalue::FromBytes {
@@ -1248,7 +1236,7 @@ impl Lowerer<'_> {
                     .collect::<Result<Vec<_>, _>>()?;
                 // The recipe was resolved by the checker at this span (the same channel the other
                 // typed sites use); `None` means `T` had no decoding (already a checker error).
-                let recipe = self.ext_call_sites.get(span).cloned();
+                let recipe = self.sites.ext_call_sites.get(span).cloned();
                 Ok(self.emit(
                     out,
                     Rvalue::ExtCall {
@@ -1353,7 +1341,7 @@ impl Lowerer<'_> {
                         reuse: false,
                         // The checker-resolved reflected type (R2) for a generic instantiation; `None`
                         // for a non-generic type or the boxed path → the value reflects head-only.
-                        reflect: self.construction_sites.get(&lit.span).cloned(),
+                        reflect: self.sites.construction_sites.get(&lit.span).cloned(),
                         span: lit.span,
                     },
                     lit.span,
@@ -1399,7 +1387,7 @@ impl Lowerer<'_> {
                             reuse: false,
                             // Generic enum-variant construction records its type here (R2b.2); an
                             // ordinary method-call span is not a construction site.
-                            reflect: self.construction_sites.get(span).cloned(),
+                            reflect: self.sites.construction_sites.get(span).cloned(),
                             span: *span,
                         },
                         *span,
@@ -1437,7 +1425,7 @@ impl Lowerer<'_> {
                         name_span: *name_span,
                         args: vec![left_atom],
                         reuse: false,
-                        reflect: self.construction_sites.get(span).cloned(),
+                        reflect: self.sites.construction_sites.get(span).cloned(),
                         span: *span,
                     },
                     *span,
@@ -1506,7 +1494,7 @@ impl Lowerer<'_> {
     /// reduce the erased i64 back into the declared width; otherwise return `value` untouched. Called
     /// on the result of a lowered `Expr::Binary`/`Expr::Unary`.
     fn mask_if_width(&mut self, out: &mut Vec<Stmt>, value: Atom, span: Span) -> Atom {
-        match self.width_sites.get(&span) {
+        match self.sites.width_sites.get(&span) {
             Some(&(signed, bits)) => self.emit(
                 out,
                 Rvalue::MaskWidth {

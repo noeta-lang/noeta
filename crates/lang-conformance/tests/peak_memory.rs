@@ -87,12 +87,14 @@ fn eval_runner(program: lang_ast::Program) -> impl FnOnce() -> lang_backend::Run
     let checked = lang_check::check_all(&program);
     let ir = lang_ir::lower_with_sites(
         &program,
-        &checked.packed_list_sites,
-        &checked.index_field_sites,
-        &checked.ext_call_sites,
-        &checked.for_stream_sites,
-        &checked.width_sites,
-        &checked.construction_sites,
+        lang_ir::LoweringSites {
+            packed_list_sites: &checked.packed_list_sites,
+            index_field_sites: &checked.index_field_sites,
+            ext_call_sites: &checked.ext_call_sites,
+            for_stream_sites: &checked.for_stream_sites,
+            width_sites: &checked.width_sites,
+            construction_sites: &checked.construction_sites,
+        },
     )
     .expect("Core-IR lowering is total over the parsed language");
     let relevance = lang_ir_passes::Relevance {

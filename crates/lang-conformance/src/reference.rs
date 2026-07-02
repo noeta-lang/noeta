@@ -47,12 +47,14 @@ pub fn reference_run(
     // `run_ir` needs no map (the VM compiles the same).
     let ir = lang_ir::lower_with_sites(
         program,
-        &packed_list_sites,
-        &index_field_sites,
-        &ext_call_sites,
-        &for_stream_sites,
-        &width_sites,
-        &construction_sites,
+        lang_ir::LoweringSites {
+            packed_list_sites: &packed_list_sites,
+            index_field_sites: &index_field_sites,
+            ext_call_sites: &ext_call_sites,
+            for_stream_sites: &for_stream_sites,
+            width_sites: &width_sites,
+            construction_sites: &construction_sites,
+        },
     )
     .expect(
         "Core-IR lowering is total over the parsed language \

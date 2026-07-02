@@ -28,12 +28,14 @@ fn lowered_ir(src: &str) -> String {
     );
     let ir = lang_ir::lower_with_sites(
         &parsed.program,
-        &checked.packed_list_sites,
-        &checked.index_field_sites,
-        &checked.ext_call_sites,
-        &checked.for_stream_sites,
-        &checked.width_sites,
-        &checked.construction_sites,
+        lang_ir::LoweringSites {
+            packed_list_sites: &checked.packed_list_sites,
+            index_field_sites: &checked.index_field_sites,
+            ext_call_sites: &checked.ext_call_sites,
+            for_stream_sites: &checked.for_stream_sites,
+            width_sites: &checked.width_sites,
+            construction_sites: &checked.construction_sites,
+        },
     )
     .expect("lowering is total over the parsed language");
     lang_ir::dump(&ir)
