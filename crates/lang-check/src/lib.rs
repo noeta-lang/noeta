@@ -497,7 +497,7 @@ struct Checker {
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
-    trait_impls: HashMap<String, HashSet<String>>,
+    trait_impls: HashMap<String, HashSet<BuiltinTrait>>,
     /// Each generic user type's type-parameter **names**, in order — so a field/method access can
     /// map an instance's type arguments (`Box<int>`) back onto the declaration's parameters (`T`)
     /// and read a field/return as `int` rather than the bare parameter or `dyn` (S4.5).
@@ -3905,10 +3905,10 @@ impl Checker {
                     self.synth_intn_compare(op, &lt, &rt, span);
                     return Type::Bool;
                 }
-                if !self.operand_satisfies_operator(&lt, "Comparable")
-                    || !self.operand_satisfies_operator(&rt, "Comparable")
+                if !self.operand_satisfies_operator(&lt, BuiltinTrait::Comparable)
+                    || !self.operand_satisfies_operator(&rt, BuiltinTrait::Comparable)
                 {
-                    self.report_operator_error(op, &lt, &rt, Some("Comparable"), span);
+                    self.report_operator_error(op, &lt, &rt, Some(BuiltinTrait::Comparable), span);
                 }
                 Type::Bool
             }
@@ -4000,24 +4000,24 @@ impl Checker {
     /// Whether `operand` may be used with an operator requiring `trait_name`: a `dyn`/hole defers;
     /// an in-scope **type parameter** is licensed only by its declared bounds; any other type by the
     /// satisfaction model ([`Self::satisfies`] — built-in table + `@derive`/`impl` index).
-    fn operand_satisfies_operator(&self, operand: &Type, trait_name: &str) -> bool {
+    fn operand_satisfies_operator(&self, operand: &Type, t: BuiltinTrait) -> bool {
         if operand.defers_to_runtime() {
             return true;
         }
         if let Type::Named(n, _) = operand
             && let Some(bounds) = self.type_params.get(n)
         {
-            return bounds.iter().any(|b| b == trait_name);
+            return bounds.iter().any(|b| b == t.name());
         }
-        self.satisfies(operand, trait_name)
+        self.satisfies(operand, t)
     }
 
     /// The name of an in-scope type parameter (`operand`) that lacks `trait_name` among its bounds,
     /// or `None` if `operand` is not such a parameter — used to pick the diagnostic flavor.
-    fn unbounded_type_param(&self, operand: &Type, trait_name: &str) -> Option<String> {
+    fn unbounded_type_param(&self, operand: &Type, t: BuiltinTrait) -> Option<String> {
         match operand {
             Type::Named(n, _) => match self.type_params.get(n) {
-                Some(bounds) if !bounds.iter().any(|b| b == trait_name) => Some(n.clone()),
+                Some(bounds) if !bounds.iter().any(|b| b == t.name()) => Some(n.clone()),
                 _ => None,
             },
             _ => None,
@@ -4032,7 +4032,7 @@ impl Checker {
         op: BinaryOp,
         lt: &Type,
         rt: &Type,
-        trait_name: Option<&str>,
+        trait_name: Option<BuiltinTrait>,
         span: Span,
     ) {
         if let Some(tn) = trait_name
@@ -4044,12 +4044,13 @@ impl Checker {
                 DiagnosticCode::TraitBoundNotSatisfied,
                 span,
                 format!(
-                    "operator `{}` requires `{n}: {tn}`, but `{n}` is an unbounded type \
+                    "operator `{}` requires `{n}: {}`, but `{n}` is an unbounded type \
                          parameter",
-                    op.symbol()
+                    op.symbol(),
+                    tn.name()
                 ),
             )
-            .help(format!("add the bound, e.g. `<{n}: {tn}>`"));
+            .help(format!("add the bound, e.g. `<{n}: {}>`", tn.name()));
         } else {
             self.error(
                 DiagnosticCode::TypeMismatch,
@@ -4388,8 +4389,12 @@ impl Checker {
     /// and harmlessly recorded here.
     fn record_trait_impls<'a>(&mut self, name: &str, traits: impl Iterator<Item = &'a str>) {
         let entry = self.trait_impls.entry(name.to_string()).or_default();
-        for t in traits {
-            entry.insert(t.to_string());
+        // Map each name to its trait at the boundary; a non-built-in name (a typo, or an
+        // `@attribute` record name) is dead data here — it could never satisfy a real bound —
+        // so it is dropped rather than stored. Name validity is diagnosed on the `impl`/`@derive`
+        // path (E0014), not here.
+        for t in traits.filter_map(BuiltinTrait::from_name) {
+            entry.insert(t);
         }
     }
 
@@ -4775,7 +4780,12 @@ impl Checker {
                 continue; // unconstrained by the arguments — nothing concrete to check against
             };
             for bound in bounds {
-                if !self.satisfies(concrete, bound) {
+                // Bounds on a collected signature are validated trait names (E0014 otherwise); a
+                // non-built-in name is unreachable here, so skip rather than falsely report.
+                let Some(t) = BuiltinTrait::from_name(bound) else {
+                    continue;
+                };
+                if !self.satisfies(concrete, t) {
                     self.error(
                         DiagnosticCode::TraitBoundNotSatisfied,
                         span,
@@ -4797,17 +4807,14 @@ impl Checker {
     /// every bound (deferred to runtime / no information — never a false positive). A user type
     /// satisfies a trait it `@derive`s or `impl`s; a built-in type satisfies the traits the
     /// backends actually dispatch for it ([`builtin_satisfies`]).
-    fn satisfies(&self, ty: &Type, trait_name: &str) -> bool {
+    fn satisfies(&self, ty: &Type, t: BuiltinTrait) -> bool {
         if ty.defers_to_runtime() {
             return true;
         }
         if let Type::Named(n, _) = ty {
-            return self
-                .trait_impls
-                .get(n)
-                .is_some_and(|s| s.contains(trait_name));
+            return self.trait_impls.get(n).is_some_and(|s| s.contains(&t));
         }
-        builtin_satisfies(ty, trait_name)
+        builtin_satisfies(ty, t)
     }
 
     /// The return type of a method call `recv.name(...)`: a built-in method, a user-declared
@@ -5158,14 +5165,14 @@ fn async_return(inner: Type, is_async: bool) -> Type {
 /// (`+ - * /` → `Add`/`Sub`/`Mul`/`Div`) and ordering (`< <= > >=` → `Comparable`). `%` (no trait —
 /// numerics only), `~`/`==`/`!=` (universal: display-concat / structural-equality fallbacks), and
 /// the logical operators map to `None`, so the checker imposes no trait requirement on them.
-fn required_operator_trait(op: BinaryOp) -> Option<&'static str> {
+fn required_operator_trait(op: BinaryOp) -> Option<BuiltinTrait> {
     use BinaryOp::*;
     match op {
-        Add => Some("Add"),
-        Sub => Some("Sub"),
-        Mul => Some("Mul"),
-        Div => Some("Div"),
-        Lt | Le | Gt | Ge => Some("Comparable"),
+        Add => Some(BuiltinTrait::Add),
+        Sub => Some(BuiltinTrait::Sub),
+        Mul => Some(BuiltinTrait::Mul),
+        Div => Some(BuiltinTrait::Div),
+        Lt | Le | Gt | Ge => Some(BuiltinTrait::Comparable),
         _ => None,
     }
 }
@@ -5394,18 +5401,19 @@ fn same_width_intn(lt: &Type, rt: &Type) -> Option<(bool, u8)> {
     }
 }
 
-fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
+fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
+    use BuiltinTrait as Bt;
     use Type::*;
-    match trait_name {
-        "Comparable" => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
-        "Equatable" => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
+    match t {
+        Bt::Comparable => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
+        Bt::Equatable => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
         // Fixed-width `+ - *` are sign-agnostic (W2 — the low bits are the same read signed or
         // unsigned, so masking the result is correct); `Div` (and ordering) are sign-dependent and
         // land in W3 via the width-carrying `Rvalue::WideInt`. (`%` is numeric-only — no trait.)
-        "Add" | "Sub" | "Mul" => matches!(ty, Int | Float | F32 | IntN { .. }),
-        "Div" => matches!(ty, Int | Float | F32 | IntN { .. }),
-        "Concat" => matches!(ty, String | List(_)),
-        "Display" => matches!(
+        Bt::Add | Bt::Sub | Bt::Mul => matches!(ty, Int | Float | F32 | IntN { .. }),
+        Bt::Div => matches!(ty, Int | Float | F32 | IntN { .. }),
+        Bt::Concat => matches!(ty, String | List(_)),
+        Bt::Display => matches!(
             ty,
             Int | Float
                 | F32
@@ -5419,7 +5427,16 @@ fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
                 | Option(_)
                 | Result(..)
         ),
-        _ => false,
+        // No built-in type satisfies these marker/protocol traits without an explicit `impl`.
+        Bt::Clone
+        | Bt::Serialize
+        | Bt::Index
+        | Bt::Length
+        | Bt::Iterable
+        | Bt::Callable
+        | Bt::Members
+        | Bt::DynamicCall
+        | Bt::TryAdd => false,
     }
 }
 
