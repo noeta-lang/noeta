@@ -24,7 +24,7 @@
 pub mod executor;
 pub use executor::RealExecutor;
 
-use lang_stdlib::{ErrorKind, Host, ReadSource, StdError};
+use lang_stdlib::{Clock, Env, ErrorKind, FileReader, FileSystem, ReadSource, Rng, StdError};
 use std::collections::HashMap;
 use tokio::fs::File;
 use tokio::io::BufReader;
@@ -94,7 +94,44 @@ fn io_error(message: String) -> StdError {
     }
 }
 
-impl Host for RealHost {
+impl FileReader for RealHost {
+    fn fs_open_read(&mut self, path: &str) -> Result<ReadSource, StdError> {
+        // P-LAZY: stream the file instead of snapshotting it. Open it now (so a missing file is the
+        // same IO error as the old eager `fs_read`), register a buffered reader, and hand the handle
+        // an id to pull lines from — so a large file is never read past the cursor.
+        let file = self
+            .runtime
+            .block_on(File::open(path))
+            .map_err(|e| io_error(format!("cannot read `{path}`: {e}")))?;
+        let id = self.next_reader_id;
+        self.next_reader_id += 1;
+        self.readers.insert(id, BufReader::new(file));
+        Ok(ReadSource::Lazy(id))
+    }
+
+    fn fs_read_more(&mut self, id: u64) -> Result<Option<String>, StdError> {
+        use tokio::io::AsyncBufReadExt;
+        let Some(reader) = self.readers.get_mut(&id) else {
+            // The stream was already drained (dropped at EOF); nothing more to give.
+            return Ok(None);
+        };
+        let mut line = String::new();
+        let read = self
+            .runtime
+            .block_on(reader.read_line(&mut line))
+            .map_err(|e| io_error(format!("cannot read line: {e}")))?;
+        if read == 0 {
+            // EOF — drop the stream so its descriptor is released promptly.
+            self.readers.remove(&id);
+            Ok(None)
+        } else {
+            // `read_line` keeps the trailing `\n`; the handle splits on it, so pass it through.
+            Ok(Some(line))
+        }
+    }
+}
+
+impl FileSystem for RealHost {
     fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError> {
         self.runtime
             .block_on(tokio::fs::write(path, content))
@@ -148,41 +185,6 @@ impl Host for RealHost {
             .map_err(|e| io_error(format!("cannot remove `{path}`: {e}")))
     }
 
-    fn fs_open_read(&mut self, path: &str) -> Result<ReadSource, StdError> {
-        // P-LAZY: stream the file instead of snapshotting it. Open it now (so a missing file is the
-        // same IO error as the old eager `fs_read`), register a buffered reader, and hand the handle
-        // an id to pull lines from — so a large file is never read past the cursor.
-        let file = self
-            .runtime
-            .block_on(File::open(path))
-            .map_err(|e| io_error(format!("cannot read `{path}`: {e}")))?;
-        let id = self.next_reader_id;
-        self.next_reader_id += 1;
-        self.readers.insert(id, BufReader::new(file));
-        Ok(ReadSource::Lazy(id))
-    }
-
-    fn fs_read_more(&mut self, id: u64) -> Result<Option<String>, StdError> {
-        use tokio::io::AsyncBufReadExt;
-        let Some(reader) = self.readers.get_mut(&id) else {
-            // The stream was already drained (dropped at EOF); nothing more to give.
-            return Ok(None);
-        };
-        let mut line = String::new();
-        let read = self
-            .runtime
-            .block_on(reader.read_line(&mut line))
-            .map_err(|e| io_error(format!("cannot read line: {e}")))?;
-        if read == 0 {
-            // EOF — drop the stream so its descriptor is released promptly.
-            self.readers.remove(&id);
-            Ok(None)
-        } else {
-            // `read_line` keeps the trailing `\n`; the handle splits on it, so pass it through.
-            Ok(Some(line))
-        }
-    }
-
     fn fs_list(&self) -> Result<Vec<String>, StdError> {
         self.read_dir_names(".")
     }
@@ -202,7 +204,9 @@ impl Host for RealHost {
     fn fs_is_dir(&self, path: &str) -> bool {
         std::path::Path::new(path).is_dir()
     }
+}
 
+impl Rng for RealHost {
     fn rng_seed(&mut self, seed: i64) {
         self.rng = lang_stdlib::random::seed_state(seed);
     }
@@ -218,7 +222,9 @@ impl Host for RealHost {
         self.rng = next_state;
         value
     }
+}
 
+impl Clock for RealHost {
     fn clock_monotonic(&mut self) -> u64 {
         let now = self.clock;
         self.clock += 1;
@@ -228,7 +234,9 @@ impl Host for RealHost {
     fn clock_sleep(&mut self, ms: i64) {
         self.clock = self.clock.saturating_add(ms.max(0) as u64);
     }
+}
 
+impl Env for RealHost {
     fn env_get(&self, key: &str) -> Option<String> {
         std::env::var(key).ok()
     }

@@ -40,11 +40,11 @@
 //! hands over a whole-file [`ReadSource::Snapshot`]: the content is buffered up front and the cursor
 //! streams over it with no further host calls, exactly as before P-LAZY (so the differential is
 //! unchanged). The real host hands over a [`ReadSource::Lazy`] reader id and the handle pulls more
-//! bytes on demand via [`crate::Host::fs_read_more`] as the cursor consumes them — so a large file is
+//! bytes on demand via [`crate::FileReader::fs_read_more`] as the cursor consumes them — so a large file is
 //! never buffered whole. The cursor/line/character logic below is identical for both; only where the
 //! bytes come from differs.
 
-use crate::{ErrorKind, Host, StdError};
+use crate::{ErrorKind, FileReader, StdError};
 
 /// The mode a handle was opened in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,7 +96,7 @@ pub enum ReadSource {
     /// always uses this (its files are small in-memory fixtures).
     Snapshot(String),
     /// A host-side lazy reader identified by this id; the handle pulls more bytes via
-    /// [`crate::Host::fs_read_more`] as the cursor consumes them. Real-host only.
+    /// [`crate::FileReader::fs_read_more`] as the cursor consumes them. Real-host only.
     Lazy(u64),
 }
 
@@ -192,7 +192,7 @@ impl FileHandle {
     /// Read the next line (without its trailing newline), advancing the cursor past it. Returns
     /// `none` at end of input. Matches `read_lines`/`str::lines`: a trailing newline does not yield
     /// a final empty line. A lazy handle pulls from the host until a full line is buffered or EOF.
-    pub fn read_line(&mut self, host: &mut dyn Host) -> Result<Option<String>, StdError> {
+    pub fn read_line(&mut self, host: &mut dyn FileReader) -> Result<Option<String>, StdError> {
         self.ensure_readable()?;
         // Pull more from a lazy source until a newline is buffered (a complete line) or EOF. On an
         // eager handle `fill_more` is an immediate `false`, so this loop is a no-op there.
@@ -223,7 +223,11 @@ impl FileHandle {
     /// end of input; a non-negative `count` at a live cursor always returns `some` (possibly the
     /// empty string for `count <= 0`). A lazy handle pulls from the host until `count` characters are
     /// buffered or EOF.
-    pub fn read(&mut self, count: i64, host: &mut dyn Host) -> Result<Option<String>, StdError> {
+    pub fn read(
+        &mut self,
+        count: i64,
+        host: &mut dyn FileReader,
+    ) -> Result<Option<String>, StdError> {
         self.ensure_readable()?;
         let want = count.max(0) as usize;
         // Pull more from a lazy source until `want` characters are buffered from the cursor or EOF.
@@ -245,7 +249,7 @@ impl FileHandle {
     /// is what makes the refill loops above no-ops on the snapshot path (behavior identical to the
     /// pre-P-LAZY handle, so the sandbox differential is unchanged). The host delivers valid-UTF-8
     /// chunks (it reads a line at a time), so appending can never split a character.
-    fn fill_more(&mut self, host: &mut dyn Host) -> Result<bool, StdError> {
+    fn fill_more(&mut self, host: &mut dyn FileReader) -> Result<bool, StdError> {
         // Copy the id out (so the `&mut self.backing` borrow ends) before touching `self.buffer`.
         let id = match self.backing {
             ReadBacking::Lazy { id, eof: false } => id,
@@ -400,69 +404,15 @@ mod tests {
         }
     }
 
-    impl Host for LazyMock {
+    // A read-only test double: it backs a lazy read handle and nothing else. With the capability
+    // split it implements exactly `FileReader` — no stubs for filesystem writes, RNG, clock, or env,
+    // which it does not (and should not) provide.
+    impl FileReader for LazyMock {
         fn fs_open_read(&mut self, _path: &str) -> Result<ReadSource, StdError> {
             Ok(ReadSource::Lazy(1))
         }
         fn fs_read_more(&mut self, _id: u64) -> Result<Option<String>, StdError> {
             Ok(self.chunks.pop_front())
-        }
-        fn fs_write(&mut self, _: &str, _: &str) -> Result<(), StdError> {
-            unimplemented!()
-        }
-        fn fs_append(&mut self, _: &str, _: &str) -> Result<(), StdError> {
-            unimplemented!()
-        }
-        fn fs_read(&self, _: &str) -> Result<String, StdError> {
-            unimplemented!()
-        }
-        fn fs_write_bytes(&mut self, _: &str, _: &[u8]) -> Result<(), StdError> {
-            unimplemented!()
-        }
-        fn fs_read_bytes(&self, _: &str) -> Result<Vec<u8>, StdError> {
-            unimplemented!()
-        }
-        fn fs_exists(&self, _: &str) -> bool {
-            unimplemented!()
-        }
-        fn fs_remove(&mut self, _: &str) -> Result<bool, StdError> {
-            unimplemented!()
-        }
-        fn fs_list(&self) -> Result<Vec<String>, StdError> {
-            unimplemented!()
-        }
-        fn fs_list_dir(&self, _: &str) -> Result<Vec<String>, StdError> {
-            unimplemented!()
-        }
-        fn fs_mkdir(&mut self, _: &str) -> Result<(), StdError> {
-            unimplemented!()
-        }
-        fn fs_is_dir(&self, _: &str) -> bool {
-            unimplemented!()
-        }
-        fn rng_seed(&mut self, _: i64) {
-            unimplemented!()
-        }
-        fn rng_int(&mut self, _: i64, _: i64) -> Result<i64, StdError> {
-            unimplemented!()
-        }
-        fn rng_float(&mut self) -> f64 {
-            unimplemented!()
-        }
-        fn clock_monotonic(&mut self) -> u64 {
-            unimplemented!()
-        }
-        fn clock_sleep(&mut self, _: i64) {
-            unimplemented!()
-        }
-        fn env_get(&self, _: &str) -> Option<String> {
-            unimplemented!()
-        }
-        fn env_keys(&self) -> Vec<String> {
-            unimplemented!()
-        }
-        fn args(&self) -> Vec<String> {
-            unimplemented!()
         }
     }
 

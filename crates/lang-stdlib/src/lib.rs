@@ -35,7 +35,7 @@ pub mod vec3;
 
 pub use executor::{Executor, IoOutcome, IoRequest, SandboxExecutor, run_io_sync};
 pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush, ReadSource};
-pub use host::{Host, SandboxHost};
+pub use host::{Clock, Env, FileReader, FileSystem, Host, Rng, SandboxHost};
 pub use iter::IterMethod;
 pub use registry::{
     ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType, StdExtension,

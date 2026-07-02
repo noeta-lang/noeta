@@ -19,15 +19,26 @@ use crate::fs::Vfs;
 use crate::random;
 use std::collections::BTreeMap;
 
-/// Every host-coupled effect the interpreters perform, behind one swappable seam.
+/// **Read-handle backing** (P-LAZY): how an opened file's bytes are delivered. `fs.open(path, "r")`
+/// calls `fs_open_read` to learn whether they arrive as a deterministic whole-file
+/// [`crate::ReadSource::Snapshot`] (the sandbox) or a [`crate::ReadSource::Lazy`] reader the handle
+/// pulls from via `fs_read_more` (the real host, so a large file is never buffered whole).
+/// `fs_read_more` is only ever called with an id this host returned in a `Lazy`, and returns the next
+/// chunk (valid UTF-8 — a line at a time) or `None` at EOF.
 ///
-/// Object-safe on purpose: backends hold a `Box<dyn Host>` so a real host can be
-/// substituted without re-touching their internals. IO is never a hot path, so
-/// the dynamic dispatch is immaterial.
-pub trait Host {
-    // Filesystem. The methods that touch storage are fallible so a real host (M2.3+)
-    // can surface disk errors; the in-memory `SandboxHost` simply never errors.
-    // Directory hierarchy + streaming arrive in M2.4.
+/// This is the *narrowest* filesystem capability, split out so a read handle
+/// ([`crate::FileHandle`]) — and a read-only test double — depend on exactly these two methods rather
+/// than the whole [`Host`]. It is a supertrait of [`FileSystem`].
+pub trait FileReader {
+    fn fs_open_read(&mut self, path: &str) -> Result<crate::ReadSource, StdError>;
+    fn fs_read_more(&mut self, id: u64) -> Result<Option<String>, StdError>;
+}
+
+/// **Filesystem** capability: whole-file/bytes reads and writes, existence/removal, listing, and the
+/// directory hierarchy — plus read-handle backing via the [`FileReader`] supertrait. The methods
+/// that touch storage are fallible so a real host can surface disk errors; the in-memory
+/// [`SandboxHost`] simply never errors.
+pub trait FileSystem: FileReader {
     fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_append(&mut self, path: &str, content: &str) -> Result<(), StdError>;
     fn fs_read(&self, path: &str) -> Result<String, StdError>;
@@ -39,37 +50,46 @@ pub trait Host {
     fn fs_remove(&mut self, path: &str) -> Result<bool, StdError>;
     fn fs_list(&self) -> Result<Vec<String>, StdError>;
 
-    // Read-handle backing (P-LAZY). `fs.open(path, "r")` calls `fs_open_read` to learn how the
-    // file's bytes are delivered: a deterministic whole-file [`crate::ReadSource::Snapshot`] (the
-    // sandbox) or a [`crate::ReadSource::Lazy`] reader the handle pulls from via `fs_read_more`
-    // (the real host, so a large file is never buffered whole). `fs_read_more` is only ever called
-    // with an id this host returned in a `Lazy`, and returns the next chunk (valid UTF-8 — a line at
-    // a time) or `None` at EOF.
-    fn fs_open_read(&mut self, path: &str) -> Result<crate::ReadSource, StdError>;
-    fn fs_read_more(&mut self, id: u64) -> Result<Option<String>, StdError>;
-
     // Directory hierarchy (M2.5). `fs_list_dir` returns a directory's immediate children (sorted);
     // `fs_mkdir` creates a directory and its ancestors; `fs_is_dir` reports whether a path is one.
     fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError>;
     fn fs_mkdir(&mut self, path: &str) -> Result<(), StdError>;
     fn fs_is_dir(&self, path: &str) -> bool;
+}
 
-    // Seeded PRNG — the host owns the state; the SplitMix64 stepper stays pure.
+/// **Seeded PRNG** capability — the host owns the state; the SplitMix64 stepper stays pure.
+pub trait Rng {
     fn rng_seed(&mut self, seed: i64);
     fn rng_int(&mut self, lo: i64, hi: i64) -> Result<i64, StdError>;
     fn rng_float(&mut self) -> f64;
+}
 
-    // Logical monotonic clock — `monotonic` reads-then-advances; `sleep` advances
-    // without blocking (deterministic, no wall-clock).
+/// **Logical monotonic clock** capability — `monotonic` reads-then-advances; `sleep` advances without
+/// blocking (deterministic, no wall-clock).
+pub trait Clock {
     fn clock_monotonic(&mut self) -> u64;
     fn clock_sleep(&mut self, ms: i64);
+}
 
-    // Host introspection (M2.2). `env_keys` is sorted. The sandbox presents a fixed
-    // fixture; a real host reads the real environment/args (later M2 slices).
+/// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed
+/// fixture; a real host reads the real environment/args.
+pub trait Env {
     fn env_get(&self, key: &str) -> Option<String>;
     fn env_keys(&self) -> Vec<String>;
     fn args(&self) -> Vec<String>;
 }
+
+/// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
+/// four capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`]). Backends hold a
+/// `Box<dyn Host>` and reach any capability through it; a consumer that needs only one (a read handle
+/// → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on that trait instead, so a partial host
+/// (e.g. a read-only test double) implements exactly what it supports rather than stubbing the rest.
+///
+/// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
+/// blanket impl means any type providing all four capabilities *is* a `Host` automatically — there is
+/// nothing extra to implement.
+pub trait Host: FileSystem + Rng + Clock + Env {}
+impl<T: FileSystem + Rng + Clock + Env> Host for T {}
 
 /// The deterministic sandbox: in-memory VFS, seeded SplitMix64 state, and a logical
 /// clock — fresh per run, identical across backends by construction. This is what
@@ -105,7 +125,20 @@ impl Default for SandboxHost {
     }
 }
 
-impl Host for SandboxHost {
+impl FileReader for SandboxHost {
+    /// The sandbox is in-memory with tiny fixtures, so it always snapshots — keeping reads
+    /// deterministic and behavior byte-identical to the pre-P-LAZY handle. It therefore never hands
+    /// out a lazy id, so `fs_read_more` is unreachable here.
+    fn fs_open_read(&mut self, path: &str) -> Result<crate::ReadSource, StdError> {
+        Ok(crate::ReadSource::Snapshot(self.fs.read(path)?))
+    }
+
+    fn fs_read_more(&mut self, _id: u64) -> Result<Option<String>, StdError> {
+        unreachable!("SandboxHost never opens a lazy reader, so it is never asked for more")
+    }
+}
+
+impl FileSystem for SandboxHost {
     fn fs_write(&mut self, path: &str, content: &str) -> Result<(), StdError> {
         self.fs.write(path, content);
         Ok(())
@@ -141,17 +174,6 @@ impl Host for SandboxHost {
         Ok(self.fs.list())
     }
 
-    /// The sandbox is in-memory with tiny fixtures, so it always snapshots — keeping reads
-    /// deterministic and behavior byte-identical to the pre-P-LAZY handle. It therefore never hands
-    /// out a lazy id, so `fs_read_more` is unreachable here.
-    fn fs_open_read(&mut self, path: &str) -> Result<crate::ReadSource, StdError> {
-        Ok(crate::ReadSource::Snapshot(self.fs.read(path)?))
-    }
-
-    fn fs_read_more(&mut self, _id: u64) -> Result<Option<String>, StdError> {
-        unreachable!("SandboxHost never opens a lazy reader, so it is never asked for more")
-    }
-
     fn fs_list_dir(&self, dir: &str) -> Result<Vec<String>, StdError> {
         Ok(self.fs.list_dir(dir))
     }
@@ -164,7 +186,9 @@ impl Host for SandboxHost {
     fn fs_is_dir(&self, path: &str) -> bool {
         self.fs.is_dir(path)
     }
+}
 
+impl Rng for SandboxHost {
     fn rng_seed(&mut self, seed: i64) {
         self.rng = random::seed_state(seed);
     }
@@ -180,7 +204,9 @@ impl Host for SandboxHost {
         self.rng = next_state;
         value
     }
+}
 
+impl Clock for SandboxHost {
     fn clock_monotonic(&mut self) -> u64 {
         let now = self.clock;
         self.clock += 1;
@@ -190,7 +216,9 @@ impl Host for SandboxHost {
     fn clock_sleep(&mut self, ms: i64) {
         self.clock = self.clock.saturating_add(ms.max(0) as u64);
     }
+}
 
+impl Env for SandboxHost {
     fn env_get(&self, key: &str) -> Option<String> {
         self.env.get(key).cloned()
     }
