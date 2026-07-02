@@ -3106,14 +3106,11 @@ impl Interpreter {
         }
         let supplied = args.len();
         let call_scope = Scope::child(&method.captured);
-        {
-            // Snapshot the fields into the call scope, releasing the borrow before the body runs (a
-            // method may re-enter and mutate `self` through the same shared `RefCell`).
-            let slots = object.slots.borrow();
-            for (spec, value) in object.def.fields.iter().zip(slots.iter()) {
-                call_scope.declare(spec.name.clone(), value.clone(), false);
-            }
-        }
+        // Bind only `self` — fields are **not** snapshotted into the scope. A bare field read
+        // resolves live off `self` (see `eval_ir_atom`), mirroring the VM (which loads fields off the
+        // receiver register, never a copy), so a field mutated mid-method — including through an alias
+        // — is observed by a later bare read. A bare *write* `n = v` therefore declares a local (the
+        // name is not in scope); mutating a field is the explicit `self.f = v`.
         call_scope.declare("self".to_string(), Value::Object(Rc::clone(object)), false);
         for (param, arg) in method.params.iter().zip(args) {
             call_scope.declare(param.clone(), arg, false);

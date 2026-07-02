@@ -12,10 +12,16 @@ parser, no checker/backend change) to `x.f = x.f.set(i, v)` — routing through 
 `Expr::FieldSet` path, so it is in-place on a `class` and copy-on-write on a `struct`, and inherits
 the `mut`-field (E0033) / `mut`-receiver (E0006) checks. This unblocks self-mutating collection
 methods (`self.words[i] = v`), the missing piece for building a `BitSet` in-language
-(`tests/conformance/classes/bitset.lang` — the bit-tier dogfood). Two adjacent gaps were logged in
-`plans/deferred.md` rather than fixed: (a) a **bare** `field = v` write (no `self.`) inside a method
-diverges between backends — use `self.field = v`; (b) a `List<IntN>` element type is lost through a
-field read inside a method.
+(`tests/conformance/classes/bitset.lang` — the bit-tier dogfood).
+
+**Also (2026-07): live in-method field access, both backends.** Decided (with user) that a bare name
+inside a method is a **local** — self-reference is the explicit `self.f = v`. The tree-walker no
+longer snapshots fields into the method scope: a bare field read resolves live off `self`
+(`eval_ir_atom`) and a bare write declares a local, matching the VM. This closed two divergences the
+snapshot caused (a bare write hit an immutable snapshot → E0006 on the walker; and `self.n = v` then
+a bare read returned the stale snapshot value). Pinned by `classes/method_field_access.lang`. One
+adjacent gap remains logged in `plans/deferred.md`: a `List<IntN>` element type is lost through a
+field read inside a method (a checker type-flow gap — next).
 
 **Original status: design, NOT scheduled.** A consolidated proposal from a design discussion (2026-06). It
 **replaces an earlier `resource`-kind proposal** (removed) — the `resource` kind dissolves into "a class

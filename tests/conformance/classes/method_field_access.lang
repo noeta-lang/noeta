@@ -1,0 +1,39 @@
+// A method reads its instance's fields **live** off `self` (not a snapshot), and a bare-name write
+// declares a **local** — field mutation is the explicit `self.f = v`. So: a bare read after a
+// `self.f = v` sees the new value (even when the write went through an alias, since a `class` is
+// shared by reference); a bare write leaves the field untouched. Both backends agree — this pins the
+// tree-walker to the VM's model (fields load off the receiver, writes touch locals).
+// expect: stdout "99"
+// expect: stdout "10"
+// expect: stdout "5"
+// expect: stdout "7"
+// expect: exit 0
+class Counter {
+    pub mut n: int
+    fn new(): Counter { return Counter { n: 10 }; }
+
+    // A bare write is a local; the field is untouched. The bare read returns the local.
+    fn shadow(): int {
+        n = 99;
+        return n;
+    }
+
+    // A bare read after an explicit `self.n = v` observes the live field.
+    fn set_then_read(): int {
+        self.n = 5;
+        return n;
+    }
+
+    // A write through an alias mutates the shared instance (reference); the bare read is live.
+    fn alias_then_read(): int {
+        other = self;
+        other.n = 7;
+        return n;
+    }
+}
+
+mut c = Counter.new();
+echo c.shadow();          // 99 (the local)
+echo c.n;                 // 10 (field untouched by the bare write)
+echo c.set_then_read();   // 5 (live field after self.n = 5)
+echo c.alias_then_read(); // 7 (live field after the alias mutated the shared instance)

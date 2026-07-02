@@ -678,6 +678,15 @@ impl Interpreter {
             lang_ir::Atom::Var { name, span } => match self.scope.lookup(name) {
                 Some(value) => Ok(value),
                 None => {
+                    // Not a local: resolve a bare field read live off the current method's `self`,
+                    // mirroring the VM (fields are read off the receiver, not a scope snapshot). A
+                    // bare *write* never reaches here — it declares a local — so field mutation stays
+                    // the explicit `self.f = v`.
+                    if let Some(Value::Object(object)) = self.scope.lookup("self")
+                        && let Some(value) = object.field(name)
+                    {
+                        return Ok(value);
+                    }
                     self.diagnostics.push(Diagnostic::error(
                         DiagnosticCode::UnknownName,
                         *span,
