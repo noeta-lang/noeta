@@ -2692,9 +2692,12 @@ impl Checker {
             }
             // An empty map literal absorbs an expected `Map<K, V>` (the map analogue of the list
             // arm); a non-empty map synthesizes its own element types and is then subsumed.
-            Expr::Map { entries, .. }
+            Expr::Map { entries, span }
                 if entries.is_empty() && matches!(expected, Type::Map(..)) =>
             {
+                // Annotation-driven: record the *expected* map type (R1) so `Map<string, dyn> = {}`
+                // tags `Map(String, Dyn)`, the map analogue of the list arm above.
+                self.note_construction(expected, *span);
                 expected.clone()
             }
             // `none` absorbs an expected `Option<T>` (`?T`): it carries no payload, so it simply

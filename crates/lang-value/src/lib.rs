@@ -1639,10 +1639,13 @@ impl Value {
             "map_insert requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
-            heap::with_payload_mut(self, |p| match p {
+            let displaced = heap::with_payload_mut(self, |p| match p {
                 Payload::Map(entries) => entries.insert(key, value),
                 _ => None,
-            })
+            });
+            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            heap::set_reflect(self, None);
+            displaced
         } else {
             None
         }
@@ -1656,10 +1659,13 @@ impl Value {
             "map_remove requires a uniquely-owned map (the COW invariant)"
         );
         if self.is_map() {
-            heap::with_payload_mut(self, |p| match p {
+            let removed = heap::with_payload_mut(self, |p| match p {
                 Payload::Map(entries) => entries.remove(key),
                 _ => None,
-            })
+            });
+            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            heap::set_reflect(self, None);
+            removed
         } else {
             None
         }

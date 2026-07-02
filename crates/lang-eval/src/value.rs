@@ -46,8 +46,12 @@ pub enum Value {
     /// An immutable set, held in canonical (sorted, de-duplicated) order so iteration,
     /// display, and equality are deterministic and identical to the VM's `Payload::Set`.
     Set(Rc<Vec<Value>>),
-    /// An immutable string-keyed map. `BTreeMap` gives deterministic iteration order.
-    Map(Rc<BTreeMap<String, Value>>),
+    /// An immutable string-keyed map. `BTreeMap` gives deterministic iteration order. The second
+    /// field is the checker-resolved `Map(K, V)` reflected type (runtime type-argument reflection,
+    /// R1), set at literal construction so `type_of` recovers it after a `dyn` launder; `None` for a
+    /// derived/mutated map. Invisible to value semantics — equality compares only the entries — the
+    /// tree-walker twin of the VM's node tag.
+    Map(Rc<BTreeMap<String, Value>>, Option<Rc<TypeRepr>>),
     /// A user-defined function or closure.
     Function(Rc<Closure>),
     /// A built-in (native) function from the prelude.
@@ -596,6 +600,23 @@ impl Value {
         Value::List(ListRepr::boxed(items))
     }
 
+    /// Construct a map value from its shared entries, **untagged** (R1) — the constructor every
+    /// map-producing path uses. A literal that carries a reflected `Map(K, V)` type stamps it via
+    /// [`Value::map_value_tagged`]; every other map (derived, mutated) stays untagged and reflects
+    /// head-only.
+    pub(crate) fn map_value(entries: Rc<BTreeMap<String, Value>>) -> Value {
+        Value::Map(entries, None)
+    }
+
+    /// As [`Value::map_value`], but carrying the reflected `Map(K, V)` type (R1) — used only at map
+    /// literal construction.
+    pub(crate) fn map_value_tagged(
+        entries: Rc<BTreeMap<String, Value>>,
+        reflect: Option<Rc<TypeRepr>>,
+    ) -> Value {
+        Value::Map(entries, reflect)
+    }
+
     /// If this is a packed `List<Vec3<f32>>`, its schema and byte buffer (P-PACK 4.2 bulk `vec`).
     pub(crate) fn packed_vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
         match self {
@@ -655,7 +676,7 @@ impl Value {
                 let parts: Vec<String> = items.iter().map(Value::repr).collect();
                 format!("{{{}}}", parts.join(", "))
             }
-            Value::Map(entries) => {
+            Value::Map(entries, _) => {
                 let parts: Vec<String> = entries
                     .iter()
                     .map(|(k, v)| format!("{k:?}: {}", v.repr()))
@@ -706,7 +727,7 @@ impl Value {
             Value::List(_) => "list",
             Value::Tuple(_) => "tuple",
             Value::Set(_) => "set",
-            Value::Map(_) => "map",
+            Value::Map(..) => "map",
             Value::Function(_) | Value::Builtin(_) => "function",
             Value::EnumType(_) => "enum type",
             Value::Enum(_) => "enum",
@@ -741,7 +762,7 @@ impl fmt::Debug for Value {
             Value::List(repr) => write!(f, "List({repr:?})"),
             Value::Tuple(items) => write!(f, "Tuple({items:?})"),
             Value::Set(items) => write!(f, "Set({items:?})"),
-            Value::Map(entries) => write!(f, "Map({entries:?})"),
+            Value::Map(entries, _) => write!(f, "Map({entries:?})"),
             Value::Function(_) => write!(f, "Function(<fn>)"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
             Value::EnumType(def) => write!(f, "EnumType({})", def.name()),
@@ -777,7 +798,7 @@ impl PartialEq for Value {
             (Value::List(a), Value::List(b)) => a.elements_eq(b),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
             (Value::Set(a), Value::Set(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => a == b,
+            (Value::Map(a, _), Value::Map(b, _)) => a == b,
             (Value::Enum(a), Value::Enum(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::NativeModule(a), Value::NativeModule(b)) => a == b,
@@ -811,7 +832,7 @@ mod tests {
     }
 
     fn map(pairs: &[(&str, Value)]) -> Value {
-        Value::Map(Rc::new(
+        Value::map_value(Rc::new(
             pairs
                 .iter()
                 .map(|(k, v)| (k.to_string(), v.clone()))

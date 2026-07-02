@@ -173,7 +173,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*start);
             f.uses.push(*end);
         }
-        Op::MakeMap { dst, entries } => {
+        Op::MakeMap { dst, entries, .. } => {
             f.def = Some(*dst);
             for (k, v) in entries.iter() {
                 f.uses.push(*k);
@@ -627,7 +627,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(start);
             m(end);
         }
-        Op::MakeMap { dst, entries } => {
+        Op::MakeMap { dst, entries, .. } => {
             m(dst);
             for (k, v) in entries.iter_mut() {
                 m(k);

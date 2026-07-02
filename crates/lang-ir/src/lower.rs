@@ -870,6 +870,9 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::Map {
                         entries: pairs,
+                        // The checker-resolved `Map(K, V)` type for this literal (R1); empty on the
+                        // boxed/REPL path → the map stays untagged and reflects head-only.
+                        reflect: self.construction_sites.get(span).cloned(),
                         span: *span,
                     },
                     *span,

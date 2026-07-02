@@ -314,9 +314,13 @@ pub enum Rvalue {
         index: u32,
         span: Span,
     },
-    /// A map literal `{k: v, ...}`.
+    /// A map literal `{k: v, ...}`. `reflect` is the checker-resolved `Map(K, V)` type (runtime
+    /// type-argument reflection, R1), baked from the construction-site map so `type_of` recovers the
+    /// map's key/value types after a `dyn` launder; `None` on the boxed/REPL path. Invisible to value
+    /// semantics — carried beside the value, exactly like [`Rvalue::List`]'s tag.
     Map {
         entries: Vec<(Atom, Atom)>,
+        reflect: Option<lang_ast::reflect::TypeRepr>,
         span: Span,
     },
     /// An integer range `start..end` / `start..=end`, eagerly materialized to a list.

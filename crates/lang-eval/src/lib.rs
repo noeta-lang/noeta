@@ -1256,7 +1256,7 @@ impl Interpreter {
             // A packed list (P-PACK 2.3) holds only primitive words — no heap elements, no
             // destructors — so its `Rc<Vec<u64>>` simply drops here, reclaiming the buffer.
             Value::List(ListRepr::Packed(_)) => {}
-            Value::Map(entries) => self.destroy_map(entries),
+            Value::Map(entries, _) => self.destroy_map(entries),
             // Scalars/functions/types/handles bear no destructor (a function's *captured* values
             // are Phase-6 territory); their `Rc`/value drops here, reclaiming memory.
             _ => {}
@@ -1341,7 +1341,7 @@ impl Interpreter {
             // A set iterates in its canonical (sorted) order — deterministic, like the VM.
             Value::Set(items) => Ok((**items).clone()),
             // Iterating a map yields its values, in deterministic key order.
-            Value::Map(entries) => Ok(entries.values().cloned().collect()),
+            Value::Map(entries, _) => Ok(entries.values().cloned().collect()),
             // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
             // `iter` method returns.
             Value::Object(object) if object.def.methods.contains_key("iter") => {
@@ -2060,12 +2060,12 @@ impl Interpreter {
         // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A set/map first becomes a
         // list of its elements / values (the iteration order `for` uses); a list shares its backing.
         // Guarded to built-in collections so it does not shadow a user object's own `iter` method.
-        if name == "iter" && matches!(receiver, Value::List(_) | Value::Set(_) | Value::Map(_)) {
+        if name == "iter" && matches!(receiver, Value::List(_) | Value::Set(_) | Value::Map(..)) {
             self.expect_std_arity(name, &args, 0, span)?;
             let list = match &receiver {
                 Value::List(_) => receiver.clone(),
                 Value::Set(items) => Value::list_rc(Rc::clone(items)),
-                Value::Map(entries) => Value::list(entries.values().cloned().collect()),
+                Value::Map(entries, _) => Value::list(entries.values().cloned().collect()),
                 _ => unreachable!("guarded to list/set/map above"),
             };
             return Ok(Value::Iter(Rc::new(RefCell::new(IterState::List {
@@ -2074,7 +2074,7 @@ impl Interpreter {
             }))));
         }
         // Ring 1 map methods (keys/values/has).
-        if let Value::Map(entries) = &receiver
+        if let Value::Map(entries, _) = &receiver
             && let Some(method) = lang_stdlib::MapMethod::from_name(name)
         {
             return self.call_map_method(method, entries, name, &args, span);
@@ -2098,7 +2098,7 @@ impl Interpreter {
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
             ("count", Value::Set(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
-            ("count", Value::Map(entries)) if arity_ok => Some(Value::Int(entries.len() as i64)),
+            ("count", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
             ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
             ("count", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
             // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
@@ -2877,14 +2877,14 @@ impl Interpreter {
                 let key = self.expect_std_string(name, &args[0], span)?.to_string();
                 let mut new = entries.clone();
                 new.insert(key, args[1].clone());
-                Ok(Value::Map(Rc::new(new)))
+                Ok(Value::map_value(Rc::new(new)))
             }
             lang_stdlib::MapMethod::Remove => {
                 self.expect_std_arity(name, args, 1, span)?;
                 let key = self.expect_std_string(name, &args[0], span)?;
                 let mut new = entries.clone();
                 new.remove(key);
-                Ok(Value::Map(Rc::new(new)))
+                Ok(Value::map_value(Rc::new(new)))
             }
         }
     }
@@ -3003,7 +3003,7 @@ impl Interpreter {
                 Ok(items.get(i as usize).expect("bounds checked above"))
             }
             // `m[k]` on a map looks the value up by its string key; a missing key is `E0018`.
-            Value::Map(entries) => {
+            Value::Map(entries, _) => {
                 let Value::Str(key) = &index else {
                     return Err(self.runtime_error(
                         DiagnosticCode::TypeMismatch,
@@ -3202,7 +3202,7 @@ impl Interpreter {
                 match &args[0] {
                     Value::List(items) => Ok(Value::Int(items.len() as i64)),
                     Value::Set(items) => Ok(Value::Int(items.len() as i64)),
-                    Value::Map(entries) => Ok(Value::Int(entries.len() as i64)),
+                    Value::Map(entries, _) => Ok(Value::Int(entries.len() as i64)),
                     Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                     // A user object lights up the `Length` trait: `len(o)` dispatches to its
                     // `len` method (an object without a `Length` impl has no `len` method).
@@ -4170,7 +4170,12 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
         Value::Tuple(_) => TypeRepr::Dyn,
         Value::Set(_) => TypeRepr::Set(dyn_()),
-        Value::Map(_) => TypeRepr::Map(dyn_(), dyn_()),
+        // A map carrying a reflected type tag (R1) reports its precise `Map(K, V)` type; an
+        // untagged/derived map falls back to the head-only `Map(dyn, dyn)`. Mirrors `vm_type_repr`.
+        Value::Map(_, reflect) => reflect
+            .as_ref()
+            .map(|r| (**r).clone())
+            .unwrap_or_else(|| TypeRepr::Map(dyn_(), dyn_())),
         Value::Function(_) | Value::Builtin(_) => TypeRepr::Fn(Vec::new(), dyn_()),
         Value::Enum(e) => match e.enum_name.as_str() {
             "Option" => TypeRepr::Option(dyn_()),
@@ -4317,7 +4322,7 @@ fn attr_value_to_eval(
             for (k, v) in entries {
                 map.insert(k.clone(), recur(v));
             }
-            Value::Map(Rc::new(map))
+            Value::map_value(Rc::new(map))
         }
         A::Enum {
             enum_name,
@@ -4363,7 +4368,7 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
             // Narrowing to the open top is a no-op: every value is a `dyn`.
             "dyn" | "Any" => true,
             "List" | "list" => matches!(value, Value::List(_)),
-            "Map" | "map" => matches!(value, Value::Map(_)),
+            "Map" | "map" => matches!(value, Value::Map(..)),
             "Set" | "set" => matches!(value, Value::Set(_)),
             // Abstract kind-types match any value of that declaration kind (structs and classes are
             // both `Object`s, told apart by `TypeDef::is_struct`).
@@ -4473,7 +4478,7 @@ fn materialize_native(out: lang_stdlib::NativeOut) -> Value {
         NativeOut::Unit => Value::Unit,
         NativeOut::List(items) => Value::list(items.into_iter().map(materialize_native).collect()),
         // A dynamic `json.parse` object → a string-keyed map (entries arrive in key order).
-        NativeOut::Map(entries) => Value::Map(Rc::new(
+        NativeOut::Map(entries) => Value::map_value(Rc::new(
             entries
                 .into_iter()
                 .map(|(k, v)| (k, materialize_native(v)))
@@ -4599,7 +4604,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::Tuple(items) | Value::Set(items) => {
             NativeValue::List(items.iter().map(value_to_native_deep).collect())
         }
-        Value::Map(entries) => NativeValue::Map(
+        Value::Map(entries, _) => NativeValue::Map(
             entries
                 .iter()
                 .map(|(k, v)| (k.clone(), value_to_native_deep(v)))

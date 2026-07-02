@@ -330,6 +330,10 @@ pub enum Op {
     MakeMap {
         dst: Reg,
         entries: Box<[(Reg, Reg)]>,
+        /// The map's reflected `Map(K, V)` type (R1): an index into [`Module::type_reprs`], or `None`
+        /// when the literal carried no checker-resolved type. Stamped onto the built map so `type_of`
+        /// recovers it after a `dyn` launder. Invisible to value semantics, like `MakeList`'s tag.
+        reflect: Option<u32>,
     },
     /// Require `reg` to be a string (a map key), else raise E0007 ("map keys must be strings,
     /// found <type>") at `span`. Emitted between a map entry's key and value so the error
@@ -1207,9 +1211,17 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             let op = if *inclusive { "..=" } else { ".." };
             format!("MakeRange   r{dst} <- r{start}{op}r{end}")
         }
-        Op::MakeMap { dst, entries } => {
+        Op::MakeMap {
+            dst,
+            entries,
+            reflect,
+        } => {
             let entries: Vec<String> = entries.iter().map(|(k, v)| format!("r{k}: r{v}")).collect();
-            format!("MakeMap     r{dst} <- {{{}}}", entries.join(", "))
+            let tag = match reflect {
+                Some(idx) => format!("  ; reflect #{idx}"),
+                None => String::new(),
+            };
+            format!("MakeMap     r{dst} <- {{{}}}{tag}", entries.join(", "))
         }
         Op::RequireMapKey { reg, .. } => format!("RequireMapKey r{reg}"),
         Op::IterSnapshot { dst, src, .. } => format!("IterSnapshot r{dst} <- r{src}"),

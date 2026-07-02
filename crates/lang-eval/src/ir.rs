@@ -923,7 +923,11 @@ impl Interpreter {
                     )),
                 }
             }
-            lang_ir::Rvalue::Map { entries, span } => {
+            lang_ir::Rvalue::Map {
+                entries,
+                reflect,
+                span,
+            } => {
                 let mut map = BTreeMap::new();
                 for (key_atom, value_atom) in entries {
                     let key = match self.eval_ir_atom(key_atom, frame)? {
@@ -939,7 +943,12 @@ impl Interpreter {
                     let value = self.eval_ir_atom(value_atom, frame)?;
                     map.insert(key, value);
                 }
-                Ok(Value::Map(Rc::new(map)))
+                // Stamp the checker-resolved `Map(K, V)` type (R1) so `type_of` recovers it after a
+                // `dyn` launder — the tree-walker twin of the VM's node tag. `None` → untagged.
+                Ok(Value::map_value_tagged(
+                    Rc::new(map),
+                    reflect.clone().map(Rc::new),
+                ))
             }
             lang_ir::Rvalue::Index {
                 receiver,
@@ -1002,7 +1011,7 @@ impl Interpreter {
                         Some(v) => v,
                         None => self.eval_ir_atom(receiver, frame)?,
                     };
-                    if matches!(&recv, Value::Map(_)) {
+                    if matches!(&recv, Value::Map(..)) {
                         if name == "set" && values.len() == 2 {
                             return self.map_set_in_place(recv, values, *span);
                         }
@@ -1425,7 +1434,7 @@ impl Interpreter {
                     let value = self.materialize_recipe(value, span)?;
                     map.insert(key, value);
                 }
-                Ok(Value::Map(Rc::new(map)))
+                Ok(Value::map_value(Rc::new(map)))
             }
             NativeOut::Struct { name, fields } => {
                 let mut field_values = Vec::with_capacity(fields.len());
@@ -1501,7 +1510,7 @@ impl Interpreter {
     /// copy-and-reassign baseline, which releases it when the old map dies); an aliased map copies,
     /// preserving the other owner's view. `values` is `[key, value]`.
     fn map_set_in_place(&mut self, recv: Value, mut values: Vec<Value>, span: Span) -> Eval<Value> {
-        let Value::Map(mut rc) = recv else {
+        let Value::Map(mut rc, _) = recv else {
             unreachable!("caller checked the receiver is a map")
         };
         let new_value = values.pop().expect("set takes two args");
@@ -1509,19 +1518,24 @@ impl Interpreter {
         let Value::Str(key) = key_value else {
             // Defensive: a non-string key cannot occur for a checked map `set`; rebuild via the
             // ordinary path so the error (if any) matches.
-            return self.call_method(Value::Map(rc), "set", vec![key_value, new_value], span);
+            return self.call_method(
+                Value::map_value(rc),
+                "set",
+                vec![key_value, new_value],
+                span,
+            );
         };
         match Rc::get_mut(&mut rc) {
             Some(map) => {
                 if let Some(old) = map.insert(key, new_value) {
                     self.destroy_value(old);
                 }
-                Ok(Value::Map(rc))
+                Ok(Value::map_value(rc))
             }
             None => {
                 let mut new = (*rc).clone();
                 new.insert(key, new_value);
-                Ok(Value::Map(Rc::new(new)))
+                Ok(Value::map_value(Rc::new(new)))
             }
         }
     }
@@ -1534,24 +1548,24 @@ impl Interpreter {
         mut values: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        let Value::Map(mut rc) = recv else {
+        let Value::Map(mut rc, _) = recv else {
             unreachable!("caller checked the receiver is a map")
         };
         let key_value = values.pop().expect("remove takes one arg");
         let Value::Str(key) = key_value else {
-            return self.call_method(Value::Map(rc), "remove", vec![key_value], span);
+            return self.call_method(Value::map_value(rc), "remove", vec![key_value], span);
         };
         match Rc::get_mut(&mut rc) {
             Some(map) => {
                 if let Some(old) = map.remove(&key) {
                     self.destroy_value(old);
                 }
-                Ok(Value::Map(rc))
+                Ok(Value::map_value(rc))
             }
             None => {
                 let mut new = (*rc).clone();
                 new.remove(&key);
-                Ok(Value::Map(Rc::new(new)))
+                Ok(Value::map_value(Rc::new(new)))
             }
         }
     }

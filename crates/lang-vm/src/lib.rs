@@ -2458,7 +2458,11 @@ impl<'m> Vm<'m> {
                         }
                     }
                 }
-                Op::MakeMap { dst, entries } => {
+                Op::MakeMap {
+                    dst,
+                    entries,
+                    reflect,
+                } => {
                     let mut map = BTreeMap::new();
                     for (key_reg, value_reg) in entries.iter() {
                         let key = frames[top].regs[*key_reg as usize]
@@ -2472,7 +2476,13 @@ impl<'m> Vm<'m> {
                             release(old);
                         }
                     }
-                    set_reg(&mut frames[top].regs, *dst, Value::map(map));
+                    let map = Value::map(map);
+                    // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
+                    // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
+                    if let Some(idx) = reflect {
+                        map.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                    }
+                    set_reg(&mut frames[top].regs, *dst, map);
                     frames[top].pc += 1;
                 }
                 Op::RequireMapKey { reg, span } => {

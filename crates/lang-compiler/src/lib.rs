@@ -2320,9 +2320,16 @@ impl<'m> FnCompiler<'m> {
                 self.drop_temp_receiver(receiver, recv);
                 Ok(())
             }
-            Rvalue::Map { entries, span } => {
+            Rvalue::Map {
+                entries,
+                reflect,
+                span,
+            } => {
                 // Evaluate each key, check it is a string (matching M0's per-entry error timing),
                 // then the value — then assemble the map.
+                // The checker-resolved `Map(K, V)` type (R1), interned into the module table so the VM
+                // can stamp it onto the built map for `type_of`. `None` → the map stays untagged.
+                let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
                 let mut consumed = Vec::new();
                 let mut pairs = Vec::with_capacity(entries.len());
                 for (key, value) in entries {
@@ -2337,6 +2344,7 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::MakeMap {
                     dst,
                     entries: pairs.into_boxed_slice(),
+                    reflect,
                 });
                 self.release_consumed(&consumed);
                 Ok(())

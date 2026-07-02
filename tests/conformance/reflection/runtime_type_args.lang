@@ -10,6 +10,10 @@
 // expect: stdout "list<list<int>>"
 // expect: stdout "list<dyn>"
 // expect: stdout "list<dyn>"
+// expect: stdout "map<string,int>"
+// expect: stdout "map<string,list<int>>"
+// expect: stdout "map<string,dyn>"
+// expect: stdout "map<dyn,dyn>"
 // expect: stdout "true"
 // expect: stdout "true"
 // expect: exit 0
@@ -21,6 +25,7 @@ fn label(t: Type): string {
         Type.Bool => "bool",
         Type.Dyn => "dyn",
         Type.List(inner) => "list<${label(inner)}>",
+        Type.Map(k, v) => "map<${label(k)},${label(v)}>",
         _ => "other",
     };
 }
@@ -40,6 +45,14 @@ echo label(type_of(launder(xs)));                 // list<dyn>
 
 // A content-changing op yields a logically new, untagged list → it reflects head-only.
 echo label(type_of(launder([1, 2, 3].set(0, 9)))); // list<dyn>
+
+// Maps carry the same tag: a literal's key/value types survive a `dyn` launder (nested too), a
+// `Map<string, dyn>` stays `dyn`, and a mutated map reflects head-only.
+echo label(type_of(launder({"a": 1, "b": 2})));       // map<string,int>
+echo label(type_of(launder({"a": [1], "b": [2, 3]}))); // map<string,list<int>>
+mm: Map<string, dyn> = {};
+echo label(type_of(launder(mm)));                     // map<string,dyn>
+echo label(type_of(launder({"a": 1}.set("b", 2))));   // map<dyn,dyn> (mutated → tag dropped)
 
 // Value semantics are unaffected by the tag: a tagged literal equals a laundered (still-tagged) and
 // a mutated (untagged) list with the same elements.
