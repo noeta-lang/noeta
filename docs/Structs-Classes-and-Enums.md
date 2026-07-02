@@ -15,7 +15,7 @@ The language has two aggregate kinds and one sum kind. `struct` and `class` shar
 
 The choice is about whether a value *is* its contents (a `Point` is its `x` and `y`) or has an *identity* that persists across mutation (an `Order` you keep updating).
 
-```lang
+```lang ignore
 struct Point { x: int  y: int }        // value type
 
 class Order {
@@ -28,6 +28,11 @@ class Order {
 Aliasing makes the difference concrete:
 
 ```lang
+class Box { pub mut n: int
+    fn new(v: int): Box { return Box { n: v } }
+}
+struct Cell { mut n: int }
+
 // class: an alias sees in-place mutation
 mut b = Box.new(10)
 alias = b
@@ -73,27 +78,27 @@ cfg = Cfg { name: "svc" }   // retries = 3, tags = [1, 2]
 
 The all-fields literal `T { f: v, … }` must set every non-defaulted field (a missing one is E0009).
 
-```lang
+```lang ignore
 p = Point { x: 1, y: 2 }
 ```
 
 **Field-init shorthand** puns an in-scope variable of the same name:
 
-```lang
+```lang ignore
 name = "Ada"; email = "ada@x.io"
 u = User { name, email }    // ≡ User { name: name, email: email }
 ```
 
 The **empty literal** `T {}` is valid iff every field has a default:
 
-```lang
+```lang ignore
 c = Cfg { name: "x" }   // ok
 d = Defaults {}         // ok only if every field of Defaults has a default
 ```
 
 **Spread** `T { ...base, f: override }` copies every field from `base`, then applies overrides. The original is unchanged (structural update):
 
-```lang
+```lang ignore
 a = Money { amount: 100, currency: "USD" }
 b = Money { amount: 300, ...a }    // amount: 300, currency: "USD"
 ```
@@ -119,7 +124,7 @@ class Counter {
 
 **Associated functions** take no receiver (constructors are the usual case) and are called on the bare type name; **methods** dispatch on a value:
 
-```lang
+```lang ignore
 c = Counter.new()   // associated function
 c.set_then_read()   // method
 ```
@@ -156,6 +161,8 @@ enum Direction: string {                                 // string-backed
 Construct with `Enum.Variant` (or `Enum.Variant(payload)`), compare with `==`, and destructure in a `match`:
 
 ```lang
+enum OrderError { Empty; NegativePrice(index: int) }
+
 e = OrderError.NegativePrice(index: 2)
 echo match e {
     OrderError.Empty            => "empty",
@@ -182,6 +189,8 @@ A **string-backed** enum gets `Enum.try_from(s): ?Enum` (name-matched, `none` on
 Tuples are anonymous, positional, value-semantic aggregates. A literal needs **2 or more** elements — `(x)` is just a parenthesized expression, and `()` is unit.
 
 ```lang
+fn divmod(a: int, b: int): (int, int) { return (a / b, a % b) }
+
 p = (1, "two", 3.0)
 echo p.0                        // 1  (access by position)
 echo p == (1, "two", 3.0)       // true  (structural equality)

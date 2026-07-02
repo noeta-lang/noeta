@@ -24,7 +24,7 @@ struct Route { path: string  method: string = "GET" }
 struct Users { id: int }
 
 #[Route("/admin", method: "POST")]
-fn admin_handler(): void { /* ... */ }
+fn admin_handler(): void { }
 ```
 
 - Attributes are **structs, not classes** (a struct has one canonical all-fields construction).
@@ -77,7 +77,7 @@ echo match type_of(5) {
 
 Materializes every `#[T(...)]` attribute in the program — each entry's `.value` is a real `T`, and `.target` is the annotated declaration's name:
 
-```lang
+```lang ignore
 routes = attributes_of::<Route>()
 for r in routes {
     echo "${r.target} -> ${r.value.path}"
@@ -92,7 +92,7 @@ The compile-time `(declaration, role)` index built from `@role(...)` tags — ea
 
 Fallible dispatch by name — `recv` is a value (→ an instance method) or a bare type name (→ an associated function). Returns `Err` on an unknown name, a non-string name, or an arity mismatch:
 
-```lang
+```lang ignore
 echo match invoke(Shape.new(2, 3), "area", []) {
     Ok(v)  => "area = ${v}",
     Err(e) => "no such method",

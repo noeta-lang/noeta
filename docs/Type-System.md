@@ -59,6 +59,7 @@ fn parse(s: string): int | string {
 ```lang
 d: dyn = 42
 echo d is int          // true
+echo d is string       // false
 ```
 
 ## Type tests and narrowing
@@ -66,6 +67,7 @@ echo d is int          // true
 **`x is T`** is a plain `bool` head-constructor test — well-formed even on a concrete `x`. Generics are erased, so `x is List<int>` really tests "is `x` a list."
 
 ```lang
+enum Color { Red; Green }
 d: dyn = Color.Green
 echo d is Enum          // true
 ```
@@ -73,12 +75,15 @@ echo d is Enum          // true
 **`.as<T>()`** is a *checked narrowing* of a `dyn` or union to `?T` — `some(x)` if the runtime head constructor is `T`, else `none`. Narrowing an already-concrete (non-dynamic) value is E0028.
 
 ```lang
+struct Point { x: int  y: int }
+
 fn as_point(x: dyn): ?Point { return x.as<Point>() }
 
 fn kind(x: int | string): string {
     if x.as<int>() != none { return "int" }
     return "string"
 }
+echo kind(5)            // int
 ```
 
 An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees `x` as `T`.
@@ -88,9 +93,10 @@ An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees 
 `Struct`, `Class`, `Enum`, and `Record` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:
 
 ```lang
+enum Color { Red; Green }
 d: dyn = Color.Green
 echo d is Enum              // true
-p: ?Struct = x.as<Struct>()
+echo d is Struct            // false (it's an enum, not a struct)
 ```
 
 ## Where inference stops

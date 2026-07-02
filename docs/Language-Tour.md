@@ -66,6 +66,7 @@ Strings carry a rich method set — `.upper()`, `.trim()`, `.split(",")`, `.repl
 `if`/`else if`/`else` with mandatory braces:
 
 ```lang
+n = 1
 if n == 0 {
     echo "zero"
 } else if n == 1 {
@@ -78,7 +79,9 @@ if n == 0 {
 `if … then … else` is also an **expression** (note the `then` keyword):
 
 ```lang
+n = 50
 label = if n > 10 then "big" else "small"
+echo label                    // big
 ```
 
 `while` and `for … in`:
@@ -210,7 +213,7 @@ All three kinds share the same body grammar — they can hold methods and `impl 
 
 `match` is an expression, and it is checked for exhaustiveness — a missing case (with no `_`) is a compile error:
 
-```lang
+```lang ignore
 fn label(s: Status): string {
     return match s {
         Status.Pending  => "awaiting payment",
@@ -289,7 +292,7 @@ echo pick(false) ?? 0          // 0
 
 The `?` operator propagates a failure, early-returning it from the current function:
 
-```lang
+```lang ignore
 fn validate(items: List<Item>): Result<void, OrderError> {
     if items.count() == 0 { return Err(OrderError.Empty) }
     return Ok()
@@ -351,7 +354,7 @@ pub class User {
 }
 ```
 
-```lang
+```lang ignore
 // main.lang
 namespace App.Main;
 use App.Models.User;

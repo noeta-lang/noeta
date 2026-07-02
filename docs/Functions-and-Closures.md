@@ -85,6 +85,9 @@ The prelude builtins (`len`, `sum`, `map`, `filter`) are themselves first-class 
 `|>` threads the left value as the **first argument** of the right call. It turns nested calls into a left-to-right pipeline:
 
 ```lang
+fn inc(x: int): int { return x + 1 }
+fn add(a: int, b: int): int { return a + b }
+
 echo 5 |> inc |> inc          // inc(inc(5))
 echo 5 |> add(10)             // add(5, 10)
 

@@ -100,9 +100,14 @@ async fn produce(tx: Sender<int>): void {
 
 async fn consume(rx: Receiver<int>): int {
     mut total = 0
-    while true {
-        v = rx.recv().await
-        total += match v { some(n) => n, none => break }
+    mut running = true
+    while running {
+        (delta, keep) = match rx.recv().await {
+            some(v) => (v, true),
+            none    => (0, false),
+        }
+        total = total + delta
+        running = keep
     }
     return total
 }

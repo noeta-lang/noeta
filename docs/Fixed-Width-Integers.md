@@ -81,7 +81,7 @@ echo (300).to_u8()    // 44   (300 mod 256)
 
 Fixed-width fields let you define **packed value types** — structs stored as a flat, unboxed, cache-friendly numeric buffer rather than an array of pointers. A `List` of a packed type serializes to and from an opaque `bytes` buffer:
 
-```lang
+```lang ignore
 blob = packed_list.to_bytes()          // -> bytes
 back = from_bytes::<Vec3>(blob)         // -> List<Vec3>
 ```

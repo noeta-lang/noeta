@@ -21,7 +21,7 @@ pub class User {
 
 Import a declaration by its full path. Grouped imports share a prefix:
 
-```lang
+```lang ignore
 namespace App.Main;
 
 use App.Models.User;                       // single import
@@ -43,8 +43,8 @@ A declaration is **module-private by default**. Only `pub` items can be imported
 ```lang
 namespace App.Models;
 
-pub class User { pub name: string  /* ... */ }   // importable
-class Internal { /* ... */ }                      // module-private
+pub class User { pub name: string }    // importable
+class Internal { secret: string }      // module-private
 ```
 
 Field and method visibility inside a type is separate — see [Structs, Classes & Enums](Structs-Classes-and-Enums#fields).

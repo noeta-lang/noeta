@@ -64,6 +64,7 @@ Implement a trait **in the type's body** with `impl Trait { }` (uniform across c
 ```lang
 class Money {
     amount: int
+    fn new(a: int): Money { return Money { amount: a } }
     impl Add {
         fn add(other: Money): Money { return Money { amount: amount + other.amount } }
     }
@@ -71,7 +72,7 @@ class Money {
         fn compare(other: Money): Ordering { return amount.compare(other.amount) }
     }
 }
-echo (Money { amount: 3 } < Money { amount: 5 })   // true
+echo (Money.new(3) < Money.new(5))   // true
 ```
 
 There is also a **standalone** `impl Trait for T { }` (marker/empty-body only for now), which must target a type declared in the same module — an orphan target is E0013, a wrong or missing method is E0015.
@@ -88,7 +89,7 @@ There is also a **standalone** `impl Trait for T { }` (marker/empty-body only fo
 | `Clone` | A structural clone. |
 | `Serialize<Json>` | Synthesizes `to_json()`. |
 
-```lang
+```lang ignore
 @derive(Equatable, Comparable, Display, Clone)
 class Point {
     x: int

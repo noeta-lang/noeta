@@ -29,7 +29,7 @@ Splitting on `""` yields characters. Also: index `s[i]` returns the i-th charact
 Construct with `[a, b, c]`; an empty list in an ambiguous position needs a type (`xs: List<int> = []`).
 
 ```lang
-xs = [1, 2, 3]
+mut xs = [1, 2, 3]
 echo xs[0]              // 1  (index; out of bounds is E0016)
 echo [...xs, 4]        // [1, 2, 3, 4]  (spread)
 echo xs ~ [4, 5]       // [1, 2, 3, 4, 5]  (concat)
@@ -67,7 +67,8 @@ echo [1,2,3,4] |> filter(fn(n) => n % 2 == 0)
 String-keyed; keys iterate and print in sorted order. Empty is `{}`.
 
 ```lang
-m = {"a": 1, "b": 2}
+host = "h"; scheme = "https"
+mut m = {"a": 1, "b": 2}
 echo m["a"]            // 1  (missing key is E0018)
 m["c"] = 3            // sugar for  m = m.set("c", 3)
 echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }

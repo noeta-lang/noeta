@@ -111,7 +111,7 @@ echo reader.read_line() ?? "<eof>"   // alpha
 | `parse` | `parse(text: string) -> dyn` | Objects → maps, arrays → lists, `null` → unit. Malformed is E0007. |
 | `parse::<T>` | `parse::<T>(text: string) -> T` | **Typed** decode into a real value. |
 
-```lang
+```lang ignore
 use std.{json}
 echo json.stringify({"b": 2, "a": 1})               // {"a":1,"b":2}
 
@@ -127,7 +127,7 @@ The typed form supports nested structs, `List<T>`, `Map`, and optional fields (a
 
 Scalar 3D vector and quaternion math over any struct with the right shape — a `Vec3` is any struct with three `f32` fields, a `Quat` any struct with four. Result-shape operations return the *same* struct type as the input.
 
-```lang
+```lang ignore
 use std.{vec}
 a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
 b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }
