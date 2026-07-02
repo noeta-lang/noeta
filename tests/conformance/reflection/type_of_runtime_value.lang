@@ -1,0 +1,50 @@
+// `type_of(value)` recovers a value's **concrete runtime type**, even when the value's *static* type
+// was erased to `dyn`. A runtime value carries its own identity (a scalar's payload tag, an object's
+// shape), so reflecting it is precise regardless of how it was declared or passed. What erasure drops
+// is only a generic *container's* type parameter — a `List<dyn>` reports `list` (its element type is
+// not carried), but each element pulled out of it reflects to its own concrete type. Both backends
+// build the `Type` value from the shared runtime head constructor, so they agree by construction.
+// expect: stdout "int"
+// expect: stdout "string"
+// expect: stdout "bool"
+// expect: stdout "struct:Point"
+// expect: stdout "enum:Mode"
+// expect: stdout "class:Engine"
+// expect: stdout "list"
+// expect: stdout "struct:Point"
+// expect: stdout "int"
+// expect: exit 0
+struct Point { x: int }
+enum Mode { Fast; Slow; }
+class Engine { id: int  fn new(): Engine { return Engine { id: 0 }; } }
+
+fn label(t: Type): string {
+    return match t {
+        Type.Int => "int",
+        Type.String => "string",
+        Type.Bool => "bool",
+        Type.List(_) => "list",
+        Type.Struct(name, _) => "struct:${name}",
+        Type.Enum(name, _) => "enum:${name}",
+        Type.Class(name, _) => "class:${name}",
+        Type.Named(name, _) => "named:${name}",
+        _ => "other",
+    };
+}
+
+// Erase a value's static type by laundering it through a `dyn` parameter.
+fn launder(v: dyn): dyn { return v; }
+
+// A heterogeneous list DECLARED `List<dyn>`: the container's parameter is `dyn`, but every element is
+// a concrete value. Pulling each out and reflecting recovers its concrete runtime type.
+xs: List<dyn> = [1, "hi", true, Point { x: 1 }, Mode.Fast, Engine.new()];
+for x in xs {
+    echo label(type_of(x));   // int / string / bool / struct:Point / enum:Mode / class:Engine
+}
+
+// The container itself: its element type is erased (fidelity B), so it reflects to a bare `list`.
+echo label(type_of(xs));
+
+// A value whose static type is `dyn` (laundered) still reflects to its concrete runtime type.
+echo label(type_of(launder(Point { x: 2 })));  // struct:Point
+echo label(type_of(launder(42)));              // int
