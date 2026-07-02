@@ -1,0 +1,35 @@
+// Generic-enum match-payload typing (the destructuring companion to R2b.1's construction inference):
+// matching a value of a concretely-instantiated generic enum binds each payload to the **instantiated**
+// type, not the abstract parameter. `match t { Tree.Leaf(n) => … }` where `t: Tree<int>` types `n` as
+// `int`, so `n + 1` type-checks; `Pair<int, string>` binds `(n, s)` as `(int, string)`. A nullary
+// variant (`Tree.Empty` : `Tree<dyn>`, no payload to pin) flows gradually into any concrete
+// instantiation (`Tree<dyn> <: Tree<int>`), so it may be passed where `Tree<int>` is expected.
+// expect: stdout "42"
+// expect: stdout "0"
+// expect: stdout "7:hi"
+// expect: stdout "none"
+// expect: exit 0
+
+enum Tree<T> { Leaf(T); Empty; }
+enum Pair<A, B> { Both(A, B); Neither; }
+
+// `n` binds as `int` (the instantiated payload), so integer arithmetic on it is well-typed.
+fn incr_leaf(t: Tree<int>): int {
+    return match t {
+        Tree.Leaf(n) => n + 1,
+        Tree.Empty => 0,
+    };
+}
+
+// Each payload of a multi-parameter enum binds by position: `n: int`, `s: string`.
+fn show(p: Pair<int, string>): string {
+    return match p {
+        Pair.Both(n, s) => "${n}:${s}",
+        Pair.Neither => "none",
+    };
+}
+
+echo incr_leaf(Tree.Leaf(41));   // 42  (n: int)
+echo incr_leaf(Tree.Empty);      // 0   (nullary Tree<dyn> flows into Tree<int>)
+echo show(Pair.Both(7, "hi"));   // 7:hi
+echo show(Pair.Neither);         // none

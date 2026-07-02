@@ -5182,11 +5182,18 @@ impl Checker {
                 "some" => vec![(**some).clone()],
                 _ => Vec::new(),
             },
-            Type::Named(n, _) => self
+            // Substitute the enum's type arguments into the variant's declared payload types, so a
+            // pattern on a generic enum binds the *instantiated* payload: `match t { Tree.Leaf(n) => … }`
+            // where `t: Tree<int>` types `n` as `int`, not the abstract parameter `T`. Mirrors the
+            // construction-side inference (R2b.1); the two are the same generic type-argument flow.
+            Type::Named(n, args) => self
                 .enums
                 .get(n)
                 .and_then(|vs| vs.iter().find(|v| v.name == variant))
-                .map(|v| v.fields.clone())
+                .map(|v| {
+                    let subst = self.type_arg_subst(n, args);
+                    v.fields.iter().map(|t| apply_subst(t, &subst)).collect()
+                })
                 .unwrap_or_default(),
             _ => Vec::new(),
         };

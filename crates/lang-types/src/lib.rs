@@ -259,14 +259,19 @@ impl Type {
             // A named type is covariant in its arguments (`Box<int> <: Box<dyn>`); the name must
             // match. An **empty** argument list on either side means "arguments unspecified" (a
             // literal or partially-erased instance) and is compatible with any instantiation of the
-            // same name; only when both sides carry arguments are arity + covariance checked.
-            // (Covariance is sound here — generics are erased and immutable-by-default.)
+            // same name; only when both sides carry arguments are arity + covariance checked. A `dyn`
+            // *argument* on either side is the per-argument analogue of that escape — an unspecified
+            // element flows gradually into a concrete instantiation (`Tree<dyn> <: Tree<int>`), which
+            // is how a nullary/partial generic constructor (`Tree.Empty` : `Tree<dyn>`) reaches a
+            // concrete parameter. (Covariance is sound here — generics are erased and immutable-by-default.)
             (Named(an, aa), Named(bn, ba)) => {
                 an == bn
                     && (aa.is_empty()
                         || ba.is_empty()
                         || (aa.len() == ba.len()
-                            && aa.iter().zip(ba).all(|(a, b)| Type::subtype(a, b))))
+                            && aa.iter().zip(ba).all(|(a, b)| {
+                                matches!(a, Dyn) || matches!(b, Dyn) || Type::subtype(a, b)
+                            })))
             }
             // Abstract kind-types: a kind is a subtype only of the same kind (widening into `dyn`
             // is handled above). `Named(n) <: Kind(k)` is **registry-dependent** (is `n` an enum?),
