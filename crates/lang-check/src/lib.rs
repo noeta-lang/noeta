@@ -2953,8 +2953,41 @@ impl Checker {
         self.report_intn_mismatch(op, lt, rt, "comparison", span);
     }
 
+    /// Type a fixed-width symmetric bitwise op `& | ^` (Tier W5). Both operands must be the **same**
+    /// `IntN` and the result is that type; unlike shifts and arithmetic, the erased `& | ^` of two
+    /// correctly-extended words is already correctly extended, so **no mask** (and no `width_sites`
+    /// entry) is needed. Mixed-width or `IntN`+`int` → E0044; a `dyn`/hole defers. Only called with
+    /// at least one `IntN`.
+    fn synth_intn_bitwise(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) -> Type {
+        let concrete = if matches!(lt, Type::IntN { .. }) {
+            lt
+        } else {
+            rt
+        };
+        if lt.defers_to_runtime() || rt.defers_to_runtime() {
+            return concrete.clone();
+        }
+        if let Some((signed, bits)) = same_width_intn(lt, rt) {
+            return Type::IntN { signed, bits };
+        }
+        self.report_intn_mismatch(op, lt, rt, "bitwise", span);
+        concrete.clone()
+    }
+
+    /// The E0043 for a non-fixed-width bitwise/shift op whose operands are not `int` (P-BITS Tier B).
+    fn report_noninteger_bitwise(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) {
+        self.diags.push(Diagnostic::error(
+            DiagnosticCode::NonIntegerBitwise,
+            span,
+            format!(
+                "`{}` requires integer operands, but found `{lt}` and `{rt}`",
+                op.symbol(),
+            ),
+        ));
+    }
+
     /// The shared E0044 for a fixed-width op whose operands are not the same `IntN` — `kind` is
-    /// `"arithmetic"` or `"comparison"` (the two W2/W3 sites).
+    /// `"arithmetic"`, `"comparison"`, or `"bitwise"` (the W2/W3/W5 sites).
     fn report_intn_mismatch(&mut self, op: BinaryOp, lt: &Type, rt: &Type, kind: &str, span: Span) {
         self.diags.push(Diagnostic::error(
             DiagnosticCode::FixedWidthOutOfRange,
@@ -3872,24 +3905,47 @@ impl Checker {
                 }
                 Type::Bool
             }
-            // Bitwise/shift operators (P-BITS Tier B) are integer-only → `int`. Each operand must be
-            // `int` (a `dyn`/hole defers); anything else is E0043 — `bool` uses `&&`/`||`, and there
-            // is no bitwise overload in v1.
-            BinaryOp::BitAnd
-            | BinaryOp::BitOr
-            | BinaryOp::BitXor
-            | BinaryOp::Shl
-            | BinaryOp::Shr => {
+            // Symmetric bitwise `& | ^` (P-BITS Tier B on `int`; W5 on fixed-width). Two same-width
+            // `IntN` yield that width — the erased op is already correctly extended, so no mask.
+            // Mixed-width or `IntN`+`int` → E0044. Otherwise both operands must be `int` → `int`
+            // (a `dyn`/hole defers); anything else is E0043 (`bool` uses `&&`/`||`).
+            BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
+                if matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }) {
+                    return self.synth_intn_bitwise(op, &lt, &rt, span);
+                }
                 let ok = |t: &Type| matches!(t, Type::Int) || t.defers_to_runtime();
                 if !ok(&lt) || !ok(&rt) {
-                    self.diags.push(Diagnostic::error(
-                        DiagnosticCode::NonIntegerBitwise,
-                        span,
-                        format!(
-                            "`{}` requires integer operands, but found `{lt}` and `{rt}`",
-                            op.symbol(),
-                        ),
-                    ));
+                    self.report_noninteger_bitwise(op, &lt, &rt, span);
+                }
+                Type::Int
+            }
+            // Shifts `<< >>` are asymmetric: the left operand is the value (it sets the result type),
+            // the right is a count (any integer — its width is irrelevant). On a fixed-width value
+            // (W5) `<<` masks the result into the width (sign-agnostic, like `+ - *`), and `>>` is
+            // sign-dependent — **arithmetic** (sign-fill) on a signed width, **logical** (zero-fill)
+            // on an unsigned one — so it lowers to the width-carrying `WideInt`.
+            BinaryOp::Shl | BinaryOp::Shr => {
+                let amount_ok =
+                    |t: &Type| matches!(t, Type::Int | Type::IntN { .. }) || t.defers_to_runtime();
+                if let Type::IntN { signed, bits } = lt {
+                    if !amount_ok(&rt) {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::NonIntegerBitwise,
+                            span,
+                            format!(
+                                "`{}` shift amount must be an integer, found `{rt}`",
+                                op.symbol()
+                            ),
+                        ));
+                    }
+                    // Both `<<` (via `MaskWidth`) and `>>` (via `WideInt`) read the width from here;
+                    // lowering routes by the operator.
+                    self.width_sites.insert(span, (signed, bits));
+                    return Type::IntN { signed, bits };
+                }
+                let ok = |t: &Type| matches!(t, Type::Int) || t.defers_to_runtime();
+                if !ok(&lt) || !amount_ok(&rt) {
+                    self.report_noninteger_bitwise(op, &lt, &rt, span);
                 }
                 Type::Int
             }

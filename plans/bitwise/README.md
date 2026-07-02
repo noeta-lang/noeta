@@ -289,9 +289,24 @@ how untyped literals in an `i64`-typed context coerce (same in-range coercion as
   **Deferred:** the range-*checked* form `checked_to_u8(): u8?` (returns an optional — needs the
   none-on-overflow path; a small follow-on). Conformance 404 (types/fixed_width_conversions),
   differential 394 / 0-skipped / backends agree, leak residency 0 both, clippy + fmt clean.
-- **W5 — logical shift + exact-width intrinsics.** Now `>>` on an unsigned width is **logical**
-  (zero-fill); the popcount-class intrinsics (B4) become width-exact (`(1u8).leading_zeros() == 7`).
-  Re-point the B4 methods to consult width.
+- **W5 — bitwise/shift on fixed-width + exact-width intrinsics.** Split into W5a (operators) and W5b
+  (intrinsics).
+  - **W5a — `& | ^ << >>` on fixed-width ints. ✅ DONE.** `& | ^` require the same width and need **no
+    mask** (the erased op of two correctly-extended words is already correct); mixed-width → E0044.
+    `<<` masks its result into the width (sign-agnostic → reuses W2's `MaskWidth`). `>>` is
+    sign-dependent — **arithmetic** (sign-fill) on a signed width, **logical** (zero-fill) on an
+    unsigned one, differing only for `u64` past bit 63 — so it lowers to W3's `WideInt` (new `Shr` arm
+    in `apply_binary_wide`, both backends; `0..=63` shift domain as Tier B, no result mask since `>>`
+    never grows the value). Shifts are asymmetric: the left operand sets the result width, the right is
+    a count of any integer type. Reused the existing `width_sites` map + lowering op-branch (added
+    `Shr` to the `WideInt` set; `Shl`/`& | ^` stay `Binary`, `<<` gets a `MaskWidth`). Conformance 407
+    (types/fixed_width_bitwise + 1 E0044 diagnostic), differential 0-skipped / backends agree, leak 0
+    both, clippy + fmt + miri clean.
+  - **W5b — exact-width popcount intrinsics.** `count_ones`/`count_zeros`/`leading_zeros`/
+    `trailing_zeros`/`rotate_*`/`reverse_bits`/`swap_bytes` on an `IntN` receiver become width-exact
+    (`(1u8).leading_zeros() == 7`, `(0u8).count_zeros() == 8`, rotate/reverse/swap within the width).
+    Fixes a latent wrong-answer W4 introduced (these currently compute i64-relative on `IntN`). Needs
+    the width at the op — a width-carrying method lowering keyed off a checker site map.
 - **W6 — (optional) `BitSet` stdlib type.** A growable bitset over `[u64]` with `set/clear/test/
   count/iter_set_bits`, the ergonomic consumer of the whole tier and a natural conformance demo.
 

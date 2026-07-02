@@ -67,6 +67,21 @@ pub fn apply_binary_wide(
         return apply_binary(op, left, right);
     };
     let (a, b) = (*a, *b);
+    // `>>` on a fixed-width value (W5): `a` is the value, `b` the shift count (same `0..=63` domain as
+    // Tier B `int` shifts). Arithmetic (sign-filling) on a signed width, logical (zero-filling) on an
+    // unsigned one — they differ only for `u64` with bit 63 set. A right shift never grows the value
+    // past the width, so no mask is needed.
+    if op == BinaryOp::Shr {
+        if !(0..64).contains(&b) {
+            return Err(shift_out_of_range(b));
+        }
+        let n = b as u32;
+        return Ok(Value::Int(if signed {
+            a >> n
+        } else {
+            ((a as u64) >> n) as i64
+        }));
+    }
     let mask = |v: i64| Value::Int(lang_stdlib::mask_to_width(v, signed, bits));
     if signed {
         match op {
@@ -78,7 +93,7 @@ pub fn apply_binary_wide(
             BinaryOp::Le => Ok(Value::Bool(a <= b)),
             BinaryOp::Gt => Ok(Value::Bool(a > b)),
             BinaryOp::Ge => Ok(Value::Bool(a >= b)),
-            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+            _ => unreachable!("apply_binary_wide: div/rem/compare only; >> handled above"),
         }
     } else {
         let (a, b) = (a as u64, b as u64);
@@ -91,7 +106,7 @@ pub fn apply_binary_wide(
             BinaryOp::Le => Ok(Value::Bool(a <= b)),
             BinaryOp::Gt => Ok(Value::Bool(a > b)),
             BinaryOp::Ge => Ok(Value::Bool(a >= b)),
-            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+            _ => unreachable!("apply_binary_wide: div/rem/compare only; >> handled above"),
         }
     }
 }

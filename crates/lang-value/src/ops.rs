@@ -92,6 +92,21 @@ pub fn apply_binary_wide(
     let (Some(a), Some(b)) = (left.as_int(), right.as_int()) else {
         return apply_binary(op, left, right);
     };
+    // `>>` on a fixed-width value (W5): `a` is the value, `b` the shift count (same `0..=63` domain as
+    // Tier B `int` shifts). It is **arithmetic** (sign-filling) on a signed width and **logical**
+    // (zero-filling) on an unsigned one — the only place they differ is `u64` with bit 63 set. A right
+    // shift never grows the value past the width, so no mask is needed.
+    if op == BinaryOp::Shr {
+        if !(0..64).contains(&b) {
+            return Err(shift_out_of_range(b));
+        }
+        let n = b as u32;
+        return Ok(Value::int(if signed {
+            a >> n
+        } else {
+            ((a as u64) >> n) as i64
+        }));
+    }
     let mask = |v: i64| Value::int(lang_stdlib::mask_to_width(v, signed, bits));
     if signed {
         match op {
@@ -103,7 +118,7 @@ pub fn apply_binary_wide(
             BinaryOp::Le => Ok(Value::bool(a <= b)),
             BinaryOp::Gt => Ok(Value::bool(a > b)),
             BinaryOp::Ge => Ok(Value::bool(a >= b)),
-            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+            _ => unreachable!("apply_binary_wide: div/rem/compare only; >> handled above"),
         }
     } else {
         let (a, b) = (a as u64, b as u64);
@@ -116,7 +131,7 @@ pub fn apply_binary_wide(
             BinaryOp::Le => Ok(Value::bool(a <= b)),
             BinaryOp::Gt => Ok(Value::bool(a > b)),
             BinaryOp::Ge => Ok(Value::bool(a >= b)),
-            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+            _ => unreachable!("apply_binary_wide: div/rem/compare only; >> handled above"),
         }
     }
 }
@@ -471,21 +486,25 @@ fn type_mismatch(op: BinaryOp, left: Value, right: Value) -> OpError {
 mod tests {
     use super::*;
 
-    // Read the `int`/`bool` result of a wide op, freeing the result Value (a large i64 like
-    // `i64::MAX` boxes on the NaN-boxed heap, so it must be freed to stay miri-clean). The small
-    // operands never box, so passing them by value is enough.
+    // Read the `int`/`bool` result of a wide op, freeing the result and both operands (a large i64
+    // like `i64::MAX` / `i64::MIN` boxes on the NaN-boxed heap, so every boxed handle must be freed
+    // to stay miri-clean; freeing an unboxed immediate is a no-op).
     fn wide_int(op: BinaryOp, a: i64, b: i64, signed: bool, bits: u8) -> i64 {
-        let v = apply_binary_wide(op, Value::int(a), Value::int(b), signed, bits)
-            .expect("no div-by-zero");
+        let (la, lb) = (Value::int(a), Value::int(b));
+        let v = apply_binary_wide(op, la, lb, signed, bits).expect("no div-by-zero");
         let n = v.as_int().expect("int result");
         v.free();
+        la.free();
+        lb.free();
         n
     }
     fn wide_bool(op: BinaryOp, a: i64, b: i64, signed: bool, bits: u8) -> bool {
-        let v = apply_binary_wide(op, Value::int(a), Value::int(b), signed, bits)
-            .expect("comparisons never error");
+        let (la, lb) = (Value::int(a), Value::int(b));
+        let v = apply_binary_wide(op, la, lb, signed, bits).expect("comparisons never error");
         let r = v.as_bool().expect("bool result");
         v.free();
+        la.free();
+        lb.free();
         r
     }
 
@@ -517,5 +536,22 @@ mod tests {
     fn division_by_zero_is_an_error_both_signednesses() {
         assert!(apply_binary_wide(BinaryOp::Div, Value::int(1), Value::int(0), true, 32).is_err());
         assert!(apply_binary_wide(BinaryOp::Rem, Value::int(1), Value::int(0), false, 64).is_err());
+    }
+
+    #[test]
+    fn right_shift_is_arithmetic_signed_logical_unsigned() {
+        // Signed `>>` sign-fills (arithmetic).
+        assert_eq!(wide_int(BinaryOp::Shr, -128, 1, true, 8), -64);
+        // Unsigned `<64`-bit widths are non-negative erased, so arithmetic == logical here.
+        assert_eq!(wide_int(BinaryOp::Shr, 200, 1, false, 8), 100);
+        // The crux: `u64` with bit 63 set (erased to a negative i64) shifts LOGICALLY — a signed
+        // arithmetic shift would sign-fill to a negative result.
+        let bit63 = 1i64 << 63; // i64::MIN, the erased `1u64 << 63`
+        assert_eq!(wide_int(BinaryOp::Shr, bit63, 62, false, 64), 2);
+        assert_eq!(wide_int(BinaryOp::Shr, bit63, 62, true, 64), -2);
+        // Out-of-range shift count panics deterministically (same domain as Tier B).
+        assert!(
+            apply_binary_wide(BinaryOp::Shr, Value::int(1), Value::int(64), false, 64).is_err()
+        );
     }
 }

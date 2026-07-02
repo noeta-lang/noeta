@@ -1,0 +1,37 @@
+// Tier W5: bitwise `& | ^` and shifts `<< >>` on fixed-width integers. `& | ^` require the same
+// width and need no mask (the erased op of two correctly-extended words is already correct). `<<`
+// masks its result into the width (sign-agnostic, like `+ - *`). `>>` is sign-dependent: arithmetic
+// (sign-filling) on a signed width, logical (zero-filling) on an unsigned one — differing only for
+// `u64` past bit 63. The shift count is any integer (its width is irrelevant). Both backends share
+// the mask / wide-op, so the differential pins them equal.
+// expect: stdout "64"
+// expect: stdout "205"
+// expect: stdout "172"
+// expect: stdout "144"
+// expect: stdout "128"
+// expect: stdout "-56"
+// expect: stdout "100"
+// expect: stdout "-64"
+// expect: stdout "2"
+// expect: stdout "100"
+// expect: exit 0
+
+// `& | ^`: same width, result that width (no mask needed).
+echo 200u8 & 100u8      // 64
+echo 200u8 | 5u8        // 205
+echo 200u8 ^ 100u8      // 172
+
+// `<<` masks the result into the width (truncating / wrapping).
+echo 200u8 << 1         // 400 mod 256 = 144
+echo 1u8 << 7           // 128
+echo 100i8 << 1         // 200 -> -56 (signed wrap)
+
+// `>>`: unsigned is logical, signed is arithmetic.
+echo 200u8 >> 1         // 100
+echo (-128i8) >> 1      // -64 (arithmetic, sign-filling)
+
+// The crux: `u64` with bit 63 set shifts LOGICALLY (a signed arithmetic shift would give -2).
+echo (1u64 << 63) >> 62 // 2
+
+// The shift count may be any integer type — it is just a count.
+echo 200u8 >> 1u8       // 100
