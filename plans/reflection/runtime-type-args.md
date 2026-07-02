@@ -107,9 +107,21 @@ table and carry a `u32` id instead of an `Rc` — deferred; correctness first.)
     `Expr::Object`), so R0 doesn't record it and generic enums currently reflect head-only
     (`Enum("Tree", [])`). Record the variant-construction site + tag the `MakeEnum` value. Consistent
     across backends today (neither tags enums), so no divergence — just a fidelity gap to close.
-- **R3 — precise `is` / `as`.** The narrowing matcher consults the operand's tag: `x is List<int>` /
-  `x is Box<int>` check arguments when tagged; untagged/`dyn` stays head-only. Removes the
-  `is List<string>` false-positive. New behavior pinned; no new diagnostic code.
+- **R3 — precise `is` / `as` DONE** (`6b313d7`). The narrowing matcher consults the operand's tag:
+  `x is List<int>` / `x is Box<int>` / `.as<…>()` check arguments when tagged; untagged/`dyn`/bare-head
+  (`is List`) stays head-only. Removes the `is List<string>` false positive. **Additive** — the existing
+  head-only matcher is the first gate (all non-parametrized + untagged + widening cases unchanged); a
+  second gate runs only for a `Named` target with non-empty args, via the shared
+  `reflect::narrow_args_match(target_args, actual)` over `arg_matches` (a `dyn`-wildcard recursive
+  match; nominal types by name, kind-tolerant). VM: `NarrowTarget::Generic { head, args: Vec<TypeRepr> }`
+  built via new `reflect::typeref_to_repr`; tree-walker `runtime_matches` mirrors it — both share
+  `narrow_args_match`. `TypeRepr` gained `Eq`. No new diagnostic code. Test `reflection/is_type_args.lang`.
+  Conformance 419, differential 409/0-skipped/agree, leak 0 both.
+
+**USER-FACING ARC (R1a/R1b/R2a/R3) COMPLETE** — the reflection residual is closed for lists, maps, and
+generic structs/classes, on `type_of` and `is`/`as`. Remaining deferred: **R2b** (generic enum tags —
+needs a construction-site record + `MakeEnum` tag; consistent head-only today, no divergence) and Set
+tags (no literal). Approach B (distinct shapes, benched follow-up) untouched.
 
 **Gates each slice:** conformance + differential 0-skipped / backends agree + leak residency 0 both +
 clippy/fmt. R1/R2 add miri over the tagged value's heap accounting (the tag is an `Rc`, so its
