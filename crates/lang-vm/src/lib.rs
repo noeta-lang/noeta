@@ -407,6 +407,14 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::AnyClass => {
             return v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
         }
+        // A parametrized target (R3): the head must match head-only (which handles the untagged and
+        // widening cases), and — when the value carries a reflected tag — its type arguments must
+        // match `args` (a `dyn` on either side is a wildcard). An untagged value classifies its args
+        // to `dyn`, so `vm_type_repr` yields `dyn` arguments and the check passes head-only.
+        NarrowTarget::Generic { head, args } => {
+            return narrow_matches(v, head)
+                && lang_ast::reflect::narrow_args_match(args, &vm_type_repr(&v));
+        }
     };
     v.type_name() == kind
 }

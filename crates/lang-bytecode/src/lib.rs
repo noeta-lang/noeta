@@ -141,6 +141,16 @@ pub enum NarrowTarget {
     AnyEnum,
     AnyStruct,
     AnyClass,
+    /// A **parametrized** target (`x is List<int>` / `x is Box<int>`, R3): `head` is the head-only
+    /// target (matched exactly as before — this preserves the widening `x is List` and the untagged
+    /// fallback), and `args` are the expected type arguments. When the value carries a reflected type
+    /// (R1/R2), the matcher additionally requires its arguments match `args` (a `dyn` on either side is
+    /// a wildcard), so `List<int>` no longer matches a value tagged `List<string>`. An untagged value
+    /// classifies its arguments to `dyn` and so still matches head-only.
+    Generic {
+        head: Box<NarrowTarget>,
+        args: Vec<lang_ast::reflect::TypeRepr>,
+    },
 }
 
 /// How a [`Op::MakeStructInPlace`] is allowed to reuse its consumed `base` object's allocation.

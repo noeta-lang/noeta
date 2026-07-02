@@ -4389,30 +4389,45 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         // A function type is erased to a head-constructor "is callable" test (params/return dropped),
         // matching the VM's `NarrowTarget::Fn` (type_name `"function"`).
         TypeRef::Fn { .. } => matches!(value, Value::Function(_) | Value::Builtin(_)),
-        TypeRef::Named { name, .. } => match name.as_str() {
-            "int" => matches!(value, Value::Int(_)),
-            "float" => matches!(value, Value::Float(_)),
-            "bool" => matches!(value, Value::Bool(_)),
-            "string" => matches!(value, Value::Str(_)),
-            "bytes" => matches!(value, Value::Bytes(_)),
-            "void" | "unit" => matches!(value, Value::Unit),
-            // Narrowing to the open top is a no-op: every value is a `dyn`.
-            "dyn" | "Any" => true,
-            "List" | "list" => matches!(value, Value::List(_)),
-            "Map" | "map" => matches!(value, Value::Map(..)),
-            "Set" | "set" => matches!(value, Value::Set(_)),
-            // Abstract kind-types match any value of that declaration kind (structs and classes are
-            // both `Object`s, told apart by `TypeDef::is_struct`).
-            "Enum" => matches!(value, Value::Enum(_)),
-            "Struct" => matches!(value, Value::Object(o) if o.def.is_struct),
-            "Class" => matches!(value, Value::Object(o) if !o.def.is_struct),
-            // `Option`/`Result` are enums whose shape name is the type name, like a user enum.
-            other => match value {
-                Value::Object(object) => object.def.name() == other,
-                Value::Enum(enum_value) => enum_value.enum_name == other,
-                _ => false,
-            },
-        },
+        TypeRef::Named { name, args, .. } => {
+            let head_ok = match name.as_str() {
+                "int" => matches!(value, Value::Int(_)),
+                "float" => matches!(value, Value::Float(_)),
+                "bool" => matches!(value, Value::Bool(_)),
+                "string" => matches!(value, Value::Str(_)),
+                "bytes" => matches!(value, Value::Bytes(_)),
+                "void" | "unit" => matches!(value, Value::Unit),
+                // Narrowing to the open top is a no-op: every value is a `dyn`.
+                "dyn" | "Any" => true,
+                "List" | "list" => matches!(value, Value::List(_)),
+                "Map" | "map" => matches!(value, Value::Map(..)),
+                "Set" | "set" => matches!(value, Value::Set(_)),
+                // Abstract kind-types match any value of that declaration kind (structs and classes are
+                // both `Object`s, told apart by `TypeDef::is_struct`).
+                "Enum" => matches!(value, Value::Enum(_)),
+                "Struct" => matches!(value, Value::Object(o) if o.def.is_struct),
+                "Class" => matches!(value, Value::Object(o) if !o.def.is_struct),
+                // `Option`/`Result` are enums whose shape name is the type name, like a user enum.
+                other => match value {
+                    Value::Object(object) => object.def.name() == other,
+                    Value::Enum(enum_value) => enum_value.enum_name == other,
+                    _ => false,
+                },
+            };
+            // A parametrized target (`x is List<int>`, R3) additionally checks its type arguments
+            // against the value's reflected tag; a bare name stays head-only (the widening `x is List`
+            // and the untagged fallback). An untagged value's `eval_type_repr` yields `dyn` arguments,
+            // so the check passes head-only — mirroring the VM's `NarrowTarget::Generic` by construction.
+            if head_ok && !args.is_empty() {
+                let target: Vec<lang_ast::reflect::TypeRepr> = args
+                    .iter()
+                    .map(lang_ast::reflect::typeref_to_repr)
+                    .collect();
+                lang_ast::reflect::narrow_args_match(&target, &eval_type_repr(value))
+            } else {
+                head_ok
+            }
+        }
     }
 }
 

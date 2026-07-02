@@ -4,7 +4,7 @@
 //! the tree-walker and the VM **by construction** — there is no second walk to drift from the first.
 //! It carries no codegen or runtime meaning of its own; it is a read-only view of the program.
 
-use crate::{AttrArg, AttrValue, Attribute, Expr, FieldDecl, Program, Stmt, UnaryOp};
+use crate::{AttrArg, AttrValue, Attribute, Expr, FieldDecl, Program, Stmt, TypeRef, UnaryOp};
 
 /// Everything reflection needs about a program, derived purely from its AST.
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -371,7 +371,7 @@ pub fn materialize_args(
 /// At runtime fidelity (B) generics are erased, so a container's element types are [`TypeRepr::Dyn`]
 /// (`type_of([1])` is `List(Dyn)`); the compile-time full-fidelity path (P2.3) builds a precise
 /// `TypeRepr` from the checker's inferred type and reuses the same construction.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TypeRepr {
     Int,
     Float,
@@ -407,6 +407,35 @@ pub enum TypeRepr {
 }
 
 impl TypeRepr {
+    /// This type's **type arguments** (runtime type-argument reflection, R3), in order: a container's
+    /// element/key/value types, a generic nominal type's arguments. Empty for a scalar or a
+    /// non-generic nominal. Used to compare a narrow target's arguments against a value's reflected tag.
+    pub fn type_args(&self) -> Vec<&TypeRepr> {
+        match self {
+            TypeRepr::List(t) | TypeRepr::Set(t) | TypeRepr::Option(t) => vec![t],
+            TypeRepr::Map(k, v) | TypeRepr::Result(k, v) => vec![k, v],
+            TypeRepr::Enum(_, args)
+            | TypeRepr::Struct(_, args)
+            | TypeRepr::Class(_, args)
+            | TypeRepr::Named(_, args) => args.iter().collect(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// The nominal type name for a declared `struct`/`class`/`enum` or an unknown-kind `Named`, else
+    /// `None`. Two nominal reprs of the same name are the same head **regardless of kind** — a narrow
+    /// target built without kind information is `Named`, while a value's tag knows its kind
+    /// (`Struct`/`Class`/`Enum`), so R3 matching keys on the name, not the kind.
+    fn nominal_name(&self) -> Option<&str> {
+        match self {
+            TypeRepr::Enum(n, _)
+            | TypeRepr::Struct(n, _)
+            | TypeRepr::Class(n, _)
+            | TypeRepr::Named(n, _) => Some(n),
+            _ => None,
+        }
+    }
+
     /// The `Type.*` enum variant name this descriptor constructs — the single source of truth for
     /// the prelude enum's variant naming, shared by both backends and the checker registration.
     pub fn variant_name(&self) -> &'static str {
@@ -432,6 +461,96 @@ impl TypeRepr {
             TypeRepr::Union(_) => "Union",
         }
     }
+}
+
+/// Project a surface [`TypeRef`] onto a reflection [`TypeRepr`], **without kind information** (runtime
+/// type-argument reflection, R3): a declared `struct`/`class`/`enum` maps to [`TypeRepr::Named`]
+/// (the R3 matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
+/// `Struct("Box")`). Built-in scalars/collections map to their lattice variant; a `?T` is `Option<T>`.
+/// Used to turn a narrow target (`x is List<int>`) into the shape compared against a value's tag.
+pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
+    let boxed = |t: &TypeRef| Box::new(typeref_to_repr(t));
+    let dyn_box = || Box::new(TypeRepr::Dyn);
+    match ty {
+        TypeRef::Union { members, .. } => {
+            TypeRepr::Union(members.iter().map(typeref_to_repr).collect())
+        }
+        TypeRef::Optional { inner, .. } => TypeRepr::Option(boxed(inner)),
+        TypeRef::Tuple { .. } => TypeRepr::Dyn,
+        TypeRef::Fn { params, ret, .. } => TypeRepr::Fn(
+            params.iter().map(typeref_to_repr).collect(),
+            Box::new(typeref_to_repr(ret)),
+        ),
+        TypeRef::Named { name, args, .. } => {
+            let arg = |i: usize| args.get(i).map(boxed).unwrap_or_else(dyn_box);
+            match name.as_str() {
+                "int" => TypeRepr::Int,
+                "float" => TypeRepr::Float,
+                "f32" => TypeRepr::F32,
+                "bool" => TypeRepr::Bool,
+                "string" => TypeRepr::Str,
+                "bytes" => TypeRepr::Bytes,
+                "void" | "unit" => TypeRepr::Unit,
+                "dyn" | "Any" => TypeRepr::Dyn,
+                "List" | "list" => TypeRepr::List(arg(0)),
+                "Set" | "set" => TypeRepr::Set(arg(0)),
+                "Map" | "map" => TypeRepr::Map(arg(0), arg(1)),
+                "Option" => TypeRepr::Option(arg(0)),
+                "Result" => TypeRepr::Result(arg(0), arg(1)),
+                _ => TypeRepr::Named(name.clone(), args.iter().map(typeref_to_repr).collect()),
+            }
+        }
+    }
+}
+
+/// Whether one narrow-target type argument (`expected`, from `x is List<int>`) matches a value's
+/// reflected argument (`actual`, from its R1/R2 tag or its head-only classification) — runtime
+/// type-argument reflection, R3. A [`TypeRepr::Dyn`] on **either** side is a wildcard: the target
+/// `<dyn>` matches anything, and an untagged/unknown actual (whose args classify to `Dyn`) is not
+/// rejected — preserving the head-only behavior for values that carry no tag. Otherwise the
+/// constructors must agree (nominal types by **name**, tolerant of kind) and their own arguments
+/// match recursively.
+pub fn arg_matches(expected: &TypeRepr, actual: &TypeRepr) -> bool {
+    use TypeRepr::*;
+    match (expected, actual) {
+        (Dyn, _) | (_, Dyn) => true,
+        (List(e), List(a)) | (Set(e), Set(a)) | (Option(e), Option(a)) => arg_matches(e, a),
+        (Map(ek, ev), Map(ak, av)) | (Result(ek, ev), Result(ak, av)) => {
+            arg_matches(ek, ak) && arg_matches(ev, av)
+        }
+        (Int, Int)
+        | (Float, Float)
+        | (F32, F32)
+        | (Bool, Bool)
+        | (Str, Str)
+        | (Bytes, Bytes)
+        | (Unit, Unit) => true,
+        (Union(es), a) => es.iter().any(|e| arg_matches(e, a)),
+        (e, Union(as_)) => as_.iter().any(|a| arg_matches(e, a)),
+        // A nominal type matches by name (kind-tolerant: a `Named` target vs a `Struct`/`Class`/`Enum`
+        // tag), then argument-wise.
+        (e, a) => match (e.nominal_name(), a.nominal_name()) {
+            (Some(en), Some(an)) if en == an => {
+                let (ea, aa) = (e.type_args(), a.type_args());
+                ea.len() == aa.len() && ea.iter().zip(aa).all(|(x, y)| arg_matches(x, y))
+            }
+            _ => false,
+        },
+    }
+}
+
+/// Whether a parametrized narrow target's arguments (`target_args`, e.g. the `int` of `x is List<int>`)
+/// match a value's reflected type `actual` (its R1/R2 tag, or the head-only classification for an
+/// untagged value) — runtime type-argument reflection, R3. The head constructor is assumed already
+/// matched by the caller's head-only test; this checks the arguments position-wise via [`arg_matches`]
+/// (so an untagged value, whose reflected args are `Dyn`, matches any target — the head-only fallback).
+pub fn narrow_args_match(target_args: &[TypeRepr], actual: &TypeRepr) -> bool {
+    let actual_args = actual.type_args();
+    target_args.len() == actual_args.len()
+        && target_args
+            .iter()
+            .zip(actual_args)
+            .all(|(e, a)| arg_matches(e, a))
 }
 
 /// The `Type` prelude enum's name (the language type `type_of` returns and users match on).

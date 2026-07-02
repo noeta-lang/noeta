@@ -3560,23 +3560,39 @@ fn narrow_target(ty: &TypeRef) -> NarrowTarget {
         // (params/return dropped), matching any function/closure value — like `List` ignoring its
         // element type.
         TypeRef::Fn { .. } => NarrowTarget::Fn,
-        TypeRef::Named { name, .. } => match name.as_str() {
-            "int" => NarrowTarget::Int,
-            "float" => NarrowTarget::Float,
-            "bool" => NarrowTarget::Bool,
-            "string" => NarrowTarget::String,
-            "bytes" => NarrowTarget::Bytes,
-            "void" | "unit" => NarrowTarget::Unit,
-            "dyn" | "Any" => NarrowTarget::Dyn,
-            "List" | "list" => NarrowTarget::List,
-            "Map" | "map" => NarrowTarget::Map,
-            "Set" | "set" => NarrowTarget::Set,
-            "tuple" => NarrowTarget::Tuple,
-            "Enum" => NarrowTarget::AnyEnum,
-            "Struct" => NarrowTarget::AnyStruct,
-            "Class" => NarrowTarget::AnyClass,
-            other => NarrowTarget::Named(other.to_string()),
-        },
+        TypeRef::Named { name, args, .. } => {
+            let head = match name.as_str() {
+                "int" => NarrowTarget::Int,
+                "float" => NarrowTarget::Float,
+                "bool" => NarrowTarget::Bool,
+                "string" => NarrowTarget::String,
+                "bytes" => NarrowTarget::Bytes,
+                "void" | "unit" => NarrowTarget::Unit,
+                "dyn" | "Any" => NarrowTarget::Dyn,
+                "List" | "list" => NarrowTarget::List,
+                "Map" | "map" => NarrowTarget::Map,
+                "Set" | "set" => NarrowTarget::Set,
+                "tuple" => NarrowTarget::Tuple,
+                "Enum" => NarrowTarget::AnyEnum,
+                "Struct" => NarrowTarget::AnyStruct,
+                "Class" => NarrowTarget::AnyClass,
+                other => NarrowTarget::Named(other.to_string()),
+            };
+            // A parametrized target (`List<int>`, `Box<int>`) additionally checks its type arguments
+            // against the value's reflected tag (R3); a bare name (`List`, `Box`, `Struct`) stays the
+            // head-only target, preserving the widening `x is List` and the untagged fallback.
+            if args.is_empty() {
+                head
+            } else {
+                NarrowTarget::Generic {
+                    head: Box::new(head),
+                    args: args
+                        .iter()
+                        .map(lang_ast::reflect::typeref_to_repr)
+                        .collect(),
+                }
+            }
+        }
     }
 }
 

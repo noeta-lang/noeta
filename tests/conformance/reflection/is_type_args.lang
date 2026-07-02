@@ -1,0 +1,61 @@
+// Precise `is` / `as<T>()` over type arguments (runtime type-argument reflection, R3): when a value
+// carries a reflected tag (R1/R2), a parametrized narrow target checks its type arguments — so
+// `x is List<int>` no longer matches a value tagged `List<string>`. A **bare** head (`x is List`)
+// stays head-only (widening), a `<dyn>` argument is a wildcard, and an **untagged** value (whose
+// arguments classify to `dyn`) still matches head-only — the honest "unknown" answer. Both backends
+// consult the tag identically (the VM's `NarrowTarget::Generic`, the tree-walker's `runtime_matches`
+// arg check share `reflect::narrow_args_match`), so `is`/`as` agree across the differential.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: exit 0
+
+struct Box<T> { value: T }
+fn launder(v: dyn): dyn { return v; }
+
+// Whether a `.as<T>()` narrowing succeeded (`some`) or failed (`none`).
+fn present(o: dyn): bool {
+    return match o {
+        some(_) => true,
+        none => false,
+        _ => false,
+    };
+}
+
+xs: dyn = launder([1, 2, 3]);          // tagged List(int)
+b: dyn = launder(Box { value: 5 });    // tagged Struct(Box, [int])
+
+// Precise: the tag's arguments are checked, removing the head-only false positive.
+echo xs is List<int>;                  // true
+echo xs is List<string>;               // false  (head-only would have said true)
+echo b is Box<int>;                    // true
+echo b is Box<string>;                 // false
+
+// Widening: a bare head matches any instance (no arguments to check).
+echo xs is List;                       // true
+echo b is Box;                         // true
+
+// A `<dyn>` argument is a wildcard.
+echo xs is List<dyn>;                  // true
+
+// An untagged value (mutation drops the tag) matches head-only — args cannot be verified.
+zs: dyn = launder([1, 2, 3].set(0, 9));
+echo zs is List<string>;               // true
+
+// `.as<T>()` shares the matcher: a matching parametrization narrows to `some`, a non-matching to `none`.
+echo present(xs.as<List<int>>());      // true
+echo present(xs.as<List<string>>());   // false
+
+// Nested arguments are checked recursively.
+nested: dyn = launder([[1], [2, 3]]);  // List(List(int))
+echo nested is List<List<string>>;     // false
+echo nested is List<List<int>>;        // true
