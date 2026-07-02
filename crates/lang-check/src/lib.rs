@@ -765,19 +765,39 @@ impl Checker {
         let mut reachable = self.destructor_classes.clone();
         loop {
             let mut changed = false;
+            // A field/payload mentioning a **generic parameter** is conservatively relevant: the
+            // parameter could be instantiated with a destructor-bearing type, and the runtime erases
+            // the argument (the backends gate the container-first destructor walk on the value's shape
+            // *name* alone), so a generic container's name must be marked destruct-reachable whenever a
+            // payload mentions a parameter. Substituting each parameter to `dyn` (which is relevant)
+            // before the check achieves exactly that; a concrete field is unaffected.
             for (name, fields) in &self.records {
+                let params = self
+                    .generic_types
+                    .get(name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 if !reachable.contains(name)
-                    && fields.iter().any(|(_, ty)| type_relevant(ty, &reachable))
+                    && fields
+                        .iter()
+                        .any(|(_, ty)| type_relevant(&params_to_dyn(ty, params), &reachable))
                 {
                     reachable.insert(name.clone());
                     changed = true;
                 }
             }
             for (name, variants) in &self.enums {
+                let params = self
+                    .generic_types
+                    .get(name)
+                    .map(Vec::as_slice)
+                    .unwrap_or(&[]);
                 if !reachable.contains(name)
-                    && variants
-                        .iter()
-                        .any(|v| v.fields.iter().any(|ty| type_relevant(ty, &reachable)))
+                    && variants.iter().any(|v| {
+                        v.fields
+                            .iter()
+                            .any(|ty| type_relevant(&params_to_dyn(ty, params), &reachable))
+                    })
                 {
                     reachable.insert(name.clone());
                     changed = true;
@@ -1754,6 +1774,16 @@ impl Checker {
     /// `struct` / `enum` is `Send` iff its elements / fields / payloads are — with a `visited` set so a
     /// recursive value type terminates. `dyn` is conservatively `!Send` (can't prove it isn't a class);
     /// an inference hole (`Unknown`) is permissive (it will resolve; blocking it would be spurious).
+    /// The substitution mapping a declared type's generic parameters to the type arguments a use site
+    /// supplied (`Box<int>` → `{T: int}`) — used to instantiate field/payload types before the `Send`
+    /// check. Empty for a non-generic type or when no arguments are given.
+    fn type_arg_subst(&self, name: &str, args: &[Type]) -> HashMap<String, Type> {
+        self.generic_types
+            .get(name)
+            .map(|params| params.iter().cloned().zip(args.iter().cloned()).collect())
+            .unwrap_or_default()
+    }
+
     fn is_send(&self, ty: &Type, visited: &mut Vec<String>) -> bool {
         match ty {
             Type::Int
@@ -1778,26 +1808,34 @@ impl Checker {
                         return true; // recursive struct — its fields are covered by the outer frame
                     }
                     visited.push(name.clone());
-                    let fields_send = self
-                        .records
-                        .get(name)
-                        .is_none_or(|fs| fs.iter().all(|(_, t)| self.is_send(t, visited)));
-                    let args_send = args.iter().all(|a| self.is_send(a, visited));
+                    // Substitute the type arguments into the field types before checking, so a generic
+                    // value type is `Send` iff its *instantiated* fields are (`Box<int>` → `Send`,
+                    // `Box<Conn>` → `!Send`). Without this a generic struct's field `T` (`Named("T")`)
+                    // classified `!Send` unconditionally, making every generic struct `!Send`.
+                    let subst = self.type_arg_subst(name, args);
+                    let fields_send = self.records.get(name).is_none_or(|fs| {
+                        fs.iter()
+                            .all(|(_, t)| self.is_send(&apply_subst(t, &subst), visited))
+                    });
                     visited.pop();
-                    fields_send && args_send
+                    fields_send
                 }
                 Some(lang_types::TypeKind::Enum) => {
                     if visited.iter().any(|v| v == name) {
                         return true;
                     }
                     visited.push(name.clone());
+                    // Substitute the type arguments into the payload types (as for a struct's fields).
+                    let subst = self.type_arg_subst(name, args);
                     let payloads_send = self.enums.get(name).is_none_or(|vs| {
-                        vs.iter()
-                            .all(|v| v.fields.iter().all(|t| self.is_send(t, visited)))
+                        vs.iter().all(|v| {
+                            v.fields
+                                .iter()
+                                .all(|t| self.is_send(&apply_subst(t, &subst), visited))
+                        })
                     });
-                    let args_send = args.iter().all(|a| self.is_send(a, visited));
                     visited.pop();
-                    payloads_send && args_send
+                    payloads_send
                 }
                 // A built-in `Named` type: the payload-free prelude `Ordering` enum is `Send`. A
                 // channel endpoint (`Sender<T>`/`Receiver<T>`, isolates I.1) is a scheduler-owned id,
@@ -5288,6 +5326,19 @@ fn bind_type_params(
         }
         _ => {}
     }
+}
+
+/// Substitute every generic **type parameter** of a declared type with `dyn` — the conservative form
+/// for destructor-relevance (a parameter could be instantiated with a destructor-bearing type, and the
+/// runtime erases the argument). `dyn` is destruct-relevant, so a field mentioning a parameter (bare
+/// or nested, `T` / `List<T>`) becomes relevant; a concrete field is unchanged. No-op for a
+/// non-generic type (empty `params`).
+fn params_to_dyn(ty: &Type, params: &[String]) -> Type {
+    if params.is_empty() {
+        return ty.clone();
+    }
+    let subst: HashMap<String, Type> = params.iter().map(|p| (p.clone(), Type::Dyn)).collect();
+    apply_subst(ty, &subst)
 }
 
 /// Substitute resolved type parameters into a type, deeply. An unresolved parameter is left as its

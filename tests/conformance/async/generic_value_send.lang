@@ -1,0 +1,23 @@
+// A generic **value** type is `Send` when its instantiated fields/payloads are `Send`: `Box<int>` and
+// `Tree<int>` may cross an isolate boundary because they carry only an `int`. The `Send` check
+// substitutes the type arguments into the fields before deciding — previously it saw only the bare
+// parameter `T` (never `Send`) and over-restrictively rejected *every* generic value type. (A generic
+// container of a `!Send` type — `Box<Conn>` — is still rejected; see `generic_value_not_send.lang`.)
+// expect: stdout "42"
+// expect: stdout "7"
+// expect: exit 0
+
+struct Box<T> { value: T }
+enum Tree<T> { Leaf(T); Empty; }
+
+async fn unbox(b: Box<int>): int { return b.value }
+// `Tree<int>` need only *cross* the boundary to prove it is `Send`; extracting the generic payload is
+// a separate concern, so this returns a constant.
+async fn use_tree(t: Tree<int>): int { return 7 }
+
+concurrent {
+    a = isolate unbox(Box { value: 42 })
+    b = isolate use_tree(Tree.Leaf(1))
+    echo a.await
+    echo b.await
+}

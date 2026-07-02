@@ -1,0 +1,35 @@
+// A **generic** container that owns a class instance must run that instance's `destruct` when the
+// container is dropped — a `struct Box<T>`, a `class Holder<T>`, and an `enum Tree<T>` alike. The
+// container itself has no destructor (only a `class` can); it transitively owns the class value, so
+// dropping it reclaims the value and fires its `destruct`. Previously a generic container's *name*
+// was never marked destruct-reachable (its payload type is the erased parameter `T`), so the runtime —
+// which gates the container-first walk on the shape name — took the fast path and **skipped** the
+// owned destructor. Locals drop in reverse declaration order, so the ids appear 3, 2, 1.
+// expect: stdout "made"
+// expect: stdout "drop 3"
+// expect: stdout "drop 2"
+// expect: stdout "drop 1"
+// expect: exit 0
+
+class Res {
+    pub id: int
+    fn new(n: int): Res { return Res { id: n } }
+    destruct { echo "drop ${id}" }
+}
+
+struct Box<T> { value: T }
+class Holder<T> {
+    item: T
+    fn new(x: T): Holder<T> { return Holder { item: x } }
+}
+enum Tree<T> { Leaf(T); Empty; }
+
+fn main(): void {
+    b = Box { value: Res.new(1) }       // struct owning a class
+    h = Holder.new(Res.new(2))          // class owning a class
+    t = Tree.Leaf(Res.new(3))           // enum owning a class
+    echo "made"
+    // At scope end b/h/t drop in reverse order (t, h, b), each firing its Res's destructor.
+}
+
+main()

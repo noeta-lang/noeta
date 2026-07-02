@@ -1,0 +1,13 @@
+// The `Send` check substitutes type arguments before deciding, so a generic value type instantiated
+// with a `!Send` type is itself `!Send`: `Box<Conn>` carries a `class` (a reference type), so passing
+// it across an isolate boundary is E0042 — exactly as `Box<int>` is *accepted* (see
+// `generic_value_send.lang`). This pins that the substitution rejects the unsound case.
+// expect: error E0042 at 11:9
+// expect: exit 1
+class Conn { pub id: int }
+struct Box<T> { value: T }
+async fn use_box(b: Box<Conn>): int { return 0 }
+concurrent {
+    h = isolate use_box(Box { value: Conn { id: 1 } })
+    echo h.await
+}
