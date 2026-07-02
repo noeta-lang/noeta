@@ -1,0 +1,47 @@
+// Guard against the "missing dispatch arm" class of bug in `==`. Equality is a **total** two-operand
+// operation over the NaN-boxed `Value`, so the VM computes it with a predicate chain (`is_list() &&
+// is_list()`, …) rather than an exhaustive `Payload` match — a kind the chain forgets falls through to
+// a plausible-but-wrong `false` instead of a compile error. Maps were exactly such a hole: no prior
+// corpus program compared two maps, so it stayed latent until reflection R1b surfaced it. This runs
+// one value of **every** kind (and nestings, exercising the recursive `values_equal`/`slices_equal`
+// paths) through `==`, on both backends — so any future hole is a conformance + differential failure.
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+
+struct Point { x: int  y: int }
+enum Color { Red; Green; }
+
+// Scalars.
+echo 1 == 1;
+echo 1.5 == 1.5;
+echo 0.5f32 == 0.5f32;
+echo true == true;
+echo "hi" == "hi";
+
+// Aggregates — the structural comparison paths (list / tuple / set / map / struct / enum).
+echo [1, 2, 3] == [1, 2, 3];
+echo (1, "a", true) == (1, "a", true);
+echo [3, 1, 2].to_set() == [1, 2, 3].to_set();
+echo {"a": 1, "b": 2} == {"b": 2, "a": 1};
+echo Point { x: 1, y: 2 } == Point { x: 1, y: 2 };
+echo Color.Red == Color.Red;
+
+// Nestings — recurse `values_equal`/`slices_equal` through every container-in-container combination.
+echo {"k": [1, 2]} == {"k": [1, 2]};
+echo [Point { x: 1, y: 2 }] == [Point { x: 1, y: 2 }];
+echo (1, [2, 3], {"a": 4}) == (1, [2, 3], {"a": 4});
+echo [{"a": [1]}, {"b": [2]}] == [{"a": [1]}, {"b": [2]}];
