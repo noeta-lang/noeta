@@ -95,7 +95,7 @@ pub enum Value {
     /// A **task handle** (Track A.3b): the tree-walker twin of the VM's `Payload::Handle`. The
     /// `Future<T>` `spawn e` returns, referencing a task by its `(scope index, task index)` in the
     /// interpreter's concurrency-scope stack.
-    Handle(usize, usize),
+    Handle(crate::ScopeId, crate::TaskId),
     /// A **leaf async-read future** (Track A.4c): the tree-walker twin of the VM's
     /// `Payload::AsyncIo`. The `Future<string>` `fs.read_async(path)` returns, carrying the id that
     /// tickets the pending read in the injected [`lang_stdlib::Executor`].
@@ -103,16 +103,16 @@ pub enum Value {
     /// A **channel sender endpoint** (isolates I.1): the tree-walker twin of the VM's
     /// `Payload::Sender`. The `Sender<T>` `channel::<T>(cap)` yields, carrying the channel's index
     /// into the interpreter's channel table; `tx.send(v)`/`tx.close()` dispatch on it.
-    Sender(usize),
+    Sender(crate::ChannelId),
     /// A **channel receiver endpoint** (isolates I.1): the twin of the VM's `Payload::Receiver`;
     /// `rx.recv()` dispatches on it.
-    Receiver(usize),
+    Receiver(crate::ChannelId),
     /// A **leaf channel-send future** (isolates I.1): the twin of the VM's `Payload::ChannelSend`.
     /// `tx.send(v)` produces one, carrying the channel index and the message `v` (held until enqueued).
-    ChannelSend(usize, Rc<Value>),
+    ChannelSend(crate::ChannelId, Rc<Value>),
     /// A **leaf channel-recv future** (isolates I.1): the twin of the VM's `Payload::ChannelRecv`.
     /// `rx.recv()` produces one, carrying the channel index.
-    ChannelRecv(usize),
+    ChannelRecv(crate::ChannelId),
 }
 
 /// The state machine behind a [`Value::Iter`] (Track I) — the tree-walker mirror of the VM's
@@ -792,12 +792,12 @@ impl fmt::Debug for Value {
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
             Value::Timer(deadline) => write!(f, "Timer({deadline})"),
             Value::Pending => write!(f, "Pending"),
-            Value::Handle(scope, task) => write!(f, "Handle({scope}, {task})"),
+            Value::Handle(scope, task) => write!(f, "Handle({}, {})", scope.index(), task.index()),
             Value::AsyncIo(id) => write!(f, "AsyncIo({id})"),
-            Value::Sender(id) => write!(f, "Sender({id})"),
-            Value::Receiver(id) => write!(f, "Receiver({id})"),
-            Value::ChannelSend(id, value) => write!(f, "ChannelSend({id}, {value:?})"),
-            Value::ChannelRecv(id) => write!(f, "ChannelRecv({id})"),
+            Value::Sender(id) => write!(f, "Sender({})", id.index()),
+            Value::Receiver(id) => write!(f, "Receiver({})", id.index()),
+            Value::ChannelSend(id, value) => write!(f, "ChannelSend({}, {value:?})", id.index()),
+            Value::ChannelRecv(id) => write!(f, "ChannelRecv({})", id.index()),
         }
     }
 }

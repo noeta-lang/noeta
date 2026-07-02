@@ -44,7 +44,8 @@ use lang_gc::{collect_trace, release, retain};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
 use lang_value::{
-    Value, apply_binary, apply_binary_wide, apply_unary, compare_primitive, structural_compare,
+    ChannelId, ScopeId, TaskId, Value, apply_binary, apply_binary_wide, apply_unary,
+    compare_primitive, structural_compare,
 };
 
 mod isolate;
@@ -3062,7 +3063,7 @@ impl<'m> Vm<'m> {
                                 continue;
                             }
                             "close" => {
-                                match &mut self.channels[id as usize] {
+                                match &mut self.channels[id.index()] {
                                     Channel::Local { closed, .. } => *closed = true,
                                     Channel::Shared(core) => core.close(),
                                 }
@@ -4050,7 +4051,10 @@ impl<'m> Vm<'m> {
                             result: None,
                             cancelled: false,
                         });
-                        Value::make_handle(scope_idx as u32, task_idx as u32)
+                        Value::make_handle(
+                            ScopeId::from_index(scope_idx),
+                            TaskId::from_index(task_idx),
+                        )
                     };
                     set_reg(&mut frames[top].regs, *dst, handle);
                     frames[top].pc += 1;
@@ -4112,7 +4116,7 @@ impl<'m> Vm<'m> {
                             format!("`channel` capacity must be non-negative, found {cap}"),
                         ));
                     }
-                    let id = self.channels.len() as u32;
+                    let id = ChannelId::from_index(self.channels.len());
                     // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
                     // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
                     // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
@@ -4860,7 +4864,7 @@ impl<'m> Vm<'m> {
         // *reads* the task (the scheduler polls the task itself), so it retains and hands back the
         // stored result. A stale handle (its scope popped) reads as ready-unit, defensively.
         if let Some((si, ti)) = future.handle_parts() {
-            let (si, ti) = (si as usize, ti as usize);
+            let (si, ti) = (si.index(), ti.index());
             return Ok(match self.scopes.get(si).and_then(|s| s.get(ti)) {
                 Some(task) => match task.result {
                     Some(result) => {
@@ -4892,7 +4896,7 @@ impl<'m> Vm<'m> {
         // suspend. `channel_send_parts` hands back the channel id and a **freshly-retained** message —
         // transferred to the buffer on a push, released otherwise. Sending on a closed channel is a bug.
         if let Some((id, msg)) = future.channel_send_parts() {
-            let id = id as usize;
+            let id = id.index();
             match &self.channels[id] {
                 Channel::Local {
                     buffer,
@@ -4962,7 +4966,7 @@ impl<'m> Vm<'m> {
         // `none` once closed and drained, else suspend on an empty open buffer. A dequeued message's
         // reference transfers out of the queue into the `some(..)` wrapper.
         if let Some(id) = future.channel_recv_id() {
-            let id = id as usize;
+            let id = id.index();
             match &self.channels[id] {
                 Channel::Local { buffer, closed, .. } => {
                     if !buffer.is_empty() {
@@ -5051,8 +5055,8 @@ impl<'m> Vm<'m> {
         if let Some((si, ti)) = handle.handle_parts()
             && let Some(task) = self
                 .scopes
-                .get_mut(si as usize)
-                .and_then(|s| s.get_mut(ti as usize))
+                .get_mut(si.index())
+                .and_then(|s| s.get_mut(ti.index()))
             && task.result.is_none()
         {
             task.cancelled = true;
@@ -5088,7 +5092,7 @@ impl<'m> Vm<'m> {
             result: None,
             cancelled: false,
         });
-        Value::make_handle(scope_idx as u32, task_idx as u32)
+        Value::make_handle(ScopeId::from_index(scope_idx), TaskId::from_index(task_idx))
     }
 
     /// The cooperative isolate path: build the future by calling `callee(args)` (a lazy `async fn`

@@ -21,12 +21,14 @@
 //! only ever compared on observable output (`RunResult`), never on representation.
 
 mod heap;
+mod ids;
 mod ops;
 
 pub use heap::{
     CollectorMode, Color, SharedRegion, collector_mode, live_count, live_objects, live_peak,
     reset_peak, set_collector_mode, take_candidates,
 };
+pub use ids::{ChannelId, ScopeId, TaskId};
 pub use ops::{
     OpError, apply_binary, apply_binary_wide, apply_unary, compare_primitive, structural_compare,
 };
@@ -818,17 +820,17 @@ impl Value {
 
     /// A **channel sender endpoint** (isolates I.1): the `Sender<T>` `channel::<T>(cap)` yields,
     /// carrying the channel's id into the backend's channel table. A GC leaf.
-    pub fn make_sender(id: u32) -> Value {
+    pub fn make_sender(id: ChannelId) -> Value {
         heap::alloc(Payload::Sender(id))
     }
 
     /// A **channel receiver endpoint** (isolates I.1). A GC leaf like [`Self::make_sender`].
-    pub fn make_receiver(id: u32) -> Value {
+    pub fn make_receiver(id: ChannelId) -> Value {
         heap::alloc(Payload::Receiver(id))
     }
 
     /// The channel id of a sender endpoint, or `None` if this is not one.
-    pub fn sender_id(self) -> Option<u32> {
+    pub fn sender_id(self) -> Option<ChannelId> {
         if !self.is_pointer() {
             return None;
         }
@@ -839,7 +841,7 @@ impl Value {
     }
 
     /// The channel id of a receiver endpoint, or `None` if this is not one.
-    pub fn receiver_id(self) -> Option<u32> {
+    pub fn receiver_id(self) -> Option<ChannelId> {
         if !self.is_pointer() {
             return None;
         }
@@ -853,19 +855,19 @@ impl Value {
     /// `id` and **retaining its own reference** to the message `value` (like [`Self::make_future`] with
     /// its closure) — held until the message is enqueued or the future is dropped. The caller's own
     /// reference to `value` is released by its normal end-of-life.
-    pub fn make_channel_send(id: u32, value: Value) -> Value {
+    pub fn make_channel_send(id: ChannelId, value: Value) -> Value {
         value.inc_ref();
         heap::alloc(Payload::ChannelSend(id, value))
     }
 
     /// A **leaf channel-recv future** (isolates I.1): `rx.recv()` produces one, carrying the channel id.
-    pub fn make_channel_recv(id: u32) -> Value {
+    pub fn make_channel_recv(id: ChannelId) -> Value {
         heap::alloc(Payload::ChannelRecv(id))
     }
 
     /// The channel id and a freshly-retained owning reference to the queued message of a channel-send
     /// future, or `None` if this is not one. The caller takes ownership of the returned message.
-    pub fn channel_send_parts(self) -> Option<(u32, Value)> {
+    pub fn channel_send_parts(self) -> Option<(ChannelId, Value)> {
         if !self.is_pointer() {
             return None;
         }
@@ -879,7 +881,7 @@ impl Value {
     }
 
     /// The channel id of a channel-recv future, or `None` if this is not one.
-    pub fn channel_recv_id(self) -> Option<u32> {
+    pub fn channel_recv_id(self) -> Option<ChannelId> {
         if !self.is_pointer() {
             return None;
         }
@@ -891,7 +893,7 @@ impl Value {
 
     /// A **task handle** (Track A.3b): the `Future<T>` `spawn e` returns, referencing a task by its
     /// `(scope index, task index)` in the backend's concurrency-scope stack. A GC leaf.
-    pub fn make_handle(scope: u32, task: u32) -> Value {
+    pub fn make_handle(scope: ScopeId, task: TaskId) -> Value {
         heap::alloc(Payload::Handle(scope, task))
     }
 
@@ -901,7 +903,7 @@ impl Value {
     }
 
     /// The `(scope index, task index)` a task handle references, or `None` if this is not a handle.
-    pub fn handle_parts(self) -> Option<(u32, u32)> {
+    pub fn handle_parts(self) -> Option<(ScopeId, TaskId)> {
         if !self.is_pointer() {
             return None;
         }
@@ -2634,10 +2636,10 @@ mod tests {
     fn handle_carries_its_indices_and_frees_cleanly() {
         // Track A.3b: a task handle is a GC leaf holding `(scope, task)` indices; it names itself
         // "future", displays opaquely, and frees as a plain node — leak-clean under miri.
-        let handle = Value::make_handle(2, 5);
+        let handle = Value::make_handle(ScopeId::from_index(2), TaskId::from_index(5));
         assert!(handle.is_future());
         assert!(handle.is_handle());
-        assert_eq!(handle.handle_parts(), Some((2, 5)));
+        assert_eq!(handle.handle_parts(), Some((ScopeId::from_index(2), TaskId::from_index(5))));
         assert_eq!(handle.type_name(), "future");
         assert_eq!(handle.display(), "<future>");
         handle.release(); // frees the node, no leak
@@ -2661,15 +2663,15 @@ mod tests {
     fn channel_endpoints_are_leaves_and_free_cleanly() {
         // Isolates I.1: a sender/receiver endpoint is a GC leaf holding a channel id; it names itself
         // "sender"/"receiver", displays opaquely, and frees as a plain node — leak-clean under miri.
-        let tx = Value::make_sender(3);
-        assert_eq!(tx.sender_id(), Some(3));
+        let tx = Value::make_sender(ChannelId::from_index(3));
+        assert_eq!(tx.sender_id(), Some(ChannelId::from_index(3)));
         assert_eq!(tx.receiver_id(), None);
         assert_eq!(tx.type_name(), "sender");
         assert_eq!(tx.display(), "<sender>");
         tx.release();
 
-        let rx = Value::make_receiver(3);
-        assert_eq!(rx.receiver_id(), Some(3));
+        let rx = Value::make_receiver(ChannelId::from_index(3));
+        assert_eq!(rx.receiver_id(), Some(ChannelId::from_index(3)));
         assert_eq!(rx.type_name(), "receiver");
         assert_eq!(rx.display(), "<receiver>");
         rx.release();
@@ -2690,17 +2692,17 @@ mod tests {
         // (like `make_future`'s closure). Dropping the future must release that reference — no leak,
         // no double-free — which miri verifies. `channel_send_parts` hands back a fresh owning ref.
         let msg = Value::string("hi"); // refcount 1
-        let fut = Value::make_channel_send(5, msg); // retains msg → refcount 2
+        let fut = Value::make_channel_send(ChannelId::from_index(5), msg); // retains msg → refcount 2
         assert!(fut.is_future());
         msg.release(); // drop the caller's original reference → refcount 1 (the future's)
         let (id, borrowed) = fut.channel_send_parts().expect("a channel-send future");
-        assert_eq!(id, 5);
+        assert_eq!(id, ChannelId::from_index(5));
         borrowed.release(); // channel_send_parts retained a fresh ref; balance it
         fut.release(); // frees the future and its remaining message reference — no leak
 
-        let recv = Value::make_channel_recv(5);
+        let recv = Value::make_channel_recv(ChannelId::from_index(5));
         assert!(recv.is_future());
-        assert_eq!(recv.channel_recv_id(), Some(5));
+        assert_eq!(recv.channel_recv_id(), Some(ChannelId::from_index(5)));
         recv.release();
     }
 

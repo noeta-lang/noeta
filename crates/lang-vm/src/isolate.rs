@@ -20,7 +20,7 @@ use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 
 use lang_object::Shape;
-use lang_value::Value;
+use lang_value::{ChannelId, Value};
 
 use crate::Channel;
 
@@ -176,13 +176,13 @@ fn shape_index(value: Value, shapes: &[Rc<Shape>]) -> Option<u32> {
 pub fn marshal(value: Value, shapes: &[Rc<Shape>], channels: &[Channel]) -> Result<Wire, String> {
     // A channel endpoint ships the shared cross-thread channel (I.4c) by cloning its `Arc`.
     if let Some(id) = value.sender_id() {
-        return match channels.get(id as usize) {
+        return match channels.get(id.index()) {
             Some(Channel::Shared(core)) => Ok(Wire::Sender(Arc::clone(core))),
             _ => Err("channel".to_string()),
         };
     }
     if let Some(id) = value.receiver_id() {
-        return match channels.get(id as usize) {
+        return match channels.get(id.index()) {
             Some(Channel::Shared(core)) => Ok(Wire::Receiver(Arc::clone(core))),
             _ => Err("channel".to_string()),
         };
@@ -300,12 +300,12 @@ pub fn rebuild(wire: &Wire, shapes: &[Rc<Shape>], channels: &mut Vec<Channel>) -
         ),
         Wire::Function(proto) => Value::closure(*proto, Vec::new()),
         Wire::Sender(core) => {
-            let id = channels.len() as u32;
+            let id = ChannelId::from_index(channels.len());
             channels.push(Channel::Shared(Arc::clone(core)));
             Value::make_sender(id)
         }
         Wire::Receiver(core) => {
-            let id = channels.len() as u32;
+            let id = ChannelId::from_index(channels.len());
             channels.push(Channel::Shared(Arc::clone(core)));
             Value::make_receiver(id)
         }
@@ -368,14 +368,14 @@ mod tests {
         // rebuilding registers it into the destination's channel table (both isolates share one queue).
         let core = ChannelCore::new(4);
         let src_channels = vec![Channel::Shared(Arc::clone(&core))];
-        let tx = Value::make_sender(0);
+        let tx = Value::make_sender(ChannelId::from_index(0));
         let wire = marshal(tx, &[], &src_channels).expect("a shared endpoint marshals");
         assert!(matches!(&wire, Wire::Sender(c) if Arc::ptr_eq(c, &core)));
         tx.release();
 
         let mut dst_channels: Vec<Channel> = Vec::new();
         let rebuilt = rebuild(&wire, &[], &mut dst_channels);
-        assert_eq!(rebuilt.sender_id(), Some(0));
+        assert_eq!(rebuilt.sender_id(), Some(ChannelId::from_index(0)));
         assert_eq!(dst_channels.len(), 1);
         assert!(matches!(&dst_channels[0], Channel::Shared(c) if Arc::ptr_eq(c, &core)));
         rebuilt.release();
@@ -390,10 +390,10 @@ mod tests {
             capacity: 1,
             closed: false,
         }];
-        let tx = Value::make_sender(0);
+        let tx = Value::make_sender(ChannelId::from_index(0));
         assert_eq!(marshal(tx, &[], &local).unwrap_err(), "channel");
         tx.release();
-        let rx = Value::make_receiver(5); // out of range
+        let rx = Value::make_receiver(ChannelId::from_index(5)); // out of range
         assert_eq!(marshal(rx, &[], &local).unwrap_err(), "channel");
         rx.release();
     }

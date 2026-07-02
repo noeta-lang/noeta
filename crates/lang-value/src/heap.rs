@@ -261,30 +261,31 @@ pub(crate) enum Payload {
     /// clock reaches the deadline. This is the first future that can actually suspend.
     Timer(u64),
     /// A **task handle** (Track A.3b): the `Future<T>` `spawn e` returns. It references a task by its
-    /// `(scope index, task index)` position in the backend's concurrency-scope stack; polling it reads
+    /// [`ScopeId`]/[`TaskId`] position in the backend's concurrency-scope stack; polling it reads
     /// the task's stored result (ready) or reports pending. A GC leaf — the two indices are plain
     /// integers; the task's future/result are owned by the scope, not the handle.
-    Handle(u32, u32),
+    Handle(crate::ScopeId, crate::TaskId),
     /// A **leaf async-read future** (Track A.4c): the `Future<string>` `fs.read_async(path)` returns.
     /// It carries an id ticketing the read in the injected [`lang_stdlib::Executor`] (the sandbox
     /// executor resolves it synchronously; the real executor spawns it on tokio and harvests it in
     /// `advance`). A GC leaf — the id is a plain integer; the pending read lives in the executor.
     AsyncIo(u64),
     /// A **channel sender endpoint** (isolates I.1): the `Sender<T>` `channel::<T>(cap)` yields. It
-    /// carries the channel's id into the backend's channel table; `tx.send(v)`/`tx.close()` dispatch
-    /// on it. A GC leaf — the id is a plain integer; the queue lives in the backend.
-    Sender(u32),
+    /// carries the channel's [`ChannelId`](crate::ChannelId) into the backend's channel table;
+    /// `tx.send(v)`/`tx.close()` dispatch on it. A GC leaf — the id is a plain integer; the queue
+    /// lives in the backend.
+    Sender(crate::ChannelId),
     /// A **channel receiver endpoint** (isolates I.1): the `Receiver<T>` `channel::<T>(cap)` yields.
     /// A GC leaf like [`Self::Sender`]; `rx.recv()` dispatches on it.
-    Receiver(u32),
+    Receiver(crate::ChannelId),
     /// A **leaf channel-send future** (isolates I.1): `tx.send(v)` produces one, carrying the channel
     /// id and **owning one reference** to the message `v` (a GC node like [`Self::Cell`]). Polling it
     /// enqueues `v` when the buffer has room (ready → unit) or reports pending on a full buffer.
-    ChannelSend(u32, Value),
+    ChannelSend(crate::ChannelId, Value),
     /// A **leaf channel-recv future** (isolates I.1): `rx.recv()` produces one, carrying the channel
     /// id. Polling it dequeues the next message (ready → `some(v)`), reports `none` once closed and
     /// drained, or pending on an empty open buffer. A GC leaf — the queued messages live in the backend.
-    ChannelRecv(u32),
+    ChannelRecv(crate::ChannelId),
     /// A **leaf isolate-result future** (isolates I.4b): the `Future<T>` a real-thread `isolate f(args)`
     /// yields, carrying an id into the backend's isolate table (the worker thread's join handle + result
     /// receiver). Polling it harvests the marshalled result once the worker finishes, else pending. A GC

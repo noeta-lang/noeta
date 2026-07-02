@@ -31,8 +31,9 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
 use crate::{
-    Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, IterState, ListRepr, PackedList,
-    RunResult, TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo, compare_primitive,
+    ChannelId, Closure, EnumDef, Eval, FieldSpec, Flow, Interpreter, IterState, ListRepr,
+    PackedList, RunResult, ScopeId, TaskId, TreeWalkBackend, TypeDef, Unwind, Value, VariantInfo,
+    compare_primitive,
 };
 
 /// The flat temporary store for one function activation (or the top level). Indexed by
@@ -1320,7 +1321,10 @@ impl Interpreter {
                     result: None,
                     cancelled: false,
                 });
-                Ok(Value::Handle(scope_idx, task_idx))
+                Ok(Value::Handle(
+                    ScopeId::from_index(scope_idx),
+                    TaskId::from_index(task_idx),
+                ))
             }
             // `isolate f(args)` (isolates I.4b). The tree-walker only ever runs the deterministic
             // sandbox, where an isolate is observationally a cooperative task: build the future by
@@ -1341,7 +1345,10 @@ impl Interpreter {
                     result: None,
                     cancelled: false,
                 });
-                Ok(Value::Handle(scope_idx, task_idx))
+                Ok(Value::Handle(
+                    ScopeId::from_index(scope_idx),
+                    TaskId::from_index(task_idx),
+                ))
             }
             // `channel::<T>(cap)` (isolates I.1): register a new bounded channel and yield its
             // `(Sender, Receiver)` endpoint pair. The message type is checker-only; only the capacity
@@ -1372,8 +1379,8 @@ impl Interpreter {
                     closed: false,
                 });
                 Ok(Value::Tuple(Rc::new(vec![
-                    Value::Sender(id),
-                    Value::Receiver(id),
+                    Value::Sender(ChannelId::from_index(id)),
+                    Value::Receiver(ChannelId::from_index(id)),
                 ])))
             }
             lang_ir::Rvalue::RolesOf { .. } => Ok(self.materialize_roles()),

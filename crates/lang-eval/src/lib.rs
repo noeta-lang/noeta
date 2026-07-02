@@ -19,10 +19,13 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_span::Span;
 
 pub mod drop_audit;
+mod ids;
 mod ir;
 mod leak;
 mod ops;
 mod value;
+
+pub(crate) use ids::{ChannelId, ScopeId, TaskId};
 pub use leak::live_count;
 pub use value::{IterState, ListRepr, Value};
 use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
@@ -2079,7 +2082,7 @@ impl Interpreter {
                 }
                 "close" => {
                     self.expect_std_arity(name, &args, 0, span)?;
-                    self.channels[id].closed = true;
+                    self.channels[id.index()].closed = true;
                     self.channel_progress += 1;
                     return Ok(Value::Unit);
                 }
@@ -3587,7 +3590,7 @@ impl Interpreter {
             // reads as ready-unit, defensively (structured use awaits within the scope).
             Value::Handle(si, ti) => {
                 let (si, ti) = (*si, *ti);
-                match self.scopes.get(si).and_then(|s| s.get(ti)) {
+                match self.scopes.get(si.index()).and_then(|s| s.get(ti.index())) {
                     Some(task) => Ok(task.result.clone()),
                     None => Ok(Some(Value::Unit)),
                 }
@@ -3614,7 +3617,7 @@ impl Interpreter {
             // (E0010) — the receiver would never see it.
             Value::ChannelSend(id, value) => {
                 let id = *id;
-                let chan = &self.channels[id];
+                let chan = &self.channels[id.index()];
                 if chan.closed {
                     return Err(self.runtime_error(
                         DiagnosticCode::Panic,
@@ -3624,7 +3627,7 @@ impl Interpreter {
                 }
                 if chan.buffer.len() < chan.capacity {
                     let value = (**value).clone();
-                    self.channels[id].buffer.push_back(value);
+                    self.channels[id.index()].buffer.push_back(value);
                     self.channel_progress += 1;
                     Ok(Some(Value::Unit))
                 } else {
@@ -3635,10 +3638,10 @@ impl Interpreter {
             // once the channel is closed and drained, else suspend (pending) on an empty open buffer.
             Value::ChannelRecv(id) => {
                 let id = *id;
-                if let Some(value) = self.channels[id].buffer.pop_front() {
+                if let Some(value) = self.channels[id.index()].buffer.pop_front() {
                     self.channel_progress += 1;
                     Ok(Some(builtin_enum("Option", "some", vec![value])))
-                } else if self.channels[id].closed {
+                } else if self.channels[id.index()].closed {
                     Ok(Some(builtin_enum("Option", "none", vec![])))
                 } else {
                     Ok(None)
@@ -3680,7 +3683,10 @@ impl Interpreter {
     /// done for the join. The tree-walker mirror of the VM's `cancel_task`.
     fn cancel_task(&mut self, handle: &Value) {
         if let Value::Handle(si, ti) = handle
-            && let Some(task) = self.scopes.get_mut(*si).and_then(|s| s.get_mut(*ti))
+            && let Some(task) = self
+                .scopes
+                .get_mut(si.index())
+                .and_then(|s| s.get_mut(ti.index()))
             && task.result.is_none()
         {
             task.cancelled = true;
