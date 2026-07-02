@@ -1,0 +1,5 @@
+// P-BITS Tier B: the bitwise/shift operators are integer-only. A non-integer operand (here a `bool`,
+// which uses `&&`/`||`, not `&`) is a static type error (E0043), not a silent coercion.
+// expect: error E0043 at 5:6
+// expect: exit 1
+echo 5 & true

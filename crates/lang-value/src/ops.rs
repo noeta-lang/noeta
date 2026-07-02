@@ -67,9 +67,48 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
         BinaryOp::Identity => Ok(Value::bool(values_identical(left, right))),
         BinaryOp::NotIdentity => Ok(Value::bool(!values_identical(left, right))),
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => compare(op, left, right),
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            bitwise(op, left, right)
+        }
         BinaryOp::And | BinaryOp::Or => {
             unreachable!("logical operators short-circuit and are lowered to branches")
         }
+    }
+}
+
+/// Bitwise/shift operators on `int` (P-BITS Tier B). Both operands must be integers — the checker
+/// enforces this (E0043), so a non-int here is a defensive fallback. Operates on the full signed
+/// i64; `>>` is an **arithmetic** (sign-extending) shift (a logical shift arrives with the unsigned
+/// fixed-width types, Tier W). The shift amount must be in `0..=63` or the program panics
+/// deterministically (both backends), like `div`-by-zero — never the platform-dependent
+/// wrap/UB of a raw over-shift.
+fn bitwise(op: BinaryOp, left: Value, right: Value) -> Result<Value, OpError> {
+    let (Some(a), Some(b)) = (int_operand(left), int_operand(right)) else {
+        return Err(type_mismatch(op, left, right));
+    };
+    match op {
+        BinaryOp::BitAnd => Ok(Value::int(a & b)),
+        BinaryOp::BitOr => Ok(Value::int(a | b)),
+        BinaryOp::BitXor => Ok(Value::int(a ^ b)),
+        BinaryOp::Shl | BinaryOp::Shr => {
+            if !(0..64).contains(&b) {
+                return Err(shift_out_of_range(b));
+            }
+            let n = b as u32;
+            Ok(Value::int(if op == BinaryOp::Shl {
+                a << n
+            } else {
+                a >> n
+            }))
+        }
+        _ => unreachable!("bitwise only handles & | ^ << >>"),
+    }
+}
+
+fn shift_out_of_range(n: i64) -> OpError {
+    OpError {
+        code: DiagnosticCode::Panic,
+        text: format!("shift amount {n} is out of range (must be 0..=63)"),
     }
 }
 

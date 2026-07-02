@@ -41,9 +41,47 @@ pub fn apply_binary(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, 
         BinaryOp::Identity => Ok(Value::Bool(values_identical(left, right))),
         BinaryOp::NotIdentity => Ok(Value::Bool(!values_identical(left, right))),
         BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => compare(op, left, right),
+        BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor | BinaryOp::Shl | BinaryOp::Shr => {
+            bitwise(op, left, right)
+        }
         BinaryOp::And | BinaryOp::Or => {
             unreachable!("logical operators short-circuit and are handled by the interpreter")
         }
+    }
+}
+
+/// Bitwise/shift operators on `int` (P-BITS Tier B) — the tree-walker twin of the VM's `bitwise`;
+/// identical semantics and error text so the differential agrees by construction. Integer-only
+/// (checker-enforced, E0043); `>>` is arithmetic (sign-extending); the shift amount must be in
+/// `0..=63` or the program panics deterministically.
+fn bitwise(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, OpError> {
+    let (Value::Int(a), Value::Int(b)) = (left, right) else {
+        return Err(type_mismatch(op, left, right));
+    };
+    let (a, b) = (*a, *b);
+    match op {
+        BinaryOp::BitAnd => Ok(Value::Int(a & b)),
+        BinaryOp::BitOr => Ok(Value::Int(a | b)),
+        BinaryOp::BitXor => Ok(Value::Int(a ^ b)),
+        BinaryOp::Shl | BinaryOp::Shr => {
+            if !(0..64).contains(&b) {
+                return Err(shift_out_of_range(b));
+            }
+            let n = b as u32;
+            Ok(Value::Int(if op == BinaryOp::Shl {
+                a << n
+            } else {
+                a >> n
+            }))
+        }
+        _ => unreachable!("bitwise only handles & | ^ << >>"),
+    }
+}
+
+fn shift_out_of_range(n: i64) -> OpError {
+    OpError {
+        code: DiagnosticCode::Panic,
+        text: format!("shift amount {n} is out of range (must be 0..=63)"),
     }
 }
 

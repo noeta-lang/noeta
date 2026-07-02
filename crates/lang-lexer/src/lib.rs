@@ -253,10 +253,24 @@ pub enum TokenKind {
     AmpAmp,
     #[token("||")]
     PipePipe,
-    /// A bare `|` — the union-type separator (`int | string`). logos longest-match keeps `||`
-    /// (`PipePipe`) and `|>` (`PipeGt`) intact, so a single `|` only ever appears in type position.
+    /// A bare `|` — the union-type separator (`int | string`) **and** bitwise-OR in expression
+    /// position (P-BITS Tier B). logos longest-match keeps `||` (`PipePipe`) and `|>` (`PipeGt`)
+    /// intact; the type and expression grammars are disjoint, so one token serves both roles.
     #[token("|")]
     Pipe,
+    /// A bare `&` — bitwise-AND on `int` (P-BITS Tier B). logos longest-match keeps `&&` (`AmpAmp`)
+    /// intact, so a single `&` is unambiguous.
+    #[token("&")]
+    Amp,
+    /// `^` — bitwise-XOR on `int` (P-BITS Tier B).
+    #[token("^")]
+    Caret,
+    /// `<<` — left shift on `int` (P-BITS Tier B). logos longest-match takes `<<` over two `<`
+    /// (`Lt`); `<<` never opens a generic (nested generics open `Foo<Bar<`, never adjacent), so this
+    /// is safe. The right shift `>>` is *not* a token — it is composed from two adjacent `Gt` in the
+    /// expression parser so nested generic closes (`List<Map<K, V>>`) keep lexing as two `Gt`.
+    #[token("<<")]
+    Shl,
     #[token("=")]
     Eq,
     #[token("<")]
@@ -376,6 +390,9 @@ impl TokenKind {
             TokenKind::AmpAmp => "AmpAmp",
             TokenKind::PipePipe => "PipePipe",
             TokenKind::Pipe => "Pipe",
+            TokenKind::Amp => "Amp",
+            TokenKind::Caret => "Caret",
+            TokenKind::Shl => "Shl",
             TokenKind::Eq => "Eq",
             TokenKind::Lt => "Lt",
             TokenKind::Gt => "Gt",
@@ -475,6 +492,9 @@ impl TokenKind {
             TokenKind::AmpAmp => "`&&`",
             TokenKind::PipePipe => "`||`",
             TokenKind::Pipe => "`|`",
+            TokenKind::Amp => "`&`",
+            TokenKind::Caret => "`^`",
+            TokenKind::Shl => "`<<`",
             TokenKind::Eq => "`=`",
             TokenKind::Lt => "`<`",
             TokenKind::Gt => "`>`",

@@ -1509,7 +1509,7 @@ where
         // +/- < */% < prefix < postfix (call/member, tightest). Mirrors the original
         // hand-written table.
         atom.pratt((
-            postfix(10, call_args, move |callee, args, e| Expr::Call {
+            postfix(14, call_args, move |callee, args, e| Expr::Call {
                 callee: Box::new(callee),
                 args,
                 span: ctx.to_span(e.span()),
@@ -1520,7 +1520,7 @@ where
             // keywords, so neither collides with the `.ident` member-access postfix below. Binds as
             // tightly as call/member, so `f().await`, `f().await?`, and `f().await.g()` all chain.
             postfix(
-                10,
+                14,
                 just(T::Dot).ignore_then(choice((
                     just(T::AsKw)
                         .ignore_then(type_parser(ctx).delimited_by(just(T::Lt), just(T::Gt)))
@@ -1563,7 +1563,7 @@ where
             // and split on `.` into a chain (`x.0.1` ⟶ index 0 then index 1). Placed before the
             // member-access postfix so `.0` never tries to bind as an identifier member.
             postfix(
-                10,
+                14,
                 just(T::Dot).ignore_then(
                     choice((just(T::IntLit), just(T::FloatLit)))
                         .map_with(move |_, e| ctx.to_span(e.span())),
@@ -1591,7 +1591,7 @@ where
                 },
             ),
             postfix(
-                10,
+                14,
                 just(T::Dot).ignore_then(id),
                 move |receiver, (name, name_span), e| Expr::Member {
                     receiver: Box::new(receiver),
@@ -1603,7 +1603,7 @@ where
             // `receiver[index]` — index access (the `Index` trait / list element access).
             // Binds as tightly as call/member, so `a[i].b` and `f()[0]` chain naturally.
             postfix(
-                10,
+                14,
                 sub.clone()
                     .delimited_by(just(T::LBracket), just(T::RBracket)),
                 move |receiver, index, e| Expr::Index {
@@ -1613,7 +1613,7 @@ where
                 },
             ),
             // `expr?` — error/absence propagation; binds as tightly as call/member.
-            postfix(10, just(T::Question), move |operand, _, e| Expr::Try {
+            postfix(14, just(T::Question), move |operand, _, e| Expr::Try {
                 expr: Box::new(operand),
                 span: ctx.to_span(e.span()),
             }),
@@ -1621,7 +1621,7 @@ where
             // precedence, folded into one pratt entry (chumsky's op-tuple caps at 26). `spawn` binds
             // looser than call/postfix, so `spawn f()` is `spawn (f())`.
             prefix(
-                9,
+                13,
                 choice((
                     just(T::Minus).to(PrefixOp::Neg),
                     just(T::Bang).to(PrefixOp::Not),
@@ -1654,20 +1654,40 @@ where
                     }
                 },
             ),
-            infix(left(8), just(T::Star), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Mul, l, r, e)
-            }),
-            infix(left(8), just(T::Slash), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Div, l, r, e)
-            }),
-            infix(left(8), just(T::Percent), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Rem, l, r, e)
-            }),
-            infix(left(7), just(T::Plus), move |l, _, r, e| {
+            // Multiplicative `* / %` share precedence 12, folded through one `infix` entry (the op
+            // parser tags each token with its `BinaryOp`) to stay under chumsky's max pratt-op arity.
+            infix(
+                left(12),
+                choice((
+                    just(T::Star).to(BinaryOp::Mul),
+                    just(T::Slash).to(BinaryOp::Div),
+                    just(T::Percent).to(BinaryOp::Rem),
+                )),
+                move |l, op, r, e| binary(ctx, op, l, r, e),
+            ),
+            infix(left(11), just(T::Plus), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Add, l, r, e)
             }),
-            infix(left(7), just(T::Minus), move |l, _, r, e| {
+            infix(left(11), just(T::Minus), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Sub, l, r, e)
+            }),
+            // Bitwise operators (P-BITS Tier B), Rust-style precedence: shifts bind just below the
+            // additive tier, then `&`, `^`, `|` — all *above* comparison/equality, so
+            // `flags & MASK == 0` parses as `(flags & MASK) == 0` (avoiding the C footgun). `>>` is
+            // added in a follow-up (composed from two `Gt` so nested generics keep closing correctly).
+            infix(left(10), just(T::Shl), move |l, _, r, e| {
+                binary(ctx, BinaryOp::Shl, l, r, e)
+            }),
+            infix(left(9), just(T::Amp), move |l, _, r, e| {
+                binary(ctx, BinaryOp::BitAnd, l, r, e)
+            }),
+            infix(left(8), just(T::Caret), move |l, _, r, e| {
+                binary(ctx, BinaryOp::BitXor, l, r, e)
+            }),
+            // A bare `|` in expression position is bitwise-OR (the type grammar's union `|` is a
+            // disjoint context, parsed by `type_parser`, so there is no conflict).
+            infix(left(7), just(T::Pipe), move |l, _, r, e| {
+                binary(ctx, BinaryOp::BitOr, l, r, e)
             }),
             infix(left(6), just(T::Tilde), move |l, _, r, e| {
                 binary(ctx, BinaryOp::Concat, l, r, e)
@@ -1686,18 +1706,18 @@ where
                 inclusive: true,
                 span: ctx.to_span(e.span()),
             }),
-            infix(left(5), just(T::Lt), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Lt, l, r, e)
-            }),
-            infix(left(5), just(T::LtEq), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Le, l, r, e)
-            }),
-            infix(left(5), just(T::Gt), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Gt, l, r, e)
-            }),
-            infix(left(5), just(T::GtEq), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Ge, l, r, e)
-            }),
+            // Ordering comparisons `< <= > >=` share precedence 5, folded through one `infix` entry
+            // (op parser tags each token) to stay under chumsky's max pratt-op arity.
+            infix(
+                left(5),
+                choice((
+                    just(T::LtEq).to(BinaryOp::Le),
+                    just(T::GtEq).to(BinaryOp::Ge),
+                    just(T::Lt).to(BinaryOp::Lt),
+                    just(T::Gt).to(BinaryOp::Gt),
+                )),
+                move |l, op, r, e| binary(ctx, op, l, r, e),
+            ),
             // The four equality/identity operators share precedence 4; they fold through one
             // `infix` entry (the op-parser tags each token with its `BinaryOp`) to stay under
             // chumsky's max pratt-ops tuple arity. `==`/`!=` are structural-or-`Equatable`;
@@ -3237,6 +3257,29 @@ mod tests {
             parsed.diagnostics
         );
         parsed.program.to_pretty_string()
+    }
+
+    #[test]
+    fn parses_bitwise_operators_alongside_unions_and_nested_generics() {
+        // P-BITS Tier B: the bitwise operators (`& | ^ <<`) parse in expression position, and crucially
+        // the reused `|` token and the `Lt`/`Gt` tokens still parse union *types* and nested generic
+        // closes (`List<int>>`) — the design's headline hazard. All in one program, no diagnostics.
+        let parsed = parse_str(
+            "a = 5 & 3 | 0xF0 ^ 0b1010\nb = 1 << 4\nfn f(x: int | string): int { return 0 }\nm: Map<string, List<int>> = {}\n",
+        );
+        assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // Precedence sanity via the pretty tree: `5 & 3 | 0xF0 ^ 0b1010` groups as
+        // `(5 & 3) | (0xF0 ^ 0b1010)` — `&`/`^` bind tighter than `|` (Rust-style), so the *outermost*
+        // binary of `a` is `|`. The pretty printer renders the root op on its own `(binary "op"` line.
+        let pretty = parsed.program.to_pretty_string();
+        let first_binary = pretty
+            .lines()
+            .find(|l| l.trim_start().starts_with("(binary"))
+            .unwrap_or_default();
+        assert!(
+            first_binary.contains("(binary \"|\""),
+            "the outermost operator of `a` should be bitwise-or (`&`/`^` bind tighter), got: {first_binary}"
+        );
     }
 
     #[test]

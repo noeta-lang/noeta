@@ -1,0 +1,5 @@
+// P-BITS Tier B: a shift amount outside `0..=63` is a deterministic runtime panic (both backends),
+// never the platform-dependent wrap/UB of a raw over-shift. Reuses the E0010 panic path.
+// expect: error E0010 at 5:6
+// expect: exit 1
+echo 1 << 64

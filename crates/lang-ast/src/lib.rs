@@ -1206,6 +1206,19 @@ pub enum BinaryOp {
     Ge,
     And,
     Or,
+    /// Bitwise AND `&` on `int` (P-BITS Tier B). Integer-only — `&&` remains the boolean operator.
+    BitAnd,
+    /// Bitwise OR `|` on `int` (P-BITS Tier B). Reuses the `Pipe` token, which until now only
+    /// appeared in *type* position (declared unions); the type and expression grammars are disjoint,
+    /// so this is unambiguous.
+    BitOr,
+    /// Bitwise XOR `^` on `int` (P-BITS Tier B).
+    BitXor,
+    /// Left shift `<<` on `int` (P-BITS Tier B).
+    Shl,
+    /// Right shift `>>` on `int` (P-BITS Tier B) — arithmetic (sign-extending) on the signed `int`;
+    /// a logical (zero-fill) shift arrives with the unsigned fixed-width types (Tier W).
+    Shr,
 }
 
 impl BinaryOp {
@@ -1227,6 +1240,11 @@ impl BinaryOp {
             BinaryOp::Ge => ">=",
             BinaryOp::And => "&&",
             BinaryOp::Or => "||",
+            BinaryOp::BitAnd => "&",
+            BinaryOp::BitOr => "|",
+            BinaryOp::BitXor => "^",
+            BinaryOp::Shl => "<<",
+            BinaryOp::Shr => ">>",
         }
     }
 
@@ -1252,7 +1270,14 @@ impl BinaryOp {
             | BinaryOp::Gt
             | BinaryOp::Ge
             | BinaryOp::And
-            | BinaryOp::Or => None,
+            | BinaryOp::Or
+            // Bitwise/shift operators are not user-overloadable in v1 (a `Bits` trait is a later
+            // option); they have fixed integer semantics.
+            | BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => None,
         }
     }
 

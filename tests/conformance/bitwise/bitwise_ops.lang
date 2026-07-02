@@ -1,0 +1,28 @@
+// P-BITS Tier B: bitwise AND/OR/XOR and left-shift on `int`, with hex/binary/octal literals and `_`
+// separators. Precedence is Rust-style — the bitwise ops bind *above* comparison/equality, so
+// `flags & MASK == 0` parses as `(flags & MASK) == 0` (not the C footgun), and shifts bind just below
+// `+`/`-`. Both backends route through the shared `apply_binary`, so the differential agrees.
+// expect: stdout "1"
+// expect: stdout "255"
+// expect: stdout "6"
+// expect: stdout "16"
+// expect: stdout "true"
+// expect: stdout "8"
+// expect: stdout "48"
+// expect: stdout "63"
+// expect: stdout "5"
+// expect: stdout "0"
+// expect: exit 0
+echo 5 & 3                       // 0b101 & 0b011 = 0b001
+echo 0xF0 | 0x0F                 // 240 | 15 = 255
+echo 0b1100 ^ 0b1010             // 0b0110 = 6
+echo 1 << 4                      // 16
+
+echo 5 & 3 == 1                  // (5 & 3) == 1 — bitwise binds tighter than `==`
+echo 1 << 2 + 1                  // 1 << (2+1) — shift binds looser than `+`
+echo 2 + 1 << 4                  // (2+1) << 4 = 48
+echo 0xFF & 0x0F | 0x30          // (0xFF & 0x0F) | 0x30 — `&` tighter than `|`
+
+// Bit idioms: set/test a bit in a flag word.
+echo (1 << 2) | (1 << 0)         // set bits 2 and 0 → 0b101 = 5
+echo (0b111 & (1 << 3))          // test bit 3 in 0b111 → 0

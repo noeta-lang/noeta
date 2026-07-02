@@ -171,6 +171,10 @@ pub enum DiagnosticCode {
     /// otherwise not `Send`, or `isolate` is applied to something that is not a direct call. Only value
     /// types (`struct`/primitives/`bytes`/tuples/enums and `Send` containers) may cross.
     NotSend,
+    /// A bitwise or shift operator (`& | ^ << >>`) was applied to a non-integer operand (P-BITS
+    /// Tier B). These operators are integer-only — `bool` uses `&&`/`||`, and there is no bitwise
+    /// overload for other types in v1.
+    NonIntegerBitwise,
 }
 
 impl DiagnosticCode {
@@ -219,6 +223,7 @@ impl DiagnosticCode {
         DiagnosticCode::AsyncMisuse,
         DiagnosticCode::OrphanSpawn,
         DiagnosticCode::NotSend,
+        DiagnosticCode::NonIntegerBitwise,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -267,6 +272,7 @@ impl DiagnosticCode {
             DiagnosticCode::AsyncMisuse => "E0040",
             DiagnosticCode::OrphanSpawn => "E0041",
             DiagnosticCode::NotSend => "E0042",
+            DiagnosticCode::NonIntegerBitwise => "E0043",
         }
     }
 

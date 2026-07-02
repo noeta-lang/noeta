@@ -3670,6 +3670,27 @@ impl Checker {
                 }
                 Type::Bool
             }
+            // Bitwise/shift operators (P-BITS Tier B) are integer-only → `int`. Each operand must be
+            // `int` (a `dyn`/hole defers); anything else is E0043 — `bool` uses `&&`/`||`, and there
+            // is no bitwise overload in v1.
+            BinaryOp::BitAnd
+            | BinaryOp::BitOr
+            | BinaryOp::BitXor
+            | BinaryOp::Shl
+            | BinaryOp::Shr => {
+                let ok = |t: &Type| matches!(t, Type::Int) || t.defers_to_runtime();
+                if !ok(&lt) || !ok(&rt) {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::NonIntegerBitwise,
+                        span,
+                        format!(
+                            "`{}` requires integer operands, but found `{lt}` and `{rt}`",
+                            op.symbol(),
+                        ),
+                    ));
+                }
+                Type::Int
+            }
         }
     }
 
