@@ -103,10 +103,25 @@ table and carry a `u32` id instead of an `Rc` — deferred; correctness first.)
     (`Holder { item: x }`, `x: T`) reflects `Holder<dyn>`, never the param name `T`; a direct literal
     the checker infers (`Box { value: 5 }` → `Box<int>`) is unaffected. Conformance 418, differential
     408/0-skipped/agree, leak 0 both, miri clean. Test `reflection/runtime_type_args_generic.lang`.
-  - **R2b — generic enum tags** *(next)*. Enum-variant construction is a separate expression path (not
-    `Expr::Object`), so R0 doesn't record it and generic enums currently reflect head-only
-    (`Enum("Tree", [])`). Record the variant-construction site + tag the `MakeEnum` value. Consistent
-    across backends today (neither tags enums), so no divergence — just a fidelity gap to close.
+  - **R2b.1 — generic enum type-argument INFERENCE DONE** (`c39f28a`). `Tree.Leaf(5)` now types as
+    `Tree<int>` (was `Tree<>`): `enum_construction_type` unifies the variant's declared payload types
+    against the argument types (reusing `bind_type_params`), filling unpinned params with `dyn`; a
+    payload-free generic variant (`Tree.Empty`) infers `dyn`. Refines the **static** type → the static
+    `type_of` path recovers `Enum("Tree",[Int])` for a **non-laundered** value (the common case), on
+    both backends. Prereq: the variant payload types were never captured (`VariantInfo.fields` is
+    `Unknown` for a positional payload — its type is parsed into the `Param`'s *name*); a new
+    `enum_variant_payloads` map records the accurate types (via `variant_field_type`) without touching
+    the `Unknown`-tolerant destructor-relevance/`Send` readers of `VariantInfo.fields`. Conformance 420.
+    Test `reflection/enum_type_args.lang`.
+  - **R2b.2 — runtime enum tag (laundered case) DEFERRED.** Only adds `type_of(launder(Tree.Leaf(5)))`
+    → `Tree<int>` (vs head-only today). Deferred because: (a) it is the **rarest** case (launder an enum
+    through `dyn`, then reflect it); (b) enum construction has **no clean IR node** — the value is built
+    by `Op::MakeEnum` at several compiler sites (payload via `lower_method`→`make_enum`, nullary via the
+    member path, plus the Option/Result builtins) reinterpreted from generic call/member rvalues, and
+    the tree-walker reinterprets too, so threading a tag means span-matching through that shared
+    machinery + `EnumValue` churn; (c) it is **consistent across backends today** (both head-only), so
+    it is a fidelity gap, not a divergence. Do it if a use case needs it, or once enum construction gets
+    a dedicated IR node.
 - **R3 — precise `is` / `as` DONE** (`6b313d7`). The narrowing matcher consults the operand's tag:
   `x is List<int>` / `x is Box<int>` / `.as<…>()` check arguments when tagged; untagged/`dyn`/bare-head
   (`is List`) stays head-only. Removes the `is List<string>` false positive. **Additive** — the existing
