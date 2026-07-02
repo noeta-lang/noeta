@@ -1,6 +1,21 @@
 # Convert stringly-typed trait dispatch to the `BuiltinTrait` enum
 
-Status: todo
+Status: done (`0a57be1` → `fb516f9`)
+
+**Done in three commits.** `BuiltinTrait` was a *struct*, not an enum, so step 1
+was to convert it: (1) `0a57be1` made it a **fieldless enum** with per-variant
+metadata behind one authoritative `info()` match (`lookup` → `from_name`, field
+access → method calls, `operator_trait` returns it by value); (2) `ccf7e75`
+threaded it through the satisfaction path — `trait_impls: HashMap<String,
+HashSet<BuiltinTrait>>` (mapped at the `record_trait_impls` boundary),
+`satisfies`/`builtin_satisfies`/`operand_satisfies_operator`/`unbounded_type_param`/
+`report_operator_error`/`required_operator_trait` take/return `BuiltinTrait`, and
+`builtin_satisfies` matches the enum **exhaustively** (no `_` arm); (3) `fb516f9`
+added `Type::is_arith_numeric()` (IntN-inclusive, distinct from `is_numeric`) to
+dedup the numeric sets and closed the private-field `verb: &str` into a
+`FieldAccess` enum. Left the single `json`/`parse` special-case (one guarded
+check, not a dispatch table). 189 checker tests + differential 417/0 unchanged,
+clippy/fmt clean.
 
 `lang-types` already exports a `BuiltinTrait` enum (with `BUILTIN_TRAITS`,
 `operator_trait`, …), yet the checker dispatches on trait **name strings**
@@ -65,13 +80,13 @@ coverage — the whole point).
 
 ## Checklist
 
-- [ ] `BuiltinTrait::from_name` (if not already present) + one parse boundary
-- [ ] `trait_impls` keyed by `BuiltinTrait`; `record_trait_impls` maps at the edge
-- [ ] `satisfies`/`builtin_satisfies`/`operand_satisfies_operator`/`check_trait_impl`
-      take `BuiltinTrait`
-- [ ] `Type::is_arith_numeric()` helper (IntN-inclusive) removes the numeric-set dup
-- [ ] (optional) module-dispatch + private-field-`verb` enums
-- [ ] 189 checker tests green; differential 417/0, backends agree; clippy/fmt clean
+- [x] `BuiltinTrait::from_name` + one parse boundary (plus `BuiltinTrait` is now a fieldless enum)
+- [x] `trait_impls` keyed by `BuiltinTrait`; `record_trait_impls` maps at the edge
+- [x] `satisfies`/`builtin_satisfies`/`operand_satisfies_operator`/`unbounded_type_param`/
+      `report_operator_error`/`required_operator_trait` take/return `BuiltinTrait`
+- [x] `Type::is_arith_numeric()` helper (IntN-inclusive) removes the numeric-set dup
+- [x] (optional) private-field-`verb` → `FieldAccess` enum (module-dispatch left as-is: one guarded check)
+- [x] 189 checker tests green; differential 417/0, backends agree; clippy/fmt clean
 
 ## Definition of done
 
