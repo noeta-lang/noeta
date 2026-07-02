@@ -4127,7 +4127,10 @@ impl Checker {
                 // through a trait at runtime — so both are left lenient; only the closed primitives
                 // are flagged.
                 if matches!(ret, Type::Unknown)
-                    && matches!(recv, Type::Int | Type::Float | Type::Bool | Type::Unit)
+                    && matches!(
+                        recv,
+                        Type::Int | Type::IntN { .. } | Type::Float | Type::Bool | Type::Unit
+                    )
                 {
                     self.diags.push(Diagnostic::error(
                         DiagnosticCode::TypeMismatch,

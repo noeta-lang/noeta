@@ -271,11 +271,24 @@ how untyped literals in an `i64`-typed context coerce (same in-range coercion as
   div-by-zero errors), miri-clean (freeing the boxed `i64::MAX` result). Conformance 403
   (types/fixed_width_ordering_division + 2 E0044 diagnostics), differential 393 / 0-skipped / backends
   agree, leak residency 0 both, clippy + fmt clean, miri clean over the wide path.
-- **W4 — conversions & casts.** Explicit, total, and visible: `u8.to_u32()` (widen, always safe),
-  `u32.to_u8()` (truncate — wrapping, named so), `int.to_u8()`/`u8.to_int()`, `checked_to_u8(): u8?`.
-  Decide the surface (`as`-cast vs methods); `as` is already a keyword (S6 narrowing) — reusing it for
-  numeric casts is possible but overloads its meaning, so **recommend conversion *methods*** and keep
-  `as` for type-narrowing. Implicit conversion → **E0036**.
+- **W4 — conversions & casts. ✅ DONE.** Explicit, total conversion **methods** (kept `as` for
+  type-narrowing, per the recommendation): `to_u8`/`to_u16`/`to_u32`/`to_u64`/`to_i8`/`to_i16`/
+  `to_i32`/`to_i64`/`to_int`, on both `int` and any `IntN`. **Erasure makes every conversion one
+  `mask_to_width` into the *destination* width** — because the erased i64 is already sign/zero-extended
+  for its source type, re-masking into the target yields exactly Rust's `as` cast (widen = safe, narrow
+  = wrapping truncation, cross-signedness = bit reinterpretation). Implemented as a single new
+  `IntMethod::Convert { signed, bits }` variant (name-decoded in `lang-stdlib`; `to_int`/`to_i64` share
+  the signed-64 identity at runtime, the checker keeps their static types distinct via a name→`Type`
+  decoder using `lang_types::parse_int_width`). **Zero backend changes**: both VM and tree-walker
+  already route int-receiver methods through the shared `int_method`, and an `IntN` receiver *is* an
+  erased `int` value at runtime, so conversions dispatch there automatically. Checker: `method_return`/
+  `method_params` now serve `Type::IntN` the same surface as `Type::Int` (conversions + the B4 bit
+  intrinsics). Composes with W2/W3 (`300u16.to_u8() + 1u8` → 45). **No new diagnostic code** — a bad
+  arity/arg reuses the existing method-call checks; there is no implicit conversion to reject (mixed
+  width already E0044 from W2/W3, and these methods are how you satisfy its "convert explicitly").
+  **Deferred:** the range-*checked* form `checked_to_u8(): u8?` (returns an optional — needs the
+  none-on-overflow path; a small follow-on). Conformance 404 (types/fixed_width_conversions),
+  differential 394 / 0-skipped / backends agree, leak residency 0 both, clippy + fmt clean.
 - **W5 — logical shift + exact-width intrinsics.** Now `>>` on an unsigned width is **logical**
   (zero-fill); the popcount-class intrinsics (B4) become width-exact (`(1u8).leading_zeros() == 7`).
   Re-point the B4 methods to consult width.

@@ -89,7 +89,9 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         return Some(Type::Named("Ordering".to_string(), vec![]));
     }
     match receiver {
-        Type::Int => int_method(name),
+        // A fixed-width integer exposes the same method surface as `int` (Tier W4): both are erased
+        // to the i64 word at runtime, so the bit intrinsics and conversions apply uniformly.
+        Type::Int | Type::IntN { .. } => int_method(name),
         Type::String => string_method(name),
         Type::List(elem) => list_method(name, elem),
         Type::Set(elem) => set_method(name, elem),
@@ -170,10 +172,29 @@ fn bytes_method(name: &str) -> Option<Type> {
     })
 }
 
-/// The bit-manipulation intrinsics on `int` (P-BITS Tier B4) — all return `int` (`rotate_*` take an
-/// `int` amount; the rest take none). The method set is the shared `lang_stdlib::IntMethod` enum.
+/// The methods on `int` (and, identically, any fixed-width `IntN`): the bit-manipulation intrinsics
+/// (P-BITS Tier B4 — all return `int`; `rotate_*` take an `int`, the rest none) and the total
+/// numeric conversions (Tier W4 — `to_u8`/`to_i32`/…/`to_int`, each returning its destination type).
+/// The method set is the shared `lang_stdlib::IntMethod` enum, so a bad arity is caught statically.
 fn int_method(name: &str) -> Option<Type> {
+    // A conversion carries a destination type distinct from `int`; the bit intrinsics all return `int`.
+    if let Some(t) = int_conversion_return(name) {
+        return Some(t);
+    }
     lang_stdlib::IntMethod::from_name(name).map(|_| Type::Int)
+}
+
+/// The destination type of a `to_<type>` conversion method (Tier W4), or `None` if `name` is not a
+/// conversion. `to_int` yields the platform `int`; `to_i8`/`to_u32`/… their fixed-width type. The
+/// checker decodes names to *types* (unlike the runtime `IntMethod::Convert`, it must tell `to_int`
+/// from `to_i64`); shared by the `int` and `IntN` method typing.
+fn int_conversion_return(name: &str) -> Option<Type> {
+    let rest = name.strip_prefix("to_")?;
+    if rest == "int" {
+        return Some(Type::Int);
+    }
+    let (signed, bits) = lang_types::parse_int_width(rest)?;
+    Some(Type::IntN { signed, bits })
 }
 
 fn string_method(name: &str) -> Option<Type> {
@@ -243,7 +264,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         return Some(vec![Type::Dyn]); // compares against any value
     }
     match receiver {
-        Type::Int => int_params(name),
+        Type::Int | Type::IntN { .. } => int_params(name),
         Type::String => string_params(name),
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),

@@ -450,6 +450,13 @@ pub enum IntMethod {
     ReverseBits,
     /// `swap_bytes()` → the value with its byte order reversed (endianness swap).
     SwapBytes,
+    /// A total, explicit numeric conversion (Tier W4): `to_u8`/`to_i32`/…/`to_int` on an `int` or a
+    /// fixed-width integer. Because every fixed-width value is an erased i64 already sign/zero-extended
+    /// for its *source* type, the conversion to any destination is a single [`mask_to_width`] into the
+    /// destination's `(signed, bits)` — matching Rust's `as` cast (widen = safe, narrow = wrapping
+    /// truncation, cross-signedness = bit reinterpretation). `to_int` and `to_i64` both carry
+    /// `(true, 64)` (identical at runtime; the checker keeps their static types distinct).
+    Convert { signed: bool, bits: u8 },
 }
 
 impl IntMethod {
@@ -463,12 +470,39 @@ impl IntMethod {
             "rotate_right" => IntMethod::RotateRight,
             "reverse_bits" => IntMethod::ReverseBits,
             "swap_bytes" => IntMethod::SwapBytes,
-            _ => return None,
+            _ => return Self::conversion_from_name(name),
         })
     }
 
+    /// Decode a `to_<type>` conversion method name into its destination `(signed, bits)`. `to_int`
+    /// is the i64-signed identity; otherwise the suffix is an `i8`/`u32`/… spelling. Kept here (not
+    /// in `lang-types`) so `lang-stdlib` stays dependency-free; the checker decodes names to *types*
+    /// separately (it must tell `to_int` from `to_i64`, which share a runtime `Convert`).
+    fn conversion_from_name(name: &str) -> Option<IntMethod> {
+        let rest = name.strip_prefix("to_")?;
+        if rest == "int" {
+            return Some(IntMethod::Convert {
+                signed: true,
+                bits: 64,
+            });
+        }
+        let signed = match rest.as_bytes().first()? {
+            b'i' => true,
+            b'u' => false,
+            _ => return None,
+        };
+        let bits = match &rest[1..] {
+            "8" => 8,
+            "16" => 16,
+            "32" => 32,
+            "64" => 64,
+            _ => return None,
+        };
+        Some(IntMethod::Convert { signed, bits })
+    }
+
     /// The number of arguments the method takes: `rotate_left`/`rotate_right` take one shift amount;
-    /// the rest take none.
+    /// the rest (including the `Convert` conversions) take none.
     pub fn arity(self) -> usize {
         match self {
             IntMethod::RotateLeft | IntMethod::RotateRight => 1,
@@ -491,6 +525,9 @@ pub fn int_method(recv: i64, method: IntMethod, arg: i64) -> i64 {
         IntMethod::RotateRight => recv.rotate_right((arg as u64 & 63) as u32),
         IntMethod::ReverseBits => recv.reverse_bits(),
         IntMethod::SwapBytes => recv.swap_bytes(),
+        // Total conversion (Tier W4): the erased i64 is already correctly extended for its source
+        // type, so re-masking into the destination width yields the `as`-cast result in one step.
+        IntMethod::Convert { signed, bits } => mask_to_width(recv, signed, bits),
     }
 }
 
@@ -682,6 +719,52 @@ mod tests {
             int_method(1, IntMethod::RotateLeft, 64),
             int_method(1, IntMethod::RotateLeft, 0)
         );
+    }
+
+    #[test]
+    fn conversions_resolve_and_cast_like_rust_as() {
+        // Name resolution: `to_int` and every `to_<width>` decode to a `Convert`; `to_int`/`to_i64`
+        // share the signed-64 identity; unknown / non-conversion `to_*` do not resolve.
+        assert_eq!(
+            IntMethod::from_name("to_u8"),
+            Some(IntMethod::Convert {
+                signed: false,
+                bits: 8
+            })
+        );
+        assert_eq!(
+            IntMethod::from_name("to_int"),
+            IntMethod::from_name("to_i64")
+        );
+        assert_eq!(IntMethod::from_name("to_u7"), None);
+        assert_eq!(IntMethod::from_name("to_bytes"), None);
+        assert_eq!(
+            IntMethod::Convert {
+                signed: false,
+                bits: 8
+            }
+            .arity(),
+            0
+        );
+
+        // Computation matches `x as T`: widen (safe), narrow (truncate), cross-signedness (reinterpret).
+        let u8 = IntMethod::Convert {
+            signed: false,
+            bits: 8,
+        };
+        let i8 = IntMethod::Convert {
+            signed: true,
+            bits: 8,
+        };
+        let i32 = IntMethod::Convert {
+            signed: true,
+            bits: 32,
+        };
+        assert_eq!(int_method(200, u8, 0), 200); // 200u8 as u8
+        assert_eq!(int_method(300, u8, 0), 44); // 300 as u8 (truncate)
+        assert_eq!(int_method(200, i8, 0), -56); // 200u8 as i8 (reinterpret)
+        assert_eq!(int_method(-56, u8, 0), 200); // -56i8 as u8 (reinterpret)
+        assert_eq!(int_method(4000000000, i32, 0), -294967296); // 4e9u32 as i32
     }
 
     #[test]

@@ -1,0 +1,45 @@
+// Tier W4: total, explicit numeric conversions between `int` and the fixed-width types, and between
+// widths — `to_u8`/`to_i32`/…/`to_int`. Because every fixed-width value is an erased i64 already
+// extended for its source type, each conversion is a single re-mask into the destination width, i.e.
+// exactly a Rust `as` cast: widening is safe, narrowing wraps (truncates), and crossing signedness
+// reinterprets the bit pattern. Total (never fails) — a range-checked form arrives later. Both
+// backends dispatch the conversion through the shared `int_method`, so the differential pins them.
+// expect: stdout "200"
+// expect: stdout "44"
+// expect: stdout "-56"
+// expect: stdout "200"
+// expect: stdout "-294967296"
+// expect: stdout "200"
+// expect: stdout "-5"
+// expect: stdout "251"
+// expect: stdout "44"
+// expect: stdout "-1"
+// expect: stdout "45"
+// expect: exit 0
+
+// Widening is value-preserving.
+echo 200u8.to_u32()        // 200
+
+// Narrowing truncates (mod 2^bits).
+echo 300u16.to_u8()        // 300 mod 256 = 44
+
+// Crossing signedness reinterprets the two's-complement bit pattern.
+echo 200u8.to_i8()         // 200 -> -56
+echo (-56i8).to_u8()       // -56 -> 200
+
+// A `u32` past the `i32` range becomes negative.
+echo 4000000000u32.to_i32()  // -294967296
+
+// Fixed-width -> `int` is the erased word (widening for small widths).
+echo 200u8.to_int()        // 200
+echo (-5i8).to_int()       // -5
+
+// `int` -> fixed width wraps like the width's arithmetic.
+echo (-5).to_u8()          // -5 mod 256 = 251
+echo 300.to_u8()           // 44
+
+// `u64` past bit 63 -> `int` (i64) is the same negative erased word.
+echo 18446744073709551615u64.to_int()   // -1
+
+// Conversion composes with fixed-width arithmetic: narrow, then add same-width.
+echo 300u16.to_u8() + 1u8  // 44 + 1 = 45

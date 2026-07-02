@@ -1,0 +1,6 @@
+// Tier W4: a fixed-width integer exposes the same closed method surface as `int` (the bit intrinsics
+// and the `to_<type>` conversions), so an unknown method is rejected statically — with the real width
+// in the message — rather than deferred to a runtime "no method" error. `to_u9` is not a valid width.
+// expect: error E0007 at 6:6
+// expect: exit 1
+echo 200u8.to_u9()
