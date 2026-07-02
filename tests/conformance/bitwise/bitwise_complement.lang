@@ -1,0 +1,22 @@
+// P-BITS Tier B2: `!` is bitwise complement on `int` (like Rust: `!x == -(x+1)`), while staying
+// logical-NOT on `bool`. One operator, operand-typed — no new `~`-style token (that stays concat).
+// Both backends route through the shared `apply_unary`, so the differential agrees.
+// expect: stdout "-1"
+// expect: stdout "-6"
+// expect: stdout "0"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "8"
+// expect: stdout "5"
+// expect: exit 0
+echo !0                          // ...1111 = -1
+echo !5                          // -(5+1) = -6
+echo !(-1)                       // 0
+echo !0 == -1                    // true
+echo !true                       // logical-NOT on bool is unchanged
+
+// Clear a bit with AND-NOT: `x & !mask`.
+echo 0b1010 & !0b0010            // clear bit 1 of 0b1010 → 0b1000 = 8
+
+// Mask off the low nibble's complement: `~0` is all ones, so `x & !0` is `x`.
+echo 5 & !0                      // 5

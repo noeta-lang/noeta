@@ -92,6 +92,8 @@ pub fn apply_unary(op: UnaryOp, value: &Value) -> Result<Value, OpError> {
         (UnaryOp::Neg, Value::Float(f)) => Ok(Value::Float(-f)),
         (UnaryOp::Neg, Value::F32(f)) => Ok(Value::F32(-f)),
         (UnaryOp::Not, Value::Bool(b)) => Ok(Value::Bool(!b)),
+        // `!` on an `int` is bitwise complement (P-BITS Tier B2), like Rust: `!x == -(x+1)`.
+        (UnaryOp::Not, Value::Int(i)) => Ok(Value::Int(!i)),
         // `...xs` (list spread) is the runtime identity — the value flows straight into the
         // surrounding `~` concatenation; the list requirement is enforced statically.
         (UnaryOp::Spread, value) => Ok(value.clone()),
@@ -408,8 +410,14 @@ mod tests {
                 .code,
             DiagnosticCode::TypeMismatch
         );
+        // `!` on an `int` is bitwise complement (P-BITS Tier B2): `!1 == -2`, `!0 == -1`.
+        assert_eq!(apply_unary(UnaryOp::Not, &int(1)), Ok(int(-2)));
+        assert_eq!(apply_unary(UnaryOp::Not, &int(0)), Ok(int(-1)));
+        // `!` on a non-int/non-bool is still a type error.
         assert_eq!(
-            apply_unary(UnaryOp::Not, &int(1)).unwrap_err().code,
+            apply_unary(UnaryOp::Not, &Value::Str("x".into()))
+                .unwrap_err()
+                .code,
             DiagnosticCode::TypeMismatch
         );
     }
