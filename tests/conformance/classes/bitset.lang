@@ -1,0 +1,54 @@
+// Integration demo: a growable BitSet backed by `List<int>` 64-bit words, exercising the whole
+// object model + bit stack end-to-end — self-mutating methods (`self.f = v`), the new
+// index-assignment-through-a-field sugar (`self.words[w] = ...`), and the bitwise operators
+// (`<< >> & | !`) plus the `count_ones()` intrinsic. `set`/`clear` mutate the shared instance in
+// place (class = reference), so the changes persist across calls. Both backends agree.
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "true"
+// expect: stdout "3"
+// expect: stdout "false"
+// expect: stdout "2"
+// expect: stdout "true"
+// expect: exit 0
+class BitSet {
+    mut words: List<int>
+
+    // A fixed-capacity 256-bit set (four 64-bit words); `.set` replaces a word, it does not grow.
+    fn new(): BitSet { return BitSet { words: [0, 0, 0, 0] }; }
+
+    fn set(i: int): void {
+        // The index-assignment-through-a-field sugar: `self.words[w] = v` desugars to
+        // `self.words = self.words.set(w, v)`, mutating the instance's list in place.
+        self.words[i / 64] = self.words[i / 64] | (1 << (i % 64));
+    }
+
+    fn clear(i: int): void {
+        self.words[i / 64] = self.words[i / 64] & (!(1 << (i % 64)));
+    }
+
+    fn test(i: int): bool {
+        return (self.words[i / 64] >> (i % 64)) & 1 == 1;
+    }
+
+    fn count(): int {
+        return self.words |> map(fn(w) => w.count_ones()) |> sum();
+    }
+}
+
+mut bs = BitSet.new();
+bs.set(5);
+bs.set(64);   // second word
+bs.set(70);
+echo bs.test(5);    // true
+echo bs.test(6);    // false
+echo bs.test(70);   // true
+echo bs.count();    // 3
+
+bs.clear(70);
+echo bs.test(70);   // false
+echo bs.count();    // 2
+
+// A method that both mutates (`self.words[...] = ...`) and is observed through the same instance.
+bs.set(200);
+echo bs.test(200);  // true

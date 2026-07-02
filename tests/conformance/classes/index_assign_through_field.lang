@@ -1,0 +1,37 @@
+// Object-model follow-on: index-assignment through a field. `x.f[i] = v` desugars to
+// `x.f = x.f.set(i, v)`, so it composes the value-semantics list `set` with the field-assignment
+// path. On a `class` (reference) it mutates the shared instance in place — visible through an alias;
+// on a `struct` (value) it is copy-on-write — a prior snapshot keeps the old value. It also works on
+// a plain local receiver, and inside a method via `self`. Both backends agree.
+// expect: stdout "99"
+// expect: stdout "99"
+// expect: stdout "7"
+// expect: stdout "3"
+// expect: stdout "42"
+// expect: exit 0
+class Row {
+    pub mut cells: List<int>
+    fn new(): Row { return Row { cells: [0, 0, 0] }; }
+    fn put(i: int, v: int): void { self.cells[i] = v; }   // self.f[i] = v inside a method
+}
+
+// Class: in-place through an alias.
+mut r = Row.new();
+alias = r;
+r.put(1, 99);
+echo alias.cells[1];   // 99 — the alias observes the in-place mutation
+echo r.cells[1];       // 99
+
+// Struct: copy-on-write.
+struct Buf { mut data: List<int> }
+mut b = Buf { data: [0, 7] };
+snap = b;              // value snapshot
+b.data[1] = 3;        // rebuilds b's list, rebinds b
+echo snap.data[1];     // 7 — the snapshot keeps the old value
+echo b.data[1];        // 3
+
+// Plain local receiver (not a method, not self).
+struct Grid { mut cells: List<int> }
+mut g = Grid { cells: [0, 0] };
+g.cells[0] = 42;
+echo g.cells[0];       // 42

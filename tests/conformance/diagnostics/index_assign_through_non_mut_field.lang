@@ -1,0 +1,8 @@
+// Object-model follow-on: index-assignment through a field inherits the field-assignment checks.
+// `g.cells[0] = 42` desugars to `g.cells = g.cells.set(0, 42)`, a write to the field `cells`, which
+// must be declared `mut` — so a non-`mut` field is E0033, exactly as a plain `g.cells = ...` would be.
+// expect: error E0033 at 8:3
+// expect: exit 1
+struct Grid { cells: List<int> }
+mut g = Grid { cells: [0, 0] };
+g.cells[0] = 42;

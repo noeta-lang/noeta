@@ -7,6 +7,16 @@
 empty `T {}` literal (7b). Generics reification remains its own later milestone (unchanged). The
 historical design text below is preserved as the rationale record.
 
+**Post-arc follow-on (2026-07): index-assignment through a field.** `x.f[i] = v` now desugars (pure
+parser, no checker/backend change) to `x.f = x.f.set(i, v)` — routing through the existing
+`Expr::FieldSet` path, so it is in-place on a `class` and copy-on-write on a `struct`, and inherits
+the `mut`-field (E0033) / `mut`-receiver (E0006) checks. This unblocks self-mutating collection
+methods (`self.words[i] = v`), the missing piece for building a `BitSet` in-language
+(`tests/conformance/classes/bitset.lang` — the bit-tier dogfood). Two adjacent gaps were logged in
+`plans/deferred.md` rather than fixed: (a) a **bare** `field = v` write (no `self.`) inside a method
+diverges between backends — use `self.field = v`; (b) a `List<IntN>` element type is lost through a
+field read inside a method.
+
 **Original status: design, NOT scheduled.** A consolidated proposal from a design discussion (2026-06). It
 **replaces an earlier `resource`-kind proposal** (removed) — the `resource` kind dissolves into "a class
 with a `destruct`". It re-scopes parts of the completed memory-management **Phase 5.2** (which made classes

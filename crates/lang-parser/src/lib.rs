@@ -2548,6 +2548,79 @@ where
                                 span,
                             }
                         }
+                        // `x.f[k] = v` ⟶ `x.f = x.f.set(k, v)` — index-assignment through a **field**
+                        // (object-model follow-on: enables `self.words[i] = v` in a method). The index
+                        // receiver is a field access `x.f` over a bare name, so the update targets that
+                        // field: compose the value-semantics `set` with the field-assignment path
+                        // below, producing the same AST as writing `x.f = x.f.set(k, v)` by hand. Plain
+                        // `=`, no type annotation; `x` must be `mut` (E0006) and `f` a `mut` field
+                        // (E0033), enforced by the field-assignment checker as usual.
+                        Expr::Index {
+                            receiver: index_recv,
+                            index,
+                            span: idx_span,
+                        } if matches!(op, AssignKind::Plain)
+                            && ty.is_none()
+                            && matches!(index_recv.as_ref(), Expr::Member { receiver, .. }
+                                if matches!(receiver.as_ref(), Expr::Ident { .. })) =>
+                        {
+                            let Expr::Member {
+                                receiver: obj,
+                                name: field,
+                                name_span: field_span,
+                                span: member_span,
+                            } = *index_recv
+                            else {
+                                unreachable!("guarded above")
+                            };
+                            let Expr::Ident {
+                                name,
+                                span: name_span,
+                            } = *obj
+                            else {
+                                unreachable!("guarded above")
+                            };
+                            // `x.f` — the field read, reused as the `set` receiver.
+                            let field_read = Expr::Member {
+                                receiver: Box::new(Expr::Ident {
+                                    name: name.clone(),
+                                    span: name_span,
+                                }),
+                                name: field.clone(),
+                                name_span: field_span,
+                                span: member_span,
+                            };
+                            // `x.f.set(k, v)`
+                            let updated = Expr::Call {
+                                callee: Box::new(Expr::Member {
+                                    receiver: Box::new(field_read),
+                                    name: "set".to_string(),
+                                    name_span: idx_span,
+                                    span,
+                                }),
+                                args: vec![*index, rhs],
+                                span,
+                            };
+                            // `x.f = <updated>`
+                            let value = Expr::FieldSet {
+                                receiver: Box::new(Expr::Ident {
+                                    name: name.clone(),
+                                    span: name_span,
+                                }),
+                                field,
+                                field_span,
+                                value: Box::new(updated),
+                                span,
+                            };
+                            Stmt::Binding {
+                                mut_decl: false,
+                                name,
+                                name_span,
+                                ty: None,
+                                value,
+                                span,
+                            }
+                        }
                         // `x.f = v` (and `x.f OP= v`, `x.f ??= v`) — field assignment over a bare-name
                         // receiver (no type annotation). It produces an `Expr::FieldSet` (the value
                         // is the field's new value: the rhs for `=`, `x.f OP rhs` for a compound, the
