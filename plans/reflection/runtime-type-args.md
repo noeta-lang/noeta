@@ -141,8 +141,13 @@ Type arguments are recovered at runtime even after a value is laundered through 
 `is`/`as`), while a `List<dyn>`/untagged value honestly stays `dyn`. **Set tags DONE** (`eb10d4a`): a set
 has no literal (`#{…}` desugars to `[…].to_set()`), so its element type is carried from the source
 list's `List<T>` tag onto the `Set<T>` at `to_set` (VM `set_tag_from_list` + node tag; tree-walker
-`Value::Set` field + `call_list_method` threading); mutations (`.add`/`.remove`) drop the tag. Only
-remaining: **Approach B** (distinct shapes per instantiation — the benched perf follow-up, untouched).
+`Value::Set` field + `call_list_method` threading); mutations (`.add`/`.remove`) drop the tag.
+**Approach B** (distinct shapes per instantiation — the benched perf follow-up) was then **evaluated
+and dropped** (2026-07-02, see the "Approach B — EVALUATED AND DROPPED" section): no dispatch upside
+(no ICs; dispatch keys on base name), no layout upside (flat-packed already shipped via `PackedSchema`),
+no reachable memory upside (collections carry no shape, so the 8-byte tag field stays), tag construction
+cost is statistical noise — versus a runtime interner + shape-table growth + a two-notions-of-identity
+hazard. **The reflection track is now fully closed.**
 Along the way this arc also fixed real latent bugs (see [[value-equality-dispatch]],
 [[generics-send-destructor-gaps]]): VM structural map equality, enum `Send` soundness, generic-type
 over-restrictive `!Send`, and skipped generic-container destructors.
@@ -161,6 +166,54 @@ speedup** — built only if it benches faster, exactly as the P-SIMD track treat
 lost the bench and was dropped). B is *not* required for reflection; A already delivers that. Do B
 after A ships, as its own benched slice, and keep it only if the numbers justify the added shape
 machinery.
+
+## Approach B — EVALUATED AND DROPPED (2026-07-02)
+
+Investigated the current architecture before committing to the build; the two stated upsides are void
+today and the one plausible remaining upside is structurally unreachable. **Decision: do not build B.**
+Same outcome as P-SIMD — the experiment loses before it ships.
+
+**Finding 1 — the "IC-guard discrimination" upside has nothing to attach to.** There are *no inline
+caches*. `lang-object`'s own doc says they are "deferred to a later optimization pass; field/slot
+resolution here is a direct lookup," and VM method dispatch is a `HashMap<(type_name, method)>` lookup
+**keyed on `shape.name`** (the base name, e.g. `"Box"`), never cached per call-site. Per-instantiation
+shapes would have nothing to accelerate — and because dispatch keys on the base name, splitting
+`Box<int>`/`Box<string>` into distinct shapes would *complicate* dispatch, not speed it. (Generic
+methods are uniform — `Box<int>.get` and `Box<string>.get` run identical code — so a hypothetical IC
+would go *polymorphic* across instantiations for zero code-specialization benefit: strictly worse.)
+
+**Finding 2 — the "on-ramp to flat-packed storage" upside already shipped, via a different road.**
+Monomorphic flat-packed storage exists today as `lang_object::PackedSchema` / `@packed`, keyed by a
+compiled packed-list *layout*, **not** by per-instantiation shapes. B is not the on-ramp; the on-ramp
+is built and took a path that never needed distinct shapes.
+
+**Finding 3 — B's one plausible remaining upside (per-value memory) is structurally unreachable.**
+Measured `size_of::<Obj>() == 104`; the `reflect: Option<Rc<TypeRepr>>` field is **8 bytes, additive**
+(not padding-absorbed: 96 → 104). But B stores type-args *in the shape*, and **only `Object`/`Enum`
+carry a `Shape`** — `List(Vec<Value>)`, `Set(Vec<Value>)`, `Map(BTreeMap<String,Value>)` have none. So
+the most common containers still need the per-value tag → the 8-byte field stays on the shared `Obj`
+struct → **zero per-object shrink**. B could only *move* where `Object`/`Enum` args live, at no size win.
+
+**Finding 4 — measured construction cost of A's tag is statistical noise.** A construction hot loop
+(`Box<int>` per iteration, tagged) vs a non-generic control (`Plain`, never tagged): +1.9% / +0.5% /
++2.2% at n = 1000/2000/4000, **confidence intervals fully overlapping**. Eliminating the tag stamp
+(A's `Rc::clone` + `Option` write) — B's absolute best-case time upside, which B cannot even reach
+since it replaces the stamp with an equal-cost shape-handle clone — buys nothing outside the noise.
+
+**Finding 5 — B carries new, real cost and a correctness hazard A avoids.** Object `==` compares
+`sa.name == sb.name` + slots (`lang-value/src/ops.rs`), **never shape identity**, and the differential
+requires the tag be *invisible to value semantics* (`Box{5}` from a `Box<int>` site must equal one from
+a `Box<dyn>` site). B therefore needs shapes that are simultaneously **distinct for interning**
+(type-args in the key) and **equal for value semantics** (type-args excluded from `PartialEq`/`Hash`) —
+two contradictory notions of shape identity, plus a runtime shape interner and shape-table growth
+linear in distinct instantiations. A sidesteps all of it with one shared shape + an orthogonal
+per-value tag.
+
+**Net:** B has no dispatch upside (no ICs; dispatch keys on base name), no layout upside (flat-packed
+already shipped separately), no reachable memory upside (collections have no shape, so the tag field
+stays), no measurable time upside (tag cost is noise) — against a runtime interner, shape-table growth,
+and a two-notions-of-identity hazard. Approach A is strictly better under the current architecture. If
+inline caches are ever built *and* keyed by full shape identity, revisit; until then, closed.
 
 ## Explicitly out of scope (for A)
 
