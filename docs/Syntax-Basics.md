@@ -4,12 +4,19 @@ The lexical foundation: comments, statement termination, bindings, primitive typ
 
 ## Comments
 
-Line comments only, `//` to end of line. There is no block-comment form.
+`//` starts a line comment (to end of line); `/* … */` is a block comment. Block comments **nest**, so you can comment out a region that already contains a block comment.
 
 ```lang
-// this is a comment
-echo 1   // trailing comment
+// a line comment
+echo 1        // trailing comment
+
+/* a block comment
+   spanning several lines */
+x = /* inline */ 2 + /* they nest: /* inner */ still commented */ 3
+echo x        // 5
 ```
+
+A block comment may span a statement boundary — like a line continuation, the enclosing statement continues across it.
 
 ## Statements and semicolons
 

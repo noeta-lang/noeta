@@ -4,9 +4,9 @@ The language distinguishes **codegen directives** (`@…`) from **data attribute
 
 > `@` = the compiler generates or registers something; `#[…]` = inert data metadata is attached.
 
-## The four decorator directives
+## The decorator directives
 
-There is a fixed set of four `@` decorators that annotate *declarations*. (These are distinct from the `@test`/`@bench`/`@doc`/`@debug` [dev-tier blocks](Documentation-and-Tiers), which gate content rather than decorate declarations.)
+Four `@` decorators attach metadata to or drive codegen on a *declaration* — `@derive`, `@attribute`, `@role`, and `@semantic`. (The layout directive `@packed` and the `@test`/`@bench`/`@doc`/`@debug` [dev-tier blocks](Documentation-and-Tiers) also use `@` but do different jobs — see [Other `@` directives](#other--directives) below.)
 
 ### `@derive(...)` — synthesize trait impls
 
@@ -24,7 +24,7 @@ struct Route { path: string  method: string = "GET" }
 struct Users { id: int }
 
 #[Route("/admin", method: "POST")]
-fn admin_handler(): void { }
+fn admin_handler(): void { /* handle the request */ }
 ```
 
 - Attributes are **structs, not classes** (a struct has one canonical all-fields construction).

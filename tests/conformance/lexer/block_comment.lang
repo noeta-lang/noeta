@@ -1,0 +1,18 @@
+// Block comments `/* ... */` are stripped at lex, like line comments — so both backends see the
+// same token stream and agree by construction. They **nest**, a single `/` is still division, and
+// `/* */` inside a string is literal text (not a comment). A block comment spanning a newline lets
+// the statement continue, exactly as a line-continuation does.
+// expect: stdout "3"
+// expect: stdout "10"
+// expect: stdout "1"
+// expect: stdout "in a string /* not a comment */"
+// expect: exit 0
+/* a leading block comment */
+x = 1 /* inline */ + 2
+echo x
+y = /* mid-expression */ 10
+echo y
+/* nested /* inner comment */ still inside the outer */
+a = 5 / 5          /* `/` is division, not a comment */
+echo a
+echo "in a string /* not a comment */"

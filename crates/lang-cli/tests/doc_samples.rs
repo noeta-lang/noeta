@@ -104,7 +104,11 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
             "{}:{} (tag {:?}) was expected to {} but did not — {}",
             sample.file,
             sample.line,
-            if sample.tag.is_empty() { "<none>" } else { &sample.tag },
+            if sample.tag.is_empty() {
+                "<none>"
+            } else {
+                &sample.tag
+            },
             wanted,
             first.trim()
         ));
@@ -125,7 +129,10 @@ fn doc_samples_compile_and_run() {
         let text = std::fs::read_to_string(&path).expect("read markdown");
         samples.extend(extract(&name, &text));
     }
-    assert!(!samples.is_empty(), "found no `lang` code samples in {dir:?}");
+    assert!(
+        !samples.is_empty(),
+        "found no `lang` code samples in {dir:?}"
+    );
 
     let mut failures = Vec::new();
     let (mut run, mut ignored) = (0, 0);

@@ -315,6 +315,13 @@ pub enum TokenKind {
     /// source) that only exists to give the variant a `logos` rule.
     #[token("\0\0__doctext__\0\0")]
     DocText,
+    /// The opener of a `/* … */` block comment. Block comments **nest** (a `/*` inside is matched by
+    /// a `*/` before the outer one closes), so `logos` cannot skip them with a regex; [`lex`] sees
+    /// this token, scans to the matching close, and drops the whole span (no token is emitted). It
+    /// therefore never appears in the token stream. A single `/` is [`Slash`](TokenKind::Slash) and a
+    /// `//` line comment is skipped by `logos`, so those are unaffected (longest-match picks `/*`).
+    #[token("/*")]
+    BlockCommentOpen,
 }
 
 impl TokenKind {
@@ -418,6 +425,7 @@ impl TokenKind {
             TokenKind::Hash => "Hash",
             TokenKind::At => "At",
             TokenKind::DocText => "DocText",
+            TokenKind::BlockCommentOpen => "BlockCommentOpen",
         }
     }
 
@@ -521,6 +529,7 @@ impl TokenKind {
             TokenKind::Hash => "`#`",
             TokenKind::At => "`@`",
             TokenKind::DocText => "a `@doc` text body",
+            TokenKind::BlockCommentOpen => "`/*`",
         }
     }
 }
@@ -583,6 +592,18 @@ pub fn lex(source: &Source) -> Lexed {
                     }
                 }
             }
+            Ok(TokenKind::BlockCommentOpen) => {
+                // A `/* … */` block comment (nesting). Scan from just after the `/*` to the matching
+                // close and drop the whole span — no token is emitted, exactly like a line comment.
+                // An unterminated comment consumes to end-of-input and reports a diagnostic.
+                match block_comment_end(text, span.end) {
+                    Some(end) => lexer.bump((end - span.end) as usize),
+                    None => {
+                        diagnostics.push(unterminated_block_comment(span));
+                        lexer.bump(text.len() - span.end as usize);
+                    }
+                }
+            }
             Ok(kind) => tokens.push(Token { kind, span }),
             Err(()) => diagnostics.push(lex_error(source, span)),
         }
@@ -625,6 +646,42 @@ fn matching_brace(text: &str, open_end: u32) -> Option<u32> {
         }
     }
     None
+}
+
+/// Find the end of a `/* … */` block comment whose opening `/*` ends at `open_end`, returning the
+/// byte offset just past the matching `*/`. Comments **nest**: an inner `/*` must be closed by a
+/// `*/` before the outer one closes. Returns `None` if no matching `*/` appears before end-of-input.
+fn block_comment_end(text: &str, open_end: u32) -> Option<u32> {
+    let bytes = text.as_bytes();
+    let mut depth: u32 = 1;
+    let mut i = open_end as usize;
+    while i + 1 < bytes.len() {
+        match (bytes[i], bytes[i + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                i += 2;
+            }
+            (b'*', b'/') => {
+                depth -= 1;
+                i += 2;
+                if depth == 0 {
+                    return Some(i as u32);
+                }
+            }
+            _ => i += 1,
+        }
+    }
+    None
+}
+
+/// The diagnostic for a `/*` block comment that never closes (no matching `*/` before end-of-input).
+fn unterminated_block_comment(open: Span) -> Diagnostic {
+    Diagnostic::error(
+        DiagnosticCode::UnexpectedEndOfInput,
+        open,
+        "unterminated block comment",
+    )
+    .with_help("add a closing `*/`; block comments nest, so each `/*` needs its own `*/`")
 }
 
 /// The diagnostic for a `@doc {` whose body never closes (no matching `}` before end-of-input).
@@ -849,6 +906,44 @@ mod tests {
         assert_eq!(
             lexed.diagnostics[0].code,
             DiagnosticCode::UnterminatedString
+        );
+    }
+
+    #[test]
+    fn block_comments_are_stripped_and_nest() {
+        // A `/* ... */` comment (nesting, mid-expression) produces no tokens; `/` stays division.
+        let (_source, lexed) = lex_str("x = 1 /* a /* nested */ b */ + 2\ny = 5 / 5\n");
+        assert!(lexed.diagnostics.is_empty(), "{:?}", lexed.diagnostics);
+        let kinds: Vec<_> = lexed
+            .tokens
+            .iter()
+            .map(|t| t.kind)
+            .filter(|k| *k != TokenKind::Semicolon)
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                TokenKind::Ident, // x
+                TokenKind::Eq,
+                TokenKind::IntLit, // 1
+                TokenKind::Plus,
+                TokenKind::IntLit, // 2
+                TokenKind::Ident,  // y
+                TokenKind::Eq,
+                TokenKind::IntLit, // 5
+                TokenKind::Slash,  // `/` is still division, not a comment
+                TokenKind::IntLit, // 5
+            ]
+        );
+    }
+
+    #[test]
+    fn reports_unterminated_block_comment() {
+        let (_source, lexed) = lex_str("x = 1\n/* never closed\n");
+        assert_eq!(lexed.diagnostics.len(), 1);
+        assert_eq!(
+            lexed.diagnostics[0].code,
+            DiagnosticCode::UnexpectedEndOfInput
         );
     }
 

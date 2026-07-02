@@ -1,0 +1,7 @@
+// An unterminated `/*` block comment (no matching `*/` before end-of-input) is a lex error,
+// reported at the opening `/*`. The comment consumes to end-of-input.
+// expect: error E0004 at 6:1
+// expect: exit 1
+x = 1
+/* this comment is never closed
+echo x
