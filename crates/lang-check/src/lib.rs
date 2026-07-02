@@ -3357,7 +3357,12 @@ impl Checker {
                     // own methods (slice 2d) — a `class` with private fields is built externally
                     // through an associated `fn`/constructor, not a bare literal.
                     if !self.field_visible(&lit.type_name, &f.name) {
-                        self.report_private_field(&lit.type_name, &f.name, "set", f.name_span);
+                        self.report_private_field(
+                            &lit.type_name,
+                            &f.name,
+                            FieldAccess::Set,
+                            f.name_span,
+                        );
                     }
                     if let Some((_, declared)) = decls.iter().find(|(n, _)| n == &f.name) {
                         if !pset.is_empty() {
@@ -3758,7 +3763,7 @@ impl Checker {
         };
         // A private field is assignable only inside its declaring type's own methods (slice 2d).
         if !self.field_visible(&name, field) {
-            self.report_private_field(&name, field, "assign", field_span);
+            self.report_private_field(&name, field, FieldAccess::Assign, field_span);
         }
         // Asymmetric `mut` rule (object-model slice 2b′): a value `struct` field-set is desugared to
         // a rebind of the receiver (`x = T { ...x, f: v }`), so the receiver binding must be `mut`
@@ -4847,9 +4852,16 @@ impl Checker {
         !private || self.in_dev_tier || self.current_type.as_deref() == Some(type_name)
     }
 
-    /// Report an access to a private field from outside its type (E0035). `verb` is the action
-    /// (`"read"`, `"assign"`, `"set"`) for the message.
-    fn report_private_field(&mut self, type_name: &str, field: &str, verb: &str, span: Span) {
+    /// Report an access to a private field from outside its type (E0035). `access` names the action
+    /// for the message — a closed [`FieldAccess`] so a call site cannot invent a verb.
+    fn report_private_field(
+        &mut self,
+        type_name: &str,
+        field: &str,
+        access: FieldAccess,
+        span: Span,
+    ) {
+        let verb = access.verb();
         self.error(
             DiagnosticCode::PrivateField,
             span,
@@ -4887,7 +4899,7 @@ impl Checker {
         {
             // A private field is readable only inside its declaring type's own methods (slice 2d).
             if !self.field_visible(n, name) {
-                self.report_private_field(n, name, "read", name_span);
+                self.report_private_field(n, name, FieldAccess::Read, name_span);
             }
             // Fusable indexed field read: `list[i].field`, where the index receiver typed as a
             // built-in `List` (recorded in the `Expr::Index` arm) and the field resolved on the
@@ -5165,6 +5177,25 @@ fn async_return(inner: Type, is_async: bool) -> Type {
 /// (`+ - * /` → `Add`/`Sub`/`Mul`/`Div`) and ordering (`< <= > >=` → `Comparable`). `%` (no trait —
 /// numerics only), `~`/`==`/`!=` (universal: display-concat / structural-equality fallbacks), and
 /// the logical operators map to `None`, so the checker imposes no trait requirement on them.
+/// The action named in an E0035 private-field diagnostic — a closed set so a call site cannot
+/// invent a verb string.
+#[derive(Debug, Clone, Copy)]
+enum FieldAccess {
+    Read,
+    Assign,
+    Set,
+}
+
+impl FieldAccess {
+    fn verb(self) -> &'static str {
+        match self {
+            FieldAccess::Read => "read",
+            FieldAccess::Assign => "assign",
+            FieldAccess::Set => "set",
+        }
+    }
+}
+
 fn required_operator_trait(op: BinaryOp) -> Option<BuiltinTrait> {
     use BinaryOp::*;
     match op {
@@ -5405,28 +5436,19 @@ fn builtin_satisfies(ty: &Type, t: BuiltinTrait) -> bool {
     use BuiltinTrait as Bt;
     use Type::*;
     match t {
-        Bt::Comparable => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
-        Bt::Equatable => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
+        Bt::Comparable | Bt::Equatable => ty.is_arith_numeric() || matches!(ty, String | Bool),
         // Fixed-width `+ - *` are sign-agnostic (W2 — the low bits are the same read signed or
         // unsigned, so masking the result is correct); `Div` (and ordering) are sign-dependent and
         // land in W3 via the width-carrying `Rvalue::WideInt`. (`%` is numeric-only — no trait.)
-        Bt::Add | Bt::Sub | Bt::Mul => matches!(ty, Int | Float | F32 | IntN { .. }),
-        Bt::Div => matches!(ty, Int | Float | F32 | IntN { .. }),
+        Bt::Add | Bt::Sub | Bt::Mul | Bt::Div => ty.is_arith_numeric(),
         Bt::Concat => matches!(ty, String | List(_)),
-        Bt::Display => matches!(
-            ty,
-            Int | Float
-                | F32
-                | IntN { .. }
-                | String
-                | Bool
-                | Unit
-                | List(_)
-                | Map(..)
-                | Set(_)
-                | Option(_)
-                | Result(..)
-        ),
+        Bt::Display => {
+            ty.is_arith_numeric()
+                || matches!(
+                    ty,
+                    String | Bool | Unit | List(_) | Map(..) | Set(_) | Option(_) | Result(..)
+                )
+        }
         // No built-in type satisfies these marker/protocol traits without an explicit `impl`.
         Bt::Clone
         | Bt::Serialize

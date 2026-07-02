@@ -168,6 +168,16 @@ impl Type {
         matches!(self, Type::Int | Type::Float | Type::F32)
     }
 
+    /// Whether this satisfies the arithmetic operator traits (`Add`/`Sub`/`Mul`/`Div`) as a built-in.
+    /// This is [`Self::is_numeric`] **plus** the fixed-width integers `IntN` (Tier W arithmetic
+    /// masks/width-carries), which `is_numeric` deliberately excludes — do not conflate the two.
+    pub fn is_arith_numeric(&self) -> bool {
+        matches!(
+            self,
+            Type::Int | Type::Float | Type::F32 | Type::IntN { .. }
+        )
+    }
+
     /// This numeric type's rank in the widening lattice `int (0) < f32 (1) < float (2)`. Arithmetic
     /// over two numerics yields the higher-ranked type (`f32 + int → f32`, `f32 + float → float`),
     /// the production-language widening rule. `None` for a non-numeric type.
