@@ -275,6 +275,11 @@ pub enum Op {
     MakeList {
         dst: Reg,
         items: Box<[Reg]>,
+        /// The list's reflected element type (runtime type-argument reflection, R1): an index into
+        /// [`Module::type_reprs`], or `None` when the literal carried no checker-resolved type (it
+        /// stays untagged and reflects head-only). Stamped onto the freshly-built list so `type_of`
+        /// recovers the element type after a `dyn` launder. Invisible to value semantics.
+        reflect: Option<u32>,
     },
     /// `dst = <empty List<packed>>` (P-PACK 2.5) — allocate an empty flat raw-primitive buffer for a
     /// `List<@packed struct>` literal, using `schema` (an index into [`Module::packed_schemas`]). It
@@ -1031,6 +1036,13 @@ pub struct Module {
     /// construction. A build artifact for tooling and runtime reflection (pass 2); the rest of the
     /// runtime ignores it.
     pub reflection: lang_ast::reflect::ReflectionInfo,
+    /// The interned reflected element types (runtime type-argument reflection, R1), referenced by
+    /// index from [`Op::MakeList`]'s `reflect`. A list literal whose element type the checker resolved
+    /// gets that [`TypeRepr`] interned here; the VM stamps a fresh `Rc` of it onto the built list so
+    /// `type_of` recovers the element type after a `dyn` launder. Held as a module table (rather than
+    /// inline on the op) so the op stays `Copy`-cheap and the `TypeRepr` — which is `Send` — keeps the
+    /// module shareable across isolate threads. Empty for a program with no tagged list literal.
+    pub type_reprs: Vec<lang_ast::reflect::TypeRepr>,
 }
 
 impl Module {
@@ -1157,9 +1169,17 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::CellSet { cell, src } => format!("CellSet     *r{cell} <- r{src}"),
         Op::UpvalueGet { dst, index } => format!("UpvalueGet  r{dst} <- *upvalue[{index}]"),
         Op::UpvalueSet { index, src } => format!("UpvalueSet  *upvalue[{index}] <- r{src}"),
-        Op::MakeList { dst, items } => {
+        Op::MakeList {
+            dst,
+            items,
+            reflect,
+        } => {
             let items: Vec<String> = items.iter().map(|r| format!("r{r}")).collect();
-            format!("MakeList    r{dst} <- [{}]", items.join(", "))
+            let tag = match reflect {
+                Some(idx) => format!("  ; reflect #{idx}"),
+                None => String::new(),
+            };
+            format!("MakeList    r{dst} <- [{}]{tag}", items.join(", "))
         }
         Op::PackedListNew { dst, schema } => {
             format!("PackedListNew r{dst} <- [] packed{schema}")

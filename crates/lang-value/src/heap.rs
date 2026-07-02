@@ -14,6 +14,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ptr;
 use std::rc::Rc;
 
+use lang_ast::reflect::TypeRepr;
 use lang_bytecode::Builtin;
 use lang_object::{PackedSchema, Shape};
 use lang_stdlib::FileHandle;
@@ -85,6 +86,16 @@ fn live_dec() {
 #[repr(C)]
 pub(crate) struct Obj {
     header: ObjHeader,
+    /// The value's **reflected type tag** (runtime type-argument reflection, slice R1): the
+    /// `TypeRepr` the checker resolved for this value's *construction site*, so `type_of` recovers a
+    /// container's element type even after the value's static type was laundered through `dyn` — e.g.
+    /// `type_of(launder([1,2,3]))` is `List(Int)`, not the head-only `List(Dyn)`. `None` for every
+    /// value whose type is not carried (untagged) — a derived/mutated list, a scalar, an object today
+    /// — which falls back to today's head-only runtime classification. It lives **beside** the payload
+    /// (not inside it) precisely so it is invisible to value semantics: equality, hashing, `free`,
+    /// `children`, and the COW fast paths all operate on `payload` and never see the tag. It is a leaf
+    /// `Rc<TypeRepr>` (no child `Value`s), so it needs no GC handling — dropping the `Obj` drops it.
+    reflect: Option<Rc<TypeRepr>>,
     pub(crate) payload: Payload,
 }
 
@@ -391,6 +402,7 @@ pub(crate) fn alloc(payload: Payload) -> Value {
             buffered: false,
             shared: false,
         },
+        reflect: None,
         payload,
     }));
     let addr = raw.expose_provenance();
@@ -427,6 +439,7 @@ fn alloc_shared(payload: Payload) -> Value {
             buffered: false,
             shared: true,
         },
+        reflect: None,
         payload,
     }));
     let addr = raw.expose_provenance();
@@ -479,6 +492,25 @@ pub(crate) fn with_payload_mut<R>(value: Value, f: impl FnOnce(&mut Payload) -> 
     // guarantees uniqueness for the COW case, so the `&mut` does not alias another live reference.
     let obj = unsafe { &mut *obj_ptr(value) };
     f(&mut obj.payload)
+}
+
+/// The value's reflected type tag (slice R1), or `None` if untagged. A cheap `Rc` clone (refcount
+/// bump). The caller must have checked `value.is_pointer()`.
+pub(crate) fn reflect(value: Value) -> Option<Rc<TypeRepr>> {
+    // SAFETY: live object allocated by this module; single-threaded read.
+    let obj = unsafe { &*obj_ptr(value) };
+    obj.reflect.clone()
+}
+
+/// Set (or clear) the value's reflected type tag (slice R1). Used at list-literal construction to
+/// stamp the checker-resolved element type, and to **clear** the tag on an in-place COW mutation (so
+/// a reused list node does not carry the original literal's type through a value-producing op — the
+/// tag survives pure aliasing only, refcount-independently). The caller must hold `value.is_pointer()`.
+pub(crate) fn set_reflect(value: Value, tag: Option<Rc<TypeRepr>>) {
+    // SAFETY: live object allocated by this module; single-threaded write to a field the value
+    // semantics never observe (equality/hash/free/children all read `payload`, never `reflect`).
+    let obj = unsafe { &mut *obj_ptr(value) };
+    obj.reflect = tag;
 }
 
 /// Read the current refcount of a pointer value. Used to detect the last reference (so a

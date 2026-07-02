@@ -74,6 +74,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
         &HashMap::new(),
         &HashSet::new(),
         &HashMap::new(),
+        &HashMap::new(),
     )
 }
 
@@ -97,6 +98,7 @@ pub fn lower_with_sites(
     ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: &HashSet<Span>,
     width_sites: &HashMap<Span, (bool, u8)>,
+    construction_sites: &HashMap<Span, lang_ast::reflect::TypeRepr>,
 ) -> Result<Program, Unsupported> {
     lower_with_sites_opts(
         program,
@@ -105,6 +107,7 @@ pub fn lower_with_sites(
         ext_call_sites,
         for_stream_sites,
         width_sites,
+        construction_sites,
         false,
     )
 }
@@ -115,6 +118,7 @@ pub fn lower_with_sites(
 /// REPL), it lowers to a plain [`Rvalue::Spawn`] of the pre-built future, exactly as `spawn f(args)`,
 /// so the sandbox and the whole differential corpus are byte-identical and never see the new op. Only
 /// the CLI's real (VM) execution path passes `true`.
+#[allow(clippy::too_many_arguments)]
 pub fn lower_with_sites_opts(
     program: &AstProgram,
     packed_list_sites: &HashMap<Span, lang_ast::reflect::PackedLayout>,
@@ -122,6 +126,7 @@ pub fn lower_with_sites_opts(
     ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: &HashSet<Span>,
     width_sites: &HashMap<Span, (bool, u8)>,
+    construction_sites: &HashMap<Span, lang_ast::reflect::TypeRepr>,
     real_isolates: bool,
 ) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
@@ -131,6 +136,7 @@ pub fn lower_with_sites_opts(
         ext_call_sites,
         for_stream_sites,
         width_sites,
+        construction_sites,
         real_isolates,
     };
     let top = lowerer.lower_body(&program.stmts)?;
@@ -163,6 +169,10 @@ struct Lowerer<'a> {
     /// span → the result's `(signed, bits)`. A hit wraps the op's result in [`Rvalue::MaskWidth`] so
     /// the erased i64 is masked back into the declared width. Empty on the boxed/REPL path.
     width_sites: &'a HashMap<Span, (bool, u8)>,
+    /// The checker's collection-construction-site map (runtime type-argument reflection, R1), keyed by
+    /// the list-literal span → its resolved element [`TypeRepr`]. A hit bakes the type onto
+    /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder. Empty on the boxed/REPL path.
+    construction_sites: &'a HashMap<Span, lang_ast::reflect::TypeRepr>,
     /// Whether `isolate f(args)` lowers to [`Rvalue::SpawnIsolate`] (real OS-thread path, I.4b) rather
     /// than a plain [`Rvalue::Spawn`] of a pre-built future. Only the CLI's real (VM) execution path
     /// sets this; every in-oracle path leaves it false, so the differential never sees the new rvalue.
@@ -791,6 +801,10 @@ impl Lowerer<'_> {
                     out,
                     Rvalue::List {
                         items: atoms,
+                        // The checker-resolved element type for this literal (R1), so `type_of` can
+                        // recover it after the value is laundered through `dyn`. Empty on the
+                        // boxed/REPL path (no construction-site map) → the list stays untagged.
+                        reflect: self.construction_sites.get(span).cloned(),
                         span: *span,
                     },
                     *span,

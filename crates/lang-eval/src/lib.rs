@@ -86,6 +86,7 @@ impl Backend for TreeWalkBackend {
             &checked.ext_call_sites,
             &checked.for_stream_sites,
             &checked.width_sites,
+            &checked.construction_sites,
         )
         .expect("Core-IR lowering is total over the parsed language");
         let ir =
@@ -1249,9 +1250,9 @@ impl Interpreter {
             Value::Object(obj) => self.destroy_object(obj),
             Value::Enum(e) => self.destroy_enum(e),
             // A boxed list / set / tuple releases its elements through the shared `Rc<Vec<Value>>`.
-            Value::List(ListRepr::Boxed(items)) | Value::Set(items) | Value::Tuple(items) => {
-                self.destroy_sequence(items)
-            }
+            Value::List(ListRepr::Boxed { items, .. })
+            | Value::Set(items)
+            | Value::Tuple(items) => self.destroy_sequence(items),
             // A packed list (P-PACK 2.3) holds only primitive words — no heap elements, no
             // destructors — so its `Rc<Vec<u64>>` simply drops here, reclaiming the buffer.
             Value::List(ListRepr::Packed(_)) => {}
@@ -2063,7 +2064,7 @@ impl Interpreter {
             self.expect_std_arity(name, &args, 0, span)?;
             let list = match &receiver {
                 Value::List(_) => receiver.clone(),
-                Value::Set(items) => Value::List(ListRepr::Boxed(Rc::clone(items))),
+                Value::Set(items) => Value::list_rc(Rc::clone(items)),
                 Value::Map(entries) => Value::list(entries.values().cloned().collect()),
                 _ => unreachable!("guarded to list/set/map above"),
             };
@@ -3370,7 +3371,7 @@ impl Interpreter {
                     if results.iter().all(Option::is_some) {
                         let items: Vec<Value> =
                             results.into_iter().map(|r| r.expect("all ready")).collect();
-                        return Ok(Value::List(ListRepr::Boxed(Rc::new(items))));
+                        return Ok(Value::list(items));
                     }
                     let progressed = self.poll_all_scopes_round(span)?;
                     if !progressed && self.executor.advance().is_none() {
@@ -3472,7 +3473,7 @@ impl Interpreter {
                     if done == count {
                         let out: Vec<Value> =
                             results.into_iter().map(|r| r.expect("all done")).collect();
-                        return Ok(Value::List(ListRepr::Boxed(Rc::new(out))));
+                        return Ok(Value::list(out));
                     }
                     let mut progressed = false;
                     let mut k = 0;
@@ -3915,7 +3916,7 @@ fn cow_concat(left: Value, right: Value) -> Value {
             // packed list (P-PACK 2.3) has no specialized concat yet, so it materializes to a fresh,
             // uniquely-owned boxed vector — correct, just not flat. Either way the result is boxed.
             let mut a = match a {
-                ListRepr::Boxed(rc) => rc,
+                ListRepr::Boxed { items: rc, .. } => rc,
                 ListRepr::Packed(_) => a.to_rc_vec(),
             };
             let b = b.to_rc_vec();
@@ -4159,7 +4160,13 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
         Value::Str(_) => TypeRepr::Str,
         Value::Bytes(_) => TypeRepr::Bytes,
         Value::Unit => TypeRepr::Unit,
-        Value::List(_) => TypeRepr::List(dyn_()),
+        // A list carrying a reflected type tag (R1 — a tagged literal, preserved through pure
+        // aliasing) reports that precise element type; an untagged/packed list falls back to the
+        // head-only `List(Dyn)`. Mirrors the VM's `vm_type_repr` tag consultation.
+        Value::List(repr) => repr
+            .reflect()
+            .map(|r| (*r).clone())
+            .unwrap_or_else(|| TypeRepr::List(dyn_())),
         // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
         Value::Tuple(_) => TypeRepr::Dyn,
         Value::Set(_) => TypeRepr::Set(dyn_()),

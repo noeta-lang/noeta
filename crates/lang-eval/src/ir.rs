@@ -821,12 +821,17 @@ impl Interpreter {
                     recv_int, *method, amount, *bits,
                 )))
             }
-            lang_ir::Rvalue::List { items, .. } => {
+            lang_ir::Rvalue::List { items, reflect, .. } => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {
                     values.push(self.eval_ir_atom(item, frame)?);
                 }
-                Ok(Value::list(values))
+                // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers it
+                // after a `dyn` launder — the tree-walker twin of the VM's node tag, agreeing by
+                // construction. `None` → an untagged list, reflecting head-only.
+                let repr =
+                    ListRepr::boxed(Rc::new(values)).with_reflect(reflect.clone().map(Rc::new));
+                Ok(Value::List(repr))
             }
             lang_ir::Rvalue::PackedListNew { layout, .. } => {
                 // Start a streaming flat build (P-PACK 2.5): an empty `List<packed>` buffer, or an
@@ -857,7 +862,7 @@ impl Interpreter {
                             Ok(Value::list(boxed))
                         }
                     }
-                    Value::List(ListRepr::Boxed(rc)) => {
+                    Value::List(ListRepr::Boxed { items: rc, .. }) => {
                         // The accumulator is a moved temp, so it is uniquely owned — take the vector
                         // without copying (the clone is only a defensive fall-back).
                         let mut boxed = Rc::try_unwrap(rc).unwrap_or_else(|rc| (*rc).clone());
@@ -1455,7 +1460,7 @@ impl Interpreter {
         // 2.3) has no specialized `set` yet, so it materializes to a fresh boxed vector — correct,
         // just not flat. The result is a boxed list either way.
         let mut rc = match repr {
-            ListRepr::Boxed(rc) => rc,
+            ListRepr::Boxed { items: rc, .. } => rc,
             ListRepr::Packed(_) => repr.to_rc_vec(),
         };
         let new_value = values.pop().expect("set takes two args");

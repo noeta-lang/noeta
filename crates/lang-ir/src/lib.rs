@@ -276,8 +276,17 @@ pub enum Rvalue {
         field_span: Span,
         span: Span,
     },
-    /// A list literal `[a, b, c]`.
-    List { items: Vec<Atom>, span: Span },
+    /// A list literal `[a, b, c]`. `reflect` is the checker-resolved element type (runtime
+    /// type-argument reflection, R1), baked from the construction-site map so `type_of` recovers the
+    /// list's element type even after the value is laundered through `dyn`; `None` when the checker
+    /// carried no type (the boxed/REPL path, or a genuinely unknowable element type) — the value stays
+    /// untagged and reflects head-only. Invisible to value semantics — the backends stash it beside the
+    /// value, never inside it.
+    List {
+        items: Vec<Atom>,
+        reflect: Option<lang_ast::reflect::TypeRepr>,
+        span: Span,
+    },
     /// Allocate an empty flat `List<packed>` buffer for a `List<@packed struct>` literal, filled
     /// element-by-element by [`Rvalue::PackedListPush`] (P-PACK 2.5 streaming construction). The
     /// `layout` is carried inline so the backends need no side channel — both build their packed

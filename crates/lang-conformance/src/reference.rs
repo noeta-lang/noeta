@@ -39,6 +39,7 @@ pub fn reference_run(
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
+    construction_sites: HashMap<Span, TypeRepr>,
     relevance: &lang_check::DestructorRelevance,
 ) -> RunResult {
     // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
@@ -51,6 +52,7 @@ pub fn reference_run(
         &ext_call_sites,
         &for_stream_sites,
         &width_sites,
+        &construction_sites,
     )
     .expect(
         "Core-IR lowering is total over the parsed language \

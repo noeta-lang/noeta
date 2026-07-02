@@ -34,6 +34,7 @@ pub use ops::{
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
+use lang_ast::reflect::TypeRepr;
 use lang_bytecode::Builtin;
 use lang_object::{PackedKind, PackedSchema, Shape};
 use lang_stdlib::FileHandle;
@@ -224,6 +225,27 @@ impl Value {
     /// release it afterward); the list releases them when it is freed.
     pub fn list(items: Vec<Value>) -> Value {
         heap::alloc(Payload::List(items))
+    }
+
+    /// This value's **reflected type tag** (runtime type-argument reflection, R1), or `None` if the
+    /// value is untagged (an immediate, or a heap value whose construction site carried no type). Read
+    /// by `type_of` to recover a container's element type after its static type was laundered through
+    /// `dyn`. A cheap `Rc` clone; `None` for every non-pointer value.
+    pub fn reflect(self) -> Option<Rc<TypeRepr>> {
+        if self.is_pointer() {
+            heap::reflect(self)
+        } else {
+            None
+        }
+    }
+
+    /// Stamp (or clear) this value's reflected type tag (R1). Used at list-literal construction to
+    /// record the checker-resolved element type. A no-op on a non-pointer value (an immediate carries
+    /// no tag). The tag is invisible to value semantics — it lives beside the payload, never inside it.
+    pub fn set_reflect(self, tag: Option<Rc<TypeRepr>>) {
+        if self.is_pointer() {
+            heap::set_reflect(self, tag);
+        }
     }
 
     /// A heap tuple (refcount 1) — a fixed-arity, value-semantic positional aggregate (object-model
@@ -1517,6 +1539,10 @@ impl Value {
                 }
             });
         }
+        // A content-changing op yields a logically new list: drop the reflected type tag (R1) so the
+        // reused node does not carry the original literal's element type. The tag survives pure
+        // aliasing only — matching the tree-walker, which produces a fresh untagged list here.
+        heap::set_reflect(self, None);
     }
 
     /// Push one `element` onto this boxed list's backing buffer **in place**, taking ownership of the
@@ -1533,6 +1559,8 @@ impl Value {
                 items.push(element);
             }
         });
+        // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+        heap::set_reflect(self, None);
     }
 
     /// Overwrite list slot `index` **in place** with `value`, returning the displaced value (whose
@@ -1546,12 +1574,15 @@ impl Value {
             "list_replace_slot requires a uniquely-owned list (the COW invariant)"
         );
         if self.is_pointer() {
-            heap::with_payload_mut(self, |p| match p {
+            let displaced = heap::with_payload_mut(self, |p| match p {
                 Payload::List(items) if index < items.len() => {
                     std::mem::replace(&mut items[index], value)
                 }
                 _ => Value::unit(),
-            })
+            });
+            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            heap::set_reflect(self, None);
+            displaced
         } else {
             Value::unit()
         }
@@ -3263,6 +3294,40 @@ mod tests {
         assert!(list.dec_ref());
         list.free(); // frees the list and recursively its two elements
         assert_eq!(live_count(), before);
+    }
+
+    #[test]
+    fn reflect_tag_is_invisible_to_value_semantics_and_leaks_nothing() {
+        // The R1 reflected-type tag lives beside the payload: it round-trips through construction and
+        // free with no residual (a leaf `Rc<TypeRepr>`, not a child object, so `live_count` is
+        // unchanged by tagging), and it is invisible to equality — a tagged and an untagged list of
+        // the same elements compare equal.
+        use lang_ast::reflect::TypeRepr;
+        let before = live_count();
+        let tagged = Value::list(vec![Value::int(1), Value::int(2)]);
+        tagged.set_reflect(Some(Rc::new(TypeRepr::List(Box::new(TypeRepr::Int)))));
+        let untagged = Value::list(vec![Value::int(1), Value::int(2)]);
+        // Tagging allocates no heap object (small ints are immediate): two lists, nothing else.
+        assert_eq!(live_count(), before + 2);
+        // The tag is readable, and clearing it (the mutation path) drops back to `None`.
+        assert!(tagged.reflect().is_some());
+        assert!(untagged.reflect().is_none());
+        // Equality ignores the tag entirely.
+        assert!(
+            apply_binary(lang_ast::BinaryOp::Eq, tagged, untagged)
+                .unwrap()
+                .as_bool()
+                .unwrap()
+        );
+        // A content-changing op clears the tag (refcount-independent — matches the tree-walker).
+        let displaced = tagged.list_replace_slot(0, Value::int(9));
+        assert!(displaced.as_int().is_some());
+        assert!(tagged.reflect().is_none());
+        assert!(tagged.dec_ref());
+        tagged.free();
+        assert!(untagged.dec_ref());
+        untagged.free();
+        assert_eq!(live_count(), before, "the tag leaves no residual heap");
     }
 
     #[test]

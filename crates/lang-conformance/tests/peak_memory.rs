@@ -92,6 +92,7 @@ fn eval_runner(program: lang_ast::Program) -> impl FnOnce() -> lang_backend::Run
         &checked.ext_call_sites,
         &checked.for_stream_sites,
         &checked.width_sites,
+        &checked.construction_sites,
     )
     .expect("Core-IR lowering is total over the parsed language");
     let relevance = lang_ir_passes::Relevance {

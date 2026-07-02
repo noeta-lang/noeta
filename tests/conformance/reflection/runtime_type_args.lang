@@ -1,0 +1,48 @@
+// Runtime type-argument reflection (R1): a collection literal carries its checker-resolved element
+// type as a runtime tag, so `type_of` recovers a container's element type **even after the value's
+// static type is laundered through `dyn`** — closing the erasure residual for `List`. The tag is set
+// at literal construction, survives pure aliasing (passing through a `dyn` parameter), and is
+// **invisible to value semantics**: it never affects equality, and any list-producing op (a `.set`)
+// drops it, so a mutated list reflects head-only. Both backends carry the tag identically — the VM on
+// its heap node, the tree-walker inside `ListRepr` — so `type_of` agrees across the differential.
+// expect: stdout "list<int>"
+// expect: stdout "list<string>"
+// expect: stdout "list<list<int>>"
+// expect: stdout "list<dyn>"
+// expect: stdout "list<dyn>"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: exit 0
+
+fn label(t: Type): string {
+    return match t {
+        Type.Int => "int",
+        Type.String => "string",
+        Type.Bool => "bool",
+        Type.Dyn => "dyn",
+        Type.List(inner) => "list<${label(inner)}>",
+        _ => "other",
+    };
+}
+
+// Erase a value's static type by laundering it through a `dyn` parameter — after this the only type
+// information left is the runtime tag.
+fn launder(v: dyn): dyn { return v; }
+
+// Recovered element types after a `dyn` launder (the static path can no longer see them).
+echo label(type_of(launder([1, 2, 3])));          // list<int>
+echo label(type_of(launder(["a", "b"])));         // list<string>
+echo label(type_of(launder([[1, 2], [3]])));      // list<list<int>> (nested, precise)
+
+// A `List<dyn>` literal is legitimately dynamic: the tag is `List(dyn)` and stays `dyn`.
+xs: List<dyn> = [1, "two", true];
+echo label(type_of(launder(xs)));                 // list<dyn>
+
+// A content-changing op yields a logically new, untagged list → it reflects head-only.
+echo label(type_of(launder([1, 2, 3].set(0, 9)))); // list<dyn>
+
+// Value semantics are unaffected by the tag: a tagged literal equals a laundered (still-tagged) and
+// a mutated (untagged) list with the same elements.
+tagged: List<int> = [7, 8, 9];
+echo tagged == launder([7, 8, 9]);                // true
+echo tagged == [1, 8, 9].set(0, 7);               // true

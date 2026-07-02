@@ -1,8 +1,12 @@
 // `type_of` full fidelity (A): when the checker knows the operand's concrete static type, the
 // reflected `Type` recovers the element/argument types runtime erasure drops — `[1, 2, 3]` is
-// `List(Int)`, not `List(Dyn)`. An operand whose static type is `dyn` has no fixed head to bake, so
-// it falls back to the runtime head constructor (`List(Dyn)`). Both backends harvest the checker's
-// per-site resolution from the same program, so they emit identical `Type` values.
+// `List(Int)`, not `List(Dyn)`. When the operand's static type is `dyn` (laundered through a `dyn`
+// parameter), the static path has no fixed head to bake — but the value still carries the runtime
+// **type tag** its literal recorded (R1), so `type_of` recovers `List(Int)` there too. A genuinely
+// dynamic container — a `List<dyn>` literal — is tagged `List(dyn)` and stays `dyn`. Both backends
+// harvest the checker's per-site resolution and carry the runtime tag identically, so they emit
+// identical `Type` values.
+// expect: stdout "int"
 // expect: stdout "int"
 // expect: stdout "int"
 // expect: stdout "dyn"
@@ -26,4 +30,10 @@ echo elem(type_of([1, 2, 3]));   // A: literal inferred List<int> -> Type.List(T
 xs = [10, 20];
 echo elem(type_of(xs));          // A: xs: List<int> -> Type.List(Type.Int)
 
-echo elem(type_of(as_dyn([1, 2, 3])));  // B: operand static type dyn -> runtime List(Dyn)
+// Operand static type is `dyn`, but the value carries its literal's runtime tag (R1), so the
+// element type is still recovered — the erasure residual is closed for a concrete literal.
+echo elem(type_of(as_dyn([1, 2, 3])));   // R1: laundered List<int> -> Type.List(Type.Int)
+
+// A genuinely dynamic container: `List<dyn>` is tagged `List(dyn)` and stays `dyn`.
+ys: List<dyn> = [1, "two"];
+echo elem(type_of(as_dyn(ys)));          // List<dyn> -> Type.List(Type.Dyn)

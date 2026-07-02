@@ -15,6 +15,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::rc::Rc;
 
+use lang_ast::reflect::TypeRepr;
 use lang_stdlib::FileHandle;
 
 use crate::{Builtin, Closure, EnumDef, EnumValue, ObjectValue, TypeDef};
@@ -140,17 +141,56 @@ pub enum IterState {
 /// demand and runs the existing path, so the flat form stays invisible to `RunResult`.
 #[derive(Clone)]
 pub enum ListRepr {
-    /// The general boxed list: elements are full `Value`s in an `Rc`-shared vector.
-    Boxed(Rc<Vec<Value>>),
+    /// The general boxed list: elements are full `Value`s in an `Rc`-shared vector. `reflect` is the
+    /// checker-resolved element type (runtime type-argument reflection, R1), set at literal
+    /// construction so `type_of` recovers the list's element type after a `dyn` launder; `None` for
+    /// every derived/mutated list (the tag survives pure aliasing only — a `Clone` of the `ListRepr`
+    /// keeps it, but the list-producing ops rebuild through [`ListRepr::boxed`], which clears it). It
+    /// lives beside the element vector, never inside it, so it is invisible to value semantics —
+    /// `elements_eq` compares only the `Rc<Vec<Value>>`, the tree-walker twin of the VM's node tag.
+    Boxed {
+        items: Rc<Vec<Value>>,
+        reflect: Option<Rc<TypeRepr>>,
+    },
     /// A flat `List<packed>`: elements packed as raw primitive words, materialized on access.
     Packed(PackedList),
 }
 
 impl ListRepr {
+    /// A boxed list with no reflected type tag — the constructor every list-producing path uses (a
+    /// literal that carries a type stamps it afterward via [`ListRepr::with_reflect`]). Keeping the
+    /// tag `None` here is what makes it survive pure aliasing only.
+    pub(crate) fn boxed(items: Rc<Vec<Value>>) -> Self {
+        ListRepr::Boxed {
+            items,
+            reflect: None,
+        }
+    }
+
+    /// This list's reflected element type (R1), or `None` if untagged (a packed or derived list).
+    pub(crate) fn reflect(&self) -> Option<Rc<TypeRepr>> {
+        match self {
+            ListRepr::Boxed { reflect, .. } => reflect.clone(),
+            ListRepr::Packed(_) => None,
+        }
+    }
+
+    /// This list with its reflected element type set to `tag` (R1) — used at literal construction to
+    /// stamp the checker-resolved type. A no-op on a packed list (which reflects head-only).
+    pub(crate) fn with_reflect(self, tag: Option<Rc<TypeRepr>>) -> Self {
+        match self {
+            ListRepr::Boxed { items, .. } => ListRepr::Boxed {
+                items,
+                reflect: tag,
+            },
+            packed => packed,
+        }
+    }
+
     /// The number of elements.
     pub(crate) fn len(&self) -> usize {
         match self {
-            ListRepr::Boxed(items) => items.len(),
+            ListRepr::Boxed { items, .. } => items.len(),
             ListRepr::Packed(packed) => packed.len(),
         }
     }
@@ -160,7 +200,7 @@ impl ListRepr {
     pub(crate) fn packed_raw_bytes(&self) -> Option<Vec<u8>> {
         match self {
             ListRepr::Packed(packed) => Some((*packed.bytes).clone()),
-            ListRepr::Boxed(_) => None,
+            ListRepr::Boxed { .. } => None,
         }
     }
 
@@ -169,7 +209,7 @@ impl ListRepr {
     /// path; a packed buffer materializes every element into a fresh boxed vector.
     pub(crate) fn to_rc_vec(&self) -> Rc<Vec<Value>> {
         match self {
-            ListRepr::Boxed(items) => Rc::clone(items),
+            ListRepr::Boxed { items, .. } => Rc::clone(items),
             ListRepr::Packed(packed) => Rc::new(packed.materialize()),
         }
     }
@@ -178,7 +218,7 @@ impl ListRepr {
     /// A packed buffer materializes just the one element — no full-list materialization.
     pub(crate) fn get(&self, index: usize) -> Option<Value> {
         match self {
-            ListRepr::Boxed(items) => items.get(index).cloned(),
+            ListRepr::Boxed { items, .. } => items.get(index).cloned(),
             ListRepr::Packed(packed) => packed.get(index),
         }
     }
@@ -188,7 +228,7 @@ impl ListRepr {
     /// never on raw words (which would, e.g., treat distinct float `NaN` bit-patterns as equal).
     pub(crate) fn elements_eq(&self, other: &ListRepr) -> bool {
         match (self, other) {
-            (ListRepr::Boxed(a), ListRepr::Boxed(b)) => a == b,
+            (ListRepr::Boxed { items: a, .. }, ListRepr::Boxed { items: b, .. }) => a == b,
             _ => *self.to_rc_vec() == *other.to_rc_vec(),
         }
     }
@@ -199,7 +239,7 @@ impl fmt::Debug for ListRepr {
         // A packed list debugs identically to the boxed list it represents, so `Debug` never
         // exposes the layout (and the existing `List({repr:?})` shape is preserved).
         match self {
-            ListRepr::Boxed(items) => write!(f, "{items:?}"),
+            ListRepr::Boxed { items, .. } => write!(f, "{items:?}"),
             ListRepr::Packed(packed) => write!(f, "{:?}", packed.materialize()),
         }
     }
@@ -545,14 +585,15 @@ fn unpack_object(schema: &PackedSchema, bytes: &[u8], offset: usize) -> (Value, 
 }
 
 impl Value {
-    /// Construct a boxed list value from its elements (the general representation).
+    /// Construct a boxed list value from its elements (the general representation). Untagged (R1);
+    /// a literal that carries a reflected type stamps it afterward via [`ListRepr::with_reflect`].
     pub(crate) fn list(items: Vec<Value>) -> Value {
-        Value::List(ListRepr::Boxed(Rc::new(items)))
+        Value::List(ListRepr::boxed(Rc::new(items)))
     }
 
-    /// Construct a boxed list value from an already-shared `Rc<Vec<Value>>`.
+    /// Construct a boxed list value from an already-shared `Rc<Vec<Value>>`. Untagged (R1).
     pub(crate) fn list_rc(items: Rc<Vec<Value>>) -> Value {
-        Value::List(ListRepr::Boxed(items))
+        Value::List(ListRepr::boxed(items))
     }
 
     /// If this is a packed `List<Vec3<f32>>`, its schema and byte buffer (P-PACK 4.2 bulk `vec`).

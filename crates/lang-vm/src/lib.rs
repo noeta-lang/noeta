@@ -219,6 +219,11 @@ struct Vm<'m> {
     /// from [`Module::packed_schemas`] against `shapes` — so `Op::MakePackedList` packs/materializes
     /// elements that share shape identity with directly-constructed instances.
     packed_schemas: Vec<Rc<lang_object::PackedSchema>>,
+    /// One shared `Rc<TypeRepr>` per interned reflected element type (runtime type-argument
+    /// reflection, R1), built once at load from [`Module::type_reprs`]. `Op::MakeList` stamps a cheap
+    /// `Rc` clone of its indexed entry onto the built list, so `type_of` recovers the element type
+    /// after a `dyn` launder. Empty for a program with no tagged list literal.
+    type_reprs: Vec<Rc<lang_ast::reflect::TypeRepr>>,
     /// `map(...)` call span → the result element's `Rc<PackedSchema>` (P-PACK 2.6 category B), resolved
     /// at load from [`Module::map_packed_sites`]. The `map` builtin looks up its call span here to build
     /// a flat result instead of N boxed objects.
@@ -503,10 +508,15 @@ impl<'m> Vm<'m> {
             .iter()
             .map(|(span, idx)| (*span, Rc::clone(&packed_schemas[*idx as usize])))
             .collect();
+        // Build one shared `Rc<TypeRepr>` per interned reflected element type (R1), so each tagged
+        // `MakeList` is a cheap `Rc` clone rather than a fresh `TypeRepr` allocation per execution.
+        let type_reprs: Vec<Rc<lang_ast::reflect::TypeRepr>> =
+            module.type_reprs.iter().cloned().map(Rc::new).collect();
         Vm {
             module,
             shapes,
             packed_schemas,
+            type_reprs,
             map_packed,
             methods,
             destructors,
@@ -2223,14 +2233,25 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, Value::native_fn(*func));
                     frames[top].pc += 1;
                 }
-                Op::MakeList { dst, items } => {
+                Op::MakeList {
+                    dst,
+                    items,
+                    reflect,
+                } => {
                     let mut elements = Vec::with_capacity(items.len());
                     for &r in items.iter() {
                         let v = frames[top].regs[r as usize];
                         retain(v);
                         elements.push(v);
                     }
-                    set_reg(&mut frames[top].regs, *dst, Value::list(elements));
+                    let list = Value::list(elements);
+                    // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers
+                    // it after a `dyn` launder. A cheap `Rc` clone of the shared load-time entry; the
+                    // tag lives beside the payload, invisible to value semantics.
+                    if let Some(idx) = reflect {
+                        list.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                    }
+                    set_reg(&mut frames[top].regs, *dst, list);
                     frames[top].pc += 1;
                 }
                 // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
@@ -6037,6 +6058,12 @@ fn make_role(enum_name: &str, variant: &str) -> Value {
 fn vm_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
     use lang_ast::reflect::TypeRepr;
     let v = *value;
+    // A value carrying a reflected type tag (R1 — a tagged list literal, preserved through pure
+    // aliasing) reports that precise type, so `type_of` recovers a container's element type after a
+    // `dyn` launder. An untagged value falls back to the head-only runtime classification below.
+    if let Some(tag) = v.reflect() {
+        return (*tag).clone();
+    }
     let dyn_ = || Box::new(TypeRepr::Dyn);
     let shape_name = || v.shape().map(|s| s.name.clone()).unwrap_or_default();
     match v.type_name() {

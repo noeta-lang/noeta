@@ -1,6 +1,6 @@
 ---
 source: crates/lang-vm/src/lib.rs
-assertion_line: 4252
+assertion_line: 7496
 expression: module.disassemble()
 ---
 === main ===
@@ -18,7 +18,7 @@ code:
     2  LoadConst   r1 <- k1
     3  LoadConst   r2 <- k2
     4  LoadConst   r3 <- k3
-    5  MakeList    r0 <- [r1, r2, r3]
+    5  MakeList    r0 <- [r1, r2, r3]  ; reflect #0
     6  IterSnapshot r1 <- r0
     7  ListLen     r0 <- len r1
     8  LoadConst   r2 <- k4

@@ -155,6 +155,7 @@ fn run(program: &lang_ast::Program, checked: &lang_db::Checked, report: &mut IrC
                 checked.ext_call_sites.clone(),
                 checked.for_stream_sites.clone(),
                 checked.width_sites.clone(),
+                checked.construction_sites.clone(),
                 &checked.destructor_relevance,
             );
             report.ran += 1;

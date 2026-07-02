@@ -107,6 +107,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.ext_call_sites,
         checked.for_stream_sites,
         checked.width_sites,
+        checked.construction_sites,
         &checked.destructor_relevance,
         false,
     )
@@ -138,6 +139,7 @@ pub fn compile_with_sites(
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
+    construction_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     relevance: &lang_check::DestructorRelevance,
     real_isolates: bool,
 ) -> Result<Module, Unsupported> {
@@ -150,6 +152,7 @@ pub fn compile_with_sites(
         ext_call_sites,
         for_stream_sites,
         width_sites,
+        construction_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
         real_isolates,
@@ -168,6 +171,7 @@ fn compile_inner(
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
+    construction_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     relevance: Option<lang_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -192,6 +196,7 @@ fn compile_inner(
         &ext_call_sites,
         &for_stream_sites,
         &width_sites,
+        &construction_sites,
         real_isolates,
     )
     .map_err(|u| Unsupported {
@@ -216,6 +221,7 @@ fn compile_inner(
         module_globals: HashMap::new(),
         type_of_sites,
         cache_slots: 0,
+        type_reprs: Vec::new(),
     };
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
@@ -259,6 +265,7 @@ fn compile_inner(
         // The attribute manifest + type registry, built from the AST by the *same* pure builder the
         // tree-walker uses — so reflection is identical across backends by construction.
         reflection: lang_ast::reflect::build(program),
+        type_reprs: module.type_reprs,
     })
 }
 
@@ -324,6 +331,9 @@ struct ModuleCompiler {
     /// takes the next id (module-global across all chunks); the total becomes [`Module::cache_slots`],
     /// sizing the VM's per-run cache array. See [`ModuleCompiler::next_cache_slot`].
     cache_slots: u32,
+    /// The interned reflected element types (R1), referenced by index from [`Op::MakeList`]. Interned
+    /// by [`Self::intern_type_repr`]; becomes [`Module::type_reprs`].
+    type_reprs: Vec<lang_ast::reflect::TypeRepr>,
 }
 
 impl ModuleCompiler {
@@ -811,6 +821,18 @@ impl ModuleCompiler {
         }
         let idx = self.packed_schemas.len() as u32;
         self.packed_schemas.push(def);
+        idx
+    }
+
+    /// Intern a reflected element type (R1) into [`Self::type_reprs`], returning its index — the value
+    /// [`Op::MakeList`]'s `reflect` carries. Dedups structurally so repeated identical list-literal
+    /// element types share one table entry.
+    fn intern_type_repr(&mut self, repr: &lang_ast::reflect::TypeRepr) -> u32 {
+        if let Some(i) = self.type_reprs.iter().position(|r| r == repr) {
+            return i as u32;
+        }
+        let idx = self.type_reprs.len() as u32;
+        self.type_reprs.push(repr.clone());
         idx
     }
 
@@ -2220,10 +2242,13 @@ impl<'m> FnCompiler<'m> {
                 self.drop_temp_receiver(receiver, recv);
                 Ok(())
             }
-            Rvalue::List { items, .. } => {
+            Rvalue::List { items, reflect, .. } => {
                 // A boxed list: each element is consumed (retained into the list) and the temporary
                 // released. A `List<packed>` literal never reaches here — lowering streams it into
                 // `PackedListNew` + `PackedListPush` instead (P-PACK 2.5).
+                // The checker-resolved element type (R1), interned into the module table so the VM can
+                // stamp it onto the built list for `type_of`. `None` → the list stays untagged.
+                let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
                 let mut consumed = Vec::new();
                 let mut regs = Vec::with_capacity(items.len());
                 for item in items {
@@ -2232,6 +2257,7 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::MakeList {
                     dst,
                     items: regs.into_boxed_slice(),
+                    reflect,
                 });
                 self.release_consumed(&consumed);
                 Ok(())
