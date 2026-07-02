@@ -146,14 +146,14 @@ pub fn check_all(program: &Program) -> Checked {
     checker.check_program(program);
     Checked {
         diagnostics: checker.diags,
-        type_of_sites: checker.type_of_sites,
-        construction_sites: checker.construction_sites,
-        packed_list_sites: checker.packed_list_sites,
-        ext_call_sites: checker.ext_call_sites,
-        map_packed_sites: checker.map_packed_sites,
-        index_field_sites: checker.index_field_sites,
-        for_stream_sites: checker.for_stream_sites,
-        width_sites: checker.width_sites,
+        type_of_sites: checker.sites.type_of_sites,
+        construction_sites: checker.sites.construction_sites,
+        packed_list_sites: checker.sites.packed_list_sites,
+        ext_call_sites: checker.sites.ext_call_sites,
+        map_packed_sites: checker.sites.map_packed_sites,
+        index_field_sites: checker.sites.index_field_sites,
+        for_stream_sites: checker.sites.for_stream_sites,
+        width_sites: checker.sites.width_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -410,6 +410,54 @@ fn assign(env: &mut Env, name: &str, ty: Type) {
     bind(env, name, ty);
 }
 
+/// The checker's **codegen-hint output**: span-keyed site maps the backends and the lowering consult
+/// to pick a representation or fuse an operation, kept as one cohesive group rather than scattered
+/// across the [`Checker`]'s type-environment and control-flow-coloring fields (they are a distinct
+/// concern — codegen hints, not type facts). Every one is a *pure function of the program* and
+/// invisible to `RunResult`, so both backends derive the same hints by construction; they are lifted
+/// out into the public [`Checked`] result verbatim.
+#[derive(Default)]
+struct SiteMaps {
+    /// Each `type_of(value)` site (keyed by the `Expr::TypeOf` span) whose operand has a **concrete**
+    /// static type, mapped to the precise [`TypeRepr`] the backends bake as a constant (`type_of`
+    /// full fidelity, P2.3). A `dyn`/union/un-inferred operand is absent here — those fall back to
+    /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
+    /// on the same program, so they emit identical `Type` values by construction.
+    type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    construction_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
+    /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
+    /// via [`resolve_packed_list_sites`] to lay out a `List<packed>` as one contiguous raw-primitive
+    /// buffer instead of N boxed objects. A pure function of the program, like `type_of_sites`, so the
+    /// two backends pick the same representation by construction (the flat layout stays invisible to
+    /// `RunResult`).
+    packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// Call-site-typed native-call recipes (`json.parse::<T>`), keyed by the `Expr::TypedModuleCall`
+    /// span → the turbofish `T` resolved into a [`lang_stdlib::TypeRecipe`]. Both backends harvest
+    /// this on the same program, so the lowering bakes identical recipes into `Rvalue::ExtCall`.
+    ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
+    /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
+    /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
+    /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
+    /// site maps it is a pure function of the program, invisible to `RunResult`.
+    map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
+    /// Member-access spans (`list[i].field`) the checker proved fusable: the index receiver is a
+    /// built-in `List` and the field resolves on its element type. Lowering reads this (via
+    /// [`Checked::index_field_sites`]) to emit a single [`Rvalue::IndexField`] that reads a packed
+    /// element's field without materializing the element (P-PACK 2.5+). A pure function of the
+    /// program, invisible to `RunResult`, so both backends fuse the same sites by construction.
+    index_field_sites: HashSet<Span>,
+    /// `for` statement spans whose iterable is statically an `Iterator<T>` — the loop streams via
+    /// `next()` instead of snapshotting a list (Track I.2). Lowering reads this (via
+    /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
+    /// collection or `dyn` iterable is absent here and keeps the snapshot/cursor fast path.
+    for_stream_sites: HashSet<Span>,
+    /// Fixed-width arithmetic sites (Tier W): the span of a same-width `+ - *` / unary `-` on an
+    /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
+    /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
+    width_sites: HashMap<Span, (bool, u8)>,
+}
+
 #[derive(Default)]
 struct Checker {
     /// User-declared enums: name → variants (each with its **accurate** payload types, like a
@@ -527,48 +575,15 @@ struct Checker {
     /// The number of enclosing `for`/`while` loops around the statement being checked. A `break`
     /// or `continue` is only valid when this is non-zero; otherwise it is `E0024`.
     loop_depth: usize,
-    /// Each `type_of(value)` site (keyed by the `Expr::TypeOf` span) whose operand has a **concrete**
-    /// static type, mapped to the precise [`TypeRepr`] the backends bake as a constant (`type_of`
-    /// full fidelity, P2.3). A `dyn`/union/un-inferred operand is absent here — those fall back to
-    /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
-    /// on the same program, so they emit identical `Type` values by construction.
-    type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
-    construction_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
-    /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
-    /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
-    /// via [`resolve_packed_list_sites`] to lay out a `List<packed>` as one contiguous raw-primitive
-    /// buffer instead of N boxed objects. A pure function of the program, like `type_of_sites`, so the
-    /// two backends pick the same representation by construction (the flat layout stays invisible to
-    /// `RunResult`).
-    packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
-    /// Call-site-typed native-call recipes (`json.parse::<T>`), keyed by the `Expr::TypedModuleCall`
-    /// span → the turbofish `T` resolved into a [`lang_stdlib::TypeRecipe`]. Both backends harvest
-    /// this on the same program, so the lowering bakes identical recipes into `Rvalue::ExtCall`.
-    ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
-    /// `map(list, fn)` call spans whose result element type is a `@packed` struct (P-PACK 2.6
-    /// category B), keyed by the whole-call span → the result element's [`PackedLayout`]. The VM's
-    /// `map` builtin consults this to build a flat result instead of N boxed objects; like the other
-    /// site maps it is a pure function of the program, invisible to `RunResult`.
-    map_packed_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// `Expr::Index` spans whose receiver typed as a built-in `List` — recorded as each index is
     /// synthesized so that [`Checker::synth_member`] can recognize a `list[i].field` read without
-    /// re-synthesizing (and re-diagnosing) the inner receiver. Internal scratch, not exported.
+    /// re-synthesizing (and re-diagnosing) the inner receiver. Internal scratch, not exported (so it
+    /// stays a plain `Checker` field, not part of [`SiteMaps`]).
     index_on_list: HashSet<Span>,
-    /// Member-access spans (`list[i].field`) the checker proved fusable: the index receiver is a
-    /// built-in `List` and the field resolves on its element type. Lowering reads this (via
-    /// [`Checked::index_field_sites`]) to emit a single [`Rvalue::IndexField`] that reads a packed
-    /// element's field without materializing the element (P-PACK 2.5+). A pure function of the
-    /// program, invisible to `RunResult`, so both backends fuse the same sites by construction.
-    index_field_sites: HashSet<Span>,
-    /// `for` statement spans whose iterable is statically an `Iterator<T>` — the loop streams via
-    /// `next()` instead of snapshotting a list (Track I.2). Lowering reads this (via
-    /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
-    /// collection or `dyn` iterable is absent here and keeps the snapshot/cursor fast path.
-    for_stream_sites: HashSet<Span>,
-    /// Fixed-width arithmetic sites (Tier W): the span of a same-width `+ - *` / unary `-` on an
-    /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
-    /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
-    width_sites: HashMap<Span, (bool, u8)>,
+    /// The span-keyed **codegen site maps** the checker produces for the backends and lowering — its
+    /// codegen-hint output, grouped apart from the checker's own type-environment/coloring state. See
+    /// [`SiteMaps`].
+    sites: SiteMaps,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
@@ -1510,7 +1525,7 @@ impl Checker {
                 // lowering reads this set to set `Stmt::For.stream`. Collections / `dyn` keep the
                 // snapshot fast path.
                 if matches!(&iter_ty, Type::Named(n, _) if n == stdlib::ITERATOR) {
-                    self.for_stream_sites.insert(*span);
+                    self.sites.for_stream_sites.insert(*span);
                 }
                 env.push(HashMap::new());
                 self.bind_for_pattern(pattern, &iter_ty, env);
@@ -3015,7 +3030,7 @@ impl Checker {
             return concrete.clone();
         }
         if let Some((signed, bits)) = same_width_intn(lt, rt) {
-            self.width_sites.insert(span, (signed, bits));
+            self.sites.width_sites.insert(span, (signed, bits));
             return Type::IntN { signed, bits };
         }
         self.report_intn_mismatch(op, lt, rt, "arithmetic", span);
@@ -3032,7 +3047,7 @@ impl Checker {
             return;
         }
         if let Some((signed, bits)) = same_width_intn(lt, rt) {
-            self.width_sites.insert(span, (signed, bits));
+            self.sites.width_sites.insert(span, (signed, bits));
             return;
         }
         self.report_intn_mismatch(op, lt, rt, "comparison", span);
@@ -3166,7 +3181,7 @@ impl Checker {
                 // E0044. (A negated fixed-width *literal* is handled by the intercept above.)
                 if let (UnaryOp::Neg, Type::IntN { signed, bits }) = (op, &t) {
                     if *signed {
-                        self.width_sites.insert(*span, (*signed, *bits));
+                        self.sites.width_sites.insert(*span, (*signed, *bits));
                     } else {
                         self.diags.push(Diagnostic::error(
                             DiagnosticCode::FixedWidthOutOfRange,
@@ -3628,7 +3643,7 @@ impl Checker {
                 // site stays absent and falls back to the runtime head-constructor path (B).
                 let operand = self.synth(value, env);
                 if let Some(repr) = type_to_repr_top(&operand, &self.type_kinds) {
-                    self.type_of_sites.insert(*span, repr);
+                    self.sites.type_of_sites.insert(*span, repr);
                 }
                 Type::Named("Type".to_string(), Vec::new())
             }
@@ -3659,7 +3674,7 @@ impl Checker {
                 // type (no hardcoded list — extension-friendly).
                 match self.packed_layout(&elem) {
                     Some(layout) => {
-                        self.packed_list_sites.insert(*span, layout);
+                        self.sites.packed_list_sites.insert(*span, layout);
                     }
                     None => {
                         self.diags.push(Diagnostic::error(
@@ -3746,7 +3761,7 @@ impl Checker {
                 // is an error here.
                 match self.type_to_recipe(&t) {
                     Some(recipe) => {
-                        self.ext_call_sites.insert(*span, recipe);
+                        self.sites.ext_call_sites.insert(*span, recipe);
                     }
                     None => {
                         self.diags.push(Diagnostic::error(
@@ -4031,7 +4046,7 @@ impl Checker {
                     }
                     // Both `<<` (via `MaskWidth`) and `>>` (via `WideInt`) read the width from here;
                     // lowering routes by the operator.
-                    self.width_sites.insert(span, (signed, bits));
+                    self.sites.width_sites.insert(span, (signed, bits));
                     return Type::IntN { signed, bits };
                 }
                 let ok = |t: &Type| matches!(t, Type::Int) || t.defers_to_runtime();
@@ -4246,7 +4261,7 @@ impl Checker {
                     && let Some(m) = lang_stdlib::IntMethod::from_name(name)
                     && !matches!(m, lang_stdlib::IntMethod::Convert { .. })
                 {
-                    self.width_sites.insert(call_span, (false, bits));
+                    self.sites.width_sites.insert(call_span, (false, bits));
                 }
                 // `it.zip(other)` → `Iterator<(A, B)>`: both element types are needed and only `recv`
                 // reaches `method_return`, so the precise tuple is assembled here where the argument
@@ -4623,7 +4638,7 @@ impl Checker {
     /// (P-PACK Phase 2) — the span both backends key on to pick the flat raw-buffer representation.
     fn note_packed_list(&mut self, elem: &Type, span: Span) {
         if let Some(layout) = self.packed_layout(elem) {
-            self.packed_list_sites.insert(span, layout);
+            self.sites.packed_list_sites.insert(span, layout);
         }
     }
 
@@ -4648,7 +4663,7 @@ impl Checker {
             if is_nongeneric_nominal(&repr) {
                 return;
             }
-            self.construction_sites.insert(span, repr);
+            self.sites.construction_sites.insert(span, repr);
         }
     }
 
@@ -4656,7 +4671,7 @@ impl Checker {
     /// (P-PACK 2.6 category B) — the span the VM's `map` builtin keys on to build a flat result.
     fn note_map_packed(&mut self, elem: &Type, span: Span) {
         if let Some(layout) = self.packed_layout(elem) {
-            self.map_packed_sites.insert(span, layout);
+            self.sites.map_packed_sites.insert(span, layout);
         }
     }
 
@@ -4976,7 +4991,7 @@ impl Checker {
             if let Expr::Index { span: idx_span, .. } = receiver
                 && self.index_on_list.contains(idx_span)
             {
-                self.index_field_sites.insert(member_span);
+                self.sites.index_field_sites.insert(member_span);
             }
             // Substitute the class's type parameters from the receiver's type arguments, so a field
             // of a `Box<int>` reads as `int`. An unresolved parameter (the receiver's arguments are
