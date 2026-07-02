@@ -2191,7 +2191,7 @@ impl Checker {
     fn check_type_param_bounds(&mut self, params: &[TypeParam]) {
         for p in params {
             for bound in &p.bounds {
-                if BuiltinTrait::lookup(bound).is_none() {
+                if BuiltinTrait::from_name(bound).is_none() {
                     self.error(
                         DiagnosticCode::UnknownTrait,
                         p.span,
@@ -2274,7 +2274,7 @@ impl Checker {
     /// required method with the right arity. (The orphan rule and the standalone-only body
     /// restriction are enforced by the caller, [`Self::check_standalone_impl`].)
     fn check_trait_impl(&mut self, trait_name: &str, trait_span: Span, methods: &[FnDecl]) {
-        let Some(t) = BuiltinTrait::lookup(trait_name) else {
+        let Some(t) = BuiltinTrait::from_name(trait_name) else {
             self.error(
                 DiagnosticCode::UnknownTrait,
                 trait_span,
@@ -2283,7 +2283,7 @@ impl Checker {
             .help("only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)");
             return;
         };
-        let Some((req_name, req_arity)) = t.required_method else {
+        let Some((req_name, req_arity)) = t.required_method() else {
             return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
         };
         match methods.iter().find(|m| m.name == req_name) {
@@ -2403,7 +2403,7 @@ impl Checker {
     /// derivable trait today is `Serialize<Format>`.
     fn check_derives(&mut self, derives: &[DeriveSpec]) {
         for spec in derives {
-            let Some(t) = BuiltinTrait::lookup(&spec.name) else {
+            let Some(t) = BuiltinTrait::from_name(&spec.name) else {
                 self.error(
                     DiagnosticCode::UnknownTrait,
                     spec.span,
@@ -2411,7 +2411,7 @@ impl Checker {
                 );
                 continue;
             };
-            if !t.derivable {
+            if !t.derivable() {
                 self.error(
                         DiagnosticCode::UnknownTrait,
                         spec.span,

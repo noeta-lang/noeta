@@ -9,6 +9,12 @@
 //! (`lang-check`), and the operator → method correspondence it encodes is kept in lockstep with
 //! [`BinaryOp::overload_method`](lang_ast::BinaryOp::overload_method) by a unit test below.
 //!
+//! [`BuiltinTrait`] is a **fieldless enum**: trait identity is a variant, not a string, so the
+//! checker matches it exhaustively (adding a trait forces every dispatch site to be updated) and an
+//! unknown name is rejected at exactly one parse boundary ([`BuiltinTrait::from_name`]). Each
+//! variant's metadata — the source name, the single method an `impl` must provide, the operator it
+//! overloads, and whether it is derivable — lives in one authoritative [`BuiltinTrait::info`] match.
+//!
 //! Every operator is now trait-dispatched through both backends: the infix traits `Add`/`Sub`/
 //! `Mul`/`Div`/`Concat` (`+ - * / ~`, M1.8a), `Equatable` (`==`/`!=` → `eq`), and `Comparable`
 //! (`< <= > >=` → `compare`, returning the built-in `Ordering` enum). The `Index` trait lights up
@@ -20,34 +26,119 @@
 
 use lang_ast::BinaryOp;
 
-/// One built-in trait: the name users write in `impl`/`@derive(...)`, the single method an
-/// `impl` block must provide (with its user-facing arity, i.e. excluding the receiver), the infix
-/// operator it overloads (if any), and whether it may be derived.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct BuiltinTrait {
-    pub name: &'static str,
+/// One built-in trait — the fixed vocabulary an `impl`/`@derive(...)` may name. A fieldless enum so
+/// trait identity is a value the checker matches exhaustively; the per-variant metadata is reached
+/// through the accessors below (all backed by the single [`BuiltinTrait::info`] match).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BuiltinTrait {
+    // --- infix operator traits (wired through both backends in M1.8a) ---
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Concat,
+    // --- protocol traits (surface + validation now; behavior in M1.8b) ---
+    Equatable,
+    Comparable,
+    Display,
+    Clone,
+    Serialize,
+    Index,
+    Length,
+    Iterable,
+    Callable,
+    Members,
+    DynamicCall,
+    TryAdd,
+}
+
+/// The per-variant metadata of a [`BuiltinTrait`]: the name users write, the single method an `impl`
+/// block must provide (with its user-facing arity, i.e. excluding the receiver), the infix operator
+/// it overloads (if any), and whether it may be derived.
+struct Info {
+    /// The name users write in `impl`/`@derive(...)`.
+    name: &'static str,
     /// The required method's name and parameter count *excluding the receiver*, or `None` for a
     /// marker trait whose behavior is fully synthesized (e.g. `Clone`, `Serialize`) and so imposes no
     /// single hand-written method.
-    pub required_method: Option<(&'static str, usize)>,
+    required_method: Option<(&'static str, usize)>,
     /// The infix operator this trait overloads, for the operator traits; `None` otherwise.
-    pub operator: Option<BinaryOp>,
+    operator: Option<BinaryOp>,
     /// Whether `@derive(Name)` is accepted for this trait.
-    pub derivable: bool,
+    derivable: bool,
 }
 
 impl BuiltinTrait {
-    /// Look up a trait by the name written in source, or `None` if it is not a built-in trait.
-    pub fn lookup(name: &str) -> Option<&'static BuiltinTrait> {
-        BUILTIN_TRAITS.iter().find(|t| t.name == name)
+    /// The single source of truth: each variant's name, required method, operator, and derivability.
+    /// Every accessor projects one field of this; keep the operator entries consistent with
+    /// [`BinaryOp::overload_method`].
+    fn info(self) -> Info {
+        use BuiltinTrait::*;
+        let (name, required_method, operator, derivable): (
+            &'static str,
+            Option<(&'static str, usize)>,
+            Option<BinaryOp>,
+            bool,
+        ) = match self {
+            Add => ("Add", Some(("add", 1)), Some(BinaryOp::Add), false),
+            Sub => ("Sub", Some(("sub", 1)), Some(BinaryOp::Sub), false),
+            Mul => ("Mul", Some(("mul", 1)), Some(BinaryOp::Mul), false),
+            Div => ("Div", Some(("div", 1)), Some(BinaryOp::Div), false),
+            Concat => ("Concat", Some(("concat", 1)), Some(BinaryOp::Concat), false),
+            Equatable => ("Equatable", Some(("eq", 1)), None, true),
+            Comparable => ("Comparable", Some(("compare", 1)), None, true),
+            Display => ("Display", Some(("to_string", 0)), None, true),
+            Clone => ("Clone", None, None, true),
+            Serialize => ("Serialize", None, None, true),
+            Index => ("Index", Some(("get", 1)), None, false),
+            Length => ("Length", Some(("len", 0)), None, false),
+            Iterable => ("Iterable", Some(("iter", 0)), None, false),
+            Callable => ("Callable", None, None, false),
+            Members => ("Members", Some(("get", 1)), None, false),
+            DynamicCall => ("DynamicCall", Some(("call", 2)), None, false),
+            TryAdd => ("TryAdd", Some(("try_add", 1)), None, false),
+        };
+        Info {
+            name,
+            required_method,
+            operator,
+            derivable,
+        }
+    }
+
+    /// The name users write in `impl`/`@derive(...)` for this trait.
+    pub fn name(self) -> &'static str {
+        self.info().name
+    }
+
+    /// Parse a trait by the name written in source, or `None` if it is not a built-in trait. This is
+    /// the **one** boundary where a trait name enters the type system as a value; every interior path
+    /// then dispatches on the enum.
+    pub fn from_name(name: &str) -> Option<BuiltinTrait> {
+        BUILTIN_TRAITS.iter().copied().find(|t| t.name() == name)
+    }
+
+    /// The single method an `impl` block must provide (name + user-facing arity), or `None` for a
+    /// marker trait whose behavior is fully synthesized.
+    pub fn required_method(self) -> Option<(&'static str, usize)> {
+        self.info().required_method
+    }
+
+    /// The infix operator this trait overloads, or `None`.
+    pub fn operator(self) -> Option<BinaryOp> {
+        self.info().operator
+    }
+
+    /// Whether `@derive(Name)` is accepted for this trait.
+    pub fn derivable(self) -> bool {
+        self.info().derivable
     }
 
     /// How many **generic type arguments** `@derive(Name<…>)` requires for this trait. Only
-    /// `Serialize<Format>` is parameterized today (arity 1); every other trait is nullary. Kept as a
-    /// method (not a per-entry field) so the table stays terse.
-    pub fn generic_arity(&self) -> usize {
-        match self.name {
-            "Serialize" => 1,
+    /// `Serialize<Format>` is parameterized today (arity 1); every other trait is nullary.
+    pub fn generic_arity(self) -> usize {
+        match self {
+            BuiltinTrait::Serialize => 1,
             _ => 0,
         }
     }
@@ -60,117 +151,33 @@ pub const SERIALIZE_FORMATS: &[&str] = &["Json"];
 
 /// The built-in trait that overloads `op`, if any. Used by the checker; the backends use the
 /// lighter [`BinaryOp::overload_method`](lang_ast::BinaryOp::overload_method) directly.
-pub fn operator_trait(op: BinaryOp) -> Option<&'static BuiltinTrait> {
-    BUILTIN_TRAITS.iter().find(|t| t.operator == Some(op))
+pub fn operator_trait(op: BinaryOp) -> Option<BuiltinTrait> {
+    BUILTIN_TRAITS
+        .iter()
+        .copied()
+        .find(|t| t.operator() == Some(op))
 }
 
-/// The complete set of built-in traits. Operator traits come first, then the protocol/derivable
-/// traits. Keep the operator entries consistent with [`BinaryOp::overload_method`].
+/// The complete set of built-in traits, in declaration order (operator traits first, then the
+/// protocol/derivable traits). Used to scan by name/operator and by the coherence tests.
 pub const BUILTIN_TRAITS: &[BuiltinTrait] = &[
-    // --- infix operator traits (wired through both backends in M1.8a) ---
-    BuiltinTrait {
-        name: "Add",
-        required_method: Some(("add", 1)),
-        operator: Some(BinaryOp::Add),
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Sub",
-        required_method: Some(("sub", 1)),
-        operator: Some(BinaryOp::Sub),
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Mul",
-        required_method: Some(("mul", 1)),
-        operator: Some(BinaryOp::Mul),
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Div",
-        required_method: Some(("div", 1)),
-        operator: Some(BinaryOp::Div),
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Concat",
-        required_method: Some(("concat", 1)),
-        operator: Some(BinaryOp::Concat),
-        derivable: false,
-    },
-    // --- protocol traits (surface + validation now; behavior in M1.8b) ---
-    BuiltinTrait {
-        name: "Equatable",
-        required_method: Some(("eq", 1)),
-        operator: None,
-        derivable: true,
-    },
-    BuiltinTrait {
-        name: "Comparable",
-        required_method: Some(("compare", 1)),
-        operator: None,
-        derivable: true,
-    },
-    BuiltinTrait {
-        name: "Display",
-        required_method: Some(("to_string", 0)),
-        operator: None,
-        derivable: true,
-    },
-    BuiltinTrait {
-        name: "Clone",
-        required_method: None,
-        operator: None,
-        derivable: true,
-    },
-    BuiltinTrait {
-        name: "Serialize",
-        required_method: None,
-        operator: None,
-        derivable: true,
-    },
-    BuiltinTrait {
-        name: "Index",
-        required_method: Some(("get", 1)),
-        operator: None,
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Length",
-        required_method: Some(("len", 0)),
-        operator: None,
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Iterable",
-        required_method: Some(("iter", 0)),
-        operator: None,
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Callable",
-        required_method: None,
-        operator: None,
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "Members",
-        required_method: Some(("get", 1)),
-        operator: None,
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "DynamicCall",
-        required_method: Some(("call", 2)),
-        operator: None,
-        derivable: false,
-    },
-    BuiltinTrait {
-        name: "TryAdd",
-        required_method: Some(("try_add", 1)),
-        operator: None,
-        derivable: false,
-    },
+    BuiltinTrait::Add,
+    BuiltinTrait::Sub,
+    BuiltinTrait::Mul,
+    BuiltinTrait::Div,
+    BuiltinTrait::Concat,
+    BuiltinTrait::Equatable,
+    BuiltinTrait::Comparable,
+    BuiltinTrait::Display,
+    BuiltinTrait::Clone,
+    BuiltinTrait::Serialize,
+    BuiltinTrait::Index,
+    BuiltinTrait::Length,
+    BuiltinTrait::Iterable,
+    BuiltinTrait::Callable,
+    BuiltinTrait::Members,
+    BuiltinTrait::DynamicCall,
+    BuiltinTrait::TryAdd,
 ];
 
 #[cfg(test)]
@@ -191,7 +198,7 @@ mod tests {
                     let t = operator_trait(op)
                         .unwrap_or_else(|| panic!("no operator trait for {op:?}"));
                     assert_eq!(
-                        t.required_method,
+                        t.required_method(),
                         Some((method, 1)),
                         "method mismatch for {op:?}"
                     );
@@ -209,8 +216,7 @@ mod tests {
     #[test]
     fn equatable_dispatch_matches_registry() {
         use BinaryOp::*;
-        let eq = BuiltinTrait::lookup("Equatable").unwrap();
-        assert_eq!(eq.required_method, Some(("eq", 1)));
+        assert_eq!(BuiltinTrait::Equatable.required_method(), Some(("eq", 1)));
         assert_eq!(Eq.equatable_negation(), Some(false));
         assert_eq!(Ne.equatable_negation(), Some(true));
         for op in [Add, Sub, Mul, Div, Rem, Concat, Lt, Le, Gt, Ge, And, Or] {
@@ -227,8 +233,10 @@ mod tests {
     #[test]
     fn comparable_dispatch_matches_registry() {
         use BinaryOp::*;
-        let cmp = BuiltinTrait::lookup("Comparable").unwrap();
-        assert_eq!(cmp.required_method, Some(("compare", 1)));
+        assert_eq!(
+            BuiltinTrait::Comparable.required_method(),
+            Some(("compare", 1))
+        );
         for op in [Lt, Le, Gt, Ge] {
             assert_eq!(op.comparable_method(), Some("compare"));
         }
@@ -244,10 +252,13 @@ mod tests {
     }
 
     #[test]
-    fn lookup_finds_and_rejects() {
-        assert_eq!(BuiltinTrait::lookup("Add").map(|t| t.name), Some("Add"));
-        assert!(BuiltinTrait::lookup("Equatable").is_some_and(|t| t.derivable));
-        assert!(BuiltinTrait::lookup("Add").is_some_and(|t| !t.derivable));
-        assert!(BuiltinTrait::lookup("Nonexistent").is_none());
+    fn from_name_finds_and_rejects() {
+        assert_eq!(
+            BuiltinTrait::from_name("Add").map(|t| t.name()),
+            Some("Add")
+        );
+        assert!(BuiltinTrait::from_name("Equatable").is_some_and(|t| t.derivable()));
+        assert!(BuiltinTrait::from_name("Add").is_some_and(|t| !t.derivable()));
+        assert!(BuiltinTrait::from_name("Nonexistent").is_none());
     }
 }
