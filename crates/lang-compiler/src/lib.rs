@@ -2047,6 +2047,30 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // Sign-dependent fixed-width `/ % < <= > >=` (Tier W3): a single width-carrying op the VM
+            // resolves via `apply_binary_wide`. No trait dispatch (operands are erased ints), no
+            // reuse — always the copying form.
+            Rvalue::WideInt {
+                op,
+                lhs,
+                rhs,
+                signed,
+                bits,
+                span,
+            } => {
+                let a = self.atom_reg(lhs)?;
+                let b = self.atom_reg(rhs)?;
+                self.code.push(Op::WideInt {
+                    op: *op,
+                    dst,
+                    a,
+                    b,
+                    signed: *signed,
+                    bits: *bits,
+                    span: *span,
+                });
+                Ok(())
+            }
             // `&&`/`||` never reach here (they lower to `Stmt::Logical`); every other infix does.
             Rvalue::Binary {
                 op,

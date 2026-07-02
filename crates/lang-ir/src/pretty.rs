@@ -235,6 +235,20 @@ impl Printer<'_> {
                 let marker = if *reuse { " reuse" } else { "" };
                 format!("{} {} {}{}", atom(lhs), op.symbol(), atom(rhs), marker)
             }
+            Rvalue::WideInt {
+                op,
+                lhs,
+                rhs,
+                signed,
+                bits,
+                ..
+            } => format!(
+                "{} {} {} {}{bits}",
+                atom(lhs),
+                op.symbol(),
+                atom(rhs),
+                if *signed { 'i' } else { 'u' },
+            ),
             Rvalue::Call { callee, args, .. } => format!("call {}({})", atom(callee), atoms(args)),
             Rvalue::Method {
                 receiver,

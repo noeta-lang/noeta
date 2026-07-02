@@ -76,6 +76,51 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
     }
 }
 
+/// Sign-dependent fixed-width integer op (Tier W3): `/ % < <= > >=` where the operand width and
+/// signedness matter (unsigned `u64` division and ordering differ from signed once bit 63 is set).
+/// The erased-i64 operands are read as `signed`/unsigned; `/ %` mask their result back into `bits`
+/// (so signed `MIN / -1` wraps like `wrapping_div`), and `< <= > >=` yield a bool. The checker
+/// guarantees two same-width `IntN` operands (erased to `int`); a non-int pairing is a defensive
+/// fallback to `apply_binary`. The tree-walker holds the identical twin, so the differential agrees.
+pub fn apply_binary_wide(
+    op: BinaryOp,
+    left: Value,
+    right: Value,
+    signed: bool,
+    bits: u8,
+) -> Result<Value, OpError> {
+    let (Some(a), Some(b)) = (left.as_int(), right.as_int()) else {
+        return apply_binary(op, left, right);
+    };
+    let mask = |v: i64| Value::int(lang_stdlib::mask_to_width(v, signed, bits));
+    if signed {
+        match op {
+            BinaryOp::Div if b == 0 => Err(div_by_zero()),
+            BinaryOp::Div => Ok(mask(a.wrapping_div(b))),
+            BinaryOp::Rem if b == 0 => Err(div_by_zero()),
+            BinaryOp::Rem => Ok(mask(a.wrapping_rem(b))),
+            BinaryOp::Lt => Ok(Value::bool(a < b)),
+            BinaryOp::Le => Ok(Value::bool(a <= b)),
+            BinaryOp::Gt => Ok(Value::bool(a > b)),
+            BinaryOp::Ge => Ok(Value::bool(a >= b)),
+            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+        }
+    } else {
+        let (a, b) = (a as u64, b as u64);
+        match op {
+            BinaryOp::Div if b == 0 => Err(div_by_zero()),
+            BinaryOp::Div => Ok(mask((a / b) as i64)),
+            BinaryOp::Rem if b == 0 => Err(div_by_zero()),
+            BinaryOp::Rem => Ok(mask((a % b) as i64)),
+            BinaryOp::Lt => Ok(Value::bool(a < b)),
+            BinaryOp::Le => Ok(Value::bool(a <= b)),
+            BinaryOp::Gt => Ok(Value::bool(a > b)),
+            BinaryOp::Ge => Ok(Value::bool(a >= b)),
+            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+        }
+    }
+}
+
 /// Bitwise/shift operators on `int` (P-BITS Tier B). Both operands must be integers — the checker
 /// enforces this (E0043), so a non-int here is a defensive fallback. Operates on the full signed
 /// i64; `>>` is an **arithmetic** (sign-extending) shift (a logical shift arrives with the unsigned
@@ -419,5 +464,58 @@ fn type_mismatch(op: BinaryOp, left: Value, right: Value) -> OpError {
             left.type_name(),
             right.type_name()
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Read the `int`/`bool` result of a wide op, freeing the result Value (a large i64 like
+    // `i64::MAX` boxes on the NaN-boxed heap, so it must be freed to stay miri-clean). The small
+    // operands never box, so passing them by value is enough.
+    fn wide_int(op: BinaryOp, a: i64, b: i64, signed: bool, bits: u8) -> i64 {
+        let v = apply_binary_wide(op, Value::int(a), Value::int(b), signed, bits)
+            .expect("no div-by-zero");
+        let n = v.as_int().expect("int result");
+        v.free();
+        n
+    }
+    fn wide_bool(op: BinaryOp, a: i64, b: i64, signed: bool, bits: u8) -> bool {
+        let v = apply_binary_wide(op, Value::int(a), Value::int(b), signed, bits)
+            .expect("comparisons never error");
+        let r = v.as_bool().expect("bool result");
+        v.free();
+        r
+    }
+
+    #[test]
+    fn signed_division_truncates_and_wraps_min() {
+        // Truncation toward zero, like `int`.
+        assert_eq!(wide_int(BinaryOp::Div, -7, 2, true, 32), -3);
+        assert_eq!(wide_int(BinaryOp::Rem, -7, 2, true, 32), -1);
+        // Signed `MIN / -1` overflows and wraps to the width (`wrapping_div`): -128 / -1 -> -128.
+        assert_eq!(wide_int(BinaryOp::Div, -128, -1, true, 8), -128);
+    }
+
+    #[test]
+    fn unsigned_u64_past_bit63_divides_and_orders_as_unsigned() {
+        // The crux: the erased operand is a negative i64, but read unsigned it is `u64::MAX`.
+        let max = u64::MAX as i64; // -1 as i64
+        // Signed would give -1 / 2 = 0; unsigned gives u64::MAX / 2.
+        assert_eq!(
+            wide_int(BinaryOp::Div, max, 2, false, 64),
+            (u64::MAX / 2) as i64
+        );
+        // Signed would give -1 > 1 = false; unsigned gives true.
+        assert!(wide_bool(BinaryOp::Gt, max, 1, false, 64));
+        // Small unsigned widths never set bit 63, so they already agreed — still correct here.
+        assert_eq!(wide_int(BinaryOp::Div, 250, 5, false, 8), 50);
+    }
+
+    #[test]
+    fn division_by_zero_is_an_error_both_signednesses() {
+        assert!(apply_binary_wide(BinaryOp::Div, Value::int(1), Value::int(0), true, 32).is_err());
+        assert!(apply_binary_wide(BinaryOp::Rem, Value::int(1), Value::int(0), false, 64).is_err());
     }
 }

@@ -50,6 +50,52 @@ pub fn apply_binary(op: BinaryOp, left: &Value, right: &Value) -> Result<Value, 
     }
 }
 
+/// Sign-dependent fixed-width integer op (Tier W3) — the tree-walker twin of the VM's
+/// `apply_binary_wide`. `/ % < <= > >=` where the operand width and signedness matter (unsigned
+/// `u64` division and ordering differ from signed once bit 63 is set): the erased-i64 operands are
+/// read as `signed`/unsigned, `/ %` mask their result back into `bits` (so signed `MIN / -1` wraps),
+/// and `< <= > >=` yield a bool. Same helper (`lang_stdlib::mask_to_width`) and error text as the VM,
+/// so the differential agrees by construction. A non-int pairing is a defensive fallback.
+pub fn apply_binary_wide(
+    op: BinaryOp,
+    left: &Value,
+    right: &Value,
+    signed: bool,
+    bits: u8,
+) -> Result<Value, OpError> {
+    let (Value::Int(a), Value::Int(b)) = (left, right) else {
+        return apply_binary(op, left, right);
+    };
+    let (a, b) = (*a, *b);
+    let mask = |v: i64| Value::Int(lang_stdlib::mask_to_width(v, signed, bits));
+    if signed {
+        match op {
+            BinaryOp::Div if b == 0 => Err(div_by_zero()),
+            BinaryOp::Div => Ok(mask(a.wrapping_div(b))),
+            BinaryOp::Rem if b == 0 => Err(div_by_zero()),
+            BinaryOp::Rem => Ok(mask(a.wrapping_rem(b))),
+            BinaryOp::Lt => Ok(Value::Bool(a < b)),
+            BinaryOp::Le => Ok(Value::Bool(a <= b)),
+            BinaryOp::Gt => Ok(Value::Bool(a > b)),
+            BinaryOp::Ge => Ok(Value::Bool(a >= b)),
+            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+        }
+    } else {
+        let (a, b) = (a as u64, b as u64);
+        match op {
+            BinaryOp::Div if b == 0 => Err(div_by_zero()),
+            BinaryOp::Div => Ok(mask((a / b) as i64)),
+            BinaryOp::Rem if b == 0 => Err(div_by_zero()),
+            BinaryOp::Rem => Ok(mask((a % b) as i64)),
+            BinaryOp::Lt => Ok(Value::Bool(a < b)),
+            BinaryOp::Le => Ok(Value::Bool(a <= b)),
+            BinaryOp::Gt => Ok(Value::Bool(a > b)),
+            BinaryOp::Ge => Ok(Value::Bool(a >= b)),
+            _ => unreachable!("apply_binary_wide only handles / % < <= > >="),
+        }
+    }
+}
+
 /// Bitwise/shift operators on `int` (P-BITS Tier B) — the tree-walker twin of the VM's `bitwise`;
 /// identical semantics and error text so the differential agrees by construction. Integer-only
 /// (checker-enforced, E0043); `>>` is arithmetic (sign-extending); the shift amount must be in

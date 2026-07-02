@@ -27,7 +27,9 @@ pub use heap::{
     CollectorMode, Color, SharedRegion, collector_mode, live_count, live_objects, live_peak,
     reset_peak, set_collector_mode, take_candidates,
 };
-pub use ops::{OpError, apply_binary, apply_unary, compare_primitive, structural_compare};
+pub use ops::{
+    OpError, apply_binary, apply_binary_wide, apply_unary, compare_primitive, structural_compare,
+};
 
 use std::collections::BTreeMap;
 use std::rc::Rc;

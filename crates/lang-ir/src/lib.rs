@@ -177,6 +177,21 @@ pub enum Rvalue {
         reuse: bool,
         span: Span,
     },
+    /// A **sign-dependent** fixed-width integer op (Tier W3): `/ % < <= > >=` on two same-width
+    /// `IntN`. Unlike `+ - *` (sign-agnostic — a plain [`Rvalue::Binary`] + [`Rvalue::MaskWidth`]
+    /// suffices), division, remainder and ordering read the erased-i64 operands as signed or unsigned
+    /// per `signed` (unsigned `u64` differs from signed once bit 63 is set), so the operation itself
+    /// carries the width. Both backends apply the shared `apply_binary_wide`: `/ %` mask the result
+    /// back into `bits` (so signed `MIN / -1` wraps), comparisons yield a bool. `op` is always one of
+    /// `Div`/`Rem`/`Lt`/`Le`/`Gt`/`Ge`.
+    WideInt {
+        op: BinaryOp,
+        lhs: Atom,
+        rhs: Atom,
+        signed: bool,
+        bits: u8,
+        span: Span,
+    },
     /// A call of a callee value: `callee(args)`.
     Call {
         callee: Atom,

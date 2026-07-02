@@ -775,6 +775,18 @@ impl Interpreter {
                 let right = self.eval_ir_atom(rhs, frame)?;
                 self.apply_binary_op(*op, left, right, *span)
             }
+            lang_ir::Rvalue::WideInt {
+                op,
+                lhs,
+                rhs,
+                signed,
+                bits,
+                span,
+            } => {
+                let left = self.eval_ir_atom(lhs, frame)?;
+                let right = self.eval_ir_atom(rhs, frame)?;
+                self.apply_binary_wide_op(*op, left, right, *signed, *bits, *span)
+            }
             lang_ir::Rvalue::List { items, .. } => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {

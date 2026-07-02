@@ -3871,6 +3871,24 @@ impl Interpreter {
         }
     }
 
+    /// A sign-dependent fixed-width integer op (Tier W3): `/ % < <= > >=` where the operand width
+    /// and signedness matter. Operands are erased ints (no object/enum dispatch), so this goes
+    /// straight to the shared `ops::apply_binary_wide` — the VM's `Op::WideInt` twin.
+    fn apply_binary_wide_op(
+        &mut self,
+        op: BinaryOp,
+        left: Value,
+        right: Value,
+        signed: bool,
+        bits: u8,
+        span: Span,
+    ) -> Eval<Value> {
+        match ops::apply_binary_wide(op, &left, &right, signed, bits) {
+            Ok(value) => Ok(value),
+            Err(error) => Err(self.runtime_error(error.code, span, error.text)),
+        }
+    }
+
     fn eval_unary(&mut self, op: UnaryOp, value: Value, span: Span) -> Eval<Value> {
         match ops::apply_unary(op, &value) {
             Ok(value) => Ok(value),

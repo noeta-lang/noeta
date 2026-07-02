@@ -710,6 +710,34 @@ impl Lowerer<'_> {
             Expr::Binary { op, lhs, rhs, span } => {
                 let lhs = self.lower_expr(lhs, out)?;
                 let rhs = self.lower_expr(rhs, out)?;
+                // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on `IntN`, whose operand
+                // width the checker recorded in `width_sites`. Emit the width-carrying `WideInt` (it
+                // masks div/rem itself and yields a bool for comparisons) rather than a plain
+                // `Binary`. The sign-agnostic `+ - *` fall through to `Binary` + a `MaskWidth`.
+                if let Some(&(signed, bits)) = self.width_sites.get(span)
+                    && matches!(
+                        op,
+                        BinaryOp::Div
+                            | BinaryOp::Rem
+                            | BinaryOp::Lt
+                            | BinaryOp::Le
+                            | BinaryOp::Gt
+                            | BinaryOp::Ge
+                    )
+                {
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::WideInt {
+                            op: *op,
+                            lhs,
+                            rhs,
+                            signed,
+                            bits,
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
                 let result = self.emit(
                     out,
                     Rvalue::Binary {

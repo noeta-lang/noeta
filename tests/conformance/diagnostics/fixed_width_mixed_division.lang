@@ -1,0 +1,6 @@
+// Tier W3: fixed-width `/` (like `+ - * %` and ordering) requires both operands to be the same type
+// — no implicit widening. Dividing a `u16` by a `u8` is E0044, not a silent widen; the message names
+// it "arithmetic" (shared with `+ - * %`). An explicit conversion between widths arrives later.
+// expect: error E0044 at 6:6
+// expect: exit 1
+echo 300u16 / 5u8

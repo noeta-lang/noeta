@@ -398,7 +398,7 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
-        Op::Binary { dst, a, b, .. } => {
+        Op::Binary { dst, a, b, .. } | Op::WideInt { dst, a, b, .. } => {
             f.def = Some(*dst);
             f.uses.push(*a);
             f.uses.push(*b);
@@ -829,7 +829,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(src);
         }
-        Op::Binary { dst, a, b, .. } => {
+        Op::Binary { dst, a, b, .. } | Op::WideInt { dst, a, b, .. } => {
             m(dst);
             m(a);
             m(b);

@@ -1,0 +1,45 @@
+// Tier W3: sign-dependent fixed-width ops `/ % < <= > >=` on same-width integers. Division and
+// remainder read the operands as signed or unsigned per the type; ordering likewise. This matters
+// for `u64` past bit 63, where the erased i64 is negative — unsigned division/ordering differ from
+// signed. Both backends run the identical `apply_binary_wide` (masking div/rem via the shared
+// `mask_to_width`), so the differential pins them equal. Div-by-zero panics as `int` does (E0008).
+// Mixed-width `/ % < <= > >=` needs an explicit conversion (E0044) — in the diagnostics corpus.
+// expect: stdout "3"
+// expect: stdout "1"
+// expect: stdout "-3"
+// expect: stdout "-1"
+// expect: stdout "50"
+// expect: stdout "-128"
+// expect: stdout "9223372036854775807"
+// expect: stdout "5"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: exit 0
+
+// Signed division/remainder truncate toward zero, like `int`.
+echo 7i32 / 2i32          // 3
+echo 7i32 % 2i32          // 1
+echo -7i32 / 2i32         // -3
+echo -7i32 % 2i32         // -1
+
+// Unsigned division for a small width.
+echo 250u8 / 5u8          // 50
+
+// Signed `MIN / -1` wraps to the width (like `wrapping_div`): -128 / -1 = 128 -> -128.
+echo -128i8 / -1i8        // -128
+
+// The crux: `u64` past bit 63 divides/remainders as UNSIGNED (signed would give -1/2 = 0, ...15).
+echo 18446744073709551615u64 / 2u64   // u64::MAX / 2 = 9223372036854775807
+echo 18446744073709551615u64 % 10u64  // u64::MAX ends in ...615, mod 10 = 5
+
+// Ordering: signed and small-unsigned behave the obvious way.
+echo -5i8 < 3i8           // true
+echo 200u8 > 100u8        // true
+
+// The crux again: `u64::MAX > 1` is true UNSIGNED (signed would compare -1 > 1 = false).
+echo 18446744073709551615u64 > 1u64   // true
+echo 10u16 <= 10u16       // true
+echo 5i64 >= 6i64         // false

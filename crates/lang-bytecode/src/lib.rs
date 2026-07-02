@@ -783,6 +783,19 @@ pub enum Op {
         signed: bool,
         bits: u8,
     },
+    /// `dst = a op b` read as a `signed`/unsigned `bits`-wide integer — the sign-dependent
+    /// fixed-width ops `/ % < <= > >=` (Tier W3). `/ %` may raise E0008 (division by zero) at `span`
+    /// and mask their result into the width; `< <= > >=` yield a bool. The shared
+    /// `apply_binary_wide` runs identically here and in the tree-walker. `op` ∈ {Div,Rem,Lt,Le,Gt,Ge}.
+    WideInt {
+        op: BinaryOp,
+        dst: Reg,
+        a: Reg,
+        b: Reg,
+        signed: bool,
+        bits: u8,
+        span: Span,
+    },
     /// `dst = a op b` — may raise (E0007/E0008) at `span`. Never `&&`/`||` (those lower to
     /// branches).
     Binary {
@@ -1431,6 +1444,19 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::Binary { op, dst, a, b, .. } => {
             format!("Binary      r{dst} <- r{a} {} r{b}", op.symbol())
         }
+        Op::WideInt {
+            op,
+            dst,
+            a,
+            b,
+            signed,
+            bits,
+            ..
+        } => format!(
+            "WideInt     r{dst} <- r{a} {} r{b} {}{bits}",
+            op.symbol(),
+            if *signed { 'i' } else { 'u' },
+        ),
         Op::RequireBool { reg, side, op, .. } => {
             format!("RequireBool r{reg} ({} {side:?})", op.symbol())
         }

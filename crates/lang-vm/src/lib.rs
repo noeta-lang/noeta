@@ -43,7 +43,9 @@ use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_gc::{collect_trace, release, retain};
 use lang_object::{Shape, ShapeKind};
 use lang_span::Span;
-use lang_value::{Value, apply_binary, apply_unary, compare_primitive, structural_compare};
+use lang_value::{
+    Value, apply_binary, apply_binary_wide, apply_unary, compare_primitive, structural_compare,
+};
 
 mod isolate;
 
@@ -4414,6 +4416,27 @@ impl<'m> Vm<'m> {
                         continue;
                     }
                     match apply_binary(*op, left, right) {
+                        Ok(v) => {
+                            set_reg(&mut frames[top].regs, *dst, v);
+                            frames[top].pc += 1;
+                        }
+                        Err(e) => return Err(self.error(e.code, *span, e.text)),
+                    }
+                }
+                Op::WideInt {
+                    op,
+                    dst,
+                    a,
+                    b,
+                    signed,
+                    bits,
+                    span,
+                } => {
+                    // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on erased-int operands,
+                    // read as `signed`/unsigned `bits`-wide. No trait dispatch (ints only).
+                    let left = frames[top].regs[*a as usize];
+                    let right = frames[top].regs[*b as usize];
+                    match apply_binary_wide(*op, left, right, *signed, *bits) {
                         Ok(v) => {
                             set_reg(&mut frames[top].regs, *dst, v);
                             frames[top].pc += 1;

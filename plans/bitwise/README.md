@@ -254,11 +254,23 @@ how untyped literals in an `i64`-typed context coerce (same in-range coercion as
   from signed) and stay a clean E0007 "not yet" until W3/W5. Conformance 400 (types/fixed_width_
   arithmetic + 2 E0044 diagnostics), differential 390 / 0-skipped / backends agree, leak residency 0
   both, clippy + fmt clean.
-- **W3 — sign-aware `/ %` + ordering (`< <= > >=`), div/mod by zero panics as today.** These need the
-  width+signedness at the op (unsigned `u64` division/ordering differ from signed once bit 63 is set),
-  so they consult width the way W2's mask does — likely a width-carrying compare/div op (or a
-  sign-aware helper keyed off `width_sites`). Enable `Comparable`/`Div` for `IntN` here. Differential:
-  unsigned-vs-signed ordering at the `2^63` boundary; wraparound identities already covered by W2.
+- **W3 — sign-aware `/ %` + ordering (`< <= > >=`). ✅ DONE.** These are sign-*dependent* (unsigned
+  `u64` division/ordering differ from signed once bit 63 is set), so the operation itself carries the
+  width. A new **`Rvalue::WideInt { op, lhs, rhs, signed, bits }`** (+ bytecode `Op::WideInt`) — a
+  width-carrying binary op emitted by lowering for `/ % < <= > >=` on `IntN` (the checker records the
+  operand width in the same `width_sites` map W2 uses; lowering branches on the op: sign-agnostic
+  `+ - *` stay `Binary`+`MaskWidth`, sign-dependent ops become `WideInt`). Both backends resolve it
+  through a shared **`apply_binary_wide`** (`lang_value` + `lang_eval::ops`, differential-equal by
+  construction): operands read as `signed`/unsigned, `/ %` compute then `mask_to_width` the result
+  (so signed `MIN / -1` wraps), `< <= > >=` yield a bool; div/mod by zero → E0008 (as `int`). Checker:
+  `synth_intn_arith` now covers `/ %` too (shared `same_width_intn` gate); new `synth_intn_compare`
+  intercepts `IntN` ordering before the generic `Comparable` path; **mixed-width or `IntN`+`int`/
+  `float` → E0044** ("arithmetic" or "comparison" message). `builtin_satisfies` now enables
+  `Comparable`/`Div` for `IntN` (so `<T: Comparable>`/`<T: Div>` accept a width). Focused unit tests
+  in `lang-value/ops.rs` pin the crux (u64-past-2^63 divides/orders unsigned; signed `MIN/-1` wrap;
+  div-by-zero errors), miri-clean (freeing the boxed `i64::MAX` result). Conformance 403
+  (types/fixed_width_ordering_division + 2 E0044 diagnostics), differential 393 / 0-skipped / backends
+  agree, leak residency 0 both, clippy + fmt clean, miri clean over the wide path.
 - **W4 — conversions & casts.** Explicit, total, and visible: `u8.to_u32()` (widen, always safe),
   `u32.to_u8()` (truncate — wrapping, named so), `int.to_u8()`/`u8.to_int()`, `checked_to_u8(): u8?`.
   Decide the surface (`as`-cast vs methods); `as` is already a keyword (S6 narrowing) — reusing it for

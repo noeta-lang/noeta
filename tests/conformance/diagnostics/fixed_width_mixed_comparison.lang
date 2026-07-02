@@ -1,0 +1,6 @@
+// Tier W3: fixed-width ordering has no implicit widening — the operands must be the same type, just
+// like arithmetic. Comparing a `u8` to a `u16` requires an explicit conversion, so it is E0044
+// rather than a silent widen (the same rule rejects `u8 < int`). Conversions arrive in a later slice.
+// expect: error E0044 at 6:6
+// expect: exit 1
+echo 1u8 < 1u16

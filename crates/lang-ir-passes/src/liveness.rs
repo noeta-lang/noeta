@@ -503,6 +503,10 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             f(lhs);
             f(rhs);
         }
+        Rvalue::WideInt { lhs, rhs, .. } => {
+            f(lhs);
+            f(rhs);
+        }
         Rvalue::Call { callee, args, .. } => {
             f(callee);
             args.iter().for_each(&mut *f);

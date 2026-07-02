@@ -2912,10 +2912,12 @@ impl Checker {
         ty
     }
 
-    /// Type a fixed-width `+ - *` (Tier W2). Both operands must be the **same** `IntN`; the result is
-    /// that type and its span is recorded in `width_sites` so lowering masks the (full-width) result
-    /// back into range. Mixed-width, or `IntN` with `int`/`float`, needs an explicit conversion →
-    /// E0044 (a `dyn`/hole operand defers to the concrete side). Only called with at least one `IntN`.
+    /// Type a fixed-width `+ - * / %` (Tier W2/W3). Both operands must be the **same** `IntN`; the
+    /// result is that type and its span is recorded in `width_sites` so lowering wraps the op into the
+    /// width (`+ - *` via a `MaskWidth` on the plain result — sign-agnostic; `/ %` via the sign-aware
+    /// `WideInt`, which masks internally). Mixed-width, or `IntN` with `int`/`float`, needs an explicit
+    /// conversion → E0044 (a `dyn`/hole operand defers to the concrete side). Only called with at
+    /// least one `IntN`.
     fn synth_intn_arith(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) -> Type {
         // Pick the concrete IntN as the fallback result type (for a deferred or erroneous pairing).
         let concrete = if matches!(lt, Type::IntN { .. }) {
@@ -2927,35 +2929,42 @@ impl Checker {
         if lt.defers_to_runtime() || rt.defers_to_runtime() {
             return concrete.clone();
         }
-        if let (
-            Type::IntN {
-                signed: s1,
-                bits: b1,
-            },
-            Type::IntN {
-                signed: s2,
-                bits: b2,
-            },
-        ) = (lt, rt)
-            && s1 == s2
-            && b1 == b2
-        {
-            self.width_sites.insert(span, (*s1, *b1));
-            return Type::IntN {
-                signed: *s1,
-                bits: *b1,
-            };
+        if let Some((signed, bits)) = same_width_intn(lt, rt) {
+            self.width_sites.insert(span, (signed, bits));
+            return Type::IntN { signed, bits };
         }
+        self.report_intn_mismatch(op, lt, rt, "arithmetic", span);
+        concrete.clone()
+    }
+
+    /// Type a fixed-width ordering comparison `< <= > >=` (Tier W3). Both operands must be the
+    /// **same** `IntN`; the operand width is recorded in `width_sites` so lowering emits the
+    /// sign-aware `WideInt` (unsigned ordering differs from signed past bit 63). The result is always
+    /// `bool` (the caller sets it). Mixed-width, or `IntN` with `int`/`float`, needs an explicit
+    /// conversion → E0044; a `dyn`/hole defers. Only called with at least one `IntN`.
+    fn synth_intn_compare(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) {
+        if lt.defers_to_runtime() || rt.defers_to_runtime() {
+            return;
+        }
+        if let Some((signed, bits)) = same_width_intn(lt, rt) {
+            self.width_sites.insert(span, (signed, bits));
+            return;
+        }
+        self.report_intn_mismatch(op, lt, rt, "comparison", span);
+    }
+
+    /// The shared E0044 for a fixed-width op whose operands are not the same `IntN` — `kind` is
+    /// `"arithmetic"` or `"comparison"` (the two W2/W3 sites).
+    fn report_intn_mismatch(&mut self, op: BinaryOp, lt: &Type, rt: &Type, kind: &str, span: Span) {
         self.diags.push(Diagnostic::error(
             DiagnosticCode::FixedWidthOutOfRange,
             span,
             format!(
-                "cannot apply `{}` to `{lt}` and `{rt}`: fixed-width arithmetic requires both \
+                "cannot apply `{}` to `{lt}` and `{rt}`: fixed-width {kind} requires both \
                  operands to be the same type — convert explicitly",
                 op.symbol(),
             ),
         ));
-        concrete.clone()
     }
 
     /// The inclusive `(min, max)` value range of a fixed-width integer type, as `i128` so every
@@ -3796,13 +3805,12 @@ impl Checker {
                 }
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
-                // Fixed-width integers (Tier W): `+ - *` on two same-width `IntN` wrap to that width
-                // (W2). Mixed-width or `IntN` mixed with `int`/`float` needs an explicit conversion
-                // (no implicit widening) → E0044; `/ %` are withheld to W3. Intercept before the
-                // generic numeric path, whose widening lattice does not model `IntN`.
-                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
-                    && (matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }))
-                {
+                // Fixed-width integers (Tier W): `+ - * / %` on two same-width `IntN` yield that
+                // width — `+ - *` mask the result (W2, sign-agnostic), `/ %` use the width-carrying
+                // sign-aware op (W3). Mixed-width or `IntN` mixed with `int`/`float` needs an explicit
+                // conversion (no implicit widening) → E0044. Intercept before the generic numeric
+                // path, whose widening lattice does not model `IntN`.
+                if matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }) {
                     return self.synth_intn_arith(op, &lt, &rt, span);
                 }
                 // Arithmetic is trait-backed: `+`→`Add`, … (`%` has no trait — numerics only). An
@@ -3829,6 +3837,14 @@ impl Checker {
             // or `impl`s it, or a type parameter bounded by it. A concrete type that does not is
             // `E0007` (the runtime's "cannot compare"); an unbounded type parameter is `E0025`.
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+                // Fixed-width ordering (Tier W3) is sign-dependent (unsigned `u64` ordering differs
+                // from signed past bit 63), so it consults the operand width the way W2's arithmetic
+                // does — same-width `IntN` only; mixed → E0044. Intercept before the generic
+                // `Comparable` path (which the width-carrying `WideInt` op then implements).
+                if matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }) {
+                    self.synth_intn_compare(op, &lt, &rt, span);
+                    return Type::Bool;
+                }
                 if !self.operand_satisfies_operator(&lt, "Comparable")
                     || !self.operand_satisfies_operator(&rt, "Comparable")
                 {
@@ -5192,20 +5208,39 @@ fn int_literal_value(expr: &Expr) -> Option<i128> {
 /// explicit `@derive`/`impl`, handled in [`Checker::satisfies`].)
 ///
 /// Fixed-width integers (Tier W) satisfy `Equatable`/`Display` here — equality and (small-value)
-/// display are correct on the erased `int` word. `Comparable` and the arithmetic traits are
-/// **deliberately withheld until Tier W3** adds width-aware ordering/arithmetic (unsigned ordering
-/// and wraparound need the width, which the bare erased op does not carry), so `<`/`+` on an `IntN`
-/// is a clean "not yet" error rather than a subtly-wrong result.
+/// display are correct on the erased `int` word. Fixed-width arithmetic (`+ - *`, W2) and now
+/// ordering/`/`/`%` (W3) are enabled: `+ - *` are sign-agnostic (masking the result suffices), while
+/// `Div`/`Comparable` need the operand width+signedness, which lowering carries on the op
+/// (`Rvalue::WideInt`) — so the erased op is never subtly wrong.
+/// If `lt` and `rt` are the **same** fixed-width integer type, its `(signed, bits)`. Fixed-width
+/// arithmetic (W2) and ordering (W3) both require identical operand types — no implicit widening —
+/// so this gates them and yields the width lowering records for masking / the sign-aware op.
+fn same_width_intn(lt: &Type, rt: &Type) -> Option<(bool, u8)> {
+    match (lt, rt) {
+        (
+            Type::IntN {
+                signed: s1,
+                bits: b1,
+            },
+            Type::IntN {
+                signed: s2,
+                bits: b2,
+            },
+        ) if s1 == s2 && b1 == b2 => Some((*s1, *b1)),
+        _ => None,
+    }
+}
+
 fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
     use Type::*;
     match trait_name {
-        "Comparable" => matches!(ty, Int | Float | F32 | String | Bool),
+        "Comparable" => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
         "Equatable" => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
-        // Fixed-width `+ - *` land in W2 (sign-agnostic — the low bits are the same read signed or
-        // unsigned — so masking the result is correct). `Div` (and `%`, which is numeric-only) stay
-        // withheld to W3, where sign-aware division/remainder need the width.
+        // Fixed-width `+ - *` are sign-agnostic (W2 — the low bits are the same read signed or
+        // unsigned, so masking the result is correct); `Div` (and ordering) are sign-dependent and
+        // land in W3 via the width-carrying `Rvalue::WideInt`. (`%` is numeric-only — no trait.)
         "Add" | "Sub" | "Mul" => matches!(ty, Int | Float | F32 | IntN { .. }),
-        "Div" => matches!(ty, Int | Float | F32),
+        "Div" => matches!(ty, Int | Float | F32 | IntN { .. }),
         "Concat" => matches!(ty, String | List(_)),
         "Display" => matches!(
             ty,
