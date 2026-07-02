@@ -5,7 +5,7 @@
 A new, general-purpose programming language built from scratch in Rust: a persistent, reactive runtime with an ML-grade type system (algebraic data types, `Result`-typed errors, exhaustive matching, real generics), compiled to a single static binary for any surface — a web server, a desktop app, or a CLI tool — from one codebase. The surface reads cleanly and will look broadly familiar to anyone coming from PHP, JavaScript, or similar; that familiarity is a convenience, not the point.
 
 > [!NOTE]
-> **Status: pre-alpha, not public.** The codebase is at milestone **M0 (walking skeleton)** — a tree-walking interpreter for a growing subset of the language. The crate name prefix `lang-` and the binary name `lang` are placeholders pending the real language name.
+> **Status: pre-alpha, not public.** Milestones **M1 (real language core)** and **M2 cluster 1 (host IO & async foundation)** are complete: a register-based bytecode VM over NaN-boxed values, a shape-based object model, refcount + cycle GC, a bidirectional type checker on a salsa query graph, traits/generics/derives, multi-file modules, a layered stdlib, and a real host-IO boundary. The original M0 tree-walker is retained as a differential oracle the VM is checked against. See `plans/roadmap.md` for the per-slice status. The crate name prefix `lang-` and the binary name `lang` are placeholders pending the real language name.
 
 ## What it is (and is not)
 

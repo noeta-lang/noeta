@@ -27,7 +27,7 @@ Both backends implement `lang-backend::Backend`. The conformance harness runs a 
 
 Each stage is its own crate with explicit input/output types and no hidden shared mutable state, so a change is local to one crate and verifiable by that crate's tests.
 
-## Crate map (M0) — where each change goes
+## Crate map — where each change goes
 
 | Crate | What it does (in → out) |
 |---|---|
@@ -64,10 +64,10 @@ M1 is complete (see `plans/m1/`): the bytecode VM + NaN-boxed values + shapes + 
 A language feature is added as a **vertical slice** in this order — see `plans/m0/` for per-feature task files:
 
 1. **Grammar / AST** — token(s) in `lang-lexer`, node(s) in `lang-ast`, production in `lang-parser` (keep surface sugar as its own AST node).
-2. **Checker rule** — n/a in M0 (no type checker yet; arrives in M1).
-3. **Bytecode** — n/a in M0 (tree-walker only; the VM arrives in M1).
-4. **Eval op** — evaluation in `lang-eval`.
-5. **Conformance cases** — `tests/conformance/**.lang` with `// expect:` headers, including negative/error cases.
+2. **Checker rule** — typing/inference in `lang-check` (+ a new `Type` form in `lang-types` if needed); add a negative conformance case for any new static-error class.
+3. **Lowering** — AST → IR in `lang-ir` (+ `lang-ir-passes` if the feature introduces owned heap values that need drops/reuse).
+4. **Both backends** — evaluation in `lang-eval` (the oracle) **and** bytecode in `lang-compiler`/`lang-vm`; keep any shared semantics in `lang-stdlib` so the two agree by construction.
+5. **Conformance cases** — `tests/conformance/**.lang` with `// expect:` headers, including negative/error cases; must run `--differential` at `0 skipped`.
 6. **Snapshot update** — `insta` snapshots (tokens / AST / rendered diagnostics), reviewed, never blind-accepted.
 
 **The iron rule: every feature or fix lands with a conformance corpus entry.** Prefer vertical-slice tasks ("implement `~` end-to-end") over diffuse refactors — a slice's done-condition is "its conformance cases pass."
