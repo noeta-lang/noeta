@@ -1,10 +1,10 @@
 # lang-stdlib
 
-The layered standard library (milestone M1.10).
+The shared standard-library and host-capability layer.
 
 ## What this crate is for
 
-`lang-stdlib` is the home of the always-present standard library: the rich **Ring 1** core surface bound to the language's primitive types, and (as it lands) the thin **Ring 2** always-shipped modules. Ring 3 (regex, crypto, HTTP, timezone date/time, …) is out of scope — it arrives post-M1 through the extension mechanism, not here.
+`lang-stdlib` is the home of the always-present standard library: the rich **Ring 1** core surface bound to the language's primitive types, the thin **Ring 2** always-shipped modules, and the `Host`/`Executor` capability seam both backends route their side effects through. Ring 3 (regex, crypto, HTTP, timezone date/time, …) is out of scope — it arrives through the native-extension mechanism, not here.
 
 ## The load-bearing idea: shared semantics, differential by construction
 
@@ -47,11 +47,18 @@ Determinism is a hard requirement across the whole stdlib: no wall-clock, no has
   - `json` — `parse`/`stringify`; parsing lives here as the shared `json::Json` tree via `serde_json`.
   - `math` — `sqrt`/`pow`/`abs`/`floor`/`ceil`/`round`/`min`/`max`/`pi`/`e`; pure scalar functions, so their semantics live here once in [`math::call`] and both backends are project/lift glue, bit-identical.
   - `random` — `seed`/`int`/`float`; a seeded SplitMix64 **pure stepper** in [`random`], so a given seed yields the identical stream in both runtimes (each backend holds the `u64` state and threads it through; it defaults to a fixed seed so even un-seeded use is reproducible).
-  - `fs` — `write`/`read`/`exists`/`remove`/`list`; file IO over a sandboxed **in-memory** [`fs::Vfs`] each interpreter owns, fresh per run. In-memory rather than a real temp dir so isolation and cross-backend identity are *structural* (no disk flakiness, no cleanup); reading a missing path is `E0021`. Real-disk/streaming IO is an M2 concern.
+  - `fs` — file IO over a sandboxed **in-memory** [`fs::Vfs`] each interpreter owns, fresh per run. In-memory rather than a real temp dir so isolation and cross-backend identity are *structural* (no disk flakiness, no cleanup); reading a missing path is `E0021`. (Real-disk and streaming IO now ship too — see the M2 additions below.)
   - `time` — `monotonic`/`sleep`; a **logical** monotonic clock (a per-backend counter, not wall-clock) so output is reproducible and identical across backends.
 
-  (`env`/`args` process introspection is intentionally not in M1 — reading real environment is non-deterministic; deferred with the other host-coupled IO.)
+## Since M1.10 (host IO, concurrency, extensions)
 
-**M1.10 — and with it M1 — is complete.**
+Later milestones grew this crate well past the M1.10 baseline above; all of the following ship:
 
-See `plans/m1/slice-10-stdlib.md`.
+- **The `Host` capability seam** (`host.rs`) — every host-coupled effect (fs, clock, PRNG, `env`/`args`) goes through one `Host` trait with a deterministic `SandboxHost` (what the differential always runs); the real-disk `RealHost` lives in `lang-runtime`.
+- **`env`/`args`** — process introspection over the host seam (a fixed sandbox fixture; the real environment under `lang run`). No longer deferred.
+- **`fs` streaming + directories + handles** — `read_lines`/`append`, `mkdir`/`is_dir`/`list(dir)`, and the `fs.open` cursor `FileHandle` (`handle.rs`, the first mutable heap value type, shared by both backends), plus `read_bytes`/`write_bytes` and the `*_async` variants.
+- **The async `Executor` seam** (`executor.rs`) — a deterministic `SandboxExecutor` (logical time, in-oracle) behind the `async`/`await`, generator, and iterator surfaces; the real tokio `RealExecutor` lives in `lang-runtime`.
+- **`vec`/`quat`** — scalar 3D math plus the autovectorized `soa_*`/`*_all` bulk kernels over packed buffers.
+- **The native-extension registry** (`registry.rs`) — the neutral `NativeValue` marshalling seam through which `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` are registered as the dogfooded "std" extension, with one shared dispatch function per module so the differential holds by construction. `json.parse::<T>` decodes into a call-site-named type.
+
+See `plans/m1/slice-10-stdlib.md`, `plans/m2/`, and `plans/native-extensions/`.

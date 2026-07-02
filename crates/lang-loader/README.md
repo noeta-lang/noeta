@@ -22,6 +22,6 @@ Linking is purely additive. A `use` that **no** loaded module provides is left i
 
 ## Diagnostics
 
-Each module keeps its own `Source` (the entry is `SourceId(0)`, siblings follow), so a module's lex/parse diagnostics render against that module. Rendering *check/runtime* diagnostics that land on a merged-in declaration against the right source — and surfacing a referenced-but-broken module's errors, visibility (`pub`), and unknown-type `E0013` — is M1.9.2; the module graph as salsa queries (incremental boundaries) is M1.9.3.
+Each module keeps its own `Source` (the entry is `SourceId(0)`, siblings follow), so a module's lex/parse diagnostics render against that module. Visibility (`pub`, `E0019`), name-collision (`E0020`), and unknown-type (`E0013`) checks run across the merged program, and the module graph is expressed as salsa queries (`lang-db`'s `Workspace`/`linked`/`linked_checked`/`linked_bytecode`, so editing one module recomputes only its dependents). One piece remains latent: attributing a *check/runtime* diagnostic that lands on a merged-in declaration back to that declaration's own source (the merged-body `SourceMap`) — a deferred follow-up.
 
 Part of the `lang` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).
