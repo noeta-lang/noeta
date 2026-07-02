@@ -255,7 +255,7 @@ fn values_equal(left: &Value, right: &Value) -> bool {
         (Value::Tuple(a), Value::Tuple(b)) => a == b,
         // Sets are canonical (sorted, de-duplicated), so structural vector equality is set
         // equality — matching the VM's `values_equal`.
-        (Value::Set(a), Value::Set(b)) => a == b,
+        (Value::Set(a, _), Value::Set(b, _)) => a == b,
         (Value::Map(a, _), Value::Map(b, _)) => a == b,
         (Value::Enum(a), Value::Enum(b)) => a == b,
         // Object `==` is kind-dependent (object-model slice 2): a value `struct` compares

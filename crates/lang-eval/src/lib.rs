@@ -1288,7 +1288,7 @@ impl Interpreter {
             Value::Enum(e) => self.destroy_enum(e),
             // A boxed list / set / tuple releases its elements through the shared `Rc<Vec<Value>>`.
             Value::List(ListRepr::Boxed { items, .. })
-            | Value::Set(items)
+            | Value::Set(items, _)
             | Value::Tuple(items) => self.destroy_sequence(items),
             // A packed list (P-PACK 2.3) holds only primitive words — no heap elements, no
             // destructors — so its `Rc<Vec<u64>>` simply drops here, reclaiming the buffer.
@@ -1376,7 +1376,7 @@ impl Interpreter {
         match &iterable {
             Value::List(repr) => Ok((*repr.to_rc_vec()).clone()),
             // A set iterates in its canonical (sorted) order — deterministic, like the VM.
-            Value::Set(items) => Ok((**items).clone()),
+            Value::Set(items, _) => Ok((**items).clone()),
             // Iterating a map yields its values, in deterministic key order.
             Value::Map(entries, _) => Ok(entries.values().cloned().collect()),
             // A user object lights up the `Iterable` trait: `for x in o` iterates the list its
@@ -2048,10 +2048,13 @@ impl Interpreter {
             && let Some(method) = lang_stdlib::ListMethod::from_name(name)
         {
             let items = repr.to_rc_vec();
-            return self.call_list_method(method, &items, name, &args, span);
+            // The source list's reflected element type (R1) — carried onto a `to_set` result so a
+            // `Set<T>` recovers its element type (sets have no literal of their own).
+            let list_reflect = repr.reflect();
+            return self.call_list_method(method, &items, list_reflect, name, &args, span);
         }
         // Ring 1 set methods (contains/union/intersection).
-        if let Value::Set(items) = &receiver
+        if let Value::Set(items, _) = &receiver
             && let Some(method) = lang_stdlib::SetMethod::from_name(name)
         {
             return self.call_set_method(method, items, name, &args, span);
@@ -2101,11 +2104,11 @@ impl Interpreter {
         // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A set/map first becomes a
         // list of its elements / values (the iteration order `for` uses); a list shares its backing.
         // Guarded to built-in collections so it does not shadow a user object's own `iter` method.
-        if name == "iter" && matches!(receiver, Value::List(_) | Value::Set(_) | Value::Map(..)) {
+        if name == "iter" && matches!(receiver, Value::List(_) | Value::Set(..) | Value::Map(..)) {
             self.expect_std_arity(name, &args, 0, span)?;
             let list = match &receiver {
                 Value::List(_) => receiver.clone(),
-                Value::Set(items) => Value::list_rc(Rc::clone(items)),
+                Value::Set(items, _) => Value::list_rc(Rc::clone(items)),
                 Value::Map(entries, _) => Value::list(entries.values().cloned().collect()),
                 _ => unreachable!("guarded to list/set/map above"),
             };
@@ -2138,7 +2141,7 @@ impl Interpreter {
         let arity_ok = args.is_empty();
         let result = match (name, &receiver) {
             ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
-            ("count", Value::Set(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("count", Value::Set(items, _)) if arity_ok => Some(Value::Int(items.len() as i64)),
             ("count", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
             ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
             ("count", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
@@ -2268,10 +2271,12 @@ impl Interpreter {
     /// A Ring 1 list method (`reverse`/`contains`/`join`). Mirrors the VM's `call_list_method`;
     /// arity/type misuse is reported through the shared `lang-stdlib` error builders so both
     /// backends produce identical diagnostics.
+    #[allow(clippy::too_many_arguments)]
     fn call_list_method(
         &mut self,
         method: lang_stdlib::ListMethod,
         items: &[Value],
+        list_reflect: Option<Rc<TypeRepr>>,
         name: &str,
         args: &[Value],
         span: Span,
@@ -2350,7 +2355,17 @@ impl Interpreter {
             lang_stdlib::ListMethod::ToSet => {
                 self.expect_std_arity(name, args, 0, span)?;
                 match canonical_set(items) {
-                    Some(canonical) => Ok(Value::Set(Rc::new(canonical))),
+                    // Carry the element type from the source list's `List<T>` tag onto the resulting
+                    // `Set<T>` (R1 set tags); mirrors the VM's `set_tag_from_list`.
+                    Some(canonical) => {
+                        let set_tag = match list_reflect.as_deref() {
+                            Some(TypeRepr::List(elem)) => {
+                                Some(Rc::new(TypeRepr::Set(elem.clone())))
+                            }
+                            _ => None,
+                        };
+                        Ok(Value::set_value_tagged(Rc::new(canonical), set_tag))
+                    }
                     None => {
                         let error = lang_stdlib::unorderable_error(name);
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -2396,7 +2411,7 @@ impl Interpreter {
                 combined.extend(other.iter().cloned());
                 // Both operands are valid sets, so every element is orderable.
                 let canonical = canonical_set(&combined).expect("set elements are orderable");
-                Ok(Value::Set(Rc::new(canonical)))
+                Ok(Value::set_value(Rc::new(canonical)))
             }
             lang_stdlib::SetMethod::Intersection => {
                 self.expect_std_arity(name, args, 1, span)?;
@@ -2407,7 +2422,7 @@ impl Interpreter {
                     .filter(|item| other.iter().any(|o| *item == o))
                     .cloned()
                     .collect();
-                Ok(Value::Set(Rc::new(kept)))
+                Ok(Value::set_value(Rc::new(kept)))
             }
             lang_stdlib::SetMethod::Add => {
                 self.expect_std_arity(name, args, 1, span)?;
@@ -2415,7 +2430,7 @@ impl Interpreter {
                 combined.push(args[0].clone());
                 // The new element must be orderable with the rest (a homogeneous set).
                 match canonical_set(&combined) {
-                    Some(canonical) => Ok(Value::Set(Rc::new(canonical))),
+                    Some(canonical) => Ok(Value::set_value(Rc::new(canonical))),
                     None => {
                         let error = lang_stdlib::unorderable_error(name);
                         Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -2430,7 +2445,7 @@ impl Interpreter {
                     .filter(|item| **item != args[0])
                     .cloned()
                     .collect();
-                Ok(Value::Set(Rc::new(kept)))
+                Ok(Value::set_value(Rc::new(kept)))
             }
         }
     }
@@ -2443,7 +2458,7 @@ impl Interpreter {
         span: Span,
     ) -> Eval<&'a Rc<Vec<Value>>> {
         match value {
-            Value::Set(items) => Ok(items),
+            Value::Set(items, _) => Ok(items),
             _ => {
                 let error = lang_stdlib::type_error(name, "set");
                 Err(self.runtime_error(std_error_code(error.kind), span, error.message))
@@ -3242,7 +3257,7 @@ impl Interpreter {
                 self.expect_arity(builtin, &args, 1, span)?;
                 match &args[0] {
                     Value::List(items) => Ok(Value::Int(items.len() as i64)),
-                    Value::Set(items) => Ok(Value::Int(items.len() as i64)),
+                    Value::Set(items, _) => Ok(Value::Int(items.len() as i64)),
                     Value::Map(entries, _) => Ok(Value::Int(entries.len() as i64)),
                     Value::Str(s) => Ok(Value::Int(s.chars().count() as i64)),
                     // A user object lights up the `Length` trait: `len(o)` dispatches to its
@@ -4211,7 +4226,12 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
             .unwrap_or_else(|| TypeRepr::List(dyn_())),
         // A tuple has no reflection descriptor (like a union) — it erases to the dynamic top.
         Value::Tuple(_) => TypeRepr::Dyn,
-        Value::Set(_) => TypeRepr::Set(dyn_()),
+        // A set carrying a reflected type tag (R1) reports its precise `Set(T)` type (carried from
+        // the source list through `to_set`); an untagged/derived set falls back to head-only.
+        Value::Set(_, reflect) => reflect
+            .as_ref()
+            .map(|r| (**r).clone())
+            .unwrap_or_else(|| TypeRepr::Set(dyn_())),
         // A map carrying a reflected type tag (R1) reports its precise `Map(K, V)` type; an
         // untagged/derived map falls back to the head-only `Map(dyn, dyn)`. Mirrors `vm_type_repr`.
         Value::Map(_, reflect) => reflect
@@ -4372,7 +4392,7 @@ fn attr_value_to_eval(
         A::List(items) => Value::list(items.iter().map(recur).collect()),
         A::Set(items) => {
             let vals: Vec<Value> = items.iter().map(recur).collect();
-            Value::Set(Rc::new(canonical_set(&vals).unwrap_or(vals)))
+            Value::set_value(Rc::new(canonical_set(&vals).unwrap_or(vals)))
         }
         A::Map(entries) => {
             let mut map = BTreeMap::new();
@@ -4427,7 +4447,7 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 "dyn" | "Any" => true,
                 "List" | "list" => matches!(value, Value::List(_)),
                 "Map" | "map" => matches!(value, Value::Map(..)),
-                "Set" | "set" => matches!(value, Value::Set(_)),
+                "Set" | "set" => matches!(value, Value::Set(..)),
                 // Abstract kind-types match any value of that declaration kind (structs and classes are
                 // both `Object`s, told apart by `TypeDef::is_struct`).
                 "Enum" => matches!(value, Value::Enum(_)),
@@ -4673,7 +4693,7 @@ fn value_to_native_deep(value: &Value) -> lang_stdlib::NativeValue {
         Value::List(repr) => {
             NativeValue::List(repr.to_rc_vec().iter().map(value_to_native_deep).collect())
         }
-        Value::Tuple(items) | Value::Set(items) => {
+        Value::Tuple(items) | Value::Set(items, _) => {
             NativeValue::List(items.iter().map(value_to_native_deep).collect())
         }
         Value::Map(entries, _) => NativeValue::Map(

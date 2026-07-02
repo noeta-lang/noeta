@@ -1,0 +1,36 @@
+// Runtime type-argument reflection for sets (the last container kind): a set has no literal of its
+// own — `#{a, b, c}` desugars to `[a, b, c].to_set()` — so its element type is carried from the source
+// list's `List<T>` tag onto the resulting `Set<T>` at `to_set`. `type_of` then recovers it even after
+// the value is laundered through `dyn`; a set produced by a content-changing op (`.add`) is untagged
+// and reflects head-only. Both backends carry the tag (VM heap node, tree-walker `Set` field), so
+// `type_of` agrees across the differential.
+// expect: stdout "set<int>"
+// expect: stdout "set<int>"
+// expect: stdout "set<string>"
+// expect: stdout "set<dyn>"
+// expect: stdout "true"
+// expect: exit 0
+
+fn label(t: Type): string {
+    return match t {
+        Type.Int => "int",
+        Type.String => "string",
+        Type.Dyn => "dyn",
+        Type.List(inner) => "list<${label(inner)}>",
+        Type.Set(inner) => "set<${label(inner)}>",
+        _ => "?",
+    };
+}
+
+fn launder(v: dyn): dyn { return v; }
+
+// The element type is carried from the source list through `to_set`, recovered after a `dyn` launder.
+echo label(type_of(launder([1, 2, 3].to_set())));   // set<int>
+echo label(type_of(launder(#{1, 2, 3})));           // set<int>  (#{…} ≡ […].to_set())
+echo label(type_of(launder(#{"a", "b"})));          // set<string>
+
+// A content-changing op yields a logically new, untagged set → head-only.
+echo label(type_of(launder(#{1, 2}.add(3))));        // set<dyn>
+
+// The tag is invisible to value semantics: sets equal by elements compare equal regardless of tags.
+echo #{1, 2, 3} == #{3, 2, 1};                       // true

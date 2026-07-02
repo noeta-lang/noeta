@@ -1041,7 +1041,7 @@ impl Interpreter {
                     if matches!(&recv, Value::List(_)) && name == "set" && values.len() == 2 {
                         return self.list_set_in_place(recv, values, *span);
                     }
-                    if matches!(&recv, Value::Set(_)) && values.len() == 1 {
+                    if matches!(&recv, Value::Set(..)) && values.len() == 1 {
                         if name == "add" {
                             return self.set_add_in_place(recv, values, *span);
                         }
@@ -1614,7 +1614,7 @@ impl Interpreter {
     /// unorderable element (a runtime error) or an aliased set falls back to the ordinary copy path so
     /// the result, and any error message, matches exactly. `values` is `[element]`.
     fn set_add_in_place(&mut self, recv: Value, mut values: Vec<Value>, span: Span) -> Eval<Value> {
-        let Value::Set(mut rc) = recv else {
+        let Value::Set(mut rc, _) = recv else {
             unreachable!("caller checked the receiver is a set")
         };
         let value = values.pop().expect("add takes one arg");
@@ -1624,7 +1624,7 @@ impl Interpreter {
             .first()
             .is_none_or(|first| compare_primitive(first, &value).is_some());
         if !orderable {
-            return self.call_method(Value::Set(rc), "add", vec![value], span);
+            return self.call_method(Value::set_value(rc), "add", vec![value], span);
         }
         match Rc::get_mut(&mut rc) {
             Some(items) => {
@@ -1633,9 +1633,9 @@ impl Interpreter {
                 }) {
                     items.insert(pos, value);
                 }
-                Ok(Value::Set(rc))
+                Ok(Value::set_value(rc))
             }
-            None => self.call_method(Value::Set(rc), "add", vec![value], span),
+            None => self.call_method(Value::set_value(rc), "add", vec![value], span),
         }
     }
 
@@ -1650,7 +1650,7 @@ impl Interpreter {
         mut values: Vec<Value>,
         span: Span,
     ) -> Eval<Value> {
-        let Value::Set(mut rc) = recv else {
+        let Value::Set(mut rc, _) = recv else {
             unreachable!("caller checked the receiver is a set")
         };
         let target = values.pop().expect("remove takes one arg");
@@ -1658,7 +1658,7 @@ impl Interpreter {
             .first()
             .is_none_or(|first| compare_primitive(first, &target).is_some());
         if !orderable {
-            return Ok(Value::Set(rc));
+            return Ok(Value::set_value(rc));
         }
         match Rc::get_mut(&mut rc) {
             Some(items) => {
@@ -1668,9 +1668,9 @@ impl Interpreter {
                     let old = items.remove(pos);
                     self.destroy_value(old);
                 }
-                Ok(Value::Set(rc))
+                Ok(Value::set_value(rc))
             }
-            None => self.call_method(Value::Set(rc), "remove", vec![target], span),
+            None => self.call_method(Value::set_value(rc), "remove", vec![target], span),
         }
     }
 

@@ -44,8 +44,12 @@ pub enum Value {
     /// slice 4). `Rc` keeps copies cheap; equality is structural (element-wise).
     Tuple(Rc<Vec<Value>>),
     /// An immutable set, held in canonical (sorted, de-duplicated) order so iteration,
-    /// display, and equality are deterministic and identical to the VM's `Payload::Set`.
-    Set(Rc<Vec<Value>>),
+    /// display, and equality are deterministic and identical to the VM's `Payload::Set`. The second
+    /// field is the checker-resolved `Set(T)` reflected type (runtime type-argument reflection): sets
+    /// have no literal, so it is carried from a source list's `List(T)` tag through `to_set`; `None`
+    /// for a derived/mutated set. Invisible to value semantics (equality compares only the elements),
+    /// the tree-walker twin of the VM's node tag.
+    Set(Rc<Vec<Value>>, Option<Rc<TypeRepr>>),
     /// An immutable string-keyed map. `BTreeMap` gives deterministic iteration order. The second
     /// field is the checker-resolved `Map(K, V)` reflected type (runtime type-argument reflection,
     /// R1), set at literal construction so `type_of` recovers it after a `dyn` launder; `None` for a
@@ -617,6 +621,19 @@ impl Value {
         Value::Map(entries, reflect)
     }
 
+    /// Construct a set value from its canonical elements, **untagged** — the constructor every
+    /// set-producing path uses (`to_set` on a tagged list stamps the derived `Set(T)` via
+    /// [`Value::set_value_tagged`]; every other set stays untagged and reflects head-only).
+    pub(crate) fn set_value(items: Rc<Vec<Value>>) -> Value {
+        Value::Set(items, None)
+    }
+
+    /// As [`Value::set_value`], but carrying a reflected `Set(T)` type — used by `to_set` to carry the
+    /// element type from the source list's tag.
+    pub(crate) fn set_value_tagged(items: Rc<Vec<Value>>, reflect: Option<Rc<TypeRepr>>) -> Value {
+        Value::Set(items, reflect)
+    }
+
     /// If this is a packed `List<Vec3<f32>>`, its schema and byte buffer (P-PACK 4.2 bulk `vec`).
     pub(crate) fn packed_vec3_data(&self) -> Option<(Rc<PackedSchema>, Vec<u8>)> {
         match self {
@@ -672,7 +689,7 @@ impl Value {
             }
             // Braces with no key colons (`{1, 2, 3}`) distinguish a set from a non-empty map;
             // an empty set is `{}`, like an empty map.
-            Value::Set(items) => {
+            Value::Set(items, _) => {
                 let parts: Vec<String> = items.iter().map(Value::repr).collect();
                 format!("{{{}}}", parts.join(", "))
             }
@@ -726,7 +743,7 @@ impl Value {
             Value::Bytes(_) => "bytes",
             Value::List(_) => "list",
             Value::Tuple(_) => "tuple",
-            Value::Set(_) => "set",
+            Value::Set(..) => "set",
             Value::Map(..) => "map",
             Value::Function(_) | Value::Builtin(_) => "function",
             Value::EnumType(_) => "enum type",
@@ -761,7 +778,7 @@ impl fmt::Debug for Value {
             Value::Bytes(b) => write!(f, "Bytes({} bytes)", b.len()),
             Value::List(repr) => write!(f, "List({repr:?})"),
             Value::Tuple(items) => write!(f, "Tuple({items:?})"),
-            Value::Set(items) => write!(f, "Set({items:?})"),
+            Value::Set(items, _) => write!(f, "Set({items:?})"),
             Value::Map(entries, _) => write!(f, "Map({entries:?})"),
             Value::Function(_) => write!(f, "Function(<fn>)"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
@@ -797,7 +814,7 @@ impl PartialEq for Value {
             (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::List(a), Value::List(b)) => a.elements_eq(b),
             (Value::Tuple(a), Value::Tuple(b)) => a == b,
-            (Value::Set(a), Value::Set(b)) => a == b,
+            (Value::Set(a, _), Value::Set(b, _)) => a == b,
             (Value::Map(a, _), Value::Map(b, _)) => a == b,
             (Value::Enum(a), Value::Enum(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => a == b,

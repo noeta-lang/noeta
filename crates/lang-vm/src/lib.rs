@@ -945,7 +945,12 @@ impl<'m> Vm<'m> {
                         for &element in &canonical {
                             retain(element);
                         }
-                        Ok(Value::set(canonical))
+                        let set = Value::set(canonical);
+                        // Carry the element type from the source list's `List<T>` tag onto the
+                        // resulting `Set<T>` (R1 set tags) — sets have no literal, so `to_set` is the
+                        // one construction point where the element type is known.
+                        set.set_reflect(set_tag_from_list(list));
+                        Ok(set)
                     }
                     None => {
                         let error = lang_stdlib::unorderable_error(name);
@@ -6099,6 +6104,17 @@ fn make_role(enum_name: &str, variant: &str) -> Value {
 
 /// Classify a runtime value into its **head-constructor** [`TypeRepr`] (`type_of`, fidelity B).
 /// Generics are erased at runtime, so a container's element/argument types collapse to `Dyn`.
+/// Derive a `Set<T>` reflected tag from a source list's `List<T>` tag (R1 set tags): `to_set` on a
+/// tagged list carries the element type onto the resulting set. `None` if the list is untagged (the
+/// set reflects head-only) or, defensively, its tag is not a `List`.
+fn set_tag_from_list(list: Value) -> Option<Rc<lang_ast::reflect::TypeRepr>> {
+    use lang_ast::reflect::TypeRepr;
+    match list.reflect().as_deref() {
+        Some(TypeRepr::List(elem)) => Some(Rc::new(TypeRepr::Set(elem.clone()))),
+        _ => None,
+    }
+}
+
 /// Mirrors the tree-walker's `eval_type_repr` exactly so both backends reflect identical `Type`
 /// values; the classification follows the same kind order as [`Value::type_name`].
 fn vm_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {

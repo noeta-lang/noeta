@@ -1422,7 +1422,7 @@ impl Value {
             "set_insert_sorted requires a uniquely-owned set (the COW invariant)"
         );
         if self.is_set() {
-            heap::with_payload_mut(self, |p| match p {
+            let inserted = heap::with_payload_mut(self, |p| match p {
                 Payload::Set(items) => match items.binary_search_by(|&item| {
                     compare_primitive(item, value).unwrap_or(std::cmp::Ordering::Equal)
                 }) {
@@ -1433,7 +1433,10 @@ impl Value {
                     }
                 },
                 _ => false,
-            })
+            });
+            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            heap::set_reflect(self, None);
+            inserted
         } else {
             false
         }
@@ -1449,7 +1452,7 @@ impl Value {
             "set_remove_sorted requires a uniquely-owned set (the COW invariant)"
         );
         if self.is_set() {
-            heap::with_payload_mut(self, |p| match p {
+            let removed = heap::with_payload_mut(self, |p| match p {
                 Payload::Set(items) => match items.binary_search_by(|&item| {
                     compare_primitive(item, target).unwrap_or(std::cmp::Ordering::Equal)
                 }) {
@@ -1457,7 +1460,10 @@ impl Value {
                     Err(_) => None,
                 },
                 _ => None,
-            })
+            });
+            // Content-changing → drop the reflected type tag (R1); see `list_extend`.
+            heap::set_reflect(self, None);
+            removed
         } else {
             None
         }
