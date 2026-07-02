@@ -19,9 +19,15 @@ inside a method is a **local** — self-reference is the explicit `self.f = v`. 
 longer snapshots fields into the method scope: a bare field read resolves live off `self`
 (`eval_ir_atom`) and a bare write declares a local, matching the VM. This closed two divergences the
 snapshot caused (a bare write hit an immutable snapshot → E0006 on the walker; and `self.n = v` then
-a bare read returned the stale snapshot value). Pinned by `classes/method_field_access.lang`. One
-adjacent gap remains logged in `plans/deferred.md`: a `List<IntN>` element type is lost through a
-field read inside a method (a checker type-flow gap — next).
+a bare read returned the stale snapshot value). Pinned by `classes/method_field_access.lang`.
+
+**And (2026-07): precise `self.field` typing.** The checker never bound `self` for `struct`/`class`
+methods (only enums did), so an explicit `self.f` synthesized its receiver as `dyn` and erased the
+field's type (e.g. `List<u64>` → `List<dyn>`, breaking fixed-width arithmetic on an element). Now
+`check_struct`/`check_class` bind `self` to `Named(name, <own type params>)` (helper `self_type`), so
+`self.field` resolves through `synth_member` to the field's declared type — as precisely as a bare
+`field` read. This let the `BitSet` dogfood move to `List<u64>` (genuine Tier-W fixed-width),
+`classes/bitset.lang` + `types/fixed_width_field.lang`.
 
 **Original status: design, NOT scheduled.** A consolidated proposal from a design discussion (2026-06). It
 **replaces an earlier `resource`-kind proposal** (removed) — the `resource` kind dissolves into "a class

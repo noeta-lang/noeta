@@ -1979,11 +1979,13 @@ impl Checker {
 
     fn check_struct(&mut self, r: &StructDecl, env: &mut Env) {
         let saved = self.enter_type_params(&r.type_params);
-        let fields: Vec<(String, Type)> = r
+        let mut fields: Vec<(String, Type)> = r
             .fields
             .iter()
             .map(|f| (f.name.clone(), field_type(&f.ty)))
             .collect();
+        // Bind `self` too, so an explicit `self.field` types as precisely as a bare `field` read.
+        fields.push(("self".to_string(), self_type(&r.name, &r.type_params)));
         for f in &r.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
@@ -2016,11 +2018,13 @@ impl Checker {
 
     fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
         let saved = self.enter_type_params(&c.type_params);
-        let fields: Vec<(String, Type)> = c
+        let mut fields: Vec<(String, Type)> = c
             .fields
             .iter()
             .map(|f| (f.name.clone(), field_type(&f.ty)))
             .collect();
+        // Bind `self` too, so an explicit `self.field` types as precisely as a bare `field` read.
+        fields.push(("self".to_string(), self_type(&c.name, &c.type_params)));
         for f in &c.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
@@ -5443,6 +5447,20 @@ fn reassigns(stmts: &[Stmt], name: &str) -> bool {
 /// The declared type of a field, or `Unknown` when unannotated.
 fn field_type(ty: &Option<TypeRef>) -> Type {
     ty.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown)
+}
+
+/// The receiver (`self`) type inside a method of `name` — `Named(name, <its own type params>)` — so
+/// an explicit `self.field` resolves through [`Checker::synth_member`] to the field's declared type
+/// (a concrete field keeps it precisely, e.g. `List<u64>`; a generic field erases to `dyn` via the
+/// same parameter substitution as bare field access). Structs/classes bind this exactly as enums do.
+fn self_type(name: &str, type_params: &[TypeParam]) -> Type {
+    Type::Named(
+        name.to_string(),
+        type_params
+            .iter()
+            .map(|p| Type::Named(p.name.clone(), vec![]))
+            .collect(),
+    )
 }
 
 /// The declared type of a parameter, or `Unknown` when unannotated.

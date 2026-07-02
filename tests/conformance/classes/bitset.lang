@@ -1,8 +1,9 @@
-// Integration demo: a growable BitSet backed by `List<int>` 64-bit words, exercising the whole
-// object model + bit stack end-to-end — self-mutating methods (`self.f = v`), the new
-// index-assignment-through-a-field sugar (`self.words[w] = ...`), and the bitwise operators
-// (`<< >> & | !`) plus the `count_ones()` intrinsic. `set`/`clear` mutate the shared instance in
-// place (class = reference), so the changes persist across calls. Both backends agree.
+// Integration demo: a BitSet backed by `List<u64>` 64-bit words — the capstone dogfood of the whole
+// stack. It exercises the object model (self-mutating methods, index-assignment through a field
+// `self.words[w] = ...`, live in-method field access) AND the fixed-width integer tier end-to-end:
+// `u64` literals, the bitwise/shift operators (`<< >> & | !`) on `u64`, and the width-exact
+// `count_ones()` intrinsic — all flowing through a `List<u64>` field read + index inside a method.
+// `set`/`clear` mutate the shared instance in place (class = reference). Both backends agree.
 // expect: stdout "true"
 // expect: stdout "false"
 // expect: stdout "true"
@@ -12,23 +13,23 @@
 // expect: stdout "true"
 // expect: exit 0
 class BitSet {
-    mut words: List<int>
+    mut words: List<u64>
 
     // A fixed-capacity 256-bit set (four 64-bit words); `.set` replaces a word, it does not grow.
-    fn new(): BitSet { return BitSet { words: [0, 0, 0, 0] }; }
+    fn new(): BitSet { return BitSet { words: [0u64, 0u64, 0u64, 0u64] }; }
 
     fn set(i: int): void {
-        // The index-assignment-through-a-field sugar: `self.words[w] = v` desugars to
-        // `self.words = self.words.set(w, v)`, mutating the instance's list in place.
-        self.words[i / 64] = self.words[i / 64] | (1 << (i % 64));
+        // Index-assignment through a field: `self.words[w] = v` ⟶ `self.words = self.words.set(w, v)`,
+        // mutating the instance's list in place. The value is a `u64` bitwise expression.
+        self.words[i / 64] = self.words[i / 64] | (1u64 << (i % 64));
     }
 
     fn clear(i: int): void {
-        self.words[i / 64] = self.words[i / 64] & (!(1 << (i % 64)));
+        self.words[i / 64] = self.words[i / 64] & (!(1u64 << (i % 64)));
     }
 
     fn test(i: int): bool {
-        return (self.words[i / 64] >> (i % 64)) & 1 == 1;
+        return (self.words[i / 64] >> (i % 64)) & 1u64 == 1u64;
     }
 
     fn count(): int {
@@ -49,6 +50,5 @@ bs.clear(70);
 echo bs.test(70);   // false
 echo bs.count();    // 2
 
-// A method that both mutates (`self.words[...] = ...`) and is observed through the same instance.
-bs.set(200);
+bs.set(200);        // fourth word
 echo bs.test(200);  // true
