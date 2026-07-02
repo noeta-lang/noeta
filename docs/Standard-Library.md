@@ -70,7 +70,7 @@ String-keyed; keys iterate and print in sorted order. Empty is `{}`.
 m = {"a": 1, "b": 2}
 echo m["a"]            // 1  (missing key is E0018)
 m["c"] = 3            // sugar for  m = m.set("c", 3)
-echo { host, port }   // shorthand: { "host": host, "port": port }
+echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 ```
 
 | Method | Signature | Example → result |
