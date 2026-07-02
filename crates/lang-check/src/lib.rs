@@ -623,6 +623,20 @@ pub struct DestructorRelevance {
 }
 
 impl Checker {
+    /// Record an error diagnostic, returning `&mut` to the just-pushed diagnostic so a help line can
+    /// be chained onto it in place (`self.error(code, span, msg).help("…")`). The single place the
+    /// checker constructs an error — every diagnostic site funnels through here rather than repeating
+    /// `self.diags.push(Diagnostic::error(…))`.
+    fn error(
+        &mut self,
+        code: DiagnosticCode,
+        span: Span,
+        message: impl Into<String>,
+    ) -> &mut Diagnostic {
+        self.diags.push(Diagnostic::error(code, span, message));
+        self.diags.last_mut().expect("just pushed a diagnostic")
+    }
+
     /// Register built-in prelude types the checker must know regardless of the program. Run before
     /// `collect` so a user declaration of the same name shadows it (matching the backends, which
     /// register `Ordering` the same way). `Attributed<T> { target: string, value: T }` is the
@@ -976,19 +990,17 @@ impl Checker {
                     );
                     // Attributes are structs only: `@attribute` on a class is an error (E0029).
                     if c.attribute.is_some() {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::NotAnAttribute,
-                                c.name_span,
-                                format!(
-                                    "a class cannot be an attribute: `{}` must be a record",
-                                    c.name
-                                ),
-                            )
-                            .with_help(
-                                "attributes are records (their `#[...]` arguments map to fields); \
-                                 declare it as `@attribute type` instead of `class`",
+                        self.error(
+                            DiagnosticCode::NotAnAttribute,
+                            c.name_span,
+                            format!(
+                                "a class cannot be an attribute: `{}` must be a record",
+                                c.name
                             ),
+                        )
+                        .help(
+                            "attributes are records (their `#[...]` arguments map to fields); \
+                                 declare it as `@attribute type` instead of `class`",
                         );
                     }
                     // Record each method's signature (class methods and impl-block methods alike),
@@ -1221,17 +1233,15 @@ impl Checker {
                 && is_uninferable_literal(value)
                 && !reassigns(&stmts[i + 1..], name)
             {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::CannotInfer,
-                        value.span(),
-                        format!("cannot infer the type of `{name}`"),
-                    )
-                    .with_help(
-                        "this `mut` binding is never assigned after its empty initializer, so its \
+                self.error(
+                    DiagnosticCode::CannotInfer,
+                    value.span(),
+                    format!("cannot infer the type of `{name}`"),
+                )
+                .help(
+                    "this `mut` binding is never assigned after its empty initializer, so its \
                          type stays undeterminable — annotate it (e.g. `mut x: List<int> = []`) \
                          or remove it",
-                    ),
                 );
             }
             // Recurse into nested statement bodies for `mut` bindings declared there.
@@ -1367,16 +1377,14 @@ impl Checker {
                         // with an annotation. A `mut` binding is exempt: it is an accumulator whose
                         // later writes supply the type (L3).
                         if !*mut_decl && is_uninferable_literal(value) {
-                            self.diags.push(
-                                Diagnostic::error(
-                                    DiagnosticCode::CannotInfer,
-                                    value.span(),
-                                    format!("cannot infer the type of `{name}`"),
-                                )
-                                .with_help(
-                                    "annotate it (e.g. `x: List<int> = []`), or use a `mut` binding \
+                            self.error(
+                                DiagnosticCode::CannotInfer,
+                                value.span(),
+                                format!("cannot infer the type of `{name}`"),
+                            )
+                            .help(
+                                "annotate it (e.g. `x: List<int> = []`), or use a `mut` binding \
                                      whose later writes determine the type",
-                                ),
                             );
                         }
                         // `mut x = …` is a fresh declaration (innermost frame, even if it shadows);
@@ -1403,7 +1411,7 @@ impl Checker {
                 let elem_types: Vec<Type> = match &vty {
                     Type::Tuple(els) => {
                         if els.len() != targets.len() {
-                            self.diags.push(Diagnostic::error(
+                            self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
                                 format!(
@@ -1411,7 +1419,7 @@ impl Checker {
                                     els.len(),
                                     targets.len()
                                 ),
-                            ));
+                            );
                         }
                         targets
                             .iter()
@@ -1421,11 +1429,11 @@ impl Checker {
                     }
                     _ if vty.defers_to_runtime() => vec![Type::Unknown; targets.len()],
                     _ => {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::TypeMismatch,
                             value.span(),
                             format!("cannot destructure `{vty}` — expected a tuple"),
-                        ));
+                        );
                         vec![Type::Unknown; targets.len()]
                     }
                 };
@@ -1444,13 +1452,13 @@ impl Checker {
                 // place under pure-pull `next() -> ?T` (no completion type) → E0039.
                 if self.current_yield.is_some() {
                     if value.is_some() {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::GeneratorMisuse,
                             *span,
                             "a generator's `return` cannot carry a value; use bare `return;` to end \
                              iteration (the elements come from `yield`)"
                                 .to_string(),
-                        ));
+                        );
                     }
                     return;
                 }
@@ -1478,13 +1486,13 @@ impl Checker {
                     }
                     None => {
                         self.synth(value, env); // still type the operand for nested checks
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::GeneratorMisuse,
                             *span,
                             "`yield` is only valid inside a generator (a function whose body \
                              contains `yield`, returning `Iterator<T>`)"
                                 .to_string(),
-                        ));
+                        );
                     }
                 }
             }
@@ -1549,18 +1557,16 @@ impl Checker {
                 // joining spawned tasks needs suspend machinery — so it is illegal in a sync context
                 // (the coloring rule, E0040), exactly like `.await`.
                 if !self.current_async {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::AsyncMisuse,
-                            *span,
-                            "`concurrent { }` is only allowed inside an `async fn` (or the async top \
+                    self.error(
+                        DiagnosticCode::AsyncMisuse,
+                        *span,
+                        "`concurrent { }` is only allowed inside an `async fn` (or the async top \
                              level)"
-                                .to_string(),
-                        )
-                        .with_help(
-                            "mark the enclosing function `async fn`; structured concurrency needs an \
+                            .to_string(),
+                    )
+                    .help(
+                        "mark the enclosing function `async fn`; structured concurrency needs an \
                              async context to join its tasks",
-                        ),
                     );
                 }
                 // Inside the scope, `spawn` is legal; check the body with the depth raised.
@@ -1576,11 +1582,11 @@ impl Checker {
                     } else {
                         "continue"
                     };
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::LoopControlOutsideLoop,
                         *span,
                         format!("`{kw}` outside of a loop"),
-                    ));
+                    );
                 }
             }
             Stmt::Fn(decl) => self.check_fn(decl, env, &[], TargetKind::Function),
@@ -1666,14 +1672,14 @@ impl Checker {
                     Some(args.first().cloned().unwrap_or(Type::Unknown))
                 }
                 _ => {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::GeneratorMisuse,
                         decl.name_span,
                         format!(
                             "a generator (a function that uses `yield`) must declare its return \
                              type as `Iterator<T>`, found `{ret}`"
                         ),
-                    ));
+                    );
                     Some(Type::Unknown)
                 }
             }
@@ -1728,16 +1734,14 @@ impl Checker {
     /// **direct call** so it knows what to ship. `result` is the already-synthesized `Future<T>`.
     fn check_isolate_send(&mut self, future: &Expr, result: &Type, span: Span) {
         let Expr::Call { callee, .. } = future else {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::NotSend,
-                    span,
-                    "`isolate` expects a direct call, e.g. `isolate work(x)`".to_string(),
-                )
-                .with_help(
-                    "the argument to `isolate` must be a function call so the arguments and \
+            self.error(
+                DiagnosticCode::NotSend,
+                span,
+                "`isolate` expects a direct call, e.g. `isolate work(x)`".to_string(),
+            )
+            .help(
+                "the argument to `isolate` must be a function call so the arguments and \
                             the function to run can be shipped to the fresh isolate",
-                ),
             );
             return;
         };
@@ -1747,16 +1751,14 @@ impl Checker {
         {
             let t = targs.first().cloned().unwrap_or(Type::Unknown);
             if !self.is_send(&t, &mut Vec::new()) {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::NotSend,
-                        span,
-                        format!("an isolate's result type `{t}` is not `Send`"),
-                    )
-                    .with_help(
-                        "only value types cross an isolate boundary; a `class` (reference type) has \
+                self.error(
+                    DiagnosticCode::NotSend,
+                    span,
+                    format!("an isolate's result type `{t}` is not `Send`"),
+                )
+                .help(
+                    "only value types cross an isolate boundary; a `class` (reference type) has \
                          identity and cannot — return a `struct` instead",
-                    ),
                 );
             }
         }
@@ -1767,16 +1769,14 @@ impl Checker {
         {
             for param in sig.params.clone() {
                 if !self.is_send(&param, &mut Vec::new()) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::NotSend,
-                            span,
-                            format!("an isolate argument of type `{param}` is not `Send`"),
-                        )
-                        .with_help(
-                            "only value types cross an isolate boundary; a `class` (reference type) \
+                    self.error(
+                        DiagnosticCode::NotSend,
+                        span,
+                        format!("an isolate argument of type `{param}` is not `Send`"),
+                    )
+                    .help(
+                        "only value types cross an isolate boundary; a `class` (reference type) \
                              has identity and cannot — pass a `struct` instead",
-                        ),
                     );
                 }
             }
@@ -1922,18 +1922,15 @@ impl Checker {
     /// semantics (A.6b).
     fn check_value_await(&mut self, value: &Expr) {
         if let Some(span) = conditional_await_span(value) {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::AsyncMisuse,
-                    span,
-                    "`.await` in a conditionally-evaluated position is not yet supported"
-                        .to_string(),
-                )
-                .with_help(
-                    "an `.await` in the right side of `&&`/`||`/`??` or a `match`/`if…then…else` \
+            self.error(
+                DiagnosticCode::AsyncMisuse,
+                span,
+                "`.await` in a conditionally-evaluated position is not yet supported".to_string(),
+            )
+            .help(
+                "an `.await` in the right side of `&&`/`||`/`??` or a `match`/`if…then…else` \
                      branch would change short-circuit evaluation — bind it to a variable first, \
                      e.g. `x = f().await`, then use `x`",
-                ),
             );
         }
     }
@@ -1943,16 +1940,12 @@ impl Checker {
     /// [`Expr::has_await`] already stops at closure boundaries.
     fn reject_nested_await(&mut self, expr: &Expr) {
         if expr.has_await() {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::AsyncMisuse,
-                    expr.span(),
-                    "`.await` is not supported in a condition or loop head".to_string(),
-                )
-                .with_help(
-                    "bind the awaited value to a variable first, e.g. `x = f().await`, then use `x`",
-                ),
-            );
+            self.error(
+                DiagnosticCode::AsyncMisuse,
+                expr.span(),
+                "`.await` is not supported in a condition or loop head".to_string(),
+            )
+            .help("bind the awaited value to a variable first, e.g. `x = f().await`, then use `x`");
         }
     }
 
@@ -1970,19 +1963,15 @@ impl Checker {
             if p.default.is_some() {
                 seen_default = true;
             } else if seen_default {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::RequiredAfterOptional,
-                        p.name_span,
-                        format!(
-                            "required parameter `{}` cannot follow a parameter with a default value",
-                            p.name
-                        ),
-                    )
-                    .with_help(
-                        "give this parameter a default too, or move it before the optional ones",
+                self.error(
+                    DiagnosticCode::RequiredAfterOptional,
+                    p.name_span,
+                    format!(
+                        "required parameter `{}` cannot follow a parameter with a default value",
+                        p.name
                     ),
-                );
+                )
+                .help("give this parameter a default too, or move it before the optional ones");
             }
         }
         let tps: HashSet<String> = self.type_params.keys().cloned().collect();
@@ -1994,13 +1983,13 @@ impl Checker {
             if p.ty.is_some() {
                 let expected = erase_type_params(param_type(p), &tps);
                 if !self.arg_assignable(&actual, &expected) {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::TypeMismatch,
                         default.span(),
                         format!(
                             "default value of type `{actual}` is not assignable to parameter type `{expected}`"
                         ),
-                    ));
+                    );
                 }
             }
         }
@@ -2023,13 +2012,13 @@ impl Checker {
             if f.ty.is_some() {
                 let expected = erase_type_params(field_type(&f.ty), &tps);
                 if !self.arg_assignable(&actual, &expected) {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::TypeMismatch,
                         default.span(),
                         format!(
                             "default value of type `{actual}` is not assignable to field type `{expected}`"
                         ),
-                    ));
+                    );
                 }
             }
         }
@@ -2041,28 +2030,24 @@ impl Checker {
     fn require_signature(&mut self, decl: &FnDecl) {
         for p in &decl.params {
             if p.ty.is_none() {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::MissingSignature,
-                        p.name_span,
-                        format!("parameter `{}` needs a type annotation", p.name),
-                    )
-                    .with_help(
-                        "every parameter of a named function needs a type; only closures and \
+                self.error(
+                    DiagnosticCode::MissingSignature,
+                    p.name_span,
+                    format!("parameter `{}` needs a type annotation", p.name),
+                )
+                .help(
+                    "every parameter of a named function needs a type; only closures and \
                          locals are inferred",
-                    ),
                 );
             }
         }
         if decl.ret.is_none() {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::MissingSignature,
-                    decl.name_span,
-                    format!("function `{}` needs a return type", decl.name),
-                )
-                .with_help("annotate the return type after the parameters, e.g. `): int`"),
-            );
+            self.error(
+                DiagnosticCode::MissingSignature,
+                decl.name_span,
+                format!("function `{}` needs a return type", decl.name),
+            )
+            .help("annotate the return type after the parameters, e.g. `): int`");
         }
     }
 
@@ -2207,19 +2192,17 @@ impl Checker {
         for p in params {
             for bound in &p.bounds {
                 if BuiltinTrait::lookup(bound).is_none() {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::UnknownTrait,
-                            p.span,
-                            format!(
-                                "unknown trait `{bound}` in bound on type parameter `{}`",
-                                p.name
-                            ),
-                        )
-                        .with_help(
-                            "a bound must name a built-in trait, e.g. `Comparable`, `Equatable`, \
-                             or `Display`",
+                    self.error(
+                        DiagnosticCode::UnknownTrait,
+                        p.span,
+                        format!(
+                            "unknown trait `{bound}` in bound on type parameter `{}`",
+                            p.name
                         ),
+                    )
+                    .help(
+                        "a bound must name a built-in trait, e.g. `Comparable`, `Equatable`, \
+                             or `Display`",
                     );
                 }
             }
@@ -2260,16 +2243,14 @@ impl Checker {
                     && !self.type_params.contains_key(name)
                     && !self.types.contains(name)
                 {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::UnknownType,
-                            *span,
-                            format!("unknown type `{name}`"),
-                        )
-                        .with_help(
-                            "name a declared type, one imported with `use`, a generic parameter, \
+                    self.error(
+                        DiagnosticCode::UnknownType,
+                        *span,
+                        format!("unknown type `{name}`"),
+                    )
+                    .help(
+                        "name a declared type, one imported with `use`, a generic parameter, \
                              or a built-in",
-                        ),
                     );
                 }
                 for arg in args {
@@ -2294,40 +2275,38 @@ impl Checker {
     /// restriction are enforced by the caller, [`Self::check_standalone_impl`].)
     fn check_trait_impl(&mut self, trait_name: &str, trait_span: Span, methods: &[FnDecl]) {
         let Some(t) = BuiltinTrait::lookup(trait_name) else {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::UnknownTrait,
-                    trait_span,
-                    format!("unknown trait `{trait_name}`"),
-                )
-                .with_help(
-                    "only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)",
-                ),
-            );
+            self.error(
+                DiagnosticCode::UnknownTrait,
+                trait_span,
+                format!("unknown trait `{trait_name}`"),
+            )
+            .help("only built-in traits can be implemented (e.g. `Add`, `Equatable`, `Display`)");
             return;
         };
         let Some((req_name, req_arity)) = t.required_method else {
             return; // a marker trait (e.g. `Clone`, `Attribute`) imposes no hand-written method
         };
         match methods.iter().find(|m| m.name == req_name) {
-            None => self.diags.push(
-                Diagnostic::error(
+            None => {
+                self.error(
                     DiagnosticCode::InvalidImpl,
                     trait_span,
                     format!("`impl {trait_name}` must define `fn {req_name}`"),
                 )
-                .with_help(format!(
+                .help(format!(
                     "the `{trait_name}` trait requires the `{req_name}` method"
-                )),
-            ),
-            Some(m) if m.params.len() != req_arity => self.diags.push(Diagnostic::error(
-                DiagnosticCode::InvalidImpl,
-                m.name_span,
-                format!(
-                    "`{req_name}` must take {req_arity} parameter(s), found {}",
-                    m.params.len()
-                ),
-            )),
+                ));
+            }
+            Some(m) if m.params.len() != req_arity => {
+                self.error(
+                    DiagnosticCode::InvalidImpl,
+                    m.name_span,
+                    format!(
+                        "`{req_name}` must take {req_arity} parameter(s), found {}",
+                        m.params.len()
+                    ),
+                );
+            }
             Some(_) => {}
         }
     }
@@ -2341,33 +2320,29 @@ impl Checker {
     /// [`Self::check_coherence`].
     fn check_standalone_impl(&mut self, decl: &ImplDecl) {
         if !self.records.contains_key(&decl.target) && !self.enums.contains_key(&decl.target) {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::UnknownType,
-                    decl.target_span,
-                    format!(
-                        "cannot implement a trait for `{}`: it is not a record, class, or enum \
+            self.error(
+                DiagnosticCode::UnknownType,
+                decl.target_span,
+                format!(
+                    "cannot implement a trait for `{}`: it is not a record, class, or enum \
                          declared in this module",
-                        decl.target
-                    ),
-                )
-                .with_help(
-                    "a standalone `impl` may only target a type you declare — implement the trait \
-                     where the type is defined",
+                    decl.target
                 ),
+            )
+            .help(
+                "a standalone `impl` may only target a type you declare — implement the trait \
+                     where the type is defined",
             );
         }
         if !decl.methods.is_empty() {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::InvalidImpl,
-                    decl.span,
-                    "a standalone `impl` with methods is not yet supported",
-                )
-                .with_help(
-                    "only an empty-body capability impl (e.g. `impl Serialize for X {}`) is \
+            self.error(
+                DiagnosticCode::InvalidImpl,
+                decl.span,
+                "a standalone `impl` with methods is not yet supported",
+            )
+            .help(
+                "only an empty-body capability impl (e.g. `impl Serialize for X {}`) is \
                      supported here; write trait methods inside the type's own `class` body",
-                ),
             );
         }
         self.check_trait_impl(&decl.trait_name, decl.trait_span, &decl.methods);
@@ -2403,17 +2378,17 @@ impl Checker {
             .chain(standalone.iter().map(|(name, span)| (name.as_str(), *span)));
         for (name, span) in occurrences {
             match seen.get(name) {
-                Some(_first) => self.diags.push(
-                    Diagnostic::error(
+                Some(_first) => {
+                    self.error(
                         DiagnosticCode::ConflictingTraitImpl,
                         span,
                         format!("trait `{name}` is implemented more than once for this type"),
                     )
-                    .with_help(format!(
+                    .help(format!(
                         "`{name}` is already implemented above; a type may implement each trait \
                          only once (via one `@derive` or one `impl` block, not both)"
-                    )),
-                ),
+                    ));
+                }
                 None => {
                     seen.insert(name, span);
                 }
@@ -2429,25 +2404,23 @@ impl Checker {
     fn check_derives(&mut self, derives: &[DeriveSpec]) {
         for spec in derives {
             let Some(t) = BuiltinTrait::lookup(&spec.name) else {
-                self.diags.push(Diagnostic::error(
+                self.error(
                     DiagnosticCode::UnknownTrait,
                     spec.span,
                     format!("unknown trait `{}` in `@derive(...)`", spec.name),
-                ));
+                );
                 continue;
             };
             if !t.derivable {
-                self.diags.push(
-                    Diagnostic::error(
+                self.error(
                         DiagnosticCode::UnknownTrait,
                         spec.span,
                         format!("`{}` is not a derivable trait", spec.name),
                     )
-                    .with_help(
+                    .help(
                         "derivable traits are `Equatable`, `Comparable`, `Display`, `Clone`, \
                          `Serialize<Format>`; mark attribute records with the `@attribute` directive",
-                    ),
-                );
+                    );
                 continue;
             }
             // Generic arity: `Serialize` requires one type argument (`Serialize<Json>`); every other
@@ -2463,12 +2436,10 @@ impl Checker {
                         spec.args.len()
                     )
                 };
-                self.diags.push(
-                    Diagnostic::error(DiagnosticCode::UnknownTrait, spec.span, msg).with_help(
+                self.error(DiagnosticCode::UnknownTrait, spec.span, msg).help(
                         "`Serialize` is `@derive(Serialize<Json>)`; the other derivable traits take \
                          no arguments",
-                    ),
-                );
+                    );
                 continue;
             }
             // `Serialize`'s argument is a serialization **format** (a blessed token, not a general
@@ -2489,17 +2460,15 @@ impl Checker {
                 if args.is_empty() && lang_types::SERIALIZE_FORMATS.contains(&name.as_str())
         );
         if !ok {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::UnknownType,
-                    arg.span(),
-                    "expected a serialization format".to_string(),
-                )
-                .with_help(format!(
-                    "the formats are {}",
-                    lang_types::SERIALIZE_FORMATS.join(", ")
-                )),
-            );
+            self.error(
+                DiagnosticCode::UnknownType,
+                arg.span(),
+                "expected a serialization format".to_string(),
+            )
+            .help(format!(
+                "the formats are {}",
+                lang_types::SERIALIZE_FORMATS.join(", ")
+            ));
         }
     }
 
@@ -2513,31 +2482,27 @@ impl Checker {
     fn check_attrs(&mut self, attrs: &[Attribute], target: TargetKind) {
         for attr in attrs {
             if attr.name == "derive" {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::InvalidAttribute,
-                        attr.span,
-                        "`#[derive(...)]` is not a data attribute",
-                    )
-                    .with_help(
-                        "code generation now uses the `@derive(...)` directive; `#[...]` is for \
+                self.error(
+                    DiagnosticCode::InvalidAttribute,
+                    attr.span,
+                    "`#[derive(...)]` is not a data attribute",
+                )
+                .help(
+                    "code generation now uses the `@derive(...)` directive; `#[...]` is for \
                          data attributes only",
-                    ),
                 );
                 continue;
             }
             // The capability gate: only a struct marked `@attribute` may be used as `#[Foo(...)]`.
             if !self.attributes.contains(&attr.name) {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::NotAnAttribute,
-                        attr.name_span,
-                        format!("`{}` cannot be used as an attribute", attr.name),
-                    )
-                    .with_help(
-                        "an attribute is a record marked `@attribute`; declare the record with that \
+                self.error(
+                    DiagnosticCode::NotAnAttribute,
+                    attr.name_span,
+                    format!("`{}` cannot be used as an attribute", attr.name),
+                )
+                .help(
+                    "an attribute is a record marked `@attribute`; declare the record with that \
                          directive",
-                    ),
                 );
                 continue;
             }
@@ -2551,18 +2516,16 @@ impl Checker {
                     .map(|k| k.label())
                     .collect::<Vec<_>>()
                     .join(", ");
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::InvalidAttributeTarget,
-                        attr.name_span,
-                        format!(
-                            "`{}` cannot attach to a {}; it is restricted to {permitted}",
-                            attr.name,
-                            target.label(),
-                        ),
-                    )
-                    .with_help("change the target, or widen the `@attribute(...)` directive"),
-                );
+                self.error(
+                    DiagnosticCode::InvalidAttributeTarget,
+                    attr.name_span,
+                    format!(
+                        "`{}` cannot attach to a {}; it is restricted to {permitted}",
+                        attr.name,
+                        target.label(),
+                    ),
+                )
+                .help("change the target, or widen the `@attribute(...)` directive");
                 continue;
             }
             self.check_attribute_construction(attr);
@@ -2593,22 +2556,22 @@ impl Checker {
                     Some(fname) => format!("has no field `{fname}`"),
                     None => format!("declares only {} field(s)", fields.len()),
                 };
-                self.diags.push(Diagnostic::error(
+                self.error(
                     DiagnosticCode::UnknownName,
                     arg.span,
                     format!("attribute `{}` {what}", attr.name),
-                ));
+                );
                 continue;
             };
             if filled[i] {
-                self.diags.push(Diagnostic::error(
+                self.error(
                     DiagnosticCode::UnknownName,
                     arg.span,
                     format!(
                         "field `{}` of attribute `{}` is set twice",
                         fields[i].0, attr.name
                     ),
-                ));
+                );
                 continue;
             }
             filled[i] = true;
@@ -2618,14 +2581,14 @@ impl Checker {
         for (i, (fname, fty)) in fields.iter().enumerate() {
             // A field with a default (`name: T = …`) is optional — it may be omitted (slice 6i).
             if !filled[i] && !self.is_optional_attribute_field(&attr.name, fname) {
-                self.diags.push(Diagnostic::error(
+                self.error(
                     DiagnosticCode::MissingField,
                     attr.span,
                     format!(
                         "attribute `{}` is missing field `{fname}: {fty}`",
                         attr.name
                     ),
-                ));
+                );
             }
         }
     }
@@ -2696,17 +2659,15 @@ impl Checker {
                     && !PRELUDE_TYPES.contains(&name.as_str())
                     && !self.types.contains(name)
                 {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::UnknownType,
-                            span,
-                            format!("unknown type `{name}` in attribute argument"),
-                        )
-                        .with_help(
-                            "a bare name in an attribute argument is a type reference; name a \
+                    self.error(
+                        DiagnosticCode::UnknownType,
+                        span,
+                        format!("unknown type `{name}` in attribute argument"),
+                    )
+                    .help(
+                        "a bare name in an attribute argument is a type reference; name a \
                              declared type, an import, or a built-in (use `Enum.Variant` for an \
                              enum value)",
-                        ),
                     );
                     return;
                 }
@@ -2714,11 +2675,11 @@ impl Checker {
             }
         };
         if !self.assignable(&synth, expected) {
-            self.diags.push(Diagnostic::error(
+            self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!("value of type `{synth}` is not assignable to field `{field}: {expected}`"),
-            ));
+            );
         }
     }
 
@@ -2885,13 +2846,13 @@ impl Checker {
                 let value = int_literal_value(expr).unwrap();
                 let (lo, hi) = Self::int_width_range(*signed, *bits);
                 if value < lo || value > hi {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::FixedWidthOutOfRange,
                         *span,
                         format!(
                             "literal `{value}` is out of range for `{expected}` (valid range {lo}..={hi})"
                         ),
-                    ));
+                    );
                 }
                 expected.clone()
             }
@@ -2956,11 +2917,11 @@ impl Checker {
 
     fn subsume(&mut self, actual: &Type, expected: &Type, span: Span) {
         if !self.assignable(actual, expected) {
-            self.diags.push(Diagnostic::error(
+            self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!("expected `{expected}`, found `{actual}`"),
-            ));
+            );
         }
     }
 
@@ -2982,11 +2943,11 @@ impl Checker {
         let ty = Type::IntN { signed, bits };
         let mag = magnitude as u128;
         if negated && !signed {
-            self.diags.push(Diagnostic::error(
+            self.error(
                 DiagnosticCode::FixedWidthOutOfRange,
                 span,
                 format!("cannot negate an unsigned literal `{magnitude}{ty}`"),
-            ));
+            );
             return ty;
         }
         // Legal magnitude bound: unsigned `2^bits - 1`; signed positive `2^(bits-1) - 1`; a negated
@@ -3000,14 +2961,14 @@ impl Checker {
         };
         if mag > max {
             let (lo, hi) = Self::int_width_range(signed, bits);
-            self.diags.push(Diagnostic::error(
+            self.error(
                 DiagnosticCode::FixedWidthOutOfRange,
                 span,
                 format!(
                     "literal `{}{magnitude}{ty}` is out of range for `{ty}` (valid range {lo}..={hi})",
                     if negated { "-" } else { "" },
                 ),
-            ));
+            );
         }
         ty
     }
@@ -3076,20 +3037,20 @@ impl Checker {
 
     /// The E0043 for a non-fixed-width bitwise/shift op whose operands are not `int` (P-BITS Tier B).
     fn report_noninteger_bitwise(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) {
-        self.diags.push(Diagnostic::error(
+        self.error(
             DiagnosticCode::NonIntegerBitwise,
             span,
             format!(
                 "`{}` requires integer operands, but found `{lt}` and `{rt}`",
                 op.symbol(),
             ),
-        ));
+        );
     }
 
     /// The shared E0044 for a fixed-width op whose operands are not the same `IntN` — `kind` is
     /// `"arithmetic"`, `"comparison"`, or `"bitwise"` (the W2/W3/W5 sites).
     fn report_intn_mismatch(&mut self, op: BinaryOp, lt: &Type, rt: &Type, kind: &str, span: Span) {
-        self.diags.push(Diagnostic::error(
+        self.error(
             DiagnosticCode::FixedWidthOutOfRange,
             span,
             format!(
@@ -3097,7 +3058,7 @@ impl Checker {
                  operands to be the same type — convert explicitly",
                 op.symbol(),
             ),
-        ));
+        );
     }
 
     /// The inclusive `(min, max)` value range of a fixed-width integer type, as `i128` so every
@@ -3167,11 +3128,11 @@ impl Checker {
                         Type::List(_) => t,
                         _ if t.defers_to_runtime() => Type::List(Box::new(Type::Dyn)),
                         _ => {
-                            self.diags.push(Diagnostic::error(
+                            self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
                                 format!("cannot spread `{t}` — `...` expects a list"),
-                            ));
+                            );
                             Type::List(Box::new(Type::Dyn))
                         }
                     };
@@ -3183,11 +3144,11 @@ impl Checker {
                     if *signed {
                         self.sites.width_sites.insert(*span, (*signed, *bits));
                     } else {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::FixedWidthOutOfRange,
                             *span,
                             format!("cannot negate `u{bits}`: unary `-` requires a signed type"),
-                        ));
+                        );
                     }
                     return t;
                 }
@@ -3244,14 +3205,12 @@ impl Checker {
                     }
                 }
                 if heterogeneous {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            "list elements have differing types",
-                        )
-                        .with_help("make the elements one type, or annotate a `List<dyn>` for a mixed list"),
-                    );
+                    self.error(
+                        DiagnosticCode::TypeMismatch,
+                        *span,
+                        "list elements have differing types",
+                    )
+                    .help("make the elements one type, or annotate a `List<dyn>` for a mixed list");
                     elem = Type::Dyn; // recover as a mixed list
                 }
                 self.note_packed_list(&elem, *span);
@@ -3276,24 +3235,24 @@ impl Checker {
                     Type::Tuple(elements) => match elements.get(*index as usize) {
                         Some(t) => t.clone(),
                         None => {
-                            self.diags.push(Diagnostic::error(
+                            self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
                                 format!(
                                     "tuple index `{index}` is out of range for `{recv}` ({} element(s))",
                                     elements.len()
                                 ),
-                            ));
+                            );
                             Type::Unknown
                         }
                     },
                     _ if recv.defers_to_runtime() => Type::Unknown,
                     _ => {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
                             format!("cannot apply tuple index `.{index}` to non-tuple `{recv}`"),
-                        ));
+                        );
                         Type::Unknown
                     }
                 }
@@ -3306,11 +3265,11 @@ impl Checker {
                 let en = self.synth(end, env);
                 let bad = |t: &Type| !matches!(t, Type::Int) && !t.defers_to_runtime();
                 if bad(&st) || bad(&en) {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
                         format!("range bounds must be `int`, found `{st}` and `{en}`"),
-                    ));
+                    );
                 }
                 Type::List(Box::new(Type::Int))
             }
@@ -3332,16 +3291,14 @@ impl Checker {
                     }
                 }
                 if heterogeneous {
-                    self.diags.push(
-                        Diagnostic::error(
+                    self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
                             "map values have differing types",
                         )
-                        .with_help(
+                        .help(
                             "make the values one type, or annotate a `Map<string, dyn>` for a mixed map",
-                        ),
-                    );
+                        );
                     val_ty = Type::Dyn; // recover as a mixed map
                 }
                 let ty = Type::Map(Box::new(key_ty), Box::new(val_ty));
@@ -3374,11 +3331,11 @@ impl Checker {
                         // A concrete primitive cannot be indexed (`42[0]`). A `Named` type may
                         // implement `Index`, and a hole/`dyn` defers — neither errors here.
                         if matches!(recv, Type::Int | Type::Float | Type::Bool | Type::Unit) {
-                            self.diags.push(Diagnostic::error(
+                            self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
                                 format!("cannot index into `{recv}`"),
-                            ));
+                            );
                         }
                         Type::Unknown
                     }
@@ -3428,14 +3385,14 @@ impl Checker {
                         // accepts any value while a concrete field type is enforced.
                         let expected = erase_type_params(declared.clone(), &pset);
                         if !self.arg_assignable(&vty, &expected) {
-                            self.diags.push(Diagnostic::error(
+                            self.error(
                                 DiagnosticCode::TypeMismatch,
                                 f.value.span(),
                                 format!(
                                     "field `{}` expects type `{expected}`, found `{vty}`",
                                     f.name
                                 ),
-                            ));
+                            );
                         }
                     }
                 }
@@ -3460,16 +3417,12 @@ impl Checker {
                     // diagnostic, yielding the same deferred type.
                     t if t.defers_to_runtime() => t.clone(),
                     other => {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::InvalidTry,
-                                *span,
-                                format!("`?` expects a `Result` or `Option`, found `{other}`"),
-                            )
-                            .with_help(
-                                "`?` only propagates `Result`/`Option`; this value is neither",
-                            ),
-                        );
+                        self.error(
+                            DiagnosticCode::InvalidTry,
+                            *span,
+                            format!("`?` expects a `Result` or `Option`, found `{other}`"),
+                        )
+                        .help("`?` only propagates `Result`/`Option`; this value is neither");
                         Type::Unknown
                     }
                 }
@@ -3480,17 +3433,15 @@ impl Checker {
                 // body or the implicitly-async top level). A `.await` in a sync `fn` — or in a closure
                 // passed to a builtin, where `current_async` was reset at the boundary — is E0040.
                 if !self.current_async {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::AsyncMisuse,
-                            *span,
-                            "`.await` is only allowed inside an `async fn` (or the async top level)"
-                                .to_string(),
-                        )
-                        .with_help(
-                            "mark the enclosing function `async fn`; `.await` cannot be used in a \
+                    self.error(
+                        DiagnosticCode::AsyncMisuse,
+                        *span,
+                        "`.await` is only allowed inside an `async fn` (or the async top level)"
+                            .to_string(),
+                    )
+                    .help(
+                        "mark the enclosing function `async fn`; `.await` cannot be used in a \
                              synchronous function or in a closure passed to a builtin",
-                        ),
                     );
                 }
                 // `Future<T>.await` yields `T`; a hole/`dyn` defers to runtime; anything else is a
@@ -3501,14 +3452,12 @@ impl Checker {
                     }
                     t if t.defers_to_runtime() => t.clone(),
                     other => {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::AsyncMisuse,
-                                *span,
-                                format!("`.await` expects a `Future`, found `{other}`"),
-                            )
-                            .with_help("`.await` unwraps a `Future<T>` produced by an `async fn`"),
-                        );
+                        self.error(
+                            DiagnosticCode::AsyncMisuse,
+                            *span,
+                            format!("`.await` expects a `Future`, found `{other}`"),
+                        )
+                        .help("`.await` unwraps a `Future<T>` produced by an `async fn`");
                         Type::Unknown
                     }
                 }
@@ -3525,17 +3474,15 @@ impl Checker {
                 // where the depth was reset) is E0041 by construction, so a spawned unit can never
                 // outlive a scope.
                 if self.concurrent_depth == 0 {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::OrphanSpawn,
-                            *span,
-                            format!("`{kw}` is only allowed inside a `concurrent {{ }}` scope"),
-                        )
-                        .with_help(format!(
-                            "wrap the `{kw}` in a `concurrent {{ }}` block; a task must have an owning \
+                    self.error(
+                        DiagnosticCode::OrphanSpawn,
+                        *span,
+                        format!("`{kw}` is only allowed inside a `concurrent {{ }}` scope"),
+                    )
+                    .help(format!(
+                        "wrap the `{kw}` in a `concurrent {{ }}` block; a task must have an owning \
                              scope that joins it"
-                        )),
-                    );
+                    ));
                 }
                 // `spawn e`/`isolate f(args)` take a `Future<T>` (an `async fn` call) and yield a handle
                 // that is itself a `Future<T>` — so `spawn f().await` produces the result. A non-future
@@ -3546,16 +3493,12 @@ impl Checker {
                         Type::Named(stdlib::FUTURE.to_string(), vec![t.clone()])
                     }
                     other => {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::OrphanSpawn,
-                                *span,
-                                format!("`{kw}` expects a `Future`, found `{other}`"),
-                            )
-                            .with_help(format!(
-                                "`{kw}` an `async fn` call, e.g. `{kw} fetch(url)`"
-                            )),
-                        );
+                        self.error(
+                            DiagnosticCode::OrphanSpawn,
+                            *span,
+                            format!("`{kw}` expects a `Future`, found `{other}`"),
+                        )
+                        .help(format!("`{kw}` an `async fn` call, e.g. `{kw} fetch(url)`"));
                         Type::Named(stdlib::FUTURE.to_string(), vec![Type::Unknown])
                     }
                 };
@@ -3587,19 +3530,17 @@ impl Checker {
                 // whose static type is already a single concrete type has nothing dynamic to narrow
                 // — that is an `E0028`.
                 if !src.defers_to_runtime() && !matches!(src, Type::Union(_) | Type::Kind(_)) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::InvalidNarrow,
-                            *span,
-                            format!(
-                                "`.as<{target}>()` can only narrow a `dyn` or union value, but \
+                    self.error(
+                        DiagnosticCode::InvalidNarrow,
+                        *span,
+                        format!(
+                            "`.as<{target}>()` can only narrow a `dyn` or union value, but \
                                  this value is already `{src}`"
-                            ),
-                        )
-                        .with_help(
-                            "narrowing converts an open type (`dyn` or a union) to a checked `?T`; \
-                             a value with a single known concrete type does not need it",
                         ),
+                    )
+                    .help(
+                        "narrowing converts an open type (`dyn` or a union) to a checked `?T`; \
+                             a value with a single known concrete type does not need it",
                     );
                 }
                 Type::Option(Box::new(target))
@@ -3621,14 +3562,14 @@ impl Checker {
                 let is_attribute = matches!(&target, Type::Named(n, _)
                     if self.attributes.contains(n));
                 if !is_attribute {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::NotAnAttribute,
-                            *span,
-                            format!("`attributes_of` requires an attribute type, but `{target}` is not one"),
-                        )
-                        .with_help("name a record marked `@attribute`"),
-                    );
+                    self.error(
+                        DiagnosticCode::NotAnAttribute,
+                        *span,
+                        format!(
+                            "`attributes_of` requires an attribute type, but `{target}` is not one"
+                        ),
+                    )
+                    .help("name a record marked `@attribute`");
                     return Type::List(Box::new(Type::Dyn));
                 }
                 Type::List(Box::new(Type::Named(
@@ -3660,11 +3601,11 @@ impl Checker {
                 // The operand must be a `bytes` buffer (gradual holes tolerated).
                 let blob_ty = self.synth(blob, env);
                 if !matches!(blob_ty, Type::Bytes) && !blob_ty.defers_to_runtime() {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::TypeMismatch,
                         blob.span(),
                         format!("`from_bytes` expects a `bytes` value, found `{blob_ty}`"),
-                    ));
+                    );
                 }
                 self.check_type_ref(ty);
                 let elem = Type::from_ref(ty);
@@ -3677,13 +3618,13 @@ impl Checker {
                         self.sites.packed_list_sites.insert(*span, layout);
                     }
                     None => {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::InvalidPackedType,
                             *span,
                             format!(
                                 "`from_bytes::<{elem}>` requires a packable `@packed` struct element type"
                             ),
-                        ));
+                        );
                     }
                 }
                 Type::List(Box::new(elem))
@@ -3696,11 +3637,11 @@ impl Checker {
                 // The capacity is a buffer size — an `int` (gradual holes tolerated).
                 let cap_ty = self.synth(capacity, env);
                 if !matches!(cap_ty, Type::Int) && !cap_ty.defers_to_runtime() {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::TypeMismatch,
                         capacity.span(),
                         format!("`channel` expects an `int` capacity, found `{cap_ty}`"),
-                    ));
+                    );
                 }
                 self.check_type_ref(elem);
                 let t = Type::from_ref(elem);
@@ -3729,31 +3670,31 @@ impl Checker {
                 // dynamic `json.parse(s)` keeps its own path, so the shared name does not collide.)
                 if module == "json" && func == "parse" {
                     if arg_types.len() != 1 {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
                             format!(
                                 "`json.parse::<T>` takes 1 argument, found {}",
                                 arg_types.len()
                             ),
-                        ));
+                        );
                     } else if !matches!(arg_types[0], Type::String)
                         && !arg_types[0].defers_to_runtime()
                     {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::TypeMismatch,
                             args[0].span(),
                             format!("`json.parse` expects a `string`, found `{}`", arg_types[0]),
-                        ));
+                        );
                     }
                 } else {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::UnknownName,
                         *func_span,
                         format!(
                             "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
                         ),
-                    ));
+                    );
                 }
                 self.check_type_ref(ty);
                 let t = Type::from_ref(ty);
@@ -3764,11 +3705,11 @@ impl Checker {
                         self.sites.ext_call_sites.insert(*span, recipe);
                     }
                     None => {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
                             format!("`{t}` cannot be deserialized from JSON with `json.parse`"),
-                        ));
+                        );
                     }
                 }
                 t
@@ -3823,14 +3764,12 @@ impl Checker {
             return recv;
         }
         let Type::Named(name, recv_args) = recv.clone() else {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::ImmutableField,
-                    field_span,
-                    format!("cannot assign to field `{field}`: `{recv}` is not a class instance"),
-                )
-                .with_help("only a `mut` field of a class instance can be assigned with `x.f = v`"),
-            );
+            self.error(
+                DiagnosticCode::ImmutableField,
+                field_span,
+                format!("cannot assign to field `{field}`: `{recv}` is not a class instance"),
+            )
+            .help("only a `mut` field of a class instance can be assigned with `x.f = v`");
             return recv;
         };
         // A private field is assignable only inside its declaring type's own methods (slice 2d).
@@ -3850,20 +3789,18 @@ impl Checker {
         } = receiver
             && !lookup_mutable(env, recv_name)
         {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::ImmutableAssignment,
-                    *recv_span,
-                    format!(
-                        "cannot assign to field `{field}`: `{recv_name}` is an immutable binding, \
+            self.error(
+                DiagnosticCode::ImmutableAssignment,
+                *recv_span,
+                format!(
+                    "cannot assign to field `{field}`: `{recv_name}` is an immutable binding, \
                          and a `struct` field-set rebinds it"
-                    ),
-                )
-                .with_help(format!(
-                    "declare it `mut {recv_name} = ...` (a value `struct` is updated by rebinding); \
+                ),
+            )
+            .help(format!(
+                "declare it `mut {recv_name} = ...` (a value `struct` is updated by rebinding); \
                      a reference `class` field mutates in place without `mut`"
-                )),
-            );
+            ));
         }
         let is_mut = self
             .mut_fields
@@ -3913,11 +3850,11 @@ impl Checker {
             let pset: HashSet<String> = params.into_iter().collect();
             let expected = erase_type_params(apply_subst(&fty, &subst), &pset);
             if !self.assignable(&vty, &expected) {
-                self.diags.push(Diagnostic::error(
+                self.error(
                     DiagnosticCode::TypeMismatch,
                     value.span(),
                     format!("field `{field}` has type `{expected}`, but the value is `{vty}`"),
-                ));
+                );
             }
         }
         recv
@@ -3999,7 +3936,7 @@ impl Checker {
             // tuple, fn) has no identity → E0034; a `dyn`/hole or class (or a union of them) defers.
             BinaryOp::Identity | BinaryOp::NotIdentity => {
                 if !self.is_reference_comparable(&lt) || !self.is_reference_comparable(&rt) {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::InvalidIdentityCompare,
                         span,
                         format!(
@@ -4007,7 +3944,7 @@ impl Checker {
                              `{lt}` and `{rt}` are value types — compare them with `==`",
                             op.symbol(),
                         ),
-                    ));
+                    );
                 }
                 Type::Bool
             }
@@ -4035,14 +3972,14 @@ impl Checker {
                     |t: &Type| matches!(t, Type::Int | Type::IntN { .. }) || t.defers_to_runtime();
                 if let Type::IntN { signed, bits } = lt {
                     if !amount_ok(&rt) {
-                        self.diags.push(Diagnostic::error(
+                        self.error(
                             DiagnosticCode::NonIntegerBitwise,
                             span,
                             format!(
                                 "`{}` shift amount must be an integer, found `{rt}`",
                                 op.symbol()
                             ),
-                        ));
+                        );
                     }
                     // Both `<<` (via `MaskWidth`) and `>>` (via `WideInt`) read the width from here;
                     // lowering routes by the operator.
@@ -4119,24 +4056,22 @@ impl Checker {
                 .unbounded_type_param(lt, tn)
                 .or_else(|| self.unbounded_type_param(rt, tn))
         {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::TraitBoundNotSatisfied,
-                    span,
-                    format!(
-                        "operator `{}` requires `{n}: {tn}`, but `{n}` is an unbounded type \
+            self.error(
+                DiagnosticCode::TraitBoundNotSatisfied,
+                span,
+                format!(
+                    "operator `{}` requires `{n}: {tn}`, but `{n}` is an unbounded type \
                          parameter",
-                        op.symbol()
-                    ),
-                )
-                .with_help(format!("add the bound, e.g. `<{n}: {tn}>`")),
-            );
+                    op.symbol()
+                ),
+            )
+            .help(format!("add the bound, e.g. `<{n}: {tn}>`"));
         } else {
-            self.diags.push(Diagnostic::error(
+            self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!("cannot apply `{}` to `{lt}` and `{rt}`", op.symbol()),
-            ));
+            );
         }
     }
 
@@ -4306,11 +4241,11 @@ impl Checker {
                         Type::Int | Type::IntN { .. } | Type::Float | Type::Bool | Type::Unit
                     )
                 {
-                    self.diags.push(Diagnostic::error(
+                    self.error(
                         DiagnosticCode::TypeMismatch,
                         span,
                         format!("type `{recv}` has no method `{name}`"),
-                    ));
+                    );
                 }
                 ret
             }
@@ -4417,14 +4352,14 @@ impl Checker {
             } else {
                 format!("between {required} and {}", params.len())
             };
-            self.diags.push(Diagnostic::error(
+            self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!(
                     "`{callee}` expects {expected} argument(s), found {}",
                     args.len()
                 ),
-            ));
+            );
             return;
         }
         // Only the supplied arguments are type-checked; the omitted trailing parameters are
@@ -4432,11 +4367,11 @@ impl Checker {
         // declaration), so `zip` stopping at the shorter side is exactly right.
         for (param, arg) in params.iter().zip(args) {
             if !self.arg_assignable(arg, param) {
-                self.diags.push(Diagnostic::error(
+                self.error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("argument of type `{arg}` is not assignable to `{param}`"),
-                ));
+                );
             }
         }
     }
@@ -4487,16 +4422,16 @@ impl Checker {
         for (kind_name, span) in kinds {
             match TargetKind::from_name(kind_name) {
                 Some(kind) => recognized.push(kind),
-                None => self.diags.push(
-                    Diagnostic::error(
+                None => {
+                    self.error(
                         DiagnosticCode::InvalidAttributeTarget,
                         *span,
                         format!("`{kind_name}` is not a valid attribute target kind"),
                     )
-                    .with_help(
+                    .help(
                         "the target kinds are Record, Class, Enum, Function, Method, Field, Variant",
-                    ),
-                ),
+                    );
+                }
             }
         }
         if !recognized.is_empty() {
@@ -4524,19 +4459,15 @@ impl Checker {
                     // A role tags an attribute, and attributes are structs only, so `@role` on a
                     // class is an error (E0031).
                     if c.role.is_some() {
-                        self.diags.push(
-                            Diagnostic::error(
-                                DiagnosticCode::InvalidRole,
-                                c.name_span,
-                                format!(
-                                    "a class cannot carry a role: `{}` must be a record attribute",
-                                    c.name
-                                ),
-                            )
-                            .with_help(
-                                "declare it as an `@attribute type` and tag that with `@role`",
+                        self.error(
+                            DiagnosticCode::InvalidRole,
+                            c.name_span,
+                            format!(
+                                "a class cannot carry a role: `{}` must be a record attribute",
+                                c.name
                             ),
-                        );
+                        )
+                        .help("declare it as an `@attribute type` and tag that with `@role`");
                     }
                 }
                 Stmt::Enum(e) => {
@@ -4685,8 +4616,7 @@ impl Checker {
         for f in &r.fields {
             let ty = field_type(&f.ty);
             if !self.is_packable_type(&ty) {
-                self.diags.push(
-                    Diagnostic::error(
+                self.error(
                         DiagnosticCode::InvalidPackedType,
                         f.span,
                         format!(
@@ -4694,10 +4624,9 @@ impl Checker {
                             f.name, r.name
                         ),
                     )
-                    .with_help(
+                    .help(
                         "a `@packed` struct's fields must be primitives (`int`, `float`, `bool`) or other packed structs",
-                    ),
-                );
+                    );
             }
         }
     }
@@ -4707,14 +4636,12 @@ impl Checker {
     fn check_misplaced_packed(&mut self, packed: Option<PackedDirective>, name: &str, kind: &str) {
         if let Some(directive) = packed {
             let span = directive.span;
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::InvalidPackedType,
-                    span,
-                    format!("`@packed` may only mark a struct, not the {kind} `{name}`"),
-                )
-                .with_help("`@packed` gives a value `struct` of primitives an unboxed flat layout"),
-            );
+            self.error(
+                DiagnosticCode::InvalidPackedType,
+                span,
+                format!("`@packed` may only mark a struct, not the {kind} `{name}`"),
+            )
+            .help("`@packed` gives a value `struct` of primitives an unboxed flat layout");
         }
     }
 
@@ -4722,14 +4649,12 @@ impl Checker {
     /// and has no meaning on a struct or class.
     fn check_misplaced_semantic(&mut self, semantic: Option<Span>, name: &str, kind: &str) {
         if let Some(span) = semantic {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::InvalidRole,
-                    span,
-                    format!("`@semantic` may only mark an enum, not the {kind} `{name}`"),
-                )
-                .with_help("`@semantic` makes an enum's variants usable as `@role(Enum.Variant)`"),
-            );
+            self.error(
+                DiagnosticCode::InvalidRole,
+                span,
+                format!("`@semantic` may only mark an enum, not the {kind} `{name}`"),
+            )
+            .help("`@semantic` makes an enum's variants usable as `@role(Enum.Variant)`");
         }
     }
 
@@ -4745,43 +4670,35 @@ impl Checker {
     ) {
         let Some(roles) = roles else { return };
         if !is_attribute {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::InvalidRole,
-                    name_span,
-                    "`@role(...)` may only tag an attribute".to_string(),
-                )
-                .with_help("also mark the record `@attribute`"),
-            );
+            self.error(
+                DiagnosticCode::InvalidRole,
+                name_span,
+                "`@role(...)` may only tag an attribute".to_string(),
+            )
+            .help("also mark the record `@attribute`");
         }
         for tag in roles {
             // A bare `@role(Variant)` carries no enum; a role must name `Enum.Variant`.
             if tag.enum_name.is_empty() {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::InvalidRole,
-                        tag.span,
-                        format!(
-                            "`@role` requires a qualified `Enum.Variant`, not `{}`",
-                            tag.variant
-                        ),
-                    )
-                    .with_help(
-                        "name a variant of a `@semantic` enum, e.g. `@role(Semantic.EntryPoint)`",
+                self.error(
+                    DiagnosticCode::InvalidRole,
+                    tag.span,
+                    format!(
+                        "`@role` requires a qualified `Enum.Variant`, not `{}`",
+                        tag.variant
                     ),
-                );
+                )
+                .help("name a variant of a `@semantic` enum, e.g. `@role(Semantic.EntryPoint)`");
                 continue;
             }
             // The enum must be `@semantic` (the built-in `Semantic` always is).
             if !self.semantic_enums.contains(&tag.enum_name) {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::InvalidRole,
-                        tag.span,
-                        format!("`{}` is not a `@semantic` enum", tag.enum_name),
-                    )
-                    .with_help("mark the enum `@semantic` to use its variants as roles"),
-                );
+                self.error(
+                    DiagnosticCode::InvalidRole,
+                    tag.span,
+                    format!("`{}` is not a `@semantic` enum", tag.enum_name),
+                )
+                .help("mark the enum `@semantic` to use its variants as roles");
                 continue;
             }
             // The variant must exist on that enum and be fieldless (a payload would have to be
@@ -4791,13 +4708,15 @@ impl Checker {
                 .get(&tag.enum_name)
                 .and_then(|vs| vs.iter().find(|v| v.name == tag.variant))
             {
-                None => self.diags.push(Diagnostic::error(
-                    DiagnosticCode::InvalidRole,
-                    tag.span,
-                    format!("`{}` has no variant `{}`", tag.enum_name, tag.variant),
-                )),
-                Some(variant) if !variant.fields.is_empty() => self.diags.push(
-                    Diagnostic::error(
+                None => {
+                    self.error(
+                        DiagnosticCode::InvalidRole,
+                        tag.span,
+                        format!("`{}` has no variant `{}`", tag.enum_name, tag.variant),
+                    );
+                }
+                Some(variant) if !variant.fields.is_empty() => {
+                    self.error(
                         DiagnosticCode::InvalidRole,
                         tag.span,
                         format!(
@@ -4805,8 +4724,8 @@ impl Checker {
                             tag.enum_name, tag.variant
                         ),
                     )
-                    .with_help("a role must be a fieldless (payload-free) variant"),
-                ),
+                    .help("a role must be a fieldless (payload-free) variant");
+                }
                 Some(_) => {}
             }
         }
@@ -4837,14 +4756,14 @@ impl Checker {
             } else {
                 format!("between {required} and {}", generic.raw_params.len())
             };
-            self.diags.push(Diagnostic::error(
+            self.error(
                 DiagnosticCode::TypeMismatch,
                 span,
                 format!(
                     "`{name}` expects {expected} argument(s), found {}",
                     args.len()
                 ),
-            ));
+            );
             return erase_type_params(generic.raw_ret.clone(), &tps);
         }
         // Seed with the receiver's type arguments (instance call); the call's own arguments then
@@ -4860,11 +4779,11 @@ impl Checker {
             bind_type_params(raw, arg, &tps, &mut subst);
             let expected = apply_subst(raw, &subst);
             if !self.arg_assignable(arg, &expected) {
-                self.diags.push(Diagnostic::error(
+                self.error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("argument of type `{arg}` is not assignable to `{expected}`"),
-                ));
+                );
             }
         }
         for (pname, bounds) in &generic.params {
@@ -4873,19 +4792,17 @@ impl Checker {
             };
             for bound in bounds {
                 if !self.satisfies(concrete, bound) {
-                    self.diags.push(
-                        Diagnostic::error(
-                            DiagnosticCode::TraitBoundNotSatisfied,
-                            span,
-                            format!(
-                                "type `{concrete}` does not satisfy the bound `{bound}` on type \
+                    self.error(
+                        DiagnosticCode::TraitBoundNotSatisfied,
+                        span,
+                        format!(
+                            "type `{concrete}` does not satisfy the bound `{bound}` on type \
                                  parameter `{pname}` of `{name}`"
-                            ),
-                        )
-                        .with_help(format!(
-                            "`{concrete}` must `@derive` or `impl {bound}` to be used here"
-                        )),
-                    );
+                        ),
+                    )
+                    .help(format!(
+                        "`{concrete}` must `@derive` or `impl {bound}` to be used here"
+                    ));
                 }
             }
         }
@@ -4942,17 +4859,15 @@ impl Checker {
     /// Report an access to a private field from outside its type (E0035). `verb` is the action
     /// (`"read"`, `"assign"`, `"set"`) for the message.
     fn report_private_field(&mut self, type_name: &str, field: &str, verb: &str, span: Span) {
-        self.diags.push(
-            Diagnostic::error(
-                DiagnosticCode::PrivateField,
-                span,
-                format!("cannot {verb} private field `{field}` of `{type_name}` from outside it"),
-            )
-            .with_help(format!(
-                "fields of a `class` are private by default; declare it `pub {field}: ...` to expose \
+        self.error(
+            DiagnosticCode::PrivateField,
+            span,
+            format!("cannot {verb} private field `{field}` of `{type_name}` from outside it"),
+        )
+        .help(format!(
+            "fields of a `class` are private by default; declare it `pub {field}: ...` to expose \
                  it, or go through a method"
-            )),
-        );
+        ));
     }
 
     fn synth_member(
@@ -5079,14 +4994,12 @@ impl Checker {
                 _ => return,
             };
             if !missing.is_empty() {
-                self.diags.push(
-                    Diagnostic::error(
-                        DiagnosticCode::NonExhaustiveMatch,
-                        span,
-                        format!("non-exhaustive `match`: missing {}", missing.join(", ")),
-                    )
-                    .with_help("add an `is T` arm for each missing type, or a `_` catch-all"),
-                );
+                self.error(
+                    DiagnosticCode::NonExhaustiveMatch,
+                    span,
+                    format!("non-exhaustive `match`: missing {}", missing.join(", ")),
+                )
+                .help("add an `is T` arm for each missing type, or a `_` catch-all");
             }
             return;
         }
@@ -5111,14 +5024,12 @@ impl Checker {
             .filter(|v| !covered.contains(v.as_str()))
             .collect();
         if !missing.is_empty() {
-            self.diags.push(
-                Diagnostic::error(
-                    DiagnosticCode::NonExhaustiveMatch,
-                    span,
-                    format!("non-exhaustive `match`: missing {}", missing.join(", ")),
-                )
-                .with_help("add an arm for each missing case, or a `_` catch-all"),
-            );
+            self.error(
+                DiagnosticCode::NonExhaustiveMatch,
+                span,
+                format!("non-exhaustive `match`: missing {}", missing.join(", ")),
+            )
+            .help("add an arm for each missing case, or a `_` catch-all");
         }
     }
 

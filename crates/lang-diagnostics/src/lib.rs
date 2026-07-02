@@ -355,6 +355,14 @@ impl Diagnostic {
         self.help = Some(help.into());
         self
     }
+
+    /// Attach a help/suggestion line **in place**, returning `&mut Self` for chaining. The `&mut`
+    /// counterpart of [`with_help`](Diagnostic::with_help), for the push-then-annotate pattern where
+    /// the diagnostic is already owned by a buffer (e.g. `checker.error(...).help(...)`).
+    pub fn help(&mut self, help: impl Into<String>) -> &mut Diagnostic {
+        self.help = Some(help.into());
+        self
+    }
 }
 
 mod render;
