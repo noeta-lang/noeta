@@ -796,6 +796,19 @@ pub enum Op {
         bits: u8,
         span: Span,
     },
+    /// `dst = int_method_width(recv, method, arg, bits)` — a bit intrinsic computed **within a
+    /// fixed width** (Tier W5): `count_ones`/`leading_zeros`/`rotate_*`/`reverse_bits`/… on an `IntN`
+    /// receiver act on the low `bits` bits, not the full erased i64. `arg` is the sole `rotate_*`
+    /// shift amount (absent for the nullary intrinsics). Total (never raises). Shared with the
+    /// tree-walker. `method` is never `Convert`.
+    WidthIntMethod {
+        dst: Reg,
+        recv: Reg,
+        method: lang_stdlib::IntMethod,
+        arg: Option<Reg>,
+        bits: u8,
+        span: Span,
+    },
     /// `dst = a op b` — may raise (E0007/E0008) at `span`. Never `&&`/`||` (those lower to
     /// branches).
     Binary {
@@ -1457,6 +1470,17 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             op.symbol(),
             if *signed { 'i' } else { 'u' },
         ),
+        Op::WidthIntMethod {
+            dst,
+            recv,
+            method,
+            arg,
+            bits,
+            ..
+        } => match arg {
+            Some(a) => format!("WidthIntMethod r{dst} <- r{recv}.{method:?}(r{a}) w{bits}"),
+            None => format!("WidthIntMethod r{dst} <- r{recv}.{method:?}() w{bits}"),
+        },
         Op::RequireBool { reg, side, op, .. } => {
             format!("RequireBool r{reg} ({} {side:?})", op.symbol())
         }

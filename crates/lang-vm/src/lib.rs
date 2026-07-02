@@ -4444,6 +4444,27 @@ impl<'m> Vm<'m> {
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
                     }
                 }
+                Op::WidthIntMethod {
+                    dst,
+                    recv,
+                    method,
+                    arg,
+                    bits,
+                    ..
+                } => {
+                    // Width-exact bit intrinsic (Tier W5): compute within `bits`, not the erased i64.
+                    // The checker guarantees an integer receiver and (for `rotate_*`) an integer arg.
+                    let recv_int = frames[top].regs[*recv as usize].as_int().unwrap_or(0);
+                    let amount = match arg {
+                        Some(r) => frames[top].regs[*r as usize].as_int().unwrap_or(0),
+                        None => 0,
+                    };
+                    let value = Value::int(lang_stdlib::int_method_width(
+                        recv_int, *method, amount, *bits,
+                    ));
+                    set_reg(&mut frames[top].regs, *dst, value);
+                    frames[top].pc += 1;
+                }
                 Op::RequireBool {
                     reg,
                     side,

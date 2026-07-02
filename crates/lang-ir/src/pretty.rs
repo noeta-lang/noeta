@@ -249,6 +249,13 @@ impl Printer<'_> {
                 atom(rhs),
                 if *signed { 'i' } else { 'u' },
             ),
+            Rvalue::WidthIntMethod {
+                receiver,
+                method,
+                args,
+                bits,
+                ..
+            } => format!("{}.{method:?}({}) w{bits}", atom(receiver), atoms(args)),
             Rvalue::Call { callee, args, .. } => format!("call {}({})", atom(callee), atoms(args)),
             Rvalue::Method {
                 receiver,

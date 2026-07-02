@@ -931,6 +931,27 @@ impl Lowerer<'_> {
                 {
                     let receiver = self.lower_expr(receiver, out)?;
                     let arg_atoms = self.lower_args(args, out)?;
+                    // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): the checker marked
+                    // this call span in `width_sites`. Emit the width-carrying `WidthIntMethod` so both
+                    // backends compute within the width via `int_method_width`, rather than the generic
+                    // `Method` (which would compute on the full erased i64). A `Convert` (`to_*`) is not
+                    // width-relative — it stays an ordinary method.
+                    if let Some(&(_, bits)) = self.width_sites.get(span)
+                        && let Some(method) = lang_stdlib::IntMethod::from_name(name)
+                        && !matches!(method, lang_stdlib::IntMethod::Convert { .. })
+                    {
+                        return Ok(self.emit(
+                            out,
+                            Rvalue::WidthIntMethod {
+                                receiver,
+                                method,
+                                args: arg_atoms,
+                                bits,
+                                span: *span,
+                            },
+                            *span,
+                        ));
+                    }
                     Ok(self.emit(
                         out,
                         Rvalue::Method {

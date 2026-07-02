@@ -192,6 +192,20 @@ pub enum Rvalue {
         bits: u8,
         span: Span,
     },
+    /// A bit-manipulation intrinsic applied **within a fixed width** (Tier W5): `count_ones`/
+    /// `leading_zeros`/`rotate_*`/`reverse_bits`/… on an `IntN` receiver, which must act on the low
+    /// `bits` bits rather than the full erased i64 (`(1u8).leading_zeros() == 7`). Emitted (in place of
+    /// a generic `Method`) when the checker marks a call site as an `IntN`-receiver intrinsic; both
+    /// backends compute it via the shared `lang_stdlib::int_method_width`. `args` holds the sole
+    /// `rotate_*` shift amount (empty for the nullary intrinsics). `method` is never `Convert` (a
+    /// width-typed conversion stays an ordinary `Method`, resolved by `int_method`).
+    WidthIntMethod {
+        receiver: Atom,
+        method: lang_stdlib::IntMethod,
+        args: Vec<Atom>,
+        bits: u8,
+        span: Span,
+    },
     /// A call of a callee value: `callee(args)`.
     Call {
         callee: Atom,

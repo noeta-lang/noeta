@@ -787,6 +787,31 @@ impl Interpreter {
                 let right = self.eval_ir_atom(rhs, frame)?;
                 self.apply_binary_wide_op(*op, left, right, *signed, *bits, *span)
             }
+            lang_ir::Rvalue::WidthIntMethod {
+                receiver,
+                method,
+                args,
+                bits,
+                ..
+            } => {
+                // Width-exact bit intrinsic (Tier W5): the twin of the VM's `Op::WidthIntMethod`,
+                // computed within `bits` via the shared `int_method_width`.
+                let recv = self.eval_ir_atom(receiver, frame)?;
+                let recv_int = match recv {
+                    Value::Int(n) => n,
+                    _ => 0,
+                };
+                let amount = match args.first() {
+                    Some(a) => match self.eval_ir_atom(a, frame)? {
+                        Value::Int(n) => n,
+                        _ => 0,
+                    },
+                    None => 0,
+                };
+                Ok(Value::Int(lang_stdlib::int_method_width(
+                    recv_int, *method, amount, *bits,
+                )))
+            }
             lang_ir::Rvalue::List { items, .. } => {
                 let mut values = Vec::with_capacity(items.len());
                 for item in items {

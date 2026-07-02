@@ -302,11 +302,20 @@ how untyped literals in an `i64`-typed context coerce (same in-range coercion as
     `Shr` to the `WideInt` set; `Shl`/`& | ^` stay `Binary`, `<<` gets a `MaskWidth`). Conformance 407
     (types/fixed_width_bitwise + 1 E0044 diagnostic), differential 0-skipped / backends agree, leak 0
     both, clippy + fmt + miri clean.
-  - **W5b — exact-width popcount intrinsics.** `count_ones`/`count_zeros`/`leading_zeros`/
-    `trailing_zeros`/`rotate_*`/`reverse_bits`/`swap_bytes` on an `IntN` receiver become width-exact
-    (`(1u8).leading_zeros() == 7`, `(0u8).count_zeros() == 8`, rotate/reverse/swap within the width).
-    Fixes a latent wrong-answer W4 introduced (these currently compute i64-relative on `IntN`). Needs
-    the width at the op — a width-carrying method lowering keyed off a checker site map.
+  - **W5b — exact-width popcount intrinsics. ✅ DONE.** `count_ones`/`count_zeros`/`leading_zeros`/
+    `trailing_zeros`/`rotate_*`/`reverse_bits`/`swap_bytes` on an `IntN` receiver are now width-exact
+    (`(1u8).leading_zeros() == 7`, `(0u8).count_zeros() == 8`, `(0x80u8).rotate_left(1) == 1`,
+    reverse/swap within the width); on a plain `int` they are unchanged. Fixes the latent i64-relative
+    wrong-answer W4 introduced when it opened the int-method surface to `IntN`. Shared
+    `lang_stdlib::int_method_width(recv, method, arg, bits)` (mask to the low `bits`, then the
+    intrinsic; signedness irrelevant; `bits >= 64` ≡ `int_method`). New width-carrying op
+    `Rvalue::WidthIntMethod`/`Op::WidthIntMethod` (the `WideInt` template — pretty/liveness/freevars/
+    regalloc/bytecode/both backends), emitted by lowering when the checker marks the **call** span
+    (reused the `width_sites` map — spans are unique per expr, so method-call sites never collide with
+    binary-op sites; no new threaded map). Both backends compute via `int_method_width`. Boxed-result
+    path (e.g. `(1u32).reverse_bits() == 2147483648`) covered + leak-clean. Conformance 408
+    (types/fixed_width_intrinsics), differential 0-skipped / backends agree, leak 0 both, clippy + fmt
+    clean. **W5 COMPLETE.**
 - **W6 — (optional) `BitSet` stdlib type.** A growable bitset over `[u64]` with `set/clear/test/
   count/iter_set_bits`, the ergonomic consumer of the whole tier and a natural conformance demo.
 

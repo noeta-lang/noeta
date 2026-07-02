@@ -531,6 +531,59 @@ pub fn int_method(recv: i64, method: IntMethod, arg: i64) -> i64 {
     }
 }
 
+/// Apply a bit-manipulation intrinsic to `recv` **exactly within a `bits`-wide integer** (Tier W5):
+/// the ops act on the low `bits` bits, not the full i64, so `(1u8).leading_zeros() == 7`,
+/// `(0u8).count_zeros() == 8`, and rotate/reverse/swap wrap within the width. Signedness is
+/// irrelevant (these read the value as its `bits`-bit pattern). For `bits >= 64` this is exactly
+/// [`int_method`]. Never called with `Convert` (a conversion is width-typed at the call site, not a
+/// width-relative intrinsic).
+pub fn int_method_width(recv: i64, method: IntMethod, arg: i64, bits: u8) -> i64 {
+    if bits >= 64 {
+        return int_method(recv, method, arg);
+    }
+    let width = bits as u32;
+    let mask = (1u64 << width) - 1;
+    let v = (recv as u64) & mask; // the bits-wide value, zero-extended into a u64
+    match method {
+        IntMethod::CountOnes => v.count_ones() as i64,
+        IntMethod::CountZeros => (width - v.count_ones()) as i64,
+        // `64 - v.leading_zeros()` is the count of significant bits (≤ width, since `v < 2^width`),
+        // so the leading zeros *within the width* is `width - significant`.
+        IntMethod::LeadingZeros => (width - (64 - v.leading_zeros())) as i64,
+        IntMethod::TrailingZeros => {
+            if v == 0 {
+                width as i64
+            } else {
+                v.trailing_zeros() as i64
+            }
+        }
+        IntMethod::RotateLeft => {
+            let n = (arg.rem_euclid(width as i64)) as u32;
+            let r = if n == 0 {
+                v
+            } else {
+                ((v << n) | (v >> (width - n))) & mask
+            };
+            r as i64
+        }
+        IntMethod::RotateRight => {
+            let n = (arg.rem_euclid(width as i64)) as u32;
+            let r = if n == 0 {
+                v
+            } else {
+                ((v >> n) | (v << (width - n))) & mask
+            };
+            r as i64
+        }
+        // Reverse / swap operate on the full 64 bits, so shift the reversed low-`bits` field back down.
+        IntMethod::ReverseBits => (v.reverse_bits() >> (64 - width)) as i64,
+        IntMethod::SwapBytes => (v.swap_bytes() >> (64 - width)) as i64,
+        IntMethod::Convert { .. } => {
+            unreachable!("Convert is a width-typed conversion, not a width-relative intrinsic")
+        }
+    }
+}
+
 /// Reduce an i64 word to the value it represents in a fixed-width integer type (Tier W). Fixed-width
 /// values are **erased to i64** at runtime — the width lives only in the static type — so after any
 /// width-bearing op (`+ - *`, unary `-`) the compiler applies this to wrap the result into range:
@@ -765,6 +818,34 @@ mod tests {
         assert_eq!(int_method(200, i8, 0), -56); // 200u8 as i8 (reinterpret)
         assert_eq!(int_method(-56, u8, 0), 200); // -56i8 as u8 (reinterpret)
         assert_eq!(int_method(4000000000, i32, 0), -294967296); // 4e9u32 as i32
+    }
+
+    #[test]
+    fn width_exact_intrinsics_operate_within_the_width() {
+        use IntMethod::*;
+        // count within the width (a signed negative's high i64 bits do not leak in).
+        assert_eq!(int_method_width(0b1011, CountOnes, 0, 8), 3);
+        assert_eq!(int_method_width(-1, CountOnes, 0, 8), 8); // i8 -1 = 0xFF
+        assert_eq!(int_method_width(0, CountZeros, 0, 8), 8); // all 8 bits clear
+        assert_eq!(int_method_width(0xFF, CountZeros, 0, 8), 0);
+        // leading/trailing relative to the width, not to 64.
+        assert_eq!(int_method_width(1, LeadingZeros, 0, 8), 7);
+        assert_eq!(int_method_width(0, LeadingZeros, 0, 8), 8);
+        assert_eq!(int_method_width(0, TrailingZeros, 0, 8), 8);
+        assert_eq!(int_method_width(8, TrailingZeros, 0, 8), 3);
+        // rotate wraps within the width: 0x80 (top bit of u8) rotate_left 1 -> 0x01.
+        assert_eq!(int_method_width(0x80, RotateLeft, 1, 8), 1);
+        assert_eq!(int_method_width(1, RotateRight, 1, 8), 0x80);
+        // reverse / swap within the width.
+        assert_eq!(int_method_width(1, ReverseBits, 0, 8), 0x80);
+        assert_eq!(int_method_width(0x0102, SwapBytes, 0, 16), 0x0201);
+        assert_eq!(int_method_width(0x05, SwapBytes, 0, 8), 0x05); // one byte: identity
+        // bits >= 64 is exactly the full-width `int_method`.
+        assert_eq!(int_method_width(1, LeadingZeros, 0, 64), 63);
+        assert_eq!(
+            int_method_width(0x0102, SwapBytes, 0, 64),
+            int_method(0x0102, SwapBytes, 0)
+        );
     }
 
     #[test]

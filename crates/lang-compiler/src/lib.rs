@@ -2071,6 +2071,30 @@ impl<'m> FnCompiler<'m> {
                 });
                 Ok(())
             }
+            // Width-exact bit intrinsic on a fixed-width receiver (Tier W5): a single op the backend
+            // computes via `int_method_width`. `arg` is the sole `rotate_*` amount (absent otherwise).
+            Rvalue::WidthIntMethod {
+                receiver,
+                method,
+                args,
+                bits,
+                span,
+            } => {
+                let recv = self.atom_reg(receiver)?;
+                let arg = match args.first() {
+                    Some(a) => Some(self.atom_reg(a)?),
+                    None => None,
+                };
+                self.code.push(Op::WidthIntMethod {
+                    dst,
+                    recv,
+                    method: *method,
+                    arg,
+                    bits: *bits,
+                    span: *span,
+                });
+                Ok(())
+            }
             // `&&`/`||` never reach here (they lower to `Stmt::Logical`); every other infix does.
             Rvalue::Binary {
                 op,

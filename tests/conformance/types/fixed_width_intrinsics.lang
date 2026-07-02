@@ -1,0 +1,39 @@
+// Tier W5b: the bit-manipulation intrinsics are width-exact on a fixed-width receiver — they operate
+// on the low `bits` bits, not the full erased i64. So `(1u8).leading_zeros()` is 7 (not 63),
+// `(0u8).count_zeros()` is 8 (not 64), and rotate/reverse/swap wrap within the width. On a plain
+// `int` (i64) they are unchanged. Both backends compute via the shared `int_method_width`.
+// expect: stdout "7"
+// expect: stdout "8"
+// expect: stdout "8"
+// expect: stdout "8"
+// expect: stdout "1"
+// expect: stdout "128"
+// expect: stdout "128"
+// expect: stdout "513"
+// expect: stdout "15"
+// expect: stdout "2"
+// expect: stdout "63"
+// expect: stdout "2147483648"
+// expect: stdout "4294967295"
+// expect: exit 0
+
+// Counts/leading/trailing relative to the width.
+echo (1u8).leading_zeros()      // 7
+echo (0u8).count_zeros()        // 8 (all bits clear)
+echo (0u8).trailing_zeros()     // 8 (no set bit -> width)
+echo (255u8).count_ones()       // 8
+
+// Rotate / reverse / swap wrap within the width.
+echo (0x80u8).rotate_left(1)    // top bit wraps to bottom -> 1
+echo (1u8).rotate_right(1)      // bottom bit wraps to top -> 128
+echo (1u8).reverse_bits()       // 0b00000001 -> 0b10000000 = 128
+echo (0x0102u16).swap_bytes()   // 0x0102 -> 0x0201 = 513
+echo (1u16).leading_zeros()     // 15
+
+// On a plain `int` (i64) the intrinsics are unchanged (full 64-bit).
+echo (5).count_ones()           // 2
+echo (1).leading_zeros()        // 63
+
+// Results wider than the NaN-box immediate range are heap-boxed — exercise that path stays correct.
+echo (1u32).reverse_bits()      // 0x80000000 = 2147483648
+echo (0xFFFFFFFFu32).swap_bytes() // 4294967295

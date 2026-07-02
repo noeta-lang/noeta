@@ -4145,6 +4145,17 @@ impl Checker {
                     return self.call_user_method(name, &sig, args, span, recv_args);
                 }
                 self.check_method_args(&recv, name, args, span);
+                // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
+                // the erased i64 (`(1u8).leading_zeros() == 7`), so mark the **call** span (the one
+                // lowering's `Method` carries) — lowering then emits the width-carrying
+                // `WidthIntMethod`. Conversions (`IntMethod::Convert`, the `to_*` names) are already
+                // width-typed by name and stay ordinary methods. Signedness is irrelevant here.
+                if let Type::IntN { bits, .. } = recv
+                    && let Some(m) = lang_stdlib::IntMethod::from_name(name)
+                    && !matches!(m, lang_stdlib::IntMethod::Convert { .. })
+                {
+                    self.width_sites.insert(call_span, (false, bits));
+                }
                 // `it.zip(other)` → `Iterator<(A, B)>`: both element types are needed and only `recv`
                 // reaches `method_return`, so the precise tuple is assembled here where the argument
                 // type is in scope (A from the receiver, B from the argument iterator).

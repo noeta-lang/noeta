@@ -403,6 +403,13 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*a);
             f.uses.push(*b);
         }
+        Op::WidthIntMethod { dst, recv, arg, .. } => {
+            f.def = Some(*dst);
+            f.uses.push(*recv);
+            if let Some(a) = arg {
+                f.uses.push(*a);
+            }
+        }
         Op::RequireBool { reg, .. } => f.uses.push(*reg),
         Op::RequireCondBool { reg, .. } => f.uses.push(*reg),
         Op::Jump { target } => {
@@ -833,6 +840,13 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
             m(dst);
             m(a);
             m(b);
+        }
+        Op::WidthIntMethod { dst, recv, arg, .. } => {
+            m(dst);
+            m(recv);
+            if let Some(a) = arg {
+                m(a);
+            }
         }
         Op::RequireBool { reg, .. } => m(reg),
         Op::RequireCondBool { reg, .. } => m(reg),
