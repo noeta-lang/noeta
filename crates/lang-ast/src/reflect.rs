@@ -44,16 +44,11 @@ impl ReflectionInfo {
     /// unknown-kind fallback. Both backends build a type-ref through this one function, so the
     /// materialized `Type` value agrees across the differential by construction.
     pub fn type_ref_repr(&self, name: &str) -> TypeRepr {
+        if let Some(scalar) = scalar_repr(name) {
+            return scalar;
+        }
         let dyn_box = || Box::new(TypeRepr::Dyn);
         match name {
-            "int" => TypeRepr::Int,
-            "float" => TypeRepr::Float,
-            "f32" => TypeRepr::F32,
-            "bool" => TypeRepr::Bool,
-            "string" => TypeRepr::Str,
-            "bytes" => TypeRepr::Bytes,
-            "void" | "unit" => TypeRepr::Unit,
-            "dyn" | "Any" => TypeRepr::Dyn,
             "list" | "List" => TypeRepr::List(dyn_box()),
             "set" | "Set" => TypeRepr::Set(dyn_box()),
             "map" | "Map" => TypeRepr::Map(dyn_box(), dyn_box()),
@@ -468,6 +463,25 @@ impl TypeRepr {
 /// (the R3 matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
 /// `Struct("Box")`). Built-in scalars/collections map to their lattice variant; a `?T` is `Option<T>`.
 /// Used to turn a narrow target (`x is List<int>`) into the shape compared against a value's tag.
+/// The [`TypeRepr`] of a built-in **scalar** type name — one with no type arguments and no nominal
+/// resolution. `None` for a container (`List`/`Map`/…), a user type, or `Any`-shaped name that the
+/// two mappers below handle differently. Shared by [`ReflectionInfo::type_ref_repr`] and
+/// [`typeref_to_repr`], which agree on the scalars but diverge on containers (bare `dyn` args vs the
+/// real `TypeRef` args) and on the fallback (nominal-kind lookup vs `TypeRepr::Named`).
+fn scalar_repr(name: &str) -> Option<TypeRepr> {
+    Some(match name {
+        "int" => TypeRepr::Int,
+        "float" => TypeRepr::Float,
+        "f32" => TypeRepr::F32,
+        "bool" => TypeRepr::Bool,
+        "string" => TypeRepr::Str,
+        "bytes" => TypeRepr::Bytes,
+        "void" | "unit" => TypeRepr::Unit,
+        "dyn" | "Any" => TypeRepr::Dyn,
+        _ => return None,
+    })
+}
+
 pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
     let boxed = |t: &TypeRef| Box::new(typeref_to_repr(t));
     let dyn_box = || Box::new(TypeRepr::Dyn);
@@ -482,16 +496,11 @@ pub fn typeref_to_repr(ty: &TypeRef) -> TypeRepr {
             Box::new(typeref_to_repr(ret)),
         ),
         TypeRef::Named { name, args, .. } => {
+            if let Some(scalar) = scalar_repr(name) {
+                return scalar;
+            }
             let arg = |i: usize| args.get(i).map(boxed).unwrap_or_else(dyn_box);
             match name.as_str() {
-                "int" => TypeRepr::Int,
-                "float" => TypeRepr::Float,
-                "f32" => TypeRepr::F32,
-                "bool" => TypeRepr::Bool,
-                "string" => TypeRepr::Str,
-                "bytes" => TypeRepr::Bytes,
-                "void" | "unit" => TypeRepr::Unit,
-                "dyn" | "Any" => TypeRepr::Dyn,
                 "List" | "list" => TypeRepr::List(arg(0)),
                 "Set" | "set" => TypeRepr::Set(arg(0)),
                 "Map" | "map" => TypeRepr::Map(arg(0), arg(1)),
