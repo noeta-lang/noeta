@@ -1,8 +1,28 @@
 # Bit-level computation arc — bitwise ops → fixed-width integers → packed types & SIMD
 
-**Status: NOT STARTED — design plan, to be picked up later.** Branch name TBD (suggest
-`bitwise`). Standard commit trailers. This is a *new track*, independent of the in-progress
-memory-management Phase 5; it can run after 5.2 or interleaved.
+**Status: TIER B COMPLETE.** Tiers W and P remain (design below). Standard commit trailers.
+This is a *new track*, independent of the in-progress memory-management Phase 5.
+
+**Tier B shipped (on `main`), all slices green (conformance / differential 0-skipped / leak 0):**
+- **B0 — integer literal forms** (`0x`/`0o`/`0b` + `_` separators) — already present from earlier work.
+- **B1a — `& | ^ <<`** — new `Amp`/`Caret`/`Shl` tokens; `Pipe` reused for bitwise-OR in expression
+  position; `BinaryOp::{BitAnd,BitOr,BitXor,Shl,Shr}`; **Rust-style precedence** (shifts just below
+  additive, then `&`/`^`/`|`, all *above* comparison → no C footgun); integer-only, non-int operand →
+  **E0043** (the doc's provisional "E0034" — actual next-free was E0043); shared `apply_binary` arm in
+  both backends; shift amount outside `0..=63` panics deterministically (reuses E0010, not a new code).
+  Folded the multiplicative + comparison pratt groups into single `choice` entries to stay under
+  chumsky's 26-op tuple cap.
+- **B1b — `>>`** — composed from two adjacent `Gt` in the expression pratt (never lexed as one token),
+  so nested generic closes (`Map<K, List<V>>`, `x.as<List<int>>()`) stay in the disjoint type grammar.
+  The hazard, resolved via option (1).
+- **B2 — `!` complement** — `!` is operand-typed (bool→bool unchanged, int→int bitwise complement,
+  `!x == -(x+1)`); no `~` clash (that stays concat).
+- **B3 — shift domain** — folded into B1a (panic on out-of-range).
+- **B4 — popcount intrinsics** — `count_ones`/`count_zeros`/`leading_zeros`/`trailing_zeros`/
+  `rotate_left`/`rotate_right`/`reverse_bits`/`swap_bytes` as `int` methods; shared
+  `lang_stdlib::IntMethod` + `int_method`; checker types them via `method_return`/`method_params`
+  (all return `int`; `rotate_*` take one `int`). `count_zeros`/`leading_zeros` are width-relative to
+  i64 (documented) — exact-width waits on Tier W.
 
 ## Why this exists
 
@@ -57,17 +77,17 @@ fixed-width = erase-to-i64 + shared mask; SIMD = scalar semantics with an option
 
 ## Diagnostic codes
 
-Next free is **E0034** (E0033 was taken by the Phase-5.2 `mut`-field assignment, `ImmutableField`).
-Provisional allocation (finalize per slice):
+The doc's original E0034/E0035 allocation was stale — many codes shipped between writing this and
+starting the track (object-model, packed-types, isolates took E0029–E0042). **Actual, as built/next:**
 
-| Code | Meaning | Tier |
-|---|---|---|
-| E0034 | Bitwise/shift operand is not an integer | B |
-| E0035 | Shift amount out of range (if enforced statically; else a runtime panic reusing E0010) | B |
-| E0036 | Fixed-width literal out of range for its type (`256u8`) | W |
-| E0037 | Implicit/lossy width conversion — an explicit cast is required | W |
-| E0038 | Mixed-width arithmetic without a cast (`u8 + u32`) | W |
-| E0039 | SIMD lane-type / lane-count mismatch | P |
+| Code | Meaning | Tier | Status |
+|---|---|---|---|
+| E0043 | Bitwise/shift operand is not an integer (`NonIntegerBitwise`) | B | ✅ shipped |
+| (E0010) | Shift amount out of range — reuses the runtime `Panic` path, no new code | B | ✅ shipped |
+| E0044+ | Fixed-width literal out of range / lossy conversion / mixed-width arithmetic | W | free |
+| E00xx | SIMD lane-type / lane-count mismatch | P | free |
+
+Next free is **E0044**. (Tier W/P codes to be finalized per slice against the then-current next-free.)
 
 ---
 
