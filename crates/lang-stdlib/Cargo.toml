@@ -17,5 +17,9 @@ criterion = { workspace = true }
 name = "vec3_kernels"
 harness = false
 
+[[bench]]
+name = "column_generality"
+harness = false
+
 [lints]
 workspace = true

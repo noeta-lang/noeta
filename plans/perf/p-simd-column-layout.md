@@ -149,6 +149,33 @@ The shipped S5 surface was reworked into this cleaner shape:
 Net: less language surface than S5 (one directive arg vs eight `soa_*` functions + a value type), and
 the win is reachable through the *existing* `vec` API.
 
+## Does the win generalize past `f32`? (measured — `column_generality` bench)
+
+Yes — the win is a property of the **layout**, not the element type. The mechanism (contiguous column
+→ typed `&[T]` slice → LLVM autovectorizes the reduction across elements) has nothing `f32`-specific in
+it. A sum-of-squares reduction (`a²+b²+c²` per element, the shape of `length_all` minus `sqrt`) over a
+3-field struct, row vs column, on this machine:
+
+| type | n=10k row→col | n=100k row→col |
+|---|---|---|
+| `f32` | 4.65 → 1.26 µs (**3.7×**) | 49.1 → 13.9 µs (**3.5×**) |
+| `f64` | 5.10 → 2.15 µs (**2.4×**) | 47.7 → 31.0 µs (**1.5×**) |
+| `i64` | 7.24 → 4.92 µs (**1.5×**) | 70.7 → 49.5 µs (**1.4×**) |
+
+Every primitive benefits; `f32` benefits **most**, because the margin tracks three things:
+1. **SIMD lane count** — a 256-bit AVX2 vector holds 8×`f32` but only 4×`f64`/`i64`, so `f32` gets ~2×
+   the parallelism.
+2. **How well the op vectorizes** — float mul/add map to clean SIMD; 64-bit integer multiply is weak on
+   x86 pre-AVX-512, so `i64` gains least even though it is also 4-wide.
+3. **Memory bandwidth at scale** — at n=100k the `f64`/`i64` column buffers (2.4 MB) spill L2 and the
+   reduction goes bandwidth-bound, compressing the compute win (`f64` 2.4×→1.5×); `f32`'s smaller
+   footprint holds its win better.
+
+So the layout is the general lever; the element type sets the ceiling. This is the evidence base for
+the **generic per-column primitives** tier (sum-a-field, field-wise add/scale on *any* numeric column
+struct) — currently deferred against the `lang-native` ABI. The shipped kernels (`col_dot`/`col_length`)
+remain Vec3/`f32`-only; this bench measures the potential the generic tier would unlock.
+
 ## Tradeoffs (what `column` optimizes, and its cost)
 
 | operation | `row` (default) | `column` |
