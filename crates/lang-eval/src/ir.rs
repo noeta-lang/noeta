@@ -441,7 +441,6 @@ impl Interpreter {
             .iter()
             .map(|f| FieldSpec {
                 name: f.name.clone(),
-                mutable: f.mut_field,
             })
             .collect();
         let methods = strukt
@@ -506,7 +505,6 @@ impl Interpreter {
             .iter()
             .map(|f| FieldSpec {
                 name: f.name.clone(),
-                mutable: f.mut_field,
             })
             .collect();
         let methods = class

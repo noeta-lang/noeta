@@ -1,8 +1,10 @@
-//! The runtime value representation for the M0 tree-walker.
+//! The runtime value representation for the tree-walker.
 //!
-//! Deliberately a simple boxed `enum` in M0. M1 replaces this with the NaN-boxed
-//! value representation and the shape-based object model; keeping it behind this type
-//! (and the `display()`/`type_name()` methods) keeps that swap local.
+//! Deliberately a simple boxed `enum`. The VM backend (`lang-value`) uses a NaN-boxed value
+//! representation and a shape-based object model instead; the two backends run the same programs and
+//! are asserted to agree (the differential oracle), so each is free to represent values its own way.
+//! Keeping the tree-walker's model behind this type (and the `display()`/`type_name()` methods) is
+//! what makes that independence local.
 //!
 //! `Debug` and `PartialEq` are hand-written rather than derived: function values hold
 //! an `Rc<Scope>` whose graph can contain reference cycles (a global function captures
@@ -665,8 +667,9 @@ impl Value {
         Value::List(ListRepr::Packed(PackedList::from_bytes(schema, bytes)))
     }
 
-    /// The display form used by `echo`, `~` concatenation, and (later) interpolation.
-    /// In M1 this becomes `Display` trait dispatch; in M0 it is built in per value kind.
+    /// The display form used by `echo`, `~` concatenation, and interpolation. Built in per value
+    /// kind here in the tree-walker; a user type's `Display` `impl` is dispatched a level up (in the
+    /// interpreter), mirroring how the VM renders values.
     pub fn display(&self) -> String {
         match self {
             Value::Unit => String::new(),

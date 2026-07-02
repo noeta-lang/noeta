@@ -555,13 +555,10 @@ impl std::fmt::Debug for TypeDef {
     }
 }
 
-/// One declared field of a [`TypeDef`]: its name and whether it was declared `mut`.
-/// `mutable` is recorded for M1 tooling (field-assignment checking); M0 objects are
-/// immutable after construction, so it is not yet read.
+/// One declared field of a [`TypeDef`]: its name. (Field mutability is a *static* concern — the
+/// checker enforces `mut`-field assignment, E0033 — so the runtime tree-walker records only the name.)
 struct FieldSpec {
     name: String,
-    #[allow(dead_code)]
-    mutable: bool,
 }
 
 /// A struct or class instance: its type and the values of its fields. A value `struct` is
@@ -4333,10 +4330,7 @@ fn fresh_type_def(name: &str, fields: &[String], is_struct: bool) -> TypeDef {
         name: name.to_string(),
         fields: fields
             .iter()
-            .map(|f| FieldSpec {
-                name: f.clone(),
-                mutable: false,
-            })
+            .map(|f| FieldSpec { name: f.clone() })
             .collect(),
         methods: HashMap::new(),
         destructor: None,
