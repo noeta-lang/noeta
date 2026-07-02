@@ -13,6 +13,7 @@ The language is built almost entirely by AI agents over a multi-year effort. Wor
 - `m0/`, `m1/`, `m2/` — one file per work unit (a "slice"), grouped by milestone. Each slice is a vertical cut through the pipeline that is independently testable. M0, M1, and M2 cluster 1 (host IO & async foundation) are complete; later M2 clusters await their own planning passes.
 - `types/` — the milestone-scale **inferred-static type-system track** (redirecting the checker from gradual to inferred-static + explicit `dyn`; bidirectional checking, not HM). See `types/README.md` for the slice map; gates the later packed-types/SIMD perf work.
 - `followups/` — cross-milestone slices that close items from `deferred.md` (e.g. `slice-f1-upvalues.md` adds the VM upvalue machinery deferred since M1.2). Same slice shape as the milestone folders.
+- `code-quality/` — the **architectural-cleanup track**: findings from a whole-codebase review. The bounded/medium items were done on the `code-quality-cleanup` branch; this folder scopes the four remaining large, entangled, *behavior-neutral* refactors (splitting the VM / checker / parser god files, and the BuiltinTrait-enum conversion), one file each. Pure structural work — the differential oracle is the gate, so each is safe but voluminous. See `code-quality/README.md`.
 - `done/` — completed slice files are moved here once their definition-of-done is met (and recorded in `roadmap.md`). Keep the trail; do not delete.
 
 ## Slice file shape
