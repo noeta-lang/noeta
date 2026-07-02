@@ -348,6 +348,12 @@ pub enum Rvalue {
         fields: Vec<ObjectFieldInit>,
         spread: Option<(Atom, Span)>,
         reuse: bool,
+        /// The checker-resolved reflected type (runtime type-argument reflection, R2) — `Some` only
+        /// for a **generic** instantiation (`Box<int>` → `Struct("Box", [Int])`), so `type_of`
+        /// recovers the type arguments after a `dyn` launder; `None` for a non-generic type (whose
+        /// head-only shape name already recovers it) and on the boxed/REPL path. Invisible to value
+        /// semantics — carried beside the value like the collection tags.
+        reflect: Option<lang_ast::reflect::TypeRepr>,
         span: Span,
     },
     /// An interpolated string with its holes reduced to atoms.

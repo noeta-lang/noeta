@@ -1345,6 +1345,9 @@ impl Lowerer<'_> {
                         // The reuse-analysis pass (Phase 5) sets this when it recognizes a self-update;
                         // lowering is reuse-neutral.
                         reuse: false,
+                        // The checker-resolved reflected type (R2) for a generic instantiation; `None`
+                        // for a non-generic type or the boxed path → the value reflects head-only.
+                        reflect: self.construction_sites.get(&lit.span).cloned(),
                         span: lit.span,
                     },
                     lit.span,

@@ -1207,8 +1207,13 @@ impl Interpreter {
                 fields,
                 spread,
                 reuse,
+                reflect,
                 span,
             } => {
+                // The checker-resolved reflected type (R2) for a generic instantiation; `None` for a
+                // non-generic type → the value reflects head-only. Wrapped in an `Rc` to match the tag
+                // stored on the object (a cheap refcount bump on construction).
+                let reflect = reflect.clone().map(Rc::new);
                 // In-place reuse (Phase 5): a marked self-update `acc = Type { ...acc, … }` moves the
                 // accumulator out of its (reassigned) binding and mutates it in place when uniquely
                 // owned, mirroring the VM's `MakeStructInPlace`. The token guarantees the spread is the
@@ -1219,6 +1224,7 @@ impl Interpreter {
                         *type_name_span,
                         fields,
                         name,
+                        reflect,
                         *span,
                         frame,
                     );
@@ -1232,7 +1238,14 @@ impl Interpreter {
                     let value = self.eval_ir_atom(&f.value, frame)?;
                     field_values.push((f.name.clone(), f.name_span, value));
                 }
-                self.construct_object(type_name, *type_name_span, field_values, spread, *span)
+                self.construct_object(
+                    type_name,
+                    *type_name_span,
+                    field_values,
+                    spread,
+                    reflect,
+                    *span,
+                )
             }
             lang_ir::Rvalue::Closure { func, .. } => {
                 Ok(Value::Function(Rc::new(self.make_ir_closure(func))))
@@ -1442,7 +1455,9 @@ impl Interpreter {
                     let value = self.materialize_recipe(fout, span)?;
                     field_values.push((fname, span, value));
                 }
-                self.construct_object(&name, span, field_values, None, span)
+                // A `json.parse::<T>` result carries no reflected tag (R2) — its concrete type is
+                // recovered head-only from the shape; untagged.
+                self.construct_object(&name, span, field_values, None, None, span)
             }
             // `Object` (shape-from-argument) and `FileHandle` are never produced by a recipe decode.
             NativeOut::Object(_) | NativeOut::FileHandle(_) => {
@@ -1646,12 +1661,14 @@ impl Interpreter {
     /// displacing its old value through `destroy_value` so a replaced field's `destruct` fires at the
     /// right time (spec §4/§5); an aliased base copies, preserving the other owner's view. Both paths
     /// gate on the runtime refcount exactly as the VM does, so the two backends agree.
+    #[allow(clippy::too_many_arguments)]
     fn construct_object_reuse(
         &mut self,
         type_name: &str,
         type_name_span: Span,
         fields: &[lang_ir::ObjectFieldInit],
         base_name: &str,
+        reflect: Option<Rc<lang_ast::reflect::TypeRepr>>,
         span: Span,
         frame: &mut Frame,
     ) -> Eval<Value> {
@@ -1671,6 +1688,8 @@ impl Interpreter {
                 // `x` has no other alias, mutating its allocation in place is unobservable. (Distinct
                 // from the in-place `x.f = v` class mutation in `set_field_in_place`.)
                 if Rc::strong_count(&rc) == 1 {
+                    // Reuse keeps the accumulator's existing reflected type (R2) — a self-update
+                    // rebuilds a value of the same (generic) type, matching the VM's reuse path.
                     for (name, value) in overrides {
                         if let Some(old) = rc.set_field_value(&name, value) {
                             self.destroy_value(old);
@@ -1680,15 +1699,16 @@ impl Interpreter {
                 }
                 // Aliased: copy, preserving the alias's view. The displaced fields live in `rc`,
                 // whose `Rc` drops at the end of this statement (releasing the scope's old
-                // reference); the alias keeps the original object.
+                // reference); the alias keeps the original object. The fresh copy carries the
+                // literal's reflected type (R2), matching the VM's copy branch.
                 let mut new_slots = rc.fields_snapshot();
                 for (name, value) in overrides {
                     if let Some(i) = rc.slot_of(&name) {
                         new_slots[i] = value;
                     }
                 }
-                Ok(Value::Object(Rc::new(crate::ObjectValue::new(
-                    def, new_slots,
+                Ok(Value::Object(Rc::new(crate::ObjectValue::new_reflected(
+                    def, new_slots, reflect,
                 ))))
             }
             // Defensive: the taken value is not a matching object (cannot happen for a check-clean
@@ -1700,7 +1720,14 @@ impl Interpreter {
                     .into_iter()
                     .map(|(name, value)| (name, span, value))
                     .collect();
-                self.construct_object(type_name, type_name_span, field_values, spread, span)
+                self.construct_object(
+                    type_name,
+                    type_name_span,
+                    field_values,
+                    spread,
+                    reflect,
+                    span,
+                )
             }
         }
     }

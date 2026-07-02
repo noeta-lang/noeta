@@ -1,0 +1,60 @@
+// Runtime type-argument reflection for **generic user types** (R2): a generic `struct`/`class`
+// instance carries the checker-resolved type arguments as a runtime tag, so `type_of` recovers them
+// even after the value's static type is laundered through `dyn`. A **direct** literal whose argument
+// the checker infers concretely (`Box { value: 5 }` → `Box<int>`) recovers that argument; a value
+// built inside a **generic constructor** (`Holder.new(3)`, whose literal only knows the abstract param
+// `T`) honestly reflects `dyn`, never the parameter name; a **non-generic** type reflects head-only
+// (its shape name, no args). Both backends carry the tag identically, so `type_of` agrees.
+// expect: stdout "Box<int>"
+// expect: stdout "Box<string>"
+// expect: stdout "Box<list<int>>"
+// expect: stdout "Holder<int>"
+// expect: stdout "Holder<dyn>"
+// expect: stdout "Point<>"
+// expect: stdout "true"
+// expect: exit 0
+
+struct Box<T> { value: T }
+class Holder<T> {
+    pub item: T
+    fn new(x: T): Holder<T> { return Holder { item: x }; }
+}
+struct Point { x: int }
+
+fn label(t: Type): string {
+    return match t {
+        Type.Int => "int",
+        Type.String => "string",
+        Type.Dyn => "dyn",
+        Type.List(inner) => "list<${label(inner)}>",
+        Type.Struct(name, args) => "${name}<${arglabel(args)}>",
+        Type.Class(name, args) => "${name}<${arglabel(args)}>",
+        _ => "?",
+    };
+}
+
+// Label the single type argument (every case here is a one-parameter generic), or empty for none.
+fn arglabel(args: List<Type>): string {
+    return if args.count() == 0 then "" else label(args[0]);
+}
+
+fn launder(v: dyn): dyn { return v; }
+
+// A direct generic literal: the checker infers the concrete argument from the field value.
+echo label(type_of(launder(Box { value: 5 })));        // Box<int>
+echo label(type_of(launder(Box { value: "s" })));      // Box<string>
+echo label(type_of(launder(Box { value: [1, 2] })));   // Box<list<int>> (nested)
+
+// A direct class literal (argument annotated on the binding).
+h: Holder<int> = Holder { item: 7 };
+echo label(type_of(launder(h)));                       // Holder<int>
+
+// Built via a generic constructor — the literal inside `new` only knows the abstract param `T`, so
+// the concrete argument is not recoverable at that site: honestly reflects `dyn`, not `T`.
+echo label(type_of(launder(Holder.new(3))));           // Holder<dyn>
+
+// A non-generic type reflects head-only (shape name, no arguments).
+echo label(type_of(launder(Point { x: 1 })));          // Point<>
+
+// The tag is invisible to value semantics: two equal generic structs compare equal.
+echo Box { value: 5 } == Box { value: 5 };             // true

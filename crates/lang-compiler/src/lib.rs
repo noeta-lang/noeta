@@ -2372,16 +2372,24 @@ impl<'m> FnCompiler<'m> {
                 fields,
                 spread,
                 reuse,
+                reflect,
                 span,
-            } => self.lower_object(
-                type_name,
-                *type_name_span,
-                fields,
-                spread,
-                *reuse,
-                dst,
-                *span,
-            ),
+            } => {
+                // The checker-resolved reflected type (R2), interned so the VM can stamp it onto the
+                // built struct for `type_of`. `None` for a non-generic type → the value reflects
+                // head-only.
+                let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
+                self.lower_object(
+                    type_name,
+                    *type_name_span,
+                    fields,
+                    spread,
+                    *reuse,
+                    reflect,
+                    dst,
+                    *span,
+                )
+            }
             Rvalue::Interp { parts, span } => self.lower_interp(parts, dst, *span),
             Rvalue::Closure { func, .. } => {
                 // Resolve the closure's captures in this (the building) frame's terms, compile its
@@ -2876,6 +2884,7 @@ impl<'m> FnCompiler<'m> {
     /// `Type { field: value, ...spread }` — construct a struct/class/opaque instance, or raise the
     /// tree-walker's runtime error for an unknown type.
     #[allow(clippy::too_many_arguments)]
+    #[allow(clippy::too_many_arguments)]
     fn lower_object(
         &mut self,
         type_name: &str,
@@ -2883,6 +2892,7 @@ impl<'m> FnCompiler<'m> {
         fields: &[lang_ir::ObjectFieldInit],
         spread: &Option<(Atom, Span)>,
         reuse: bool,
+        reflect: Option<u32>,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
@@ -2896,6 +2906,7 @@ impl<'m> FnCompiler<'m> {
                     fields,
                     spread,
                     reuse,
+                    reflect,
                     dst,
                     span,
                 )
@@ -2909,6 +2920,7 @@ impl<'m> FnCompiler<'m> {
                     fields,
                     spread,
                     reuse,
+                    reflect,
                     dst,
                     span,
                 )
@@ -2939,6 +2951,7 @@ impl<'m> FnCompiler<'m> {
         inits: &[lang_ir::ObjectFieldInit],
         spread: &Option<(Atom, Span)>,
         reuse: bool,
+        reflect: Option<u32>,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
@@ -2997,6 +3010,7 @@ impl<'m> FnCompiler<'m> {
                 named: named.into_boxed_slice(),
                 base,
                 check: ReuseCheck::Runtime,
+                reflect,
                 span,
             });
             self.release_consumed(&consumed);
@@ -3022,6 +3036,7 @@ impl<'m> FnCompiler<'m> {
             shape,
             named: named.into_boxed_slice(),
             spread: spread_reg,
+            reflect,
             span,
         });
         self.release_consumed(&consumed);

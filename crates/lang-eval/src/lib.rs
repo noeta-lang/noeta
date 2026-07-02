@@ -12,6 +12,7 @@ use std::cell::RefCell;
 use std::collections::{BTreeMap, HashMap};
 use std::rc::{Rc, Weak};
 
+use lang_ast::reflect::TypeRepr;
 use lang_ast::{BinaryOp, ForPattern, Pattern, Program, Stmt, TypeRef, UnaryOp};
 use lang_builtins::IdGen;
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
@@ -564,6 +565,13 @@ pub struct ObjectValue {
     /// age. The cycle reaper finalizes reclaimed members in reverse-creation order (newest-first) by
     /// this key, matching the VM's `ObjHeader::seq` so cyclic `destruct` order agrees across backends.
     seq: u64,
+    /// The checker-resolved reflected type (runtime type-argument reflection, R2), `Some` only for a
+    /// **generic** instantiation (`Box<int>` → `Struct("Box", [Int])`) so `type_of` recovers the type
+    /// arguments after a `dyn` launder; `None` for a non-generic type (recovered head-only from the
+    /// shape) and every non-literal-constructed instance. Invisible to value semantics — `PartialEq`
+    /// compares only `def`/`slots` — the tree-walker twin of the VM's node tag. An object's type is
+    /// invariant under field mutation, so (unlike the collection tags) it is never cleared.
+    reflect: Option<Rc<TypeRepr>>,
 }
 
 thread_local! {
@@ -576,6 +584,17 @@ impl ObjectValue {
     /// through the leak-oracle counter (paired with [`Drop`]). All `ObjectValue` construction goes
     /// through here so the live count is exact. The caller guarantees `slots.len() == def.fields.len()`.
     fn new(def: Rc<TypeDef>, slots: Vec<Value>) -> ObjectValue {
+        ObjectValue::new_reflected(def, slots, None)
+    }
+
+    /// As [`ObjectValue::new`], but carrying the reflected type tag (R2). Used only at object-literal
+    /// construction for a generic instantiation; every other construction path uses [`ObjectValue::new`]
+    /// (untagged → head-only reflection).
+    fn new_reflected(
+        def: Rc<TypeDef>,
+        slots: Vec<Value>,
+        reflect: Option<Rc<TypeRepr>>,
+    ) -> ObjectValue {
         debug_assert_eq!(
             slots.len(),
             def.fields.len(),
@@ -591,6 +610,7 @@ impl ObjectValue {
             def,
             slots: RefCell::new(slots),
             seq,
+            reflect,
         }
     }
 
@@ -1506,6 +1526,7 @@ impl Interpreter {
         type_name_span: Span,
         field_values: Vec<(String, Span, Value)>,
         spread: Option<(Value, Span)>,
+        reflect: Option<Rc<TypeRepr>>,
         span: Span,
     ) -> Eval<Value> {
         let def = match self.scope.lookup(type_name) {
@@ -1627,9 +1648,10 @@ impl Interpreter {
         }
 
         let slots: Vec<Value> = slots.into_iter().map(Option::unwrap).collect();
-        Ok(Value::Object(Rc::new(ObjectValue::new(
+        Ok(Value::Object(Rc::new(ObjectValue::new_reflected(
             Rc::clone(&def),
             slots,
+            reflect,
         ))))
     }
 
@@ -4182,10 +4204,19 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
             "Result" => TypeRepr::Result(dyn_(), dyn_()),
             other => TypeRepr::Enum(other.to_string(), Vec::new()),
         },
-        Value::Object(o) if o.def.is_struct => {
-            TypeRepr::Struct(o.def.name().to_string(), Vec::new())
-        }
-        Value::Object(o) => TypeRepr::Class(o.def.name().to_string(), Vec::new()),
+        // A generic struct/class instance carrying a reflected type tag (R2) reports its precise type
+        // (with type arguments); a non-generic/untagged instance falls back to the head-only shape name
+        // with empty args. Mirrors `vm_type_repr`'s node-tag consultation.
+        Value::Object(o) if o.def.is_struct => o
+            .reflect
+            .as_ref()
+            .map(|r| (**r).clone())
+            .unwrap_or_else(|| TypeRepr::Struct(o.def.name().to_string(), Vec::new())),
+        Value::Object(o) => o
+            .reflect
+            .as_ref()
+            .map(|r| (**r).clone())
+            .unwrap_or_else(|| TypeRepr::Class(o.def.name().to_string(), Vec::new())),
         // A type value, module, file handle, iterator, or enum-type has no nameable lattice type → top.
         Value::EnumType(_)
         | Value::Type(_)

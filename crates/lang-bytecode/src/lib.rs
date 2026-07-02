@@ -441,6 +441,10 @@ pub enum Op {
         shape: u32,
         named: Box<[(u16, Reg)]>,
         spread: Option<Reg>,
+        /// The reflected type (R2): an index into [`Module::type_reprs`] for a **generic**
+        /// instantiation, or `None` for a non-generic type (recovered head-only). Stamped onto the
+        /// built struct so `type_of` recovers its type arguments after a `dyn` launder.
+        reflect: Option<u32>,
         span: Span,
     },
     /// `dst = Type { named..., ...base }` for a **self-update** (`acc = Type { ...acc, f: v }`),
@@ -459,6 +463,9 @@ pub enum Op {
         named: Box<[(u16, Reg)]>,
         base: Reg,
         check: ReuseCheck,
+        /// The reflected type (R2), as on [`Op::MakeStruct`]. A self-update rebuilds a value of the
+        /// same type, so the reused node is (re)stamped with the current literal's tag.
+        reflect: Option<u32>,
         span: Span,
     },
     /// `dst = Type { key: value, ...spread }` for an **opaque** `use`-imported type, whose

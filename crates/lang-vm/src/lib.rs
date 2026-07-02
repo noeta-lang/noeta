@@ -3433,6 +3433,7 @@ impl<'m> Vm<'m> {
                     shape,
                     named,
                     spread,
+                    reflect,
                     span,
                 } => {
                     let shape = self.shapes[*shape as usize].clone();
@@ -3501,7 +3502,14 @@ impl<'m> Vm<'m> {
                         ));
                     }
                     let slots = slots.into_iter().map(Option::unwrap).collect();
-                    set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
+                    let object = Value::object(shape, slots);
+                    // Stamp the reflected type onto a generic instantiation (R2) so `type_of` recovers
+                    // its type arguments after a `dyn` launder. The object's type is invariant under
+                    // field mutation, so — unlike the collection tags — it is never cleared.
+                    if let Some(idx) = reflect {
+                        object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                    }
+                    set_reg(&mut frames[top].regs, *dst, object);
                     frames[top].pc += 1;
                 }
                 Op::MakeStructInPlace {
@@ -3510,6 +3518,7 @@ impl<'m> Vm<'m> {
                     named,
                     base,
                     check,
+                    reflect,
                     span,
                 } => {
                     let shape = self.shapes[*shape as usize].clone();
@@ -3549,6 +3558,9 @@ impl<'m> Vm<'m> {
                             let old = base_val.replace_slot(*slot as usize, v);
                             self.release_value(old);
                         }
+                        // Reuse keeps the base node's existing reflected type (R2): a self-update
+                        // rebuilds a value of the same (generic) type, so the base's tag already carries
+                        // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
                         set_reg(&mut frames[top].regs, *dst, base_val);
                         frames[top].pc += 1;
                     } else {
@@ -3596,7 +3608,11 @@ impl<'m> Vm<'m> {
                         }
                         let slots = slots.into_iter().map(Option::unwrap).collect();
                         release(base_val);
-                        set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
+                        let object = Value::object(shape, slots);
+                        if let Some(idx) = reflect {
+                            object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                        }
+                        set_reg(&mut frames[top].regs, *dst, object);
                         frames[top].pc += 1;
                     }
                 }

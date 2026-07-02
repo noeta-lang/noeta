@@ -197,6 +197,22 @@ pub fn resolve_packed_list_sites(
 /// or `None` when the site must stay on the runtime path: a `dyn`/union/un-inferred (`Unknown`) top
 /// type carries no fixed head constructor to bake (a union's runtime value is more precise — its
 /// actual member — than `Type.Union` would be).
+/// Whether `repr` is a **non-generic nominal** type — a declared `struct`/`class`/`enum` (or an
+/// unknown-kind `Named`) with no type arguments (R2). The runtime head-only classification recovers
+/// such a type in full (its shape name), so a construction tag would be redundant; only generic
+/// instantiations and the collections need one. See [`Checker::note_construction`].
+fn is_nongeneric_nominal(repr: &lang_ast::reflect::TypeRepr) -> bool {
+    use lang_ast::reflect::TypeRepr;
+    matches!(
+        repr,
+        TypeRepr::Struct(_, args)
+            | TypeRepr::Class(_, args)
+            | TypeRepr::Enum(_, args)
+            | TypeRepr::Named(_, args)
+        if args.is_empty()
+    )
+}
+
 fn type_to_repr_top(
     ty: &Type,
     kinds: &HashMap<String, lang_types::TypeKind>,
@@ -4520,8 +4536,24 @@ impl Checker {
     /// Record the resolved `TypeRepr` at a collection/object construction site (runtime type-arg
     /// reflection, slice A — see [`Checked::construction_sites`]). A hole/`dyn`-top type is skipped, so
     /// the value stays untagged and `type_of`/`is` fall back to the head-only runtime classification.
+    /// A **non-generic nominal** type (a `struct`/`class`/`enum` with no type arguments, R2) is also
+    /// skipped: its head-only runtime classification already recovers the type in full (the shape name
+    /// with empty args), so tagging it would add per-instance overhead for no fidelity gain. Only a
+    /// generic instantiation (`Box<int>` → `Struct("Box", [Int])`) and the collections (whose element
+    /// types are always erased at runtime) carry a tag.
     fn note_construction(&mut self, ty: &Type, span: Span) {
-        if let Some(repr) = type_to_repr_top(ty, &self.type_kinds) {
+        // Erase any in-scope generic type **parameter** to `dyn` first (R2): a literal inside a generic
+        // constructor (`Holder { item: x }` where `x: T`) has type `Holder<T>`, and the concrete `T` is
+        // not known at the literal's site — only at the call. Recording it as `Holder<T>` would present
+        // the *parameter name* as if it were a concrete type; erasing to `Holder<dyn>` is the honest
+        // runtime fidelity. A direct literal whose args the checker inferred concretely (`Box { value:
+        // 5 }` → `Box<int>`) is unaffected (it has no in-scope param to erase).
+        let params: HashSet<String> = self.type_params.keys().cloned().collect();
+        let ty = erase_type_params(ty.clone(), &params);
+        if let Some(repr) = type_to_repr_top(&ty, &self.type_kinds) {
+            if is_nongeneric_nominal(&repr) {
+                return;
+            }
             self.construction_sites.insert(span, repr);
         }
     }
