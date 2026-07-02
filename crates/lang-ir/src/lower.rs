@@ -977,6 +977,9 @@ impl Lowerer<'_> {
                             name_span: *name_span,
                             args: arg_atoms,
                             reuse: false,
+                            // Generic enum-variant construction records its type here (R2b.2); an
+                            // ordinary method-call span is not a construction site.
+                            reflect: self.construction_sites.get(span).cloned(),
                             span: *span,
                         },
                         *span,
@@ -1391,6 +1394,9 @@ impl Lowerer<'_> {
                             name_span: *name_span,
                             args: arg_atoms,
                             reuse: false,
+                            // Generic enum-variant construction records its type here (R2b.2); an
+                            // ordinary method-call span is not a construction site.
+                            reflect: self.construction_sites.get(span).cloned(),
                             span: *span,
                         },
                         *span,
@@ -1428,6 +1434,7 @@ impl Lowerer<'_> {
                         name_span: *name_span,
                         args: vec![left_atom],
                         reuse: false,
+                        reflect: self.construction_sites.get(span).cloned(),
                         span: *span,
                     },
                     *span,

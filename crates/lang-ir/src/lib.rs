@@ -230,6 +230,12 @@ pub enum Rvalue {
         name_span: Span,
         args: Vec<Atom>,
         reuse: bool,
+        /// The checker-resolved reflected type when this "method call" is actually a **generic
+        /// enum-variant construction** (`Tree.Leaf(5)` : `Tree<int>`, runtime type-argument
+        /// reflection, R2b.2) — baked from the construction-site map so `type_of` recovers the enum's
+        /// type arguments after a `dyn` launder. `None` for an ordinary method call (the common case)
+        /// and for a non-generic enum. Invisible to value semantics.
+        reflect: Option<lang_ast::reflect::TypeRepr>,
         span: Span,
     },
     /// Bare member access: `receiver.name`. Resolves to a field load, an enum-variant

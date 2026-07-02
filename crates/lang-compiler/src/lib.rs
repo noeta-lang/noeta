@@ -2007,6 +2007,7 @@ impl<'m> FnCompiler<'m> {
                     dst,
                     shape,
                     args: Box::new([]),
+                    reflect: None,
                 });
                 Ok(dst)
             }
@@ -2186,9 +2187,15 @@ impl<'m> FnCompiler<'m> {
                 name,
                 args,
                 reuse,
+                reflect,
                 span,
                 ..
-            } => self.lower_method(receiver, name, args, *reuse, dst, *span),
+            } => {
+                // A generic enum-variant construction carries its reflected type (R2b.2); intern it so
+                // the `MakeEnum` op can stamp it. `None` for an ordinary method call.
+                let reflect = reflect.as_ref().map(|r| self.module.intern_type_repr(r));
+                self.lower_method(receiver, name, args, *reuse, reflect, dst, *span)
+            }
             Rvalue::Field {
                 receiver,
                 name,
@@ -2688,12 +2695,14 @@ impl<'m> FnCompiler<'m> {
     /// Lower a method/associated call `receiver.name(args)`. A bare type-name receiver resolves at
     /// compile time to an enum-variant construction or an associated-function call; any other
     /// receiver is a runtime-dispatched instance method.
+    #[allow(clippy::too_many_arguments)]
     fn lower_method(
         &mut self,
         receiver: &Atom,
         name: &str,
         args: &[Atom],
         reuse: bool,
+        reflect: Option<u32>,
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
@@ -2715,7 +2724,7 @@ impl<'m> FnCompiler<'m> {
                 if let Some(&proto) = fns.get(name) {
                     return self.call_associated(proto, args, dst, span);
                 }
-                return self.make_enum(type_name, name, args, dst);
+                return self.make_enum(type_name, name, args, reflect, dst);
             }
             // An associated function `Type.f(...)` resolves at compile time for both kinds — struct
             // and class share the dispatch table (the unified body).
@@ -2861,6 +2870,9 @@ impl<'m> FnCompiler<'m> {
                         dst,
                         shape,
                         args: Box::new([]),
+                        // A nullary variant infers `Enum<dyn>` — reflected head-only (R2b.2 tags only
+                        // payload variants, which pin the type arguments).
+                        reflect: None,
                     });
                     return Ok(());
                 }
@@ -3078,6 +3090,7 @@ impl<'m> FnCompiler<'m> {
         type_name: &str,
         variant: &str,
         args: &[Atom],
+        reflect: Option<u32>,
         dst: Reg,
     ) -> Result<(), Unsupported> {
         let fields = match self.module.types.get(type_name) {
@@ -3102,6 +3115,7 @@ impl<'m> FnCompiler<'m> {
             dst,
             shape,
             args: arg_regs.into_boxed_slice(),
+            reflect,
         });
         self.release_consumed(&consumed);
         Ok(())
@@ -3207,6 +3221,7 @@ impl<'m> FnCompiler<'m> {
             dst,
             shape,
             args: arg_regs,
+            reflect: None,
         });
         Ok(())
     }

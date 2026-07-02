@@ -3659,7 +3659,12 @@ impl<'m> Vm<'m> {
                     set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
                     frames[top].pc += 1;
                 }
-                Op::MakeEnum { dst, shape, args } => {
+                Op::MakeEnum {
+                    dst,
+                    shape,
+                    args,
+                    reflect,
+                } => {
                     let shape = self.shapes[*shape as usize].clone();
                     let mut data = Vec::with_capacity(args.len());
                     for &r in args.iter() {
@@ -3667,7 +3672,14 @@ impl<'m> Vm<'m> {
                         retain(v);
                         data.push(v);
                     }
-                    set_reg(&mut frames[top].regs, *dst, Value::enum_value(shape, data));
+                    let value = Value::enum_value(shape, data);
+                    // Stamp the reflected type onto a generic enum-variant construction (R2b.2) so
+                    // `type_of` recovers its type arguments after a `dyn` launder. Like an object's tag,
+                    // an enum value's type is invariant, so it is never cleared.
+                    if let Some(idx) = reflect {
+                        value.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                    }
+                    set_reg(&mut frames[top].regs, *dst, value);
                     frames[top].pc += 1;
                 }
                 Op::EnumFromStr {

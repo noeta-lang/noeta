@@ -442,11 +442,28 @@ struct VariantInfo {
 }
 
 /// A constructed enum value.
-#[derive(Debug, PartialEq)]
+#[derive(Debug)]
 pub struct EnumValue {
     enum_name: String,
     variant: String,
     data: Vec<Value>,
+    /// The reflected type for a **generic** enum-variant construction (runtime type-argument
+    /// reflection, R2b.2), `Some` only for a generic enum — so `type_of` recovers its type arguments
+    /// after a `dyn` launder. `None` for a non-generic enum / an ordinary construction. Invisible to
+    /// value semantics (equality compares `enum_name`/`variant`/`data`) — the tree-walker twin of the
+    /// VM's node tag. An enum value's type is invariant, so it is never cleared.
+    reflect: Option<Rc<TypeRepr>>,
+}
+
+/// Structural equality — the reflected type tag (R2b.2) is **invisible to value semantics**, so two
+/// enum values with equal name/variant/data are equal regardless of their tags (the tree-walker twin
+/// of the VM comparing `Payload::Enum`, not the node tag).
+impl PartialEq for EnumValue {
+    fn eq(&self, other: &EnumValue) -> bool {
+        self.enum_name == other.enum_name
+            && self.variant == other.variant
+            && self.data == other.data
+    }
 }
 
 impl EnumValue {
@@ -1729,6 +1746,7 @@ impl Interpreter {
             enum_name: def.name().to_string(),
             variant: variant.to_string(),
             data: args,
+            reflect: None,
         })))
     }
 
@@ -1769,6 +1787,7 @@ impl Interpreter {
                 enum_name: def.name().to_string(),
                 variant: key,
                 data: vec![],
+                reflect: None,
             }));
             if method == "from" {
                 Ok(value)
@@ -3981,6 +4000,7 @@ fn builtin_enum(enum_name: &str, variant: &str, data: Vec<Value>) -> Value {
         enum_name: enum_name.to_string(),
         variant: variant.to_string(),
         data,
+        reflect: None,
     }))
 }
 
@@ -4199,10 +4219,16 @@ fn eval_type_repr(value: &Value) -> lang_ast::reflect::TypeRepr {
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Map(dyn_(), dyn_())),
         Value::Function(_) | Value::Builtin(_) => TypeRepr::Fn(Vec::new(), dyn_()),
-        Value::Enum(e) => match e.enum_name.as_str() {
-            "Option" => TypeRepr::Option(dyn_()),
-            "Result" => TypeRepr::Result(dyn_(), dyn_()),
-            other => TypeRepr::Enum(other.to_string(), Vec::new()),
+        // A generic enum instance carrying a reflected type tag (R2b.2) reports its precise type;
+        // otherwise the head-only classification (`Option`/`Result` by name, else the enum name with
+        // empty args). Mirrors `vm_type_repr`'s node-tag consultation.
+        Value::Enum(e) => match &e.reflect {
+            Some(repr) => (**repr).clone(),
+            None => match e.enum_name.as_str() {
+                "Option" => TypeRepr::Option(dyn_()),
+                "Result" => TypeRepr::Result(dyn_(), dyn_()),
+                other => TypeRepr::Enum(other.to_string(), Vec::new()),
+            },
         },
         // A generic struct/class instance carrying a reflected type tag (R2) reports its precise type
         // (with type arguments); a non-generic/untagged instance falls back to the head-only shape name

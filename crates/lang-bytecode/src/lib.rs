@@ -495,6 +495,10 @@ pub enum Op {
         dst: Reg,
         shape: u32,
         args: Box<[Reg]>,
+        /// The reflected type for a **generic** enum-variant construction (R2b.2): an index into
+        /// [`Module::type_reprs`], or `None` for a non-generic enum or an ordinary variant. Stamped
+        /// onto the built value so `type_of` recovers the enum's type arguments after a `dyn` launder.
+        reflect: Option<u32>,
     },
     /// `dst = Enum.try_from(s)` / `Enum.from(s)` — construct a **payload-free** enum case from the
     /// string in `arg`, matched by case name (the PHP `tryFrom`/`from` pair). `cases` lists every
@@ -1335,7 +1339,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             }
             format!("MakeOpaque  r{dst} <- {type_name} {{{}}}", parts.join(", "))
         }
-        Op::MakeEnum { dst, shape, args } => {
+        Op::MakeEnum {
+            dst, shape, args, ..
+        } => {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
             format!("MakeEnum    r{dst} <- shape s{shape}({})", args.join(", "))
         }

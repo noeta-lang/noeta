@@ -45,6 +45,24 @@ fn is_temp(atom: &lang_ir::Atom) -> bool {
     matches!(atom, lang_ir::Atom::Temp(_))
 }
 
+/// Stamp a generic enum-variant construction's reflected type onto the freshly-built value (runtime
+/// type-argument reflection, R2b.2), so `type_of` recovers the enum's type arguments after a `dyn`
+/// launder. `reflect` is `Some` only for a generic enum construction; a non-enum result or an
+/// ordinary call is returned unchanged. The value was just built and is uniquely owned, so its parts
+/// move into a re-tagged `EnumValue` with no clone; an unexpectedly-shared value is left untagged.
+fn tag_enum_reflect(value: Value, reflect: &Option<lang_ast::reflect::TypeRepr>) -> Value {
+    match (reflect, value) {
+        (Some(repr), Value::Enum(rc)) => match Rc::try_unwrap(rc) {
+            Ok(ev) => Value::Enum(Rc::new(crate::EnumValue {
+                reflect: Some(Rc::new(repr.clone())),
+                ..ev
+            })),
+            Err(rc) => Value::Enum(rc),
+        },
+        (_, value) => value,
+    }
+}
+
 struct Frame {
     temps: Vec<Option<Value>>,
 }
@@ -991,6 +1009,7 @@ impl Interpreter {
                 name,
                 args,
                 reuse,
+                reflect,
                 span,
                 ..
             } => {
@@ -1034,7 +1053,7 @@ impl Interpreter {
                 }
                 let recv = self.eval_ir_atom(receiver, frame)?;
                 let values = self.eval_ir_atoms(args, frame)?;
-                if is_temp(receiver) {
+                let result = if is_temp(receiver) {
                     // An owned temp receiver (`Resource.new().use()`): fire its destructor after the
                     // call (Phase 4.4). `call_method` consumes the receiver, so clone for the call
                     // and destroy the held copy — last-reference-gated, so a method that returns
@@ -1044,7 +1063,10 @@ impl Interpreter {
                     result
                 } else {
                     self.call_method(recv, name, values, *span)
-                }
+                };
+                // When this "method call" was a generic enum-variant construction, stamp the reflected
+                // type onto the freshly-built value (R2b.2) — the tree-walker twin of the VM's node tag.
+                result.map(|v| tag_enum_reflect(v, reflect))
             }
             lang_ir::Rvalue::Field {
                 receiver,

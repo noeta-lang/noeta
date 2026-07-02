@@ -1,0 +1,52 @@
+// Runtime type-argument reflection for generic **enums** (R2b.2): a generic enum-variant construction
+// carries the checker-resolved type arguments as a runtime tag, so `type_of` recovers them even after
+// the value's static type is laundered through `dyn` — the enum completion of the list/map/struct/class
+// tags. A payload variant pins the arguments (`Tree.Leaf(5)` → `Tree<int>`); a nullary variant
+// (`Tree.Empty`) has no payload to pin and reflects head-only. Both backends carry the tag (the VM on
+// its heap node, the tree-walker on the `EnumValue`), so `type_of` agrees across the differential.
+// expect: stdout "Tree<int>"
+// expect: stdout "Tree<string>"
+// expect: stdout "Tree<list<int>>"
+// expect: stdout "Pair<int,string>"
+// expect: stdout "Tree<>"
+// expect: stdout "true"
+// expect: exit 0
+
+enum Tree<T> { Leaf(T); Empty; }
+enum Pair<A, B> { Both(A, B); Neither; }
+
+fn label(t: Type): string {
+    return match t {
+        Type.Int => "int",
+        Type.String => "string",
+        Type.Dyn => "dyn",
+        Type.List(inner) => "list<${label(inner)}>",
+        Type.Enum(name, args) => "${name}<${arglist(args)}>",
+        _ => "?",
+    };
+}
+
+// Join the type arguments' labels with commas.
+fn arglist(args: List<Type>): string {
+    mut out = ""
+    mut first = true
+    for a in args {
+        out = if first then label(a) else "${out},${label(a)}"
+        first = false
+    }
+    return out
+}
+
+fn launder(v: dyn): dyn { return v; }
+
+// Payload variants pin the enum's type arguments; recovered after a `dyn` launder.
+echo label(type_of(launder(Tree.Leaf(5))));       // Tree<int>
+echo label(type_of(launder(Tree.Leaf("hi"))));    // Tree<string>
+echo label(type_of(launder(Tree.Leaf([1, 2]))));  // Tree<list<int>> (nested)
+echo label(type_of(launder(Pair.Both(1, "x"))));  // Pair<int,string> (multi-parameter)
+
+// A nullary variant pins no argument, so it reflects head-only (no type arguments).
+echo label(type_of(launder(Tree.Empty)));         // Tree<>
+
+// The tag is invisible to value semantics: equal enum values compare equal.
+echo Tree.Leaf(5) == Tree.Leaf(5);                // true
