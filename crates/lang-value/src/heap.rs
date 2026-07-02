@@ -387,8 +387,13 @@ impl IterState {
     }
 }
 
-/// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
-pub(crate) fn alloc(payload: Payload) -> Value {
+/// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference. `shared` sets
+/// the header's shared-immutable tag (isolates I.3) and, when set, keeps the object **out** of the
+/// cycle-collector [`REGISTRY`]: a shared object is owned by a [`SharedRegion`] and freed wholesale at
+/// the scope join — never by refcount, never by the GC — so it must stay out of the collector's
+/// world (it still counts toward [`live_count`], so the leak oracle sees the region balance). A normal
+/// object registers as a mark-sweep candidate in `Trace` mode.
+fn alloc_with(payload: Payload, shared: bool) -> Value {
     live_inc();
     let seq = NEXT_SEQ.with(|c| {
         let s = c.get();
@@ -401,7 +406,7 @@ pub(crate) fn alloc(payload: Payload) -> Value {
             seq,
             color: Color::Black,
             buffered: false,
-            shared: false,
+            shared,
         },
         reflect: None,
         payload,
@@ -412,43 +417,24 @@ pub(crate) fn alloc(payload: Payload) -> Value {
         "heap address does not fit the 48-bit NaN-box payload"
     );
     let value = Value(Value::SIGN_BIT | Value::QNAN | (addr as u64 & Value::PTR_MASK));
-    // The registry is the backup mark-sweep's sweep set; trial-deletion works from buffered
-    // candidates instead, so it pays no per-allocation registry cost (the Phase-6.4 trade-off).
-    if MODE.with(|m| m.get()) == CollectorMode::Trace {
+    // The registry is the backup mark-sweep's sweep set; trial-deletion works from buffered candidates
+    // instead, so it pays no per-allocation registry cost (the Phase-6.4 trade-off). A shared object is
+    // never GC-managed, so it is never registered.
+    if !shared && MODE.with(|m| m.get()) == CollectorMode::Trace {
         REGISTRY.with(|r| r.borrow_mut().insert(value.0));
     }
     value
 }
 
-/// Allocate a **shared-immutable** object (isolates I.3): the `shared` tag set at birth, and
-/// deliberately **not** entered in the cycle-collector [`REGISTRY`]. A shared object is owned by a
-/// [`SharedRegion`] and freed wholesale at the scope join — never by refcount and never by the GC —
-/// so it must stay out of the collector's world. It still counts toward [`live_count`] (the leak
-/// oracle sees the region balance: +N at promotion, −N at `free_all`). Used only by [`SharedRegion`].
+/// Allocate an object and return a NaN-boxed pointer [`Value`] owning one reference.
+pub(crate) fn alloc(payload: Payload) -> Value {
+    alloc_with(payload, false)
+}
+
+/// Allocate a **shared-immutable** object (isolates I.3) — see [`alloc_with`]. Used only by
+/// [`SharedRegion`].
 fn alloc_shared(payload: Payload) -> Value {
-    live_inc();
-    let seq = NEXT_SEQ.with(|c| {
-        let s = c.get();
-        c.set(s.wrapping_add(1));
-        s
-    });
-    let raw = Box::into_raw(Box::new(Obj {
-        header: ObjHeader {
-            refcount: 1,
-            seq,
-            color: Color::Black,
-            buffered: false,
-            shared: true,
-        },
-        reflect: None,
-        payload,
-    }));
-    let addr = raw.expose_provenance();
-    debug_assert!(
-        addr & !Value::PTR_MASK as usize == 0,
-        "heap address does not fit the 48-bit NaN-box payload"
-    );
-    Value(Value::SIGN_BIT | Value::QNAN | (addr as u64 & Value::PTR_MASK))
+    alloc_with(payload, true)
 }
 
 /// Drop `value` from the live-object registry — called by every free path so the registry tracks
