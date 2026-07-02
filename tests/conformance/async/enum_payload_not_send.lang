@@ -1,0 +1,14 @@
+// Isolates: an enum is `!Send` when any variant's payload is `!Send` — the same rule a struct obeys
+// for its fields. A `class` payload (reference type: identity, shared mutation) makes the enum
+// `!Send`, so passing such an enum across an isolate boundary is E0042 — exactly as a struct wrapping
+// the same class is rejected. (This pins the fix for a latent hole where an enum's positional payload
+// types were stored as `Unknown`, which silently classified an enum wrapping a class as `Send`.)
+// expect: error E0042 at 12:9
+// expect: exit 1
+class Conn { pub id: int }
+enum Wrap { Hold(Conn); Empty; }
+async fn use_wrap(w: Wrap): int { return 0 }
+concurrent {
+    h = isolate use_wrap(Wrap.Hold(Conn { id: 1 }))
+    echo h.await
+}

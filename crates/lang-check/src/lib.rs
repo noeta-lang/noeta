@@ -271,7 +271,10 @@ fn type_to_repr(
     }
 }
 
-/// One enum variant: its name and the types of its positional data fields.
+/// One enum variant: its name and the (accurate) types of its positional data fields — the enum
+/// analogue of a struct's `(field, Type)` list, reconstructed via [`variant_field_type`] since a
+/// positional payload parses its type into the field's *name*. The single source consulted by
+/// enum-construction inference, the `Send` classifier, and destructor-relevance.
 #[derive(Clone)]
 struct VariantInfo {
     name: String,
@@ -409,16 +412,9 @@ fn assign(env: &mut Env, name: &str, ty: Type) {
 
 #[derive(Default)]
 struct Checker {
-    /// User-declared enums: name → variants.
+    /// User-declared enums: name → variants (each with its **accurate** payload types, like a
+    /// struct's fields in [`Self::records`]).
     enums: HashMap<String, Vec<VariantInfo>>,
-    /// Each enum variant's **accurate positional payload types** (params intact), keyed by
-    /// `(enum, variant)` (R2b). Unlike [`VariantInfo::fields`] — which stores `field_type(&p.ty)` and
-    /// is `Unknown` for a positional payload (whose type is parsed into the `Param`'s *name*) — this
-    /// reconstructs the real type from the payload name, so generic-enum construction can infer the
-    /// enum's type arguments (`Tree.Leaf(5)` → `Tree<int>`) by unifying against the arguments. A
-    /// separate map so the (conservative, `Unknown`-tolerant) destructor-relevance and `Send` analyses
-    /// that read `VariantInfo::fields` are untouched.
-    enum_variant_payloads: HashMap<(String, String), Vec<Type>>,
     /// Top-level functions: name → signature.
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
@@ -1016,18 +1012,16 @@ impl Checker {
                         .iter()
                         .map(|v| VariantInfo {
                             name: v.name.clone(),
-                            fields: v.fields.iter().map(|p| field_type(&p.ty)).collect(),
+                            // A variant's **accurate** payload types (via `variant_field_type`, R2b),
+                            // exactly as a struct's field types live in `self.records`: one source of
+                            // truth for enum-construction type-argument inference **and** the `Send`
+                            // classifier **and** destructor-relevance. (Previously `field_type(&p.ty)`,
+                            // which is `Unknown` for a positional payload whose type parses into the
+                            // `Param`'s *name* — an `Unknown` that silently classified an enum wrapping
+                            // a `class` as `Send`, unlike the equivalent struct.)
+                            fields: v.fields.iter().map(variant_field_type).collect(),
                         })
                         .collect();
-                    // Record each variant's accurate positional payload types (R2b), so generic-enum
-                    // construction can infer the enum's type arguments. A positional payload's type is
-                    // parsed into the `Param`'s *name* (`Leaf(T)` → name `"T"`, no `ty`), so reconstruct
-                    // it from there; a named field (`Leaf(x: T)`) uses its annotation.
-                    for v in &e.variants {
-                        let types: Vec<Type> = v.fields.iter().map(variant_field_type).collect();
-                        self.enum_variant_payloads
-                            .insert((e.name.clone(), v.name.clone()), types);
-                    }
                     self.enums.insert(e.name.clone(), variants);
                     self.types.insert(e.name.clone());
                     self.type_kinds
@@ -4282,7 +4276,8 @@ impl Checker {
     /// **inferring the enum's type arguments** (R2b): for a generic enum, unify the variant's declared
     /// payload types against the argument types (like a generic constructor call, reusing
     /// [`bind_type_params`]), filling any parameter the payload does not pin with `dyn`; for a
-    /// non-generic enum, the empty argument list. Records the construction site (`span`) so reflection
+    /// non-generic enum, the empty argument list. Reuses the accurate [`VariantInfo::fields`] (the same
+    /// source the `Send`/relevance analyses read). Records the construction site (`span`) so reflection
     /// can tag the value (R2b.2); the refined type also flows into the static `type_of` path.
     fn enum_construction_type(
         &mut self,
@@ -4302,8 +4297,10 @@ impl Checker {
             let pset: HashSet<String> = params.iter().cloned().collect();
             let mut subst: HashMap<String, Type> = HashMap::new();
             if let Some(fields) = self
-                .enum_variant_payloads
-                .get(&(enum_name.to_string(), variant.to_string()))
+                .enums
+                .get(enum_name)
+                .and_then(|vs| vs.iter().find(|v| v.name == variant))
+                .map(|v| v.fields.clone())
             {
                 for (decl, arg) in fields.iter().zip(args) {
                     bind_type_params(decl, arg, &pset, &mut subst);
