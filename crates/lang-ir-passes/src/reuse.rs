@@ -96,30 +96,9 @@ fn collect_own_destructors_into(block: &Block, out: &mut HashSet<String>) {
                 }
             }
             Stmt::Decl(Decl::Fn { func, .. }) => collect_own_destructors_into(&func.body, out),
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_own_destructors_into(then_block, out);
-                if let Some(b) = else_block {
-                    collect_own_destructors_into(b, out);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                collect_own_destructors_into(cond, out);
-                collect_own_destructors_into(body, out);
-            }
-            Stmt::For { body, .. } => collect_own_destructors_into(body, out),
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    collect_own_destructors_into(&arm.body, out);
-                }
-            }
-            Stmt::Logical { right, .. } => collect_own_destructors_into(right, out),
-            Stmt::Coalesce { fallback, .. } => collect_own_destructors_into(fallback, out),
             _ => {}
         }
+        stmt.for_each_child_block(|b| collect_own_destructors_into(b, out));
     }
 }
 

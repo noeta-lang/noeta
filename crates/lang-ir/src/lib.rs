@@ -638,6 +638,58 @@ impl Block {
     }
 }
 
+impl Stmt {
+    /// Visit each **control-flow child block** of this statement: the two arms of `if`, the
+    /// `while` condition and body, the `for` body, each `match` arm's body, and the lazy
+    /// `right`/`fallback` operand of `&&`/`||`/`??`. Leaf statements have none.
+    ///
+    /// Deliberately does **not** descend into a `Decl` (a nested `fn`/`class` is a *separate*
+    /// scope that the reference-counting passes treat case-by-case). This is the single shared
+    /// definition of "which blocks does a statement nest," so a pure structural collector can
+    /// recurse control flow without re-listing every variant — and a new control-flow variant is
+    /// picked up here in one place. Order- or context-sensitive walkers (backward liveness,
+    /// drop-insertion rewrite) intentionally match the variants themselves instead, so adding a
+    /// variant still fails their exhaustive `match` and forces a deliberate update.
+    pub fn for_each_child_block(&self, mut f: impl FnMut(&Block)) {
+        match self {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                f(then_block);
+                if let Some(else_block) = else_block {
+                    f(else_block);
+                }
+            }
+            Stmt::While { cond, body, .. } => {
+                f(cond);
+                f(body);
+            }
+            Stmt::For { body, .. } => f(body),
+            Stmt::Match { arms, .. } => {
+                for arm in arms {
+                    f(&arm.body);
+                }
+            }
+            Stmt::Logical { right, .. } => f(right),
+            Stmt::Coalesce { fallback, .. } => f(fallback),
+            Stmt::Let { .. }
+            | Stmt::Eval { .. }
+            | Stmt::Bind { .. }
+            | Stmt::Echo { .. }
+            | Stmt::Return { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::ScopeBegin { .. }
+            | Stmt::ScopeEnd { .. }
+            | Stmt::Decl(_)
+            | Stmt::Drop(_)
+            | Stmt::DropVar { .. } => {}
+        }
+    }
+}
+
 /// The lowered template of a function, method, associated function, or closure. At runtime
 /// the interpreter pairs this with a captured scope to form a callable value; `params` and
 /// `defaults` mirror the surface signature, `body` is the lowered body (its `tail` is the

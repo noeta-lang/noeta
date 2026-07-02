@@ -588,36 +588,13 @@ fn relevance_map(func: &Func, cx: &Cx, names: VarSet) -> DropSet {
 /// function bodies). Droppable locals are single-assignment, so each has a unique span here.
 fn collect_bind_spans(block: &Block, out: &mut HashMap<String, Span>) {
     for stmt in &block.stmts {
-        match stmt {
-            Stmt::Bind {
-                name, name_span, ..
-            } => {
-                out.insert(name.clone(), *name_span);
-            }
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_bind_spans(then_block, out);
-                if let Some(b) = else_block {
-                    collect_bind_spans(b, out);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                collect_bind_spans(cond, out);
-                collect_bind_spans(body, out);
-            }
-            Stmt::For { body, .. } => collect_bind_spans(body, out),
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    collect_bind_spans(&arm.body, out);
-                }
-            }
-            Stmt::Logical { right, .. } => collect_bind_spans(right, out),
-            Stmt::Coalesce { fallback, .. } => collect_bind_spans(fallback, out),
-            _ => {}
+        if let Stmt::Bind {
+            name, name_span, ..
+        } = stmt
+        {
+            out.insert(name.clone(), *name_span);
         }
+        stmt.for_each_child_block(|b| collect_bind_spans(b, out));
     }
 }
 
@@ -705,30 +682,9 @@ fn collect_captured(block: &Block, out: &mut VarSet) {
                 }
             }
             Stmt::Decl(Decl::Fn { func, .. }) => collect_func_vars(func, out),
-            Stmt::If {
-                then_block,
-                else_block,
-                ..
-            } => {
-                collect_captured(then_block, out);
-                if let Some(b) = else_block {
-                    collect_captured(b, out);
-                }
-            }
-            Stmt::While { cond, body, .. } => {
-                collect_captured(cond, out);
-                collect_captured(body, out);
-            }
-            Stmt::For { body, .. } => collect_captured(body, out),
-            Stmt::Match { arms, .. } => {
-                for arm in arms {
-                    collect_captured(&arm.body, out);
-                }
-            }
-            Stmt::Logical { right, .. } => collect_captured(right, out),
-            Stmt::Coalesce { fallback, .. } => collect_captured(fallback, out),
             _ => {}
         }
+        stmt.for_each_child_block(|b| collect_captured(b, out));
     }
 }
 
@@ -775,48 +731,22 @@ fn count_binds_stmt(stmt: &Stmt, counts: &mut HashMap<String, u32>, excluded: &m
         Stmt::Bind { name, .. } => {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => {
-            count_binds_block(then_block, counts, excluded);
-            if let Some(else_block) = else_block {
-                count_binds_block(else_block, counts, excluded);
-            }
-        }
-        Stmt::While { cond, body, .. } => {
-            count_binds_block(cond, counts, excluded);
-            count_binds_block(body, counts, excluded);
-        }
-        Stmt::For { pattern, body, .. } => {
-            for_pattern_names(pattern, excluded);
-            count_binds_block(body, counts, excluded);
-        }
+        // `for`/`match` pattern bindings are recorded as excluded (their per-iteration / per-arm
+        // scoping is out of this slice's scope); the bodies themselves are counted via the shared
+        // child-block recursion below.
+        Stmt::For { pattern, .. } => for_pattern_names(pattern, excluded),
         Stmt::Match { arms, .. } => {
             for arm in arms {
                 pattern_names(&arm.pattern, excluded);
-                count_binds_block(&arm.body, counts, excluded);
             }
         }
-        Stmt::Logical { right, .. } => count_binds_block(right, counts, excluded),
-        Stmt::Coalesce { fallback, .. } => count_binds_block(fallback, counts, excluded),
         // A nested `fn` binds its own name in this scope; its body is a separate scope (not counted).
         Stmt::Decl(Decl::Fn { name, .. }) => {
             *counts.entry(name.clone()).or_insert(0) += 1;
         }
-        Stmt::Let { .. }
-        | Stmt::Eval { .. }
-        | Stmt::Echo { .. }
-        | Stmt::Return { .. }
-        | Stmt::Break { .. }
-        | Stmt::Continue { .. }
-        | Stmt::ScopeBegin { .. }
-        | Stmt::ScopeEnd { .. }
-        | Stmt::Drop(_)
-        | Stmt::DropVar { .. }
-        | Stmt::Decl(_) => {}
+        _ => {}
     }
+    stmt.for_each_child_block(|b| count_binds_block(b, counts, excluded));
 }
 
 // --- Helpers -----------------------------------------------------------------------------------
