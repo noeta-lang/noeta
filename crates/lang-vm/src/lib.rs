@@ -420,16 +420,11 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
 }
 
 /// Build the [`lang_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
-/// `func` is not an async fs op. A checked program always supplies string arguments; malformed args
-/// fall through to `None` (the registry dispatch then reports the unknown function).
+/// `func` is not an async fs op. Marshals this backend's `Value`s to strings; the func→request
+/// mapping is shared in [`lang_stdlib::IoRequest::from_fs_async`].
 fn vm_fs_async_request(func: &str, args: &[Value]) -> Option<lang_stdlib::IoRequest> {
-    use lang_stdlib::IoRequest;
-    Some(match func {
-        "read_async" => IoRequest::Read(args.first()?.as_string()?),
-        "write_async" => IoRequest::Write(args.first()?.as_string()?, args.get(1)?.as_string()?),
-        "append_async" => IoRequest::Append(args.first()?.as_string()?, args.get(1)?.as_string()?),
-        _ => return None,
-    })
+    let strings: Vec<Option<String>> = args.iter().map(|v| v.as_string()).collect();
+    lang_stdlib::IoRequest::from_fs_async(func, &strings)
 }
 
 /// Execute a compiled module, capturing stdout, exit code, and diagnostics.

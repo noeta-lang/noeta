@@ -98,19 +98,17 @@ impl Backend for TreeWalkBackend {
 }
 
 /// Build the [`lang_stdlib::IoRequest`] for an `fs.*_async` call (Track A.4c/A.10), or `None` if
-/// `func` is not an async fs op. Mirrors the VM's `vm_fs_async_request`.
+/// `func` is not an async fs op. Marshals this backend's `Value`s to strings; the func→request
+/// mapping is shared in [`lang_stdlib::IoRequest::from_fs_async`].
 fn eval_fs_async_request(func: &str, args: &[Value]) -> Option<lang_stdlib::IoRequest> {
-    use lang_stdlib::IoRequest;
-    let text = |v: Option<&Value>| match v {
-        Some(Value::Str(s)) => Some(s.clone()),
-        _ => None,
-    };
-    Some(match func {
-        "read_async" => IoRequest::Read(text(args.first())?),
-        "write_async" => IoRequest::Write(text(args.first())?, text(args.get(1))?),
-        "append_async" => IoRequest::Append(text(args.first())?, text(args.get(1))?),
-        _ => return None,
-    })
+    let strings: Vec<Option<String>> = args
+        .iter()
+        .map(|v| match v {
+            Value::Str(s) => Some(s.clone()),
+            _ => None,
+        })
+        .collect();
+    lang_stdlib::IoRequest::from_fs_async(func, &strings)
 }
 
 /// The drop pass's relevance form, copied from the checker's (identical sets) — the lang-eval

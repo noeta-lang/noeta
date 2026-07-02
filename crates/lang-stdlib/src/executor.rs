@@ -30,6 +30,24 @@ pub enum IoRequest {
     Append(String, String),
 }
 
+impl IoRequest {
+    /// Build the request for an `fs.*_async` call from its already-marshalled string arguments, or
+    /// `None` if `func` is not an async fs op (or an argument is missing / not a string). The
+    /// func→variant mapping lives here, next to the `FS_FNS` signature table, so it is written once
+    /// rather than mirrored in each backend: a backend only marshals its own value representation to
+    /// `&[Option<String>]` and calls this. (A checked program always supplies string arguments; the
+    /// `None` fall-through lets the registry's normal dispatch report a genuinely unknown function.)
+    pub fn from_fs_async(func: &str, args: &[Option<String>]) -> Option<IoRequest> {
+        let arg = |i: usize| args.get(i).cloned().flatten();
+        Some(match func {
+            "read_async" => IoRequest::Read(arg(0)?),
+            "write_async" => IoRequest::Write(arg(0)?, arg(1)?),
+            "append_async" => IoRequest::Append(arg(0)?, arg(1)?),
+            _ => return None,
+        })
+    }
+}
+
 /// The result of a completed [`IoRequest`] — the neutral value the backend materializes (text → a
 /// `string`, unit → the unit value). Extensible (e.g. `Bytes` for a future `read_bytes_async`).
 #[derive(Debug, Clone)]
