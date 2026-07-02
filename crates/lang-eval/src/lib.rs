@@ -1974,6 +1974,30 @@ impl Interpreter {
                 lang_stdlib::Dispatch::Unknown => {}
             }
         }
+        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class intrinsics,
+        // delegating to the shared `int_method` so the backends agree by construction. `rotate_*`
+        // take an `int` amount; the rest take none.
+        if let Value::Int(recv) = &receiver
+            && let Some(method) = lang_stdlib::IntMethod::from_name(name)
+        {
+            let recv = *recv;
+            self.expect_std_arity(name, &args, method.arity(), span)?;
+            let arg = match args.first() {
+                Some(Value::Int(n)) => *n,
+                Some(other) => {
+                    return Err(self.runtime_error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!(
+                            "`int.{name}` expects an integer argument, found {}",
+                            other.type_name()
+                        ),
+                    ));
+                }
+                None => 0,
+            };
+            return Ok(Value::Int(lang_stdlib::int_method(recv, method, arg)));
+        }
         // Ring 1 list methods (reverse/contains/join) — Value-specific, so implemented per
         // backend, but the method set is the shared `ListMethod` enum: a non-exhaustive `match`
         // here would not compile, so the VM cannot omit a method this backend offers.

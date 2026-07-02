@@ -89,6 +89,7 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         return Some(Type::Named("Ordering".to_string(), vec![]));
     }
     match receiver {
+        Type::Int => int_method(name),
         Type::String => string_method(name),
         Type::List(elem) => list_method(name, elem),
         Type::Set(elem) => set_method(name, elem),
@@ -169,6 +170,12 @@ fn bytes_method(name: &str) -> Option<Type> {
     })
 }
 
+/// The bit-manipulation intrinsics on `int` (P-BITS Tier B4) — all return `int` (`rotate_*` take an
+/// `int` amount; the rest take none). The method set is the shared `lang_stdlib::IntMethod` enum.
+fn int_method(name: &str) -> Option<Type> {
+    lang_stdlib::IntMethod::from_name(name).map(|_| Type::Int)
+}
+
 fn string_method(name: &str) -> Option<Type> {
     Some(match name {
         "upper" | "lower" | "trim" | "replace" | "repeat" => Type::String,
@@ -236,6 +243,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         return Some(vec![Type::Dyn]); // compares against any value
     }
     match receiver {
+        Type::Int => int_params(name),
         Type::String => string_params(name),
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
@@ -282,6 +290,14 @@ fn iterator_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
         }],
         _ => return None,
     })
+}
+
+/// Parameter types for the `int` bit-manipulation intrinsics (P-BITS Tier B4): `rotate_left`/
+/// `rotate_right` take an `int` amount; the rest take none. The method set is the shared enum, so a
+/// bad arity/arg-type is caught statically and neither backend needs a runtime arity check.
+fn int_params(name: &str) -> Option<Vec<Type>> {
+    let method = lang_stdlib::IntMethod::from_name(name)?;
+    Some(vec![Type::Int; method.arity()])
 }
 
 fn string_params(name: &str) -> Option<Vec<Type>> {

@@ -424,6 +424,76 @@ impl MapMethod {
     }
 }
 
+/// The bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class intrinsics that turn a
+/// bitmask into an index/count. Enumerated (like [`ListMethod`]) so both backends' dispatch `match` is
+/// exhaustive; the actual computation is the shared [`int_method`] below, so the backends agree by
+/// construction. All operate on the full signed i64.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntMethod {
+    /// `count_ones()` → the number of set bits (population count).
+    CountOnes,
+    /// `count_zeros()` → the number of clear bits — **width-relative to i64** (so `(0).count_zeros()`
+    /// is 64), exact for the user's width only under Tier W.
+    CountZeros,
+    /// `leading_zeros()` → clear bits above the highest set bit — **width-relative to i64** (so
+    /// `(1).leading_zeros()` is 63).
+    LeadingZeros,
+    /// `trailing_zeros()` → clear bits below the lowest set bit (the index of the lowest set bit);
+    /// `(0).trailing_zeros()` is 64.
+    TrailingZeros,
+    /// `rotate_left(n)` → bits rotated left by `n`, wrapping around (cyclic — the amount is taken mod
+    /// 64, so any `n` is valid and lossless).
+    RotateLeft,
+    /// `rotate_right(n)` → the mirror of [`IntMethod::RotateLeft`].
+    RotateRight,
+    /// `reverse_bits()` → the value with its bit order reversed (bit 0 ↔ bit 63).
+    ReverseBits,
+    /// `swap_bytes()` → the value with its byte order reversed (endianness swap).
+    SwapBytes,
+}
+
+impl IntMethod {
+    pub fn from_name(name: &str) -> Option<IntMethod> {
+        Some(match name {
+            "count_ones" => IntMethod::CountOnes,
+            "count_zeros" => IntMethod::CountZeros,
+            "leading_zeros" => IntMethod::LeadingZeros,
+            "trailing_zeros" => IntMethod::TrailingZeros,
+            "rotate_left" => IntMethod::RotateLeft,
+            "rotate_right" => IntMethod::RotateRight,
+            "reverse_bits" => IntMethod::ReverseBits,
+            "swap_bytes" => IntMethod::SwapBytes,
+            _ => return None,
+        })
+    }
+
+    /// The number of arguments the method takes: `rotate_left`/`rotate_right` take one shift amount;
+    /// the rest take none.
+    pub fn arity(self) -> usize {
+        match self {
+            IntMethod::RotateLeft | IntMethod::RotateRight => 1,
+            _ => 0,
+        }
+    }
+}
+
+/// Apply an [`IntMethod`] to receiver `recv`, with `arg` the shift amount for `rotate_left`/
+/// `rotate_right` (ignored otherwise). The single source of truth both backends call, delegating to
+/// the `i64` inherent methods so the results are identical. The bit-count methods return a value in
+/// `0..=64`; the rotate amount is taken mod 64 (cyclic, lossless).
+pub fn int_method(recv: i64, method: IntMethod, arg: i64) -> i64 {
+    match method {
+        IntMethod::CountOnes => recv.count_ones() as i64,
+        IntMethod::CountZeros => recv.count_zeros() as i64,
+        IntMethod::LeadingZeros => recv.leading_zeros() as i64,
+        IntMethod::TrailingZeros => recv.trailing_zeros() as i64,
+        IntMethod::RotateLeft => recv.rotate_left((arg as u64 & 63) as u32),
+        IntMethod::RotateRight => recv.rotate_right((arg as u64 & 63) as u32),
+        IntMethod::ReverseBits => recv.reverse_bits(),
+        IntMethod::SwapBytes => recv.swap_bytes(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -552,6 +622,41 @@ mod tests {
             Some(SetMethod::Intersection)
         );
         assert_eq!(SetMethod::from_name("nope"), None);
+    }
+
+    #[test]
+    fn int_methods_resolve_and_compute() {
+        // Name resolution + arity.
+        assert_eq!(
+            IntMethod::from_name("count_ones"),
+            Some(IntMethod::CountOnes)
+        );
+        assert_eq!(
+            IntMethod::from_name("trailing_zeros"),
+            Some(IntMethod::TrailingZeros)
+        );
+        assert_eq!(
+            IntMethod::from_name("rotate_left"),
+            Some(IntMethod::RotateLeft)
+        );
+        assert_eq!(IntMethod::from_name("nope"), None);
+        assert_eq!(IntMethod::CountOnes.arity(), 0);
+        assert_eq!(IntMethod::RotateRight.arity(), 1);
+
+        // Computation, delegating to the i64 inherent methods.
+        assert_eq!(int_method(0b1011, IntMethod::CountOnes, 0), 3);
+        assert_eq!(int_method(0b1011, IntMethod::CountZeros, 0), 61);
+        assert_eq!(int_method(1, IntMethod::LeadingZeros, 0), 63);
+        assert_eq!(int_method(8, IntMethod::TrailingZeros, 0), 3);
+        assert_eq!(int_method(0, IntMethod::TrailingZeros, 0), 64);
+        assert_eq!(int_method(1, IntMethod::RotateLeft, 4), 16);
+        assert_eq!(int_method(256, IntMethod::RotateRight, 4), 16);
+        assert_eq!(int_method(-1, IntMethod::ReverseBits, 0), -1);
+        // The rotate amount is cyclic (mod 64), so a huge or negative amount is well-defined.
+        assert_eq!(
+            int_method(1, IntMethod::RotateLeft, 64),
+            int_method(1, IntMethod::RotateLeft, 0)
+        );
     }
 
     #[test]

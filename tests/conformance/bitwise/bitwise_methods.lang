@@ -1,0 +1,29 @@
+// P-BITS Tier B4: the popcount-class bit intrinsics as methods on `int` — `count_ones`/`count_zeros`,
+// `leading_zeros`/`trailing_zeros`, `rotate_left`/`rotate_right`, `reverse_bits`, `swap_bytes`. The
+// method set + computation live once in `lang_stdlib::IntMethod`/`int_method`, so both backends agree.
+// Note: `count_zeros`/`leading_zeros` are width-relative to i64 (64 bits).
+// expect: stdout "3"
+// expect: stdout "61"
+// expect: stdout "63"
+// expect: stdout "3"
+// expect: stdout "64"
+// expect: stdout "16"
+// expect: stdout "16"
+// expect: stdout "2"
+// expect: stdout "4"
+// expect: stdout "2"
+// expect: exit 0
+echo (0b1011).count_ones()       // bits 0,1,3 set → 3
+echo (0b1011).count_zeros()      // 64 - 3 = 61
+echo (1).leading_zeros()         // 63 (width-relative to i64)
+echo (8).trailing_zeros()        // 0b1000 → 3 trailing zeros
+echo (0).trailing_zeros()        // 64 (no bits set)
+echo (1).rotate_left(4)          // 1 << 4 = 16
+echo (256).rotate_right(4)       // (1<<8) >> 4 = 1<<4 = 16
+
+// The mask → index idiom: `trailing_zeros` finds the first present item; `count_ones` of the bits
+// below a position gives its rank.
+mask = 0b10110100                // items 2,4,5,7 present
+echo mask.trailing_zeros()       // first present item → index 2
+echo mask.count_ones()           // how many present → 4
+echo (mask & ((1 << 5) - 1)).count_ones()   // rank of item 5 = # present strictly below it (2,4) → 2

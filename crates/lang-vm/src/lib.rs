@@ -2931,6 +2931,36 @@ impl<'m> Vm<'m> {
                             lang_stdlib::Dispatch::Unknown => {}
                         }
                     }
+                    // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
+                    // intrinsics, delegating to the shared `int_method` so the backends agree. The
+                    // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
+                    if let Some(recv_int) = v.as_int()
+                        && let Some(int_method) = lang_stdlib::IntMethod::from_name(method)
+                    {
+                        let arg = match args.first() {
+                            Some(r) => {
+                                let a = frames[top].regs[*r as usize];
+                                match a.as_int() {
+                                    Some(n) => n,
+                                    None => {
+                                        return Err(self.error(
+                                            DiagnosticCode::TypeMismatch,
+                                            *span,
+                                            format!(
+                                                "`int.{method}` expects an integer argument, found {}",
+                                                a.type_name()
+                                            ),
+                                        ));
+                                    }
+                                }
+                            }
+                            None => 0,
+                        };
+                        let value = Value::int(lang_stdlib::int_method(recv_int, int_method, arg));
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
                     // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
                     // method this backend lacks.
