@@ -1,0 +1,39 @@
+### [Home](Home)
+
+**Onboarding**
+- [Getting Started](Getting-Started)
+- [Language Tour](Language-Tour)
+
+**Tools**
+- [The `lang` CLI](The-CLI)
+- [Testing](Testing)
+- [Benchmarking](Benchmarking)
+- [Documentation & Dev Tiers](Documentation-and-Tiers)
+- [Editor & AI Tooling](Editor-and-AI-Tooling)
+
+**Language reference**
+- [Syntax Basics](Syntax-Basics)
+- [Control Flow & Matching](Control-Flow-and-Pattern-Matching)
+- [Functions & Closures](Functions-and-Closures)
+- [Structs, Classes & Enums](Structs-Classes-and-Enums)
+- [Generics & Traits](Generics-and-Traits)
+- [The Type System](Type-System)
+- [Error Handling](Error-Handling)
+- [Modules & Visibility](Modules)
+- [Fixed-Width Integers](Fixed-Width-Integers)
+- [Attributes & Reflection](Attributes-and-Reflection)
+- [Concurrency](Concurrency)
+- [Standard Library](Standard-Library)
+- [Standard-Library Modules](Standard-Library-Modules)
+
+**Concepts & design**
+- [Architecture & Pipeline](Architecture-and-Pipeline)
+- [The Virtual Machine](The-Virtual-Machine)
+- [Memory Management](Memory-Management)
+- [The Type Checker](Type-Checker-Internals)
+- [Concurrency Internals](Concurrency-Internals)
+- [Performance Techniques](Performance-Techniques)
+- [Native Extensions](Native-Extensions)
+
+**Contributing**
+- [Developer Guide](Contributing)
