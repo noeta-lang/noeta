@@ -2883,26 +2883,10 @@ impl Checker {
     /// the rule composes (`List<WebRole> <: List<Enum>`); every non-kind case delegates to the pure
     /// lattice. This is the single funnel for assignment, argument, return, and field checks.
     fn assignable(&self, actual: &Type, expected: &Type) -> bool {
-        // Preserve the lattice's hole/`dyn` leniencies before the structural walk.
-        if actual.is_gradual() || expected.is_gradual() || matches!(expected, Type::Dyn) {
-            return true;
-        }
-        match (actual, expected) {
-            (Type::Named(n, _), Type::Kind(k)) => self.is_of_kind(n, *k),
-            (Type::List(a), Type::List(b)) | (Type::Set(a), Type::Set(b)) => self.assignable(a, b),
-            (Type::Option(a), Type::Option(b)) => self.assignable(a, b),
-            (Type::Map(ak, av), Type::Map(bk, bv)) => {
-                self.assignable(ak, bk) && self.assignable(av, bv)
-            }
-            (Type::Result(at, ae), Type::Result(bt, be)) => {
-                self.assignable(at, bt) && self.assignable(ae, be)
-            }
-            (Type::Union(members), _) => members.iter().all(|m| self.assignable(m, expected)),
-            (_, Type::Union(members)) => members.iter().any(|m| self.assignable(actual, m)),
-            // No kind rule applies — defer to the pure lattice (identity, covariance already
-            // handled above for the cases a kind could nest in, function arrows, primitives).
-            _ => Type::subtype(actual, expected),
-        }
+        // The pure subtype lattice, plus the one registry-dependent rule it defers: whether a
+        // `Named(n)` is a member of an abstract `Kind(k)`. Threading it through [`Type::subtype_with`]
+        // reaches every nested covariant position without re-implementing the variance walk here.
+        Type::subtype_with(actual, expected, &|n, k| self.is_of_kind(n, k))
     }
 
     /// Whether an argument of type `arg` may be passed where `param` is expected — the kind-aware

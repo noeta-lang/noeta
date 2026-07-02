@@ -214,6 +214,17 @@ impl Type {
     ///   parameters and covariant in the return (the standard arrow rule).
     /// - Everything else holds only by identity.
     pub fn subtype(sub: &Type, sup: &Type) -> bool {
+        // The pure lattice: no registry, so `Named(n) <: Kind(k)` is conservatively false.
+        Type::subtype_with(sub, sup, &|_, _| false)
+    }
+
+    /// The subtype relation, parameterized by a **nominal hook** deciding the one registry-dependent
+    /// rule the pure lattice cannot: whether a `Named(n)` is a member of an abstract `Kind(k)` (is `n`
+    /// an enum? a class?). The whole covariant/contravariant walk lives here once; [`subtype`] passes a
+    /// hook that always says "no" (the pure lattice), and the checker passes one backed by its type
+    /// registry (its `assignable`), so the nominal rule reaches every nested covariant position without
+    /// re-implementing the walk.
+    pub fn subtype_with(sub: &Type, sup: &Type, nominal: &impl Fn(&str, TypeKind) -> bool) -> bool {
         use Type::*;
         // Inference holes: bidirectionally compatible (no false positives on missing info).
         if sub.is_gradual() || sup.is_gradual() {
@@ -223,25 +234,24 @@ impl Type {
         if matches!(sup, Dyn) {
             return true;
         }
+        let rec = |a: &Type, b: &Type| Type::subtype_with(a, b, nominal);
         match (sub, sup) {
             // Narrowing out of `dyn` is never implicit (only via a checked `.as<T>()`).
             (Dyn, _) => false,
             // A union is a subtype of `sup` only if *every* arm is (`int | string <: dyn` already
             // held above; `int | string <: A` needs both). Checked before the member rule so
             // `(A|B) <: (C|D)` decomposes arm-by-arm on the left first.
-            (Union(members), _) => members.iter().all(|m| Type::subtype(m, sup)),
+            (Union(members), _) => members.iter().all(|m| rec(m, sup)),
             // A type widens into a union if it is a subtype of *any* member.
-            (_, Union(members)) => members.iter().any(|m| Type::subtype(sub, m)),
-            (List(a), List(b)) => Type::subtype(a, b),
-            (Set(a), Set(b)) => Type::subtype(a, b),
+            (_, Union(members)) => members.iter().any(|m| rec(sub, m)),
+            (List(a), List(b)) => rec(a, b),
+            (Set(a), Set(b)) => rec(a, b),
             // A tuple is element-wise covariant — same arity, each position a subtype (`(int, A) <:
             // (int, dyn)`). Sound: tuples are value-semantic and immutable.
-            (Tuple(a), Tuple(b)) => {
-                a.len() == b.len() && a.iter().zip(b).all(|(x, y)| Type::subtype(x, y))
-            }
-            (Map(ak, av), Map(bk, bv)) => Type::subtype(ak, bk) && Type::subtype(av, bv),
-            (Option(a), Option(b)) => Type::subtype(a, b),
-            (Result(at, ae), Result(bt, be)) => Type::subtype(at, bt) && Type::subtype(ae, be),
+            (Tuple(a), Tuple(b)) => a.len() == b.len() && a.iter().zip(b).all(|(x, y)| rec(x, y)),
+            (Map(ak, av), Map(bk, bv)) => rec(ak, bk) && rec(av, bv),
+            (Option(a), Option(b)) => rec(a, b),
+            (Result(at, ae), Result(bt, be)) => rec(at, bt) && rec(ae, be),
             (
                 Fn {
                     params: ap,
@@ -253,8 +263,8 @@ impl Type {
                 },
             ) => {
                 ap.len() == bp.len()
-                    && ap.iter().zip(bp).all(|(a, b)| Type::subtype(b, a)) // contravariant params
-                    && Type::subtype(ar, br) // covariant return
+                    && ap.iter().zip(bp).all(|(a, b)| rec(b, a)) // contravariant params
+                    && rec(ar, br) // covariant return
             }
             // A named type is covariant in its arguments (`Box<int> <: Box<dyn>`); the name must
             // match. An **empty** argument list on either side means "arguments unspecified" (a
@@ -269,14 +279,16 @@ impl Type {
                     && (aa.is_empty()
                         || ba.is_empty()
                         || (aa.len() == ba.len()
-                            && aa.iter().zip(ba).all(|(a, b)| {
-                                matches!(a, Dyn) || matches!(b, Dyn) || Type::subtype(a, b)
-                            })))
+                            && aa
+                                .iter()
+                                .zip(ba)
+                                .all(|(a, b)| matches!(a, Dyn) || matches!(b, Dyn) || rec(a, b))))
             }
+            // A `Named(n)` is a member of an abstract kind when the registry says so — the one rule
+            // the pure lattice defers to the `nominal` hook (`Named(n) <: Enum` iff `n` is an enum).
+            (Named(n, _), Kind(k)) => nominal(n, *k),
             // Abstract kind-types: a kind is a subtype only of the same kind (widening into `dyn`
-            // is handled above). `Named(n) <: Kind(k)` is **registry-dependent** (is `n` an enum?),
-            // which the pure lattice cannot decide — the checker's `assignable` handles it; here it
-            // is conservatively false.
+            // is handled above).
             (Kind(a), Kind(b)) => a == b,
             // Primitives, `Unit`: identity only.
             _ => sub == sup,
