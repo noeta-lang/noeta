@@ -1,7 +1,19 @@
 # Bit-level computation arc — bitwise ops → fixed-width integers → packed types & SIMD
 
-**Status: TIER B COMPLETE.** Tiers W and P remain (design below). Standard commit trailers.
-This is a *new track*, independent of the in-progress memory-management Phase 5.
+**Status: TIERS B & W COMPLETE. Tier P + W6 SUPERSEDED — the arc is closed; do not pick them up.**
+See the reconciliation notes on Tier P (below the W slices) and W6 before doing any SIMD/bitset work —
+both were overtaken by other tracks and are **not** open work. Standard commit trailers. This was a
+*new track*, independent of the memory-management line.
+
+- **Tier B — bitwise & shift on `int`. ✅ COMPLETE** (`& | ^ << >>`, `!`, hex/bin literals,
+  popcount-class intrinsics). B0–B4 shipped.
+- **Tier W — fixed-width integers. ✅ COMPLETE** (W1–W5): the eight `{i,u}{8,16,32,64}` types
+  (erase-to-i64 + type-directed masking), wrapping `+ - *`, sign-aware `/ % < <= > >=`, total
+  conversion methods, bitwise/shift (`<<` masks, `>>` logical-vs-arithmetic), and width-exact
+  intrinsics. Realized the "correct masks" substrate. The `BitSet` dogfood (W6's intent) shipped
+  **in-language** — see W6 below.
+- **Tier P — packed types & SIMD. ⛔ SUPERSEDED** (not built, and not to be built as sketched) — its
+  two use cases were delivered elsewhere. See the Tier P reconciliation note.
 
 **Tier B shipped (on `main`), all slices green (conformance / differential 0-skipped / leak 0):**
 - **B0 — integer literal forms** (`0x`/`0o`/`0b` + `_` separators) — already present from earlier work.
@@ -44,13 +56,13 @@ independently shippable and the cheap, useful part can land long before the expe
 
 | Tier | Delivers | Cost | Unlocks |
 |---|---|---|---|
-| **B — Bitwise operators on `int`** | `& \| ^ << >>`, complement, hex/bin literals, popcount-class intrinsics | Small (operators are `Op::Binary` discriminants; no value-repr change) | `int`-as-bitset for small flag work, mask plumbing |
-| **W — Fixed-width integers** | `u8/u32/u64` (+ maybe `i8/i16/i32`), wrapping arithmetic, logical shift, typed conversions | Large (type-lattice + checker + value-repr decisions) | *Correct* masks (defined wraparound, no sign-extension), the substrate for SIMD lanes |
-| **P — Packed types & SIMD** | `Simd<T, N>` lanes, elementwise ops, reductions + movemask, load/store | Milestone (new value kind; const-generic lane counts; scalar-semantics-first) | The Zed-blog class: SIMD scan/count, mask→index |
+| **B — Bitwise operators on `int` ✅** | `& \| ^ << >>`, complement, hex/bin literals, popcount-class intrinsics | Small (operators are `Op::Binary` discriminants; no value-repr change) | `int`-as-bitset for small flag work, mask plumbing |
+| **W — Fixed-width integers ✅** | full `{i,u}{8,16,32,64}`, wrapping arithmetic, sign-aware `/ %`/ordering, logical shift, typed conversions, width-exact intrinsics | Large (type-lattice + checker + value-repr decisions) | *Correct* masks (defined wraparound, no sign-extension); `u64` mask→index (`count_ones`/`trailing_zeros`) |
+| ~~**P — Packed types & SIMD**~~ ⛔ **SUPERSEDED** | ~~`Simd<T, N>` lanes, movemask, load/store~~ — **not built.** Numeric SIMD shipped as *columnar layout* autovectorization (`plans/perf/` P-SIMD, done); bit-scan/mask→index served by Tiers B+W | — | — (see the Tier P reconciliation note) |
 
 **Dependency:** B is standalone. W depends on B (its operators) and the completed inferred-static
-type system. P depends on W (lane scalars) and likely **const generics** (`Simd<u8, 16>` needs a
-const `N` — a prerequisite the S-track's bounded generics do *not* yet provide; see "Prerequisites").
+type system. **Tier P is superseded** (see its reconciliation note) — its const-generics
+"prerequisite" is moot for this arc.
 
 ## The oracle through-line (read this first — it shapes every slice)
 
@@ -66,14 +78,12 @@ program. Every slice below preserves this the same way:
   width through a **single shared masking helper**. This mirrors how declared unions are *erased* (a
   union value IS its concrete value) — width lives in the type, not the runtime tag. Both backends
   share the helper ⇒ agreement by construction; the value model is unchanged.
-- **Tier P** defines SIMD types with **scalar fallback semantics first** — every lane op is specified
-  elementwise and implemented with a plain loop in both backends. The differential then holds at
-  0-skipped because the semantics are portable and identical. *Real* SIMD codegen is a later
-  **perf-only** swap behind byte-identical semantics (it cannot change `RunResult`, so it cannot break
-  the oracle). This is the single most important design decision in the tier.
+- ~~**Tier P**~~ — superseded (see the reconciliation note); the columnar-layout SIMD win that
+  replaced it lives in the `plans/perf/` P-SIMD track, which already preserves the oracle (layout is
+  invisible to `RunResult`).
 
-Net: nothing in this arc requires divergent backend behavior. Bitwise = more `apply_binary` arms;
-fixed-width = erase-to-i64 + shared mask; SIMD = scalar semantics with an optional perf swap.
+Net: nothing in this arc required divergent backend behavior. Bitwise = more `apply_binary` arms;
+fixed-width = erase-to-i64 + shared mask. (SIMD is out of this arc — see Tier P.)
 
 ## Diagnostic codes
 
@@ -316,8 +326,15 @@ how untyped literals in an `i64`-typed context coerce (same in-range coercion as
     path (e.g. `(1u32).reverse_bits() == 2147483648`) covered + leak-clean. Conformance 408
     (types/fixed_width_intrinsics), differential 0-skipped / backends agree, leak 0 both, clippy + fmt
     clean. **W5 COMPLETE.**
-- **W6 — (optional) `BitSet` stdlib type.** A growable bitset over `[u64]` with `set/clear/test/
-  count/iter_set_bits`, the ergonomic consumer of the whole tier and a natural conformance demo.
+- **W6 — (optional) `BitSet` stdlib type. ⛔ SUPERSEDED — delivered in-language instead.** The intent
+  was "the ergonomic consumer of the whole tier + a conformance demo." That shipped as a **BitSet
+  written in the language** (`tests/conformance/classes/bitset.lang`) once the object-model follow-ons
+  landed (index-assignment through a field `self.words[i] = v`; live in-method field access; precise
+  `self.field` typing — see `plans/object-model-redesign/README.md`). It backs a `List<u64>` word
+  array and uses `<< >> & | !` + `count_ones()` end-to-end, dogfooding the tier exactly as W6 intended.
+  A *native* Rust `BitSet` value type was considered and rejected: it would not dogfood the tier (Rust
+  would use its own `u64` ops), and it is just another native collection. Only build one if a growable
+  bitset is wanted as a first-class stdlib primitive for its own sake — not as part of this arc.
 
 **Tier W gates:** as Tier B, plus **bench** any slice that claims a speed/space win (e.g. a `u8`
 buffer vs `int` list for memory), and miri over the masking + conversion paths. The checker work is
@@ -325,48 +342,42 @@ the bulk; lean on the existing inferred-static engine and add focused unit tests
 
 ---
 
-## Tier P — Packed types & SIMD
+## Tier P — Packed types & SIMD ⛔ SUPERSEDED (reconciliation, 2026-07)
 
-The milestone the type system was built to gate — the Zed-blog class proper (SIMD newline scan, lane
-counts, mask→index). Scope deliberately, and **lead with scalar semantics** so the oracle never
-breaks.
+**Do not build Tier P as an explicit `Simd<T, N>` lane type.** When this arc was written, Tier P was
+sketched as an explicit SIMD value type (lanes, elementwise ops, reductions, **`movemask`**, load/
+store, then real SIMD codegen — the Zed-blog newline-scan). It was never built, and it should not be:
+its two use cases were **delivered by other tracks**, and the project's own benchmarks contradicted the
+premise.
 
-### Prerequisites (flag before starting)
-- **Const generics.** `Simd<u8, 16>` needs a *const* lane count `N`. The S-track shipped bounded
-  *type* generics (`<T: Comparable>`) but **not** const-generic value parameters. This is a real
-  prerequisite — either a small preceding track ("const generic params `<const N: int>`") or a
-  restricted fixed-set of SIMD widths hard-coded as distinct types to avoid const generics in v1.
-  **Decision point.**
-- **Tier W** (the lane scalars) must land first.
+**Why it's closed, precisely:**
 
-### Slices
-- **P1 — the `Simd<T, N>` type + scalar-semantics value.** A new heap value kind: an aligned lane
-  array. Both backends store it identically and operate **scalar-ly** (a plain loop over lanes), so
-  semantics are portable and the differential agrees by construction. No real SIMD yet.
-- **P2 — elementwise ops.** `+ - * & | ^ << >>`, comparisons producing a lane-mask. Defined
-  elementwise over the Tier-W scalar semantics (including wraparound).
-- **P3 — reductions, masks, movemask.** `any()`, `all()`, `count()`, and **`movemask(): u64`** (pack
-  per-lane high bits into an integer) — the exact primitive that turns a SIMD compare into an index
-  via `trailing_zeros()` (B4). This is what "find the first newline in 16 bytes" compiles to.
-- **P4 — load/store.** Build a `Simd` from a slice of a `u8`/`u32` buffer (or string bytes) and write
-  back. Bounds + tail-handling defined.
-- **P5 — real SIMD codegen (PERF-ONLY, benched).** Swap the VM's scalar lane loops for actual
-  platform SIMD *behind byte-identical semantics*. Because it cannot change `RunResult`, the
-  differential and conformance are unchanged; this slice is gated purely on **measured speedup** (the
-  "bench every gain" mandate). The IR-interpreter may stay scalar — it is the reference.
+1. **Numeric elementwise/reduction SIMD → done via *columnar layout*, not lanes.** The `plans/perf/`
+   P-SIMD track (`p-simd.md`, **DONE**) shipped the throughput win as an opt-in structure-of-arrays
+   form — `vec.soa*` (`soa_dot`/`soa_length`, `lang-stdlib/src/vec3.rs`), **2.7×–4×** on dot/length.
+   Crucially, **explicit SIMD intrinsics (`wide`) were benched twice and dropped — they were *slower*
+   than an autovectorized scalar loop over a contiguous columnar buffer.** The lever is the *layout*
+   (contiguous same-type columns LLVM can vectorize), not hand-written lanes. Building `Simd<T, N>` +
+   `movemask` would re-introduce exactly the intrinsics approach that lost the bench. The clean surface
+   for the layout win — `@packed(layout: column)` as an invisible per-type perf attribute — is the
+   `plans/perf/p-simd-column-layout.md` follow-on (parser + checker wired; doc still "design, for
+   sign-off"; shipped surface today is `vec.soa*`). Any further SIMD-perf work continues **there**, not
+   here.
+2. **Bit-scan / `mask → index` (the newline trick) → served by Tier W.** The primitive Tier P's
+   `movemask` existed to feed — "turn a compare-mask into an index via `trailing_zeros`" — is now
+   directly expressible: a `u64` presence/compare mask plus `count_ones()` / `trailing_zeros()` /
+   `<< >> & | ^` (Tier B on `int`, Tier W on `u64`, both **complete**). The `BitSet` dogfood
+   (`classes/bitset.lang`) already demonstrates the mask→count→address composition end-to-end. An
+   explicit lane type buys nothing extra for this class of work.
 
-**Tier P gates:** conformance + differential (scalar semantics, 0-skipped, agree), miri over the new
-lane value's heap accounting, and — for P5 — a criterion bench proving the SIMD win on a realistic
-kernel (newline-scan / byte-count over a large buffer).
+**The const-generics "prerequisite" is therefore moot for this arc** — nothing here needs
+`Simd<u8, 16>`. (Reified/const generics remain their own independent milestone, wanted for other
+reasons — not as a Tier-P gate.)
 
----
-
-## Capstone (optional) — a rope, to prove the arc
-
-The blog's subject is a *rope*. Once Tier P lands, a `Rope` stdlib type (chunked text with a `u64`
-chunk-presence summary indexed via `count_ones`, and SIMD newline/char scanning) is the natural
-end-to-end demonstration that every primitive composes. Not required by the arc, but the obvious
-conformance showcase and the thing that proves the tiers were the right ones.
+**Capstone (rope):** the original "prove the arc with a `Rope`" idea assumed Tier P. The composition it
+was meant to show — a `u64` chunk-presence summary indexed via `count_ones`, plus fast scanning — is
+already provable with Tiers B+W (see `classes/bitset.lang`). A `Rope` stdlib type, if ever wanted, is
+an ordinary data-structure task, not a bit-tier capstone. Not open work.
 
 ## Cross-cutting work (all tiers)
 - **Docs:** `docs/resources/02-syntax.md` (operators, literal forms, fixed-width types), and the
@@ -377,10 +388,9 @@ conformance showcase and the thing that proves the tiers were the right ones.
 - **Memory:** on starting, add a `bitwise-arc` topic file + MEMORY.md index line; record the settled
   decision-point answers (types chosen, repr, overflow policy) since those are non-obvious and durable.
 
-## Suggested sequencing
-1. **Tier B in full** (B0→B4) — small, high-value, unblocks all flag/mask work. Ship and stop here if
-   that is all that is needed.
-2. **Tier W** only when *correct* masks (packing, logical shift, unsigned) are actually required —
-   settle the four decision points with the user first.
-3. **Tier P** only when SIMD throughput is the goal, and only after the const-generic prerequisite is
-   resolved. Land scalar-semantics first; treat real SIMD as a separate benched perf slice.
+## Suggested sequencing (historical — the arc is closed)
+1. **Tier B in full** (B0→B4). ✅ Done.
+2. **Tier W** (W1–W6). ✅ Done (W6 delivered in-language, see above).
+3. ~~**Tier P**~~ — **not sequenced; superseded** (see the Tier P reconciliation note). Numeric SIMD
+   lives in the `plans/perf/` P-SIMD columnar track; bit-scan/mask→index is served by Tiers B+W. No
+   remaining work in this arc.
