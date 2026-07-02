@@ -97,6 +97,13 @@ pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
     pub type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    /// Runtime type-argument reflection (`plans/reflection/runtime-type-args.md`, slice A): the
+    /// resolved `TypeRepr` at each collection/object **construction** site (list/map/set/object/enum
+    /// literal), so a value can be tagged with the type it was built as and `type_of`/`is` recover its
+    /// type arguments after the static type is lost to `dyn`. Annotation-driven — a `List<dyn>` literal
+    /// records `List(Dyn)`. Populated only for concretely-typed sites (a hole/`dyn` top is omitted →
+    /// the value stays untagged, i.e. the pre-track head-only runtime behavior).
+    pub construction_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     /// The packed-`List` construction-site map (see [`resolve_packed_list_sites`]).
     pub packed_list_sites: HashMap<Span, lang_ast::reflect::PackedLayout>,
     /// Call-site-typed native-call recipes (`json.parse::<T>`): the turbofish `T` resolved into a
@@ -140,6 +147,7 @@ pub fn check_all(program: &Program) -> Checked {
     Checked {
         diagnostics: checker.diags,
         type_of_sites: checker.type_of_sites,
+        construction_sites: checker.construction_sites,
         packed_list_sites: checker.packed_list_sites,
         ext_call_sites: checker.ext_call_sites,
         map_packed_sites: checker.map_packed_sites,
@@ -505,6 +513,7 @@ struct Checker {
     /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
     /// on the same program, so they emit identical `Type` values by construction.
     type_of_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
+    construction_sites: HashMap<Span, lang_ast::reflect::TypeRepr>,
     /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
     /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
     /// via [`resolve_packed_list_sites`] to lay out a `List<packed>` as one contiguous raw-primitive
@@ -2675,7 +2684,11 @@ impl Checker {
                     self.check(item, elem, env);
                 }
                 self.note_packed_list(elem, *span);
-                Type::List(elem.clone())
+                // Annotation-driven: record the *expected* element type (so `List<dyn> = [1,2,3]`
+                // tags `List(Dyn)`, not the inferred `List(int)`).
+                let ty = Type::List(elem.clone());
+                self.note_construction(&ty, *span);
+                ty
             }
             // An empty map literal absorbs an expected `Map<K, V>` (the map analogue of the list
             // arm); a non-empty map synthesizes its own element types and is then subsumed.
@@ -3159,7 +3172,9 @@ impl Checker {
                     elem = Type::Dyn; // recover as a mixed list
                 }
                 self.note_packed_list(&elem, *span);
-                Type::List(Box::new(elem))
+                let ty = Type::List(Box::new(elem));
+                self.note_construction(&ty, *span);
+                ty
             }
             // A tuple literal `(a, b, …)` synthesizes a `Type::Tuple` of its elements' types,
             // positionally — heterogeneity is the point (no unification, unlike a list).
@@ -3246,7 +3261,9 @@ impl Checker {
                     );
                     val_ty = Type::Dyn; // recover as a mixed map
                 }
-                Type::Map(Box::new(key_ty), Box::new(val_ty))
+                let ty = Type::Map(Box::new(key_ty), Box::new(val_ty));
+                self.note_construction(&ty, *span);
+                ty
             }
             Expr::Member {
                 receiver,
@@ -3347,7 +3364,9 @@ impl Checker {
                         .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
                         .collect()
                 };
-                Type::Named(lit.type_name.clone(), args)
+                let ty = Type::Named(lit.type_name.clone(), args);
+                self.note_construction(&ty, lit.span);
+                ty
             }
             Expr::Try { expr, span } => {
                 let inner = self.synth(expr, env);
@@ -4492,6 +4511,15 @@ impl Checker {
     fn note_packed_list(&mut self, elem: &Type, span: Span) {
         if let Some(layout) = self.packed_layout(elem) {
             self.packed_list_sites.insert(span, layout);
+        }
+    }
+
+    /// Record the resolved `TypeRepr` at a collection/object construction site (runtime type-arg
+    /// reflection, slice A — see [`Checked::construction_sites`]). A hole/`dyn`-top type is skipped, so
+    /// the value stays untagged and `type_of`/`is` fall back to the head-only runtime classification.
+    fn note_construction(&mut self, ty: &Type, span: Span) {
+        if let Some(repr) = type_to_repr_top(ty, &self.type_kinds) {
+            self.construction_sites.insert(span, repr);
         }
     }
 
