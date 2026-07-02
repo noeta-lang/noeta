@@ -80,11 +80,17 @@ table and carry a `u32` id instead of an `Rc` — deferred; correctness first.)
     eval/db/cli/conformance → lowering. Packed lists untagged (head-only), consistent. Conformance 415,
     differential 405/0-skipped/agree, leak 0 both, miri clean. Tests: `reflection/runtime_type_args.lang`
     (laundered recovery + nesting + invisibility) + updated `type_of_static_fidelity.lang`.
-  - **R1b — Map (and Set) tags** *(next)*. Map has a literal (`{k:v}`), so R0 already records its
-    construction site — extend the same node/`ListRepr`-style tag to `Payload::Map`/`Value::Map`
-    (`Op::MakeMap` reflect index) and consult it in `type_of`. Set has **no literal** (built via
-    `.to_set()`), so a Set tag needs propagation through `to_set` from its source list's tag — either do
-    that or leave Set head-only (decide when R1b lands).
+  - **R1b — map literals DONE** (`745739d`, on `dccd026`). Reused R1a's mechanism: VM node tag already
+    works for any pointer value → `Op::MakeMap` gains a `reflect: Option<u32>`, stamped at construction,
+    cleared at the in-place COW mutations (`map_insert`/`map_remove`); tree-walker `Value::Map` gains the
+    `Option<Rc<TypeRepr>>` field (equality compares only entries). `Rvalue::Map` carries `Map(K,V)`;
+    checker's empty-annotated-map check arm now records its site too (so `Map<string,dyn> = {}` tags).
+    `type_of(launder({"a":1}))`→`Map(string,int)`, nested + `Map<string,dyn>` + mutation-drop all pinned
+    in `runtime_type_args.lang`. **Prereq bug found+fixed first (`dccd026`):** VM `values_equal` had no
+    map arm → two equal maps compared `false` (latent VM/tree-walker divergence, like the old list arm).
+    Conformance 416, differential 406/0-skipped/agree, leak 0 both, miri clean.
+  - **Set** has **no literal** (built via `.to_set()`), so it stays head-only for now — a Set tag would
+    need propagation through `to_set` from its source list's tag; revisit only if a use case needs it.
 - **R2 — generic user-type tags.** Same tag on `Object` (struct/class) + enum values; `MakeStruct`/
   `MakeEnum` carry the `TypeRepr`; `type_of` reads it. Closes `type_of(launder(Box<int>))` → `Box<int>`.
 - **R3 — precise `is` / `as`.** The narrowing matcher consults the operand's tag: `x is List<int>` /
