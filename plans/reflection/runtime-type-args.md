@@ -135,12 +135,15 @@ table and carry a `u32` id instead of an `Rc` — deferred; correctness first.)
   `narrow_args_match`. `TypeRepr` gained `Eq`. No new diagnostic code. Test `reflection/is_type_args.lang`.
   Conformance 419, differential 409/0-skipped/agree, leak 0 both.
 
-**TRACK COMPLETE (R1a/R1b/R2a/R2b.1/R2b.2/R3)** — the reflection residual is closed for **lists, maps,
-generic structs/classes, and generic enums**, on `type_of` and `is`/`as`: type arguments are recovered
-at runtime even after a value is laundered through `dyn`, while a `List<dyn>`/untagged value honestly
-stays `dyn`. Only remaining: **Set** tags (no literal — built via `.to_set()`; would need `to_set` tag
-propagation) and **Approach B** (distinct shapes per instantiation — the benched perf follow-up,
-untouched). Along the way this arc also fixed real latent bugs (see [[value-equality-dispatch]],
+**TRACK COMPLETE (R1a/R1b/R2a/R2b.1/R2b.2/R3 + set tags)** — the reflection residual is closed for
+**every container and user type**: lists, maps, **sets**, generic structs/classes, and generic enums.
+Type arguments are recovered at runtime even after a value is laundered through `dyn` (on `type_of` and
+`is`/`as`), while a `List<dyn>`/untagged value honestly stays `dyn`. **Set tags DONE** (`eb10d4a`): a set
+has no literal (`#{…}` desugars to `[…].to_set()`), so its element type is carried from the source
+list's `List<T>` tag onto the `Set<T>` at `to_set` (VM `set_tag_from_list` + node tag; tree-walker
+`Value::Set` field + `call_list_method` threading); mutations (`.add`/`.remove`) drop the tag. Only
+remaining: **Approach B** (distinct shapes per instantiation — the benched perf follow-up, untouched).
+Along the way this arc also fixed real latent bugs (see [[value-equality-dispatch]],
 [[generics-send-destructor-gaps]]): VM structural map equality, enum `Send` soundness, generic-type
 over-restrictive `!Send`, and skipped generic-container destructors.
 
