@@ -1673,11 +1673,20 @@ where
             }),
             // Bitwise operators (P-BITS Tier B), Rust-style precedence: shifts bind just below the
             // additive tier, then `&`, `^`, `|` — all *above* comparison/equality, so
-            // `flags & MASK == 0` parses as `(flags & MASK) == 0` (avoiding the C footgun). `>>` is
-            // added in a follow-up (composed from two `Gt` so nested generics keep closing correctly).
-            infix(left(10), just(T::Shl), move |l, _, r, e| {
-                binary(ctx, BinaryOp::Shl, l, r, e)
-            }),
+            // `flags & MASK == 0` parses as `(flags & MASK) == 0` (avoiding the C footgun).
+            // `>>` is **not** a lexer token — it is composed here from two adjacent `Gt`, so nested
+            // generic closes (`Map<K, List<V>>`) keep lexing/parsing as two separate `Gt` in *type*
+            // position (the expression pratt is a disjoint context). This shift entry is placed before
+            // the comparison entry, so a `Gt Gt` pair is taken as `>>` before the single-`Gt` `>`
+            // comparison can claim the first one; a lone `Gt` falls through to comparison as before.
+            infix(
+                left(10),
+                choice((
+                    just(T::Shl).to(BinaryOp::Shl),
+                    just(T::Gt).ignore_then(just(T::Gt)).to(BinaryOp::Shr),
+                )),
+                move |l, op, r, e| binary(ctx, op, l, r, e),
+            ),
             infix(left(9), just(T::Amp), move |l, _, r, e| {
                 binary(ctx, BinaryOp::BitAnd, l, r, e)
             }),
@@ -3265,9 +3274,20 @@ mod tests {
         // the reused `|` token and the `Lt`/`Gt` tokens still parse union *types* and nested generic
         // closes (`List<int>>`) — the design's headline hazard. All in one program, no diagnostics.
         let parsed = parse_str(
-            "a = 5 & 3 | 0xF0 ^ 0b1010\nb = 1 << 4\nfn f(x: int | string): int { return 0 }\nm: Map<string, List<int>> = {}\n",
+            "a = 5 & 3 | 0xF0 ^ 0b1010\nb = 1 << 4\nc = 256 >> 2\nd = 5 > 3\nfn f(x: int | string): int { return 0 }\nm: Map<string, List<int>> = {}\n",
         );
         assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+        // `>>` (composed from two `Gt`) parses as a right shift, while a lone `>` (`d`) stays a
+        // comparison and the nested generic `List<int>>` still closes as two `Gt` in type position.
+        let pretty_full = parsed.program.to_pretty_string();
+        assert!(
+            pretty_full.contains("(binary \">>\""),
+            "`256 >> 2` should parse as a right shift"
+        );
+        assert!(
+            pretty_full.contains("(binary \">\""),
+            "`5 > 3` should still parse as a comparison"
+        );
         // Precedence sanity via the pretty tree: `5 & 3 | 0xF0 ^ 0b1010` groups as
         // `(5 & 3) | (0xF0 ^ 0b1010)` — `&`/`^` bind tighter than `|` (Rust-style), so the *outermost*
         // binary of `a` is `|`. The pretty printer renders the root op on its own `(binary "op"` line.
