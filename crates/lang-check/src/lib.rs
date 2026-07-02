@@ -411,6 +411,14 @@ fn assign(env: &mut Env, name: &str, ty: Type) {
 struct Checker {
     /// User-declared enums: name → variants.
     enums: HashMap<String, Vec<VariantInfo>>,
+    /// Each enum variant's **accurate positional payload types** (params intact), keyed by
+    /// `(enum, variant)` (R2b). Unlike [`VariantInfo::fields`] — which stores `field_type(&p.ty)` and
+    /// is `Unknown` for a positional payload (whose type is parsed into the `Param`'s *name*) — this
+    /// reconstructs the real type from the payload name, so generic-enum construction can infer the
+    /// enum's type arguments (`Tree.Leaf(5)` → `Tree<int>`) by unifying against the arguments. A
+    /// separate map so the (conservative, `Unknown`-tolerant) destructor-relevance and `Send` analyses
+    /// that read `VariantInfo::fields` are untouched.
+    enum_variant_payloads: HashMap<(String, String), Vec<Type>>,
     /// Top-level functions: name → signature.
     functions: HashMap<String, FnSig>,
     /// Records/classes: name → declared fields (name, type).
@@ -1011,6 +1019,15 @@ impl Checker {
                             fields: v.fields.iter().map(|p| field_type(&p.ty)).collect(),
                         })
                         .collect();
+                    // Record each variant's accurate positional payload types (R2b), so generic-enum
+                    // construction can infer the enum's type arguments. A positional payload's type is
+                    // parsed into the `Param`'s *name* (`Leaf(T)` → name `"T"`, no `ty`), so reconstruct
+                    // it from there; a named field (`Leaf(x: T)`) uses its annotation.
+                    for v in &e.variants {
+                        let types: Vec<Type> = v.fields.iter().map(variant_field_type).collect();
+                        self.enum_variant_payloads
+                            .insert((e.name.clone(), v.name.clone()), types);
+                    }
                     self.enums.insert(e.name.clone(), variants);
                     self.types.insert(e.name.clone());
                     self.type_kinds
@@ -4144,11 +4161,12 @@ impl Checker {
                         Type::Option(Box::new(ty))
                     };
                 }
-                // `Type.Variant(args)` — an algebraic enum constructor applied to its data.
+                // `Type.Variant(args)` — an algebraic enum constructor applied to its data. Infer the
+                // enum's type arguments from the payload (R2b), so `Tree.Leaf(5)` is `Tree<int>`.
                 if let Expr::Ident { name: tn, .. } = receiver.as_ref()
                     && self.is_enum_variant(tn, name)
                 {
-                    return Type::Named(tn.clone(), Vec::new());
+                    return self.enum_construction_type(tn, name, args, call_span);
                 }
                 // `module.func(args)` — a Ring 2 stdlib module call.
                 if let Expr::Ident { name: m, .. } = receiver.as_ref()
@@ -4260,6 +4278,47 @@ impl Checker {
     /// A generic one (a method of a generic class) instantiates and enforces its bounds through the
     /// shared [`Self::check_generic_call`]; a non-generic one checks arguments against its
     /// (erased) parameter types and returns its declared return type.
+    /// The type of an enum-variant construction — `Tree.Leaf(5)` (payload) or `Color.Red` (nullary) —
+    /// **inferring the enum's type arguments** (R2b): for a generic enum, unify the variant's declared
+    /// payload types against the argument types (like a generic constructor call, reusing
+    /// [`bind_type_params`]), filling any parameter the payload does not pin with `dyn`; for a
+    /// non-generic enum, the empty argument list. Records the construction site (`span`) so reflection
+    /// can tag the value (R2b.2); the refined type also flows into the static `type_of` path.
+    fn enum_construction_type(
+        &mut self,
+        enum_name: &str,
+        variant: &str,
+        args: &[Type],
+        span: Span,
+    ) -> Type {
+        let params = self
+            .generic_types
+            .get(enum_name)
+            .cloned()
+            .unwrap_or_default();
+        let type_args = if params.is_empty() {
+            Vec::new()
+        } else {
+            let pset: HashSet<String> = params.iter().cloned().collect();
+            let mut subst: HashMap<String, Type> = HashMap::new();
+            if let Some(fields) = self
+                .enum_variant_payloads
+                .get(&(enum_name.to_string(), variant.to_string()))
+            {
+                for (decl, arg) in fields.iter().zip(args) {
+                    bind_type_params(decl, arg, &pset, &mut subst);
+                }
+            }
+            params
+                .iter()
+                .map(|p| subst.get(p).cloned().unwrap_or(Type::Dyn))
+                .collect()
+        };
+        let ty = Type::Named(enum_name.to_string(), type_args);
+        self.note_construction(&ty, span);
+        ty
+    }
+
     fn call_user_method(
         &mut self,
         name: &str,
@@ -4854,11 +4913,13 @@ impl Checker {
         member_span: Span,
         env: &mut Env,
     ) -> Type {
-        // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type.
+        // `Type.Variant` (a nullary enum constructor like `Status.Paid`) reads as the enum type. For a
+        // generic enum a payload-free variant pins no parameter, so its arguments infer to `dyn`
+        // (R2b) — keeping the arity consistent with a payload variant of the same enum.
         if let Expr::Ident { name: tn, .. } = receiver
             && self.is_enum_variant(tn, name)
         {
-            return Type::Named(tn.clone(), Vec::new());
+            return self.enum_construction_type(tn, name, &[], member_span);
         }
         let recv = self.synth(receiver, env);
         if let Type::Named(n, recv_args) = &recv
@@ -5510,6 +5571,22 @@ fn reassigns(stmts: &[Stmt], name: &str) -> bool {
 /// The declared type of a field, or `Unknown` when unannotated.
 fn field_type(ty: &Option<TypeRef>) -> Type {
     ty.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown)
+}
+
+/// The type of one enum-variant payload field (R2b). A **positional** payload (`Leaf(T)`, `V(int)`)
+/// is parsed with its type as the `Param`'s *name* and no annotation, so its type is reconstructed
+/// from the name; a **named** field (`Leaf(x: T)`) uses its annotation. Reconstructing from the name
+/// routes through the same name→[`Type`] resolution `from_ref` uses, so `int` maps to [`Type::Int`]
+/// and a type parameter `T` to `Type::Named("T", [])` (the form [`bind_type_params`] unifies).
+fn variant_field_type(p: &Param) -> Type {
+    match &p.ty {
+        Some(tr) => Type::from_ref(tr),
+        None => Type::from_ref(&TypeRef::Named {
+            name: p.name.clone(),
+            args: Vec::new(),
+            span: p.name_span,
+        }),
+    }
 }
 
 /// The receiver (`self`) type inside a method of `name` — `Named(name, <its own type params>)` — so

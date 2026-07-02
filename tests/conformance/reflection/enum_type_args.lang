@@ -1,0 +1,47 @@
+// Generic-enum type-argument inference (R2b.1): a variant construction infers the enum's type
+// arguments by unifying the variant's declared payload types against the argument types — so
+// `Tree.Leaf(5)` is `Tree<int>`, not `Tree<>`. This refines the static type (and so the static
+// `type_of` path) for a non-laundered value; a payload-free variant of a generic enum pins no
+// parameter and infers `dyn`. Both backends bake the checker's per-site type identically.
+// expect: stdout "Tree<int>"
+// expect: stdout "Tree<string>"
+// expect: stdout "Tree<list<int>>"
+// expect: stdout "Tree<dyn>"
+// expect: stdout "Pair<int,string>"
+// expect: exit 0
+
+enum Tree<T> { Leaf(T); Empty; }
+enum Pair<A, B> { Both(A, B); Neither; }
+
+fn label(t: Type): string {
+    return match t {
+        Type.Int => "int",
+        Type.String => "string",
+        Type.Dyn => "dyn",
+        Type.List(inner) => "list<${label(inner)}>",
+        Type.Enum(name, args) => "${name}<${arglist(args)}>",
+        _ => "?",
+    };
+}
+
+// Join the type arguments' labels with commas.
+fn arglist(args: List<Type>): string {
+    mut out = "";
+    mut first = true;
+    for a in args {
+        out = if first then label(a) else "${out},${label(a)}";
+        first = false;
+    }
+    return out;
+}
+
+// The payload pins the parameter: `Tree.Leaf(5)` infers `Tree<int>` (static type_of, not laundered).
+echo label(type_of(Tree.Leaf(5)));         // Tree<int>
+echo label(type_of(Tree.Leaf("hi")));      // Tree<string>
+echo label(type_of(Tree.Leaf([1, 2])));    // Tree<list<int>> (nested)
+
+// A payload-free variant of a generic enum pins nothing → its argument infers `dyn`.
+echo label(type_of(Tree.Empty));           // Tree<dyn>
+
+// A multi-parameter enum binds each parameter from its position.
+echo label(type_of(Pair.Both(1, "x")));    // Pair<int,string>
