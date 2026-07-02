@@ -93,6 +93,20 @@ table and carry a `u32` id instead of an `Rc` — deferred; correctness first.)
     need propagation through `to_set` from its source list's tag; revisit only if a use case needs it.
 - **R2 — generic user-type tags.** Same tag on `Object` (struct/class) + enum values; `MakeStruct`/
   `MakeEnum` carry the `TypeRepr`; `type_of` reads it. Closes `type_of(launder(Box<int>))` → `Box<int>`.
+  - **R2a — generic struct/class literals DONE** (`68e65a7`). Tag on `Rvalue::Object` → `Op::MakeStruct`/
+    `Op::MakeStructInPlace` (reflect index); VM node tag, tree-walker `ObjectValue.reflect` (eq ignores
+    it). **Object type is invariant under field mutation → tag never cleared:** self-update keeps the
+    base's tag on the reuse path (both backends), stamps the literal's tag on the copy path (both).
+    **Only generic instantiations tagged** (`is_nongeneric_nominal` skips non-generic — head-only shape
+    name already recovers it, zero per-instance overhead). **`note_construction` erases in-scope type
+    params to `dyn` first** (`erase_type_params`) so a literal inside a generic constructor
+    (`Holder { item: x }`, `x: T`) reflects `Holder<dyn>`, never the param name `T`; a direct literal
+    the checker infers (`Box { value: 5 }` → `Box<int>`) is unaffected. Conformance 418, differential
+    408/0-skipped/agree, leak 0 both, miri clean. Test `reflection/runtime_type_args_generic.lang`.
+  - **R2b — generic enum tags** *(next)*. Enum-variant construction is a separate expression path (not
+    `Expr::Object`), so R0 doesn't record it and generic enums currently reflect head-only
+    (`Enum("Tree", [])`). Record the variant-construction site + tag the `MakeEnum` value. Consistent
+    across backends today (neither tags enums), so no divergence — just a fidelity gap to close.
 - **R3 — precise `is` / `as`.** The narrowing matcher consults the operand's tag: `x is List<int>` /
   `x is Box<int>` check arguments when tagged; untagged/`dyn` stays head-only. Removes the
   `is List<string>` false-positive. New behavior pinned; no new diagnostic code.
