@@ -386,7 +386,7 @@ async fn work(name: string, ms: int): int {
 concurrent {
     hs = [spawn work("a", 2), spawn work("b", 1)]
     xs = all(hs)                 // awaits all, results in input order
-    echo "done: ${xs.join(",")}"
+    echo "done: " ~ xs.join(",")
 }
 ```
 
