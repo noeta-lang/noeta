@@ -1,6 +1,19 @@
 # Split the VM (`lang-vm/src/lib.rs`, 7733 LOC)
 
-Status: todo
+Status: done (core split) — optional `dispatch` decomposition remains
+
+**Done (`2cc06db` → `28c72b9`):** the three concern seams are extracted —
+`methods.rs` (1119 LOC, receiver-method dispatch), `scheduler.rs` (473 LOC,
+async/isolate scheduler), `values.rs` (475 LOC, the value-construction seam).
+lib.rs dropped **7733 → 5729 LOC**. Extraction pattern: `impl Vm` methods moved
+verbatim (methods/scheduler → the few called from lib.rs are `pub(crate)`); the
+free-fn value cluster moved to `values.rs` as `pub(crate)` + re-exported at the
+crate root (`pub(crate) use values::*`) so callers use bare names unchanged.
+Differential 417/0 (backends agree), 118 VM unit tests, clippy/fmt clean;
+lang-value untouched so miri unaffected. **Remaining (optional follow-ons, see
+Out/Design):** the 2740-line `dispatch` fn → per-opcode `fn op_*`, the `Vm`
+25-field regrouping, and `Op::operands()/defs()` to collapse the regalloc
+matches.
 
 The register VM lives in one 7733-line file. It is competently engineered
 (inline caches, disciplined refcounting, a shared `Host`/`Executor` seam) but
@@ -66,12 +79,12 @@ Follow the `state_machine.rs` / `literals.rs` extraction pattern:
 
 ## Checklist
 
-- [ ] `values.rs` extracted; `pub(crate)` surface minimal; lib.rs shrinks ~450 LOC
-- [ ] `scheduler.rs` (async/isolate) extracted
-- [ ] `methods.rs` (builtin/receiver dispatch) extracted
+- [x] `values.rs` extracted; `pub(crate)` re-export at crate root; lib.rs shrinks ~450 LOC
+- [x] `scheduler.rs` (async/isolate) extracted
+- [x] `methods.rs` (builtin/receiver dispatch) extracted
 - [ ] (optional) `dispatch` arms → `fn op_*` methods
 - [ ] (optional) `Op::operands()/defs()` to collapse regalloc matches
-- [ ] differential 417/0, backends agree; clippy `--all-targets` + fmt clean; miri clean
+- [x] differential 417/0, backends agree; clippy `--all-targets` + fmt clean; miri n/a (lang-value untouched)
 
 ## Definition of done
 
