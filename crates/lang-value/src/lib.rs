@@ -2639,7 +2639,10 @@ mod tests {
         let handle = Value::make_handle(ScopeId::from_index(2), TaskId::from_index(5));
         assert!(handle.is_future());
         assert!(handle.is_handle());
-        assert_eq!(handle.handle_parts(), Some((ScopeId::from_index(2), TaskId::from_index(5))));
+        assert_eq!(
+            handle.handle_parts(),
+            Some((ScopeId::from_index(2), TaskId::from_index(5)))
+        );
         assert_eq!(handle.type_name(), "future");
         assert_eq!(handle.display(), "<future>");
         handle.release(); // frees the node, no leak

@@ -7,7 +7,7 @@
 
 use criterion::{Criterion, criterion_group, criterion_main};
 use lang_runtime::RealHost;
-use lang_stdlib::{FileHandle, Host, ReadSource};
+use lang_stdlib::{FileHandle, FileReader, FileSystem, ReadSource};
 use std::hint::black_box;
 
 /// Write a ~8 MB, 200k-line fixture once and return its path.
