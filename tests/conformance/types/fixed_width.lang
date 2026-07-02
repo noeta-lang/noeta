@@ -1,0 +1,49 @@
+// Tier W1: the eight fixed-width integer types (`i8 i16 i32 i64 u8 u16 u32 u64`) exist as distinct
+// scalar types with suffixed literals — decimal or `0x`/`0o`/`0b` radix, `_` separators. There is no
+// implicit widening/subtyping (movement to/from `int` and between widths is explicit — later slices).
+// A value is ERASED to the underlying `int` word at runtime, so `type_of` reports `Int` and both
+// backends agree by construction (the differential pins them). An untyped literal coerces into a
+// fixed-width annotation when it fits; a negated signed literal reaches the type's minimum (`-128i8`).
+// W1 is types/literals/range-checks only — arithmetic, ordering, and width-aware display land in W3,
+// so this exercises literals, equality, coercion, and small-value display (correct on the erased word).
+// expect: stdout "255"
+// expect: stdout "255"
+// expect: stdout "10"
+// expect: stdout "1000"
+// expect: stdout "511"
+// expect: stdout "42"
+// expect: stdout "-128"
+// expect: stdout "127"
+// expect: stdout "1"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "1000"
+// expect: stdout "-1000"
+// expect: stdout "Type.Int"
+// expect: exit 0
+
+// Literal forms across widths and radices.
+echo 255u8
+echo 0xFFi32
+echo 0b1010u16
+echo 1_000u32
+echo 0o777u16
+echo 42i8
+
+// Signed boundaries: `-128i8` (min) is valid though a bare `128i8` would overflow; `127i8` (max).
+echo -128i8
+echo 127i8
+echo 1u64
+
+// Equality is correct on the erased word (same width).
+echo 255u8 == 255u8
+echo 100u16 == 200u16
+
+// An untyped literal coerces into a fixed-width annotation when in range (positive and negative).
+x: u16 = 1000
+echo x
+y: i32 = -1000
+echo y
+
+// Erasure: reflection sees the underlying `int` — the width lives only in the static type.
+echo type_of(255u8)

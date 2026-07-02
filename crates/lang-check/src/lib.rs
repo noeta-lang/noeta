@@ -210,6 +210,9 @@ fn type_to_repr(
         Type::Int => TypeRepr::Int,
         Type::Float => TypeRepr::Float,
         Type::F32 => TypeRepr::F32,
+        // Fixed-width integers are **erased to `int`** at runtime (Tier W), so runtime reflection
+        // (`type_of`) cannot recover the width — it reports `Int`, consistent with the erased value.
+        Type::IntN { .. } => TypeRepr::Int,
         Type::Bool => TypeRepr::Bool,
         Type::String => TypeRepr::Str,
         Type::Bytes => TypeRepr::Bytes,
@@ -2756,6 +2759,32 @@ impl Checker {
                     ret: Box::new(declared.unwrap_or(body_ty)),
                 }
             }
+            // An **untyped** integer literal (optionally negated) coerces into a fixed-width context
+            // when it fits the width's range — `x: u8 = 200`, `y: i8 = -5`. Out of range → E0044.
+            // (A *suffixed* literal like `200u8` is an `Expr::IntN`, not an `Expr::Int`; it
+            // synthesizes its own `IntN` type and is subsumed by the default arm below.)
+            Expr::Int { span, .. }
+            | Expr::Unary {
+                op: UnaryOp::Neg,
+                span,
+                ..
+            } if matches!(expected, Type::IntN { .. }) && int_literal_value(expr).is_some() => {
+                let Type::IntN { signed, bits } = expected else {
+                    unreachable!()
+                };
+                let value = int_literal_value(expr).unwrap();
+                let (lo, hi) = Self::int_width_range(*signed, *bits);
+                if value < lo || value > hi {
+                    self.diags.push(Diagnostic::error(
+                        DiagnosticCode::FixedWidthOutOfRange,
+                        *span,
+                        format!(
+                            "literal `{value}` is out of range for `{expected}` (valid range {lo}..={hi})"
+                        ),
+                    ));
+                }
+                expected.clone()
+            }
             // Default: synthesize the actual type, then require it to be a subtype of the
             // expectation.
             _ => {
@@ -2827,12 +2856,74 @@ impl Checker {
 
     // ----- synthesis -----
 
+    /// Range-check a fixed-width integer literal (Tier W) and return its `Type::IntN`. `negated` is
+    /// set when the literal is the operand of a unary `-`, which widens a signed type's low bound to
+    /// `-2^(bits-1)` (so `-128i8` is valid though bare `128i8` overflows) and makes negating an
+    /// **unsigned** literal an error. Out of range / illegal negation pushes `E0044`; the type is
+    /// still returned so downstream inference proceeds.
+    fn check_intn_literal(
+        &mut self,
+        magnitude: u64,
+        signed: bool,
+        bits: u8,
+        negated: bool,
+        span: Span,
+    ) -> Type {
+        let ty = Type::IntN { signed, bits };
+        let mag = magnitude as u128;
+        if negated && !signed {
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::FixedWidthOutOfRange,
+                span,
+                format!("cannot negate an unsigned literal `{magnitude}{ty}`"),
+            ));
+            return ty;
+        }
+        // Legal magnitude bound: unsigned `2^bits - 1`; signed positive `2^(bits-1) - 1`; a negated
+        // signed literal reaches down to `-2^(bits-1)`, i.e. magnitude `2^(bits-1)`.
+        let max = if !signed {
+            (1u128 << bits) - 1
+        } else if negated {
+            1u128 << (bits - 1)
+        } else {
+            (1u128 << (bits - 1)) - 1
+        };
+        if mag > max {
+            let (lo, hi) = Self::int_width_range(signed, bits);
+            self.diags.push(Diagnostic::error(
+                DiagnosticCode::FixedWidthOutOfRange,
+                span,
+                format!(
+                    "literal `{}{magnitude}{ty}` is out of range for `{ty}` (valid range {lo}..={hi})",
+                    if negated { "-" } else { "" },
+                ),
+            ));
+        }
+        ty
+    }
+
+    /// The inclusive `(min, max)` value range of a fixed-width integer type, as `i128` so every
+    /// width (including `u64`) fits — used only for diagnostic text.
+    fn int_width_range(signed: bool, bits: u8) -> (i128, i128) {
+        if signed {
+            (-(1i128 << (bits - 1)), (1i128 << (bits - 1)) - 1)
+        } else {
+            (0, (1i128 << bits) - 1)
+        }
+    }
+
     fn synth(&mut self, expr: &Expr, env: &mut Env) -> Type {
         match expr {
             Expr::Str { .. } => Type::String,
             Expr::Int { .. } => Type::Int,
             Expr::Float { .. } => Type::Float,
             Expr::F32 { .. } => Type::F32,
+            Expr::IntN {
+                magnitude,
+                signed,
+                bits,
+                span,
+            } => self.check_intn_literal(*magnitude, *signed, *bits, false, *span),
             Expr::Bool { .. } => Type::Bool,
             Expr::Interp { parts, .. } => {
                 for part in parts {
@@ -2851,6 +2942,21 @@ impl Checker {
                 })
                 .unwrap_or(Type::Unknown),
             Expr::Unary { op, operand, span } => {
+                // A negated fixed-width literal (`-128i8`, `-1i32`): check against the *signed*
+                // negative range here, so the inner literal's positive-range check does not fire a
+                // false positive on the boundary value `128i8` that only `-128i8` may reach.
+                if let (
+                    UnaryOp::Neg,
+                    Expr::IntN {
+                        magnitude,
+                        signed,
+                        bits,
+                        span: lit_span,
+                    },
+                ) = (op, operand.as_ref())
+                {
+                    return self.check_intn_literal(*magnitude, *signed, *bits, true, *lit_span);
+                }
                 let t = self.synth(operand, env);
                 // A list spread `...xs` (the marker the L2 desugar wraps spread operands in) must
                 // spread a list — otherwise the desugared `~` would silently fall through to
@@ -4982,20 +5088,46 @@ fn stmt_has_yield(stmt: &Stmt) -> bool {
     }
 }
 
+/// The signed value of an **untyped** integer literal expression — `Int{v}` → `v`, `-Int{v}` →
+/// `-v` — or `None` if it is not a plain (optionally negated) integer literal. Used to coerce an
+/// untyped literal into a fixed-width context (Tier W). `i128` so no width's range overflows.
+fn int_literal_value(expr: &Expr) -> Option<i128> {
+    match expr {
+        Expr::Int { value, .. } => Some(*value as i128),
+        Expr::Unary {
+            op: UnaryOp::Neg,
+            operand,
+            ..
+        } => match operand.as_ref() {
+            Expr::Int { value, .. } => Some(-(*value as i128)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Whether a **built-in** type satisfies a built-in trait — the static mirror of what the backends
 /// actually dispatch. The scalars are ordered/equatable; both numerics are arithmetic; `string`
 /// and `list` concatenate; almost everything displays. (User types satisfy traits only via an
 /// explicit `@derive`/`impl`, handled in [`Checker::satisfies`].)
+///
+/// Fixed-width integers (Tier W) satisfy `Equatable`/`Display` here — equality and (small-value)
+/// display are correct on the erased `int` word. `Comparable` and the arithmetic traits are
+/// **deliberately withheld until Tier W3** adds width-aware ordering/arithmetic (unsigned ordering
+/// and wraparound need the width, which the bare erased op does not carry), so `<`/`+` on an `IntN`
+/// is a clean "not yet" error rather than a subtly-wrong result.
 fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
     use Type::*;
     match trait_name {
-        "Comparable" | "Equatable" => matches!(ty, Int | Float | F32 | String | Bool),
+        "Comparable" => matches!(ty, Int | Float | F32 | String | Bool),
+        "Equatable" => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
         "Add" | "Sub" | "Mul" | "Div" => matches!(ty, Int | Float | F32),
         "Concat" => matches!(ty, String | List(_)),
         "Display" => matches!(
             ty,
             Int | Float
                 | F32
+                | IntN { .. }
                 | String
                 | Bool
                 | Unit
@@ -5143,6 +5275,7 @@ fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         | Type::Int
         | Type::Float
         | Type::F32
+        | Type::IntN { .. }
         | Type::Bool
         | Type::String
         | Type::Bytes => false,
@@ -5263,6 +5396,7 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
         // Leaves — no sub-expressions.
         Expr::Str { .. }
         | Expr::Int { .. }
+        | Expr::IntN { .. }
         | Expr::Float { .. }
         | Expr::F32 { .. }
         | Expr::Bool { .. }

@@ -1106,6 +1106,36 @@ where
                 span,
             }
         });
+        let intn_lit = just(T::IntNLit).map_with(move |_, e| {
+            let span = ctx.to_span(e.span());
+            let text = ctx.source.slice(span);
+            match parse_intn_literal(text) {
+                Some((magnitude, signed, bits)) => Expr::IntN {
+                    magnitude,
+                    signed,
+                    bits,
+                    span,
+                },
+                // The lexer guarantees a well-formed body + width suffix, so the only failure is a
+                // magnitude that overflows 64 bits (which no width could hold). The width range
+                // check (E0044) is the checker's job; this is a lexical-magnitude overflow.
+                None => {
+                    ctx.diags.borrow_mut().push(Diagnostic::error(
+                        DiagnosticCode::UnexpectedToken,
+                        span,
+                        format!(
+                            "integer literal `{text}` does not fit in a 64-bit fixed-width integer"
+                        ),
+                    ));
+                    Expr::IntN {
+                        magnitude: 0,
+                        signed: false,
+                        bits: 64,
+                        span,
+                    }
+                }
+            }
+        });
         let string = just(T::StringLit)
             .map_with(move |_, e| parse_string_literal(ctx, ctx.to_span(e.span())));
         let raw_string =
@@ -1469,6 +1499,7 @@ where
         let atom = choice((
             int,
             f32_lit,
+            intn_lit,
             float,
             string,
             raw_string,
@@ -3207,6 +3238,41 @@ fn parse_f32_literal(text: &str) -> f32 {
     let body = text.strip_suffix("f32").unwrap_or(text);
     let cleaned: String = body.chars().filter(|&c| c != '_').collect();
     cleaned.parse().unwrap_or(0.0)
+}
+
+/// Parse a fixed-width integer literal's source text (Tier W) into its `(magnitude, signed, bits)`,
+/// stripping the width suffix and `_` separators and honouring the `0x`/`0o`/`0b` radix prefix. The
+/// magnitude is the **unsigned** parsed value (a leading `-` is a separate unary op); `None` means it
+/// overflows 64 bits — no width can hold it. The per-width range check is the checker's (E0044).
+fn parse_intn_literal(text: &str) -> Option<(u64, bool, u8)> {
+    const WIDTHS: [(&str, bool, u8); 8] = [
+        ("i8", true, 8),
+        ("i16", true, 16),
+        ("i32", true, 32),
+        ("i64", true, 64),
+        ("u8", false, 8),
+        ("u16", false, 16),
+        ("u32", false, 32),
+        ("u64", false, 64),
+    ];
+    for (suffix, signed, bits) in WIDTHS {
+        let Some(body) = text.strip_suffix(suffix) else {
+            continue;
+        };
+        let cleaned: String = body.chars().filter(|&c| c != '_').collect();
+        let lower = cleaned.to_ascii_lowercase();
+        let magnitude = if let Some(hex) = lower.strip_prefix("0x") {
+            u64::from_str_radix(hex, 16)
+        } else if let Some(oct) = lower.strip_prefix("0o") {
+            u64::from_str_radix(oct, 8)
+        } else if let Some(bin) = lower.strip_prefix("0b") {
+            u64::from_str_radix(bin, 2)
+        } else {
+            cleaned.parse::<u64>()
+        };
+        return magnitude.ok().map(|m| (m, signed, bits));
+    }
+    None
 }
 
 /// Parse a single interpolation hole's expression. The hole text is lexed and parsed

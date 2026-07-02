@@ -1,0 +1,6 @@
+// Tier W1: `128` overflows a signed `i8` (max 127) even though the negated `-128i8` is valid. The
+// bare positive literal is checked against the positive range, so `128i8` is E0044. This is the
+// asymmetric signed boundary: only `-128i8` may reach the type's minimum magnitude.
+// expect: error E0044 at 6:6
+// expect: exit 1
+echo 128i8

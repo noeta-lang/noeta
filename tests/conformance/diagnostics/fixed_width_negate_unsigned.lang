@@ -1,0 +1,6 @@
+// Tier W1: an unsigned fixed-width type has no negative values, so negating an unsigned literal
+// (`-1u8`) is a static error (E0044) rather than a wraparound to `255u8`. Negation is only defined on
+// the signed widths; unsigned "negatives" must be written as the intended bit pattern explicitly.
+// expect: error E0044 at 6:7
+// expect: exit 1
+echo -1u8

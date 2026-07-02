@@ -1,0 +1,7 @@
+// Tier W1: an untyped integer literal coerces into a fixed-width annotation only when it fits the
+// width's range. `300` does not fit `u8` (0..=255), so the coercion at the annotation is E0044: the
+// same range rule as a suffixed literal, applied where the untyped literal meets the context.
+// expect: error E0044 at 6:9
+// expect: exit 1
+x: u8 = 300
+echo x

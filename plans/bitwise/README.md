@@ -185,31 +185,60 @@ sign-extension, exact-width popcount. This is a real type-system and value-repre
 the expensive middle of the arc — so its decisions are called out explicitly and should be settled
 *with the user* before W1.
 
-### Decision points (settle before building)
-1. **Which types?** Full `{i,u}{8,16,32,64}`, or a focused `u8 / u32 / u64` (+ keep `int` = i64)?
-   The rope tricks need `u64` masks and `u8`/`u32` lanes. **Recommendation: start `u8, u32, u64`**;
-   add the rest on demand. (`int` stays the ergonomic default signed type.)
-2. **Subtyping.** Are fixed-width ints subtypes of `int`? **Recommendation: NO** — implicit
-   widen/truncate is a footgun. They are distinct scalar types; movement between them and `int` is via
-   **explicit conversions** (W4). Mixed-width arithmetic (`u8 + u32`) is **E0037** (cast required).
-3. **Value representation — the crux.** **Recommendation: erase-to-i64 + type-directed masking** (the
-   union-erasure philosophy): a fixed-width value is physically the existing i64 word; the compiler
-   emits width-aware ops that mask the result to the declared width via a shared helper, so wraparound
-   and logical shift are correct in *both* backends with **no new NaN-box tags and no value-model
-   change**. Width/signedness travel in the type and reach the backend through the existing
-   checker→backend channel (the S-track already threads resolved types to the compiler, e.g.
-   `resolve_type_of_sites`). The alternative (new NaN tags per width, or a boxed width-carrying cell)
-   costs scarce tag space or an allocation per scalar — reject unless masking proves insufficient.
-4. **Overflow policy.** Fixed-width arithmetic is for bit work, where **wrapping is the expected
-   default**. **Recommendation: wrapping by default**, with `checked_*` (→ `Option`), `saturating_*`,
-   and `wrapping_*` methods for explicit intent. `int` (i64) keeps its current policy.
+### Decision points — SETTLED WITH USER (2026-07-02)
+1. **Which types? → FULL `{i,u}{8,16,32,64}`.** All eight fixed-width types (`i8 i16 i32 i64` +
+   `u8 u16 u32 u64`) land in Tier W. `int` stays the ergonomic default signed type (distinct from
+   `i64` — see below). One `Type::IntN { signed, bits }` variant covers all eight.
+2. **Subtyping → NO.** Fixed-width ints are **distinct scalar types**, not subtypes of `int`. All
+   movement between widths and to/from `int` is via **explicit conversions** (W4). Mixed-width
+   arithmetic (`u8 + u32`, or `u8 + int`) is a **cast-required error** (E0044+).
+3. **Value representation → ERASE-TO-i64 + TYPE-DIRECTED MASKING** (the union-erasure philosophy): a
+   fixed-width value is physically the existing i64 word; the compiler emits width-aware ops that mask
+   the result to the declared width via a single shared helper, so wraparound and logical shift are
+   correct in *both* backends with **no new NaN-box tags and no value-model change**. Width/signedness
+   travel in the type and reach the backend through the existing checker→backend channel (the S-track
+   already threads resolved types to the compiler, e.g. `resolve_type_of_sites`).
+4. **Overflow policy → WRAPPING BY DEFAULT.** Fixed-width `+ - * ` wrap to the declared width;
+   `checked_*` (→ `Option`), `saturating_*`, and `wrapping_*` methods express other intent. `int`
+   (i64) keeps its current policy.
+
+**Design note (i64 vs `int`):** with the full set chosen, `i64` and `int` are the *same* physical
+value and range but **different types** (no subtyping ⇒ `int + i64` needs a cast). Keep `int` as the
+inferred default for untyped integer literals and arithmetic; `i64` is the explicit fixed-width
+sibling that composes with the other widths under the uniform width/conversion rules. W1 must decide
+how untyped literals in an `i64`-typed context coerce (same in-range coercion as the other widths).
 
 ### Slices
-- **W1 — lattice + literals.** Add the chosen scalar types to `Type` (suggest `Type::IntN { signed,
-  bits }` so one variant covers all widths; update `is_numeric`, `from_ref` for the new builtin names
-  `u8`/`u32`/`u64`, subtyping = invariant/no-widen). Typed literals `255u8`, `0xFFu32`, `1u64`;
-  out-of-range literal → **E0035**. Checker literal inference: a fixed-width context coerces an
-  untyped int literal to that width if in range.
+- **W1 — lattice + literals. ✅ DONE.** Added the eight scalar types as one `Type::IntN { signed,
+  bits }` variant + a shared `parse_int_width` decoder (single source of truth for the eight
+  spellings, used by `from_ref`, `is_builtin_name`, `Display`). Lexer `IntNLit` token (all four
+  radices × eight suffixes, maximal-munch over `IntLit`); parser `parse_intn_literal` →
+  `Expr::IntN { magnitude, signed, bits }` (magnitude parsed unsigned into `u64`, a leading `-` is a
+  separate unary op; overflow of 64 bits is a lexical error). Checker: `check_intn_literal`
+  range-checks the literal (positive range for a bare literal; the `Unary{Neg, IntN}` arm widens a
+  signed type to its `-2^(bits-1)` minimum so `-128i8` is valid though bare `128i8` overflows;
+  negating an **unsigned** literal is an error) and untyped-literal coercion into a fixed-width
+  annotation (`x: u8 = 200`, `y: i8 = -5`) via a check-mode arm — all out-of-range/illegal cases →
+  **E0044 `FixedWidthOutOfRange`**. Subtyping = identity-only (the `subtype` `_ => sub == sup`
+  catch-all already gives no cross-width widening, and `is_numeric` deliberately *excludes* `IntN`
+  so it stays out of the numeric-widening lattice and the arg-leniency).
+
+  **Erasure realized (the key W1 simplification):** an `IntN` literal lowers to an ordinary
+  `Const::Int(magnitude as i64)` — **no new runtime `Value`, NaN-box tag, IR const, or bytecode
+  const**. Width lives only in the type; the runtime word is the erased i64. Consequences, scoped to
+  W1 honestly: `type_of(1u8)` reports `Int` (reflection sees the erased value — `Type::IntN =>
+  TypeRepr::Int`); `Equatable`/`Display` are enabled (correct on the erased word for the common
+  case), while **`Comparable` and the arithmetic traits are withheld to W3** (unsigned ordering +
+  wraparound need the width — a bare erased `<`/`+` would be subtly wrong), so `1u8 + 2u8` / `1u8 <
+  2u8` are a clean E0007 "not yet." Conformance 397 (types/fixed_width + 4 E0044 diagnostics),
+  differential 387 / 0-skipped / backends agree, leak residency 0 both, clippy + fmt clean.
+
+  **Deferred to W2/W3 (write these up in `plans/deferred.md` when W2 starts):** width-aware
+  **display** of unsigned high-bit values (`u64 ≥ 2^63` erases to a negative i64 and would print
+  wrong — needs the compiler to emit width-aware formatting); mixed-width **comparison** strictness
+  (`u8 == u16` is currently lenient-true via erasure — decide whether `==` across widths needs a
+  cast like arithmetic will); reflection **fidelity** (distinguishing widths in `type_of` would
+  require carrying the width to runtime, which contradicts erasure — likely never).
 - **W2 — value repr + the masking helper (both backends).** Implement the shared
   `mask_to_width(value, bits, signed)` in `lang-value`; the compiler emits width-tagged binary/unary
   ops (e.g. extend `Op::Binary` with an optional width, or a new `Op::BinaryWidth { op, bits, signed }`)

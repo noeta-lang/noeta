@@ -175,6 +175,11 @@ pub enum DiagnosticCode {
     /// Tier B). These operators are integer-only — `bool` uses `&&`/`||`, and there is no bitwise
     /// overload for other types in v1.
     NonIntegerBitwise,
+    /// A fixed-width integer literal (Tier W) is outside the declared width's range — a bare
+    /// `256u8`, a `128i8` (max 127), a negated `-129i8`, or negating an unsigned literal (`-1u8`);
+    /// also an untyped integer literal coerced into a fixed-width context that does not fit it
+    /// (`x: u8 = 300`). The value simply does not fit the type's range.
+    FixedWidthOutOfRange,
 }
 
 impl DiagnosticCode {
@@ -224,6 +229,7 @@ impl DiagnosticCode {
         DiagnosticCode::OrphanSpawn,
         DiagnosticCode::NotSend,
         DiagnosticCode::NonIntegerBitwise,
+        DiagnosticCode::FixedWidthOutOfRange,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -273,6 +279,7 @@ impl DiagnosticCode {
             DiagnosticCode::OrphanSpawn => "E0041",
             DiagnosticCode::NotSend => "E0042",
             DiagnosticCode::NonIntegerBitwise => "E0043",
+            DiagnosticCode::FixedWidthOutOfRange => "E0044",
         }
     }
 

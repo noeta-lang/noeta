@@ -82,6 +82,17 @@ pub enum Type {
     /// observable precision. Written with the `f32` literal suffix (`1.0f32`); arithmetic widens it
     /// within the numeric lattice `int < f32 < float`, but assignment is strict (like `int`/`float`).
     F32,
+    /// A **fixed-width integer** (Tier W): one of `i8 i16 i32 i64 u8 u16 u32 u64`, decoded as
+    /// `{signed, bits}`. Distinct from `int` (i64) and from each other — there is **no** implicit
+    /// widening/subtyping (movement between widths and to/from `int` is via explicit conversions),
+    /// so the lattice treats every `(signed, bits)` pair as its own scalar with identity-only
+    /// subtyping. The value is **erased to the underlying i64 word at runtime** (the union-erasure
+    /// philosophy): width and signedness live only in the type, and the compiler emits width-aware
+    /// masking ops — there is no runtime tag for it. `bits` is always one of 8/16/32/64.
+    IntN {
+        signed: bool,
+        bits: u8,
+    },
     Bool,
     String,
     /// A raw immutable byte buffer (`bytes`) — the binary-serialization surface (P-PACK 4.4). Produced
@@ -125,6 +136,28 @@ pub enum Type {
     /// slice 4). Always ≥2 elements (a 1-tuple is unrepresentable in the surface — `(T)` is a
     /// parenthesized type — and `()` is `unit`). Subtyping is element-wise covariant.
     Tuple(Vec<Type>),
+}
+
+/// Decode a **fixed-width integer type name** (`i8 i16 i32 i64 u8 u16 u32 u64`) into its
+/// `(signed, bits)`, or `None` for any other name. Deliberately rejects `int`/`unit`/bare `i`/`u`
+/// (the prefix must be followed by exactly one of the four legal widths). The single source of
+/// truth for what spellings the Tier-W width types accept — the lexer, parser, `from_ref`, and
+/// `is_builtin_name` all route through it.
+pub fn parse_int_width(name: &str) -> Option<(bool, u8)> {
+    let (signed, rest) = if let Some(r) = name.strip_prefix('i') {
+        (true, r)
+    } else if let Some(r) = name.strip_prefix('u') {
+        (false, r)
+    } else {
+        return None;
+    };
+    match rest {
+        "8" => Some((signed, 8)),
+        "16" => Some((signed, 16)),
+        "32" => Some((signed, 32)),
+        "64" => Some((signed, 64)),
+        _ => None,
+    }
 }
 
 impl Type {
@@ -249,30 +282,31 @@ impl Type {
     /// `lang-check` uses this to decide whether a `TypeRef` base name needs to resolve to a
     /// *declared* type (for the unknown-type diagnostic).
     pub fn is_builtin_name(name: &str) -> bool {
-        matches!(
-            name,
-            "int"
-                | "float"
-                | "f32"
-                | "bool"
-                | "string"
-                | "bytes"
-                | "void"
-                | "unit"
-                | "dyn"
-                | "Any"
-                | "List"
-                | "Map"
-                | "Set"
-                | "list"
-                | "map"
-                | "set"
-                | "Option"
-                | "Result"
-                | "Enum"
-                | "Struct"
-                | "Class"
-        )
+        parse_int_width(name).is_some()
+            || matches!(
+                name,
+                "int"
+                    | "float"
+                    | "f32"
+                    | "bool"
+                    | "string"
+                    | "bytes"
+                    | "void"
+                    | "unit"
+                    | "dyn"
+                    | "Any"
+                    | "List"
+                    | "Map"
+                    | "Set"
+                    | "list"
+                    | "map"
+                    | "set"
+                    | "Option"
+                    | "Result"
+                    | "Enum"
+                    | "Struct"
+                    | "Class"
+            )
     }
 
     /// Build a union from its members, **normalizing**: flatten nested unions, drop structural
@@ -336,6 +370,10 @@ impl Type {
                     "int" => Type::Int,
                     "float" => Type::Float,
                     "f32" => Type::F32,
+                    fixed if parse_int_width(fixed).is_some() => {
+                        let (signed, bits) = parse_int_width(fixed).unwrap();
+                        Type::IntN { signed, bits }
+                    }
                     "bool" => Type::Bool,
                     "string" => Type::String,
                     "bytes" => Type::Bytes,
@@ -372,6 +410,9 @@ impl std::fmt::Display for Type {
             Type::Int => f.write_str("int"),
             Type::Float => f.write_str("float"),
             Type::F32 => f.write_str("f32"),
+            Type::IntN { signed, bits } => {
+                write!(f, "{}{bits}", if *signed { 'i' } else { 'u' })
+            }
             Type::Bool => f.write_str("bool"),
             Type::String => f.write_str("string"),
             Type::Bytes => f.write_str("bytes"),

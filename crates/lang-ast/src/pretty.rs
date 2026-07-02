@@ -510,6 +510,15 @@ impl Pretty for Expr {
             Expr::F32 { value, span: s } => {
                 out.push_str(&format!("(f32 {value} {})", span(*s)));
             }
+            Expr::IntN {
+                magnitude,
+                signed,
+                bits,
+                span: s,
+            } => {
+                let suffix = if *signed { 'i' } else { 'u' };
+                out.push_str(&format!("(intn {magnitude}{suffix}{bits} {})", span(*s)));
+            }
             Expr::Bool { value, span: s } => {
                 out.push_str(&format!("(bool {value} {})", span(*s)));
             }

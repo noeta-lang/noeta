@@ -169,6 +169,17 @@ pub enum TokenKind {
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f32")]
     #[regex(r"[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f32")]
     F32Lit,
+    /// A **fixed-width integer literal** (Tier W): an integer literal (decimal or `0x`/`0o`/`0b`
+    /// radix, with `_` separators) carrying one of the eight width suffixes `i8 i16 i32 i64 u8 u16
+    /// u32 u64` — `255u8`, `0xFFi32`, `0b1010u16`, `1_000u32`. Maximal munch picks this over
+    /// `IntLit` + an identifier suffix; a bare width name (no leading digits) stays an `Ident` (the
+    /// type name). Only integer bodies take the suffix (there is no `1.5u8`). The parser re-slices
+    /// the span to recover the magnitude, radix, and width.
+    #[regex(r"[0-9][0-9_]*(i8|i16|i32|i64|u8|u16|u32|u64)")]
+    #[regex(r"0[xX][0-9A-Fa-f][0-9A-Fa-f_]*(i8|i16|i32|i64|u8|u16|u32|u64)")]
+    #[regex(r"0[oO][0-7][0-7_]*(i8|i16|i32|i64|u8|u16|u32|u64)")]
+    #[regex(r"0[bB][01][01_]*(i8|i16|i32|i64|u8|u16|u32|u64)")]
+    IntNLit,
     /// An integer literal: decimal, or `0x`/`0o`/`0b` radix-prefixed, with optional `_` digit
     /// separators (stripped by the parser). Examples: `42`, `1_000_000`, `0xDE_AD`, `0o755`, `0b1010`.
     #[regex(r"[0-9][0-9_]*")]
@@ -354,6 +365,7 @@ impl TokenKind {
             TokenKind::TemplateStr => "TemplateStr",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::F32Lit => "F32Lit",
+            TokenKind::IntNLit => "IntNLit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
             TokenKind::Semicolon => "Semicolon",
@@ -456,6 +468,7 @@ impl TokenKind {
             TokenKind::TemplateStr => "a template string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::F32Lit => "an f32 literal",
+            TokenKind::IntNLit => "a fixed-width integer literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",
             TokenKind::Semicolon => "`;`",
@@ -679,6 +692,7 @@ fn is_statement_ending(kind: TokenKind) -> bool {
             | TokenKind::IntLit
             | TokenKind::FloatLit
             | TokenKind::F32Lit
+            | TokenKind::IntNLit
             | TokenKind::StringLit
             | TokenKind::RawStr
             | TokenKind::TemplateStr

@@ -632,6 +632,16 @@ pub enum Expr {
     Float { value: f64, span: Span },
     /// A 32-bit float literal (`1.0f32`, P-PACK Phase 3) — a distinct primitive from `Float`.
     F32 { value: f32, span: Span },
+    /// A **fixed-width integer literal** (Tier W): a suffixed integer such as `255u8`, `0xFFi32`,
+    /// `1u64`. `magnitude` is the unsigned parsed value (a negative literal is `-` applied to this);
+    /// `signed`/`bits` decode the suffix. The width's range check is the checker's job (E0044) — the
+    /// parser only records the parsed magnitude. Erased to an ordinary `int` const at IR lowering.
+    IntN {
+        magnitude: u64,
+        signed: bool,
+        bits: u8,
+        span: Span,
+    },
     /// A boolean literal.
     Bool { value: bool, span: Span },
     /// A reference to a binding.
@@ -954,6 +964,7 @@ impl Expr {
         match self {
             Expr::Str { span, .. }
             | Expr::Int { span, .. }
+            | Expr::IntN { span, .. }
             | Expr::Float { span, .. }
             | Expr::F32 { span, .. }
             | Expr::Bool { span, .. }
@@ -1003,6 +1014,7 @@ impl Expr {
         match self {
             Expr::Str { .. }
             | Expr::Int { .. }
+            | Expr::IntN { .. }
             | Expr::Float { .. }
             | Expr::F32 { .. }
             | Expr::Bool { .. }
@@ -1093,6 +1105,7 @@ impl Expr {
             Expr::Await { .. } => true,
             Expr::Str { .. }
             | Expr::Int { .. }
+            | Expr::IntN { .. }
             | Expr::Float { .. }
             | Expr::F32 { .. }
             | Expr::Bool { .. }

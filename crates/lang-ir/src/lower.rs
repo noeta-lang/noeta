@@ -664,6 +664,11 @@ impl Lowerer<'_> {
         match expr {
             Expr::Str { value, .. } => Ok(Atom::Const(Const::Str(value.clone()))),
             Expr::Int { value, .. } => Ok(Atom::Const(Const::Int(*value))),
+            // A fixed-width integer literal (Tier W) is **erased to an ordinary `int` const**: the
+            // magnitude's bit pattern is the runtime i64 word (a `u64` with the high bit set boxes as
+            // the corresponding negative i64 — the correct erased pattern). Width/signedness lived in
+            // the type and have already been range-checked (E0044); nothing survives to runtime.
+            Expr::IntN { magnitude, .. } => Ok(Atom::Const(Const::Int(*magnitude as i64))),
             Expr::Float { value, .. } => Ok(Atom::Const(Const::Float(*value))),
             Expr::F32 { value, .. } => Ok(Atom::Const(Const::F32(*value))),
             Expr::Bool { value, .. } => Ok(Atom::Const(Const::Bool(*value))),
@@ -2434,6 +2439,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::Await { .. }
         | Expr::Str { .. }
         | Expr::Int { .. }
+        | Expr::IntN { .. }
         | Expr::Float { .. }
         | Expr::F32 { .. }
         | Expr::Bool { .. }
