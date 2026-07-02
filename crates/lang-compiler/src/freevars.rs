@@ -451,6 +451,7 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
     match rvalue {
         Rvalue::Use(a) => f(a),
         Rvalue::Unary { operand, .. } => f(operand),
+        Rvalue::MaskWidth { operand, .. } => f(operand),
         Rvalue::Binary { lhs, rhs, .. } => {
             f(lhs);
             f(rhs);

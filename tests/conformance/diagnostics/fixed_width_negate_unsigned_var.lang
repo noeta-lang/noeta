@@ -1,0 +1,7 @@
+// Tier W2: unary `-` requires a signed type; an unsigned fixed-width value has no negation (it would
+// silently wrap, hiding a likely bug), so negating a `u8` binding is E0044. (The literal form `-1u8`
+// is caught the same way in W1; this is the variable/expression form.)
+// expect: error E0044 at 7:6
+// expect: exit 1
+x: u8 = 5
+echo -x

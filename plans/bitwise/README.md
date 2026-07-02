@@ -239,13 +239,26 @@ how untyped literals in an `i64`-typed context coerce (same in-range coercion as
   (`u8 == u16` is currently lenient-true via erasure — decide whether `==` across widths needs a
   cast like arithmetic will); reflection **fidelity** (distinguishing widths in `type_of` would
   require carrying the width to runtime, which contradicts erasure — likely never).
-- **W2 — value repr + the masking helper (both backends).** Implement the shared
-  `mask_to_width(value, bits, signed)` in `lang-value`; the compiler emits width-tagged binary/unary
-  ops (e.g. extend `Op::Binary` with an optional width, or a new `Op::BinaryWidth { op, bits, signed }`)
-  resolved from the operand types. The VM and eval both apply the op then the mask. miri-validate (the
-  value is still an immediate/boxed i64 — no new heap shape, but confirm large-`u64` boxing).
-- **W3 — wrapping arithmetic.** `+ - * / %` on fixed-width wrap to the declared width; `/ %` by zero
-  panics as today. Differential: wraparound identities (`255u8 + 1u8 == 0u8`).
+- **W2 — masking helper + wrapping `+ - *`. ✅ DONE.** Shared `lang_stdlib::mask_to_width(value,
+  signed, bits)` (unsigned = zero high bits; signed = arithmetic-shift sign-extend; `bits==64` no-op).
+  A new **`Rvalue::MaskWidth { operand, signed, bits }`** (+ bytecode `Op::MaskWidth`) is emitted by
+  lowering **after** a width-bearing op; both backends apply the identical helper (VM handler + eval
+  `eval_ir_rvalue` arm), so wraparound agrees by construction. Threading: a checker `width_sites:
+  HashMap<Span,(bool,u8)>` (populated for same-width `+ - *` and unary `-` on signed `IntN`) rides the
+  `Checked` → compiler/reference/eval-lib → `lower_with_sites*` path exactly like the other site maps.
+  Checker: `IntN` now satisfies `Add`/`Sub`/`Mul` (same-width only; the result type + mask site come
+  from `synth_intn_arith`); **mixed-width or `IntN`+`int`/`float` → E0044** (explicit conversion
+  required); unary `-` on unsigned → E0044. **Scoped to `+ - *`** because those are sign-agnostic (the
+  low `bits` are identical read signed or unsigned) so a single result-mask is fully correct for every
+  width; `/ % < <= > >=` are **sign-dependent** (unsigned division/ordering of `u64 ≥ 2^63` differ
+  from signed) and stay a clean E0007 "not yet" until W3/W5. Conformance 400 (types/fixed_width_
+  arithmetic + 2 E0044 diagnostics), differential 390 / 0-skipped / backends agree, leak residency 0
+  both, clippy + fmt clean.
+- **W3 — sign-aware `/ %` + ordering (`< <= > >=`), div/mod by zero panics as today.** These need the
+  width+signedness at the op (unsigned `u64` division/ordering differ from signed once bit 63 is set),
+  so they consult width the way W2's mask does — likely a width-carrying compare/div op (or a
+  sign-aware helper keyed off `width_sites`). Enable `Comparable`/`Div` for `IntN` here. Differential:
+  unsigned-vs-signed ordering at the `2^63` boundary; wraparound identities already covered by W2.
 - **W4 — conversions & casts.** Explicit, total, and visible: `u8.to_u32()` (widen, always safe),
   `u32.to_u8()` (truncate — wrapping, named so), `int.to_u8()`/`u8.to_int()`, `checked_to_u8(): u8?`.
   Decide the surface (`as`-cast vs methods); `as` is already a keyword (S6 narrowing) — reusing it for

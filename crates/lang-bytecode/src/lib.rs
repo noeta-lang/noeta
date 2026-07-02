@@ -774,6 +774,15 @@ pub enum Op {
         src: Reg,
         span: Span,
     },
+    /// `dst = mask_to_width(src, signed, bits)` — reduce an erased i64 to a fixed-width integer's
+    /// range (Tier W). Emitted after a same-width `+ - *` / unary `-` on an `IntN`. Total (never
+    /// raises); the shared `lang_stdlib::mask_to_width` runs identically here and in the tree-walker.
+    MaskWidth {
+        dst: Reg,
+        src: Reg,
+        signed: bool,
+        bits: u8,
+    },
     /// `dst = a op b` — may raise (E0007/E0008) at `span`. Never `&&`/`||` (those lower to
     /// branches).
     Binary {
@@ -1410,6 +1419,15 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         }
         Op::Return { src } => format!("Return      r{src}"),
         Op::Unary { op, dst, src, .. } => format!("Unary       r{dst} <- {} r{src}", op.symbol()),
+        Op::MaskWidth {
+            dst,
+            src,
+            signed,
+            bits,
+        } => format!(
+            "MaskWidth   r{dst} <- mask_{}{bits} r{src}",
+            if *signed { 'i' } else { 'u' }
+        ),
         Op::Binary { op, dst, a, b, .. } => {
             format!("Binary      r{dst} <- r{a} {} r{b}", op.symbol())
         }

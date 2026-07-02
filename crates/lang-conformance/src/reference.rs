@@ -30,6 +30,7 @@ use lang_span::Span;
 /// inserting the precise-RC drops (with destructor relevance) exactly as the bytecode pipeline
 /// does — so the reference and the VM consume identical IR. The lowering is total over the parsed
 /// language, so every parse+check-clean program reaches the IR path (no AST-walk fallback — Phase 7).
+#[allow(clippy::too_many_arguments)]
 pub fn reference_run(
     program: &Program,
     sites: HashMap<Span, TypeRepr>,
@@ -37,6 +38,7 @@ pub fn reference_run(
     index_field_sites: HashSet<Span>,
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
+    width_sites: HashMap<Span, (bool, u8)>,
     relevance: &lang_check::DestructorRelevance,
 ) -> RunResult {
     // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
@@ -48,6 +50,7 @@ pub fn reference_run(
         &index_field_sites,
         &ext_call_sites,
         &for_stream_sites,
+        &width_sites,
     )
     .expect(
         "Core-IR lowering is total over the parsed language \

@@ -213,6 +213,16 @@ impl Printer<'_> {
         match rvalue {
             Rvalue::Use(a) => atom(a),
             Rvalue::Unary { op, operand, .. } => format!("{}{}", op.symbol(), atom(operand)),
+            Rvalue::MaskWidth {
+                operand,
+                signed,
+                bits,
+                ..
+            } => format!(
+                "mask_{}{bits}({})",
+                if *signed { 'i' } else { 'u' },
+                atom(operand)
+            ),
             Rvalue::Binary {
                 op,
                 lhs,

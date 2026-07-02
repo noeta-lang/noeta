@@ -1,0 +1,40 @@
+// Tier W2: same-width `+ - *` on fixed-width integers wrap to the declared width (the erased i64 is
+// masked back into range after the op, via the shared `mask_to_width` both backends call). Wrapping
+// is the default for bit work; `/ %`, ordering, and shifts are sign-dependent and land in W3/W5.
+// Mixed-width arithmetic needs an explicit conversion (E0044) — tested in the diagnostics corpus.
+// Unary `-` on a signed width also wraps (`-(-128i8) == -128i8`); negating an unsigned width is
+// rejected. Both backends run the identical masking op, so the differential pins them equal.
+// expect: stdout "0"
+// expect: stdout "44"
+// expect: stdout "246"
+// expect: stdout "44"
+// expect: stdout "-128"
+// expect: stdout "150"
+// expect: stdout "232"
+// expect: stdout "-100"
+// expect: stdout "-128"
+// expect: exit 0
+
+// Unsigned wraparound (mod 2^bits).
+echo 255u8 + 1u8          // 256 mod 256 = 0
+echo 200u8 + 100u8        // 300 mod 256 = 44
+echo 10u8 - 20u8          // -10 mod 256 = 246
+
+// Signed wraparound (two's-complement to the width).
+echo 100i8 * 3i8          // 300 -> 44 (fits i8)
+echo 127i8 + 1i8          // 128 -> -128 (overflow wraps)
+
+// Wider widths compute in range.
+echo 50u16 * 3u16         // 150
+
+// Wrapping accumulates correctly across a loop: 100u8 added ten times = 1000 mod 256 = 232.
+mut acc = 0u8
+for i in 0..10 {
+  acc = acc + 100u8
+}
+echo acc
+
+// Unary `-` on a signed width: ordinary negation, and the boundary `-(-128i8)` wraps back to -128.
+x: i8 = 100
+echo -x
+echo -(-128i8)

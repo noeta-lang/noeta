@@ -144,6 +144,18 @@ pub enum Rvalue {
         operand: Atom,
         span: Span,
     },
+    /// Reduce a value to its fixed-width integer range (Tier W). Emitted by lowering immediately
+    /// after a width-bearing op — same-width `+ - *` and unary `-` on an `IntN` — because fixed-width
+    /// values are erased to i64 and the arithmetic runs full-width; this wraps the result back into
+    /// the declared width via `lang_stdlib::mask_to_width(value, signed, bits)`. Both backends apply
+    /// the identical helper, so wraparound agrees by construction. Pure, single-operand (like
+    /// [`Rvalue::Unary`]); never appears on the boxed/REPL path (only IntN arithmetic produces it).
+    MaskWidth {
+        operand: Atom,
+        signed: bool,
+        bits: u8,
+        span: Span,
+    },
     /// A non-short-circuiting infix operation. `&&`/`||` are lowered to control flow and
     /// never appear here; everything else (arithmetic, concat, comparisons, equality) does.
     /// Operator-trait overloading on user objects is resolved by the interpreter, not the

@@ -114,6 +114,11 @@ pub struct Checked {
     /// `for` statement spans whose iterable is statically an `Iterator<T>` (Track I.2) — the lowering
     /// sets `Stmt::For.stream` so both backends drive the iterator's `next()` instead of snapshotting.
     pub for_stream_sites: HashSet<Span>,
+    /// Fixed-width arithmetic sites (Tier W), keyed by the `Expr::Binary`/`Expr::Unary` span → the
+    /// result's `(signed, bits)`. A same-width `+ - *` or unary `-` on an `IntN` records its site here;
+    /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
+    /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
+    pub width_sites: HashMap<Span, (bool, u8)>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -140,6 +145,7 @@ pub fn check_all(program: &Program) -> Checked {
         map_packed_sites: checker.map_packed_sites,
         index_field_sites: checker.index_field_sites,
         for_stream_sites: checker.for_stream_sites,
+        width_sites: checker.width_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -530,6 +536,10 @@ struct Checker {
     /// [`Checked::for_stream_sites`]) to set `Stmt::For.stream`. A pure function of the program; a
     /// collection or `dyn` iterable is absent here and keeps the snapshot/cursor fast path.
     for_stream_sites: HashSet<Span>,
+    /// Fixed-width arithmetic sites (Tier W): the span of a same-width `+ - *` / unary `-` on an
+    /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
+    /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
+    width_sites: HashMap<Span, (bool, u8)>,
     /// Class names that declare a `destruct { ... }` block — the seeds of destruct-reachability.
     destructor_classes: HashSet<String>,
     /// Type names whose value, when dropped, could run *some* `destruct` block — transitively,
@@ -2902,6 +2912,52 @@ impl Checker {
         ty
     }
 
+    /// Type a fixed-width `+ - *` (Tier W2). Both operands must be the **same** `IntN`; the result is
+    /// that type and its span is recorded in `width_sites` so lowering masks the (full-width) result
+    /// back into range. Mixed-width, or `IntN` with `int`/`float`, needs an explicit conversion →
+    /// E0044 (a `dyn`/hole operand defers to the concrete side). Only called with at least one `IntN`.
+    fn synth_intn_arith(&mut self, op: BinaryOp, lt: &Type, rt: &Type, span: Span) -> Type {
+        // Pick the concrete IntN as the fallback result type (for a deferred or erroneous pairing).
+        let concrete = if matches!(lt, Type::IntN { .. }) {
+            lt
+        } else {
+            rt
+        };
+        // A `dyn`/hole on the other side defers to runtime — no static width to mask.
+        if lt.defers_to_runtime() || rt.defers_to_runtime() {
+            return concrete.clone();
+        }
+        if let (
+            Type::IntN {
+                signed: s1,
+                bits: b1,
+            },
+            Type::IntN {
+                signed: s2,
+                bits: b2,
+            },
+        ) = (lt, rt)
+            && s1 == s2
+            && b1 == b2
+        {
+            self.width_sites.insert(span, (*s1, *b1));
+            return Type::IntN {
+                signed: *s1,
+                bits: *b1,
+            };
+        }
+        self.diags.push(Diagnostic::error(
+            DiagnosticCode::FixedWidthOutOfRange,
+            span,
+            format!(
+                "cannot apply `{}` to `{lt}` and `{rt}`: fixed-width arithmetic requires both \
+                 operands to be the same type — convert explicitly",
+                op.symbol(),
+            ),
+        ));
+        concrete.clone()
+    }
+
     /// The inclusive `(min, max)` value range of a fixed-width integer type, as `i128` so every
     /// width (including `u64`) fits — used only for diagnostic text.
     fn int_width_range(signed: bool, bits: u8) -> (i128, i128) {
@@ -2977,6 +3033,21 @@ impl Checker {
                             Type::List(Box::new(Type::Dyn))
                         }
                     };
+                }
+                // Unary `-` on a fixed-width integer (Tier W): the result is the same width, masked so
+                // `-i8::MIN` wraps back to `i8::MIN`; negating an *unsigned* width has no meaning →
+                // E0044. (A negated fixed-width *literal* is handled by the intercept above.)
+                if let (UnaryOp::Neg, Type::IntN { signed, bits }) = (op, &t) {
+                    if *signed {
+                        self.width_sites.insert(*span, (*signed, *bits));
+                    } else {
+                        self.diags.push(Diagnostic::error(
+                            DiagnosticCode::FixedWidthOutOfRange,
+                            *span,
+                            format!("cannot negate `u{bits}`: unary `-` requires a signed type"),
+                        ));
+                    }
+                    return t;
                 }
                 // Other unary type errors have no corpus case and the operand is often gradual;
                 // infer for nested checks but do not promote (kept conservative).
@@ -3725,6 +3796,15 @@ impl Checker {
                 }
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {
+                // Fixed-width integers (Tier W): `+ - *` on two same-width `IntN` wrap to that width
+                // (W2). Mixed-width or `IntN` mixed with `int`/`float` needs an explicit conversion
+                // (no implicit widening) → E0044; `/ %` are withheld to W3. Intercept before the
+                // generic numeric path, whose widening lattice does not model `IntN`.
+                if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul)
+                    && (matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }))
+                {
+                    return self.synth_intn_arith(op, &lt, &rt, span);
+                }
                 // Arithmetic is trait-backed: `+`→`Add`, … (`%` has no trait — numerics only). An
                 // operand must satisfy that trait — a built-in numeric, a user type that `impl`s it,
                 // or a type parameter bounded by it; a `dyn`/hole defers. Otherwise it is rejected,
@@ -5121,7 +5201,11 @@ fn builtin_satisfies(ty: &Type, trait_name: &str) -> bool {
     match trait_name {
         "Comparable" => matches!(ty, Int | Float | F32 | String | Bool),
         "Equatable" => matches!(ty, Int | Float | F32 | String | Bool | IntN { .. }),
-        "Add" | "Sub" | "Mul" | "Div" => matches!(ty, Int | Float | F32),
+        // Fixed-width `+ - *` land in W2 (sign-agnostic — the low bits are the same read signed or
+        // unsigned — so masking the result is correct). `Div` (and `%`, which is numeric-only) stay
+        // withheld to W3, where sign-aware division/remainder need the width.
+        "Add" | "Sub" | "Mul" => matches!(ty, Int | Float | F32 | IntN { .. }),
+        "Div" => matches!(ty, Int | Float | F32),
         "Concat" => matches!(ty, String | List(_)),
         "Display" => matches!(
             ty,

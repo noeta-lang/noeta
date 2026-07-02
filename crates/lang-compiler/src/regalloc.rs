@@ -394,6 +394,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.def = Some(*dst);
             f.uses.push(*src);
         }
+        Op::MaskWidth { dst, src, .. } => {
+            f.def = Some(*dst);
+            f.uses.push(*src);
+        }
         Op::Binary { dst, a, b, .. } => {
             f.def = Some(*dst);
             f.uses.push(*a);
@@ -818,6 +822,10 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         }
         Op::Return { src } => m(src),
         Op::Unary { dst, src, .. } => {
+            m(dst);
+            m(src);
+        }
+        Op::MaskWidth { dst, src, .. } => {
             m(dst);
             m(src);
         }

@@ -494,6 +494,31 @@ pub fn int_method(recv: i64, method: IntMethod, arg: i64) -> i64 {
     }
 }
 
+/// Reduce an i64 word to the value it represents in a fixed-width integer type (Tier W). Fixed-width
+/// values are **erased to i64** at runtime — the width lives only in the static type — so after any
+/// width-bearing op (`+ - *`, unary `-`) the compiler applies this to wrap the result into range:
+///
+/// - **unsigned**: zero the bits above `bits` (`value & (2^bits - 1)`), so `255u8 + 1 → 0`.
+/// - **signed**: sign-extend from bit `bits-1` via an arithmetic shift pair, so `128 → -128` for i8
+///   and the stored word is the correct two's-complement pattern for the width.
+/// - **`bits == 64`**: the i64 word already *is* the u64/i64 bit pattern — a no-op (and avoids the
+///   `1u64 << 64` overflow).
+///
+/// Both backends call this on the same erased word, so wraparound is identical by construction. It is
+/// sign-agnostic for `+ - *` (their low `bits` are the same whether operands are read signed or
+/// unsigned), which is why those three land before the sign-dependent `/ % < >>`.
+pub fn mask_to_width(value: i64, signed: bool, bits: u8) -> i64 {
+    if bits >= 64 {
+        return value;
+    }
+    if signed {
+        let shift = 64 - bits;
+        (value << shift) >> shift
+    } else {
+        (value as u64 & ((1u64 << bits) - 1)) as i64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -657,6 +682,25 @@ mod tests {
             int_method(1, IntMethod::RotateLeft, 64),
             int_method(1, IntMethod::RotateLeft, 0)
         );
+    }
+
+    #[test]
+    fn mask_to_width_wraps_each_width() {
+        // Unsigned: zero the high bits (`255u8 + 1 → 0`, `200 + 100 → 44`).
+        assert_eq!(mask_to_width(256, false, 8), 0);
+        assert_eq!(mask_to_width(300, false, 8), 44);
+        assert_eq!(mask_to_width(255, false, 8), 255);
+        assert_eq!(mask_to_width(65536, false, 16), 0);
+        // Signed: sign-extend from the width's high bit (`128 → -128` for i8, `300 → 44`).
+        assert_eq!(mask_to_width(128, true, 8), -128);
+        assert_eq!(mask_to_width(300, true, 8), 44);
+        assert_eq!(mask_to_width(127, true, 8), 127);
+        assert_eq!(mask_to_width(-1, true, 8), -1);
+        // `-(-128i8)` overflows back to `-128i8`.
+        assert_eq!(mask_to_width(-mask_to_width(128, true, 8), true, 8), -128);
+        // 64-bit is a no-op: the word already is the pattern (and avoids `1 << 64`).
+        assert_eq!(mask_to_width(-1, false, 64), -1);
+        assert_eq!(mask_to_width(i64::MIN, true, 64), i64::MIN);
     }
 
     #[test]

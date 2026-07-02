@@ -1,0 +1,6 @@
+// Tier W2: fixed-width arithmetic has no implicit widening; the operands must be the same type.
+// Adding a `u8` to a `u16` requires an explicit conversion, so it is E0044 rather than a silent
+// widen. (The same rule rejects `u8 + int`.) Conversions between widths arrive in a later slice.
+// expect: error E0044 at 6:6
+// expect: exit 1
+echo 1u8 + 1u16

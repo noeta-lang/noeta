@@ -730,6 +730,21 @@ impl Interpreter {
                 let value = self.eval_ir_atom(operand, frame)?;
                 self.eval_unary(*op, value, *span)
             }
+            lang_ir::Rvalue::MaskWidth {
+                operand,
+                signed,
+                bits,
+                ..
+            } => {
+                // Reduce an erased fixed-width integer (an `Int`) into its declared width (Tier W) via
+                // the same shared helper the VM calls, so wraparound agrees by construction. A non-int
+                // (only if the checker's IntN guarantee broke) passes through unchanged.
+                let value = self.eval_ir_atom(operand, frame)?;
+                Ok(match value {
+                    Value::Int(n) => Value::Int(lang_stdlib::mask_to_width(n, *signed, *bits)),
+                    other => other,
+                })
+            }
             lang_ir::Rvalue::Binary {
                 op,
                 lhs,

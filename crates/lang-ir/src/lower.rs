@@ -73,6 +73,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
         &HashSet::new(),
         &HashMap::new(),
         &HashSet::new(),
+        &HashMap::new(),
     )
 }
 
@@ -95,6 +96,7 @@ pub fn lower_with_sites(
     index_field_sites: &HashSet<Span>,
     ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: &HashSet<Span>,
+    width_sites: &HashMap<Span, (bool, u8)>,
 ) -> Result<Program, Unsupported> {
     lower_with_sites_opts(
         program,
@@ -102,6 +104,7 @@ pub fn lower_with_sites(
         index_field_sites,
         ext_call_sites,
         for_stream_sites,
+        width_sites,
         false,
     )
 }
@@ -118,6 +121,7 @@ pub fn lower_with_sites_opts(
     index_field_sites: &HashSet<Span>,
     ext_call_sites: &HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: &HashSet<Span>,
+    width_sites: &HashMap<Span, (bool, u8)>,
     real_isolates: bool,
 ) -> Result<Program, Unsupported> {
     let mut lowerer = Lowerer {
@@ -126,6 +130,7 @@ pub fn lower_with_sites_opts(
         index_field_sites,
         ext_call_sites,
         for_stream_sites,
+        width_sites,
         real_isolates,
     };
     let top = lowerer.lower_body(&program.stmts)?;
@@ -154,6 +159,10 @@ struct Lowerer<'a> {
     /// The checker's streaming-`for` set (keyed by the `for` statement's span): the iterable is
     /// statically an `Iterator<T>`, so the lowered [`Stmt::For`] gets `stream: true` (Track I.2).
     for_stream_sites: &'a HashSet<Span>,
+    /// The checker's fixed-width arithmetic sites (Tier W), keyed by the `Expr::Binary`/`Expr::Unary`
+    /// span → the result's `(signed, bits)`. A hit wraps the op's result in [`Rvalue::MaskWidth`] so
+    /// the erased i64 is masked back into the declared width. Empty on the boxed/REPL path.
+    width_sites: &'a HashMap<Span, (bool, u8)>,
     /// Whether `isolate f(args)` lowers to [`Rvalue::SpawnIsolate`] (real OS-thread path, I.4b) rather
     /// than a plain [`Rvalue::Spawn`] of a pre-built future. Only the CLI's real (VM) execution path
     /// sets this; every in-oracle path leaves it false, so the differential never sees the new rvalue.
@@ -684,7 +693,7 @@ impl Lowerer<'_> {
             }),
             Expr::Unary { op, operand, span } => {
                 let operand = self.lower_expr(operand, out)?;
-                Ok(self.emit(
+                let result = self.emit(
                     out,
                     Rvalue::Unary {
                         op: *op,
@@ -692,7 +701,8 @@ impl Lowerer<'_> {
                         span: *span,
                     },
                     *span,
-                ))
+                );
+                Ok(self.mask_if_width(out, result, *span))
             }
             Expr::Binary { op, lhs, rhs, span } if matches!(op, BinaryOp::And | BinaryOp::Or) => {
                 self.lower_logical(*op, lhs, rhs, *span, out)
@@ -700,7 +710,7 @@ impl Lowerer<'_> {
             Expr::Binary { op, lhs, rhs, span } => {
                 let lhs = self.lower_expr(lhs, out)?;
                 let rhs = self.lower_expr(rhs, out)?;
-                Ok(self.emit(
+                let result = self.emit(
                     out,
                     Rvalue::Binary {
                         op: *op,
@@ -710,7 +720,8 @@ impl Lowerer<'_> {
                         span: *span,
                     },
                     *span,
-                ))
+                );
+                Ok(self.mask_if_width(out, result, *span))
             }
             Expr::List { items, span } => {
                 // A `List<@packed struct>` literal (its span recorded by the checker) streams into a
@@ -1407,6 +1418,25 @@ impl Lowerer<'_> {
         let dst = self.fresh();
         out.push(Stmt::Let { dst, rvalue, span });
         Atom::Temp(dst)
+    }
+
+    /// If `span` is a fixed-width arithmetic site (Tier W), wrap `value` in [`Rvalue::MaskWidth`] to
+    /// reduce the erased i64 back into the declared width; otherwise return `value` untouched. Called
+    /// on the result of a lowered `Expr::Binary`/`Expr::Unary`.
+    fn mask_if_width(&mut self, out: &mut Vec<Stmt>, value: Atom, span: Span) -> Atom {
+        match self.width_sites.get(&span) {
+            Some(&(signed, bits)) => self.emit(
+                out,
+                Rvalue::MaskWidth {
+                    operand: value,
+                    signed,
+                    bits,
+                    span,
+                },
+                span,
+            ),
+            None => value,
+        }
     }
 
     /// Emit, into `out`, the per-position `.N` projections that destructure a tuple held by the

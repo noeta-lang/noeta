@@ -4304,6 +4304,24 @@ impl<'m> Vm<'m> {
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
                     }
                 }
+                Op::MaskWidth {
+                    dst,
+                    src,
+                    signed,
+                    bits,
+                } => {
+                    // Reduce an erased fixed-width integer (an `int` value) into its declared width
+                    // (Tier W). Total — the shared helper runs identically in the tree-walker. A
+                    // non-int (only if the checker's IntN guarantee broke) passes through unchanged.
+                    let v = frames[top].regs[*src as usize];
+                    let masked = match v.as_int() {
+                        Some(n) => Value::int(lang_stdlib::mask_to_width(n, *signed, *bits)),
+                        None => v,
+                    };
+                    retain(masked);
+                    set_reg(&mut frames[top].regs, *dst, masked);
+                    frames[top].pc += 1;
+                }
                 Op::Binary {
                     op,
                     dst,

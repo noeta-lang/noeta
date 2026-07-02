@@ -95,6 +95,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         let mut index_field_sites = std::collections::HashSet::new();
         let mut ext_call_sites = std::collections::HashMap::new();
         let mut for_stream_sites = std::collections::HashSet::new();
+        let mut width_sites = std::collections::HashMap::new();
         let mut destructor_relevance = lang_check::DestructorRelevance::default();
         if stage == Stage::Eval && diagnostics.is_empty() {
             let checked = lang_check::check_all(&parsed.program);
@@ -104,6 +105,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
             index_field_sites = checked.index_field_sites;
             ext_call_sites = checked.ext_call_sites;
             for_stream_sites = checked.for_stream_sites;
+            width_sites = checked.width_sites;
             destructor_relevance = checked.destructor_relevance;
         }
 
@@ -118,6 +120,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
                 index_field_sites,
                 ext_call_sites,
                 for_stream_sites,
+                width_sites,
                 &destructor_relevance,
             );
             stdout = result.stdout;
@@ -291,6 +294,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
         checked.index_field_sites,
         checked.ext_call_sites,
         checked.for_stream_sites,
+        checked.width_sites,
         &checked.destructor_relevance,
     );
     Outcome {

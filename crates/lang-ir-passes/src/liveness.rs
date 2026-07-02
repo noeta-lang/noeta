@@ -562,7 +562,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
         Rvalue::Try { operand, .. }
         | Rvalue::As { operand, .. }
         | Rvalue::TypeTest { operand, .. }
-        | Rvalue::TypeOf { operand, .. } => f(operand),
+        | Rvalue::TypeOf { operand, .. }
+        | Rvalue::MaskWidth { operand, .. } => f(operand),
         // The generator desugar's `make_gen(step)` reads its step-closure operand (Track G.1b).
         Rvalue::MakeGen { step, .. } => f(step),
         Rvalue::MakeFuture { thunk, .. } => f(thunk),

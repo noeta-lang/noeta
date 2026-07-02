@@ -106,6 +106,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.index_field_sites,
         checked.ext_call_sites,
         checked.for_stream_sites,
+        checked.width_sites,
         &checked.destructor_relevance,
         false,
     )
@@ -136,6 +137,7 @@ pub fn compile_with_sites(
     index_field_sites: HashSet<Span>,
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
+    width_sites: HashMap<Span, (bool, u8)>,
     relevance: &lang_check::DestructorRelevance,
     real_isolates: bool,
 ) -> Result<Module, Unsupported> {
@@ -147,6 +149,7 @@ pub fn compile_with_sites(
         index_field_sites,
         ext_call_sites,
         for_stream_sites,
+        width_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
         real_isolates,
@@ -164,6 +167,7 @@ fn compile_inner(
     index_field_sites: HashSet<Span>,
     ext_call_sites: HashMap<Span, lang_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
+    width_sites: HashMap<Span, (bool, u8)>,
     relevance: Option<lang_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -187,6 +191,7 @@ fn compile_inner(
         &index_field_sites,
         &ext_call_sites,
         &for_stream_sites,
+        &width_sites,
         real_isolates,
     )
     .map_err(|u| Unsupported {
@@ -2024,6 +2029,21 @@ impl<'m> FnCompiler<'m> {
                     dst,
                     src,
                     span: *span,
+                });
+                Ok(())
+            }
+            Rvalue::MaskWidth {
+                operand,
+                signed,
+                bits,
+                ..
+            } => {
+                let src = self.atom_reg(operand)?;
+                self.code.push(Op::MaskWidth {
+                    dst,
+                    src,
+                    signed: *signed,
+                    bits: *bits,
                 });
                 Ok(())
             }
