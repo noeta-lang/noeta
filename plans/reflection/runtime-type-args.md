@@ -113,15 +113,17 @@ table and carry a `u32` id instead of an `Rc` — deferred; correctness first.)
     `enum_variant_payloads` map records the accurate types (via `variant_field_type`) without touching
     the `Unknown`-tolerant destructor-relevance/`Send` readers of `VariantInfo.fields`. Conformance 420.
     Test `reflection/enum_type_args.lang`.
-  - **R2b.2 — runtime enum tag (laundered case) DEFERRED.** Only adds `type_of(launder(Tree.Leaf(5)))`
-    → `Tree<int>` (vs head-only today). Deferred because: (a) it is the **rarest** case (launder an enum
-    through `dyn`, then reflect it); (b) enum construction has **no clean IR node** — the value is built
-    by `Op::MakeEnum` at several compiler sites (payload via `lower_method`→`make_enum`, nullary via the
-    member path, plus the Option/Result builtins) reinterpreted from generic call/member rvalues, and
-    the tree-walker reinterprets too, so threading a tag means span-matching through that shared
-    machinery + `EnumValue` churn; (c) it is **consistent across backends today** (both head-only), so
-    it is a fidelity gap, not a divergence. Do it if a use case needs it, or once enum construction gets
-    a dedicated IR node.
+  - **R2b.2 — runtime enum tag (laundered case) DONE** (`e2e3b89`). `type_of(launder(Tree.Leaf(5)))` →
+    `Tree<int>`, the enum completion of the runtime tags. Enum construction has no dedicated IR node, so
+    the tag rides on `Rvalue::Method.reflect` (baked by the lowerer from the construction-site map;
+    `None` for an ordinary method call). VM interns it onto `Op::MakeEnum` + stamps the node tag; the
+    tree-walker, whose enum is built deep in `call_method`, tags the fresh value **post-hoc** at the one
+    `Rvalue::Method` site (`tag_enum_reflect` moves the unique value's parts into a re-tagged
+    `EnumValue`, hand-written `PartialEq` ignores the tag). Scoped to **payload** variants (nullary →
+    head-only both backends). Conformance 426, differential 415/0-skipped/agree, leak 0 both. Test
+    `reflection/enum_runtime_type_args.lang`. **ALSO the destructuring companion** `f20a895`: match on a
+    generic enum binds the instantiated payload (`match t{Tree.Leaf(n)}`, `t:Tree<int>` → `n:int`) +
+    lattice relaxation so a `dyn` type arg is gradually compatible (`Tree<dyn> <: Tree<int>`).
 - **R3 — precise `is` / `as` DONE** (`6b313d7`). The narrowing matcher consults the operand's tag:
   `x is List<int>` / `x is Box<int>` / `.as<…>()` check arguments when tagged; untagged/`dyn`/bare-head
   (`is List`) stays head-only. Removes the `is List<string>` false positive. **Additive** — the existing
@@ -133,10 +135,14 @@ table and carry a `u32` id instead of an `Rc` — deferred; correctness first.)
   `narrow_args_match`. `TypeRepr` gained `Eq`. No new diagnostic code. Test `reflection/is_type_args.lang`.
   Conformance 419, differential 409/0-skipped/agree, leak 0 both.
 
-**USER-FACING ARC (R1a/R1b/R2a/R3) COMPLETE** — the reflection residual is closed for lists, maps, and
-generic structs/classes, on `type_of` and `is`/`as`. Remaining deferred: **R2b** (generic enum tags —
-needs a construction-site record + `MakeEnum` tag; consistent head-only today, no divergence) and Set
-tags (no literal). Approach B (distinct shapes, benched follow-up) untouched.
+**TRACK COMPLETE (R1a/R1b/R2a/R2b.1/R2b.2/R3)** — the reflection residual is closed for **lists, maps,
+generic structs/classes, and generic enums**, on `type_of` and `is`/`as`: type arguments are recovered
+at runtime even after a value is laundered through `dyn`, while a `List<dyn>`/untagged value honestly
+stays `dyn`. Only remaining: **Set** tags (no literal — built via `.to_set()`; would need `to_set` tag
+propagation) and **Approach B** (distinct shapes per instantiation — the benched perf follow-up,
+untouched). Along the way this arc also fixed real latent bugs (see [[value-equality-dispatch]],
+[[generics-send-destructor-gaps]]): VM structural map equality, enum `Send` soundness, generic-type
+over-restrictive `!Send`, and skipped generic-container destructors.
 
 **Gates each slice:** conformance + differential 0-skipped / backends agree + leak residency 0 both +
 clippy/fmt. R1/R2 add miri over the tagged value's heap accounting (the tag is an `Rc`, so its
