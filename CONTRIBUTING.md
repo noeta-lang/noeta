@@ -4,7 +4,7 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
 
 ## Orientation
 
-- **What the language is:** see `README.md` and `docs/resources/`.
+- **What the language is:** see `README.md` and the [wiki](docs/Home.md) (`docs/`).
 - **How the implementation is structured:** see `ARCHITECTURE.md` (pipeline + crate map).
 - **Conventions and the agent workflow:** see `AGENTS.md` — naming, formatting/linting, the new-feature template, and the testing discipline apply to humans and agents alike.
 - **What to work on next:** see `plans/roadmap.md` and the per-slice files in `plans/m0/`.

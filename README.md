@@ -2,32 +2,63 @@
 
 > **A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.**
 
-A new, general-purpose programming language built from scratch in Rust: a persistent, reactive runtime with an ML-grade type system (algebraic data types, `Result`-typed errors, exhaustive matching, real generics), compiled to a single static binary for any surface — a web server, a desktop app, or a CLI tool — from one codebase. The surface reads cleanly and will look broadly familiar to anyone coming from PHP, JavaScript, or similar; that familiarity is a convenience, not the point.
+`lang` is a new, general-purpose programming language built from scratch in Rust. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
+
+```lang
+enum OrderError { Empty; NegativePrice(index: int) }
+
+fn validate(items: List<Item>): Result<void, OrderError> {
+    if items.count() == 0 { return Err(OrderError.Empty) }
+    for (i, item) in items.enumerate() {
+        if item.price < 0 { return Err(OrderError.NegativePrice(index: i)) }
+    }
+    return Ok()
+}
+
+echo match validate(cart) {
+    Ok()   => "ready to ship",
+    Err(e) => match e {
+        OrderError.Empty            => "cart is empty",
+        OrderError.NegativePrice(i) => "item ${i} has a negative price",
+    },
+}
+```
+
+## Why it's interesting
+
+- **Correct by construction.** Algebraic data types, `Result`-typed errors, exhaustive matching, real generics, and inferred-static typing with `dyn` as the one explicit escape — illegal states don't compile.
+- **Fast without a tracing GC.** A register bytecode VM over NaN-boxed values and shape-based objects with inline caches; memory is *compiled* — precise reference counting with in-place reuse and a cycle-collector backstop, no stop-the-world pauses.
+- **Value/reference by intent.** `struct` is a value (copy-on-write, structural equality); `class` is a reference (identity, in-place mutation). The same axis decides what's safe to send across an isolate.
+- **Real concurrency.** `async`/`await` with structured `concurrent { }` scopes, lazy iterators and generators, and shared-nothing **isolates** with typed channels for true multi-core parallelism.
+- **Batteries and tooling.** A layered standard library and a toolchain that runs, tests, benchmarks, and documents your code — `run`, `repl`, `test`, `bench`, `doc`.
 
 > [!NOTE]
-> **Status: pre-alpha, not public.** Milestones **M1 (real language core)** and **M2 cluster 1 (host IO & async foundation)** are complete: a register-based bytecode VM over NaN-boxed values, a shape-based object model, refcount + cycle GC, a bidirectional type checker on a salsa query graph, traits/generics/derives, multi-file modules, a layered stdlib, and a real host-IO boundary. The original M0 tree-walker is retained as a differential oracle the VM is checked against. See `plans/roadmap.md` for the per-slice status. The crate name prefix `lang-` and the binary name `lang` are placeholders pending the real language name.
+> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, and the CLI all ship today. The larger north-star vision — server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP/WS server, desktop packaging, an embedded LSP, and an agentic MCP surface — is the roadmap, not yet built. The [wiki](docs/Home.md) marks the boundary between the two everywhere. The `lang-` crate prefix and the binary name `lang` are placeholders pending the real name.
 
-## What it is (and is not)
+## Try it
 
-- **Is:** general-purpose and application-oriented; a persistent runtime (not request-per-process); reactive at the language level (server-side `signal`/`computed`/`effect`); strongly, statically typed with a gradual on-ramp; single-binary, any-surface.
-- **Is not:** a PHP runtime (it does not run PHP/Composer/Laravel), a "better PHP," a framework, or a systems language (embedded/bare-metal/hard-real-time are out of scope).
+Requires a recent stable Rust toolchain (1.95+).
+
+```sh
+cargo build                                 # build the workspace + the `lang` binary
+echo 'echo "hello"' > hello.lang
+cargo run -p lang-cli -- run hello.lang     # -> hello
+cargo run -p lang-cli -- repl               # interactive REPL
+```
+
+To put `lang` on your `PATH`: `cargo install --path crates/lang-cli`.
 
 ## Documentation
 
-- `docs/resources/` — the canonical design: [positioning](docs/resources/00-positioning.md), [architecture](docs/resources/01-architecture.md), [syntax](docs/resources/02-syntax.md), [implementation plan](docs/resources/03-implementation-plan.md), [cross-reference](docs/resources/04-cross-reference.md).
-- `ARCHITECTURE.md` — technical overview of the implementation.
-- `AGENTS.md` — entry point for coding agents: conventions, crate map, the pipeline, the new-feature template.
-- `CONTRIBUTING.md` — entry point for developers.
-- `plans/` — the in-repo task tracker (roadmap + per-slice work units).
+The complete documentation is the **[wiki](docs/Home.md)** (`docs/`, GitHub-Wiki format):
 
-## Building
+- **[Getting Started](docs/Getting-Started.md)** and the **[Language Tour](docs/Language-Tour.md)** — learn the language from zero.
+- **[Bundled tools](docs/The-CLI.md)** — the CLI, test runner, benchmarks, and doc extraction.
+- **[Language & standard-library reference](docs/Home.md)** — the exhaustive reference for syntax and the stdlib.
+- **[Concepts & design](docs/Architecture-and-Pipeline.md)** — the VM, memory management, concurrency, and every technique under the hood.
 
-Requires a recent stable Rust toolchain.
+For contributors: **[the developer guide](docs/Contributing.md)** and, in the repo, `ARCHITECTURE.md` (implementation overview), `AGENTS.md` (conventions + the new-feature template), `CONTRIBUTING.md`, and `plans/` (the roadmap and task tracker).
 
-```sh
-cargo build                              # build the workspace
-cargo test                               # unit + snapshot + conformance + property tests
-cargo run -p lang-cli -- run <file>.lang # run a program
-cargo run -p lang-cli -- repl            # interactive REPL
-cargo run -p lang-conformance            # run the language conformance suite (dev harness)
-```
+## License
+
+MIT — see [LICENSE](LICENSE).
