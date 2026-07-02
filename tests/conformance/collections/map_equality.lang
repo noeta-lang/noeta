@@ -1,0 +1,16 @@
+// Two maps compare **structurally**: equal iff they have the same keys and each key's values are
+// equal (recursively, so nested lists/maps compare by contents, not identity). Key insertion order
+// is irrelevant — a `BTreeMap` canonicalizes it. Both backends compare maps element-wise, so they
+// agree by construction (this pins the VM arm that previously fell through to `false`).
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "false"
+// expect: exit 0
+
+echo {"a": 1, "b": 2} == {"a": 1, "b": 2};          // same entries -> true
+echo {"a": 1, "b": 2} == {"b": 2, "a": 1};          // order-independent -> true
+echo {"k": [1, 2, 3]} == {"k": [1, 2, 3]};          // nested lists compare by contents -> true
+echo {"a": 1} == {"a": 2};                          // different value -> false
+echo {"a": 1} == {"a": 1, "b": 2};                  // different size -> false

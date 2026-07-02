@@ -405,6 +405,17 @@ fn values_equal(left: Value, right: Value) -> bool {
     if left.is_set() && right.is_set() {
         return slices_equal(&left.set_items().unwrap(), &right.set_items().unwrap());
     }
+    // Maps compare structurally: same keys, and each key's values `values_equal`. (Without this arm
+    // two equal maps fell through to `false` — a latent bug analogous to the list one above, since no
+    // prior corpus case compared two equal map literals; the tree-walker's `BTreeMap` `==` recurses
+    // through `Value`'s equality, so this arm keeps the two backends in agreement.)
+    if left.is_map() && right.is_map() {
+        let a = left.map_entries().unwrap();
+        let b = right.map_entries().unwrap();
+        return a.len() == b.len()
+            && a.iter()
+                .all(|(k, &va)| b.get(k).is_some_and(|&vb| values_equal(va, vb)));
+    }
     // Native modules compare equal when they name the same module.
     if let (Some(a), Some(b)) = (left.native_module_name(), right.native_module_name()) {
         return a == b;
