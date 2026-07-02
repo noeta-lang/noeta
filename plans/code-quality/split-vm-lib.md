@@ -10,10 +10,14 @@ verbatim (methods/scheduler → the few called from lib.rs are `pub(crate)`); th
 free-fn value cluster moved to `values.rs` as `pub(crate)` + re-exported at the
 crate root (`pub(crate) use values::*`) so callers use bare names unchanged.
 Differential 417/0 (backends agree), 118 VM unit tests, clippy/fmt clean;
-lang-value untouched so miri unaffected. **Remaining (optional follow-ons, see
-Out/Design):** the 2740-line `dispatch` fn → per-opcode `fn op_*`, the `Vm`
-25-field regrouping, and `Op::operands()/defs()` to collapse the regalloc
-matches.
+lang-value untouched so miri unaffected. **Remaining follow-ons — assessed,
+recommend leaving:** the 2740-line `dispatch` fn (idiomatic as one match for a
+bytecode loop — jump-table codegen + inlining + cohesion; splitting risks the
+hot path for readability only) and `Op::operands()/defs()` (the three exhaustive
+`op_facts`/`extra_defs`/`remap_op` register matches are a compiler-enforced
+safety mechanism against use-after-free; collapsing them onto one visitor trades
+boring-safe for clever-risky in the register allocator). The `Vm` 25-field
+regrouping remains available if a future change motivates it.
 
 The register VM lives in one 7733-line file. It is competently engineered
 (inline caches, disciplined refcounting, a shared `Host`/`Executor` seam) but

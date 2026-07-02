@@ -1,6 +1,15 @@
 # Split the checker (`lang-check/src/lib.rs`, 5722 LOC)
 
-Status: todo
+Status: partial — surgical extraction done (`59c9a38`, `4e67f39`); rest left by design
+
+**Done:** the two most self-contained concerns were lifted — `packed.rs` (IntN
++ @packed layout, `59c9a38`) and `attributes.rs` (`#[...]` validation,
+`4e67f39`). lib.rs is 5722 → 5279. **Left by design:** the full 5-way mechanical
+split (`expr`/`decl`/`traits`) — splitting one `impl Checker` across files does
+not reduce coupling (every submodule still reaches all of `self`'s private
+state), so beyond lifting genuinely loosely-coupled concerns it is
+navigation-only churn on a tightly-interwoven `synth`/`check_stmt` core where
+locality helps. Revisit only if the remaining file size causes real friction.
 
 The bidirectional type checker is one 5722-line file built around a single huge
 `impl Checker`. The type *lattice* (`lang-types`) is clean; the debt is entirely

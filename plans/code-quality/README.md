@@ -23,11 +23,33 @@ clippy/fmt clean, and — where the unsafe crate is touched — miri clean."
 | Decompose the parser fns | [`split-parser-fns.md`](split-parser-fns.md) | `lang-parser/src/lib.rs` (3679) | Break up the 1164-line `statement_parser` and 744-line `expr_with` chumsky closures. |
 | BuiltinTrait enum | [`builtin-trait-enum.md`](builtin-trait-enum.md) | `lang-check` (cross-cutting) | Replace stringly-typed trait/module dispatch with the existing `BuiltinTrait` enum. |
 
-**Recommended order:** parser and VM/checker splits are independent and can be
-done in any order; do **BuiltinTrait** before or independently of the checker
-split (it touches the same file but different code). Pick the one whose file you
-are about to work in anyway — a split pays off most right before feature work in
-that area.
+## Outcome (assessed + executed)
+
+The clean-seam, positive-risk/reward work is **done** on `code-quality-cleanup`:
+the VM split (methods/scheduler/values — lib.rs 7733→5729), the **BuiltinTrait**
+fieldless-enum conversion, and a *surgical* slice of the checker split (packed +
+attributes — lib.rs 5722→5279). See each file's status header.
+
+The remainder was **assessed and deliberately left as-is** — these are cases
+where the "god" unit is as-maintainable or *more* maintainable than the split:
+
+- **VM `dispatch` fn** (2740 lines) — a bytecode interpreter's dispatch loop is
+  idiomatic as one `match` (jump-table codegen, inlining, cohesion). Splitting
+  into `op_*` methods risks the hottest path for a readability-only gain.
+- **Parser closures** — chumsky combinators capture each other; extracting
+  sub-builders means unnameable `impl Parser` return types and hand-threaded
+  recursion, easy to perturb precedence/recovery. God-function is defensible.
+- **Full mechanical checker split** — splitting `impl Checker` across files does
+  not reduce coupling (every submodule still touches all of `self`), so beyond
+  the surgical packed/attributes lift it is navigation-only churn.
+- **`Op::operands()/defs()` regalloc consolidation** — `op_facts`/`extra_defs`/
+  `remap_op` are three exhaustive (no `_` arm) register matches; that verbosity
+  is a compiler-enforced safety mechanism against use-after-free. Collapsing them
+  onto one visitor trades boring-safe for clever-risky in the register allocator,
+  for zero behavior change. Not worth it.
+
+**Recommended order** (if any remaining item is revisited): parser and checker
+splits are independent; do **BuiltinTrait** before the checker split.
 
 **Shared discipline for all four:**
 

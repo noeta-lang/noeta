@@ -1,6 +1,13 @@
 # Decompose the parser's giant closures (`lang-parser/src/lib.rs`, 3679 LOC)
 
-Status: todo
+Status: assessed — recommend leaving as-is (highest-risk, negative payoff)
+
+chumsky combinators capture each other, so extracting sub-builders means
+unnameable generic `impl Parser` return types and hand-threaded recursion, and
+precedence / error-recovery is easy to perturb invisibly. A single cohesive
+grammar function is a defensible (often preferable) shape for a combinator
+parser. Revisit only if a specific sub-builder (`fn_decl`/`class_body`) becomes
+independently useful; do not do the mechanical whole-file split.
 
 The literal-parsing concern was already lifted to `literals.rs`. What remains is
 the hardest part of the parser file: two enormous chumsky combinator functions —
