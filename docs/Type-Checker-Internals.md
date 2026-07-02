@@ -15,13 +15,13 @@ Signatures are required at named boundaries (which give the checker its expected
 
 ## The type lattice
 
-`lang-types` is the pure-data `Type` lattice: `Int`/`Float`/`Bool`/`String`/`Unit`, `List`/`Map`/`Option`/`Result`, `Named`, `Fn`, the inference variable `Var`, and the gradual top `Unknown`. `Type::from_ref` structurally desugars surface annotations (including `?T → Option<T>`); predicates like `is_numeric`/`is_gradual` are what the checks key off.
+`lang-types` is the pure-data `Type` lattice: `Int`/`Float`/`Bool`/`String`/`Unit`, `List`/`Map`/`Option`/`Result`, `Named`, `Fn`, unions, and the top `Unknown`. (The Hindley–Milner inference-variable slot was removed once the engine settled on bidirectional-with-subtyping.) `Type::from_ref` structurally desugars surface annotations (including `?T → Option<T>`); predicates like `is_numeric`/`is_gradual` are what the checks key off.
 
 `lang-types` also owns the **built-in trait registry** — `BuiltinTrait`, `BUILTIN_TRAITS`, and `operator_trait` — the fixed set an `impl` block or `@derive(...)` may name. Each entry records its required method and arity, the operator it overloads, and whether it is derivable. The registry's operator→method map is lock-stepped to the backends' `BinaryOp::overload_method` by a unit test, so the checker's view and the runtime's view of operator dispatch cannot drift.
 
 ## Gradual by construction, static at the boundaries
 
-`check(&Program) -> Vec<Diagnostic>` is the body of the `checked` salsa query. Every expression gets an inferred `Type`, with `Unknown` as the fallback, and **every check suppresses itself on a gradual operand** — a diagnostic fires only when types are concretely known and unambiguously wrong. Representative checks:
+`check(&Program) -> Vec<Diagnostic>` is the body of the `checked` salsa query. Every expression gets an inferred `Type`, with `Unknown` as the fallback wherever a type is genuinely not yet known, and **a check suppresses itself on an `Unknown` operand** — so a diagnostic fires only when types are concretely known and unambiguously wrong. That tolerance is *interior* only: holes are eliminated at typed boundaries (a missing signature is E0022, an un-inferable binding is E0023), which is what makes the system inferred-*static* rather than gradual. Representative checks:
 
 | Check | Code |
 |---|---|
@@ -38,7 +38,7 @@ Signatures are required at named boundaries (which give the checker its expected
 
 The inferred-static track layered on required signatures at named boundaries, checked arguments and returns, the E0023 "cannot infer" endpoint, bounded generics, trait coherence, `dyn` narrowing, and declared unions — while tolerating an *interior* inference hole by design. The result is the "inferred-static" contract: no holes at named boundaries, inference in the interior, and `dyn` as the one explicit escape.
 
-**Generics are erased**: `class Box<T>` parses, checks (a type parameter is treated gradually), and runs with `T` erased to one shape.
+**Generics are erased**: `class Box<T>` parses, checks (a type parameter is treated as `Unknown`), and runs with `T` erased to one shape.
 
 ## Why it can't drift from the backends
 
