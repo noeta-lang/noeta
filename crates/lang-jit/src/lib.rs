@@ -110,6 +110,9 @@ pub const OUTCOME_RETURNED: i64 = -3;
 /// over; its value is on the VM (`jit_ret`). Only reached via the interpreter seam, never a direct
 /// call.
 pub const OUTCOME_HALTED: i64 = -4;
+/// Internal outcome (never returned by a [`CompiledFn`]): the `jit_after_direct_call` helper's signal
+/// that a native direct call's callee returned cleanly, so the native caller continues in place.
+pub const OUTCOME_CONTINUE: i64 = -5;
 
 /// The name the bail stub calls to prove the runtime-helper ABI links. The VM registers a pointer
 /// for this symbol when it constructs the [`Jit`].
@@ -131,6 +134,14 @@ pub const CALL_HELPER: &str = "lang_jit_call";
 /// The `Op::Return` helper (J3 native calls): runs the shared return protocol (transfer to the
 /// caller, pop the frame) and returns [`OUTCOME_RETURNED`] or [`OUTCOME_HALTED`].
 pub const RETURN_HELPER: &str = "lang_jit_return";
+/// Direct-call helpers (J3 native→native calls). `prepare_call` checks whether the `Op::Call` at a pc
+/// can be a direct native call (compiled callee, plain arity, no upvalues, stack capacity) and, if so,
+/// sets up the callee frame and returns the callee's compiled entry pointer (else `0`, a fallback to
+/// `call`); `callee_base` reads the reserved callee base it stashed; `after_call` inspects the
+/// callee's outcome and tells the caller to continue in place ([`OUTCOME_CONTINUE`]) or propagate.
+pub const PREPARE_CALL_HELPER: &str = "lang_jit_prepare_call";
+pub const CALLEE_BASE_HELPER: &str = "lang_jit_callee_base";
+pub const AFTER_CALL_HELPER: &str = "lang_jit_after_call";
 
 /// The method JIT: a Cranelift [`JITModule`] plus a per-prototype cache of finalized entry points.
 ///
@@ -152,6 +163,9 @@ pub struct Jit {
     release_value_id: FuncId,
     call_id: FuncId,
     return_id: FuncId,
+    prepare_call_id: FuncId,
+    callee_base_id: FuncId,
+    after_call_id: FuncId,
     ctx: cranelift_codegen::Context,
     fb_ctx: FunctionBuilderContext,
 }
@@ -241,6 +255,25 @@ impl Jit {
         let return_id = module
             .declare_function(RETURN_HELPER, Linkage::Import, &return_sig)
             .map_err(|e| e.to_string())?;
+        // Direct-call helpers. `prepare_call` shares `call`'s signature (returns a fn ptr or 0);
+        // `callee_base(vm) -> usize`; `after_call(vm, frames, outcome: i64) -> i64`.
+        let prepare_call_id = module
+            .declare_function(PREPARE_CALL_HELPER, Linkage::Import, &call_sig)
+            .map_err(|e| e.to_string())?;
+        let mut callee_base_sig = module.make_signature();
+        callee_base_sig.params.push(AbiParam::new(ptr_ty));
+        callee_base_sig.returns.push(AbiParam::new(ptr_ty));
+        let callee_base_id = module
+            .declare_function(CALLEE_BASE_HELPER, Linkage::Import, &callee_base_sig)
+            .map_err(|e| e.to_string())?;
+        let mut after_call_sig = module.make_signature();
+        after_call_sig.params.push(AbiParam::new(ptr_ty)); // vm
+        after_call_sig.params.push(AbiParam::new(ptr_ty)); // frames
+        after_call_sig.params.push(AbiParam::new(types::I64)); // callee outcome
+        after_call_sig.returns.push(AbiParam::new(types::I64));
+        let after_call_id = module
+            .declare_function(AFTER_CALL_HELPER, Linkage::Import, &after_call_sig)
+            .map_err(|e| e.to_string())?;
         let ctx = module.make_context();
         Ok(Jit {
             module,
@@ -253,6 +286,9 @@ impl Jit {
             release_value_id,
             call_id,
             return_id,
+            prepare_call_id,
+            callee_base_id,
+            after_call_id,
             ctx,
             fb_ctx: FunctionBuilderContext::new(),
         })
@@ -364,7 +400,10 @@ impl Jit {
         let reachable = reachable_pcs(chunk);
 
         self.module.clear_context(&mut self.ctx);
-        self.ctx.func.signature = self.abi_signature();
+        // Precompute the ABI signature (also imported for the direct-call `call_indirect`) before the
+        // builder borrows `self.ctx.func`, so it doesn't also need to borrow `self`.
+        let abi_sig = self.abi_signature();
+        self.ctx.func.signature = abi_sig.clone();
         {
             let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fb_ctx);
 
@@ -392,6 +431,16 @@ impl Jit {
                 .declare_func_in_func(self.release_value_id, b.func);
             let call_ref = self.module.declare_func_in_func(self.call_id, b.func);
             let return_ref = self.module.declare_func_in_func(self.return_id, b.func);
+            let prepare_call_ref = self
+                .module
+                .declare_func_in_func(self.prepare_call_id, b.func);
+            let callee_base_ref = self
+                .module
+                .declare_func_in_func(self.callee_base_id, b.func);
+            let after_call_ref = self.module.declare_func_in_func(self.after_call_id, b.func);
+            // The signature of a compiled prototype, imported so a direct call can `call_indirect`
+            // another compiled prototype's entry point.
+            let callee_sig = b.import_signature(abi_sig.clone());
 
             // A prototype that makes a call carries heap values (the callee closure, and results) in
             // registers, so its register writes must be refcount-correct (release the overwritten
@@ -402,6 +451,7 @@ impl Jit {
             let mut cg = Codegen {
                 b: &mut b,
                 vm,
+                regs,
                 frame_ptr,
                 base,
                 globals,
@@ -415,6 +465,10 @@ impl Jit {
                 release_value_ref,
                 call_ref,
                 return_ref,
+                prepare_call_ref,
+                callee_base_ref,
+                after_call_ref,
+                callee_sig,
             };
 
             // Entry-pc dispatch (J3 resume-native): jump to the block for `entry_pc`. `0` is a fresh
@@ -622,6 +676,10 @@ struct Codegen<'a, 'b> {
     b: &'a mut FunctionBuilder<'b>,
     /// The opaque `*mut Vm` (ABI param 0), passed to runtime helpers.
     vm: ClValue,
+    /// The register-stack base pointer (ABI param 1) — passed unchanged to a direct callee (which
+    /// computes its own frame pointer from it and its base). Valid across a direct call because that
+    /// path is only taken when no `reserve_window` reallocation can occur.
+    regs: ClValue,
     frame_ptr: ClValue,
     /// The frame's base offset (ABI param 2), passed to the call helper.
     base: ClValue,
@@ -640,6 +698,10 @@ struct Codegen<'a, 'b> {
     release_value_ref: FuncRef,
     call_ref: FuncRef,
     return_ref: FuncRef,
+    prepare_call_ref: FuncRef,
+    callee_base_ref: FuncRef,
+    after_call_ref: FuncRef,
+    callee_sig: cranelift_codegen::ir::SigRef,
 }
 
 impl Codegen<'_, '_> {
@@ -914,7 +976,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::LoadGlobal { dst, global, .. } => emit_load_global(cg, *dst, global.0, pc, op_blocks),
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
-        Op::Call { .. } => emit_call(cg, pc),
+        Op::Call { .. } => emit_call(cg, pc, op_blocks),
         Op::Return { src } => emit_return(cg, *src),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
@@ -929,19 +991,66 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
 /// frame/register stacks (pushing the callee frame). Whatever it returns — `CALLED` (frame pushed),
 /// a resume pc (a synchronous first-class-builtin call completed), or `ABORTED` — becomes this
 /// compiled function's outcome, so the interpreter runs the callee and resumes the caller in tier 0.
-fn emit_call(cg: &mut Codegen, pc: usize) {
+fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     let vm = cg.vm;
     let frames = cg.frames;
     let regs_vec = cg.regs_vec;
     let base = cg.base;
     let proto = cg.b.ins().iconst(types::I32, cg.proto as i64);
     let pcv = cg.b.ins().iconst(types::I32, pc as i64);
+
+    // Try a direct native→native call: `prepare_call` returns the callee's compiled entry pointer if
+    // the call is direct-able (compiled callee, plain arity, no upvalues, stack capacity), else 0.
+    let prep = cg.prepare_call_ref;
+    let pinst =
+        cg.b.ins()
+            .call(prep, &[vm, frames, regs_vec, base, proto, pcv]);
+    let fnptr = cg.b.inst_results(pinst)[0];
+    let zero = cg.b.ins().iconst(types::I64, 0);
+    let is_zero = cg.b.ins().icmp(IntCC::Equal, fnptr, zero);
+    let fallback = cg.b.create_block();
+    let direct = cg.b.create_block();
+    cg.b.ins().brif(is_zero, fallback, &[], direct, &[]);
+
+    // Fallback: the shared `jit_call` path (pushes a frame, returns CALLED/resume-pc/ABORTED).
+    cg.b.switch_to_block(fallback);
     let call = cg.call_ref;
     let inst =
         cg.b.ins()
             .call(call, &[vm, frames, regs_vec, base, proto, pcv]);
     let outcome = cg.b.inst_results(inst)[0];
     cg.b.ins().return_(&[outcome]);
+
+    // Direct: call the callee's compiled entry on the shared stack. `prepare_call` already reserved
+    // the callee window and pushed its frame; `regs`/`globals`/`frames`/`regs_vec` pass through, the
+    // callee base comes from `callee_base`, and `entry_pc = 0` (a fresh frame). No reallocation can
+    // happen (capacity was checked), so `cg.regs` stays valid across the indirect call.
+    cg.b.switch_to_block(direct);
+    let cbinst = cg.b.ins().call(cg.callee_base_ref, &[vm]);
+    let callee_base = cg.b.inst_results(cbinst)[0];
+    let regs = cg.regs;
+    let globals = cg.globals;
+    let entry0 = cg.b.ins().iconst(types::I64, 0);
+    let iinst = cg.b.ins().call_indirect(
+        cg.callee_sig,
+        fnptr,
+        &[vm, regs, callee_base, globals, frames, regs_vec, entry0],
+    );
+    let callee_outcome = cg.b.inst_results(iinst)[0];
+    // `after_call` interprets the callee outcome: continue in place, or an outcome to propagate.
+    let ainst =
+        cg.b.ins()
+            .call(cg.after_call_ref, &[vm, frames, callee_outcome]);
+    let after = cg.b.inst_results(ainst)[0];
+    let cont = cg.b.ins().iconst(types::I64, OUTCOME_CONTINUE);
+    let is_cont = cg.b.ins().icmp(IntCC::Equal, after, cont);
+    let continue_blk = cg.b.create_block();
+    let return_blk = cg.b.create_block();
+    cg.b.ins().brif(is_cont, continue_blk, &[], return_blk, &[]);
+    cg.b.switch_to_block(continue_blk);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
+    cg.b.switch_to_block(return_blk);
+    cg.b.ins().return_(&[after]);
 }
 
 /// A native `Op::Return` (P-JIT J3): hand the return value to the `jit_return` helper, which runs the

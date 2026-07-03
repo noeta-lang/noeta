@@ -371,6 +371,10 @@ struct Vm<'m> {
     /// parks it here for the dispatch loop to yield as the run's result.
     #[cfg(feature = "jit")]
     jit_ret: Value,
+    /// The callee window base a `jit_prepare_call` reserved for a native direct call (J3): the
+    /// compiled caller reads it back (via `jit_callee_base`) to `call_indirect` the callee.
+    #[cfg(feature = "jit")]
+    jit_callee_base: usize,
 }
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
@@ -534,6 +538,116 @@ extern "C" fn jit_return(
             lang_jit::OUTCOME_HALTED
         }
         None => lang_jit::OUTCOME_RETURNED,
+    }
+}
+
+/// Runtime helper for a native direct call (J3 native→native): decide whether the `Op::Call` at
+/// `pc` can be called directly and, if so, set up the callee frame on the shared stacks and return
+/// the callee's compiled entry pointer (as an `i64`); otherwise return `0` (the caller falls back to
+/// `jit_call`). Direct-able means: a closure callee, plain arity (no defaults), no upvalues, an
+/// already-compiled callee, and stack capacity for the callee window without a reallocation (so the
+/// caller's register pointer stays valid across the indirect call).
+///
+/// # Safety
+/// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_prepare_call(
+    vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    base: usize,
+    proto: i32,
+    pc: i32,
+) -> i64 {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    let module = vm.module;
+    let Op::Call {
+        dst, callee, args, ..
+    } = &module.protos[proto as usize].code[pc as usize]
+    else {
+        return 0;
+    };
+    let callee_val = regs[base + *callee as usize];
+    let Some(callee_proto) = callee_val.as_closure() else {
+        return 0; // a first-class builtin / non-callable → fall back
+    };
+    let cc = &module.protos[callee_proto as usize];
+    // Plain arity (no default-filling) and no upvalues — else the general setup path handles it.
+    if args.len() != cc.num_params as usize || callee_val.closure_upvalue_count() != 0 {
+        return 0;
+    }
+    let num_regs = cc.num_registers as usize;
+    // The callee must already be compiled, and its window must fit without reallocating the register
+    // stack (which would dangle the caller's pointer).
+    let Some(f) = vm.jit.as_ref().and_then(|j| j.get(callee_proto as usize)) else {
+        return 0;
+    };
+    if regs.len() + num_regs > regs.capacity() {
+        return 0;
+    }
+    // Set up the callee frame (like `setup_closure_call`'s closure arm, minus defaults/upvalues).
+    let new_base = reserve_window(regs, num_regs);
+    for (i, &arg_reg) in args.iter().enumerate() {
+        let v = regs[base + arg_reg as usize];
+        retain(v);
+        regs[new_base + i] = v;
+    }
+    let caller_top = frames.len() - 1;
+    frames[caller_top].pc = pc as usize + 1;
+    frames.push(Frame {
+        proto: callee_proto,
+        base: new_base,
+        pc: 0,
+        ret_dst: *dst,
+        ret_transform: RetTransform::None,
+        upvalues: Vec::new(),
+    });
+    vm.jit_callee_base = new_base;
+    f as usize as i64
+}
+
+/// Runtime helper: read back the callee base a preceding `jit_prepare_call` reserved (J3).
+///
+/// # Safety
+/// `vm` must be the live `*mut Vm` the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_callee_base(vm: *mut core::ffi::c_void) -> usize {
+    let vm = unsafe { &*(vm as *const Vm) };
+    vm.jit_callee_base
+}
+
+/// Runtime helper: interpret a direct callee's outcome for its native caller (J3). `RETURNED` → the
+/// caller continues in place (`OUTCOME_CONTINUE`, result already in its destination). Otherwise the
+/// callee did not complete natively — a bail sets the (still-live) callee frame's pc so the
+/// interpreter resumes it there, and the caller propagates `CALLED`; `CALLED`/`ABORTED` pass through.
+///
+/// # Safety
+/// `frames` must be the live pointer the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_after_call(
+    _vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    callee_outcome: i64,
+) -> i64 {
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    match callee_outcome {
+        lang_jit::OUTCOME_RETURNED => lang_jit::OUTCOME_CONTINUE,
+        lang_jit::OUTCOME_CALLED => lang_jit::OUTCOME_CALLED,
+        lang_jit::OUTCOME_ABORTED => lang_jit::OUTCOME_ABORTED,
+        // A bail pc: the callee frame is still the top; point it at its resume pc so the interpreter
+        // runs it there, and tell the caller a frame is pending (CALLED). (HALTED can't occur — a
+        // direct callee always has a caller — so it also lands here defensively as a re-run.)
+        bail_pc => {
+            if let Some(top) = frames.last_mut() {
+                top.pc = bail_pc.max(0) as usize;
+            }
+            lang_jit::OUTCOME_CALLED
+        }
     }
 }
 
@@ -793,6 +907,8 @@ impl<'m> Vm<'m> {
             jit_counters: Vec::new(),
             #[cfg(feature = "jit")]
             jit_ret: Value::unit(),
+            #[cfg(feature = "jit")]
+            jit_callee_base: 0,
         }
     }
 
@@ -816,6 +932,9 @@ impl<'m> Vm<'m> {
             ),
             (lang_jit::CALL_HELPER, jit_call as *const u8),
             (lang_jit::RETURN_HELPER, jit_return as *const u8),
+            (lang_jit::PREPARE_CALL_HELPER, jit_prepare_call as *const u8),
+            (lang_jit::CALLEE_BASE_HELPER, jit_callee_base as *const u8),
+            (lang_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
         ];
         match lang_jit::Jit::new(helpers) {
             Ok(mut jit) => {
@@ -1274,6 +1393,13 @@ impl<'m> Vm<'m> {
     /// halts (an implicit unit return). Returns the produced value, which the caller owns.
     /// On abort, every register still owned by a frame left on the stack is released here.
     fn run(&mut self, mut frames: Vec<Frame>, mut regs: Vec<Value>) -> Result<Value, Abort> {
+        // Give the register stack generous headroom up front (P-JIT J3): a native direct call only
+        // fires when the callee window fits without reallocating (so the caller's register pointer
+        // stays valid), so a pre-reserved buffer keeps common recursion on the fast path. A deeper
+        // stack simply reallocates once and the direct-call check re-passes at the new capacity, so
+        // this only affects performance, never correctness — and is a no-op without the `jit` feature.
+        #[cfg(feature = "jit")]
+        regs.reserve(8192usize.saturating_sub(regs.len()));
         let result = self.dispatch(&mut frames, &mut regs);
         if result.is_err() {
             // Phase 4.2c-ii: a panic unwinds the live frames. Before reclaiming their memory, fire
