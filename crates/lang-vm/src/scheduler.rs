@@ -383,10 +383,14 @@ impl<'m> Vm<'m> {
         // Snapshot the globals the worker can see (functions + value-type constants); skip any that are
         // unshippable (e.g. a class instance) — a v1 limitation, documented, since an isolate body that
         // referenced one would then fail at use rather than silently observing parent state.
-        let mut wire_globals: Vec<(String, isolate::Wire)> = Vec::new();
-        for (name, &v) in &self.globals {
-            if let Ok(w) = isolate::marshal(v, &self.shapes, &self.channels) {
-                wire_globals.push((name.clone(), w));
+        // Ship globals by slot id (P-VMT-GSLOT): the worker shares the same `Arc<Module>`, so slots
+        // line up on both sides. A `None` (unbound) or unshippable slot is skipped.
+        let mut wire_globals: Vec<(u32, isolate::Wire)> = Vec::new();
+        for (slot, cell) in self.globals.iter().enumerate() {
+            if let Some(v) = cell
+                && let Ok(w) = isolate::marshal(*v, &self.shapes, &self.channels)
+            {
+                wire_globals.push((slot as u32, w));
             }
         }
         let module = Arc::clone(

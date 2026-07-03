@@ -259,10 +259,15 @@ struct Vm<'m> {
     /// Type names that `@derive(Serialize<Json>)` (without a hand-written `to_json`): `o.to_json()` on
     /// their instances synthesizes a structural JSON serializer.
     tojson_derives: HashSet<String>,
-    globals: HashMap<String, Value>,
-    /// Top-level binding names in declaration order, so globals are destroyed at program end
-    /// in reverse declaration order (the deterministic "program order" the spec requires).
-    global_order: Vec<String>,
+    /// The per-run global slots (P-VMT-GSLOT), indexed by [`GlobalId`] — sized to
+    /// `module.global_names.len()`. `None` is an unbound slot (a `LoadGlobal`/`TakeGlobal` of one
+    /// raises E0005); the compiler assigns a dense slot to every top-level binding and `fn` name so
+    /// access is a `Vec` index, not a `HashMap` hash+probe on the name.
+    globals: Vec<Option<Value>>,
+    /// Global slots in **binding order** (each pushed the first time its slot is stored), so globals
+    /// are destroyed at program end in reverse binding order (the deterministic "program order" the
+    /// spec requires) — the same order the pre-slot name-keyed `global_order` produced.
+    global_order: Vec<u32>,
     /// The deterministic `next_id()` counter, seeded at 1 (matching the M0 `IdGen`).
     next_id: u64,
     /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
@@ -538,7 +543,7 @@ impl<'m> Vm<'m> {
             destruct_reachable,
             comparable_derives,
             tojson_derives,
-            globals: HashMap::new(),
+            globals: vec![None; module.global_names.len()],
             global_order: Vec::new(),
             next_id: 1,
             host,
@@ -583,7 +588,7 @@ fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
     // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
     // and global release has had a chance to buffer the cycle's roots.
     if mode == lang_value::CollectorMode::Trace {
-        let roots: Vec<Value> = vm.globals.values().copied().collect();
+        let roots: Vec<Value> = vm.globals.iter().filter_map(|c| *c).collect();
         let garbage = collect_trace(&roots);
         vm.reclaim_cycle_garbage(garbage);
     }
@@ -599,8 +604,8 @@ fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
     }
     // Destroy the globals at program end in reverse declaration order, running each
     // destructor on its last reference — the deterministic destruction the spec requires.
-    for name in vm.global_order.clone().into_iter().rev() {
-        if let Some(v) = vm.globals.get(&name).copied() {
+    for slot in vm.global_order.clone().into_iter().rev() {
+        if let Some(v) = vm.globals[slot as usize].take() {
             vm.release_value(v);
         }
     }
@@ -646,7 +651,7 @@ fn run_isolate_worker(
     factory: &IsolateFactory,
     proto: u32,
     wire_args: Vec<isolate::Wire>,
-    wire_globals: Vec<(String, isolate::Wire)>,
+    wire_globals: Vec<(u32, isolate::Wire)>,
     span: Span,
 ) -> Result<isolate::Wire, String> {
     lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
@@ -656,11 +661,12 @@ fn run_isolate_worker(
     wvm.isolate_module = Some(Arc::clone(module));
     wvm.isolate_factory = Some(factory.clone());
     // Seed the worker's globals from the parent's snapshot so the isolate body can call other
-    // top-level functions (and read value-type constants).
-    for (name, wire) in &wire_globals {
+    // top-level functions (and read value-type constants). Slots match: parent and worker share the
+    // same `Arc<Module>`, so a global's `GlobalId` is identical on both sides (P-VMT-GSLOT).
+    for (slot, wire) in &wire_globals {
         let value = isolate::rebuild(wire, &wvm.shapes, &mut wvm.channels);
-        wvm.globals.insert(name.clone(), value);
-        wvm.global_order.push(name.clone());
+        wvm.globals[*slot as usize] = Some(value);
+        wvm.global_order.push(*slot);
     }
     let arg_vals: Vec<Value> = wire_args
         .iter()
@@ -691,8 +697,8 @@ fn run_isolate_worker(
     };
     // Tear the worker down so its thread-local heap returns to zero residency: destroy globals in
     // reverse declaration order, then drain any channel buffers.
-    for name in wvm.global_order.clone().into_iter().rev() {
-        if let Some(value) = wvm.globals.get(&name).copied() {
+    for slot in wvm.global_order.clone().into_iter().rev() {
+        if let Some(value) = wvm.globals[slot as usize].take() {
             wvm.release_value(value);
         }
     }
@@ -1003,10 +1009,12 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, v);
                         pc += 1;
                     }
-                    Op::LoadGlobal { dst, name, span } => {
-                        let name = module.name(*name);
-                        match self.globals.get(name) {
-                            Some(&v) => {
+                    Op::LoadGlobal { dst, global, span } => {
+                        // Direct slot index — no name hashing (P-VMT-GSLOT). `Option<Value>` is `Copy`,
+                        // so the match copies the slot out and the `self.globals` borrow ends before the
+                        // unbound arm needs `&mut self` for `self.error`.
+                        match self.globals[global.0 as usize] {
+                            Some(v) => {
                                 retain(v);
                                 set_reg(regs, fbase, *dst, v);
                                 pc += 1;
@@ -1015,39 +1023,47 @@ impl<'m> Vm<'m> {
                                 return Err(self.error(
                                     DiagnosticCode::UnknownName,
                                     *span,
-                                    format!("cannot find `{name}` in this scope"),
+                                    format!(
+                                        "cannot find `{}` in this scope",
+                                        module.global_name(*global)
+                                    ),
                                 ));
                             }
                         }
                     }
-                    Op::StoreGlobal { name, src } => {
+                    Op::StoreGlobal { global, src } => {
                         // Transfer ownership from the (dead) source temporary into the global,
                         // rather than retaining a duplicate. This keeps the reference count equal
                         // to the tree-walker's direct-binding model — a lingering temporary would
                         // otherwise inflate the count and hide a reassigned value's last reference,
                         // suppressing its destructor.
-                        let name = module.name(*name);
                         let v = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
-                        match self.globals.insert(name.to_string(), v) {
+                        match self.globals[global.0 as usize].replace(v) {
                             // Reassigning a global: the previous value is dropped here, running its
                             // destructor if this was its last reference.
                             Some(old) => self.release_value(old),
-                            // First binding of this name: record it for reverse-order destruction.
-                            None => self.global_order.push(name.to_string()),
+                            // First binding of this slot: record it for reverse-order destruction.
+                            None => self.global_order.push(global.0),
                         }
                         pc += 1;
                     }
-                    Op::TakeGlobal { dst, name, span } => {
+                    Op::TakeGlobal { dst, global, span } => {
                         // Move the global's value into `dst`, leaving `unit` — no retain, so the single
                         // owning reference transfers and a following `ConcatInPlace` can see uniqueness.
-                        let name = module.name(*name);
-                        let v = match self.globals.get_mut(name) {
-                            Some(slot) => std::mem::replace(slot, Value::unit()),
+                        // An unbound slot is left untouched (it stays `None`) and raises E0005.
+                        let taken = self.globals[global.0 as usize]
+                            .as_mut()
+                            .map(|slot| std::mem::replace(slot, Value::unit()));
+                        let v = match taken {
+                            Some(v) => v,
                             None => {
                                 return Err(self.error(
                                     DiagnosticCode::UnknownName,
                                     *span,
-                                    format!("cannot find `{name}` in this scope"),
+                                    format!(
+                                        "cannot find `{}` in this scope",
+                                        module.global_name(*global)
+                                    ),
                                 ));
                             }
                         };

@@ -18,14 +18,23 @@ use lang_span::Span;
 pub type Reg = u16;
 
 /// An interned name index into [`Module::names`] (P-VMT-OPSZ). Every instruction-embedded name —
-/// field/method/global names, the ext-call module+func, type names, and `match`-literal strings —
+/// field/method names, the ext-call module+func, type names, and `match`-literal strings —
 /// is held as this 4-byte id instead of an inline 24-byte `String`, which is what shrinks `Op` from
 /// two cache lines toward one. The VM resolves it back to `&str` only at the cold lookup sites
-/// (global / method / field resolution, all of which then hit a hashmap or field scan anyway); the
+/// (method / field resolution, which then hit a hashmap or field scan anyway); the
 /// disassembler resolves it for readable output. Distinct newtype (not a bare `u32`) so it can't be
 /// confused with the other u32 indices an op carries (shape, proto, cache slot).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct NameId(pub u32);
+
+/// A global-variable **slot index** into the VM's per-run globals vector (P-VMT-GSLOT). Top-level
+/// bindings and `fn` names used to be resolved by hashing their name against a `HashMap` on every
+/// access — the dominant cost of a top-level loop and of every global-function call. The compiler
+/// now assigns each global a dense slot at emit time, so `LoadGlobal`/`StoreGlobal`/`TakeGlobal`
+/// index a `Vec` directly, with no hashing (PHP's compiled-variable model). [`Module::global_names`]
+/// maps a slot back to its name for diagnostics and disassembly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct GlobalId(pub u32);
 
 /// Which operand of a logical operator is being checked, for the "expects a bool on the
 /// left/right" diagnostic (matching the M0 tree-walker's `eval_logical`).
@@ -212,13 +221,13 @@ pub enum Op {
     /// frame-local register: top-level bindings, function names, and (at runtime) unknowns.
     LoadGlobal {
         dst: Reg,
-        name: NameId,
+        global: GlobalId,
         span: Span,
     },
     /// `globals[name] = src` (refcounted: release old binding, retain `src`). Only emitted at
     /// the top level — functions never assign globals in the M1.2 subset.
     StoreGlobal {
-        name: NameId,
+        global: GlobalId,
         src: Reg,
     },
     /// `dst = take(globals[name])` — **move** the global's value into `dst`, leaving `unit` in the
@@ -229,7 +238,7 @@ pub enum Op {
     /// unbound (matching `LoadGlobal`).
     TakeGlobal {
         dst: Reg,
-        name: NameId,
+        global: GlobalId,
         span: Span,
     },
     /// `drop(reg)` — release the value held in `reg` and leave `unit` in its place. Inserted by the
@@ -980,7 +989,8 @@ impl Chunk {
     /// Render the chunk as stable, human-readable disassembly for snapshot tests. `names` is the
     /// owning module's interned name table (P-VMT-OPSZ), used to resolve each op's [`NameId`]s back
     /// to their strings so the output is unchanged from the pre-interning inline-`String` form.
-    pub fn disassemble(&self, names: &[String]) -> String {
+    /// `global_names` (P-VMT-GSLOT) resolves each global slot back to its name likewise.
+    pub fn disassemble(&self, names: &[String], global_names: &[String]) -> String {
         let mut out = String::new();
         let _ = writeln!(
             out,
@@ -1001,7 +1011,11 @@ impl Chunk {
         }
         out.push_str("code:\n");
         for (i, op) in self.code.iter().enumerate() {
-            let _ = writeln!(out, "  {i:>3}  {}", op_repr(op, &self.diagnostics, names));
+            let _ = writeln!(
+                out,
+                "  {i:>3}  {}",
+                op_repr(op, &self.diagnostics, names, global_names)
+            );
         }
         out
     }
@@ -1114,6 +1128,11 @@ pub struct Module {
     /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
     /// resolves an id to `&str` only at the cold lookup sites, the disassembler for readable output.
     pub names: Vec<String>,
+    /// The global slot table (P-VMT-GSLOT): `global_names[i]` is the name of the global in slot `i`.
+    /// Its length is the number of slots the VM's per-run globals vector needs. The slot **index** is
+    /// what `LoadGlobal`/`StoreGlobal`/`TakeGlobal` carry ([`GlobalId`]); the name here is only for
+    /// the unbound-global diagnostic and disassembly, never the hot path.
+    pub global_names: Vec<String>,
 }
 
 impl Module {
@@ -1126,6 +1145,12 @@ impl Module {
     /// against this same table, so the index is always in range.
     pub fn name(&self, id: NameId) -> &str {
         &self.names[id.0 as usize]
+    }
+
+    /// Resolve a [`GlobalId`] to the global's name (P-VMT-GSLOT) — for the unbound-global diagnostic
+    /// and disassembly only.
+    pub fn global_name(&self, id: GlobalId) -> &str {
+        &self.global_names[id.0 as usize]
     }
 
     /// The data attributes (`#[...]`) attached to `target`, in source order — the manifest query
@@ -1202,7 +1227,7 @@ impl Module {
             } else {
                 let _ = writeln!(out, "=== proto {i} ===");
             }
-            out.push_str(&proto.disassemble(&self.names));
+            out.push_str(&proto.disassemble(&self.names, &self.global_names));
         }
         out
     }
@@ -1220,15 +1245,17 @@ fn const_repr(c: &Const) -> String {
     }
 }
 
-fn op_repr(op: &Op, diagnostics: &[Diagnostic], names: &[String]) -> String {
+fn op_repr(op: &Op, diagnostics: &[Diagnostic], names: &[String], global_names: &[String]) -> String {
     // Resolve an interned name id to its string for readable disassembly (P-VMT-OPSZ).
     let n = |id: &NameId| names[id.0 as usize].as_str();
+    // Resolve a global slot to its name (P-VMT-GSLOT).
+    let g = |id: &GlobalId| global_names[id.0 as usize].as_str();
     match op {
         Op::LoadConst { dst, k } => format!("LoadConst   r{dst} <- k{k}"),
         Op::Move { dst, src } => format!("Move        r{dst} <- r{src}"),
-        Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {:?}", n(name)),
-        Op::StoreGlobal { name, src } => format!("StoreGlobal {:?} <- r{src}", n(name)),
-        Op::TakeGlobal { dst, name, .. } => format!("TakeGlobal  r{dst} <- take({:?})", n(name)),
+        Op::LoadGlobal { dst, global, .. } => format!("LoadGlobal  r{dst} <- {:?}", g(global)),
+        Op::StoreGlobal { global, src } => format!("StoreGlobal {:?} <- r{src}", g(global)),
+        Op::TakeGlobal { dst, global, .. } => format!("TakeGlobal  r{dst} <- take({:?})", g(global)),
         Op::Drop { reg, relevant } => {
             let tag = if *relevant { " ~destruct" } else { "" };
             format!("Drop        r{reg}{tag}")

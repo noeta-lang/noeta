@@ -321,6 +321,18 @@ fn loop_sum_src(n: usize) -> String {
     )
 }
 
+/// The same tight arithmetic loop as `loop_sum_src` but with **top-level** `mut` accumulators (the
+/// natural scripting shape) rather than function locals — so `i`/`total` are globals. Before
+/// P-VMT-GSLOT each `LoadGlobal`/`StoreGlobal` hashed the name against a `HashMap` every iteration
+/// (6 hash+probe ops per step here); slot indexing makes each a direct `Vec` index. Measured ~2.3×
+/// end to end. The contrast with `loop_sum_src` (function locals, already register-fast) isolates the
+/// global-access cost.
+fn global_loop_src(n: usize) -> String {
+    format!(
+        "mut total = 0;\nmut i = 0;\nwhile i < {n} {{\n    total = total + (i % 7);\n    i = i + 1;\n}}\necho total;\n"
+    )
+}
+
 const LOOP_ITERS: &[usize] = &[100_000, 1_000_000];
 
 /// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
@@ -660,6 +672,12 @@ fn vm_hot_paths(c: &mut Criterion) {
     for &n in LOOP_ITERS {
         let module = compile(&loop_sum_src(n));
         disp.bench_with_input(BenchmarkId::new("loop_sum", n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        // P-VMT-GSLOT: the same loop with top-level (global) accumulators — measures the
+        // per-iteration global-access cost slot indexing removed.
+        let g = compile(&global_loop_src(n));
+        disp.bench_with_input(BenchmarkId::new("global_loop", n), &g, |b, module| {
             b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
         });
     }

@@ -51,8 +51,8 @@ use std::collections::{HashMap, HashSet};
 use lang_ast::{BinaryOp, Program, TypeRef};
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
-    BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NameId, NarrowTarget, Op,
-    Reg, ReuseCheck, StrPart,
+    BoolSide, Builtin, CaptureFrom, Chunk, Const, GlobalId, MethodEntry, Module, NameId,
+    NarrowTarget, Op, Reg, ReuseCheck, StrPart,
 };
 use lang_ir::{
     Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
@@ -226,6 +226,8 @@ fn compile_inner(
         type_reprs: Vec::new(),
         names: Vec::new(),
         name_ids: HashMap::new(),
+        global_names: Vec::new(),
+        global_slots: HashMap::new(),
     };
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
@@ -271,6 +273,7 @@ fn compile_inner(
         reflection: lang_ast::reflect::build(program),
         type_reprs: module.type_reprs,
         names: module.names,
+        global_names: module.global_names,
     })
 }
 
@@ -345,6 +348,12 @@ struct ModuleCompiler {
     names: Vec<String>,
     /// Dedup index for [`Self::names`]: name → its id, so a name used at N sites is stored once.
     name_ids: HashMap<String, u32>,
+    /// The global slot table (P-VMT-GSLOT), becomes [`Module::global_names`]. Each top-level binding
+    /// and `fn` name gets a dense slot by [`Self::intern_global`] so the VM indexes a `Vec` instead of
+    /// hashing a name on every global access.
+    global_names: Vec<String>,
+    /// Dedup index for [`Self::global_names`]: global name → its slot id.
+    global_slots: HashMap<String, u32>,
 }
 
 impl ModuleCompiler {
@@ -366,6 +375,20 @@ impl ModuleCompiler {
         self.names.push(name.to_string());
         self.name_ids.insert(name.to_string(), id);
         NameId(id)
+    }
+
+    /// Assign (or reuse) the global slot for `name` (P-VMT-GSLOT), returning its [`GlobalId`]. Called
+    /// at every `LoadGlobal`/`StoreGlobal`/`TakeGlobal` emission; the final table sizes the VM's
+    /// per-run globals vector. Slot order is assignment order and carries no semantics — the VM tracks
+    /// runtime binding order separately for reverse-order destruction.
+    fn intern_global(&mut self, name: &str) -> GlobalId {
+        if let Some(&id) = self.global_slots.get(name) {
+            return GlobalId(id);
+        }
+        let id = self.global_names.len() as u32;
+        self.global_names.push(name.to_string());
+        self.global_slots.insert(name.to_string(), id);
+        GlobalId(id)
     }
 
     /// Pre-pass: collect every top-level value global (a binding or `fn`/native-module name) and
@@ -1318,8 +1341,8 @@ impl<'m> FnCompiler<'m> {
                         let value = self.alloc_reg();
                         let k = self.add_const(Const::NativeModule(imported.name.clone()));
                         self.code.push(Op::LoadConst { dst: value, k });
-                        let name = self.module.intern_name(&imported.name);
-                        self.code.push(Op::StoreGlobal { name, src: value });
+                        let global = self.module.intern_global(&imported.name);
+                        self.code.push(Op::StoreGlobal { global, src: value });
                     }
                 }
                 Ok(())
@@ -1343,11 +1366,8 @@ impl<'m> FnCompiler<'m> {
             });
             self.globals
                 .insert(name.to_string(), GlobalInfo { mutable: false });
-            let name_id = self.module.intern_name(name);
-            self.code.push(Op::StoreGlobal {
-                name: name_id,
-                src: t,
-            });
+            let global = self.module.intern_global(name);
+            self.code.push(Op::StoreGlobal { global, src: t });
             return Ok(());
         }
 
@@ -1732,11 +1752,8 @@ impl<'m> FnCompiler<'m> {
             if self.at_global_depth() {
                 self.globals
                     .insert(name.to_string(), GlobalInfo { mutable: true });
-                let name_id = self.module.intern_name(name);
-                self.code.push(Op::StoreGlobal {
-                    name: name_id,
-                    src,
-                });
+                let global = self.module.intern_global(name);
+                self.code.push(Op::StoreGlobal { global, src });
             } else {
                 self.declare_local(name, src, owned, true);
             }
@@ -1808,11 +1825,8 @@ impl<'m> FnCompiler<'m> {
         };
         if let Some(mutable) = global_mut {
             if mutable || field_assign {
-                let name_id = self.module.intern_name(name);
-                self.code.push(Op::StoreGlobal {
-                    name: name_id,
-                    src,
-                });
+                let global = self.module.intern_global(name);
+                self.code.push(Op::StoreGlobal { global, src });
             } else {
                 let idx = self.add_diag(immutable_diag(name, name_span));
                 self.code.push(Op::Raise { idx });
@@ -1824,11 +1838,8 @@ impl<'m> FnCompiler<'m> {
         if self.scopes.is_empty() {
             self.globals
                 .insert(name.to_string(), GlobalInfo { mutable: false });
-            let name_id = self.module.intern_name(name);
-            self.code.push(Op::StoreGlobal {
-                name: name_id,
-                src,
-            });
+            let global = self.module.intern_global(name);
+            self.code.push(Op::StoreGlobal { global, src });
         } else {
             self.declare_local(name, src, owned, false);
         }
@@ -2018,8 +2029,8 @@ impl<'m> FnCompiler<'m> {
             }
             Resolved::Global => {
                 let dst = self.alloc_reg();
-                let name = self.module.intern_name(name);
-                self.code.push(Op::LoadGlobal { dst, name, span });
+                let global = self.module.intern_global(name);
+                self.code.push(Op::LoadGlobal { dst, global, span });
                 Ok(dst)
             }
             // `none` is the one prelude *value* (not a function): the `Option.none` variant.
@@ -2164,10 +2175,10 @@ impl<'m> FnCompiler<'m> {
                         Resolved::Local(reg) => Some(reg),
                         Resolved::Global => {
                             let reg = self.alloc_reg();
-                            let name = self.module.intern_name(name);
+                            let global = self.module.intern_global(name);
                             self.code.push(Op::TakeGlobal {
                                 dst: reg,
-                                name,
+                                global,
                                 span: *span,
                             });
                             Some(reg)
@@ -2786,10 +2797,10 @@ impl<'m> FnCompiler<'m> {
                 Resolved::Local(reg) => (reg, true),
                 Resolved::Global => {
                     let reg = self.alloc_reg();
-                    let name = self.module.intern_name(name);
+                    let global = self.module.intern_global(name);
                     self.code.push(Op::TakeGlobal {
                         dst: reg,
-                        name,
+                        global,
                         span,
                     });
                     (reg, true)
@@ -2841,10 +2852,10 @@ impl<'m> FnCompiler<'m> {
                     Resolved::Local(reg) => Some(reg),
                     Resolved::Global => {
                         let reg = self.alloc_reg();
-                        let name = self.module.intern_name(name);
+                        let global = self.module.intern_global(name);
                         self.code.push(Op::TakeGlobal {
                             dst: reg,
-                            name,
+                            global,
                             span,
                         });
                         Some(reg)
@@ -3064,10 +3075,10 @@ impl<'m> FnCompiler<'m> {
                 // two handled cases.)
                 _ => {
                     let reg = self.alloc_reg();
-                    let name = self.module.intern_name(name);
+                    let global = self.module.intern_global(name);
                     self.code.push(Op::TakeGlobal {
                         dst: reg,
-                        name,
+                        global,
                         span,
                     });
                     reg
