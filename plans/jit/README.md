@@ -103,7 +103,7 @@ on every eligible program.
 | **J0** | ✅ **DONE.** **Foundation** — `lang-jit` crate + `jit` feature, Cranelift wired, the compiled-code cache + tier-0/1 dispatch seam, the runtime-helper ABI skeleton, hot-counter promotion, and the `--jit-differential` + leak-under-JIT oracle harness. No op compiled yet (every proto bails to tier 0) — proves the *plumbing* and the oracle. | Setup; the ABI/deopt seam is the crux to get right early. |
 | **J1** | ✅ **DONE.** **Integer fast path** — compile protos whose ops are all in {`LoadConst`(imm), `Move`, `Drop`, `Binary`(int `+ - * / %` and `== != < <= > >=`), `CondBranch`, `Jump`, `JumpIf*`, `Return`/`Halt` as bail points}. Guard-and-bail on non-int operands, zero divisor, and 48-bit overflow. First real native code — **~6–7.5× on register-local integer loops**. (Globals + `WideInt`/bitwise deferred; see below.) | Codegen correctness; NaN-box guards; the first oracle run. |
 | **J2** | ✅ **DONE (floats).** **Float fast path** — native f64 ALU (`+ - * /`) and ordered comparison (`== != < <= > >=`), dispatched from the same `Binary` by a runtime int-vs-float type check; NaN results canonicalized to match `Value::float` bit-for-bit. **~6.5× on float loops.** (f32, tuples, `Narrow`/`IsType` deferred — see below.) | Incremental. |
-| **J3** | ⏳ **DONE (foundation); full win pending.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation), driving the interpreter's own closure-call setup; heap-aware refcounting (retain/release helpers) for the callee closure and results; `fib`-class recursion runs correctly, both subtrees native. **~1.1× so far** — the caller resumes in tier 0 after its first call; the full win needs resume-native-at-pc (below). | Call ABI, stack/frame interaction, recursion depth. |
+| **J3** | ✅ **DONE.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation), driving the interpreter's own closure-call setup; heap-aware refcounting (retain/release helpers) for the callee closure and results; **resume-native** re-enters the compiled caller after its callee returns, so a whole `fib` frame runs native (only its `Return` bails). `fib`-class recursion **~1.27×**; loops still ~6–8.4×. Remaining gap is the per-call interpreter round-trip (native→native direct calls, a later refinement). | Call ABI, stack/frame interaction, recursion depth. |
 | **J4** | **Heap & collections** — retain/release inlined, allocation + list/map/set/string/field ops via runtime helpers keeping refcount exact. Most real programs become fully JIT-eligible. | **Refcount exactness** — the leak oracle is the gate. |
 | **J5** | **Tiering polish + OSR** — on-stack replacement so a hot loop enters tier 1 mid-execution (not only at call boundary); counter tuning; per-op bail replacing whole-proto eligibility; compile-time budget. | Deopt/OSR is subtle; do last. |
 
@@ -274,11 +274,22 @@ VM execution core, but reuses the interpreter's own logic so behaviour is identi
   (`CALLED`), so the callee runs native (it enters at pc 0) but the **caller resumes in tier 0** after
   its first call. Each frame is native up to its first call + both subtrees native; the tail is
   interpreted. New `jit_recursive_call_is_native_and_correct` test + `vm_jit/fib_*` bench.
-- **The full win — resume-native-at-pc (next).** To keep the caller native after a call, the seam must
-  re-enter the compiled function at an arbitrary resume pc (an entry-pc jump table + firing the seam at
-  every frame re-entry, not just `pc == 0`), so the whole `fib` frame runs native. That is the
-  follow-up that turns the ~1.1× into the real recursion win; the heap-aware machinery and the
-  shared-stack call path it needs are now all in place.
+- **Resume-native (landed).** To keep the caller native after a call returns, the seam now fires at
+  **every** frame `'reload` (not just `pc == 0`) and passes the frame's `entry_pc`; the compiled
+  function has an entry-pc dispatch (a compare chain) that jumps to the resume block. The resume pcs
+  (each `call_pc + 1`) are extra reachability roots, so their blocks get real code. So a whole `fib`
+  frame now runs native except its final `Return` (a once-per-frame bail). This lifted `fib(24)` from
+  ~1.12× to **~1.27×** with no loop regression (`--jit-differential` still 419/0/722-native/0-leak).
+  One bug it surfaced and fixed: `StoreGlobal` was clearing its source register *before* its
+  bail-on-heap-old-global check — harmless when the frame never ran that op natively (v1), but a lost
+  value once resume-native reached it. The rule (now enforced): **a native op must decide its bail
+  before mutating any state**, so a bail re-runs cleanly in the interpreter.
+- **The remaining gap — native→native direct calls (later).** `fib` is ~1.27×, not loop-like, because
+  every call still round-trips through the interpreter seam (native `Call` → `jit_call` → interpreter
+  runs the callee → seam re-enters the caller). Closing it means the compiled caller calling the
+  compiled callee directly, which needs a value-returning `Return` (the callee returns a value to
+  native code) and callee-bail handling — a larger, separate refinement. The current design is correct
+  and a real speedup; the direct-call path is the next lever if recursion parity matters.
 
 ## Open questions (resolve at sign-off)
 

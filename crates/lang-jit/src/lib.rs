@@ -74,6 +74,10 @@ use lang_value::Value;
 ///   (the frame and register stacks), passed to the `jit_call` helper so a native call can push the
 ///   callee frame and grow the shared stack — the contiguous-stack call path (J3). This crate never
 ///   dereferences them.
+/// - `entry_pc` is the bytecode pc at which native execution resumes: `0` for a fresh frame (the
+///   parameter guard runs), or a post-call resume pc when the interpreter re-enters a compiled frame
+///   after its callee returned (J3 resume-native). An `entry_pc` the compiled code has no entry for
+///   is returned as a bail (the interpreter keeps running that frame).
 ///
 /// The `i64` return encodes the outcome: a non-negative value is a **resume pc** (the frame bailed
 /// there); [`OUTCOME_CALLED`] means a callee frame was pushed (the interpreter should run it);
@@ -88,6 +92,7 @@ pub type CompiledFn = unsafe extern "C" fn(
     globals: *mut Value,
     frames: *mut c_void,
     regs_vec: *mut c_void,
+    entry_pc: usize,
 ) -> i64;
 
 /// [`CompiledFn`] return sentinel: a callee frame was pushed onto the frame stack (a native `Call`);
@@ -279,6 +284,7 @@ impl Jit {
         sig.params.push(AbiParam::new(ptr_ty)); // globals
         sig.params.push(AbiParam::new(ptr_ty)); // frames (opaque *mut Vec<Frame>)
         sig.params.push(AbiParam::new(ptr_ty)); // regs_vec (opaque *mut Vec<Value>)
+        sig.params.push(AbiParam::new(ptr_ty)); // entry_pc (usize — where to resume native execution)
         sig.returns.push(AbiParam::new(types::I64)); // outcome (resume pc / CALLED / ABORTED)
         sig
     }
@@ -350,6 +356,7 @@ impl Jit {
             let globals = b.block_params(entry)[3];
             let frames = b.block_params(entry)[4];
             let regs_vec = b.block_params(entry)[5];
+            let entry_pc = b.block_params(entry)[6];
             // frame_ptr = regs + base * 8 (Value is 8 bytes). All register access is off this.
             let base_bytes = b.ins().imul_imm(base, 8);
             let frame_ptr = b.ins().iadd(regs, base_bytes);
@@ -384,9 +391,43 @@ impl Jit {
                 call_ref,
             };
 
-            // Parameter guard: if any argument is a heap pointer, bail to pc 0 (interpret the frame).
-            // Keeps heap arguments out of the body (the body's heap values then arise only from
-            // `LoadGlobal`/calls, which the heap-aware path refcounts).
+            // Entry-pc dispatch (J3 resume-native): jump to the block for `entry_pc`. `0` is a fresh
+            // frame (run the parameter guard first); a post-call resume pc jumps straight to its block;
+            // any other value has no native entry, so bail (the interpreter runs that frame). The valid
+            // resume pcs are exactly `call_pc + 1` for each `Call` (the interpreter re-enters a frame
+            // only at pc 0 or just after a call returns).
+            let resume_targets: Vec<usize> =
+                entry_pcs(chunk).into_iter().filter(|&p| p != 0).collect();
+            let guarded = cg.b.create_block();
+            let bad_entry = cg.b.create_block();
+            // Chain: entry_pc == 0 → guarded; == resume_pc_k → op_blocks[k]; else → bad_entry.
+            let is_zero = cg.b.ins().icmp_imm(IntCC::Equal, entry_pc, 0);
+            let mut next = cg.b.create_block();
+            cg.b.ins().brif(is_zero, guarded, &[], next, &[]);
+            for (i, &rp) in resume_targets.iter().enumerate() {
+                cg.b.switch_to_block(next);
+                let is_rp = cg.b.ins().icmp_imm(IntCC::Equal, entry_pc, rp as i64);
+                let after = if i + 1 < resume_targets.len() {
+                    cg.b.create_block()
+                } else {
+                    bad_entry
+                };
+                cg.b.ins().brif(is_rp, op_blocks[rp], &[], after, &[]);
+                next = after;
+            }
+            if resume_targets.is_empty() {
+                cg.b.switch_to_block(next);
+                cg.b.ins().jump(bad_entry, &[]);
+            }
+            // `bad_entry`: an unexpected resume pc — hand the frame back to the interpreter there.
+            // (`entry_pc` is pointer-width, i.e. i64 on the 64-bit target, matching the return.)
+            cg.b.switch_to_block(bad_entry);
+            cg.b.ins().return_(&[entry_pc]);
+
+            // `guarded` (fresh frame, entry_pc == 0): parameter guard, then op block 0. If any argument
+            // is a heap pointer, bail to pc 0 — keeping heap arguments out of the body (the body's heap
+            // values then arise only from `LoadGlobal`/calls, which the heap-aware path refcounts).
+            cg.b.switch_to_block(guarded);
             let mut any_ptr: Option<ClValue> = None;
             for p in 0..chunk.num_params {
                 let v = cg.load_reg(p);
@@ -494,7 +535,22 @@ fn const_immediate_bits(c: &Const) -> Option<u64> {
     }
 }
 
-/// Forward reachability of each bytecode pc from pc 0 in the *native* control-flow graph. A non-fast
+/// The bytecode pcs at which the interpreter may (re-)enter this prototype's native code: pc 0 (a
+/// fresh frame) plus every `call_pc + 1` (a resume after a native `Call` returned) — J3
+/// resume-native. Those are the only pcs a frame's saved `pc` ever holds at a `'reload` transition.
+fn entry_pcs(chunk: &lang_bytecode::Chunk) -> Vec<usize> {
+    let n = chunk.code.len();
+    let mut pcs = vec![0usize];
+    for (pc, op) in chunk.code.iter().enumerate() {
+        if matches!(op, Op::Call { .. }) && pc + 1 < n {
+            pcs.push(pc + 1);
+        }
+    }
+    pcs
+}
+
+/// Forward reachability of each bytecode pc in the *native* control-flow graph, seeded from every
+/// native entry point ([`entry_pcs`]) — a fresh frame (pc 0) and every post-call resume pc. A non-fast
 /// op is terminal — it bails (returns its pc), so it has no native successor — which is why this
 /// follows edges only out of fast ops. Used so the codegen fills unreachable blocks (dead code, or the
 /// fall-through past a bail) with a trivial bail instead of code that would reference the entry-only
@@ -502,7 +558,7 @@ fn const_immediate_bits(c: &Const) -> Option<u64> {
 fn reachable_pcs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
     let n = chunk.code.len();
     let mut seen = vec![false; n];
-    let mut stack = vec![0usize];
+    let mut stack = entry_pcs(chunk);
     while let Some(pc) = stack.pop() {
         if pc >= n || seen[pc] {
             continue;
@@ -893,40 +949,39 @@ fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
 /// heap value → bail (its `release` may run a destructor); an immediate → plain overwrite (its release
 /// is a no-op).
 fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &[Block]) {
+    // Decide the bail BEFORE mutating anything: a bail hands control back to the interpreter, which
+    // re-runs this op, so no register or slot may have changed yet. The only bail here is a bound heap
+    // old value (its `release` may run a destructor) — `is_pointer` is false for the unbound sentinel,
+    // so it excludes the first-bind case.
+    let old = cg.load_global(g);
+    let heap = cg.is_pointer(old);
+    let cont = cg.b.create_block();
+    let bail = cg.b.create_block();
+    cg.b.ins().brif(heap, bail, &[], cont, &[]);
+    cg.b.switch_to_block(bail);
+    let here = cg.pc_const(pc);
+    cg.b.ins().return_(&[here]);
+
+    // Not a heap old value: safe to mutate. Take the source out (moved into the global — no release,
+    // its reference transfers) and write the slot; a first bind also records it in `global_order`.
+    cg.b.switch_to_block(cont);
     let v = cg.load_reg(src);
-    // Match the interpreter's `mem::replace(reg[src], unit)`: the source is *moved* into the global
-    // (no release — its reference transfers), so use the raw store, not the releasing `store_reg`.
     let unit =
         cg.b.ins()
             .iconst(types::I64, Value::NANBOX.unit_bits as i64);
     cg.store_reg_raw(src, unit);
-
-    let old = cg.load_global(g);
+    cg.store_global(g, v);
     let is_unb = cg.is_unbound(old);
     let bind_blk = cg.b.create_block();
-    let bound_blk = cg.b.create_block();
-    cg.b.ins().brif(is_unb, bind_blk, &[], bound_blk, &[]);
-
-    // First binding: write the slot, then record it in `global_order` via the helper.
+    let after = cg.b.create_block();
+    cg.b.ins().brif(is_unb, bind_blk, &[], after, &[]);
     cg.b.switch_to_block(bind_blk);
-    cg.store_global(g, v);
     let vm = cg.vm;
     let gid = cg.b.ins().iconst(types::I32, g as i64);
     let note = cg.note_bound_ref;
     cg.b.ins().call(note, &[vm, gid]);
-    cg.b.ins().jump(op_blocks[pc + 1], &[]);
-
-    // Already bound: a heap old value bails; an immediate is overwritten in place.
-    cg.b.switch_to_block(bound_blk);
-    let heap = cg.is_pointer(old);
-    let store_blk = cg.b.create_block();
-    let bail = cg.b.create_block();
-    cg.b.ins().brif(heap, bail, &[], store_blk, &[]);
-    cg.b.switch_to_block(bail);
-    let here = cg.pc_const(pc);
-    cg.b.ins().return_(&[here]);
-    cg.b.switch_to_block(store_blk);
-    cg.store_global(g, v);
+    cg.b.ins().jump(after, &[]);
+    cg.b.switch_to_block(after);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
 

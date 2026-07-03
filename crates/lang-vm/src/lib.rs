@@ -792,10 +792,12 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Tier-0/tier-1 dispatch at frame entry (P-JIT). Called once per fresh frame (`pc == 0`).
-    /// Runs the compiled prototype's native code and returns what the interpreter should do next
+    /// Tier-0/tier-1 dispatch at a frame `'reload` (P-JIT). `entry_pc` is where native execution
+    /// should resume — `0` for a fresh frame, or a post-call resume pc when re-entering a compiled
+    /// frame after its callee returned (J3 resume-native). Returns what the interpreter should do next
     /// (the deopt contract). `None` when the prototype is not compiled and the interpreter should run
-    /// it as usual. Under ordinary (non-forced) execution this also drives hot-counter promotion.
+    /// it as usual. Hot-counter promotion happens only on a fresh entry (`entry_pc == 0`), so a resume
+    /// never compiles — it only re-enters an already-native frame.
     #[cfg(feature = "jit")]
     #[allow(unsafe_code)]
     fn jit_enter(
@@ -804,10 +806,13 @@ impl<'m> Vm<'m> {
         frames: &mut Vec<Frame>,
         regs: &mut Vec<Value>,
         base: usize,
+        entry_pc: usize,
     ) -> Option<JitOutcome> {
         let f = match self.jit.as_ref().and_then(|j| j.get(proto)) {
             Some(f) => f,
-            None => self.jit_maybe_compile(proto)?,
+            // Only a fresh entry drives compilation; a resume at a compiled-away frame just interprets.
+            None if entry_pc == 0 => self.jit_maybe_compile(proto)?,
+            None => return None,
         };
         let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
         let regs_ptr = regs.as_mut_ptr();
@@ -828,6 +833,7 @@ impl<'m> Vm<'m> {
                 globals_ptr,
                 frames_ptr,
                 regs_vec_ptr,
+                entry_pc,
             )
         };
         Some(match raw {
@@ -1300,9 +1306,14 @@ impl<'m> Vm<'m> {
             // the inner loop, so `pc == 0` is exactly "this frame is starting". A compiled prototype
             // may run the whole frame in native code; J0 always bails, so control falls straight
             // through to the interpreter below (byte-identical).
+            // Fire at every frame `'reload`, not only fresh entries: after a native `Call`'s callee
+            // returns, the interpreter re-enters the caller at its resume pc and native execution
+            // picks up there (J3 resume-native). `entry_pc = pc` is 0 for a fresh frame or the saved
+            // resume pc otherwise; the compiled code jumps to that block (or bails if it has no entry
+            // for it).
             #[cfg(feature = "jit")]
-            if pc == 0 && self.jit.is_some() {
-                match self.jit_enter(proto, frames, regs, fbase) {
+            if self.jit.is_some() {
+                match self.jit_enter(proto, frames, regs, fbase, pc) {
                     // Not compiled → interpret as usual.
                     None => {}
                     // Native code ran the frame to a bail point and left the register window in the
