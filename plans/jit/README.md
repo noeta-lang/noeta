@@ -234,6 +234,19 @@ was the target. Two changes got it native:
   native-global-loop test; the foundation test reworked (per-op bail leaves almost nothing a pure bail
   stub, so it now uses a string-returning fn — no fast op — to exercise the stub path).
 
+> **Revisit at the end of the JIT arc — Finding-1 refinement (register-allocate uncaptured top-level
+> locals).** The ~4.2× (vs a register loop's ~6×) is the cost of the global indirection. The
+> next-gap doc's Finding-1 "later refinement" — the *compiler* promoting top-level `mut`/`let` that no
+> nested `fn` captures into pure frame registers of prototype 0 (no global slot at all) — would make
+> b_loop a plain register loop, native at the full ~6×, and speed the **interpreter** too. It is a
+> compiler change, not a JIT one, and it touches destruction semantics (a top-level local is currently
+> destroyed at program end in reverse `global_order`; as a register it dies at frame teardown — for
+> `int`/`float` unobservable, but a heap top-level local with a `destruct` could shift timing vs the
+> tree-walker → a differential risk to design against). Deferred deliberately: land it once the JIT
+> arc is complete, so the two speedups (register promotion + native register loops) compose and the
+> destruction-order work is done once, oracle-guarded. See `../perf/vm-throughput/next-gap-investigation.md`
+> Finding 1.
+
 ## Open questions (resolve at sign-off)
 
 - **Method JIT vs tracing.** Proposal: method JIT first (J1–J4), OSR/tracing deferred to J5+. Tracing
