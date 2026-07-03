@@ -37,7 +37,9 @@ use std::sync::Arc;
 
 use lang_ast::{BinaryOp, Program};
 use lang_backend::{Backend, RunResult};
-use lang_bytecode::{BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, ReuseCheck};
+use lang_bytecode::{
+    BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, ReuseCheck, StrPart,
+};
 use lang_compiler::{Unsupported, compile};
 use lang_diagnostics::{Diagnostic, DiagnosticCode};
 use lang_gc::{collect_trace, release, retain};
@@ -3631,6 +3633,40 @@ impl<'m> Vm<'m> {
                         // it via `display`.
                         retain(v);
                         set_reg(regs, fbase, *dst, v);
+                        pc += 1;
+                    }
+                    Op::BuildString { dst, parts } => {
+                        // One pass, one output allocation (P-VMT-STR). Size the buffer from the
+                        // literal segments (known up front); holes grow it as they render. Each hole
+                        // register holds an already-`Stringify`-ed value (a `Display` object was
+                        // dispatched to `to_string` by the preceding `Stringify`), so `display` here
+                        // never pushes a frame — the whole build stays within this one op. Holes are
+                        // read by value (`Value` is `Copy`); their registers keep ownership and are
+                        // released at frame teardown, exactly as the old fold's temporaries were.
+                        let cap: usize = parts
+                            .iter()
+                            .map(|p| match p {
+                                StrPart::Literal(k) => match &chunk.consts[*k as usize] {
+                                    Const::Str(s) => s.len(),
+                                    _ => 0,
+                                },
+                                StrPart::Hole(_) => 0,
+                            })
+                            .sum();
+                        let mut out = String::with_capacity(cap);
+                        for part in parts.iter() {
+                            match part {
+                                StrPart::Literal(k) => {
+                                    if let Const::Str(s) = &chunk.consts[*k as usize] {
+                                        out.push_str(s);
+                                    }
+                                }
+                                StrPart::Hole(r) => {
+                                    out.push_str(&regs[fbase + *r as usize].display());
+                                }
+                            }
+                        }
+                        set_reg(regs, fbase, *dst, Value::string(&out));
                         pc += 1;
                     }
                     Op::Raise { idx } => {

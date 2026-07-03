@@ -323,6 +323,37 @@ fn loop_sum_src(n: usize) -> String {
 
 const LOOP_ITERS: &[usize] = &[100_000, 1_000_000];
 
+/// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
+/// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
+/// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
+/// allocation). `single_hole` is the wordcount-style hot key `"word${i}"`; `multi_hole` stresses the
+/// old fold's O(k²) copying with three holes.
+fn interp_single_hole_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    \
+            mut total = 0;\n    \
+            for i in 0..{n} {{\n        \
+                total = total + \"word${{i}}\".count();\n    \
+            }}\n    \
+            return total;\n\
+         }}\n\
+         echo build();\n"
+    )
+}
+
+fn interp_multi_hole_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    \
+            mut total = 0;\n    \
+            for i in 0..{n} {{\n        \
+                total = total + \"${{i}}-${{i}}-${{i}}\".count();\n    \
+            }}\n    \
+            return total;\n\
+         }}\n\
+         echo build();\n"
+    )
+}
+
 /// Property access through inline caches: read the same object's fields on every
 /// iteration. After the first hit the `p.x`/`p.y` sites go monomorphic, so this
 /// measures the cached LOAD path.
@@ -612,6 +643,20 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     disp.finish();
+
+    // S5 (P-VMT-STR): interpolation throughput — one `BuildString` vs the old N-way concat fold.
+    let mut interp = c.benchmark_group("vm_interp");
+    for &n in LOOP_ITERS {
+        let single = compile(&interp_single_hole_src(n));
+        interp.bench_with_input(BenchmarkId::new("single_hole", n), &single, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let multi = compile(&interp_multi_hole_src(n));
+        interp.bench_with_input(BenchmarkId::new("multi_hole", n), &multi, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    interp.finish();
 
     let mut fieldset = c.benchmark_group("vm_field_assign");
     for &n in LOOP_SIZES {

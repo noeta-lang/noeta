@@ -111,6 +111,19 @@ pub enum Const {
     NativeModule(String),
 }
 
+/// One segment of a fused string interpolation ([`Op::BuildString`], P-VMT-STR). A `Literal` is a
+/// constant-pool string copied verbatim; a `Hole` register is rendered through `display` (a
+/// `Display` object was already routed through its `to_string` by the preceding `Stringify`, so by
+/// this point the register holds a plain value). Replaces the old `LoadConst "" + N×(Stringify +
+/// Concat)` left-fold, which allocated an intermediate `String` per part.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StrPart {
+    /// Index into the prototype's constant pool; the referenced `Const` is always a `Str`.
+    Literal(u16),
+    /// A register holding the (already `Stringify`-ed) hole value, rendered via `display`.
+    Hole(Reg),
+}
+
 /// The target of a checked narrowing (`x.as<T>()`) reduced to its runtime **head constructor**.
 /// Generics are erased, so only the constructor is retained — a `List<int>` target narrows on
 /// "is a list", trusting the element type from the static annotation. `Named` covers user
@@ -888,6 +901,16 @@ pub enum Op {
         src: Reg,
         span: Span,
     },
+    /// `dst = concat(display(part) for part in parts)` — build an interpolated string in one pass
+    /// and one output allocation (P-VMT-STR). Each `Literal` part is copied verbatim from the
+    /// constant pool; each `Hole` part is a register rendered via `display` (a `Display` object was
+    /// already dispatched to `to_string` by a preceding `Stringify`). Replaces the pre-S5
+    /// `LoadConst "" + N×(Stringify + Concat)` fold, which allocated an intermediate `String` per
+    /// part and reallocated the accumulator on every step.
+    BuildString {
+        dst: Reg,
+        parts: Box<[StrPart]>,
+    },
     /// Push a precomputed diagnostic (`diagnostics[idx]`) and halt — the unknown-name (E0005)
     /// and immutable-assignment (E0006) errors, whose text the compiler knows statically.
     Raise {
@@ -1545,6 +1568,17 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         Op::JumpIfFalse { reg, target } => format!("JumpIfFalse r{reg} -> {target}"),
         Op::Echo { reg } => format!("Echo        r{reg}"),
         Op::Stringify { dst, src, .. } => format!("Stringify   r{dst} <- display(r{src})"),
+        Op::BuildString { dst, parts } => {
+            let rendered = parts
+                .iter()
+                .map(|p| match p {
+                    StrPart::Literal(k) => format!("k{k}"),
+                    StrPart::Hole(r) => format!("display(r{r})"),
+                })
+                .collect::<Vec<_>>()
+                .join(" ~ ");
+            format!("BuildString r{dst} <- {rendered}")
+        }
         Op::Raise { idx } => {
             let code = diagnostics
                 .get(*idx as usize)

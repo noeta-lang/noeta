@@ -52,7 +52,7 @@ use lang_ast::{BinaryOp, Program, TypeRef};
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
     BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NarrowTarget, Op, Reg,
-    ReuseCheck,
+    ReuseCheck, StrPart,
 };
 use lang_ir::{
     Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
@@ -2618,30 +2618,32 @@ impl<'m> FnCompiler<'m> {
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let empty = self.add_const(Const::Str(String::new()));
-        self.code.push(Op::LoadConst { dst, k: empty });
+        // Build the interpolation in one pass (P-VMT-STR): each literal is a constant-pool string
+        // copied verbatim, each hole is `Stringify`-ed into its own register (so a `Display` object
+        // still dispatches to `to_string` via a call frame) and then rendered by the single
+        // `BuildString`. This replaces the old `LoadConst "" + N×(Stringify + Concat)` left-fold,
+        // which allocated an intermediate `String` for every part.
+        let mut segments: Vec<StrPart> = Vec::with_capacity(parts.len());
         for part in parts {
-            let r = self.alloc_reg();
             match part {
                 InterpPart::Literal(text) => {
                     let k = self.add_const(Const::Str(text.clone()));
-                    self.code.push(Op::LoadConst { dst: r, k });
+                    segments.push(StrPart::Literal(k));
                 }
                 InterpPart::Hole { atom, .. } => {
                     let src = self.atom_reg(atom)?;
-                    // Route a `Display` object through its `to_string` before the concatenation
-                    // stringifies it; identity for every other value.
+                    let r = self.alloc_reg();
+                    // Route a `Display` object through its `to_string` before `BuildString` renders
+                    // it via `display`; identity for every other value.
                     self.code.push(Op::Stringify { dst: r, src, span });
+                    segments.push(StrPart::Hole(r));
                 }
             }
-            self.code.push(Op::Binary {
-                op: BinaryOp::Concat,
-                dst,
-                a: dst,
-                b: r,
-                span,
-            });
         }
+        self.code.push(Op::BuildString {
+            dst,
+            parts: segments.into_boxed_slice(),
+        });
         Ok(())
     }
 
