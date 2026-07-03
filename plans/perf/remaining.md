@@ -23,6 +23,7 @@ by construction and an optimization may land in **one backend first** (perf asym
 | **P-BITS** | Bit-level arc: Tier B (bitwise/shift ops on `int`) → Tier W (fixed-width ints) → Tier P (`Simd<T,N>` + const generics) | backlog (`plans/bitwise/`) | B: none · W: none · P: const generics | Large (3 tiers) |
 | **P-MONO** | Monomorphic shape specialization + reflection cross-`dyn` element recovery (`type_of` recovers `List<int>`'s `int` after a `dyn` boundary once type args ride in shapes) | M1.8 / deferred "P2.9" | verify current type-arg-in-shape state (S4.5) | Medium |
 | **P-POLISH** | Isolate real-path micro-items: `send` marshals only on a race today (already cheap); the stall-yield is a 100µs sleep-spin (could be a `Condvar`/park) | isolates I.4b/c | — | Small |
+| **P-VMT** | **VM-throughput arc** — close the scalar/loop/call gap the PHP benchmark exposed (28–350× on loops/calls; O(n²) top-level collection cliff; 128 B `Op`; per-call reg alloc; 80 ns/iter dispatch). 6 slices S0–S5. See [`vm-throughput/`](vm-throughput/README.md). | 2026-07-03 PHP bench + profiling | — | Large (6 slices) |
 
 ## Sequencing — value × independence, ascending in risk (the sweep's spine)
 

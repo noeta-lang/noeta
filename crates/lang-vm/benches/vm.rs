@@ -284,6 +284,76 @@ fn dispatch_src() -> String {
         .to_string()
 }
 
+/// S2 (P-VMT-FRAME): call-heavy recursion. `fib(n)` performs ~2·fib(n) calls. Before this slice each
+/// call heap-allocated its register file (`vec![Value::unit(); num_registers]`) and freed it on
+/// return; now every frame is a base offset into one contiguous per-run register stack that a call
+/// extends and a return truncates — so an ordinary call allocates nothing once the stack has grown
+/// to the run's deepest depth. Parameterized over depth so the per-call cost, not just a constant, is
+/// visible.
+fn fib_src(n: usize) -> String {
+    format!(
+        "fn fib(n: int): int {{\n    \
+            if n < 2 {{ return n; }}\n    \
+            return fib(n - 1) + fib(n - 2);\n\
+         }}\n\
+         echo fib({n});\n"
+    )
+}
+
+const FIB_DEPTHS: &[usize] = &[20, 24, 28];
+
+/// S3 (P-VMT-DISP): a tight arithmetic loop with no per-iteration heap work (ints are NaN-boxed),
+/// so its cost is dominated by the raw dispatch floor — the per-op work the interpreter does before
+/// any real computation. Before S3 the loop head re-derived the current frame (`frames.len() - 1`,
+/// `module.protos[..]`) and re-bounds-checked `frames[top].pc` and every operand on every op; S3
+/// hoists the frame window into loop-locals re-derived only on a call/return, so a straight-line op
+/// is just `pc += 1`. Parameterized so the per-iteration cost is visible, not just a constant.
+fn loop_sum_src(n: usize) -> String {
+    format!(
+        "fn sum(n: int): int {{\n    \
+            mut acc = 0;\n    \
+            for i in 0..n {{\n        \
+                acc = acc + i;\n    \
+            }}\n    \
+            return acc;\n\
+         }}\n\
+         echo sum({n});\n"
+    )
+}
+
+const LOOP_ITERS: &[usize] = &[100_000, 1_000_000];
+
+/// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
+/// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
+/// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
+/// allocation). `single_hole` is the wordcount-style hot key `"word${i}"`; `multi_hole` stresses the
+/// old fold's O(k²) copying with three holes.
+fn interp_single_hole_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    \
+            mut total = 0;\n    \
+            for i in 0..{n} {{\n        \
+                total = total + \"word${{i}}\".count();\n    \
+            }}\n    \
+            return total;\n\
+         }}\n\
+         echo build();\n"
+    )
+}
+
+fn interp_multi_hole_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    \
+            mut total = 0;\n    \
+            for i in 0..{n} {{\n        \
+                total = total + \"${{i}}-${{i}}-${{i}}\".count();\n    \
+            }}\n    \
+            return total;\n\
+         }}\n\
+         echo build();\n"
+    )
+}
+
 /// Property access through inline caches: read the same object's fields on every
 /// iteration. After the first hit the `p.x`/`p.y` sites go monomorphic, so this
 /// measures the cached LOAD path.
@@ -360,6 +430,28 @@ fn set_accumulate_src(n: usize) -> String {
     format!(
         "fn build(): int {{\n    mut s = #{{}};\n    for i in 0..{n} {{\n        s = s.add(i);\n    }}\n    return s.count();\n}}\necho build();\n"
     )
+}
+
+/// A **top-level (global)** map accumulator built by `m[k] = i` n times — the idiomatic
+/// script-at-module-scope shape. Was O(n²) even after Phase 5.1c (which reused only function-local
+/// receivers): the compiler dropped the reuse token for a global receiver, so every `set` deep-copied
+/// the whole map. S1 (P-VMT-GACC) moves the global out with `TakeGlobal` so the in-place op sees
+/// refcount 1, bringing it to O(n) — ~850× at n=40000 (33.5 s → 40 ms). The local twin is
+/// `map_accumulate_src`; this is its global counterpart, parameterized so the scaling is visible.
+fn map_accumulate_global_src(n: usize) -> String {
+    format!("mut m = {{}};\nfor i in 0..{n} {{\n    m[\"k${{i}}\"] = i;\n}}\necho m.count();\n")
+}
+
+/// A top-level (global) list index-write accumulator — the global twin of `list_index_write_src`.
+/// O(n²)→O(n) under S1 (global-receiver reuse via `TakeGlobal`).
+fn list_index_write_global_src(n: usize) -> String {
+    format!("mut xs = 0..{n};\nfor i in 0..{n} {{\n    xs[i] = i * 2;\n}}\necho xs.count();\n")
+}
+
+/// A top-level (global) set accumulator — the global twin of `set_accumulate_src`.
+/// O(n² log n)→O(n) under S1 (global-receiver reuse via `TakeGlobal`).
+fn set_accumulate_global_src(n: usize) -> String {
+    format!("mut s = #{{}};\nfor i in 0..{n} {{\n    s = s.add(i);\n}}\necho s.count();\n")
 }
 
 /// A hot method-call + field-read site on the same receiver every iteration — the monomorphic
@@ -509,6 +601,62 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     setacc.finish();
+
+    // S1 (P-VMT-GACC): the same collection accumulators built in a **top-level global** — O(n²)
+    // before this slice (the compiler dropped the reuse token for a global receiver), O(n) after.
+    let mut gacc = c.benchmark_group("vm_global_accumulate");
+    for &n in LOOP_SIZES {
+        let map = compile(&map_accumulate_global_src(n));
+        gacc.bench_with_input(BenchmarkId::new("map", n), &map, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let list = compile(&list_index_write_global_src(n));
+        gacc.bench_with_input(BenchmarkId::new("list", n), &list, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let set = compile(&set_accumulate_global_src(n));
+        gacc.bench_with_input(BenchmarkId::new("set", n), &set, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    gacc.finish();
+
+    // S2 (P-VMT-FRAME): call-heavy recursion — every call previously heap-allocated its register
+    // file; the contiguous per-run register stack removes the per-call alloc after warm-up.
+    let mut recur = c.benchmark_group("vm_recursion");
+    for &n in FIB_DEPTHS {
+        let module = compile(&fib_src(n));
+        recur.bench_with_input(BenchmarkId::new("fib", n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    recur.finish();
+
+    // S3 (P-VMT-DISP): the dispatch floor — a tight arithmetic loop whose per-iteration cost is
+    // the interpreter's per-op overhead, not real work. Hoisting the frame window out of the loop
+    // head (re-derived only on call/return) is what this measures.
+    let mut disp = c.benchmark_group("vm_dispatch");
+    for &n in LOOP_ITERS {
+        let module = compile(&loop_sum_src(n));
+        disp.bench_with_input(BenchmarkId::new("loop_sum", n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    disp.finish();
+
+    // S5 (P-VMT-STR): interpolation throughput — one `BuildString` vs the old N-way concat fold.
+    let mut interp = c.benchmark_group("vm_interp");
+    for &n in LOOP_ITERS {
+        let single = compile(&interp_single_hole_src(n));
+        interp.bench_with_input(BenchmarkId::new("single_hole", n), &single, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let multi = compile(&interp_multi_hole_src(n));
+        interp.bench_with_input(BenchmarkId::new("multi_hole", n), &multi, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    interp.finish();
 
     let mut fieldset = c.benchmark_group("vm_field_assign");
     for &n in LOOP_SIZES {

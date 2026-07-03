@@ -34,7 +34,7 @@
 //!
 //! [`set_reg`]: ../../lang_vm/index.html
 
-use lang_bytecode::{CaptureFrom, Chunk, Op, Reg};
+use lang_bytecode::{CaptureFrom, Chunk, Op, Reg, StrPart};
 
 /// Coalesce `chunk`'s registers in place: rename register numbers onto the smallest set of physical
 /// slots that respects liveness, and shrink `num_registers` to match. Behaviour-preserving — only
@@ -428,6 +428,14 @@ fn op_facts(op: &Op) -> OpFacts {
         Op::Stringify { dst, src, .. } => {
             f.def = Some(*dst);
             f.uses.push(*src);
+        }
+        Op::BuildString { dst, parts } => {
+            f.def = Some(*dst);
+            for part in parts.iter() {
+                if let StrPart::Hole(r) = part {
+                    f.uses.push(*r);
+                }
+            }
         }
         Op::Raise { .. } => f.fallthrough = false,
         Op::Halt => f.fallthrough = false,
@@ -857,6 +865,14 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         Op::Stringify { dst, src, .. } => {
             m(dst);
             m(src);
+        }
+        Op::BuildString { dst, parts } => {
+            m(dst);
+            for part in parts.iter_mut() {
+                if let StrPart::Hole(r) = part {
+                    m(r);
+                }
+            }
         }
         Op::Raise { .. } => {}
         Op::Halt => {}

@@ -51,8 +51,8 @@ use std::collections::{HashMap, HashSet};
 use lang_ast::{BinaryOp, Program, TypeRef};
 use lang_builtins::PRELUDE_NAMES;
 use lang_bytecode::{
-    BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NarrowTarget, Op, Reg,
-    ReuseCheck,
+    BoolSide, Builtin, CaptureFrom, Chunk, Const, MethodEntry, Module, NameId, NarrowTarget, Op,
+    Reg, ReuseCheck, StrPart,
 };
 use lang_ir::{
     Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
@@ -224,6 +224,8 @@ fn compile_inner(
         type_of_sites,
         cache_slots: 0,
         type_reprs: Vec::new(),
+        names: Vec::new(),
+        name_ids: HashMap::new(),
     };
     // Type registration reads the surface declarations (shapes, derives, the method/destructor
     // proto table) the IR carries verbatim; bodies are lowered from the IR.
@@ -268,6 +270,7 @@ fn compile_inner(
         // tree-walker uses — so reflection is identical across backends by construction.
         reflection: lang_ast::reflect::build(program),
         type_reprs: module.type_reprs,
+        names: module.names,
     })
 }
 
@@ -336,6 +339,12 @@ struct ModuleCompiler {
     /// The interned reflected element types (R1), referenced by index from [`Op::MakeList`]. Interned
     /// by [`Self::intern_type_repr`]; becomes [`Module::type_reprs`].
     type_reprs: Vec<lang_ast::reflect::TypeRepr>,
+    /// The interned instruction name table (P-VMT-OPSZ), becomes [`Module::names`]. Every op name
+    /// (field / method / global / type, ext-call module+func, `match`-literal strings) is interned
+    /// by [`Self::intern_name`] to a 4-byte [`NameId`] instead of an inline `String`, shrinking `Op`.
+    names: Vec<String>,
+    /// Dedup index for [`Self::names`]: name → its id, so a name used at N sites is stored once.
+    name_ids: HashMap<String, u32>,
 }
 
 impl ModuleCompiler {
@@ -345,6 +354,18 @@ impl ModuleCompiler {
         let slot = self.cache_slots;
         self.cache_slots += 1;
         slot
+    }
+
+    /// Intern an instruction name into [`Self::names`], returning its [`NameId`] (P-VMT-OPSZ).
+    /// Deduped module-wide, so a name emitted at many sites costs one table entry.
+    fn intern_name(&mut self, name: &str) -> NameId {
+        if let Some(&id) = self.name_ids.get(name) {
+            return NameId(id);
+        }
+        let id = self.names.len() as u32;
+        self.names.push(name.to_string());
+        self.name_ids.insert(name.to_string(), id);
+        NameId(id)
     }
 
     /// Pre-pass: collect every top-level value global (a binding or `fn`/native-module name) and
@@ -1297,10 +1318,8 @@ impl<'m> FnCompiler<'m> {
                         let value = self.alloc_reg();
                         let k = self.add_const(Const::NativeModule(imported.name.clone()));
                         self.code.push(Op::LoadConst { dst: value, k });
-                        self.code.push(Op::StoreGlobal {
-                            name: imported.name.clone(),
-                            src: value,
-                        });
+                        let name = self.module.intern_name(&imported.name);
+                        self.code.push(Op::StoreGlobal { name, src: value });
                     }
                 }
                 Ok(())
@@ -1324,8 +1343,9 @@ impl<'m> FnCompiler<'m> {
             });
             self.globals
                 .insert(name.to_string(), GlobalInfo { mutable: false });
+            let name_id = self.module.intern_name(name);
             self.code.push(Op::StoreGlobal {
-                name: name.to_string(),
+                name: name_id,
                 src: t,
             });
             return Ok(());
@@ -1712,8 +1732,9 @@ impl<'m> FnCompiler<'m> {
             if self.at_global_depth() {
                 self.globals
                     .insert(name.to_string(), GlobalInfo { mutable: true });
+                let name_id = self.module.intern_name(name);
                 self.code.push(Op::StoreGlobal {
-                    name: name.to_string(),
+                    name: name_id,
                     src,
                 });
             } else {
@@ -1787,8 +1808,9 @@ impl<'m> FnCompiler<'m> {
         };
         if let Some(mutable) = global_mut {
             if mutable || field_assign {
+                let name_id = self.module.intern_name(name);
                 self.code.push(Op::StoreGlobal {
-                    name: name.to_string(),
+                    name: name_id,
                     src,
                 });
             } else {
@@ -1802,8 +1824,9 @@ impl<'m> FnCompiler<'m> {
         if self.scopes.is_empty() {
             self.globals
                 .insert(name.to_string(), GlobalInfo { mutable: false });
+            let name_id = self.module.intern_name(name);
             self.code.push(Op::StoreGlobal {
-                name: name.to_string(),
+                name: name_id,
                 src,
             });
         } else {
@@ -1983,10 +2006,11 @@ impl<'m> FnCompiler<'m> {
             Resolved::Field => {
                 let dst = self.alloc_reg();
                 let cache = self.module.next_cache_slot();
+                let field = self.module.intern_name(name);
                 self.code.push(Op::LoadField {
                     dst,
                     obj: 0,
-                    field: name.to_string(),
+                    field,
                     span,
                     cache,
                 });
@@ -1994,11 +2018,8 @@ impl<'m> FnCompiler<'m> {
             }
             Resolved::Global => {
                 let dst = self.alloc_reg();
-                self.code.push(Op::LoadGlobal {
-                    dst,
-                    name: name.to_string(),
-                    span,
-                });
+                let name = self.module.intern_name(name);
+                self.code.push(Op::LoadGlobal { dst, name, span });
                 Ok(dst)
             }
             // `none` is the one prelude *value* (not a function): the `Option.none` variant.
@@ -2143,9 +2164,10 @@ impl<'m> FnCompiler<'m> {
                         Resolved::Local(reg) => Some(reg),
                         Resolved::Global => {
                             let reg = self.alloc_reg();
+                            let name = self.module.intern_name(name);
                             self.code.push(Op::TakeGlobal {
                                 dst: reg,
-                                name: name.clone(),
+                                name,
                                 span: *span,
                             });
                             Some(reg)
@@ -2241,11 +2263,12 @@ impl<'m> FnCompiler<'m> {
                 // exists, so there is nothing else to drop).
                 let recv = self.atom_reg(receiver)?;
                 let idx = self.atom_reg(index)?;
+                let field = self.module.intern_name(field);
                 self.code.push(Op::IndexField {
                     dst,
                     recv,
                     index: idx,
-                    field: field.clone(),
+                    field,
                     span: *span,
                 });
                 self.drop_temp_receiver(receiver, recv);
@@ -2440,7 +2463,7 @@ impl<'m> FnCompiler<'m> {
             }
             Rvalue::As { operand, ty, .. } => {
                 let src = self.atom_reg(operand)?;
-                let target = narrow_target(ty);
+                let target = Box::new(narrow_target(ty));
                 let some_shape = self.module.builtin_enum_shape("Option", "some");
                 let none_shape = self.module.builtin_enum_shape("Option", "none");
                 self.code.push(Op::Narrow {
@@ -2454,7 +2477,7 @@ impl<'m> FnCompiler<'m> {
             }
             Rvalue::TypeTest { operand, ty, .. } => {
                 let src = self.atom_reg(operand)?;
-                let target = narrow_target(ty);
+                let target = Box::new(narrow_target(ty));
                 self.code.push(Op::IsType { dst, src, target });
                 Ok(())
             }
@@ -2562,7 +2585,7 @@ impl<'m> FnCompiler<'m> {
                 match self.module.type_of_sites.get(span) {
                     Some(repr) => self.code.push(Op::TypeOfStatic {
                         dst,
-                        repr: repr.clone(),
+                        repr: Box::new(repr.clone()),
                     }),
                     None => self.code.push(Op::TypeOf { dst, src }),
                 }
@@ -2572,9 +2595,10 @@ impl<'m> FnCompiler<'m> {
                 // The attribute type is resolved at compile time (closed-world); the VM reads the
                 // matching manifest entries from `Module::reflection` and materializes them.
                 let type_name = match ty {
-                    TypeRef::Named { name, .. } => name.clone(),
-                    _ => String::new(),
+                    TypeRef::Named { name, .. } => name.as_str(),
+                    _ => "",
                 };
+                let type_name = self.module.intern_name(type_name);
                 self.code.push(Op::AttributesOf { dst, type_name });
                 Ok(())
             }
@@ -2596,12 +2620,14 @@ impl<'m> FnCompiler<'m> {
                 span,
             } => {
                 let args = self.atom_regs(args)?;
+                let module_id = self.module.intern_name(module);
+                let func_id = self.module.intern_name(func);
                 self.code.push(Op::ExtCall {
                     dst,
-                    module: module.clone(),
-                    func: func.clone(),
+                    module: module_id,
+                    func: func_id,
                     args,
-                    recipe: recipe.clone(),
+                    recipe: recipe.clone().map(Box::new),
                     span: *span,
                 });
                 Ok(())
@@ -2618,30 +2644,32 @@ impl<'m> FnCompiler<'m> {
         dst: Reg,
         span: Span,
     ) -> Result<(), Unsupported> {
-        let empty = self.add_const(Const::Str(String::new()));
-        self.code.push(Op::LoadConst { dst, k: empty });
+        // Build the interpolation in one pass (P-VMT-STR): each literal is a constant-pool string
+        // copied verbatim, each hole is `Stringify`-ed into its own register (so a `Display` object
+        // still dispatches to `to_string` via a call frame) and then rendered by the single
+        // `BuildString`. This replaces the old `LoadConst "" + N×(Stringify + Concat)` left-fold,
+        // which allocated an intermediate `String` for every part.
+        let mut segments: Vec<StrPart> = Vec::with_capacity(parts.len());
         for part in parts {
-            let r = self.alloc_reg();
             match part {
                 InterpPart::Literal(text) => {
                     let k = self.add_const(Const::Str(text.clone()));
-                    self.code.push(Op::LoadConst { dst: r, k });
+                    segments.push(StrPart::Literal(k));
                 }
                 InterpPart::Hole { atom, .. } => {
                     let src = self.atom_reg(atom)?;
-                    // Route a `Display` object through its `to_string` before the concatenation
-                    // stringifies it; identity for every other value.
+                    let r = self.alloc_reg();
+                    // Route a `Display` object through its `to_string` before `BuildString` renders
+                    // it via `display`; identity for every other value.
                     self.code.push(Op::Stringify { dst: r, src, span });
+                    segments.push(StrPart::Hole(r));
                 }
             }
-            self.code.push(Op::Binary {
-                op: BinaryOp::Concat,
-                dst,
-                a: dst,
-                b: r,
-                span,
-            });
         }
+        self.code.push(Op::BuildString {
+            dst,
+            parts: segments.into_boxed_slice(),
+        });
         Ok(())
     }
 
@@ -2740,30 +2768,53 @@ impl<'m> FnCompiler<'m> {
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
         // method, or a `count`/`enumerate` built-in — the VM decides).
         //
-        // In-place collection self-update (Phase 5.1c): forward the IR reuse token to the op only when
-        // the receiver is a directly-held **local** — its register *is* the binding's sole storage, so
-        // the VM's reuse path can consume it and the runtime sees refcount 1 on the unique path. A
-        // global accumulator is the `TakeGlobal` case (a later slice; the IR interpreter already reuses
-        // it, and reuse is invisible, so the backends still agree). The VM's reuse branch additionally
-        // checks the runtime receiver kind, so a same-named user method only ever costs the flag.
-        let recv_reuse = reuse
-            && matches!(receiver, Atom::Var { name, .. } if matches!(self.resolve(name), Resolved::Local(_)));
-        let recv = self.atom_reg(receiver)?;
-        let args = self.atom_regs(args)?;
+        // In-place collection self-update (Phase 5.1c / S1): forward the IR reuse token to the op when
+        // the receiver's sole reference can be handed to the in-place path — a directly-held **local**
+        // (its register *is* the binding) or a top-level **global** (moved out with `TakeGlobal` so the
+        // in-place op sees refcount 1, the same shape `lower_set_field` uses for a global field-set and
+        // the global struct/list accumulator reuse uses). A celled/captured base — or an unmarked op —
+        // falls through to the copying path (`reuse: false`), always correct value semantics. The VM's
+        // reuse branch additionally checks the runtime receiver kind, so a same-named user method only
+        // ever costs the flag. The trailing `acc = %t` reassignment re-stores the mutated collection
+        // (`StoreGlobal` for a global), so the vacated slot is never observed between the two.
+        //
+        // Args are resolved *before* a `TakeGlobal` so moving the receiver global out cannot vacate a
+        // slot an arg still reads (the reuse pass also guarantees no arg mentions the receiver var).
+        let arg_regs = self.atom_regs(args)?;
+        let (recv, recv_reuse) = match (reuse, receiver) {
+            (true, Atom::Var { name, .. }) => match self.resolve(name) {
+                Resolved::Local(reg) => (reg, true),
+                Resolved::Global => {
+                    let reg = self.alloc_reg();
+                    let name = self.module.intern_name(name);
+                    self.code.push(Op::TakeGlobal {
+                        dst: reg,
+                        name,
+                        span,
+                    });
+                    (reg, true)
+                }
+                _ => (self.atom_reg(receiver)?, false),
+            },
+            _ => (self.atom_reg(receiver)?, false),
+        };
         let cache = self.module.next_cache_slot();
+        let method = self.module.intern_name(name);
         self.code.push(Op::CallMethod {
             dst,
             recv,
-            method: name.to_string(),
-            args,
+            method,
+            args: arg_regs,
             span,
             cache,
             reuse: recv_reuse,
         });
-        // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path), so
-        // the temp-receiver drop must not also fire — but a reuse receiver is always a `Var` local, not
-        // an owned temp, so `drop_temp_receiver` is already a no-op for it.
-        self.drop_temp_receiver(receiver, recv);
+        // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
+        // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.
+        // Only the copying path can carry an owned temp receiver that still needs its drop.
+        if !recv_reuse {
+            self.drop_temp_receiver(receiver, recv);
+        }
         Ok(())
     }
 
@@ -2790,9 +2841,10 @@ impl<'m> FnCompiler<'m> {
                     Resolved::Local(reg) => Some(reg),
                     Resolved::Global => {
                         let reg = self.alloc_reg();
+                        let name = self.module.intern_name(name);
                         self.code.push(Op::TakeGlobal {
                             dst: reg,
-                            name: name.clone(),
+                            name,
                             span,
                         });
                         Some(reg)
@@ -2805,12 +2857,13 @@ impl<'m> FnCompiler<'m> {
         } else {
             None
         };
+        let field_id = self.module.intern_name(field);
         match reuse_base {
             Some(obj) => {
                 self.code.push(Op::SetField {
                     dst,
                     obj,
-                    field: field.to_string(),
+                    field: field_id,
                     value: val,
                     reuse: true,
                     span,
@@ -2822,7 +2875,7 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::SetField {
                     dst,
                     obj,
-                    field: field.to_string(),
+                    field: field_id,
                     value: val,
                     reuse: false,
                     span,
@@ -2884,10 +2937,11 @@ impl<'m> FnCompiler<'m> {
         }
         let obj = self.atom_reg(receiver)?;
         let cache = self.module.next_cache_slot();
+        let field = self.module.intern_name(name);
         self.code.push(Op::LoadField {
             dst,
             obj,
-            field: name.to_string(),
+            field,
             span,
             cache,
         });
@@ -3010,9 +3064,10 @@ impl<'m> FnCompiler<'m> {
                 // two handled cases.)
                 _ => {
                     let reg = self.alloc_reg();
+                    let name = self.module.intern_name(name);
                     self.code.push(Op::TakeGlobal {
                         dst: reg,
-                        name: name.clone(),
+                        name,
                         span,
                     });
                     reg
@@ -3071,14 +3126,16 @@ impl<'m> FnCompiler<'m> {
             Some((a, _)) => Some(self.consume_operand(a, &mut consumed)?),
             None => None,
         };
-        let mut keys: Vec<(String, Reg)> = Vec::with_capacity(inits.len());
+        let mut keys: Vec<(NameId, Reg)> = Vec::with_capacity(inits.len());
         for init in inits {
             let r = self.consume_operand(&init.value, &mut consumed)?;
-            keys.push((init.name.clone(), r));
+            let key = self.module.intern_name(&init.name);
+            keys.push((key, r));
         }
+        let type_name = self.module.intern_name(type_name);
         self.code.push(Op::MakeOpaque {
             dst,
-            type_name: type_name.to_string(),
+            type_name,
             keys: keys.into_boxed_slice(),
             spread: spread_reg,
         });
@@ -3152,16 +3209,22 @@ impl<'m> FnCompiler<'m> {
                 (vname, shape)
             })
             .collect();
-        // Stable order keeps the disassembly deterministic (the source `HashMap` is not ordered).
+        // Stable order keeps the case list deterministic (the source `HashMap` is not ordered).
+        // Sort by name *before* interning, since ids follow emission order, not lexical order.
         cases.sort_by(|a, b| a.0.cmp(&b.0));
+        let cases: Vec<(NameId, u32)> = cases
+            .into_iter()
+            .map(|(vname, shape)| (self.module.intern_name(&vname), shape))
+            .collect();
         let some_shape = self.module.builtin_enum_shape("Option", "some");
         let none_shape = self.module.builtin_enum_shape("Option", "none");
         let mut consumed = Vec::new();
         let arg = self.consume_operand(&args[0], &mut consumed)?;
+        let enum_name = self.module.intern_name(type_name);
         self.code.push(Op::EnumFromStr {
             dst,
             arg,
-            enum_name: type_name.to_string(),
+            enum_name,
             cases: cases.into_boxed_slice(),
             some_shape,
             none_shape,
@@ -3259,10 +3322,8 @@ impl<'m> FnCompiler<'m> {
             && self.module.types.contains_key(type_name)
         {
             let r = self.alloc_reg();
-            self.code.push(Op::TypeValue {
-                dst: r,
-                name: type_name.clone(),
-            });
+            let name = self.module.intern_name(type_name);
+            self.code.push(Op::TypeValue { dst: r, name });
             r
         } else {
             self.atom_reg(recv)?
@@ -3377,9 +3438,10 @@ impl<'m> FnCompiler<'m> {
             }
             Pattern::Str { value, .. } => {
                 fail_jumps.push(self.code.len());
+                let value = self.module.intern_name(value);
                 self.code.push(Op::MatchStr {
                     src: reg,
-                    value: value.clone(),
+                    value,
                     fail: 0,
                 });
             }
@@ -3398,10 +3460,14 @@ impl<'m> FnCompiler<'m> {
                 ..
             } => {
                 fail_jumps.push(self.code.len());
+                let type_name = type_name
+                    .as_ref()
+                    .map(|n| self.module.intern_name(n));
+                let variant = self.module.intern_name(variant);
                 self.code.push(Op::MatchVariant {
                     src: reg,
-                    type_name: type_name.clone(),
-                    variant: variant.clone(),
+                    type_name,
+                    variant,
                     arity: bindings.len() as u16,
                     fail: 0,
                 });
@@ -3422,7 +3488,7 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::IsType {
                     dst: test,
                     src: reg,
-                    target: narrow_target(ty),
+                    target: Box::new(narrow_target(ty)),
                 });
                 fail_jumps.push(self.code.len());
                 self.code.push(Op::JumpIfFalse {
