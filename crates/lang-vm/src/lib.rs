@@ -68,7 +68,12 @@ impl VmBackend {
     /// Compile and run a program, or report that it falls outside the supported subset.
     pub fn try_run(&self, program: &Program) -> Result<RunResult, Unsupported> {
         let module = compile(program)?;
-        Ok(execute(&module, Box::new(lang_stdlib::SandboxHost::new())))
+        // The differential harness path stays pure tier-0 (see `run_module`).
+        Ok(execute(
+            &module,
+            Box::new(lang_stdlib::SandboxHost::new()),
+            false,
+        ))
     }
 
     /// Execute an already-compiled [`Module`]. This is the seam the salsa graph (`lang-db`)
@@ -77,7 +82,9 @@ impl VmBackend {
     /// without the VM crate depending on the database. Runs against a deterministic
     /// [`lang_stdlib::SandboxHost`] — the host the conformance differential always uses.
     pub fn run_module(&self, module: &Module) -> RunResult {
-        execute(module, Box::new(lang_stdlib::SandboxHost::new()))
+        // The sandbox path is the `--jit-differential` oracle's pure tier-0 baseline, so it never
+        // auto-JITs (the oracle's tier-1 tier is `run_module_jit`'s explicit `force_jit`).
+        execute(module, Box::new(lang_stdlib::SandboxHost::new()), false)
     }
 
     /// Execute a module against a caller-provided [`lang_stdlib::Host`] (M2.3). The CLI/REPL pass
@@ -88,7 +95,9 @@ impl VmBackend {
         module: &Module,
         host: Box<dyn lang_stdlib::Host>,
     ) -> RunResult {
-        execute(module, host)
+        // A real-host production run (`lang bench`, single-isolate CLI): drive the tier-1 JIT under
+        // ordinary hot-counter promotion (P-JIT). A no-op without the `jit` feature.
+        execute(module, host, true)
     }
 
     /// Execute a module against a caller-provided host *and* async executor (Track A.4). The CLI
@@ -100,7 +109,14 @@ impl VmBackend {
         host: Box<dyn lang_stdlib::Host>,
         executor: Box<dyn lang_stdlib::Executor>,
     ) -> RunResult {
-        execute_with_collector(module, host, executor, lang_value::CollectorMode::Trace)
+        // Real-host production run with a real async executor: hot-counter JIT (P-JIT).
+        execute_with_collector(
+            module,
+            host,
+            executor,
+            lang_value::CollectorMode::Trace,
+            true,
+        )
     }
 
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
@@ -121,6 +137,10 @@ impl VmBackend {
         vm.parallel_isolates = true;
         vm.isolate_module = Some(Arc::clone(&module));
         vm.isolate_factory = Some(factory);
+        // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT). Worker
+        // isolates load through `Vm::load` and stay tier-0 (Cranelift's `JITModule` is `!Send`).
+        #[cfg(feature = "jit")]
+        vm.init_jit();
         run_and_teardown(&mut vm, lang_value::CollectorMode::Trace)
     }
 
@@ -136,6 +156,7 @@ impl VmBackend {
             Box::new(lang_stdlib::SandboxHost::new()),
             Box::new(lang_stdlib::SandboxExecutor::new()),
             mode,
+            false,
         )
     }
 
@@ -873,13 +894,15 @@ fn vm_fs_async_request(func: &str, args: &[Value]) -> Option<lang_stdlib::IoRequ
     lang_stdlib::IoRequest::from_fs_async(func, &strings)
 }
 
-/// Execute a compiled module, capturing stdout, exit code, and diagnostics.
-fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
+/// Execute a compiled module, capturing stdout, exit code, and diagnostics. `jit` enables the
+/// hot-counter tier-1 JIT (real-host production paths); the sandbox differential passes `false`.
+fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>, jit: bool) -> RunResult {
     execute_with_collector(
         module,
         host,
         Box::new(lang_stdlib::SandboxExecutor::new()),
         lang_value::CollectorMode::Trace,
+        jit,
     )
 }
 
@@ -893,9 +916,18 @@ fn execute_with_collector(
     host: Box<dyn lang_stdlib::Host>,
     executor: Box<dyn lang_stdlib::Executor>,
     mode: lang_value::CollectorMode,
+    jit: bool,
 ) -> RunResult {
     lang_value::set_collector_mode(mode);
     let mut vm = Vm::load(module, host, executor);
+    // Real-host production paths pass `jit = true` to arm the hot-counter tier-1 JIT (P-JIT). A
+    // no-op without the `jit` feature; the `jit` binding is unused there, so quiet the warning.
+    #[cfg(feature = "jit")]
+    if jit {
+        vm.init_jit();
+    }
+    #[cfg(not(feature = "jit"))]
+    let _ = jit;
     run_and_teardown(&mut vm, mode)
 }
 

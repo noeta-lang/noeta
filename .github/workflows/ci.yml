@@ -45,13 +45,19 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # The workspace suite is the spine: tests/corpus.rs runs the conformance corpus, the
-      # eval↔interpreter differential (backends must agree, 0 skipped), the leak oracle (residency 0),
-      # IR-lowering totality, and the drop-safety property — alongside all unit tests. `lang-jit` is
-      # excluded so the default build stays Cranelift-free (the point of the `jit` feature gate); the
-      # `jit` job below owns it.
+      # The workspace suite is the spine: the conformance corpus, the eval↔interpreter differential
+      # (backends must agree, 0 skipped), the leak oracle (residency 0), IR-lowering totality, and the
+      # drop-safety property — alongside all unit tests. `lang-jit` is excluded, and `lang-cli` too:
+      # the shipped CLI now defaults to the `jit` feature (P-JIT), so building it here would pull
+      # Cranelift into this job through feature unification. Excluding it keeps this the Cranelift-free
+      # library + oracle proof; the `jit` job owns the JIT-enabled CLI, and the lean-CLI build below
+      # proves the Cranelift-free binary still compiles (the point of the feature gate).
       - name: cargo test --workspace (default, Cranelift-free)
-        run: cargo test --workspace --exclude lang-jit --locked
+        run: cargo test --workspace --exclude lang-jit --exclude lang-cli --locked
+      # The `lang` binary is JIT-enabled by default; prove `--no-default-features` still yields a
+      # working interpreter-only CLI (identical behaviour, no Cranelift).
+      - name: lean CLI build (--no-default-features, Cranelift-free)
+        run: cargo test -p lang-cli --no-default-features --locked
 
   docs:
     name: Documentation samples (docs/*.md ```lang blocks)
@@ -62,10 +68,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # Every ```lang code sample in the wiki must run through the real `lang` binary exactly as
       # tagged. This keeps the docs honest — a renamed method or changed diagnostic fails here instead
-      # of silently misleading readers. A first-class check so doc-rot is its own red mark, not buried
-      # in the workspace suite (which also builds this test, but the failure message names file:line).
+      # of silently misleading readers. Run Cranelift-free (`--no-default-features`): the JIT is a
+      # byte-identical accelerator, so doc behaviour is unchanged and the gate stays fast.
       - name: cargo test -p lang-cli --test doc_samples
-        run: cargo test -p lang-cli --test doc_samples --locked
+        run: cargo test -p lang-cli --test doc_samples --no-default-features --locked
 
   jit:
     name: JIT gate (tier-0/1 differential + leak-under-JIT)
@@ -83,6 +89,10 @@ jobs:
         run: cargo test -p lang-conformance --features jit --locked
       - name: JIT differential (coverage summary)
         run: cargo run -p lang-conformance --features jit --locked -- --jit-differential
+      # The shipped CLI defaults to the `jit` feature, so its integration tests and doc-sample gate now
+      # exercise the production hot-counter JIT end-to-end (real-host `lang run`/`test`). Gate that path.
+      - name: JIT-enabled CLI (integration + doc samples)
+        run: cargo test -p lang-cli --locked
 
   clippy:
     name: Clippy (deny warnings)
@@ -93,13 +103,15 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Default build excludes `lang-jit` (Cranelift-free, like the `test` job); the jit step lints it.
+      # Default build excludes `lang-jit` and `lang-cli` (both pull Cranelift — lang-cli via its
+      # default `jit` feature; kept Cranelift-free here, like the `test` job); the jit step lints them.
       - name: Clippy (default features)
-        run: cargo clippy --workspace --exclude lang-jit --all-targets --locked -- -D warnings
-      # Lint the JIT code path and the `vm_jit` bench, which only compile under the `jit` feature.
+        run: cargo clippy --workspace --exclude lang-jit --exclude lang-cli --all-targets --locked -- -D warnings
+      # Lint the JIT code path, the `vm_jit` bench, and the JIT-enabled CLI — they only pull Cranelift
+      # under the `jit` feature (lang-cli by default).
       - name: Clippy (jit feature)
         run: >
-          cargo clippy -p lang-vm -p lang-jit -p lang-conformance
+          cargo clippy -p lang-vm -p lang-jit -p lang-conformance -p lang-cli
           --features "lang-vm/jit lang-conformance/jit" --all-targets --locked -- -D warnings
 
   miri:

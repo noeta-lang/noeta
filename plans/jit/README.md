@@ -110,6 +110,11 @@ on every eligible program.
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
 before/after, and `git` commit per green slice (standing directive).
 
+**Production wiring — ✅ DONE (post-J4-slice-1).** Until now every win was oracle/bench-only: the
+`lang` binary was built Cranelift-free and the JIT ran only under the oracle's `force_jit`. The shipped
+CLI now enables the tier-1 JIT under ordinary hot-counter promotion, so real `lang run` / `lang test` /
+`lang bench` accelerate. See the section below.
+
 ## J0 — what landed (foundation)
 
 New crate **`lang-jit`** behind `lang-vm`'s `jit` feature (default build pulls **0** Cranelift crates;
@@ -324,6 +329,27 @@ plus a name in `is_leaf_heap_op` — no new helper, no new codegen.**
   and string ops (`BuildString`, non-dispatching `Stringify`/`Echo`). Dispatching ops (`CallMethod`,
   object `Index`, `Display` `Stringify`) keep bailing — they push frames, which the leaf helper does
   not.
+
+## Production wiring — what landed (JIT reaches `lang run`)
+
+The tier-1 JIT is no longer oracle-only. The shipped `lang` binary enables it under ordinary
+hot-counter promotion, so real programs accelerate without any flag.
+
+- **`lang-cli` defaults to the `jit` feature** (`default = ["jit"]` → `lang-vm/jit`). The shipped binary
+  pulls Cranelift and JITs hot code; `cargo build --no-default-features` still yields an
+  interpreter-only, Cranelift-free binary with byte-identical behaviour (the feature gate stays real).
+- **Only the real-host paths arm the JIT.** The three `run_module_with_host*` entry points call
+  `init_jit()` with `force_jit = false`, so a prototype interprets until it has been entered
+  `JIT_HOT_THRESHOLD` (50) times, then compiles — short scripts pay no compile cost, hot loops/recursion
+  go native. The sandbox `run_module` / `try_run` paths pass `jit = false`: they are the
+  `--jit-differential` oracle's pure tier-0 baseline, and worker isolates stay tier-0 (Cranelift's
+  `JITModule` is `!Send`).
+- **Measured end-to-end** on a JIT-vs-`--no-default-features` release binary, a nested loop-with-calls
+  workload (`sum_to` in a hot outer loop): **~1.65 s → ~0.18 s, roughly 9×**. Correct output either way.
+- **Gates.** All 50 CLI integration tests + the doc-sample gate pass with the JIT default-on (real
+  isolates, the `@test` runner, backpressure all route through it). CI keeps the library + oracle + docs
+  jobs Cranelift-free (excluding `lang-cli`), adds a lean `--no-default-features` CLI build, and gates
+  the JIT-enabled CLI (integration + doc samples) in the `jit` job.
 
 ## Open questions (resolve at sign-off)
 
