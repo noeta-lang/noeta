@@ -411,6 +411,18 @@ fn map_accumulate_src(n: usize) -> String {
     )
 }
 
+/// A function-local **read-modify-write** map histogram: `m[k] = (m[k] ?? 0) + 1` over n updates with
+/// a bounded key space (the wordcount idiom). Reading `m` before the write extends its live range, so
+/// `insert_drops` puts a `DropVar` between the `m.set(...)` and its rebind — which denied the reuse
+/// token until P-VMT-RMW made the pairing tolerant of intervening drops. Before: O(n²) (each `set`
+/// copied the whole map); after: O(n) in-place — measured ~33× end to end at n=200000. The contrast
+/// with `map_accumulate_src` (write-only, always reused) isolates exactly the RMW case.
+fn map_rmw_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    mut m: Map<string, int> = {{}};\n    mut i = 0;\n    while i < {n} {{\n        k = \"w${{i % 500}}\";\n        prev = if m.has(k) then m[k] else 0;\n        m[k] = prev + 1;\n        i = i + 1;\n    }}\n    return m.count();\n}}\necho build();\n"
+    )
+}
+
 /// A function-local list index-write accumulator: build an n-element list once, then overwrite every
 /// slot via `xs[i] = …` (desugaring to `xs = xs.set(i, …)`) n times. Was O(n²) (each `set` copied the
 /// whole list); the in-place reuse (the receiver register is consumed and the uniquely-owned backing
@@ -583,6 +595,15 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     mapacc.finish();
+
+    let mut maprmw = c.benchmark_group("vm_map_rmw");
+    for &n in LOOP_SIZES {
+        let module = compile(&map_rmw_src(n));
+        maprmw.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    maprmw.finish();
 
     let mut listidx = c.benchmark_group("vm_list_index_write");
     for &n in LOOP_SIZES {

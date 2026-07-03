@@ -155,20 +155,20 @@ fn mark_self_updates(
         if i + 1 < stmts.len() {
             if let Some((dst, spread_name, type_name)) = object_self_update_candidate(&stmts[i]) {
                 if !own_destructors.contains(&type_name)
-                    && rebinds_temp(&stmts[i + 1], &spread_name, dst)
+                    && rebinds_temp_after_drops(&stmts, i + 1, &spread_name, dst)
                 {
                     set_object_reuse(&mut stmts[i]);
                 }
             } else if let Some((dst, base_name)) = concat_self_append_candidate(&stmts[i])
-                && rebinds_temp(&stmts[i + 1], &base_name, dst)
+                && rebinds_temp_after_drops(&stmts, i + 1, &base_name, dst)
             {
                 set_binary_reuse(&mut stmts[i]);
             } else if let Some((dst, base_name)) = method_self_update_candidate(&stmts[i])
-                && rebinds_temp(&stmts[i + 1], &base_name, dst)
+                && rebinds_temp_after_drops(&stmts, i + 1, &base_name, dst)
             {
                 set_method_reuse(&mut stmts[i]);
             } else if let Some((dst, base_name)) = setfield_self_update_candidate(&stmts[i])
-                && rebinds_temp(&stmts[i + 1], &base_name, dst)
+                && rebinds_temp_after_drops(&stmts, i + 1, &base_name, dst)
             {
                 set_setfield_reuse(&mut stmts[i]);
             } else if let Some((dst, type_name)) = object_reassign_candidate(&stmts[i])
@@ -347,6 +347,25 @@ fn rebinds_temp(stmt: &Stmt, name: &str, dst: Temp) -> bool {
         stmt,
         Stmt::Bind { name: bname, value: Atom::Temp(t), .. } if bname == name && *t == dst
     )
+}
+
+/// Like [`rebinds_temp`] but tolerant of intervening `DropVar` statements: scan `stmts[from..]`,
+/// skip any drops, and check the first non-drop statement is the rebind `name = %t`.
+///
+/// `insert_drops` (which runs before this pass) places a `DropVar` between the self-update op and its
+/// rebind whenever the receiver was **read earlier in the block** — the read-modify-write idiom
+/// `m[k] = f(m[k])` (e.g. `prev = m[k]; m[k] = prev + 1`), where reading `m` first extends its live
+/// range so its old value is dropped explicitly rather than folded into the reassignment. Without
+/// this tolerance such a self-update is denied reuse and copies the whole collection every iteration
+/// (O(n²) for the common counter/histogram loop). Tolerating the drops is sound: the reuse op
+/// consumes the receiver at the op itself, so a later `DropVar` of it releases a moved-out (`unit`)
+/// slot — a no-op idempotent with the reassignment — and the runtime refcount guard still falls back
+/// to a copy under any aliasing (the drops can only run after the in-place mutation, never during it).
+fn rebinds_temp_after_drops(stmts: &[Stmt], from: usize, name: &str, dst: Temp) -> bool {
+    stmts[from..]
+        .iter()
+        .find(|s| !matches!(s, Stmt::DropVar { .. }))
+        .is_some_and(|s| rebinds_temp(s, name, dst))
 }
 
 /// Set the reuse token on a `let _ = Object { … }` statement (the caller has already confirmed it is
