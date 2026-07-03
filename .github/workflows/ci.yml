@@ -4,14 +4,14 @@ name: CI
 #   - test   : the workspace suite, which runs the executable-spec conformance corpus, the
 #              eval↔interpreter differential oracle, the leak oracle (residency 0), IR-lowering
 #              totality, and the drop-safety property — plus every crate's unit tests.
+#   - docs   : the documentation-sample gate — every ```lang block in docs/ must run through the
+#              `lang` binary exactly as tagged (untagged → exit 0, `error` → non-zero, `ignore` → skip).
 #   - jit    : the tier-0/tier-1 JIT differential (interpreter vs forced native code, byte-identical
 #              RunResult) and the leak-under-JIT check, behind the `jit` cargo feature.
 #   - clippy : lints, denying warnings, for both the default build and the `jit` feature.
+#   - fmt    : `cargo fmt --check` — the tree is kept stable-rustfmt-clean.
 #   - miri   : the one place `unsafe` lives — the NaN-box value model and the cycle collector —
 #              run under Miri to prove the refcount/heap paths are sound.
-#
-# There is deliberately no `cargo fmt` gate: the tree is not formatted with stable rustfmt, so one
-# would fail on existing code. Add it only alongside a repo-wide reformat.
 
 on:
   push:
@@ -27,6 +27,17 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  fmt:
+    name: Format (cargo fmt --check)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --all --check
+        run: cargo fmt --all --check
+
   test:
     name: Test & oracles (conformance, differential, leak)
     runs-on: ubuntu-latest
@@ -41,6 +52,20 @@ jobs:
       # `jit` job below owns it.
       - name: cargo test --workspace (default, Cranelift-free)
         run: cargo test --workspace --exclude lang-jit --locked
+
+  docs:
+    name: Documentation samples (docs/*.md ```lang blocks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Every ```lang code sample in the wiki must run through the real `lang` binary exactly as
+      # tagged. This keeps the docs honest — a renamed method or changed diagnostic fails here instead
+      # of silently misleading readers. A first-class check so doc-rot is its own red mark, not buried
+      # in the workspace suite (which also builds this test, but the failure message names file:line).
+      - name: cargo test -p lang-cli --test doc_samples
+        run: cargo test -p lang-cli --test doc_samples --locked
 
   jit:
     name: JIT gate (tier-0/1 differential + leak-under-JIT)
