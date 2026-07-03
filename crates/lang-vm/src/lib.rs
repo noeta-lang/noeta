@@ -397,6 +397,21 @@ fn jit_observe_count() -> u64 {
     JIT_OBSERVE_COUNT.with(|c| c.get())
 }
 
+/// Runtime helper for native `StoreGlobal` (P-JIT globals): the compiled code has already written the
+/// slot; this records `g` in `global_order` so program-end teardown destroys globals in reverse
+/// binding order (the one part of a first-time `StoreGlobal` that can't be inlined — a `Vec` push may
+/// reallocate). Called only on the unbound→bound transition, matching the interpreter's `None` arm.
+///
+/// # Safety
+/// `vm` must be the live `*mut Vm` the tier-1 ABI passed; the call happens synchronously inside
+/// `jit_enter`, where no other borrow of `*vm` is active.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    vm.global_order.push(g);
+}
+
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
 /// `RealHost` + `RealExecutor`), so `lang-vm` stays free of `lang-runtime`/tokio. `Send + Sync` so the
 /// worker closure can carry a clone across the thread boundary.
@@ -660,7 +675,13 @@ impl<'m> Vm<'m> {
     /// interprets — behaviour is identical either way (J0 always bails to tier 0).
     #[cfg(feature = "jit")]
     fn init_jit(&mut self) {
-        let helpers: &[(&str, *const u8)] = &[(lang_jit::OBSERVE_HELPER, jit_observe as *const u8)];
+        let helpers: &[(&str, *const u8)] = &[
+            (lang_jit::OBSERVE_HELPER, jit_observe as *const u8),
+            (
+                lang_jit::NOTE_GLOBAL_BOUND_HELPER,
+                jit_note_global_bound as *const u8,
+            ),
+        ];
         match lang_jit::Jit::new(helpers) {
             Ok(mut jit) => {
                 if self.force_jit {
@@ -688,11 +709,14 @@ impl<'m> Vm<'m> {
         };
         let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
         let regs_ptr = regs.as_mut_ptr();
-        // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI; `vm_ptr` and
-        // `regs_ptr` are live for the duration of the call, and the native code only touches
-        // `regs[base..]` (never growing the stack — a J1 prototype makes no call). The returned pc is
-        // a valid index into this prototype's code (a `Return`/`Halt`/guard-bail site or 0).
-        Some(unsafe { f(vm_ptr, regs_ptr, base) })
+        let globals_ptr = self.globals.as_mut_ptr();
+        // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI; `vm_ptr`,
+        // `regs_ptr`, and `globals_ptr` are live for the duration of the call. The native code touches
+        // only `regs[base..]` (never growing the stack — a compiled prototype makes no call) and the
+        // fixed-size `globals` array (never reallocated), so both pointers stay valid, including across
+        // the `note_global_bound` helper (which pushes to the separate `global_order`). The returned pc
+        // is a valid index into this prototype's code (a bail site or 0).
+        Some(unsafe { f(vm_ptr, regs_ptr, base, globals_ptr) })
     }
 
     /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
@@ -4772,16 +4796,17 @@ mod tests {
         compile(&parsed.program).expect("program should be in the M1.0 subset")
     }
 
-    /// P-JIT foundation: the tier-1 path is byte-identical to the interpreter, an ineligible
-    /// prototype's bail stub *actually runs* (reaches the `lang_jit_observe` helper), and control
-    /// falls cleanly back to tier 0. Proves the seam (Cranelift build + finalize, tier-0/1 dispatch,
-    /// the helper ABI, the deopt handoff) end to end.
+    /// P-JIT foundation: the tier-1 path is byte-identical to the interpreter, a prototype with no
+    /// compilable op runs its bail stub (reaching the `lang_jit_observe` helper), and control falls
+    /// cleanly back to tier 0. Proves the seam (Cranelift build + finalize, tier-0/1 dispatch, the
+    /// helper ABI, the deopt handoff) end to end.
     #[cfg(feature = "jit")]
     #[test]
     fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
-        // The top-level proto (Call/Echo/globals) and `run` (a range `for` loop) are ineligible → bail
-        // stubs; `dbl` (`return x * 2`) is J1-eligible → real native code.
-        let src = "fn dbl(x: int): int { return x * 2; }\nfn run(n: int): int {\n  mut total = 0;\n  for i in 0..n { total = total + dbl(i); }\n  return total;\n}\necho \"${run(5)}\";\n";
+        // `dbl` (`return x * 2`) compiles to native code; `greet` has no fast op (a heap `LoadConst`
+        // then `Return`) → a bail stub that calls the observe helper; the top-level goes native and
+        // bails at the `Call`/`Stringify`/`Echo` it can't compile.
+        let src = "fn dbl(x: int): int { return x * 2; }\nfn greet(): string { return \"hi\"; }\necho \"${dbl(5)} ${greet()}\";\n";
         let module = compile_module(src);
 
         let interp = VmBackend::new().run_module(&module);
@@ -4791,17 +4816,14 @@ mod tests {
 
         // Byte-identical RunResult — the oracle's core invariant.
         assert_eq!(interp, jit, "tier-1 result must match the interpreter");
-        assert_eq!(jit.stdout, "20\n");
-        // At least one prototype (`dbl`) went native, and the ineligible ones (top-level, `run`) ran
-        // their bail stubs (which call the observe helper).
+        assert_eq!(jit.stdout, "10 hi\n");
+        // At least one prototype (`dbl`) went native, and the no-fast-op one (`greet`) ran its bail
+        // stub (which calls the observe helper).
         assert!(
             stats.native >= 1,
             "expected a native prototype, got {stats:?}"
         );
-        assert!(
-            entered >= 1,
-            "expected the bail stubs to run, got {entered}"
-        );
+        assert!(entered >= 1, "expected the bail stub to run, got {entered}");
     }
 
     /// J1 (integer fast path): a pure-integer `while`-loop function compiles to native code and, run
@@ -4887,6 +4909,31 @@ mod tests {
             "NaN/division float result must match the interpreter"
         );
         assert_eq!(jit.stdout, "1.5\n");
+    }
+
+    /// Native globals (P-JIT): a **top-level** loop with global `mut` accumulators — the natural
+    /// scripting shape — compiles natively (LoadGlobal/StoreGlobal inlined; first-bind via the
+    /// `note_global_bound` helper; `echo` at the end bails) and matches the interpreter. This exercises
+    /// per-op bail (the top-level prototype has `Echo`/`Stringify` it can't compile) plus the
+    /// unbound→bound global transition.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_global_top_level_loop_is_native_and_correct() {
+        let src = "mut total = 0;\nmut i = 0;\nwhile i < 1000 {\n  total = total + (i % 7);\n  i = i + 1;\n}\necho total;\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        // The top-level prototype (proto 0) itself goes native here.
+        assert!(
+            stats.native >= 1,
+            "the top-level global loop must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "native-globals result must match the interpreter"
+        );
+        let expected: i64 = (0..1000).map(|i| i % 7).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
     }
 
     /// Peak heap residency for one program (architecture §0.3) — `reset_peak` before, `live_peak`

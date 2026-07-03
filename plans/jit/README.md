@@ -1,6 +1,6 @@
 # JIT milestone (P-JIT) — closing the scalar/loop/call gap to a JIT engine
 
-**Status: J0 + J1 + J2 DONE (integer & float fast paths, ~6–7× on native loops); J3+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
+**Status: J0 + J1 + J2 + native globals DONE (integer/float/global fast paths + per-op bail, ~4–7× on native loops); J3+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
 LICM) took the interpreter as far as *interpreter-level* wins go — dispatch is now ~3.3 ns/op, near the
 floor for a `match`-based switch interpreter. The remaining ~10–35× gap to PHP 8.4 on hot scalar / loop
 / call code (`loop 10M` ~35×, `fib(32)` ~17×) is structural: PHP's **tracing JIT** runs the equivalent
@@ -204,6 +204,35 @@ bailed every time; J2 makes it compute natively.
 - **Deferred:** `f32` scalar arithmetic (rare — f32 is mostly packed-list/SIMD territory, which is
   heap), tuples make/index and `Narrow`/`IsType` (heap values / type machinery → land with the heap
   slice J4, not here).
+
+## Native globals + per-op bail — what landed (unlocks top-level loops)
+
+The b_loop-class **top-level scripting loop** (a `while` over global `mut` accumulators, then `echo`)
+was the target. Two changes got it native:
+
+- **Prereq — `Vm.globals: Vec<Option<Value>>` → `Vec<Value>` + an `unbound` sentinel** (a separate
+  behavior-neutral commit). `Option<Value>` is 16 bytes with an unstable layout the JIT can't inline;
+  a plain `Vec<Value>` slot is one 8-byte word with a sound, stable layout — and half the size, with a
+  compare-not-match unbound check. The globals array never grows, so its base pointer is stable for the
+  whole run; it's passed as a **4th ABI argument** (`globals: *mut Value`).
+- **Per-op bail replaces whole-proto eligibility.** Eligibility is now "the prototype has *at least
+  one* compilable op"; inside, any op the JIT can't compile bails at its pc (the `_ => return pc` was
+  already there). So a top-level prototype full of `Call`/`Echo`/`Stringify` still compiles its hot
+  loop and bails at the first thing it can't — instead of being rejected wholesale. Coverage jumped
+  **69 → 722 of 813 prototypes native**.
+- **Native `LoadGlobal`/`StoreGlobal`/`TakeGlobal`**, guard-and-bail like the rest: a `LoadGlobal`
+  bails if the slot is unbound (E0005) or holds a heap value (needs `retain`); an immediate copies with
+  no refcount (its `retain` is a no-op) — preserving the immediate invariant. `StoreGlobal` consumes an
+  immediate source: on the **first bind** (old slot unbound) it writes the slot and calls a tiny
+  `note_global_bound` helper to record `global_order` for teardown (a `Vec` push can't be inlined); on
+  reassign it bails on a heap old value (its `release` may run a destructor) and otherwise overwrites in
+  place. `TakeGlobal` bails on unbound/heap, else moves the immediate out leaving `unit`.
+- **Result.** `--jit-differential` **419 matched / 0 skipped / 722 native / 0 divergence / 0 leaks**.
+  Bench `vm_jit/global_*` (top-level global `while` loop, interp vs forced JIT): **100k 4.46 ms →
+  1.07 ms (~4.2×)** — less than the ~6× of a register-local loop (each global access is a memory
+  indirect + an unbound/heap guard) but the scripting shape is now genuinely fast. New lang-vm
+  native-global-loop test; the foundation test reworked (per-op bail leaves almost nothing a pure bail
+  stub, so it now uses a string-returning fn — no fast op — to exercise the stub path).
 
 ## Open questions (resolve at sign-off)
 

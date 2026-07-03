@@ -48,11 +48,13 @@
 use core::ffi::c_void;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{AbiParam, Block, InstBuilder, MemFlagsData, Value as ClValue, types};
+use cranelift_codegen::ir::{
+    AbiParam, Block, FuncRef, InstBuilder, MemFlagsData, Value as ClValue, types,
+};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{Linkage, Module as _, default_libcall_names};
+use cranelift_module::{FuncId, Linkage, Module as _, default_libcall_names};
 
 use lang_ast::BinaryOp;
 use lang_bytecode::{Const, Module, Op, Reg};
@@ -65,17 +67,30 @@ use lang_value::Value;
 /// - `regs` points at the base of the VM's shared register stack (`Vec<Value>`), and `base` is the
 ///   frame's window offset, so the frame's registers are `regs[base + i]` — identical addressing to
 ///   the interpreter (P-VMT-FRAME).
+/// - `globals` points at the base of the VM's global-slot array (`Vec<Value>`, one word per
+///   [`lang_bytecode::GlobalId`]); it never grows, so the pointer is stable for the whole run. Native
+///   `LoadGlobal`/`StoreGlobal`/`TakeGlobal` index it directly.
 /// - The `u32` return is the **bytecode `pc` at which the interpreter should resume** (the deopt
 ///   contract above). `0` means "interpret the whole frame" (an ineligible prototype's bail stub).
 ///
 /// `extern "C"` so Cranelift's platform calling convention matches the pointer this is transmuted
 /// from.
-pub type CompiledFn = unsafe extern "C" fn(vm: *mut c_void, regs: *mut Value, base: usize) -> u32;
+pub type CompiledFn = unsafe extern "C" fn(
+    vm: *mut c_void,
+    regs: *mut Value,
+    base: usize,
+    globals: *mut Value,
+) -> u32;
 
 /// The name the bail stub calls to prove the runtime-helper ABI links. The VM registers a pointer
 /// for this symbol when it constructs the [`Jit`]; J4 registers the real `retain`/`release`/`call`
 /// helpers alongside it under the same convention.
 pub const OBSERVE_HELPER: &str = "lang_jit_observe";
+
+/// The name of the "note a global's first binding" helper. Native `StoreGlobal` writes the slot
+/// itself, then calls this so the VM records the slot in `global_order` for reverse-order teardown
+/// destruction — the one piece of `StoreGlobal` that can't be inlined (a `Vec` push may reallocate).
+pub const NOTE_GLOBAL_BOUND_HELPER: &str = "lang_jit_note_global_bound";
 
 /// The method JIT: a Cranelift [`JITModule`] plus a per-prototype cache of finalized entry points.
 ///
@@ -89,6 +104,11 @@ pub struct Jit {
     compiled: Vec<Option<CompiledFn>>,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
+    /// The imported `lang_jit_observe` helper (called by the bail stub), declared once.
+    observe_id: FuncId,
+    /// The imported `lang_jit_note_global_bound` helper (called by native `StoreGlobal` on first
+    /// bind), declared once.
+    note_bound_id: FuncId,
     ctx: cranelift_codegen::Context,
     fb_ctx: FunctionBuilderContext,
 }
@@ -127,12 +147,27 @@ impl Jit {
         for (name, ptr) in helpers {
             builder.symbol(*name, *ptr);
         }
-        let module = JITModule::new(builder);
+        let mut module = JITModule::new(builder);
+        let ptr_ty = module.target_config().pointer_type();
+        // `lang_jit_observe(vm: ptr)` and `lang_jit_note_global_bound(vm: ptr, g: i32)`, declared once.
+        let mut observe_sig = module.make_signature();
+        observe_sig.params.push(AbiParam::new(ptr_ty));
+        let observe_id = module
+            .declare_function(OBSERVE_HELPER, Linkage::Import, &observe_sig)
+            .map_err(|e| e.to_string())?;
+        let mut note_sig = module.make_signature();
+        note_sig.params.push(AbiParam::new(ptr_ty));
+        note_sig.params.push(AbiParam::new(types::I32));
+        let note_bound_id = module
+            .declare_function(NOTE_GLOBAL_BOUND_HELPER, Linkage::Import, &note_sig)
+            .map_err(|e| e.to_string())?;
         let ctx = module.make_context();
         Ok(Jit {
             module,
             compiled: Vec::new(),
             native_count: 0,
+            observe_id,
+            note_bound_id,
             ctx,
             fb_ctx: FunctionBuilderContext::new(),
         })
@@ -177,13 +212,14 @@ impl Jit {
         Ok(f)
     }
 
-    /// The tier-1 ABI signature: `(vm: ptr, regs: ptr, base: usize) -> u32`.
+    /// The tier-1 ABI signature: `(vm: ptr, regs: ptr, base: usize, globals: ptr) -> u32`.
     fn abi_signature(&self) -> cranelift_codegen::ir::Signature {
         let ptr_ty = self.module.target_config().pointer_type();
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(ptr_ty)); // vm
         sig.params.push(AbiParam::new(ptr_ty)); // regs
         sig.params.push(AbiParam::new(ptr_ty)); // base (usize == pointer width)
+        sig.params.push(AbiParam::new(ptr_ty)); // globals
         sig.returns.push(AbiParam::new(types::I32)); // resume pc
         sig
     }
@@ -212,14 +248,6 @@ impl Jit {
     /// the helper ABI links and the VM pointer round-trips) and return `0` — "interpret the whole
     /// frame".
     fn emit_bail_stub(&mut self, proto: usize) -> Result<CompiledFn, String> {
-        let ptr_ty = self.module.target_config().pointer_type();
-        let mut helper_sig = self.module.make_signature();
-        helper_sig.params.push(AbiParam::new(ptr_ty));
-        let helper_id = self
-            .module
-            .declare_function(OBSERVE_HELPER, Linkage::Import, &helper_sig)
-            .map_err(|e| e.to_string())?;
-
         self.module.clear_context(&mut self.ctx);
         self.ctx.func.signature = self.abi_signature();
         {
@@ -229,7 +257,7 @@ impl Jit {
             b.switch_to_block(block);
             b.seal_block(block);
             let vm = b.block_params(block)[0];
-            let helper_ref = self.module.declare_func_in_func(helper_id, b.func);
+            let helper_ref = self.module.declare_func_in_func(self.observe_id, b.func);
             b.ins().call(helper_ref, &[vm]);
             let zero = b.ins().iconst(types::I32, 0);
             b.ins().return_(&[zero]);
@@ -257,15 +285,21 @@ impl Jit {
 
             b.append_block_params_for_function_params(entry);
             b.switch_to_block(entry);
+            let vm = b.block_params(entry)[0];
             let regs = b.block_params(entry)[1];
             let base = b.block_params(entry)[2];
+            let globals = b.block_params(entry)[3];
             // frame_ptr = regs + base * 8 (Value is 8 bytes). All register access is off this.
             let base_bytes = b.ins().imul_imm(base, 8);
             let frame_ptr = b.ins().iadd(regs, base_bytes);
+            let note_bound_ref = self.module.declare_func_in_func(self.note_bound_id, b.func);
 
             let mut cg = Codegen {
                 b: &mut b,
+                vm,
                 frame_ptr,
+                globals,
+                note_bound_ref,
             };
 
             // Parameter guard: if any argument is a heap pointer, bail to pc 0 (interpret the frame).
@@ -311,23 +345,30 @@ impl Jit {
     }
 }
 
-/// Whether every op in `chunk` is in the J1 integer subset (so it can be native-compiled). `Return`
-/// and `Halt` count as eligible (they are bail points, not compiled ops). A `LoadConst` is eligible
-/// only if its constant is an immediate (int in the 48-bit range, bool, unit, or a float — never a
-/// heap string/module or a big int that would box).
+/// Whether a prototype is worth compiling: it has at least one op the JIT emits natively. Ops it
+/// doesn't (calls, heap ops, `Echo`, `Return`, `Halt`, …) are *bail points* — the body runs its
+/// compilable ops and hands back to the interpreter at the first one it can't (per-op bail). A
+/// prototype with no fast op at all gets a bail stub instead (nothing to gain).
 fn is_eligible(chunk: &lang_bytecode::Chunk) -> bool {
-    chunk.code.iter().all(|op| match op {
-        Op::LoadConst { k, .. } => const_immediate_bits(&chunk.consts[*k as usize]).is_some(),
+    chunk.code.iter().any(|op| is_fast_op(op, &chunk.consts))
+}
+
+/// Whether [`emit_op`] compiles this op instance to native code (vs bailing to the interpreter at it).
+/// A `LoadConst` is fast only if its constant is an immediate (int in the 48-bit range, bool, unit, or
+/// a float — never a heap string/module or a big int that would box); a `Binary` only for the integer/
+/// float arithmetic-and-comparison set.
+fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
+    match op {
+        Op::LoadConst { k, .. } => const_immediate_bits(&consts[*k as usize]).is_some(),
         Op::Move { .. } | Op::Drop { .. } => true,
         Op::Binary { op, .. } => supported_binary(*op),
+        Op::LoadGlobal { .. } | Op::StoreGlobal { .. } | Op::TakeGlobal { .. } => true,
         Op::Jump { .. }
         | Op::JumpIfTrue { .. }
         | Op::JumpIfFalse { .. }
-        | Op::CondBranch { .. }
-        | Op::Return { .. }
-        | Op::Halt => true,
+        | Op::CondBranch { .. } => true,
         _ => false,
-    })
+    }
 }
 
 /// The binary operators J1 compiles natively: integer arithmetic and comparison. (Bitwise/shift and
@@ -369,9 +410,11 @@ fn const_immediate_bits(c: &Const) -> Option<u64> {
     }
 }
 
-/// Forward reachability of each bytecode pc from pc 0, following the control-flow edges of the J1 op
-/// set. Used so the codegen fills unreachable blocks (dead code) with a trivial bail instead of code
-/// that would reference the entry-only frame pointer from a non-dominated block.
+/// Forward reachability of each bytecode pc from pc 0 in the *native* control-flow graph. A non-fast
+/// op is terminal — it bails (returns its pc), so it has no native successor — which is why this
+/// follows edges only out of fast ops. Used so the codegen fills unreachable blocks (dead code, or the
+/// fall-through past a bail) with a trivial bail instead of code that would reference the entry-only
+/// frame/globals pointers from a non-dominated block.
 fn reachable_pcs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
     let n = chunk.code.len();
     let mut seen = vec![false; n];
@@ -381,7 +424,11 @@ fn reachable_pcs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
             continue;
         }
         seen[pc] = true;
-        match &chunk.code[pc] {
+        let op = &chunk.code[pc];
+        if !is_fast_op(op, &chunk.consts) {
+            continue; // a bail point: no native successor
+        }
+        match op {
             Op::Jump { target } => stack.push(*target as usize),
             Op::JumpIfTrue { target, .. } | Op::JumpIfFalse { target, .. } => {
                 stack.push(*target as usize);
@@ -391,21 +438,24 @@ fn reachable_pcs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
                 stack.push(*target as usize);
                 stack.push(pc + 1);
             }
-            Op::Return { .. } | Op::Halt => {}
-            _ => stack.push(pc + 1),
+            _ => stack.push(pc + 1), // fast straight-line op
         }
     }
     seen
 }
 
-/// A thin wrapper over the Cranelift builder carrying the frame base pointer — the context every
-/// op-emitter needs. Keeps [`emit_op`] free of builder plumbing. Register access uses *trusted*
-/// memory flags (aligned — the `Vec<Value>` is 8-byte aligned and every slot is at an 8-byte offset
-/// — and non-trapping, since the compiler proved every register in range), so Cranelift emits a bare
-/// load/store.
+/// A thin wrapper over the Cranelift builder carrying the frame base pointer, the globals base
+/// pointer, and the `note_global_bound` helper reference — the context every op-emitter needs. Keeps
+/// [`emit_op`] free of builder plumbing. Register/global access uses *trusted* memory flags (aligned
+/// — both `Vec<Value>`s are 8-byte aligned and every slot is at an 8-byte offset — and non-trapping,
+/// since the compiler proved every register/slot in range), so Cranelift emits a bare load/store.
 struct Codegen<'a, 'b> {
     b: &'a mut FunctionBuilder<'b>,
+    /// The opaque `*mut Vm` (ABI param 0), passed to runtime helpers.
+    vm: ClValue,
     frame_ptr: ClValue,
+    globals: ClValue,
+    note_bound_ref: FuncRef,
 }
 
 impl Codegen<'_, '_> {
@@ -473,6 +523,32 @@ impl Codegen<'_, '_> {
         self.b.ins().bitcast(types::F64, MemFlagsData::new(), v)
     }
 
+    /// `v == unbound` — is `v` the VM's unbound-global sentinel?
+    fn is_unbound(&mut self, v: ClValue) -> ClValue {
+        let u = self
+            .b
+            .ins()
+            .iconst(types::I64, Value::NANBOX.unbound_bits as i64);
+        self.b.ins().icmp(IntCC::Equal, v, u)
+    }
+
+    /// Load global slot `g` (a full NaN-boxed word) from the globals array.
+    fn load_global(&mut self, g: u32) -> ClValue {
+        self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            self.globals,
+            global_offset(g),
+        )
+    }
+
+    /// Store `v` into global slot `g`.
+    fn store_global(&mut self, g: u32, v: ClValue) {
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), v, self.globals, global_offset(g));
+    }
+
     /// A native i32 constant (a resume pc).
     fn pc_const(&mut self, pc: usize) -> ClValue {
         self.b.ins().iconst(types::I32, pc as i64)
@@ -484,9 +560,21 @@ fn reg_offset(r: Reg) -> i32 {
     (r as i32) * 8
 }
 
+/// Global slot `g`'s byte offset within the globals array (`g * sizeof(Value)`).
+fn global_offset(g: u32) -> i32 {
+    (g as i32) * 8
+}
+
 /// Emit the native code for one op into its (already switched-to) block. `op_blocks[pc]` maps a
-/// bytecode pc to its Cranelift block, for jumps/branches; a bail returns the pc.
+/// bytecode pc to its Cranelift block, for jumps/branches; a bail returns the pc. An op the JIT does
+/// not compile ([`is_fast_op`] is false) bails here — the interpreter runs it and the rest of the
+/// frame.
 fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[Block]) {
+    if !is_fast_op(op, consts) {
+        let here = cg.pc_const(pc);
+        cg.b.ins().return_(&[here]);
+        return;
+    }
     let next = |cg: &mut Codegen| cg.b.ins().jump(op_blocks[pc + 1], &[]);
     match op {
         Op::LoadConst { dst, k } => {
@@ -564,12 +652,100 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             let here = cg.pc_const(pc);
             cg.b.ins().return_(&[here]);
         }
-        // Return / Halt / anything else: hand back to the interpreter at this pc.
+        Op::LoadGlobal { dst, global, .. } => emit_load_global(cg, *dst, global.0, pc, op_blocks),
+        Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
+        Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
+        // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
             let here = cg.pc_const(pc);
             cg.b.ins().return_(&[here]);
         }
     }
+}
+
+/// `dst = globals[g]` (P-JIT globals). Bails if the slot is unbound (E0005) or holds a heap value
+/// (the interpreter's `retain` is needed there). An immediate global copies with no refcount — the
+/// interpreter's `retain` is a no-op on it — keeping the immediate invariant intact.
+fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[Block]) {
+    let v = cg.load_global(g);
+    let unbound = cg.is_unbound(v);
+    let heap = cg.is_pointer(v);
+    let bail_cond = cg.b.ins().bor(unbound, heap);
+    let cont = cg.b.create_block();
+    // Guard keeps going when NOT (unbound or heap): invert into a "bail if bail_cond" via a swapped brif.
+    let bail = cg.b.create_block();
+    cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);
+    cg.b.switch_to_block(bail);
+    let here = cg.pc_const(pc);
+    cg.b.ins().return_(&[here]);
+    cg.b.switch_to_block(cont);
+    cg.store_reg(dst, v);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
+}
+
+/// `globals[g] = take(reg[src])` (P-JIT globals; `StoreGlobal` moves the source out, leaving `unit`).
+/// `src` is an immediate (invariant), so the global takes it with no retain. The old occupant decides
+/// the path: unbound → write it and call the helper to record the first binding in `global_order`; a
+/// heap value → bail (its `release` may run a destructor); an immediate → plain overwrite (its release
+/// is a no-op).
+fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &[Block]) {
+    let v = cg.load_reg(src);
+    // Match the interpreter's `mem::replace(reg[src], unit)`: the source register is consumed.
+    let unit =
+        cg.b.ins()
+            .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+    cg.store_reg(src, unit);
+
+    let old = cg.load_global(g);
+    let is_unb = cg.is_unbound(old);
+    let bind_blk = cg.b.create_block();
+    let bound_blk = cg.b.create_block();
+    cg.b.ins().brif(is_unb, bind_blk, &[], bound_blk, &[]);
+
+    // First binding: write the slot, then record it in `global_order` via the helper.
+    cg.b.switch_to_block(bind_blk);
+    cg.store_global(g, v);
+    let vm = cg.vm;
+    let gid = cg.b.ins().iconst(types::I32, g as i64);
+    let note = cg.note_bound_ref;
+    cg.b.ins().call(note, &[vm, gid]);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
+
+    // Already bound: a heap old value bails; an immediate is overwritten in place.
+    cg.b.switch_to_block(bound_blk);
+    let heap = cg.is_pointer(old);
+    let store_blk = cg.b.create_block();
+    let bail = cg.b.create_block();
+    cg.b.ins().brif(heap, bail, &[], store_blk, &[]);
+    cg.b.switch_to_block(bail);
+    let here = cg.pc_const(pc);
+    cg.b.ins().return_(&[here]);
+    cg.b.switch_to_block(store_blk);
+    cg.store_global(g, v);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
+}
+
+/// `dst = take(globals[g])` — move the global out, leaving `unit` bound (P-JIT globals). Bails if
+/// unbound (E0005) or heap (moving a heap value into `dst` with no retain would break the immediate
+/// invariant — the interpreter does it). An immediate transfers with no refcount.
+fn emit_take_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[Block]) {
+    let old = cg.load_global(g);
+    let unbound = cg.is_unbound(old);
+    let heap = cg.is_pointer(old);
+    let bail_cond = cg.b.ins().bor(unbound, heap);
+    let cont = cg.b.create_block();
+    let bail = cg.b.create_block();
+    cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);
+    cg.b.switch_to_block(bail);
+    let here = cg.pc_const(pc);
+    cg.b.ins().return_(&[here]);
+    cg.b.switch_to_block(cont);
+    let unit =
+        cg.b.ins()
+            .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+    cg.store_global(g, unit);
+    cg.store_reg(dst, old);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
 
 /// Emit a numeric `Binary`, dispatching on the operands' runtime types (the bytecode is untyped):

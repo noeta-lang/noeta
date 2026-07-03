@@ -934,6 +934,20 @@ fn vm_hot_paths(c: &mut Criterion) {
             jit.bench_with_input(BenchmarkId::new("float_jit", n), &fmodule, |b, module| {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
+            // Native globals: the same arithmetic loop but **top-level** (global `i`/`total`) — the
+            // scripting shape. Per-op bail compiles proto 0 (LoadGlobal/StoreGlobal inlined), bailing
+            // only at the trailing `echo`.
+            let gmodule = compile(&global_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("global_interp", n),
+                &gmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(BenchmarkId::new("global_jit", n), &gmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
         }
         jit.finish();
     }
