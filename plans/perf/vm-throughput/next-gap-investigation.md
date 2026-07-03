@@ -84,11 +84,15 @@ Fused into one `Op::CondBranch` (check-bool-and-branch), byte-identical, the con
 untouched so operator-overload dispatch is unaffected. b_loop 601 → 509 ms (~15%), empty 2M loop 74 →
 67 ms (~10%); call-bound code flat. VM-only, differential/leak green.
 
-## Finding 3 — loop-invariant constants reloaded every iteration (minor)
+## Finding 3 — loop-invariant constants reloaded every iteration — ✅ DONE (`783c7c2`, P-VMT-LICM)
 
-`b_loop` re-`LoadConst`s `10000000`, `7`, `1` each iteration; `b_wordcount` reloads `500`/`"word"`.
-A small loop-invariant-code-motion pass (hoist constant loads out of the loop header) would trim a few
-ops per iteration. Low priority next to findings 1–2.
+**Fixed.** A bytecode pass on the monotonic pre-coalesce code hoists primitive `LoadConst`s out of
+loops into a pre-header, when the register is defined once, read only by borrowing arithmetic, and not
+a jump target (a merge point). b_loop's loop body drops from 3 in-loop `LoadConst`s to zero (~622 →
+~435 ms); gains scale with arithmetic density (the empty loop, whose hoisted loads are cheap next to
+its global accesses, is ~flat — `LoadConst` is one of the cheapest ops, so this is the smallest of the
+structural wins). Differential/leak/tests green, no snapshot churn. **This was the last worthwhile
+interpreter-level slice** — see the JIT plan (`../jit/README.md`).
 
 ## Finding 4 — the interpreter dispatch floor (the structural ceiling)
 
