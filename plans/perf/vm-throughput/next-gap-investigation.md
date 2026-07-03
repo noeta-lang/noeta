@@ -27,7 +27,20 @@ ops already exist — it is a field-type swap plus a `Vec` in the VM.
 **Later refinement:** register-allocate top-level locals that no nested `fn` captures (turn `i`/`total`
 into pure frame registers, no global array at all). Bigger; do slot-indexing first.
 
-## Finding 2 — read-modify-write on a collection copies instead of reusing (the 250× outlier)
+## Finding 2 — read-modify-write on a collection copies instead of reusing (the 250× outlier) — ✅ DONE (`094cc1a`, P-VMT-RMW)
+
+**Fixed.** `insert_drops` runs before `thread_reuse`, so reading the receiver earlier in the block
+puts a `DropVar` between the `m.set(...)` self-update and its `m = %t` rebind; the pass required the
+rebind at exactly `stmts[i+1]`, so the drop denied the reuse token. Made the pairing tolerant of
+intervening drops (`rebinds_temp_after_drops`, applied to all four self-update shapes). Sound: the
+reuse op consumes the receiver at the op, so a later drop hits a moved-out unit slot, and the runtime
+`refcount==1` guard still copies under aliasing. **O(n²) → O(n):** new `vm_map_rmw` bench 28× (n=1000)
+→ 37× (n=8000); wordcount ~2770 ms → ~84 ms (33×), from ~250× behind PHP to ~7.6×. Original analysis
+below.
+
+---
+
+
 
 The `m[k] = f(m[k])` idiom — counters, histograms, accumulation — is extremely common and today is
 **O(n²)** whenever the collection is *read* earlier in the same iteration.
