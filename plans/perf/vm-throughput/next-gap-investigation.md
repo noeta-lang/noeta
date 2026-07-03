@@ -4,7 +4,20 @@ After the P-VMT arc (S0–S5) closed part of the scalar/loop/call gap (loop 10M 
 is a disassembly-driven look at *what still dominates* the remaining 5–250× gap to PHP 8.4, and the
 next slices that would close it. Evidence is `lang dump <file>` on the `scratch-bench/` programs.
 
-## Finding 1 — top-level bindings & global functions go through a string-keyed `HashMap` (highest leverage)
+## Finding 1 — top-level bindings & global functions go through a string-keyed `HashMap` — ✅ DONE (`ecee093`, P-VMT-GSLOT)
+
+**Fixed.** The compiler now assigns each global a dense slot (`GlobalId` + `Module::global_names`)
+and the VM stores globals in a `Vec<Option<Value>>` the three ops index directly — no name hashing
+(PHP's CV-slot model). `None` marks unbound (E0005 preserved); the slot→name table is used only for
+diagnostics/disassembly (snapshots byte-identical), and the cross-thread isolate seeding keys on the
+slot id (shared `Arc<Module>` → slots line up). **b_loop 1279 → 548 ms (2.3×), empty 2M loop 124 → 65
+ms (1.9×), fib(32) 592 → 502 ms (1.18×)**; new `vm_dispatch/global_loop` bench. Original analysis
+below. *(The deeper refinement — register-allocating uncaptured top-level locals so `i`/`total` avoid
+the global array entirely — remains open.)*
+
+---
+
+
 
 `Vm.globals` is a `HashMap<String, Value>`. Every top-level `mut`/`let` binding and every top-level
 `fn` name lives there, so each use hashes and probes a string.
