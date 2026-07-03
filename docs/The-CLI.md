@@ -1,11 +1,12 @@
 # The `lang` CLI
 
-The `lang` binary is the whole toolchain. It has five subcommands:
+The `lang` binary is the whole toolchain. It has six subcommands:
 
 | Command | Purpose |
 |---|---|
 | [`lang run`](#lang-run) | Type-check and execute a program. |
 | [`lang repl`](#lang-repl) | Interactive REPL. |
+| [`lang dump`](#lang-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
 | [`lang test`](Testing) | Discover and run `@test` blocks. |
 | [`lang bench`](Benchmarking) | Discover and measure `@bench` blocks. |
 | [`lang doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
@@ -81,6 +82,60 @@ Bindings persist across entries (unlike a compiled program, where a value is des
 | `:reset` | | Clear all bindings. |
 | `:help` | `:h`, `:?` | Show help. |
 | `:quit` | `:q` | Exit (also Ctrl-D). |
+
+---
+
+## `lang dump`
+
+```
+lang dump [OPTIONS] <FILE>
+```
+
+Disassembles a program to the register-bytecode the VM executes and prints it to stdout — **a developer/debugging aid**, not part of the normal build/run flow. It runs the *same* front end and code generator as [`lang run`](#lang-run) (load → type-check → lower → compile), so what you see is exactly what would execute; a type error prints diagnostics and exits non-zero, just like `run`.
+
+Use it to answer "how does this construct actually compile?" — which opcodes a loop or method call lowers to, whether an in-place/reuse fast path fired, or how names and constants are laid out. It is the first tool to reach for when working on codegen or interpreter performance.
+
+**Options** — the same dev-tier activation as `run`:
+
+| Flag | Effect |
+|---|---|
+| `--tier <NAME>` | Disassemble with a dev-tier active (e.g. `--tier debug` compiles in `@debug { … }` blocks). Repeatable. |
+| `--profile <NAME>` | Activate the tiers a `lang.toml` build profile makes live. Unioned with any `--tier`. |
+
+**Output.** The module's side tables first (shapes, packed schemas, method/destructor tables — only those that are non-empty), then `=== main ===` and each numbered function prototype (`=== proto N ===`). Each prototype lists its parameter/register counts, its constant pool, and its numbered instructions. The text is stable and human-readable — the same form the VM's disassembly snapshot tests assert — so it diffs cleanly across changes.
+
+**Example.** The body of a recursive `fib` shows the two `LoadGlobal "fib"` that resolve the callee and the `Call` frames:
+
+```console
+$ lang dump fib.lang
+...
+=== proto 1 ===
+params: 1, registers: 4
+constants:
+  k0 = 2
+  k1 = 1
+  k2 = 2
+code:
+    0  LoadConst   r2 <- k0
+    1  Binary      r1 <- r0 < r2
+    2  RequireCondBool r1 (if)
+    3  JumpIfFalse r1 -> 5
+    4  Return      r0
+    5  LoadConst   r2 <- k1
+    6  Binary      r1 <- r0 - r2
+    7  LoadGlobal  r3 <- "fib"
+    8  Call        r2 <- r3(r1)
+    9  LoadConst   r3 <- k2
+   10  Binary      r1 <- r0 - r3
+   11  Drop        r0
+   12  LoadGlobal  r3 <- "fib"
+   13  Call        r0 <- r3(r1)
+   14  Binary      r1 <- r2 + r0
+   15  Return      r1
+   16  Halt
+```
+
+The opcode set and prototype/side-table layout are described in [The Virtual Machine](The-Virtual-Machine).
 
 ---
 
