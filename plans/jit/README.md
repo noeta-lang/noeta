@@ -104,7 +104,7 @@ on every eligible program.
 | **J1** | ✅ **DONE.** **Integer fast path** — compile protos whose ops are all in {`LoadConst`(imm), `Move`, `Drop`, `Binary`(int `+ - * / %` and `== != < <= > >=`), `CondBranch`, `Jump`, `JumpIf*`, `Return`/`Halt` as bail points}. Guard-and-bail on non-int operands, zero divisor, and 48-bit overflow. First real native code — **~6–7.5× on register-local integer loops**. (Globals + `WideInt`/bitwise deferred; see below.) | Codegen correctness; NaN-box guards; the first oracle run. |
 | **J2** | ✅ **DONE (floats).** **Float fast path** — native f64 ALU (`+ - * /`) and ordered comparison (`== != < <= > >=`), dispatched from the same `Binary` by a runtime int-vs-float type check; NaN results canonicalized to match `Value::float` bit-for-bit. **~6.5× on float loops.** (f32, tuples, `Narrow`/`IsType` deferred — see below.) | Incremental. |
 | **J3** | ✅ **DONE.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation); heap-aware refcounting for the callee closure/results; **resume-native** re-enters the compiled caller after its callee returns; **native→native direct calls** — a compiled caller `call_indirect`s a compiled callee (value-returning `Return`, capacity-guarded so the register pointer stays valid), skipping the interpreter round-trip on the fast path, falling back to the shared setup otherwise. `fib`-class recursion **~2.3×**; loops ~6–8×. | Call ABI, stack/frame interaction, recursion depth. |
-| **J4** | ⏳ **STARTED (slice 1: for-range loops).** **Heap & collections** — a generic `run_leaf_op` helper runs a single non-dispatching heap/collection op (the interpreter's exact arm, refcounts included) and returns "continue" or a resume pc; adding an op is a match arm. Slice 1 lit up `MakeRange`/`IterSnapshot`/`ListLen`/`ListGet`, so `for i in 0..n` loops go native (**~2.6×**). Next: field access, indexing, constructors, string ops. | **Refcount exactness** — the leak oracle is the gate. |
+| **J4** | ⏳ **IN PROGRESS (slices 1–2).** **Heap & collections** — a generic `run_leaf_op` helper runs a single non-dispatching heap/collection op (the interpreter's exact arm, refcounts included) and returns "continue" or a resume pc; adding an op is a match arm. Slice 1 lit up `MakeRange`/`IterSnapshot`/`ListLen`/`ListGet`, so `for i in 0..n` loops go native (**~2.6×**). Slice 2 added `LoadField`/`SetField` (the `SetField` store factored into a shared `set_field_fast` so both tiers are refcount-identical) — **812/813 protos native**; field-loop win is modest (~1.1×, each field op is a helper call) but coverage is near-total. Next: indexing, constructors, string ops. | **Refcount exactness** — the leak oracle is the gate. |
 | **J5** | **Tiering polish + OSR** — on-stack replacement so a hot loop enters tier 1 mid-execution (not only at call boundary); counter tuning; per-op bail replacing whole-proto eligibility; compile-time budget. | Deopt/OSR is subtle; do last. |
 
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
@@ -324,11 +324,21 @@ plus a name in `is_leaf_heap_op` — no new helper, no new codegen.**
   14.9 ms (~2.6×)** — below the `while` loop's ~6× because a range materializes an `n`-element list and
   `ListGet` is a per-iteration helper call, but the idiomatic loop now goes native. `--jit-differential`
   419/0/768-native/0-leak; new `jit_for_range_loop` test.
-- **Next slices (same mechanism):** field access (`LoadField`/`SetField` via the uncached slot
-  lookup), list/map indexing (`Index`), tuple ops, constructors (`MakeList`/`MakeMap`/`MakeStruct`/…),
-  and string ops (`BuildString`, non-dispatching `Stringify`/`Echo`). Dispatching ops (`CallMethod`,
-  object `Index`, `Display` `Stringify`) keep bailing — they push frames, which the leaf helper does
-  not.
+- **Slice 2 — field access (`LoadField` / `SetField`).** `LoadField` resolves the slot without the
+  interpreter's loop-local inline cache (`slot_of` then `slot_at`, bailing where the interpreter would
+  raise). `SetField`'s store — the reference-`class` in-place mutation, the value-`struct` COW, and the
+  `reuse` fast path — is factored into a shared `Vm::set_field_fast` that **both** the interpreter arm
+  and the leaf helper call, so their refcount behaviour is identical by construction (not by duplicated
+  code); the field-not-found path performs no mutation, preserving bail-before-mutate. Coverage jumps to
+  **812/813 protos native**. The field-loop micro-bench is only ~1.1× (each `LoadField`/`SetField` is a
+  full helper call — a `match` + name-intern + slot scan — roughly matching interpreter dispatch, and a
+  field-dominated loop is almost all field ops); the win is real where field access is mixed with
+  heavier native arithmetic, and the coverage is near-total. A genuinely fast field load wants a native
+  inline cache (guard on the receiver's shape pointer, load at the cached slot offset) — a J5-class slice.
+- **Next slices (same mechanism):** list/map indexing (`Index`), tuple ops, constructors
+  (`MakeList`/`MakeMap`/`MakeStruct`/…), and string ops (`BuildString`, non-dispatching
+  `Stringify`/`Echo`). Dispatching ops (`CallMethod`, object `Index`, `Display` `Stringify`) keep bailing
+  — they push frames, which the leaf helper does not.
 
 ## Production wiring — what landed (JIT reaches `lang run`)
 

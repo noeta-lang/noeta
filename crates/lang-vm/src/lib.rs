@@ -690,8 +690,11 @@ extern "C" fn jit_run_leaf_op(
     proto: i32,
     pc: i32,
 ) -> i64 {
-    let module = unsafe { (*(vm as *const Vm)).module };
+    // Reconstitute `&mut Vm` (some leaf ops, e.g. `SetField`, release displaced values through
+    // `self`); `regs_vec` points at the dispatch loop's local register stack, disjoint from the VM.
+    let vm = unsafe { &mut *(vm as *mut Vm) };
     let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    let module = vm.module;
     let bail = pc as i64;
     match &module.protos[proto as usize].code[pc as usize] {
         Op::MakeRange {
@@ -755,6 +758,42 @@ extern "C" fn jit_run_leaf_op(
                     lang_jit::OUTCOME_CONTINUE
                 }
                 None => bail,
+            }
+        }
+        Op::LoadField {
+            dst, obj, field, ..
+        } => {
+            // The interpreter's inline-cache lookup (`caches` is loop-local) is skipped here; the
+            // cache-miss resolution — `slot_of` then `slot_at` — is the same read and is bailed on
+            // exactly where the interpreter would raise (unknown field / non-object receiver).
+            let field = module.name(*field);
+            let v = regs[base + *obj as usize];
+            match v
+                .shape()
+                .and_then(|sh| sh.slot_of(field))
+                .and_then(|s| v.slot_at(s))
+            {
+                Some(value) => {
+                    retain(value);
+                    set_reg(regs, base, *dst, value);
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail, // unknown field / non-object → interpreter raises the error
+            }
+        }
+        Op::SetField {
+            dst,
+            obj,
+            field,
+            value,
+            reuse,
+            ..
+        } => {
+            let field = module.name(*field);
+            if vm.set_field_fast(regs, base, *dst, *obj, field, *value, *reuse) {
+                lang_jit::OUTCOME_CONTINUE
+            } else {
+                bail // unknown field → interpreter raises the error
             }
         }
         _ => bail,
@@ -1472,6 +1511,76 @@ impl<'m> Vm<'m> {
             self.release_value(child);
         }
         value.gc_free_shallow();
+    }
+
+    /// Perform `Op::SetField`'s store into `regs` — the reference-`class` in-place mutation, the value-
+    /// `struct` copy-on-write, and the `reuse` fast path — returning `true` when the field exists and
+    /// the store happened, or `false` when `obj` has no such field (the caller raises the E0022-family
+    /// error or, from the tier-1 leaf helper, bails so the interpreter re-runs and raises it). Factored
+    /// so the interpreter arm and the JIT leaf helper (P-JIT J4) share one implementation and are
+    /// refcount-identical by construction. The `false` path performs **no** mutation, so a leaf-helper
+    /// bail re-runs from clean state (the bail-before-mutate rule).
+    // The operands mirror `Op::SetField`'s fields one-to-one; both call sites already hold them
+    // destructured, so an explicit parameter list is clearer here than a wrapper struct.
+    #[allow(clippy::too_many_arguments)]
+    fn set_field_fast(
+        &mut self,
+        regs: &mut [Value],
+        base: usize,
+        dst: u16,
+        obj: u16,
+        field: &str,
+        value: u16,
+        reuse: bool,
+    ) -> bool {
+        let v = regs[base + obj as usize];
+        let val = regs[base + value as usize];
+        let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
+            return false;
+        };
+        // A reference `class` mutates the shared instance **in place**, regardless of refcount or the
+        // reuse flag — the change must be visible through every alias (object-model slice 2b). A value
+        // `struct` keeps copy-on-write below.
+        let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
+        if is_class {
+            let old = v.replace_slot(slot, val);
+            self.release_value(old);
+            if reuse {
+                // The receiver's reference moves into `dst` (its register cleared, as in the struct
+                // path); the instance is unchanged-but-mutated.
+                regs[base + obj as usize] = Value::unit();
+                set_reg(regs, base, dst, v);
+            } else {
+                // The receiver register is untouched (a temp is dropped later by the compiler-emitted
+                // `Drop`); `dst` takes its own counted reference.
+                retain(v);
+                set_reg(regs, base, dst, v);
+            }
+        } else if reuse {
+            // The receiver's sole reference moves into this op (its register cleared, like the
+            // map/struct in-place paths), so the `refcount == 1` check below sees the accumulator's
+            // reference and a `dst == obj` store is safe.
+            regs[base + obj as usize] = Value::unit();
+            if v.refcount() == 1 {
+                // Unique: overwrite the slot in place (`replace_slot` retains the new value); the
+                // displaced old value's `destruct` fires now (spec §5).
+                let old = v.replace_slot(slot, val);
+                self.release_value(old);
+                set_reg(regs, base, dst, v);
+            } else {
+                // Aliased: copy with the field replaced, preserving the alias's view, then release the
+                // consumed receiver reference.
+                let new = object_copy_with_slot(v, slot, val);
+                release(v);
+                set_reg(regs, base, dst, new);
+            }
+        } else {
+            // Unmarked: a functional update — copy with the field replaced, the receiver register
+            // untouched (a temp receiver is dropped by the compiler-emitted Drop).
+            let new = object_copy_with_slot(v, slot, val);
+            set_reg(regs, base, dst, new);
+        }
+        true
     }
 
     /// Whether `value`'s subtree may contain a destructor — the container-before-contained
@@ -3435,9 +3544,10 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let field = module.name(*field);
-                        let v = regs[fbase + *obj as usize];
-                        let val = regs[fbase + *value as usize];
-                        let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
+                        // The store (class in-place / struct COW / reuse) is shared with the tier-1 JIT
+                        // leaf helper (P-JIT J4); a `false` return is the field-not-found error path.
+                        if !self.set_field_fast(regs, fbase, *dst, *obj, field, *value, *reuse) {
+                            let v = regs[fbase + *obj as usize];
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
                                 *span,
@@ -3450,48 +3560,6 @@ impl<'m> Vm<'m> {
                                     format!("cannot assign field `{field}` on {}", v.type_name())
                                 },
                             ));
-                        };
-                        // A reference `class` mutates the shared instance **in place**, regardless of
-                        // refcount or the reuse flag — the change must be visible through every alias
-                        // (object-model slice 2b). A value `struct` keeps copy-on-write below.
-                        let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
-                        if is_class {
-                            let old = v.replace_slot(slot, val);
-                            self.release_value(old);
-                            if *reuse {
-                                // The receiver's reference moves into `dst` (its register cleared, as in
-                                // the struct path); the instance is unchanged-but-mutated.
-                                regs[fbase + *obj as usize] = Value::unit();
-                                set_reg(regs, fbase, *dst, v);
-                            } else {
-                                // The receiver register is untouched (a temp is dropped later by the
-                                // compiler-emitted `Drop`); `dst` takes its own counted reference.
-                                retain(v);
-                                set_reg(regs, fbase, *dst, v);
-                            }
-                        } else if *reuse {
-                            // The receiver's sole reference moves into this op (its register cleared, like
-                            // the map/struct in-place paths), so the `refcount == 1` check below sees the
-                            // accumulator's reference and a `dst == obj` store is safe.
-                            regs[fbase + *obj as usize] = Value::unit();
-                            if v.refcount() == 1 {
-                                // Unique: overwrite the slot in place (`replace_slot` retains the new
-                                // value); the displaced old value's `destruct` fires now (spec §5).
-                                let old = v.replace_slot(slot, val);
-                                self.release_value(old);
-                                set_reg(regs, fbase, *dst, v);
-                            } else {
-                                // Aliased: copy with the field replaced, preserving the alias's view, then
-                                // release the consumed receiver reference.
-                                let new = object_copy_with_slot(v, slot, val);
-                                release(v);
-                                set_reg(regs, fbase, *dst, new);
-                            }
-                        } else {
-                            // Unmarked: a functional update — copy with the field replaced, the receiver
-                            // register untouched (a temp receiver is dropped by the compiler-emitted Drop).
-                            let new = object_copy_with_slot(v, slot, val);
-                            set_reg(regs, fbase, *dst, new);
                         }
                         pc += 1;
                     }
@@ -5387,6 +5455,28 @@ mod tests {
         assert_eq!(interp, jit, "for-range result must match the interpreter");
         let expected: i64 = (0..1000).sum();
         assert_eq!(jit.stdout, format!("{expected}\n"));
+    }
+
+    /// Field access (P-JIT J4 slice 2): a hot loop that reads (`LoadField`) and writes (`SetField`,
+    /// the struct copy-on-write / reuse path) object fields runs natively through the leaf-op helper
+    /// and matches the interpreter — the store logic is the shared `set_field_fast`, so refcounts are
+    /// identical across the tier boundary (the `--jit-differential` leak check gates that).
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_field_access_loop_is_native_and_correct() {
+        let src = "struct Point {\n  mut x: int\n  mut y: int\n}\nfn run(n: int): int {\n  mut p = Point { x: 0, y: 0 };\n  mut i = 0;\n  while i < n {\n    p.x = p.x + i;\n    p.y = p.y + p.x;\n    i = i + 1;\n  }\n  return p.x + p.y;\n}\necho run(100);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the field-access loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "field-access result must match the interpreter"
+        );
+        assert_eq!(jit.stdout, "171600\n");
     }
 
     /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware

@@ -606,7 +606,12 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
 fn is_leaf_heap_op(op: &Op) -> bool {
     matches!(
         op,
-        Op::MakeRange { .. } | Op::IterSnapshot { .. } | Op::ListLen { .. } | Op::ListGet { .. }
+        Op::MakeRange { .. }
+            | Op::IterSnapshot { .. }
+            | Op::ListLen { .. }
+            | Op::ListGet { .. }
+            | Op::LoadField { .. }
+            | Op::SetField { .. }
     )
 }
 

@@ -357,6 +357,16 @@ fn jit_float_loop_src(n: usize) -> String {
     )
 }
 
+/// J4 slice 2 (P-JIT field access): a hot loop reading (`LoadField`) and writing (`SetField`) the
+/// fields of a mutable `struct`, so the leaf-op helper's field paths get exercised on the fast path
+/// while the surrounding loop stays native.
+#[cfg(feature = "jit")]
+fn field_loop_src(n: usize) -> String {
+    format!(
+        "struct Point {{\n    mut x: int\n    mut y: int\n}}\nfn run(n: int): int {{\n    mut p = Point {{ x: 0, y: 0 }};\n    mut i = 0;\n    while i < n {{\n        p.x = p.x + i;\n        p.y = p.y + p.x;\n        i = i + 1;\n    }}\n    return p.x + p.y;\n}}\necho run({n});\n"
+    )
+}
+
 /// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
 /// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
 /// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
@@ -961,6 +971,23 @@ fn vm_hot_paths(c: &mut Criterion) {
             jit.bench_with_input(
                 BenchmarkId::new("forrange_jit", n),
                 &rmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
+            // J4 slice 2 (field access): a loop reading/writing `struct` fields — LoadField/SetField
+            // run through the leaf-op helper, keeping the surrounding loop native.
+            let field_module = compile(&field_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("field_interp", n),
+                &field_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("field_jit", n),
+                &field_module,
                 |b, module| {
                     b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
                 },
