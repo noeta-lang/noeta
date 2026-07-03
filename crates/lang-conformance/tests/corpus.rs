@@ -189,8 +189,8 @@ fn jit_differential_tiers_agree() {
         report.to_human()
     );
     assert!(
-        report.compiled_protos > 0,
-        "expected the corpus to compile prototypes to native code; got:\n{}",
+        report.native_protos > 0,
+        "expected the corpus to compile prototypes to native code (J1); got:\n{}",
         report.to_human()
     );
 }

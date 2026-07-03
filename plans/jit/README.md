@@ -1,6 +1,6 @@
 # JIT milestone (P-JIT) — closing the scalar/loop/call gap to a JIT engine
 
-**Status: J0 DONE (foundation landed); J1+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
+**Status: J0 + J1 DONE (integer fast path landed, ~7× on native loops); J2+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
 LICM) took the interpreter as far as *interpreter-level* wins go — dispatch is now ~3.3 ns/op, near the
 floor for a `match`-based switch interpreter. The remaining ~10–35× gap to PHP 8.4 on hot scalar / loop
 / call code (`loop 10M` ~35×, `fib(32)` ~17×) is structural: PHP's **tracing JIT** runs the equivalent
@@ -101,7 +101,7 @@ on every eligible program.
 | # | Slice | Delivers | Risk |
 |---|---|---|---|
 | **J0** | ✅ **DONE.** **Foundation** — `lang-jit` crate + `jit` feature, Cranelift wired, the compiled-code cache + tier-0/1 dispatch seam, the runtime-helper ABI skeleton, hot-counter promotion, and the `--jit-differential` + leak-under-JIT oracle harness. No op compiled yet (every proto bails to tier 0) — proves the *plumbing* and the oracle. | Setup; the ABI/deopt seam is the crux to get right early. |
-| **J1** | **Integer fast path** — compile protos whose ops are all in {`LoadConst`(prim), `Move`, `Binary`(int arith/cmp), `WideInt`, `CondBranch`, `Jump`, `JumpIf*`, `LoadGlobal`/`StoreGlobal`/`TakeGlobal` slot, `Return`, `Halt`}. Guard-and-bail on non-int operands. First real native code — accelerates integer loops (`loop 10M`, the ablation loops). | Codegen correctness; NaN-box guards; the first oracle run. |
+| **J1** | ✅ **DONE.** **Integer fast path** — compile protos whose ops are all in {`LoadConst`(imm), `Move`, `Drop`, `Binary`(int `+ - * / %` and `== != < <= > >=`), `CondBranch`, `Jump`, `JumpIf*`, `Return`/`Halt` as bail points}. Guard-and-bail on non-int operands, zero divisor, and 48-bit overflow. First real native code — **~6–7.5× on register-local integer loops**. (Globals + `WideInt`/bitwise deferred; see below.) | Codegen correctness; NaN-box guards; the first oracle run. |
 | **J2** | **Floats + control** — float ALU, `f32`, tuples make/index, `Narrow`/`IsType`, more branch shapes. Widens the eligible set. | Incremental. |
 | **J3** | **Calls** — inline the direct-call fast path (known callee proto, arity match) with a native call into another compiled proto (or a helper trampoline to tier 0); `fib`-class recursion. | Call ABI, stack/frame interaction, recursion depth. |
 | **J4** | **Heap & collections** — retain/release inlined, allocation + list/map/set/string/field ops via runtime helpers keeping refcount exact. Most real programs become fully JIT-eligible. | **Refcount exactness** — the leak oracle is the gate. |
@@ -144,6 +144,42 @@ New crate **`lang-jit`** behind `lang-vm`'s `jit` feature (default build pulls *
 
 No criterion before/after for J0 — every prototype bails, so there is **no perf delta yet**; the
 benches begin at J1 (integer fast path), the first slice that emits real native arithmetic.
+
+## J1 — what landed (integer fast path)
+
+The first slice that emits real machine code. `Jit::compile` now checks each prototype against the J1
+op set and emits either a **native integer body** or the J0 bail stub; the interpreter dispatches
+through both at frame entry.
+
+- **The deopt contract, simplified.** The tier-1 ABI now returns a **`u32` resume pc** (not an
+  outcome). A compiled body runs the ops it knows and, at the first it doesn't (`Return`, `Halt`, or a
+  failed guard), returns that op's `pc`; the interpreter continues from there. The shared register
+  stack makes this free — the native code did the exact register writes the interpreter would have, so
+  the window is already consistent at the handoff. `0` = "interpret the whole frame" (the bail stub).
+- **The immediate invariant → zero refcounts.** The body first **guards every parameter is an
+  immediate** (bails to pc 0 if any is a heap pointer). Locals start `unit`, so from there *every
+  register holds an immediate for the entire native run* — which means every `retain`/`release` the
+  interpreter would do is a no-op, so the fast path emits **none**. This is what makes native integer
+  code both correct (no missed refcount) and fast.
+- **Per-op guards, bail-before-write.** A `Binary` bails if either operand is not a small int, if a
+  `/`/`%` divisor is zero (interpreter raises E0008), or if the arithmetic result overflows the 48-bit
+  immediate range (a big int must heap-box — the interpreter does it). A `CondBranch` bails on a
+  non-bool (E0007). Every bail happens before any store, so re-execution is clean. `JumpIfTrue/False`
+  need no guard (a non-bool is simply "not taken", matching `as_bool()`).
+- **Codegen shape.** One Cranelift block per bytecode pc; register state lives in memory (the `regs`
+  array), so blocks carry no SSA params — only the frame base pointer (computed once in the entry
+  block) crosses in. Dead-code pcs get a trivial bail so they never reference that pointer from a
+  non-dominated block. Value encoding comes from **`lang_value::Value::NANBOX`** — one source of
+  truth, `lang-value`-tested against `Value::int`/`bool`/`unit`, so the inlined tag/box/unbox math
+  can't drift from the interpreter.
+- **Result.** `--jit-differential`: **419 matched, 0 skipped, 69/813 prototypes native, 0 divergence,
+  0 leaks.** Bench `vm_jit` (interp vs forced JIT on a register-local integer `while` loop): **100k
+  4.88 ms → 0.80 ms (~6.1×), 1M 43.2 ms → 5.80 ms (~7.5×).** lang-vm tests add a native-while-loop
+  correctness test and an overflow-bail test.
+- **Deferred to later slices:** globals (`LoadGlobal`/`StoreGlobal`/`TakeGlobal` — they touch heap
+  values, so they need the runtime-helper retain/release path, folded into J4), the fixed-width
+  `WideInt` and bitwise/shift ops, and `for`-range loops (they lower to `MakeRange`/`IterSnapshot`,
+  outside the op set — a `while` loop is the J1-eligible shape).
 
 ## Open questions (resolve at sign-off)
 

@@ -56,6 +56,30 @@ pub enum IterAbort<E> {
     FilterNotBool(&'static str),
 }
 
+/// The NaN-box bit layout (see [`Value::NANBOX`]), the ABI contract between this crate's value
+/// encoding and the JIT's native codegen. Every field is a raw bit pattern (or bound) the JIT feeds
+/// straight into Cranelift constants.
+#[derive(Debug, Clone, Copy)]
+pub struct NanBoxLayout {
+    /// Quiet-NaN prefix: a word is a tagged (non-float) value iff `bits & qnan == qnan`.
+    pub qnan: u64,
+    /// Sign bit; set on pointers.
+    pub sign_bit: u64,
+    /// Immediate small-int discriminator bit.
+    pub int_tag: u64,
+    /// Low-48-bit payload mask (heap address / small-int payload).
+    pub ptr_mask: u64,
+    /// The exact bit pattern of `unit`.
+    pub unit_bits: u64,
+    /// The exact bit pattern of `true`.
+    pub true_bits: u64,
+    /// The exact bit pattern of `false`.
+    pub false_bits: u64,
+    /// Smallest / largest integer that stays an immediate (outside this range `int` boxes on the heap).
+    pub int_min: i64,
+    pub int_max: i64,
+}
+
 /// A NaN-boxed runtime value (one 64-bit word). `Copy`: it is just an integer; ownership of
 /// any heap object it points at is tracked by refcount, not by Rust's move semantics.
 #[derive(Clone, Copy)]
@@ -88,6 +112,23 @@ impl Value {
     /// Largest immediate small-int magnitude (48-bit signed payload).
     const INT_MIN: i64 = -(1 << 47);
     const INT_MAX: i64 = (1 << 47) - 1;
+
+    /// The NaN-box bit layout, exposed as the **single source of truth** for the JIT (`lang-jit`),
+    /// which emits inline tag checks and box/unbox sequences as native code and must encode values
+    /// bit-for-bit identically to this crate's safe API. These fields *are* the private constants the
+    /// constructors/accessors above use, so the JIT can never drift from the interpreter's encoding —
+    /// a `lang-value` test round-trips them against [`Value::int`]/[`Value::bool`]/[`Value::unit`].
+    pub const NANBOX: NanBoxLayout = NanBoxLayout {
+        qnan: Self::QNAN,
+        sign_bit: Self::SIGN_BIT,
+        int_tag: Self::INT_TAG,
+        ptr_mask: Self::PTR_MASK,
+        unit_bits: Self::QNAN | Self::TAG_UNIT,
+        true_bits: Self::QNAN | Self::TAG_TRUE,
+        false_bits: Self::QNAN | Self::TAG_FALSE,
+        int_min: Self::INT_MIN,
+        int_max: Self::INT_MAX,
+    };
 
     // --- Constructors ---
 
@@ -2377,6 +2418,38 @@ mod tests {
     use super::*;
     use lang_object::ShapeKind;
     use proptest::prelude::*;
+
+    /// The [`Value::NANBOX`] layout the JIT compiles against must reproduce this crate's own encoding
+    /// bit-for-bit — the whole point of exposing it as one source of truth. Round-trip the singletons
+    /// and a small int through both the safe API and the raw layout formulas the JIT uses.
+    #[test]
+    fn nanbox_layout_matches_the_value_encoding() {
+        let l = Value::NANBOX;
+        assert_eq!(l.unit_bits, Value::unit().0);
+        assert_eq!(l.true_bits, Value::bool(true).0);
+        assert_eq!(l.false_bits, Value::bool(false).0);
+        // Boxing a small int: `qnan | int_tag | (i & ptr_mask)` — the exact sequence the JIT emits.
+        for i in [0i64, 1, -1, 42, -42, l.int_max, l.int_min] {
+            let boxed = l.qnan | l.int_tag | (i as u64 & l.ptr_mask);
+            assert_eq!(boxed, Value::int(i).0, "boxing {i}");
+            // Unboxing: sign-extend the low 48 bits.
+            let p = boxed & l.ptr_mask;
+            let unboxed = ((p << 16) as i64) >> 16;
+            assert_eq!(unboxed, i, "unboxing {i}");
+        }
+        // The small-int tag test the JIT inlines: `(bits & (sign|qnan|int_tag)) == (qnan|int_tag)`.
+        let mask = l.sign_bit | l.qnan | l.int_tag;
+        let want = l.qnan | l.int_tag;
+        assert_eq!(Value::int(5).0 & mask, want, "5 reads as small int");
+        assert_ne!(Value::bool(true).0 & mask, want, "true is not a small int");
+        assert_ne!(Value::unit().0 & mask, want, "unit is not a small int");
+        // The pointer test: `(bits & (sign|qnan)) == (sign|qnan)`.
+        let pmask = l.sign_bit | l.qnan;
+        assert_ne!(Value::int(5).0 & pmask, pmask, "small int is not a pointer");
+        let s = Value::string("hi");
+        assert_eq!(s.0 & pmask, pmask, "a heap string is a pointer");
+        s.free();
+    }
 
     /// Build a packed byte buffer from a sequence of `int` field values (each an 8-byte LE word) —
     /// the byte-addressed form of the old `Vec<u64>` literals (P-PACK 3.2b).

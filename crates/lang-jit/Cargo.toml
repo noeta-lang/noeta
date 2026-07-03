@@ -7,6 +7,7 @@ repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+lang-ast = { workspace = true }
 lang-bytecode = { workspace = true }
 lang-value = { workspace = true }
 cranelift-jit = "0.133"

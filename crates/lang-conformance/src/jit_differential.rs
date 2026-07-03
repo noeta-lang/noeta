@@ -31,7 +31,9 @@ pub struct JitDiffReport {
     pub skipped: usize,
     /// Programs that did not parse cleanly, so there is no result to compare.
     pub parse_failed: usize,
-    /// Total prototypes compiled to native code across the corpus — the JIT-coverage number.
+    /// Total prototypes compiled to *real native code* across the corpus — the JIT-coverage number.
+    pub native_protos: usize,
+    /// Total prototypes compiled at all (native + bail stubs).
     pub compiled_protos: usize,
     /// Programs where tier 1 diverged from tier 0 — result failures.
     pub mismatches: Vec<Mismatch>,
@@ -56,8 +58,8 @@ impl JitDiffReport {
         let mut out = String::new();
         let _ = writeln!(
             out,
-            "jit-differential: {} matched, {} skipped (unsupported), {} parse-failed; {} prototypes JIT-compiled",
-            self.matched, self.skipped, self.parse_failed, self.compiled_protos,
+            "jit-differential: {} matched, {} skipped (unsupported), {} parse-failed; {}/{} prototypes native (rest bail stubs)",
+            self.matched, self.skipped, self.parse_failed, self.native_protos, self.compiled_protos,
         );
         if self.mismatches.is_empty() && self.leaks.is_empty() {
             out.push_str("tier 1 agrees with tier 0 and leaks nothing on every compiled program ✓\n");
@@ -165,13 +167,14 @@ fn compare_tiers_workspace(name: &str, raw: &lang_loader::RawWorkspace, report: 
 fn run_and_compare(name: &str, module: &lang_bytecode::Module, report: &mut JitDiffReport) {
     let interp = VmBackend::new().run_module(module);
 
-    // Forced-JIT run, measuring heap residency around it (refcount parity under native code). J0
-    // bails on every prototype, so residency matches the interpreter (zero) by construction.
+    // Forced-JIT run, measuring heap residency around it (refcount parity under native code): the
+    // integer fast path leaves every register an immediate, so residency must match the interpreter.
     let before = lang_value::live_count() as i64;
-    let jit = VmBackend::new().run_module_jit(module);
+    let (jit, stats) = VmBackend::new().run_module_jit_with_stats(module);
     let residual = lang_value::live_count() as i64 - before;
 
-    report.compiled_protos += module.protos.len();
+    report.native_protos += stats.native;
+    report.compiled_protos += stats.compiled;
 
     if interp == jit {
         report.matched += 1;

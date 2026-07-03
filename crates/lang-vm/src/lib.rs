@@ -142,10 +142,17 @@ impl VmBackend {
     /// Execute a module through the tier-1 JIT (milestone P-JIT), forcing every eligible prototype
     /// through native code — the `--jit-differential` and leak-under-JIT oracle path. It keeps the
     /// deterministic [`lang_stdlib::SandboxHost`], so its [`RunResult`] is directly comparable to
-    /// [`VmBackend::run_module`]: the only variable is tier 0 vs tier 1. J0 bails on every prototype,
-    /// so the result is identical by construction — which is precisely what the oracle asserts.
+    /// [`VmBackend::run_module`]: the only variable is tier 0 vs tier 1 — which is precisely what the
+    /// oracle asserts.
     #[cfg(feature = "jit")]
     pub fn run_module_jit(&self, module: &Module) -> RunResult {
+        self.run_module_jit_with_stats(module).0
+    }
+
+    /// Like [`VmBackend::run_module_jit`] but also returns how many prototypes were compiled (native
+    /// vs total) — the JIT-coverage numbers the oracle reports and the tests assert on.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_with_stats(&self, module: &Module) -> (RunResult, JitStats) {
         lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
         let mut vm = Vm::load(
             module,
@@ -154,8 +161,26 @@ impl VmBackend {
         );
         vm.force_jit = true;
         vm.init_jit();
-        run_and_teardown(&mut vm, lang_value::CollectorMode::Trace)
+        let result = run_and_teardown(&mut vm, lang_value::CollectorMode::Trace);
+        let stats = vm
+            .jit
+            .as_ref()
+            .map(|j| JitStats {
+                native: j.native_count(),
+                compiled: j.compiled_count(),
+            })
+            .unwrap_or_default();
+        (result, stats)
     }
+}
+
+/// JIT-coverage counts for one forced-JIT run: how many prototypes were compiled to real native code
+/// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs).
+#[cfg(feature = "jit")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JitStats {
+    pub native: usize,
+    pub compiled: usize,
 }
 
 impl Backend for VmBackend {
@@ -648,17 +673,13 @@ impl<'m> Vm<'m> {
     }
 
     /// Tier-0/tier-1 dispatch at frame entry (P-JIT). Called once per fresh frame (`pc == 0`).
-    /// Returns the compiled prototype's [`lang_jit::Outcome`] when tier 1 ran, or `None` when the
-    /// prototype is not compiled and the interpreter should run it. Under ordinary (non-forced)
-    /// execution this also drives hot-counter promotion.
+    /// Runs the compiled prototype's native code and returns the **bytecode `pc` at which the
+    /// interpreter should resume** (the deopt contract) — `0` means "interpret the whole frame".
+    /// Returns `None` when the prototype is not compiled and the interpreter should run it as usual.
+    /// Under ordinary (non-forced) execution this also drives hot-counter promotion.
     #[cfg(feature = "jit")]
     #[allow(unsafe_code)]
-    fn jit_enter(
-        &mut self,
-        proto: usize,
-        regs: &mut [Value],
-        base: usize,
-    ) -> Option<lang_jit::Outcome> {
+    fn jit_enter(&mut self, proto: usize, regs: &mut [Value], base: usize) -> Option<u32> {
         let f = match self.jit.as_ref().and_then(|j| j.get(proto)) {
             Some(f) => f,
             None => self.jit_maybe_compile(proto)?,
@@ -666,10 +687,10 @@ impl<'m> Vm<'m> {
         let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
         let regs_ptr = regs.as_mut_ptr();
         // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI; `vm_ptr` and
-        // `regs_ptr` are live for the duration of the call. The J0 stub only bails, so it reads
-        // neither through the pointers; J1+ helpers reconstitute `&mut Vm` from `vm_ptr`.
-        let raw = unsafe { f(vm_ptr, regs_ptr, base) };
-        Some(lang_jit::Outcome::from_raw(raw))
+        // `regs_ptr` are live for the duration of the call, and the native code only touches
+        // `regs[base..]` (never growing the stack — a J1 prototype makes no call). The returned pc is
+        // a valid index into this prototype's code (a `Return`/`Halt`/guard-bail site or 0).
+        Some(unsafe { f(vm_ptr, regs_ptr, base) })
     }
 
     /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
@@ -1131,12 +1152,13 @@ impl<'m> Vm<'m> {
             #[cfg(feature = "jit")]
             if pc == 0
                 && self.jit.is_some()
-                && let Some(lang_jit::Outcome::Returned) = self.jit_enter(proto, regs, fbase)
+                && let Some(resume) = self.jit_enter(proto, regs, fbase)
             {
-                // The compiled code performed the return protocol itself. Unreachable in J0 (no
-                // prototype returns `Returned`); wired for J1+ so the seam is complete. `Bail` or
-                // "not compiled" falls through to interpret this frame in tier 0.
-                continue 'reload;
+                // Native tier-1 code ran the frame up to a bail point and left the register window in
+                // the state the interpreter expects at `resume`; continue interpreting from there (the
+                // deopt handoff). `resume == 0` means the prototype was a bail stub or bailed at entry,
+                // so the interpreter runs the whole frame — behavior-identical.
+                pc = resume as usize;
             }
             loop {
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
@@ -4743,31 +4765,67 @@ mod tests {
         compile(&parsed.program).expect("program should be in the M1.0 subset")
     }
 
-    /// J0 (P-JIT foundation): the tier-1 JIT path is byte-identical to the interpreter, and the
-    /// generated native code *actually runs* — every compiled bail stub reaches the `lang_jit_observe`
-    /// runtime helper. Proves the whole seam (Cranelift build + finalize, tier-0/1 dispatch, the
-    /// helper ABI, and the clean fall-back to the interpreter) end to end.
+    /// P-JIT foundation: the tier-1 path is byte-identical to the interpreter, an ineligible
+    /// prototype's bail stub *actually runs* (reaches the `lang_jit_observe` helper), and control
+    /// falls cleanly back to tier 0. Proves the seam (Cranelift build + finalize, tier-0/1 dispatch,
+    /// the helper ABI, the deopt handoff) end to end.
     #[cfg(feature = "jit")]
     #[test]
     fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
-        // A program with a top-level frame and a called function — at least two prototypes to compile.
+        // The top-level proto (Call/Echo/globals) and `run` (a range `for` loop) are ineligible → bail
+        // stubs; `dbl` (`return x * 2`) is J1-eligible → real native code.
         let src = "fn dbl(x: int): int { return x * 2; }\nfn run(n: int): int {\n  mut total = 0;\n  for i in 0..n { total = total + dbl(i); }\n  return total;\n}\necho \"${run(5)}\";\n";
         let module = compile_module(src);
 
         let interp = VmBackend::new().run_module(&module);
         let before = jit_observe_count();
-        let jit = VmBackend::new().run_module_jit(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
         let entered = jit_observe_count() - before;
 
         // Byte-identical RunResult — the oracle's core invariant.
         assert_eq!(interp, jit, "tier-1 result must match the interpreter");
         assert_eq!(jit.stdout, "20\n");
-        // The native stubs really executed: the top-level frame plus every `run`/`dbl` call entered
-        // tier 1 and called the runtime helper (so the count is well above zero).
-        assert!(
-            entered >= 3,
-            "expected many tier-1 frame entries via native stubs, got {entered}"
-        );
+        // At least one prototype (`dbl`) went native, and the ineligible ones (top-level, `run`) ran
+        // their bail stubs (which call the observe helper).
+        assert!(stats.native >= 1, "expected a native prototype, got {stats:?}");
+        assert!(entered >= 1, "expected the bail stubs to run, got {entered}");
+    }
+
+    /// J1 (integer fast path): a pure-integer `while`-loop function compiles to native code and, run
+    /// through the forced JIT, produces exactly the interpreter's result. This exercises the whole
+    /// integer op set — `LoadConst`, `Binary` (`+`/`%`/`<`), `CondBranch`, `Move`, `Drop`, `Jump` —
+    /// natively, with the `Return` bailing to tier 0.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_integer_while_loop_is_native_and_correct() {
+        // sum of (i % 7) for i in 0..n — arithmetic, remainder, comparison, and a back-edge, all in
+        // registers (no globals, no calls) → J1-eligible.
+        let src = "fn run(n: int): int {\n  mut total = 0;\n  mut i = 0;\n  while i < n {\n    total = total + (i % 7);\n    i = i + 1;\n  }\n  return total;\n}\necho run(1000);\n";
+        let module = compile_module(src);
+
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+
+        // The `run` prototype (and only it) is J1-eligible.
+        assert!(stats.native >= 1, "the while-loop fn must go native, got {stats:?}");
+        assert_eq!(interp, jit, "tier-1 result must match the interpreter");
+        // Independently confirm the value: sum_{i=0}^{999} (i % 7).
+        let expected: i64 = (0..1000).map(|i| i % 7).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
+    }
+
+    /// J1 deopt: a would-be big-int result (overflowing the 48-bit immediate range) bails from native
+    /// code to the interpreter, which heap-boxes it — so the JIT and interpreter still agree.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_integer_overflow_bails_and_matches() {
+        // 2^40 * 2^40 = 2^80 wraps in i64 and, at each doubling, eventually exceeds the 48-bit
+        // immediate range, forcing the overflow-bail path; the interpreter's wrapping result must match.
+        let src = "fn run(n: int): int {\n  mut x = 1;\n  mut i = 0;\n  while i < n {\n    x = x * 3;\n    i = i + 1;\n  }\n  return x;\n}\necho run(60);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, _) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert_eq!(interp, jit, "overflow-bail result must match the interpreter");
     }
 
     /// Peak heap residency for one program (architecture §0.3) — `reset_peak` before, `live_peak`

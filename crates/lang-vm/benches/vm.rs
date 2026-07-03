@@ -335,6 +335,18 @@ fn global_loop_src(n: usize) -> String {
 
 const LOOP_ITERS: &[usize] = &[100_000, 1_000_000];
 
+/// J1 (P-JIT integer fast path): a pure-integer `while` loop in a function (register-local `i`/`total`,
+/// no globals, no calls) — the shape the JIT compiles to native machine code. The `while` form (not
+/// `for i in 0..n`, which materializes a range list) keeps the whole body in the J1 op set:
+/// `LoadConst`/`Binary`/`CondBranch`/`Move`/`Drop`/`Jump`. Benched interpreter vs forced-JIT so the
+/// native win is directly visible.
+#[cfg(feature = "jit")]
+fn jit_loop_src(n: usize) -> String {
+    format!(
+        "fn run(n: int): int {{\n    mut total = 0;\n    mut i = 0;\n    while i < n {{\n        total = total + (i % 7);\n        i = i + 1;\n    }}\n    return total;\n}}\necho run({n});\n"
+    )
+}
+
 /// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
 /// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
 /// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
@@ -887,6 +899,23 @@ fn vm_hot_paths(c: &mut Criterion) {
         }
     }
     col.finish();
+
+    // J1 (P-JIT): the integer fast path. A register-local integer `while` loop, run through the
+    // interpreter (tier 0) and the forced JIT (tier 1) so the native speedup is directly visible.
+    #[cfg(feature = "jit")]
+    {
+        let mut jit = c.benchmark_group("vm_jit");
+        for &n in LOOP_ITERS {
+            let module = compile(&jit_loop_src(n));
+            jit.bench_with_input(BenchmarkId::new("loop_interp", n), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            });
+            jit.bench_with_input(BenchmarkId::new("loop_jit", n), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+        }
+        jit.finish();
+    }
 }
 
 criterion_group!(benches, vm_hot_paths);
