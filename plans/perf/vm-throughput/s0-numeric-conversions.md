@@ -1,5 +1,11 @@
 # S0 — Numeric conversion tower (P-VMT-CONV)
 
+**Status: DONE.** Shared `NumScalar`/`NumConvert`/`num_convert` in `lang-stdlib` (int↔f64↔f32,
+float→int saturating, NaN→0); checker types the new methods on `int`/`IntN`/`float`/`f32`; both
+backends dispatch through the shared converter (agree by construction). Conformance
+`types/float_conversions.lang`; differential 419 matched / 0 skipped / agree; corpus 430 passed; docs
+updated. The SoA data-building idiom `(i % 100).to_f32()` now works.
+
 **Goal.** Close the gap that there is **no explicit conversion between the integer domain and the
 float domain**, in either direction. Today only int↔fixed-width-int conversions exist; the only
 bridge to `float`/`f32` is mixed-arithmetic coercion, so you cannot build `f32`/`float` data from a

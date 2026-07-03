@@ -1906,6 +1906,26 @@ impl<'m> Vm<'m> {
                         frames[top].pc += 1;
                         continue;
                     }
+                    // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
+                    // `float↔f32`. The `IntMethod` branch above handled `int→int` and continued; an
+                    // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
+                    // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
+                    if let Some(src) = v
+                        .as_f32()
+                        .map(lang_stdlib::NumScalar::F32)
+                        .or_else(|| v.as_float().map(lang_stdlib::NumScalar::F64))
+                        .or_else(|| v.as_int().map(lang_stdlib::NumScalar::Int))
+                        && let Some(dest) = lang_stdlib::NumConvert::from_name(method)
+                    {
+                        let value = match lang_stdlib::num_convert(src, dest) {
+                            lang_stdlib::NumScalar::Int(i) => Value::int(i),
+                            lang_stdlib::NumScalar::F64(f) => Value::float(f),
+                            lang_stdlib::NumScalar::F32(f) => Value::f32(f),
+                        };
+                        set_reg(&mut frames[top].regs, *dst, value);
+                        frames[top].pc += 1;
+                        continue;
+                    }
                     // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
                     // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
                     // method this backend lacks.

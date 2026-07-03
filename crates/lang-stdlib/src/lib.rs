@@ -609,6 +609,100 @@ pub fn mask_to_width(value: i64, signed: bool, bits: u8) -> i64 {
     }
 }
 
+/// A numeric scalar in either the integer or the float domain — the shared currency of the
+/// cross-domain conversion tower (S0 / P-VMT-CONV). Both backends read a receiver into one of these,
+/// convert with [`num_convert`], and map the result back to their own `Value`. An integer (`int` or
+/// any fixed-width `IntN`) is carried as its erased, sign/zero-extended `i64` (the runtime
+/// representation); `f64` is the platform `float`, `f32` the 32-bit float.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NumScalar {
+    Int(i64),
+    F64(f64),
+    F32(f32),
+}
+
+/// A conversion destination that **crosses** the int/float domains, decoded from a `to_<type>`
+/// method name: `to_float`/`to_f64` → `f64`, `to_f32` → `f32`, and `to_int`/`to_i8`…/`to_u64` → an
+/// integer of that width. The pure int→int conversions keep their existing [`IntMethod::Convert`]
+/// path; this type is used only where at least one side is a float (an `int` receiver reaches it only
+/// for the two float destinations, a `float`/`f32` receiver for any).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NumConvert {
+    /// `to_float` / `to_f64` — widen/convert to the 64-bit float.
+    ToF64,
+    /// `to_f32` — convert to the 32-bit float (round-to-nearest on narrowing).
+    ToF32,
+    /// `to_int` / `to_i8` … / `to_u64` — convert to an integer of `(signed, bits)`.
+    ToInt { signed: bool, bits: u8 },
+}
+
+impl NumConvert {
+    /// Decode a conversion method name, or `None` if `name` is not a `to_<type>` conversion. Reuses
+    /// [`IntMethod::from_name`] for the integer-destination spellings so the width parsing has one
+    /// source of truth.
+    pub fn from_name(name: &str) -> Option<NumConvert> {
+        match name {
+            "to_float" | "to_f64" => Some(NumConvert::ToF64),
+            "to_f32" => Some(NumConvert::ToF32),
+            _ => match IntMethod::from_name(name) {
+                Some(IntMethod::Convert { signed, bits }) => {
+                    Some(NumConvert::ToInt { signed, bits })
+                }
+                _ => None,
+            },
+        }
+    }
+}
+
+/// Convert a numeric scalar across domains, matching Rust's `as` cast: int↔float is value-preserving
+/// where it fits (rounding to nearest on `f32`), **float→int saturates** to the destination range
+/// (with `NaN` → 0), and int→int re-masks into the destination width (wrapping truncation). The
+/// single source of truth both backends call, so a conversion result is identical by construction.
+pub fn num_convert(src: NumScalar, dest: NumConvert) -> NumScalar {
+    let as_f64 = |s: NumScalar| match s {
+        NumScalar::Int(i) => i as f64,
+        NumScalar::F64(f) => f,
+        NumScalar::F32(f) => f as f64,
+    };
+    match dest {
+        NumConvert::ToF64 => NumScalar::F64(as_f64(src)),
+        NumConvert::ToF32 => NumScalar::F32(match src {
+            NumScalar::Int(i) => i as f32,
+            NumScalar::F64(f) => f as f32,
+            NumScalar::F32(f) => f,
+        }),
+        NumConvert::ToInt { signed, bits } => NumScalar::Int(match src {
+            // int→int keeps the bit-preserving mask (the erased word is already correctly extended).
+            NumScalar::Int(i) => mask_to_width(i, signed, bits),
+            // float→int: Rust's saturating `as` (NaN→0), cast straight to the destination width so
+            // out-of-range values clamp rather than wrap, then erase to the i64 word.
+            NumScalar::F64(f) => float_to_int(f, signed, bits),
+            NumScalar::F32(f) => float_to_int(f as f64, signed, bits),
+        }),
+    }
+}
+
+/// A saturating float→integer cast into `(signed, bits)`, returned as the erased, sign/zero-extended
+/// `i64` word. Delegates to Rust's primitive `as` casts (saturating + `NaN`→0 since 1.45), so
+/// `(1000.0).to_u8()` is `255`, `(-1.0).to_u8()` is `0`, and `(3.9).to_int()` is `3`.
+fn float_to_int(f: f64, signed: bool, bits: u8) -> i64 {
+    if signed {
+        match bits {
+            8 => f as i8 as i64,
+            16 => f as i16 as i64,
+            32 => f as i32 as i64,
+            _ => f as i64,
+        }
+    } else {
+        match bits {
+            8 => f as u8 as i64,
+            16 => f as u16 as i64,
+            32 => f as u32 as i64,
+            _ => f as u64 as i64,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -865,6 +959,116 @@ mod tests {
         // 64-bit is a no-op: the word already is the pattern (and avoids `1 << 64`).
         assert_eq!(mask_to_width(-1, false, 64), -1);
         assert_eq!(mask_to_width(i64::MIN, true, 64), i64::MIN);
+    }
+
+    #[test]
+    fn num_convert_crosses_domains_like_rust_as() {
+        use NumConvert::*;
+        use NumScalar::*;
+        // int → float / f32
+        assert_eq!(num_convert(Int(5), ToF64), F64(5.0));
+        assert_eq!(num_convert(Int(5), ToF32), F32(5.0));
+        assert_eq!(num_convert(Int(-3), ToF32), F32(-3.0));
+        // f32 ↔ f64
+        assert_eq!(num_convert(F32(2.5), ToF64), F64(2.5));
+        assert_eq!(num_convert(F64(2.5), ToF32), F32(2.5));
+        // float → int truncates toward zero
+        assert_eq!(
+            num_convert(
+                F64(3.9),
+                ToInt {
+                    signed: true,
+                    bits: 64
+                }
+            ),
+            Int(3)
+        );
+        assert_eq!(
+            num_convert(
+                F64(-3.9),
+                ToInt {
+                    signed: true,
+                    bits: 64
+                }
+            ),
+            Int(-3)
+        );
+        assert_eq!(
+            num_convert(
+                F32(3.9),
+                ToInt {
+                    signed: true,
+                    bits: 64
+                }
+            ),
+            Int(3)
+        );
+        // float → int SATURATES to the destination width (not wrapping), NaN → 0
+        assert_eq!(
+            num_convert(
+                F64(1000.0),
+                ToInt {
+                    signed: false,
+                    bits: 8
+                }
+            ),
+            Int(255)
+        );
+        assert_eq!(
+            num_convert(
+                F64(-1.0),
+                ToInt {
+                    signed: false,
+                    bits: 8
+                }
+            ),
+            Int(0)
+        );
+        assert_eq!(
+            num_convert(
+                F64(f64::NAN),
+                ToInt {
+                    signed: true,
+                    bits: 32
+                }
+            ),
+            Int(0)
+        );
+        // int → int stays bit-preserving (wrapping mask), matching the IntMethod::Convert path
+        assert_eq!(
+            num_convert(
+                Int(300),
+                ToInt {
+                    signed: false,
+                    bits: 8
+                }
+            ),
+            Int(44)
+        );
+    }
+
+    #[test]
+    fn num_convert_decodes_names() {
+        use NumConvert::*;
+        assert_eq!(NumConvert::from_name("to_float"), Some(ToF64));
+        assert_eq!(NumConvert::from_name("to_f64"), Some(ToF64));
+        assert_eq!(NumConvert::from_name("to_f32"), Some(ToF32));
+        assert_eq!(
+            NumConvert::from_name("to_int"),
+            Some(ToInt {
+                signed: true,
+                bits: 64
+            })
+        );
+        assert_eq!(
+            NumConvert::from_name("to_u8"),
+            Some(ToInt {
+                signed: false,
+                bits: 8
+            })
+        );
+        assert_eq!(NumConvert::from_name("count_ones"), None);
+        assert_eq!(NumConvert::from_name("upper"), None);
     }
 
     #[test]

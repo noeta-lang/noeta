@@ -2041,6 +2041,20 @@ impl Interpreter {
             };
             return Ok(Value::Int(lang_stdlib::int_method(recv, method, arg)));
         }
+        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`, `float↔f32`. The
+        // `IntMethod` branch above already handled `int→int` (`to_i32`…) and returned; an integer
+        // receiver reaches here only for the two float destinations (`to_float`/`to_f32`), a
+        // `float`/`f32` receiver for any. Delegates to the shared `num_convert` so both backends agree.
+        if let Some(src) = numeric_scalar(&receiver)
+            && let Some(dest) = lang_stdlib::NumConvert::from_name(name)
+        {
+            self.expect_std_arity(name, &args, 0, span)?;
+            return Ok(match lang_stdlib::num_convert(src, dest) {
+                lang_stdlib::NumScalar::Int(i) => Value::Int(i),
+                lang_stdlib::NumScalar::F64(f) => Value::Float(f),
+                lang_stdlib::NumScalar::F32(f) => Value::F32(f),
+            });
+        }
         // Ring 1 list methods (reverse/contains/join) — Value-specific, so implemented per
         // backend, but the method set is the shared `ListMethod` enum: a non-exhaustive `match`
         // here would not compile, so the VM cannot omit a method this backend offers.
@@ -3995,6 +4009,17 @@ fn cow_concat(left: Value, right: Value) -> Value {
 /// A boxed `List<f32>` from scalar results (the output of `dot_all`/`length_all`).
 fn f32_list(scalars: &[f32]) -> Value {
     Value::list(scalars.iter().map(|&f| Value::F32(f)).collect())
+}
+
+/// Read a numeric receiver (`int`/erased `IntN`, `float`, or `f32`) as the shared
+/// [`lang_stdlib::NumScalar`] for the conversion tower (S0); `None` for any non-numeric value.
+fn numeric_scalar(value: &Value) -> Option<lang_stdlib::NumScalar> {
+    match value {
+        Value::Int(i) => Some(lang_stdlib::NumScalar::Int(*i)),
+        Value::Float(f) => Some(lang_stdlib::NumScalar::F64(*f)),
+        Value::F32(f) => Some(lang_stdlib::NumScalar::F32(*f)),
+        _ => None,
+    }
 }
 
 /// Build a Vec3 result with the same type (shape/`def`) as `like`, from three `f32` components

@@ -77,6 +77,18 @@ Conversions are total (`to_i8`, `to_u8`, …, `to_i64`, `to_u64`, `to_int`), wit
 echo (300).to_u8()    // 44   (300 mod 256)
 ```
 
+The same `to_*` family bridges the **integer and float domains** in both directions — `to_float` (an alias `to_f64`), `to_f32`, and, on a `float`/`f32`, `to_int` / `to_i8` … / `to_u64`:
+
+```lang
+echo (5).to_f32()        // 5.0   (int -> f32; build f32 data from a computed int)
+echo (2.5).to_f32()      // 2.5   (float -> f32, rounds to nearest)
+echo (2.5f32).to_float() // 2.5   (f32 -> float, exact widening)
+echo (3.9).to_int()      // 3     (float -> int, truncates toward zero)
+echo (1000.0).to_u8()    // 255   (float -> int SATURATES to the width; negatives clamp to 0)
+```
+
+Int→float is value-preserving (rounding to nearest on `f32`); float→int truncates toward zero and **saturates** to the destination range, with `NaN` → 0.
+
 ## Packed value types — `@packed`
 
 The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored as a flat, unboxed, contiguous numeric buffer rather than an array of heap-object pointers. This is a pure *representation* change — the flat layout is invisible to program behavior (a packed list `==`, displays, and iterates exactly like a boxed one), but it is dramatically more cache-friendly and unlocks vectorized bulk math.

@@ -1,0 +1,44 @@
+// S0 (P-VMT-CONV): the cross-domain numeric conversion tower — `int`/`IntN` -> `float`/`f32`,
+// `float`/`f32` -> `int`/`IntN`, and `float` <-> `f32`. Completes the `to_<type>` family so the
+// integer and float domains are reachable from each other explicitly (before S0 the only bridge was
+// mixed-arithmetic coercion). Semantics match a Rust `as` cast: int->float is value-preserving
+// (rounding to nearest on `f32`), float->int truncates toward zero and **saturates** to the
+// destination range, and NaN->0. Both backends route through the shared `num_convert`, so the
+// differential pins them.
+// expect: stdout "5.0"
+// expect: stdout "7.0"
+// expect: stdout "-3.0"
+// expect: stdout "2.5"
+// expect: stdout "2.5"
+// expect: stdout "3"
+// expect: stdout "-3"
+// expect: stdout "255"
+// expect: stdout "0"
+// expect: stdout "9"
+// expect: stdout "255.0"
+// expect: stdout "12.5"
+// expect: exit 0
+
+// `int` -> `float` (f64) and -> `f32`, value-preserving.
+echo (5).to_float()          // 5.0
+echo (7).to_f32()            // 7.0
+echo (-3).to_f32()           // -3.0
+
+// `float` <-> `f32`: narrowing rounds to nearest, widening is exact.
+echo (2.5).to_f32()          // 2.5
+echo (2.5f32).to_f64()       // 2.5
+
+// `float`/`f32` -> `int`: truncate toward zero.
+echo (3.9).to_int()          // 3
+echo (-3.9).to_int()         // -3
+
+// `float` -> narrow int SATURATES to the destination range (not wrapping); negatives clamp to 0.
+echo (1000.0).to_u8()        // 255
+echo (-1.0).to_u8()          // 0
+echo (9.9f32).to_int()       // 9
+
+// A fixed-width integer converts to a float too (the erased word carries the true value).
+echo (255u8).to_f32()        // 255.0
+
+// Conversions compose with same-domain arithmetic: build an `f32` from an `int`, then add.
+echo (10).to_f32() + 2.5f32  // 12.5
