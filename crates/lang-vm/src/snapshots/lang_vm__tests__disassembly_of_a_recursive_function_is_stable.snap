@@ -1,6 +1,6 @@
 ---
 source: crates/lang-vm/src/lib.rs
-assertion_line: 4282
+assertion_line: 5759
 expression: module.disassemble()
 ---
 === main ===
@@ -25,18 +25,17 @@ constants:
 code:
     0  LoadConst   r2 <- k0
     1  Binary      r1 <- r0 < r2
-    2  RequireCondBool r1 (if)
-    3  JumpIfFalse r1 -> 5
-    4  Return      r0
-    5  LoadConst   r2 <- k1
-    6  Binary      r1 <- r0 - r2
-    7  LoadGlobal  r3 <- "fib"
-    8  Call        r2 <- r3(r1)
-    9  LoadConst   r3 <- k2
-   10  Binary      r1 <- r0 - r3
-   11  Drop        r0 ~destruct
-   12  LoadGlobal  r3 <- "fib"
-   13  Call        r0 <- r3(r1)
-   14  Binary      r1 <- r2 + r0
-   15  Return      r1
-   16  Halt
+    2  CondBranch  r1 unless -> 4
+    3  Return      r0
+    4  LoadConst   r2 <- k1
+    5  Binary      r1 <- r0 - r2
+    6  LoadGlobal  r3 <- "fib"
+    7  Call        r2 <- r3(r1)
+    8  LoadConst   r3 <- k2
+    9  Binary      r1 <- r0 - r3
+   10  Drop        r0 ~destruct
+   11  LoadGlobal  r3 <- "fib"
+   12  Call        r0 <- r3(r1)
+   13  Binary      r1 <- r2 + r0
+   14  Return      r1
+   15  Halt

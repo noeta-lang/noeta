@@ -424,6 +424,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*reg);
             f.targets.push(*target);
         }
+        Op::CondBranch { reg, target, .. } => {
+            f.uses.push(*reg);
+            f.targets.push(*target);
+        }
         Op::Echo { reg } => f.uses.push(*reg),
         Op::Stringify { dst, src, .. } => {
             f.def = Some(*dst);
@@ -858,6 +862,7 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         }
         Op::RequireBool { reg, .. } => m(reg),
         Op::RequireCondBool { reg, .. } => m(reg),
+        Op::CondBranch { reg, .. } => m(reg),
         Op::Jump { .. } => {}
         Op::JumpIfTrue { reg, .. } => m(reg),
         Op::JumpIfFalse { reg, .. } => m(reg),

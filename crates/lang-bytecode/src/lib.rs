@@ -913,6 +913,16 @@ pub enum Op {
         reg: Reg,
         target: u32,
     },
+    /// A fused conditional branch (P-VMT-CBR): require `reg` be a bool (else raise E0007, `` `if`
+    /// condition must be a bool ``, at `span`), then jump to `target` if it is `false` and fall
+    /// through if `true`. Emitted at `if`/`while` condition sites in place of the adjacent
+    /// `RequireCondBool` + `JumpIfFalse` pair (one dispatch instead of two, per condition test) —
+    /// byte-identical behavior, the Binary that computes the condition is untouched.
+    CondBranch {
+        reg: Reg,
+        target: u32,
+        span: Span,
+    },
     /// Print `reg`'s display form followed by a newline.
     Echo {
         reg: Reg,
@@ -1637,6 +1647,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic], names: &[String], global_names: 
         Op::Jump { target } => format!("Jump        -> {target}"),
         Op::JumpIfTrue { reg, target } => format!("JumpIfTrue  r{reg} -> {target}"),
         Op::JumpIfFalse { reg, target } => format!("JumpIfFalse r{reg} -> {target}"),
+        Op::CondBranch { reg, target, .. } => format!("CondBranch  r{reg} unless -> {target}"),
         Op::Echo { reg } => format!("Echo        r{reg}"),
         Op::Stringify { dst, src, .. } => format!("Stringify   r{dst} <- display(r{src})"),
         Op::BuildString { dst, parts } => {

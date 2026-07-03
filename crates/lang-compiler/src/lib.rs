@@ -1435,9 +1435,7 @@ impl<'m> FnCompiler<'m> {
         span: Span,
     ) -> Result<(), Unsupported> {
         let rc = self.atom_reg(cond)?;
-        self.code.push(Op::RequireCondBool { reg: rc, span });
-        let jf = self.code.len();
-        self.code.push(Op::JumpIfFalse { reg: rc, target: 0 });
+        let jf = self.push_cond_branch(rc, span);
 
         self.block(then_block)?;
 
@@ -1644,9 +1642,7 @@ impl<'m> FnCompiler<'m> {
     fn while_stmt(&mut self, cond: &Block, body: &Block, span: Span) -> Result<(), Unsupported> {
         let loop_top = self.code.len() as u32;
         let rc = self.value_block(cond)?;
-        self.code.push(Op::RequireCondBool { reg: rc, span });
-        let exit_jump = self.code.len();
-        self.code.push(Op::JumpIfFalse { reg: rc, target: 0 });
+        let exit_jump = self.push_cond_branch(rc, span);
 
         self.loops.push(LoopCtx::default());
         let result = self.block(body);
@@ -1714,11 +1710,25 @@ impl<'m> FnCompiler<'m> {
         self.atom_reg(tail)
     }
 
+    /// Emit a fused conditional branch (P-VMT-CBR) and return its code index (the patch site). One
+    /// `CondBranch` replaces the adjacent `RequireCondBool` + `JumpIfFalse` pair every `if`/`while`
+    /// condition test used to emit — the bool-check and the false-branch in a single dispatch.
+    fn push_cond_branch(&mut self, rc: Reg, span: Span) -> usize {
+        let site = self.code.len();
+        self.code.push(Op::CondBranch {
+            reg: rc,
+            target: 0,
+            span,
+        });
+        site
+    }
+
     fn patch_jump(&mut self, at: usize, target: u32) {
         match &mut self.code[at] {
             Op::Jump { target: t }
             | Op::JumpIfFalse { target: t, .. }
             | Op::JumpIfTrue { target: t, .. }
+            | Op::CondBranch { target: t, .. }
             | Op::Coalesce { fallback: t, .. }
             | Op::MatchInt { fail: t, .. }
             | Op::MatchStr { fail: t, .. }

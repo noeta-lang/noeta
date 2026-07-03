@@ -3622,6 +3622,25 @@ impl<'m> Vm<'m> {
                             pc += 1;
                         }
                     }
+                    Op::CondBranch { reg, target, span } => {
+                        // Fused bool-check + false-branch (P-VMT-CBR): identical to the
+                        // `RequireCondBool` + `JumpIfFalse` pair it replaces.
+                        let v = regs[fbase + *reg as usize];
+                        match v.as_bool() {
+                            Some(false) => pc = *target as usize,
+                            Some(true) => pc += 1,
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "`if` condition must be a bool, found {}",
+                                        v.type_name()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
                     Op::Echo { reg } => {
                         let text = regs[fbase + *reg as usize].display();
                         self.stdout.push_str(&text);
