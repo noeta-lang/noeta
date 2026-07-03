@@ -75,6 +75,8 @@ pub struct NanBoxLayout {
     pub true_bits: u64,
     /// The exact bit pattern of `false`.
     pub false_bits: u64,
+    /// The exact bit pattern of the VM's unbound-global sentinel.
+    pub unbound_bits: u64,
     /// Smallest / largest integer that stays an immediate (outside this range `int` boxes on the heap).
     pub int_min: i64,
     pub int_max: i64,
@@ -109,6 +111,11 @@ impl Value {
     /// value (including `unit`, a valid completion). It never escapes to user code — every poll site
     /// catches it — so it has no surface type; it displays opaquely purely defensively.
     const TAG_PENDING: u64 = 3;
+    /// The **unbound-global** sentinel: the VM stores its global slots as a `Vec<Value>` (P-JIT
+    /// globals), and this immediate marks a slot that has never been bound (replacing the old
+    /// `Option::None`). A distinct singleton so it can never collide with a real value; it never
+    /// escapes to user code (a `LoadGlobal`/`TakeGlobal` of it raises E0005).
+    const TAG_UNBOUND: u64 = 4;
     /// Largest immediate small-int magnitude (48-bit signed payload).
     const INT_MIN: i64 = -(1 << 47);
     const INT_MAX: i64 = (1 << 47) - 1;
@@ -126,6 +133,7 @@ impl Value {
         unit_bits: Self::QNAN | Self::TAG_UNIT,
         true_bits: Self::QNAN | Self::TAG_TRUE,
         false_bits: Self::QNAN | Self::TAG_FALSE,
+        unbound_bits: Self::QNAN | Self::TAG_UNBOUND,
         int_min: Self::INT_MIN,
         int_max: Self::INT_MAX,
     };
@@ -145,6 +153,18 @@ impl Value {
     /// suspended at an `.await`. An immediate singleton; never refcounted, never user-visible.
     pub fn pending() -> Value {
         Value(Self::QNAN | Self::TAG_PENDING)
+    }
+
+    /// The **unbound-global** sentinel — the VM's marker for a global slot that has never been bound
+    /// (the `Vec<Value>` globals model, P-JIT). An immediate singleton; never refcounted, never
+    /// user-visible (loading it raises E0005).
+    pub fn unbound() -> Value {
+        Value(Self::QNAN | Self::TAG_UNBOUND)
+    }
+
+    /// Whether this is the unbound-global sentinel (see [`Value::unbound`]).
+    pub fn is_unbound(self) -> bool {
+        self.0 == Value::unbound().0
     }
 
     /// A float. Any NaN is canonicalized to the standard quiet NaN so it can never collide
@@ -2428,6 +2448,7 @@ mod tests {
         assert_eq!(l.unit_bits, Value::unit().0);
         assert_eq!(l.true_bits, Value::bool(true).0);
         assert_eq!(l.false_bits, Value::bool(false).0);
+        assert_eq!(l.unbound_bits, Value::unbound().0);
         // Boxing a small int: `qnan | int_tag | (i & ptr_mask)` — the exact sequence the JIT emits.
         for i in [0i64, 1, -1, 42, -42, l.int_max, l.int_min] {
             let boxed = l.qnan | l.int_tag | (i as u64 & l.ptr_mask);

@@ -386,8 +386,8 @@ impl<'m> Vm<'m> {
         // Ship globals by slot id (P-VMT-GSLOT): the worker shares the same `Arc<Module>`, so slots
         // line up on both sides. A `None` (unbound) or unshippable slot is skipped.
         let mut wire_globals: Vec<(u32, isolate::Wire)> = Vec::new();
-        for (slot, cell) in self.globals.iter().enumerate() {
-            if let Some(v) = cell
+        for (slot, v) in self.globals.iter().enumerate() {
+            if !v.is_unbound()
                 && let Ok(w) = isolate::marshal(*v, &self.shapes, &self.channels)
             {
                 wire_globals.push((slot as u32, w));
