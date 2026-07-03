@@ -604,7 +604,9 @@ pub enum Op {
     Narrow {
         dst: Reg,
         src: Reg,
-        target: NarrowTarget,
+        /// Boxed (P-VMT-OPSZ): `NarrowTarget` is 32 bytes and narrowing is a cold op, so it lives
+        /// behind a pointer to keep it off the hot instruction stream.
+        target: Box<NarrowTarget>,
         some_shape: u32,
         none_shape: u32,
     },
@@ -614,7 +616,8 @@ pub enum Op {
     IsType {
         dst: Reg,
         src: Reg,
-        target: NarrowTarget,
+        /// Boxed (P-VMT-OPSZ), as in [`Op::Narrow`].
+        target: Box<NarrowTarget>,
     },
     /// `dst = make_gen(src)` (Track G.1b): wrap the step closure in `src` into a generator iterator
     /// (`IterState::Gen`). The generator desugar emits this as the tail of a generator function — the
@@ -721,7 +724,8 @@ pub enum Op {
     /// (for its side effects) but its register is unused. (`type_of` fidelity A, P2.3.)
     TypeOfStatic {
         dst: Reg,
-        repr: lang_ast::reflect::TypeRepr,
+        /// Boxed (P-VMT-OPSZ): a full-fidelity `TypeRepr` is 56 bytes and `type_of` is a cold op.
+        repr: Box<lang_ast::reflect::TypeRepr>,
     },
     /// `dst = <the reflection `Type` value for `name`>` — materialize a bare type name as a
     /// first-class value (the one "type as a value" representation, shared with `type_of` and stored
@@ -756,7 +760,9 @@ pub enum Op {
         module: NameId,
         func: NameId,
         args: Box<[Reg]>,
-        recipe: Option<lang_stdlib::TypeRecipe>,
+        /// Boxed (P-VMT-OPSZ): a `TypeRecipe` is 48 bytes and only a call-site-typed native call
+        /// (`json.parse::<T>`) carries one, so it lives behind a pointer.
+        recipe: Option<Box<lang_stdlib::TypeRecipe>>,
         span: Span,
     },
     /// A `match` literal test: if `src` equals the literal, continue; else jump to `fail` (the

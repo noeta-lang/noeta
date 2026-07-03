@@ -2463,7 +2463,7 @@ impl<'m> FnCompiler<'m> {
             }
             Rvalue::As { operand, ty, .. } => {
                 let src = self.atom_reg(operand)?;
-                let target = narrow_target(ty);
+                let target = Box::new(narrow_target(ty));
                 let some_shape = self.module.builtin_enum_shape("Option", "some");
                 let none_shape = self.module.builtin_enum_shape("Option", "none");
                 self.code.push(Op::Narrow {
@@ -2477,7 +2477,7 @@ impl<'m> FnCompiler<'m> {
             }
             Rvalue::TypeTest { operand, ty, .. } => {
                 let src = self.atom_reg(operand)?;
-                let target = narrow_target(ty);
+                let target = Box::new(narrow_target(ty));
                 self.code.push(Op::IsType { dst, src, target });
                 Ok(())
             }
@@ -2585,7 +2585,7 @@ impl<'m> FnCompiler<'m> {
                 match self.module.type_of_sites.get(span) {
                     Some(repr) => self.code.push(Op::TypeOfStatic {
                         dst,
-                        repr: repr.clone(),
+                        repr: Box::new(repr.clone()),
                     }),
                     None => self.code.push(Op::TypeOf { dst, src }),
                 }
@@ -2627,7 +2627,7 @@ impl<'m> FnCompiler<'m> {
                     module: module_id,
                     func: func_id,
                     args,
-                    recipe: recipe.clone(),
+                    recipe: recipe.clone().map(Box::new),
                     span: *span,
                 });
                 Ok(())
@@ -3488,7 +3488,7 @@ impl<'m> FnCompiler<'m> {
                 self.code.push(Op::IsType {
                     dst: test,
                     src: reg,
-                    target: narrow_target(ty),
+                    target: Box::new(narrow_target(ty)),
                 });
                 fail_jumps.push(self.code.len());
                 self.code.push(Op::JumpIfFalse {
