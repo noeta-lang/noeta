@@ -1,6 +1,6 @@
 # VM-throughput arc (P-VMT) — closing the scalar/loop/call gap
 
-**Status: planning (proposal for sign-off).** Motivated by the 2026-07-03 lang-vs-PHP 8.4
+**Status: ✅ COMPLETE (S0–S5, branch `perf-vm-throughput`, unmerged).** Motivated by the 2026-07-03 lang-vs-PHP 8.4
 benchmark + profiling pass (findings saved in memory `php-benchmark-perf-findings`; throwaway
 scripts in `scratch-bench/`). The perf *sweep* ([`../README.md`](../README.md)) tuned collections,
 inline caches, reuse, and the SoA column layout. This arc goes after the thing those left on the
@@ -44,7 +44,7 @@ call heap-allocates its register file (`vec![Value::unit(); n]`).
 | S1 | **P-VMT-GACC** | ✅ **DONE** — [Global-accumulator reuse](s1-global-accumulator-reuse.md): killed the top-level collection O(n²) cliff (33.5 s → 40 ms at n=40k) | **huge** (unbounded; ~850× at n=40k) | **S** | yes |
 | S2 | **P-VMT-FRAME** | ✅ **DONE** — [Register stack](s2-register-stack.md): one contiguous per-run register file, frames are `base` offsets, no per-call alloc. fib(28) 214.9 ms → 103.6 ms (**2.1×**) | high (call-heavy: fib, recursion) | M | yes |
 | S3 | **P-VMT-DISP** | ✅ **DONE** — [Dispatch register window](s3-dispatch-window.md): hoist frame/chunk/pc into loop-locals re-derived only on call/return, direct-index the code stream. Dispatch floor 63 → 43 ns/iter (**1.46×** on a tight loop) | high (every loop; the 80 ns/iter floor) | M | builds on S2 |
-| S4 | **P-VMT-OPSZ** | [Shrink `Op` via name interning](s4-op-interning.md) — 128 B → ~32 B | broad, modest (icache) | M–L (cross-crate) | co-schedule w/ S3 |
+| S4 | **P-VMT-OPSZ** | ✅ **DONE** — [Shrink `Op`](s4-op-interning.md): intern names to `NameId` (S4.1) + box wide cold payloads (S4.2). **128 B → 48 B** (two cache lines → one); dispatch-bound loops ~5–7% (`loop_sum` −6.7%, `fib` −5%) | broad, modest (icache) | M–L (cross-crate) | builds on S3 |
 | S5 | **P-VMT-STR** | ✅ **DONE** — [Single-pass interpolation](s5-interp-buildstring.md): one `Op::BuildString`, not an N-concat fold. `"word${i}"` 1M 303.6 → 149.7 ms (**2.0×**); multi-hole **2.7×** | medium (string-heavy: wordcount) | S–M | yes |
 
 ## Sequencing (value × independence, ascending risk)
