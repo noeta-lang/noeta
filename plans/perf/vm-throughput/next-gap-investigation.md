@@ -77,6 +77,13 @@ VM mutates in place; a genuine alias makes it > 1 and it copies, preserving valu
 blast radius (loosen the reuse-marking condition; the runtime fast path exists). Turns the RMW idiom
 O(n²) → O(n): `b_wordcount_fn` ~2770 ms → an expected ~100 ms (in line with the top-level variant).
 
+## Finding 2.5 — fused condition branch — ✅ DONE (`0aab2f0`, P-VMT-CBR)
+
+Every `if`/`while` condition emitted `RequireCondBool` + `JumpIfFalse` (two dispatches per test).
+Fused into one `Op::CondBranch` (check-bool-and-branch), byte-identical, the condition's `Binary` left
+untouched so operator-overload dispatch is unaffected. b_loop 601 → 509 ms (~15%), empty 2M loop 74 →
+67 ms (~10%); call-bound code flat. VM-only, differential/leak green.
+
 ## Finding 3 — loop-invariant constants reloaded every iteration (minor)
 
 `b_loop` re-`LoadConst`s `10000000`, `7`, `1` each iteration; `b_wordcount` reloads `500`/`"word"`.
@@ -92,16 +99,38 @@ compiler's proven-in-range invariant, removing a bounds check per operand); or u
 The first two are interpreter-level and bench-guardable; a JIT is a milestone of its own. This is the
 last-mile gap after the cheap structural wins above.
 
-## Suggested sequencing
+## Status & what's left (2026-07-03)
 
-1. **Finding 2 first** — smallest change, kills the worst outlier (250× → ~10×), and the runtime
-   fast path already exists. Immediate, dramatic, low risk.
-2. **Finding 1 next** — the broadest win (every top-level loop and global call); moderate but
-   mechanical, and `lang dump` makes the before/after obvious.
-3. **Finding 3** opportunistically alongside 1 (both touch loop codegen).
-4. **Finding 4** as a follow-on arc (superinstructions + unchecked registers) once 1–3 land, with a
-   JIT as the eventual ceiling-breaker.
+Findings **2, 1, and 2.5 are done** — the cheap, high-ROI structural wins. Cumulative vs pre-work,
+and vs PHP 8.4:
 
-Each ships with a criterion bench (findings 1–2 map directly onto `vm_dispatch/loop_sum`,
-`vm_recursion/fib`, and a new wordcount-style RMW bench) and stays invisible to `RunResult`, so the
-differential's `0 skipped / agree` gate holds by construction.
+| workload | before | now | PHP gap (was → now) |
+|---|--:|--:|--:|
+| wordcount in-fn (RMW) | ~2770 ms | ~68 ms | ~250× → **~10×** |
+| loop 10M (top-level) | 1574 ms | ~509 ms | 103× → **~35×** |
+| fib(32) (global calls) | 669 ms | ~490 ms | 28× → **~17×** |
+| SoA column vec | 24 ms | ~22 ms | **lang wins 2.3× vs JIT** |
+
+**The easy structural gains are now spent.** What remains splits into two tiers:
+
+- **Incremental (interpreter-level, each ~10–20% on loops, safe, bench-guardable):** Finding 3 (LICM —
+  hoist loop-invariant `LoadConst`/never-reassigned-global loads out of the loop; ~20% on b_loop but a
+  real loop-analysis pass with register-lifetime interaction), and further superinstructions (fuse the
+  increment `i = i+1`, or a compare-and-branch that handles the object/enum operator-overload case via
+  a synchronous `call_value` fallback). Diminishing returns — each is one or two fewer ops per iter.
+- **Structural (the real ceiling):** the empty-loop dispatch floor is ~33 ns/iter ≈ **3.3 ns/op** — a
+  switch interpreter's floor, already near-optimal for `match`-based dispatch (LLVM compiles it to a
+  jump table). PHP's ~0.3 ns/op equivalent comes from its **tracing JIT**. Closing the last ~10× on
+  hot scalar/loop code needs either **threaded dispatch** (hard in stable Rust — no computed goto; the
+  `become` tail-call path is unstable) or a **JIT** (a milestone of its own). No interpreter-level tweak
+  crosses that gap.
+
+**Recommendation:** LICM (Finding 3) is the last worthwhile interpreter-level slice (~20% on loops).
+Past that, meaningfully closing the loop/call gap is a JIT-scale effort — worth planning as its own
+milestone rather than chasing sub-10% peephole slices. The design already *wins* where it targets (SoA
+column math), so the strategic question is whether general scalar-loop parity with a 25-year JIT engine
+is a goal worth a JIT, or whether the effort is better spent elsewhere.
+
+Each landed slice shipped a criterion bench (`vm_map_rmw`, `vm_dispatch/global_loop`, plus the existing
+`loop_sum`/`fib`) and stayed invisible to `RunResult`, so the differential's `0 skipped / agree` gate
+held by construction throughout.
