@@ -104,7 +104,7 @@ on every eligible program.
 | **J1** | ✅ **DONE.** **Integer fast path** — compile protos whose ops are all in {`LoadConst`(imm), `Move`, `Drop`, `Binary`(int `+ - * / %` and `== != < <= > >=`), `CondBranch`, `Jump`, `JumpIf*`, `Return`/`Halt` as bail points}. Guard-and-bail on non-int operands, zero divisor, and 48-bit overflow. First real native code — **~6–7.5× on register-local integer loops**. (Globals + `WideInt`/bitwise deferred; see below.) | Codegen correctness; NaN-box guards; the first oracle run. |
 | **J2** | ✅ **DONE (floats).** **Float fast path** — native f64 ALU (`+ - * /`) and ordered comparison (`== != < <= > >=`), dispatched from the same `Binary` by a runtime int-vs-float type check; NaN results canonicalized to match `Value::float` bit-for-bit. **~6.5× on float loops.** (f32, tuples, `Narrow`/`IsType` deferred — see below.) | Incremental. |
 | **J3** | ✅ **DONE.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation); heap-aware refcounting for the callee closure/results; **resume-native** re-enters the compiled caller after its callee returns; **native→native direct calls** — a compiled caller `call_indirect`s a compiled callee (value-returning `Return`, capacity-guarded so the register pointer stays valid), skipping the interpreter round-trip on the fast path, falling back to the shared setup otherwise. `fib`-class recursion **~2.3×**; loops ~6–8×. | Call ABI, stack/frame interaction, recursion depth. |
-| **J4** | ⏳ **IN PROGRESS (slices 1–3).** **Heap & collections** — a generic `run_leaf_op` helper runs a single non-dispatching heap/collection op (the interpreter's exact arm, refcounts included) and returns "continue" or a resume pc; adding an op is a match arm. Slice 1 lit up `MakeRange`/`IterSnapshot`/`ListLen`/`ListGet`, so `for i in 0..n` loops go native (**~2.6×**). Slice 2 added `LoadField`/`SetField` (store factored into a shared `set_field_fast` so both tiers are refcount-identical) — **812/813 protos native**. Slice 3 added `Op::Index` (list/map/string subscript). Field/index loops are ~1.0–1.1× (each heap op is a helper call, so heap-*dominated* loops are helper-bound); the win is coverage — a loop mixing heap access with native arithmetic stays native. Genuinely fast heap access wants a native inline cache (J5). Next: tuples, constructors, string ops. | **Refcount exactness** — the leak oracle is the gate. |
+| **J4** | ✅ **LEAF-OP ARC DONE (slices 1–4).** **Heap & collections** — a generic `run_leaf_op` helper runs a single non-dispatching heap/collection op (the interpreter's exact arm, refcounts included) and returns "continue" or a resume pc; adding an op is a match arm. Slice 1: `MakeRange`/`IterSnapshot`/`ListLen`/`ListGet` → `for i in 0..n` native (**~2.6×**). Slice 2: `LoadField`/`SetField` (store factored into a shared `set_field_fast`, refcount-identical across tiers) — **812/813 protos native**. Slice 3: `Op::Index` (list/map/string subscript). Slice 4: `MakeTuple`/`TupleIndex` (completes `for (i,x) in xs.enumerate()` native). Heap-*dominated* loops are ~1.0–1.1× (each op is a helper call); the win is coverage — a loop mixing heap access with native arithmetic stays native. **Deliberately not leaf-ified** (documented below): dispatch-preceded constructors (`MakeMap`/`RequireMapKey`, `BuildString`/`Stringify`), thunk-running `MakeStruct`/`MakeEnum`. Genuinely fast heap access is the J5 inline cache, not more leaf ops. | **Refcount exactness** — the leak oracle is the gate. |
 | **J5** | **Tiering polish + OSR** — on-stack replacement so a hot loop enters tier 1 mid-execution (not only at call boundary); counter tuning; per-op bail replacing whole-proto eligibility; compile-time budget. | Deopt/OSR is subtle; do last. |
 
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
@@ -350,10 +350,29 @@ plus a name in `is_leaf_heap_op` — no new helper, no new codegen.**
   loops — the real JIT wins stay in native arithmetic/control (loops 6–7×, globals 4–5×, calls 2.3×).
   Making heap access itself fast wants a native inline cache (guard on the receiver shape, load at the
   cached offset / probe the cached bucket) — a J5-class slice, not more leaf ops.
-- **Next slices (same mechanism):** tuple ops (`MakeTuple`/`TupleIndex`), constructors
-  (`MakeList`/`MakeMap`/`MakeStruct`/…), and string ops (`BuildString`, non-dispatching
-  `Stringify`/`Echo`). Dispatching ops (`CallMethod`, object `Index`, `Display` `Stringify`) keep bailing
-  — they push frames, which the leaf helper does not.
+- **Slice 4 — tuples (`MakeTuple` / `TupleIndex`).** `MakeTuple` retains its elements into a fresh
+  tuple (no bail path — construction never fails). `TupleIndex` is the positional projection `receiver.N`,
+  retaining the element into `dst` and bailing on an out-of-range index (unreachable for well-typed
+  code). Together they make `for (i, x) in xs.enumerate()` fully native — `enumerate` yields `(int, T)`
+  tuples via the already-native `ListGet`, and the destructuring reads them with `TupleIndex`.
+- **Leaf-op arc closed here — what is deliberately *not* leaf-ified, and why.** The mechanism is
+  proven, but the remaining ops give no perf and add real risk:
+  - **`MakeMap`** is always preceded by per-key **`RequireMapKey`** validation ops, which bail; the
+    native code never reaches `MakeMap`. **`BuildString`** is preceded by **`Stringify`** ops that
+    dispatch a `Display` object to `to_string` (a frame push) and bail. Leaf-ifying the target op alone
+    buys nothing while its predecessor still bails — and both are allocation-bound, where native
+    execution saves nothing anyway.
+  - **`MakeStruct`** / **`MakeEnum`** run field-default **thunks** (`run_thunk`) that execute arbitrary
+    code and can **abort after** the op has already retained values into slots — that violates
+    bail-before-mutate and would need abort-propagation plumbing through the leaf helper, for an
+    allocation-bound op with no native upside.
+  - **Dispatching ops** (`CallMethod`, object `Index`→`get`, `Display` `Stringify`) push frames and stay
+    bail points by design.
+- **The real next lever is J5, not more leaf ops.** Field access and indexing are the common heap-hot
+  paths and both are helper-bound at ~1.0–1.1×. Making them genuinely fast needs a **native inline cache**
+  — guard on the receiver's shape pointer and load the field at the cached slot offset (or probe the
+  cached map bucket) in native code, no helper call. That is a J5-class slice with its own deopt story,
+  not a leaf-op addition.
 
 ## Production wiring — what landed (JIT reaches `lang run`)
 

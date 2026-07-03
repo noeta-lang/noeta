@@ -843,6 +843,37 @@ extern "C" fn jit_run_leaf_op(
                 bail // non-indexable → interpreter raises
             }
         }
+        Op::MakeTuple { dst, items } => {
+            // Retain each element into a fresh tuple (no bail path — construction never fails). The
+            // retains land in the local `elements`, then the tuple is stored, so nothing leaks.
+            let mut elements = Vec::with_capacity(items.len());
+            for &r in items.iter() {
+                let v = regs[base + r as usize];
+                retain(v);
+                elements.push(v);
+            }
+            set_reg(regs, base, *dst, Value::tuple(elements));
+            lang_jit::OUTCOME_CONTINUE
+        }
+        Op::TupleIndex {
+            dst,
+            receiver,
+            index,
+            ..
+        } => {
+            // Positional projection `receiver.N`, retaining the element into `dst` — the companion to
+            // the native `ListGet` for `for (i, x) in xs.enumerate()` loops. Out of range bails so the
+            // interpreter raises (the checker makes this unreachable for well-typed code).
+            let v = regs[base + *receiver as usize];
+            match v.tuple_field(*index as usize) {
+                Some(element) => {
+                    retain(element);
+                    set_reg(regs, base, *dst, element);
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail,
+            }
+        }
         _ => bail,
     }
 }
@@ -5543,6 +5574,29 @@ mod tests {
         );
         assert_eq!(interp, jit, "indexing result must match the interpreter");
         assert_eq!(jit.stdout, "960\n");
+    }
+
+    /// Tuple construction + projection (P-JIT J4 slice 4): a `for (i, x) in xs.enumerate()` loop —
+    /// `enumerate` yields `(int, T)` tuples (native `ListGet`) that the destructuring reads with
+    /// `TupleIndex` — runs natively through the leaf-op helper and matches the interpreter, including
+    /// the retain of each projected element.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_tuple_enumerate_loop_is_native_and_correct() {
+        let src = "fn run(): int {\n  xs = [10, 20, 30, 40];\n  mut total = 0;\n  for (i, x) in xs.enumerate() {\n    total = total + i * x;\n  }\n  return total;\n}\necho run();\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the enumerate loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "tuple-enumerate result must match the interpreter"
+        );
+        // 0*10 + 1*20 + 2*30 + 3*40 = 200.
+        assert_eq!(jit.stdout, "200\n");
     }
 
     /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware
