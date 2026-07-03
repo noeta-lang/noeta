@@ -1,10 +1,11 @@
 # S3 — Dispatch register window (P-VMT-DISP)
 
-**Status: DONE.** The dispatch loop now hoists the active frame's register `base`, its prototype
-(`chunk`), and its `pc` into loop-locals that are re-derived **only** on a control transfer — a call
-pushes a frame, a return / short-circuiting `?` pops one — through a `reload!(…)` macro. A
-straight-line op is now just `pc += 1` on the local; a jump assigns the local; neither re-indexes
-`frames` nor re-bounds-checks the prototype table, and `chunk.code.get(pc)` (an `Option` +
+**Status: DONE.** The interpreter is now two nested loops. The **outer `'reload` loop** derives the
+active frame's register window — its `base`, prototype (`chunk`), and starting `pc` — and is
+re-entered **only** on a control transfer (a call pushes a frame, a return / short-circuiting `?`
+pops one), each arm ending with `continue 'reload`. Within a frame the **inner loop** runs
+straight-line: an op does `pc += 1` on the local and loops; a jump assigns the local; neither
+re-indexes `frames` nor re-bounds-checks the prototype table. `chunk.code.get(pc)` (an `Option` +
 bounds-check) became a direct `chunk.code[pc]` (every prototype ends in `Halt`, so `pc` is always in
 bounds). All safe indexing — **no new `unsafe`** (the all-safe hoist already captured the win; a
 `get_unchecked` pass was not needed).
@@ -28,17 +29,20 @@ Behaviour-neutral (pure execution-structure change): differential 419 / 0 skippe
 corpus 430 passed, leak oracle residency 0 on both backends, 118 VM unit tests, clippy clean, miri
 unaffected (no `unsafe` added). Criterion bench `vm_dispatch/loop_sum/{100000,1000000}` added.
 
-**Design note — why a single loop, not a nested one.** The obvious shape for a reload point is an
-outer `'reload: loop { … inner loop … }` with `continue 'reload` on transfer. That works but forces
-the entire ~2700-line match body to re-indent by one level (a huge, noise-only diff). The single-loop
-form keeps `top`/`fbase`/`chunk`/`pc` as `let mut` before the loop and re-derives them via `reload!()`
-exactly at the 12 transfer points (9 call-push sites, the `Return`/`Halt` arms, and the `?`
-short-circuit). Every other op falls straight through the match and loops with the locals it already
-mutated — no label, no re-indent. Because `chunk: &'m Proto` points into `*module` (an `&'m Module`
-copied out of `self`), reassigning the `chunk` local mid-loop is sound: the reference it yields is
-tied to the module's lifetime, not to the variable's storage, so `&mut self` calls in the arms never
-conflict. Local `macro_rules!` is hygienic, so the mutated locals (and `frames`/`module`) are passed
-as macro arguments to resolve in the caller's scope.
+**Design note — nested loop with immutable window locals.** The window is re-derived at the 12
+transfer points: 9 call-push sites, the `Return`/`Halt` arms, and the `?` short-circuit. An earlier
+cut of this slice used a **single** loop with `top`/`fbase`/`chunk`/`pc` as `let mut` re-derived via a
+`reload!(…)` macro, to avoid re-indenting the ~2700-line match body. It worked and hit the same
+number, but the nested form is the sounder structure and was adopted once diff size was explicitly
+deprioritized: `fbase`/`chunk` are **immutable** for a frame's lifetime, so the only way to obtain a
+new window is a new outer iteration — a transfer physically *cannot* forget to reload (the alternative
+was a `let mut` a buggy arm could leave stale). It also drops the 6-argument `reload!` macro, which
+only existed to work around `macro_rules!` hygiene (a local macro can't see the enclosing `let mut`
+bindings, so they had to be threaded through as arguments). Only two subtleties remain: the `Invoke`
+arm releases its temporary boxed args list with `Option::take()` before `continue 'reload` so the
+transfer path doesn't skip the after-match cleanup; and `fbase` keeps that name (not `base`) to avoid
+colliding with ops that carry their own `base` field. Because `chunk: &'m Proto` points into `*module`
+(an `&'m Module` copied out of `self`), the window is independent of the `&mut self` the arms use.
 
 **Original goal.** Lower the per-instruction floor. An empty loop ran at **80 ns/iter** (PHP ≈ 3.6) —
 before any real work — because the dispatch loop re-derived the current frame and re-bounds-checked

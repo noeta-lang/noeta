@@ -966,81 +966,47 @@ impl<'m> Vm<'m> {
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
         // `Rc<Shape>` keeps the cached shape alive, so the pointer key can never alias a freed shape.
         let mut caches: Vec<Option<(Rc<Shape>, u32)>> = vec![None; module.cache_slots as usize];
-        // S3 dispatch window (P-VMT-DISP). The active frame's register base, its prototype, and its
-        // program counter are hoisted into loop-locals and re-derived ONLY when control transfers to
-        // a *different* frame — a call pushes one, a return / short-circuiting `?` pops one — via
-        // `reload!()`. Straight-line ops advance the local `pc` and loop; jumps assign it; neither
-        // re-indexes `frames` nor re-bounds-checks the prototype table, which is what pinned the
-        // empty-loop floor at ~80 ns/iter before this slice. The current frame's register window is
-        // `regs[fbase .. fbase + chunk.num_registers]` (P-VMT-FRAME) and every operand access below
-        // is `regs[fbase + i]`. `chunk` borrows `*module` (an `&'m Module` copied out of `self`), so
-        // it is independent of the `&mut self` the arms use and survives across ops.
-        // The mutated window locals (and `frames`/`module`) are passed in so they resolve in the
-        // caller's scope rather than the macro's own hygiene context.
-        macro_rules! reload {
-            ($frames:expr, $module:expr, $top:ident, $fbase:ident, $chunk:ident, $pc:ident) => {{
-                $top = $frames.len() - 1;
-                $fbase = $frames[$top].base;
-                $chunk = &$module.protos[$frames[$top].proto as usize];
-                $pc = $frames[$top].pc;
-            }};
-        }
-        let mut top = frames.len() - 1;
-        let mut fbase = frames[top].base;
-        let mut chunk = &module.protos[frames[top].proto as usize];
-        let mut pc = frames[top].pc;
-        loop {
-            // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
-            // instead of the `.get()` guard the pre-S3 loop used. A call frame keeps `fbase` on the
-            // *caller* until `reload!()` runs, so a call op reads its arguments before transferring.
-            let op = &chunk.code[pc];
-            match op {
-                Op::LoadConst { dst, k } => {
-                    let v = materialize(&chunk.consts[*k as usize]);
-                    set_reg(regs, fbase, *dst, v);
-                    pc += 1;
-                }
-                Op::Move { dst, src } => {
-                    let v = regs[fbase + *src as usize];
-                    retain(v);
-                    set_reg(regs, fbase, *dst, v);
-                    pc += 1;
-                }
-                Op::LoadGlobal { dst, name, span } => match self.globals.get(name) {
-                    Some(&v) => {
+        // S3 dispatch window (P-VMT-DISP). The interpreter is two nested loops. The OUTER `'reload`
+        // loop re-derives the active frame's register window — its base, prototype (`chunk`), and
+        // starting `pc` — and is re-entered ONLY when control transfers to a *different* frame: a
+        // call pushes one, a return / short-circuiting `?` pops one, each ending its arm with
+        // `continue 'reload`. Within a frame the INNER loop runs straight-line: an op advances the
+        // local `pc` and loops; a jump assigns it; neither re-indexes `frames` nor re-bounds-checks
+        // the prototype table, which is what pinned the empty-loop floor at ~80 ns/iter before this
+        // slice. `fbase`/`chunk` are immutable for the frame's lifetime — the only way to get a new
+        // window is a new outer iteration, so a transfer *cannot* silently forget to reload. The
+        // current frame's window is `regs[fbase .. fbase + chunk.num_registers]` (P-VMT-FRAME) and
+        // every operand access below is `regs[fbase + i]` (`fbase`, not `base`, to avoid colliding
+        // with ops that carry their own `base` field). `chunk` borrows `*module` (an `&'m Module`
+        // copied out of `self`), so it is independent of the `&mut self` the arms use.
+        'reload: loop {
+            let top = frames.len() - 1;
+            let fbase = frames[top].base;
+            let chunk = &module.protos[frames[top].proto as usize];
+            let mut pc = frames[top].pc;
+            loop {
+                // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
+                // instead of the `.get()` guard the pre-S3 loop used. A call keeps `fbase` on the
+                // *caller* until `continue 'reload`, so a call op reads its arguments first.
+                let op = &chunk.code[pc];
+                match op {
+                    Op::LoadConst { dst, k } => {
+                        let v = materialize(&chunk.consts[*k as usize]);
+                        set_reg(regs, fbase, *dst, v);
+                        pc += 1;
+                    }
+                    Op::Move { dst, src } => {
+                        let v = regs[fbase + *src as usize];
                         retain(v);
                         set_reg(regs, fbase, *dst, v);
                         pc += 1;
                     }
-                    None => {
-                        return Err(self.error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            format!("cannot find `{name}` in this scope"),
-                        ));
-                    }
-                },
-                Op::StoreGlobal { name, src } => {
-                    // Transfer ownership from the (dead) source temporary into the global,
-                    // rather than retaining a duplicate. This keeps the reference count equal
-                    // to the tree-walker's direct-binding model — a lingering temporary would
-                    // otherwise inflate the count and hide a reassigned value's last reference,
-                    // suppressing its destructor.
-                    let v = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
-                    match self.globals.insert(name.clone(), v) {
-                        // Reassigning a global: the previous value is dropped here, running its
-                        // destructor if this was its last reference.
-                        Some(old) => self.release_value(old),
-                        // First binding of this name: record it for reverse-order destruction.
-                        None => self.global_order.push(name.clone()),
-                    }
-                    pc += 1;
-                }
-                Op::TakeGlobal { dst, name, span } => {
-                    // Move the global's value into `dst`, leaving `unit` — no retain, so the single
-                    // owning reference transfers and a following `ConcatInPlace` can see uniqueness.
-                    let v = match self.globals.get_mut(name) {
-                        Some(slot) => std::mem::replace(slot, Value::unit()),
+                    Op::LoadGlobal { dst, name, span } => match self.globals.get(name) {
+                        Some(&v) => {
+                            retain(v);
+                            set_reg(regs, fbase, *dst, v);
+                            pc += 1;
+                        }
                         None => {
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
@@ -1048,190 +1014,224 @@ impl<'m> Vm<'m> {
                                 format!("cannot find `{name}` in this scope"),
                             ));
                         }
-                    };
-                    set_reg(regs, fbase, *dst, v);
-                    pc += 1;
-                }
-                Op::Drop { reg, relevant } => {
-                    // Release a dead binding/temporary at its last use and clear it to `unit` (so
-                    // `set_reg`/teardown later release `unit`, never double-freeing). This frees the
-                    // value promptly, restoring an accumulator's unique ownership. When the IR marked
-                    // the drop destructor-relevant (Phase 4), route it through `release_value` so a
-                    // `destruct` block fires here if this is the final owning reference; otherwise the
-                    // value provably reaches no destructor and the plain `release` is used.
-                    let v = std::mem::replace(&mut regs[fbase + *reg as usize], Value::unit());
-                    if *relevant {
-                        self.release_value(v);
-                    } else {
-                        release(v);
-                    }
-                    pc += 1;
-                }
-                Op::ConcatInPlace { dst, lhs, rhs, .. } => {
-                    let l = regs[fbase + *lhs as usize];
-                    let r = regs[fbase + *rhs as usize];
-                    // `lhs` is consumed: clear its register *without* releasing (a direct overwrite,
-                    // not `set_reg`), so the refcount below still counts the accumulator's reference
-                    // and the single owner is transferred into the result. This also makes a
-                    // `dst == lhs` store safe (the old occupant is now `unit`, not the live list).
-                    regs[fbase + *lhs as usize] = Value::unit();
-                    let result = if l.is_list() && r.is_list() {
-                        if l.is_packed_list()
-                            && r.is_packed_list()
-                            && l.refcount() == 1
-                            && l.packed_extend_in_place(r)
-                        {
-                            // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s
-                            // buffer in place (P-PACK 2.6). The single reference moves into the result.
-                            l
-                        } else if !l.is_packed_list() && !r.is_packed_list() && l.refcount() == 1 {
-                            // Sole owner, both boxed: extend the backing buffer in place (O(1)
-                            // amortized). The single reference moves from `lhs` into the result.
-                            l.list_extend(r);
-                            l
-                        } else if let Some(flat) = l.packed_concat(r) {
-                            // Aliased but both flat (same layout): copy the word buffers, then drop the
-                            // consumed accumulator reference — stays flat without mutating the alias.
-                            release(l);
-                            flat
-                        } else {
-                            // A mixed packed/boxed pairing (or differing layouts): copy, preserving
-                            // immutable semantics. Demote each operand to an owned boxed list, retain
-                            // each element into the new list, release the demotions, then drop the
-                            // accumulator's consumed reference.
-                            let lb = l.realize_list();
-                            let rb = r.realize_list();
-                            let mut items = lb.list_items().unwrap();
-                            items.extend(rb.list_items().unwrap());
-                            for &item in &items {
-                                item.inc_ref();
-                            }
-                            lb.release();
-                            rb.release();
-                            release(l);
-                            Value::list(items)
+                    },
+                    Op::StoreGlobal { name, src } => {
+                        // Transfer ownership from the (dead) source temporary into the global,
+                        // rather than retaining a duplicate. This keeps the reference count equal
+                        // to the tree-walker's direct-binding model — a lingering temporary would
+                        // otherwise inflate the count and hide a reassigned value's last reference,
+                        // suppressing its destructor.
+                        let v = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
+                        match self.globals.insert(name.clone(), v) {
+                            // Reassigning a global: the previous value is dropped here, running its
+                            // destructor if this was its last reference.
+                            Some(old) => self.release_value(old),
+                            // First binding of this name: record it for reverse-order destruction.
+                            None => self.global_order.push(name.clone()),
                         }
-                    } else {
-                        // Non-list operand: display concatenation, identical to `Op::Binary`'s `~`.
-                        let s = Value::string(&format!("{}{}", l.display(), r.display()));
-                        release(l);
-                        s
-                    };
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::MakeClosure {
-                    dst,
-                    proto,
-                    captures,
-                } => {
-                    // Gather one cell per capture (from a celled local register, or one of this
-                    // frame's own upvalues — forwarding a capture down a level), retaining each
-                    // into the new closure, which owns its upvalue cells.
-                    let mut upvalues = Vec::with_capacity(captures.len());
-                    for capture in captures.iter() {
-                        let cell = match capture {
-                            CaptureFrom::Local(reg) => regs[fbase + *reg as usize],
-                            CaptureFrom::Upvalue(index) => frames[top].upvalues[*index as usize],
+                        pc += 1;
+                    }
+                    Op::TakeGlobal { dst, name, span } => {
+                        // Move the global's value into `dst`, leaving `unit` — no retain, so the single
+                        // owning reference transfers and a following `ConcatInPlace` can see uniqueness.
+                        let v = match self.globals.get_mut(name) {
+                            Some(slot) => std::mem::replace(slot, Value::unit()),
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!("cannot find `{name}` in this scope"),
+                                ));
+                            }
                         };
-                        retain(cell);
-                        upvalues.push(cell);
+                        set_reg(regs, fbase, *dst, v);
+                        pc += 1;
                     }
-                    let v = Value::closure(*proto, upvalues);
-                    set_reg(regs, fbase, *dst, v);
-                    pc += 1;
-                }
-                Op::MakeCell { dst, src } => {
-                    // Box the value into a fresh cell, which owns one reference to it.
-                    let v = regs[fbase + *src as usize];
-                    retain(v);
-                    set_reg(regs, fbase, *dst, Value::cell(v));
-                    pc += 1;
-                }
-                Op::CellGet { dst, cell } => {
-                    let v = regs[fbase + *cell as usize].cell_get();
-                    retain(v);
-                    set_reg(regs, fbase, *dst, v);
-                    pc += 1;
-                }
-                Op::CellSet { cell, src } => {
-                    // `cell_set` retains the new occupant and releases the old internally.
-                    let v = regs[fbase + *src as usize];
-                    regs[fbase + *cell as usize].cell_set(v);
-                    pc += 1;
-                }
-                Op::UpvalueGet { dst, index } => {
-                    let v = frames[top].upvalues[*index as usize].cell_get();
-                    retain(v);
-                    set_reg(regs, fbase, *dst, v);
-                    pc += 1;
-                }
-                Op::UpvalueSet { index, src } => {
-                    let v = regs[fbase + *src as usize];
-                    frames[top].upvalues[*index as usize].cell_set(v);
-                    pc += 1;
-                }
-                Op::LoadNativeFn { dst, func } => {
-                    set_reg(regs, fbase, *dst, Value::native_fn(*func));
-                    pc += 1;
-                }
-                Op::MakeList {
-                    dst,
-                    items,
-                    reflect,
-                } => {
-                    let mut elements = Vec::with_capacity(items.len());
-                    for &r in items.iter() {
-                        let v = regs[fbase + r as usize];
+                    Op::Drop { reg, relevant } => {
+                        // Release a dead binding/temporary at its last use and clear it to `unit` (so
+                        // `set_reg`/teardown later release `unit`, never double-freeing). This frees the
+                        // value promptly, restoring an accumulator's unique ownership. When the IR marked
+                        // the drop destructor-relevant (Phase 4), route it through `release_value` so a
+                        // `destruct` block fires here if this is the final owning reference; otherwise the
+                        // value provably reaches no destructor and the plain `release` is used.
+                        let v = std::mem::replace(&mut regs[fbase + *reg as usize], Value::unit());
+                        if *relevant {
+                            self.release_value(v);
+                        } else {
+                            release(v);
+                        }
+                        pc += 1;
+                    }
+                    Op::ConcatInPlace { dst, lhs, rhs, .. } => {
+                        let l = regs[fbase + *lhs as usize];
+                        let r = regs[fbase + *rhs as usize];
+                        // `lhs` is consumed: clear its register *without* releasing (a direct overwrite,
+                        // not `set_reg`), so the refcount below still counts the accumulator's reference
+                        // and the single owner is transferred into the result. This also makes a
+                        // `dst == lhs` store safe (the old occupant is now `unit`, not the live list).
+                        regs[fbase + *lhs as usize] = Value::unit();
+                        let result = if l.is_list() && r.is_list() {
+                            if l.is_packed_list()
+                                && r.is_packed_list()
+                                && l.refcount() == 1
+                                && l.packed_extend_in_place(r)
+                            {
+                                // Sole owner, both flat, same layout: append `rhs`'s words to `lhs`'s
+                                // buffer in place (P-PACK 2.6). The single reference moves into the result.
+                                l
+                            } else if !l.is_packed_list()
+                                && !r.is_packed_list()
+                                && l.refcount() == 1
+                            {
+                                // Sole owner, both boxed: extend the backing buffer in place (O(1)
+                                // amortized). The single reference moves from `lhs` into the result.
+                                l.list_extend(r);
+                                l
+                            } else if let Some(flat) = l.packed_concat(r) {
+                                // Aliased but both flat (same layout): copy the word buffers, then drop the
+                                // consumed accumulator reference — stays flat without mutating the alias.
+                                release(l);
+                                flat
+                            } else {
+                                // A mixed packed/boxed pairing (or differing layouts): copy, preserving
+                                // immutable semantics. Demote each operand to an owned boxed list, retain
+                                // each element into the new list, release the demotions, then drop the
+                                // accumulator's consumed reference.
+                                let lb = l.realize_list();
+                                let rb = r.realize_list();
+                                let mut items = lb.list_items().unwrap();
+                                items.extend(rb.list_items().unwrap());
+                                for &item in &items {
+                                    item.inc_ref();
+                                }
+                                lb.release();
+                                rb.release();
+                                release(l);
+                                Value::list(items)
+                            }
+                        } else {
+                            // Non-list operand: display concatenation, identical to `Op::Binary`'s `~`.
+                            let s = Value::string(&format!("{}{}", l.display(), r.display()));
+                            release(l);
+                            s
+                        };
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::MakeClosure {
+                        dst,
+                        proto,
+                        captures,
+                    } => {
+                        // Gather one cell per capture (from a celled local register, or one of this
+                        // frame's own upvalues — forwarding a capture down a level), retaining each
+                        // into the new closure, which owns its upvalue cells.
+                        let mut upvalues = Vec::with_capacity(captures.len());
+                        for capture in captures.iter() {
+                            let cell = match capture {
+                                CaptureFrom::Local(reg) => regs[fbase + *reg as usize],
+                                CaptureFrom::Upvalue(index) => {
+                                    frames[top].upvalues[*index as usize]
+                                }
+                            };
+                            retain(cell);
+                            upvalues.push(cell);
+                        }
+                        let v = Value::closure(*proto, upvalues);
+                        set_reg(regs, fbase, *dst, v);
+                        pc += 1;
+                    }
+                    Op::MakeCell { dst, src } => {
+                        // Box the value into a fresh cell, which owns one reference to it.
+                        let v = regs[fbase + *src as usize];
                         retain(v);
-                        elements.push(v);
+                        set_reg(regs, fbase, *dst, Value::cell(v));
+                        pc += 1;
                     }
-                    let list = Value::list(elements);
-                    // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers
-                    // it after a `dyn` launder. A cheap `Rc` clone of the shared load-time entry; the
-                    // tag lives beside the payload, invisible to value semantics.
-                    if let Some(idx) = reflect {
-                        list.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                    Op::CellGet { dst, cell } => {
+                        let v = regs[fbase + *cell as usize].cell_get();
+                        retain(v);
+                        set_reg(regs, fbase, *dst, v);
+                        pc += 1;
                     }
-                    set_reg(regs, fbase, *dst, list);
-                    pc += 1;
-                }
-                // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
-                // buffer (no boxed objects, no retains — the words are copied), then the element
-                // temporaries are released by the following compiler-emitted drops, exactly as for
-                // `MakeList`'s consumed operands. If any element fails to pack (a shape the schema
-                // does not expect — not reachable for a well-typed marked site), fall back to a boxed
-                // list that retains each element, staying consistent with those drops.
-                Op::PackedListNew { dst, schema } => {
-                    // Allocate the empty flat buffer the following `PackedListPush` chain fills
-                    // (P-PACK 2.5 streaming construction).
-                    let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
-                    let list = Value::packed_list(schema, Vec::new());
-                    set_reg(regs, fbase, *dst, list);
-                    pc += 1;
-                }
-                Op::FromBytes {
-                    dst,
-                    src,
-                    schema,
-                    span,
-                } => {
-                    // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
-                    // bytes as a packed list of the interned schema — the inverse of `to_bytes`.
-                    let blob = regs[fbase + *src as usize];
-                    let Some(bytes) = blob.bytes_data() else {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!(
-                                "`from_bytes` expects a `bytes` value, found {}",
-                                blob.type_name()
-                            ),
-                        ));
-                    };
-                    let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
-                    if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
-                        return Err(self.error(
+                    Op::CellSet { cell, src } => {
+                        // `cell_set` retains the new occupant and releases the old internally.
+                        let v = regs[fbase + *src as usize];
+                        regs[fbase + *cell as usize].cell_set(v);
+                        pc += 1;
+                    }
+                    Op::UpvalueGet { dst, index } => {
+                        let v = frames[top].upvalues[*index as usize].cell_get();
+                        retain(v);
+                        set_reg(regs, fbase, *dst, v);
+                        pc += 1;
+                    }
+                    Op::UpvalueSet { index, src } => {
+                        let v = regs[fbase + *src as usize];
+                        frames[top].upvalues[*index as usize].cell_set(v);
+                        pc += 1;
+                    }
+                    Op::LoadNativeFn { dst, func } => {
+                        set_reg(regs, fbase, *dst, Value::native_fn(*func));
+                        pc += 1;
+                    }
+                    Op::MakeList {
+                        dst,
+                        items,
+                        reflect,
+                    } => {
+                        let mut elements = Vec::with_capacity(items.len());
+                        for &r in items.iter() {
+                            let v = regs[fbase + r as usize];
+                            retain(v);
+                            elements.push(v);
+                        }
+                        let list = Value::list(elements);
+                        // Stamp the checker-resolved element type onto the list (R1) so `type_of` recovers
+                        // it after a `dyn` launder. A cheap `Rc` clone of the shared load-time entry; the
+                        // tag lives beside the payload, invisible to value semantics.
+                        if let Some(idx) = reflect {
+                            list.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                        }
+                        set_reg(regs, fbase, *dst, list);
+                        pc += 1;
+                    }
+                    // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
+                    // buffer (no boxed objects, no retains — the words are copied), then the element
+                    // temporaries are released by the following compiler-emitted drops, exactly as for
+                    // `MakeList`'s consumed operands. If any element fails to pack (a shape the schema
+                    // does not expect — not reachable for a well-typed marked site), fall back to a boxed
+                    // list that retains each element, staying consistent with those drops.
+                    Op::PackedListNew { dst, schema } => {
+                        // Allocate the empty flat buffer the following `PackedListPush` chain fills
+                        // (P-PACK 2.5 streaming construction).
+                        let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
+                        let list = Value::packed_list(schema, Vec::new());
+                        set_reg(regs, fbase, *dst, list);
+                        pc += 1;
+                    }
+                    Op::FromBytes {
+                        dst,
+                        src,
+                        schema,
+                        span,
+                    } => {
+                        // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
+                        // bytes as a packed list of the interned schema — the inverse of `to_bytes`.
+                        let blob = regs[fbase + *src as usize];
+                        let Some(bytes) = blob.bytes_data() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`from_bytes` expects a `bytes` value, found {}",
+                                    blob.type_name()
+                                ),
+                            ));
+                        };
+                        let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
+                        if schema.byte_size == 0 || bytes.len() % schema.byte_size != 0 {
+                            return Err(self.error(
                             DiagnosticCode::TypeMismatch,
                             *span,
                             format!(
@@ -1240,344 +1240,214 @@ impl<'m> Vm<'m> {
                                 schema.byte_size
                             ),
                         ));
+                        }
+                        let list = Value::packed_list(schema, bytes);
+                        set_reg(regs, fbase, *dst, list);
+                        pc += 1;
                     }
-                    let list = Value::packed_list(schema, bytes);
-                    set_reg(regs, fbase, *dst, list);
-                    pc += 1;
-                }
-                Op::ExtCall {
-                    dst,
-                    module,
-                    func,
-                    args,
-                    recipe,
-                    span,
-                } => {
-                    // A call-site-typed native module call (`json.parse::<T>(s)`). The recipe is
-                    // required; its absence was already reported by the checker.
-                    let Some(recipe) = recipe else {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("`{module}.{func}::<T>(...)` has no resolved result type"),
-                        ));
-                    };
-                    // The only call-site-typed native function today is `json.parse::<T>(text)`.
-                    if module == "json" && func == "parse" {
-                        let text = args
-                            .first()
-                            .map(|r| regs[fbase + *r as usize])
-                            .and_then(|v| v.as_string());
-                        let Some(text) = text else {
+                    Op::ExtCall {
+                        dst,
+                        module,
+                        func,
+                        args,
+                        recipe,
+                        span,
+                    } => {
+                        // A call-site-typed native module call (`json.parse::<T>(s)`). The recipe is
+                        // required; its absence was already reported by the checker.
+                        let Some(recipe) = recipe else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                "`json.parse` expects a `string` argument".to_string(),
+                                format!("`{module}.{func}::<T>(...)` has no resolved result type"),
                             ));
                         };
-                        match lang_stdlib::json::parse_typed(&text, recipe) {
-                            Ok(out) => {
-                                let value = materialize_recipe(out);
-                                set_reg(regs, fbase, *dst, value);
-                            }
-                            Err(error) => {
+                        // The only call-site-typed native function today is `json.parse::<T>(text)`.
+                        if module == "json" && func == "parse" {
+                            let text = args
+                                .first()
+                                .map(|r| regs[fbase + *r as usize])
+                                .and_then(|v| v.as_string());
+                            let Some(text) = text else {
                                 return Err(self.error(
-                                    stdlib_error_code(error.kind),
+                                    DiagnosticCode::TypeMismatch,
                                     *span,
-                                    error.message,
+                                    "`json.parse` expects a `string` argument".to_string(),
                                 ));
+                            };
+                            match lang_stdlib::json::parse_typed(&text, recipe) {
+                                Ok(out) => {
+                                    let value = materialize_recipe(out);
+                                    set_reg(regs, fbase, *dst, value);
+                                }
+                                Err(error) => {
+                                    return Err(self.error(
+                                        stdlib_error_code(error.kind),
+                                        *span,
+                                        error.message,
+                                    ));
+                                }
                             }
-                        }
-                    } else {
-                        return Err(self.error(
+                        } else {
+                            return Err(self.error(
                             DiagnosticCode::UnknownName,
                             *span,
                             format!(
                                 "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
                             ),
                         ));
+                        }
+                        pc += 1;
                     }
-                    pc += 1;
-                }
-                Op::PackedListPush {
-                    dst, list, value, ..
-                } => {
-                    let acc = regs[fbase + *list as usize];
-                    let element = regs[fbase + *value as usize];
-                    // `list` is the streaming accumulator — a uniquely-owned temp. Clear its register
-                    // to `unit` *without* releasing (a direct overwrite, like `ConcatInPlace`), so the
-                    // single owning reference transfers into `result` and a `dst == list` store is
-                    // safe. `value` is left in its register for the compiler-emitted `Drop` to free.
-                    regs[fbase + *list as usize] = Value::unit();
-                    let result = if acc.is_packed_list() {
-                        if acc.packed_push(element) {
-                            // Element primitives copied into the buffer (not retained) — the buffer
-                            // extended in place; the `Drop` of `value` frees the element object.
-                            acc
+                    Op::PackedListPush {
+                        dst, list, value, ..
+                    } => {
+                        let acc = regs[fbase + *list as usize];
+                        let element = regs[fbase + *value as usize];
+                        // `list` is the streaming accumulator — a uniquely-owned temp. Clear its register
+                        // to `unit` *without* releasing (a direct overwrite, like `ConcatInPlace`), so the
+                        // single owning reference transfers into `result` and a `dst == list` store is
+                        // safe. `value` is left in its register for the compiler-emitted `Drop` to free.
+                        regs[fbase + *list as usize] = Value::unit();
+                        let result = if acc.is_packed_list() {
+                            if acc.packed_push(element) {
+                                // Element primitives copied into the buffer (not retained) — the buffer
+                                // extended in place; the `Drop` of `value` frees the element object.
+                                acc
+                            } else {
+                                // Defensive demote (a checked `@packed` type never mismatches): materialize
+                                // the packed buffer to an owned boxed list, release the packed accumulator,
+                                // then push the (retained) element so the boxed list owns one reference.
+                                let boxed = acc.realize_list();
+                                release(acc);
+                                retain(element);
+                                boxed.list_push(element);
+                                boxed
+                            }
                         } else {
-                            // Defensive demote (a checked `@packed` type never mismatches): materialize
-                            // the packed buffer to an owned boxed list, release the packed accumulator,
-                            // then push the (retained) element so the boxed list owns one reference.
-                            let boxed = acc.realize_list();
-                            release(acc);
+                            // Already boxed (a prior demote): push the retained element in place.
                             retain(element);
-                            boxed.list_push(element);
-                            boxed
-                        }
-                    } else {
-                        // Already boxed (a prior demote): push the retained element in place.
-                        retain(element);
-                        acc.list_push(element);
-                        acc
-                    };
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                // A tuple builds exactly like a list (object-model slice 4): retain each element into
-                // the aggregate, which owns one reference to each.
-                Op::MakeTuple { dst, items } => {
-                    let mut elements = Vec::with_capacity(items.len());
-                    for &r in items.iter() {
-                        let v = regs[fbase + r as usize];
-                        retain(v);
-                        elements.push(v);
+                            acc.list_push(element);
+                            acc
+                        };
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
                     }
-                    set_reg(regs, fbase, *dst, Value::tuple(elements));
-                    pc += 1;
-                }
-                // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
-                // into `dst`. The index is in range by construction (the checker verified it).
-                Op::TupleIndex {
-                    dst,
-                    receiver,
-                    index,
-                    span,
-                } => {
-                    let v = regs[fbase + *receiver as usize];
-                    let Some(element) = v.tuple_field(*index as usize) else {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!(
-                                "tuple index `{index}` is out of range for {}",
-                                v.type_name()
-                            ),
-                        ));
-                    };
-                    retain(element);
-                    set_reg(regs, fbase, *dst, element);
-                    pc += 1;
-                }
-                Op::MakeRange {
-                    dst,
-                    start,
-                    end,
-                    inclusive,
-                    span,
-                } => {
-                    let lo = regs[fbase + *start as usize];
-                    let hi = regs[fbase + *end as usize];
-                    match (lo.as_int(), hi.as_int()) {
-                        (Some(a), Some(b)) => {
-                            // `..=` shifts the exclusive upper to `b + 1`; `saturating_add` keeps
-                            // the unmaterializable `i64::MAX` edge from panicking. The elements are
-                            // fresh int immediates (no refcount), so no retain is needed.
-                            let upper = if *inclusive { b.saturating_add(1) } else { b };
-                            let elements: Vec<Value> = (a..upper).map(Value::int).collect();
-                            set_reg(regs, fbase, *dst, Value::list(elements));
-                            pc += 1;
+                    // A tuple builds exactly like a list (object-model slice 4): retain each element into
+                    // the aggregate, which owns one reference to each.
+                    Op::MakeTuple { dst, items } => {
+                        let mut elements = Vec::with_capacity(items.len());
+                        for &r in items.iter() {
+                            let v = regs[fbase + r as usize];
+                            retain(v);
+                            elements.push(v);
                         }
-                        _ => {
+                        set_reg(regs, fbase, *dst, Value::tuple(elements));
+                        pc += 1;
+                    }
+                    // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
+                    // into `dst`. The index is in range by construction (the checker verified it).
+                    Op::TupleIndex {
+                        dst,
+                        receiver,
+                        index,
+                        span,
+                    } => {
+                        let v = regs[fbase + *receiver as usize];
+                        let Some(element) = v.tuple_field(*index as usize) else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
                                 format!(
-                                    "range bounds must be ints, found {} and {}",
-                                    lo.type_name(),
-                                    hi.type_name()
+                                    "tuple index `{index}` is out of range for {}",
+                                    v.type_name()
                                 ),
                             ));
-                        }
+                        };
+                        retain(element);
+                        set_reg(regs, fbase, *dst, element);
+                        pc += 1;
                     }
-                }
-                Op::MakeMap {
-                    dst,
-                    entries,
-                    reflect,
-                } => {
-                    let mut map = BTreeMap::new();
-                    for (key_reg, value_reg) in entries.iter() {
-                        let key = regs[fbase + *key_reg as usize]
-                            .as_string()
-                            .expect("map keys are validated by RequireMapKey");
-                        let value = regs[fbase + *value_reg as usize];
-                        retain(value);
-                        // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
-                        // displaced value loses its owner, so release it.
-                        if let Some(old) = map.insert(key, value) {
-                            release(old);
-                        }
-                    }
-                    let map = Value::map(map);
-                    // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
-                    // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
-                    if let Some(idx) = reflect {
-                        map.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
-                    }
-                    set_reg(regs, fbase, *dst, map);
-                    pc += 1;
-                }
-                Op::RequireMapKey { reg, span } => {
-                    let v = regs[fbase + *reg as usize];
-                    if v.as_string().is_none() {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("map keys must be strings, found {}", v.type_name()),
-                        ));
-                    }
-                    pc += 1;
-                }
-                Op::IterSnapshot { dst, src, span } => {
-                    let v = regs[fbase + *src as usize];
-                    // A user object lights up the `Iterable` trait: `for x in o` iterates the list
-                    // its `iter` method returns. The method runs bytecode, so it is pushed as a
-                    // call frame; its returned value becomes the snapshot (the following `ListLen`
-                    // raises E0007 if it was not a list). Matches the tree-walker's `exec_for`.
-                    if v.is_object() {
-                        let type_name = v.shape().unwrap().name.clone();
-                        if let Some(&proto) =
-                            self.methods.get(&(type_name.clone(), "iter".to_string()))
-                        {
-                            let callee_chunk = &module.protos[proto as usize];
-                            if callee_chunk.num_params != 1 {
+                    Op::MakeRange {
+                        dst,
+                        start,
+                        end,
+                        inclusive,
+                        span,
+                    } => {
+                        let lo = regs[fbase + *start as usize];
+                        let hi = regs[fbase + *end as usize];
+                        match (lo.as_int(), hi.as_int()) {
+                            (Some(a), Some(b)) => {
+                                // `..=` shifts the exclusive upper to `b + 1`; `saturating_add` keeps
+                                // the unmaterializable `i64::MAX` edge from panicking. The elements are
+                                // fresh int immediates (no refcount), so no retain is needed.
+                                let upper = if *inclusive { b.saturating_add(1) } else { b };
+                                let elements: Vec<Value> = (a..upper).map(Value::int).collect();
+                                set_reg(regs, fbase, *dst, Value::list(elements));
+                                pc += 1;
+                            }
+                            _ => {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
                                     format!(
-                                        "this method takes {} argument(s) but 0 were supplied",
-                                        callee_chunk.num_params - 1
+                                        "range bounds must be ints, found {} and {}",
+                                        lo.type_name(),
+                                        hi.type_name()
                                     ),
                                 ));
                             }
-                            let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(v);
-                            regs[new_base] = v;
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
-                                proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues: Vec::new(),
-                            });
-                            reload!(frames, module, top, fbase, chunk, pc);
-                            continue;
                         }
                     }
-                    // A packed list (P-PACK 2.4) materializes directly into an owned boxed snapshot
-                    // (a fresh list owning each element) — the loop then indexes that boxed snapshot,
-                    // so `ListLen`/`ListGet` never see the flat form.
-                    if v.is_packed_list() {
-                        let snapshot = v.realize_list();
-                        set_reg(regs, fbase, *dst, snapshot);
-                        pc += 1;
-                        continue;
-                    }
-                    // Snapshot the elements to iterate (a list's elements, a set's canonical
-                    // elements, or a map's values in sorted-key order), each retained so the loop
-                    // owns them independently.
-                    let snapshot = match v
-                        .list_items()
-                        .or_else(|| v.set_items())
-                        .or_else(|| v.map_values())
-                    {
-                        Some(elements) => {
-                            for &e in &elements {
-                                retain(e);
+                    Op::MakeMap {
+                        dst,
+                        entries,
+                        reflect,
+                    } => {
+                        let mut map = BTreeMap::new();
+                        for (key_reg, value_reg) in entries.iter() {
+                            let key = regs[fbase + *key_reg as usize]
+                                .as_string()
+                                .expect("map keys are validated by RequireMapKey");
+                            let value = regs[fbase + *value_reg as usize];
+                            retain(value);
+                            // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
+                            // displaced value loses its owner, so release it.
+                            if let Some(old) = map.insert(key, value) {
+                                release(old);
                             }
-                            Value::list(elements)
                         }
-                        None => {
+                        let map = Value::map(map);
+                        // Stamp the checker-resolved `Map(K, V)` type onto the map (R1) so `type_of`
+                        // recovers it after a `dyn` launder — the same node-tag path `MakeList` uses.
+                        if let Some(idx) = reflect {
+                            map.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                        }
+                        set_reg(regs, fbase, *dst, map);
+                        pc += 1;
+                    }
+                    Op::RequireMapKey { reg, span } => {
+                        let v = regs[fbase + *reg as usize];
+                        if v.as_string().is_none() {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("cannot iterate over {}", v.type_name()),
+                                format!("map keys must be strings, found {}", v.type_name()),
                             ));
                         }
-                    };
-                    set_reg(regs, fbase, *dst, snapshot);
-                    pc += 1;
-                }
-                Op::ListLen { dst, src, span } => {
-                    // After `IterSnapshot`, `src` is a list for the list/map paths; the only way it
-                    // is not is an `Iterable::iter` that returned a non-list, reported here (E0007),
-                    // matching the tree-walker's `exec_for`.
-                    let v = regs[fbase + *src as usize];
-                    match v.list_len() {
-                        Some(n) => {
-                            set_reg(regs, fbase, *dst, Value::int(n as i64));
-                            pc += 1;
-                        }
-                        None => {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("`iter` must return a list, found {}", v.type_name()),
-                            ));
-                        }
+                        pc += 1;
                     }
-                }
-                Op::ListGet { dst, list, index } => {
-                    let idx = regs[fbase + *index as usize]
-                        .as_int()
-                        .expect("a loop index is an int") as usize;
-                    let element = regs[fbase + *list as usize]
-                        .list_get(idx)
-                        .expect("the loop keeps the index in bounds");
-                    retain(element);
-                    set_reg(regs, fbase, *dst, element);
-                    pc += 1;
-                }
-                // Streaming `for` step (Track I.2): advance the iterator, binding the element + a bool
-                // continue flag. A `map`/`filter` closure runs here (via `iter_for_next`), so it can
-                // abort. `set_reg` releases the previous element / flag each iteration.
-                Op::IterForNext {
-                    iter,
-                    elem,
-                    has,
-                    span,
-                } => {
-                    let it = regs[fbase + *iter as usize];
-                    match self.iter_for_next(it, *span)? {
-                        Some(element) => {
-                            set_reg(regs, fbase, *elem, element);
-                            set_reg(regs, fbase, *has, Value::bool(true));
-                        }
-                        None => {
-                            set_reg(regs, fbase, *elem, Value::unit());
-                            set_reg(regs, fbase, *has, Value::bool(false));
-                        }
-                    }
-                    pc += 1;
-                }
-                Op::CallBuiltin {
-                    dst,
-                    builtin,
-                    args,
-                    span,
-                } => {
-                    // A user object lights up the `Length` trait: `len(o)` dispatches to its `len`
-                    // method, which runs bytecode, so it is pushed as a call frame rather than
-                    // handled by the synchronous `call_builtin`. (Matches the tree-walker's
-                    // `Builtin::Len` object case.)
-                    if *builtin == Builtin::Len && args.len() == 1 {
-                        let recv = regs[fbase + args[0] as usize];
-                        if recv.is_object() {
-                            let type_name = recv.shape().unwrap().name.clone();
+                    Op::IterSnapshot { dst, src, span } => {
+                        let v = regs[fbase + *src as usize];
+                        // A user object lights up the `Iterable` trait: `for x in o` iterates the list
+                        // its `iter` method returns. The method runs bytecode, so it is pushed as a
+                        // call frame; its returned value becomes the snapshot (the following `ListLen`
+                        // raises E0007 if it was not a list). Matches the tree-walker's `exec_for`.
+                        if v.is_object() {
+                            let type_name = v.shape().unwrap().name.clone();
                             if let Some(&proto) =
-                                self.methods.get(&(type_name.clone(), "len".to_string()))
+                                self.methods.get(&(type_name.clone(), "iter".to_string()))
                             {
                                 let callee_chunk = &module.protos[proto as usize];
                                 if callee_chunk.num_params != 1 {
@@ -1590,9 +1460,10 @@ impl<'m> Vm<'m> {
                                         ),
                                     ));
                                 }
-                                let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
-                                retain(recv);
-                                regs[new_base] = recv;
+                                let new_base =
+                                    reserve_window(regs, callee_chunk.num_registers as usize);
+                                retain(v);
+                                regs[new_base] = v;
                                 frames[top].pc = pc + 1;
                                 frames.push(Frame {
                                     proto,
@@ -1602,197 +1473,289 @@ impl<'m> Vm<'m> {
                                     ret_transform: RetTransform::None,
                                     upvalues: Vec::new(),
                                 });
-                                reload!(frames, module, top, fbase, chunk, pc);
-                                continue;
+                                continue 'reload;
                             }
                         }
-                    }
-                    // Builtins borrow their arguments (the registers keep ownership); the
-                    // result is a fresh owned value.
-                    let arg_vals: Vec<Value> =
-                        args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                    let (dst, builtin, span) = (*dst, *builtin, *span);
-                    let v = self.call_builtin(builtin, &arg_vals, span)?;
-                    set_reg(regs, fbase, dst, v);
-                    pc += 1;
-                }
-                Op::CallMethod {
-                    dst,
-                    recv,
-                    method,
-                    args,
-                    span,
-                    cache,
-                    reuse,
-                } => {
-                    let v = regs[fbase + *recv as usize];
-                    // In-place map self-update (Phase 5.1c): a reuse-marked `m = m.set(k,v)` /
-                    // `m = m.remove(k)` whose runtime receiver is actually a map consumes the receiver
-                    // register and mutates the sole-owned backing buffer in place (an alias copies). A
-                    // non-map receiver — a user method that happens to be named `set` — falls through to
-                    // the ordinary dispatch below with the receiver intact.
-                    if *reuse
-                        && v.is_map()
-                        && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
-                        && matches!(
-                            map_method,
-                            lang_stdlib::MapMethod::Set | lang_stdlib::MapMethod::Remove
-                        )
-                    {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        // Consume the receiver: take its single reference out of the register without
-                        // releasing (a direct overwrite, like `ConcatInPlace`), so the refcount below
-                        // still counts the accumulator's reference and a `dst == recv` store is safe.
-                        regs[fbase + *recv as usize] = Value::unit();
-                        let result =
-                            self.map_update_in_place(v, map_method, method, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                        continue;
-                    }
-                    // In-place list self-update (`xs[i] = v` ⟶ `xs = xs.set(i, v)`): a uniquely-owned
-                    // list overwrites slot `i` in place (O(1)) instead of copying the whole list.
-                    if *reuse && v.is_list() && method == "set" {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        regs[fbase + *recv as usize] = Value::unit();
-                        let result = self.list_set_in_place(v, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                        continue;
-                    }
-                    // In-place set self-update (`s = s.add(x)` / `s = s.remove(x)`): a uniquely-owned,
-                    // canonically-ordered set binary-search-inserts/removes one element in its existing
-                    // buffer instead of cloning + re-sorting the whole set.
-                    if *reuse
-                        && v.is_set()
-                        && let Some(set_method) = lang_stdlib::SetMethod::from_name(method)
-                        && matches!(
-                            set_method,
-                            lang_stdlib::SetMethod::Add | lang_stdlib::SetMethod::Remove
-                        )
-                    {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        regs[fbase + *recv as usize] = Value::unit();
-                        let result =
-                            self.set_update_in_place(v, set_method, method, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, result);
-                        pc += 1;
-                        continue;
-                    }
-                    // `json.parse(...)` — a Ring 2 native module function call, dispatched before
-                    // the object/collection paths.
-                    if let Some(module_name) = v.native_module_name() {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let value =
-                            self.call_native_module(&module_name, method, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // An object dispatches to a user method through the type's method table;
-                    // anything else falls to the built-in `count`/`enumerate` methods.
-                    if v.is_object() {
-                        // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written
-                        // `to_json`) synthesizes a structural JSON string — a pure value
-                        // computation, so it is produced inline rather than via a call frame. Only a
-                        // literal `to_json` site reaches here, so the shape clone stays off the common
-                        // method-call path.
-                        if method == "to_json" && args.is_empty() {
-                            let type_name = v.shape().unwrap().name.clone();
-                            if self.tojson_derives.contains(&type_name) {
-                                let json = Value::string(&v.to_json());
-                                set_reg(regs, fbase, *dst, json);
-                                pc += 1;
-                                continue;
-                            }
+                        // A packed list (P-PACK 2.4) materializes directly into an owned boxed snapshot
+                        // (a fresh list owning each element) — the loop then indexes that boxed snapshot,
+                        // so `ListLen`/`ListGet` never see the flat form.
+                        if v.is_packed_list() {
+                            let snapshot = v.realize_list();
+                            set_reg(regs, fbase, *dst, snapshot);
+                            pc += 1;
+                            continue;
                         }
-                        // Inline cache: a hit (the receiver's shape pointer matches the cached one)
-                        // gives the resolved prototype directly, skipping the `(type, method)` hashmap
-                        // lookup and its two `String` clones. The hit check avoids bumping the shape
-                        // refcount (raw pointer compare); only a miss clones the shape into the cache.
-                        let ci = *cache as usize;
-                        let shape_ptr = v.object_shape_ptr();
-                        let hit = match &caches[ci] {
-                            Some((cs, p)) if Some(Rc::as_ptr(cs)) == shape_ptr => Some(*p),
-                            _ => None,
-                        };
-                        let proto = match hit {
-                            Some(proto) => proto,
+                        // Snapshot the elements to iterate (a list's elements, a set's canonical
+                        // elements, or a map's values in sorted-key order), each retained so the loop
+                        // owns them independently.
+                        let snapshot = match v
+                            .list_items()
+                            .or_else(|| v.set_items())
+                            .or_else(|| v.map_values())
+                        {
+                            Some(elements) => {
+                                for &e in &elements {
+                                    retain(e);
+                                }
+                                Value::list(elements)
+                            }
                             None => {
-                                let shape = v.shape().unwrap();
-                                let Some(&proto) =
-                                    self.methods.get(&(shape.name.clone(), method.clone()))
-                                else {
-                                    return Err(self.error(
-                                        DiagnosticCode::UnknownName,
-                                        *span,
-                                        format!("type `{}` has no method `{method}`", shape.name),
-                                    ));
-                                };
-                                caches[ci] = Some((shape, proto));
-                                proto
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!("cannot iterate over {}", v.type_name()),
+                                ));
                             }
                         };
-                        let callee_chunk = &module.protos[proto as usize];
-                        // The prototype takes the receiver in register 0 and the user arguments
-                        // after it, so its declared arity is one more than the supplied args. A
-                        // method may have trailing defaulted parameters, so the supplied count is a
-                        // range `[total - defaults, total]` (all less the receiver).
-                        let total = callee_chunk.num_params as usize - 1;
-                        let required = total - callee_chunk.defaults.len();
-                        if args.len() < required || args.len() > total {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                arity_message("method", required, total, args.len()),
-                            ));
-                        }
-                        let num_registers = callee_chunk.num_registers as usize;
-                        let defaults = callee_chunk.defaults.clone();
-                        let new_base = reserve_window(regs, num_registers);
-                        retain(v);
-                        regs[new_base] = v;
-                        for (i, &arg_reg) in args.iter().enumerate() {
-                            let a = regs[fbase + arg_reg as usize];
-                            retain(a);
-                            regs[new_base + i + 1] = a;
-                        }
-                        // Fill any omitted trailing parameters from their default thunks. The
-                        // receiver and supplied args occupy registers `0..=args.len()`, so a default
-                        // register at or beyond that was not supplied.
-                        // A method frame carries no upvalues (it is defined at module scope), so its
-                        // default thunks resolve globals only.
-                        let filled = args.len() + 1;
-                        for (reg, proto) in &defaults {
-                            if *reg as usize >= filled {
-                                let value = self.run_thunk(*proto, &[])?;
-                                regs[new_base + *reg as usize] = value;
+                        set_reg(regs, fbase, *dst, snapshot);
+                        pc += 1;
+                    }
+                    Op::ListLen { dst, src, span } => {
+                        // After `IterSnapshot`, `src` is a list for the list/map paths; the only way it
+                        // is not is an `Iterable::iter` that returned a non-list, reported here (E0007),
+                        // matching the tree-walker's `exec_for`.
+                        let v = regs[fbase + *src as usize];
+                        match v.list_len() {
+                            Some(n) => {
+                                set_reg(regs, fbase, *dst, Value::int(n as i64));
+                                pc += 1;
+                            }
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!("`iter` must return a list, found {}", v.type_name()),
+                                ));
                             }
                         }
-                        frames[top].pc = pc + 1;
-                        frames.push(Frame {
-                            proto,
-                            base: new_base,
-                            pc: 0,
-                            ret_dst: *dst,
-                            ret_transform: RetTransform::None,
-                            upvalues: Vec::new(),
-                        });
-                        reload!(frames, module, top, fbase, chunk, pc);
-                        continue;
                     }
-                    // An enum value dispatches to a user method (the unified body, object-model
-                    // slice 3) through the same `(type, method)` table as an object. Enums carry no
-                    // inline-cache shape pointer, so this is a direct table lookup. An unknown method
-                    // falls through to the built-in paths below.
-                    if v.is_enum() {
-                        let type_name = v.shape().unwrap().name.clone();
-                        if let Some(&proto) = self.methods.get(&(type_name, method.clone())) {
+                    Op::ListGet { dst, list, index } => {
+                        let idx = regs[fbase + *index as usize]
+                            .as_int()
+                            .expect("a loop index is an int")
+                            as usize;
+                        let element = regs[fbase + *list as usize]
+                            .list_get(idx)
+                            .expect("the loop keeps the index in bounds");
+                        retain(element);
+                        set_reg(regs, fbase, *dst, element);
+                        pc += 1;
+                    }
+                    // Streaming `for` step (Track I.2): advance the iterator, binding the element + a bool
+                    // continue flag. A `map`/`filter` closure runs here (via `iter_for_next`), so it can
+                    // abort. `set_reg` releases the previous element / flag each iteration.
+                    Op::IterForNext {
+                        iter,
+                        elem,
+                        has,
+                        span,
+                    } => {
+                        let it = regs[fbase + *iter as usize];
+                        match self.iter_for_next(it, *span)? {
+                            Some(element) => {
+                                set_reg(regs, fbase, *elem, element);
+                                set_reg(regs, fbase, *has, Value::bool(true));
+                            }
+                            None => {
+                                set_reg(regs, fbase, *elem, Value::unit());
+                                set_reg(regs, fbase, *has, Value::bool(false));
+                            }
+                        }
+                        pc += 1;
+                    }
+                    Op::CallBuiltin {
+                        dst,
+                        builtin,
+                        args,
+                        span,
+                    } => {
+                        // A user object lights up the `Length` trait: `len(o)` dispatches to its `len`
+                        // method, which runs bytecode, so it is pushed as a call frame rather than
+                        // handled by the synchronous `call_builtin`. (Matches the tree-walker's
+                        // `Builtin::Len` object case.)
+                        if *builtin == Builtin::Len && args.len() == 1 {
+                            let recv = regs[fbase + args[0] as usize];
+                            if recv.is_object() {
+                                let type_name = recv.shape().unwrap().name.clone();
+                                if let Some(&proto) =
+                                    self.methods.get(&(type_name.clone(), "len".to_string()))
+                                {
+                                    let callee_chunk = &module.protos[proto as usize];
+                                    if callee_chunk.num_params != 1 {
+                                        return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!(
+                                            "this method takes {} argument(s) but 0 were supplied",
+                                            callee_chunk.num_params - 1
+                                        ),
+                                    ));
+                                    }
+                                    let new_base =
+                                        reserve_window(regs, callee_chunk.num_registers as usize);
+                                    retain(recv);
+                                    regs[new_base] = recv;
+                                    frames[top].pc = pc + 1;
+                                    frames.push(Frame {
+                                        proto,
+                                        base: new_base,
+                                        pc: 0,
+                                        ret_dst: *dst,
+                                        ret_transform: RetTransform::None,
+                                        upvalues: Vec::new(),
+                                    });
+                                    continue 'reload;
+                                }
+                            }
+                        }
+                        // Builtins borrow their arguments (the registers keep ownership); the
+                        // result is a fresh owned value.
+                        let arg_vals: Vec<Value> =
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                        let (dst, builtin, span) = (*dst, *builtin, *span);
+                        let v = self.call_builtin(builtin, &arg_vals, span)?;
+                        set_reg(regs, fbase, dst, v);
+                        pc += 1;
+                    }
+                    Op::CallMethod {
+                        dst,
+                        recv,
+                        method,
+                        args,
+                        span,
+                        cache,
+                        reuse,
+                    } => {
+                        let v = regs[fbase + *recv as usize];
+                        // In-place map self-update (Phase 5.1c): a reuse-marked `m = m.set(k,v)` /
+                        // `m = m.remove(k)` whose runtime receiver is actually a map consumes the receiver
+                        // register and mutates the sole-owned backing buffer in place (an alias copies). A
+                        // non-map receiver — a user method that happens to be named `set` — falls through to
+                        // the ordinary dispatch below with the receiver intact.
+                        if *reuse
+                            && v.is_map()
+                            && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
+                            && matches!(
+                                map_method,
+                                lang_stdlib::MapMethod::Set | lang_stdlib::MapMethod::Remove
+                            )
+                        {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            // Consume the receiver: take its single reference out of the register without
+                            // releasing (a direct overwrite, like `ConcatInPlace`), so the refcount below
+                            // still counts the accumulator's reference and a `dst == recv` store is safe.
+                            regs[fbase + *recv as usize] = Value::unit();
+                            let result = self.map_update_in_place(
+                                v,
+                                map_method,
+                                method,
+                                &arg_values,
+                                *span,
+                            )?;
+                            set_reg(regs, fbase, *dst, result);
+                            pc += 1;
+                            continue;
+                        }
+                        // In-place list self-update (`xs[i] = v` ⟶ `xs = xs.set(i, v)`): a uniquely-owned
+                        // list overwrites slot `i` in place (O(1)) instead of copying the whole list.
+                        if *reuse && v.is_list() && method == "set" {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            regs[fbase + *recv as usize] = Value::unit();
+                            let result = self.list_set_in_place(v, &arg_values, *span)?;
+                            set_reg(regs, fbase, *dst, result);
+                            pc += 1;
+                            continue;
+                        }
+                        // In-place set self-update (`s = s.add(x)` / `s = s.remove(x)`): a uniquely-owned,
+                        // canonically-ordered set binary-search-inserts/removes one element in its existing
+                        // buffer instead of cloning + re-sorting the whole set.
+                        if *reuse
+                            && v.is_set()
+                            && let Some(set_method) = lang_stdlib::SetMethod::from_name(method)
+                            && matches!(
+                                set_method,
+                                lang_stdlib::SetMethod::Add | lang_stdlib::SetMethod::Remove
+                            )
+                        {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            regs[fbase + *recv as usize] = Value::unit();
+                            let result = self.set_update_in_place(
+                                v,
+                                set_method,
+                                method,
+                                &arg_values,
+                                *span,
+                            )?;
+                            set_reg(regs, fbase, *dst, result);
+                            pc += 1;
+                            continue;
+                        }
+                        // `json.parse(...)` — a Ring 2 native module function call, dispatched before
+                        // the object/collection paths.
+                        if let Some(module_name) = v.native_module_name() {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let value =
+                                self.call_native_module(&module_name, method, &arg_values, *span)?;
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // An object dispatches to a user method through the type's method table;
+                        // anything else falls to the built-in `count`/`enumerate` methods.
+                        if v.is_object() {
+                            // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written
+                            // `to_json`) synthesizes a structural JSON string — a pure value
+                            // computation, so it is produced inline rather than via a call frame. Only a
+                            // literal `to_json` site reaches here, so the shape clone stays off the common
+                            // method-call path.
+                            if method == "to_json" && args.is_empty() {
+                                let type_name = v.shape().unwrap().name.clone();
+                                if self.tojson_derives.contains(&type_name) {
+                                    let json = Value::string(&v.to_json());
+                                    set_reg(regs, fbase, *dst, json);
+                                    pc += 1;
+                                    continue;
+                                }
+                            }
+                            // Inline cache: a hit (the receiver's shape pointer matches the cached one)
+                            // gives the resolved prototype directly, skipping the `(type, method)` hashmap
+                            // lookup and its two `String` clones. The hit check avoids bumping the shape
+                            // refcount (raw pointer compare); only a miss clones the shape into the cache.
+                            let ci = *cache as usize;
+                            let shape_ptr = v.object_shape_ptr();
+                            let hit = match &caches[ci] {
+                                Some((cs, p)) if Some(Rc::as_ptr(cs)) == shape_ptr => Some(*p),
+                                _ => None,
+                            };
+                            let proto = match hit {
+                                Some(proto) => proto,
+                                None => {
+                                    let shape = v.shape().unwrap();
+                                    let Some(&proto) =
+                                        self.methods.get(&(shape.name.clone(), method.clone()))
+                                    else {
+                                        return Err(self.error(
+                                            DiagnosticCode::UnknownName,
+                                            *span,
+                                            format!(
+                                                "type `{}` has no method `{method}`",
+                                                shape.name
+                                            ),
+                                        ));
+                                    };
+                                    caches[ci] = Some((shape, proto));
+                                    proto
+                                }
+                            };
                             let callee_chunk = &module.protos[proto as usize];
+                            // The prototype takes the receiver in register 0 and the user arguments
+                            // after it, so its declared arity is one more than the supplied args. A
+                            // method may have trailing defaulted parameters, so the supplied count is a
+                            // range `[total - defaults, total]` (all less the receiver).
                             let total = callee_chunk.num_params as usize - 1;
                             let required = total - callee_chunk.defaults.len();
                             if args.len() < required || args.len() > total {
@@ -1812,6 +1775,11 @@ impl<'m> Vm<'m> {
                                 retain(a);
                                 regs[new_base + i + 1] = a;
                             }
+                            // Fill any omitted trailing parameters from their default thunks. The
+                            // receiver and supplied args occupy registers `0..=args.len()`, so a default
+                            // register at or beyond that was not supplied.
+                            // A method frame carries no upvalues (it is defined at module scope), so its
+                            // default thunks resolve globals only.
                             let filled = args.len() + 1;
                             for (reg, proto) in &defaults {
                                 if *reg as usize >= filled {
@@ -1828,100 +1796,144 @@ impl<'m> Vm<'m> {
                                 ret_transform: RetTransform::None,
                                 upvalues: Vec::new(),
                             });
-                            reload!(frames, module, top, fbase, chunk, pc);
-                            continue;
+                            continue 'reload;
                         }
-                    }
-                    // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
-                    // impl returns). One argument, on any non-object receiver.
-                    if method == "compare" {
-                        if args.len() != 1 {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "method `compare` takes 1 argument but {} were supplied",
-                                    args.len()
-                                ),
-                            ));
-                        }
-                        let other = regs[fbase + args[0] as usize];
-                        match compare_primitive(v, other) {
-                            Some(ordering) => {
-                                let value = make_ordering(lang_ast::ordering_variant(ordering));
-                                set_reg(regs, fbase, *dst, value);
-                                pc += 1;
+                        // An enum value dispatches to a user method (the unified body, object-model
+                        // slice 3) through the same `(type, method)` table as an object. Enums carry no
+                        // inline-cache shape pointer, so this is a direct table lookup. An unknown method
+                        // falls through to the built-in paths below.
+                        if v.is_enum() {
+                            let type_name = v.shape().unwrap().name.clone();
+                            if let Some(&proto) = self.methods.get(&(type_name, method.clone())) {
+                                let callee_chunk = &module.protos[proto as usize];
+                                let total = callee_chunk.num_params as usize - 1;
+                                let required = total - callee_chunk.defaults.len();
+                                if args.len() < required || args.len() > total {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        arity_message("method", required, total, args.len()),
+                                    ));
+                                }
+                                let num_registers = callee_chunk.num_registers as usize;
+                                let defaults = callee_chunk.defaults.clone();
+                                let new_base = reserve_window(regs, num_registers);
+                                retain(v);
+                                regs[new_base] = v;
+                                for (i, &arg_reg) in args.iter().enumerate() {
+                                    let a = regs[fbase + arg_reg as usize];
+                                    retain(a);
+                                    regs[new_base + i + 1] = a;
+                                }
+                                let filled = args.len() + 1;
+                                for (reg, proto) in &defaults {
+                                    if *reg as usize >= filled {
+                                        let value = self.run_thunk(*proto, &[])?;
+                                        regs[new_base + *reg as usize] = value;
+                                    }
+                                }
+                                frames[top].pc = pc + 1;
+                                frames.push(Frame {
+                                    proto,
+                                    base: new_base,
+                                    pc: 0,
+                                    ret_dst: *dst,
+                                    ret_transform: RetTransform::None,
+                                    upvalues: Vec::new(),
+                                });
+                                continue 'reload;
                             }
-                            None => {
+                        }
+                        // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
+                        // impl returns). One argument, on any non-object receiver.
+                        if method == "compare" {
+                            if args.len() != 1 {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
                                     format!(
-                                        "cannot compare {} and {}",
-                                        v.type_name(),
-                                        other.type_name()
+                                        "method `compare` takes 1 argument but {} were supplied",
+                                        args.len()
                                     ),
                                 ));
                             }
-                        }
-                        continue;
-                    }
-                    // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
-                    // the shared `lang-stdlib` surface so the tree-walker and the VM cannot drift.
-                    // `Unknown` falls through to the collection methods below. `as_string` clones
-                    // out of the heap, so the projected args own their strings for the call.
-                    if let Some(recv_str) = v.as_string() {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let arg_strings: Vec<Option<String>> =
-                            arg_values.iter().map(|a| a.as_string()).collect();
-                        let projected: Vec<lang_stdlib::Arg> = arg_values
-                            .iter()
-                            .zip(&arg_strings)
-                            .map(|(a, s)| {
-                                if let Some(s) = s {
-                                    lang_stdlib::Arg::Str(s)
-                                } else if let Some(i) = a.as_int() {
-                                    lang_stdlib::Arg::Int(i)
-                                } else if let Some(f) = a.as_float() {
-                                    lang_stdlib::Arg::Float(f)
-                                } else if let Some(b) = a.as_bool() {
-                                    lang_stdlib::Arg::Bool(b)
-                                } else {
-                                    lang_stdlib::Arg::Other
+                            let other = regs[fbase + args[0] as usize];
+                            match compare_primitive(v, other) {
+                                Some(ordering) => {
+                                    let value = make_ordering(lang_ast::ordering_variant(ordering));
+                                    set_reg(regs, fbase, *dst, value);
+                                    pc += 1;
                                 }
-                            })
-                            .collect();
-                        match lang_stdlib::string_method(&recv_str, method, &projected) {
-                            lang_stdlib::Dispatch::Done(output) => {
-                                let value = stdlib_output_to_value(output);
-                                set_reg(regs, fbase, *dst, value);
-                                pc += 1;
-                                continue;
+                                None => {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!(
+                                            "cannot compare {} and {}",
+                                            v.type_name(),
+                                            other.type_name()
+                                        ),
+                                    ));
+                                }
                             }
-                            lang_stdlib::Dispatch::Err(error) => {
-                                return Err(self.error(
-                                    stdlib_error_code(error.kind),
-                                    *span,
-                                    error.message,
-                                ));
-                            }
-                            lang_stdlib::Dispatch::Unknown => {}
+                            continue;
                         }
-                    }
-                    // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
-                    // intrinsics, delegating to the shared `int_method` so the backends agree. The
-                    // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
-                    if let Some(recv_int) = v.as_int()
-                        && let Some(int_method) = lang_stdlib::IntMethod::from_name(method)
-                    {
-                        let arg = match args.first() {
-                            Some(r) => {
-                                let a = regs[fbase + *r as usize];
-                                match a.as_int() {
-                                    Some(n) => n,
-                                    None => {
-                                        return Err(self.error(
+                        // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
+                        // the shared `lang-stdlib` surface so the tree-walker and the VM cannot drift.
+                        // `Unknown` falls through to the collection methods below. `as_string` clones
+                        // out of the heap, so the projected args own their strings for the call.
+                        if let Some(recv_str) = v.as_string() {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let arg_strings: Vec<Option<String>> =
+                                arg_values.iter().map(|a| a.as_string()).collect();
+                            let projected: Vec<lang_stdlib::Arg> = arg_values
+                                .iter()
+                                .zip(&arg_strings)
+                                .map(|(a, s)| {
+                                    if let Some(s) = s {
+                                        lang_stdlib::Arg::Str(s)
+                                    } else if let Some(i) = a.as_int() {
+                                        lang_stdlib::Arg::Int(i)
+                                    } else if let Some(f) = a.as_float() {
+                                        lang_stdlib::Arg::Float(f)
+                                    } else if let Some(b) = a.as_bool() {
+                                        lang_stdlib::Arg::Bool(b)
+                                    } else {
+                                        lang_stdlib::Arg::Other
+                                    }
+                                })
+                                .collect();
+                            match lang_stdlib::string_method(&recv_str, method, &projected) {
+                                lang_stdlib::Dispatch::Done(output) => {
+                                    let value = stdlib_output_to_value(output);
+                                    set_reg(regs, fbase, *dst, value);
+                                    pc += 1;
+                                    continue;
+                                }
+                                lang_stdlib::Dispatch::Err(error) => {
+                                    return Err(self.error(
+                                        stdlib_error_code(error.kind),
+                                        *span,
+                                        error.message,
+                                    ));
+                                }
+                                lang_stdlib::Dispatch::Unknown => {}
+                            }
+                        }
+                        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
+                        // intrinsics, delegating to the shared `int_method` so the backends agree. The
+                        // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
+                        if let Some(recv_int) = v.as_int()
+                            && let Some(int_method) = lang_stdlib::IntMethod::from_name(method)
+                        {
+                            let arg = match args.first() {
+                                Some(r) => {
+                                    let a = regs[fbase + *r as usize];
+                                    match a.as_int() {
+                                        Some(n) => n,
+                                        None => {
+                                            return Err(self.error(
                                             DiagnosticCode::TypeMismatch,
                                             *span,
                                             format!(
@@ -1929,305 +1941,424 @@ impl<'m> Vm<'m> {
                                                 a.type_name()
                                             ),
                                         ));
+                                        }
                                     }
                                 }
-                            }
-                            None => 0,
-                        };
-                        let value = Value::int(lang_stdlib::int_method(recv_int, int_method, arg));
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
-                    // `float↔f32`. The `IntMethod` branch above handled `int→int` and continued; an
-                    // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
-                    // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
-                    if let Some(src) = v
-                        .as_f32()
-                        .map(lang_stdlib::NumScalar::F32)
-                        .or_else(|| v.as_float().map(lang_stdlib::NumScalar::F64))
-                        .or_else(|| v.as_int().map(lang_stdlib::NumScalar::Int))
-                        && let Some(dest) = lang_stdlib::NumConvert::from_name(method)
-                    {
-                        let value = match lang_stdlib::num_convert(src, dest) {
-                            lang_stdlib::NumScalar::Int(i) => Value::int(i),
-                            lang_stdlib::NumScalar::F64(f) => Value::float(f),
-                            lang_stdlib::NumScalar::F32(f) => Value::f32(f),
-                        };
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
-                    // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
-                    // method this backend lacks.
-                    if v.list_len().is_some()
-                        && let Some(list_method) = lang_stdlib::ListMethod::from_name(method)
-                    {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let value =
-                            self.call_list_method(v, list_method, method, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // Ring 1 set methods (contains/union/intersection).
-                    if v.is_set()
-                        && let Some(set_method) = lang_stdlib::SetMethod::from_name(method)
-                    {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let value =
-                            self.call_set_method(v, set_method, method, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // File-handle methods (read_line/read/write/close) — the shared
-                    // `FileHandleMethod` enum keeps the two backends in lockstep.
-                    if v.is_file_handle()
-                        && let Some(handle_method) =
-                            lang_stdlib::FileHandleMethod::from_name(method)
-                    {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let value = self.call_file_handle_method(
-                            v,
-                            handle_method,
-                            method,
-                            &arg_values,
-                            *span,
-                        )?;
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
-                    // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
-                    // polled); `close` is synchronous. Endpoint validity was checked statically.
-                    if let Some(id) = v.sender_id() {
-                        match method.as_str() {
-                            "send" => {
-                                let msg = regs[fbase + args[0] as usize];
-                                // The future retains its own reference to the message; the arg
-                                // register's reference is released by its normal end-of-life.
-                                let future = Value::make_channel_send(id, msg);
-                                set_reg(regs, fbase, *dst, future);
-                                pc += 1;
-                                continue;
-                            }
-                            "close" => {
-                                match &mut self.channels[id.index()] {
-                                    Channel::Local { closed, .. } => *closed = true,
-                                    Channel::Shared(core) => core.close(),
-                                }
-                                self.channel_progress += 1;
-                                set_reg(regs, fbase, *dst, Value::unit());
-                                pc += 1;
-                                continue;
-                            }
-                            _ => {}
+                                None => 0,
+                            };
+                            let value =
+                                Value::int(lang_stdlib::int_method(recv_int, int_method, arg));
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
                         }
-                    }
-                    if let Some(id) = v.receiver_id()
-                        && method == "recv"
-                    {
-                        let future = Value::make_channel_recv(id);
-                        set_reg(regs, fbase, *dst, future);
-                        pc += 1;
-                        continue;
-                    }
-                    // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
-                    // handle above.
-                    if v.is_iter()
-                        && let Some(iter_method) = lang_stdlib::IterMethod::from_name(method)
-                    {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let value =
-                            self.call_iter_method(v, iter_method, method, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // Ring 1 map methods (keys/values/has).
-                    if v.is_map()
-                        && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
-                    {
-                        let arg_values: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let value =
-                            self.call_map_method(v, map_method, method, &arg_values, *span)?;
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
-                    // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
-                    if method == "to_bytes" && v.is_list() {
-                        if !args.is_empty() {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
+                        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
+                        // `float↔f32`. The `IntMethod` branch above handled `int→int` and continued; an
+                        // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
+                        // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
+                        if let Some(src) = v
+                            .as_f32()
+                            .map(lang_stdlib::NumScalar::F32)
+                            .or_else(|| v.as_float().map(lang_stdlib::NumScalar::F64))
+                            .or_else(|| v.as_int().map(lang_stdlib::NumScalar::Int))
+                            && let Some(dest) = lang_stdlib::NumConvert::from_name(method)
+                        {
+                            let value = match lang_stdlib::num_convert(src, dest) {
+                                lang_stdlib::NumScalar::Int(i) => Value::int(i),
+                                lang_stdlib::NumScalar::F64(f) => Value::float(f),
+                                lang_stdlib::NumScalar::F32(f) => Value::f32(f),
+                            };
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
+                        // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
+                        // method this backend lacks.
+                        if v.list_len().is_some()
+                            && let Some(list_method) = lang_stdlib::ListMethod::from_name(method)
+                        {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let value =
+                                self.call_list_method(v, list_method, method, &arg_values, *span)?;
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // Ring 1 set methods (contains/union/intersection).
+                        if v.is_set()
+                            && let Some(set_method) = lang_stdlib::SetMethod::from_name(method)
+                        {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let value =
+                                self.call_set_method(v, set_method, method, &arg_values, *span)?;
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // File-handle methods (read_line/read/write/close) — the shared
+                        // `FileHandleMethod` enum keeps the two backends in lockstep.
+                        if v.is_file_handle()
+                            && let Some(handle_method) =
+                                lang_stdlib::FileHandleMethod::from_name(method)
+                        {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let value = self.call_file_handle_method(
+                                v,
+                                handle_method,
+                                method,
+                                &arg_values,
                                 *span,
-                                "method `to_bytes` takes no arguments".to_string(),
-                            ));
+                            )?;
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
                         }
-                        let value = match v.packed_bytes() {
-                            Some(buf) => Value::bytes(buf),
-                            None => {
+                        // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
+                        // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
+                        // polled); `close` is synchronous. Endpoint validity was checked statically.
+                        if let Some(id) = v.sender_id() {
+                            match method.as_str() {
+                                "send" => {
+                                    let msg = regs[fbase + args[0] as usize];
+                                    // The future retains its own reference to the message; the arg
+                                    // register's reference is released by its normal end-of-life.
+                                    let future = Value::make_channel_send(id, msg);
+                                    set_reg(regs, fbase, *dst, future);
+                                    pc += 1;
+                                    continue;
+                                }
+                                "close" => {
+                                    match &mut self.channels[id.index()] {
+                                        Channel::Local { closed, .. } => *closed = true,
+                                        Channel::Shared(core) => core.close(),
+                                    }
+                                    self.channel_progress += 1;
+                                    set_reg(regs, fbase, *dst, Value::unit());
+                                    pc += 1;
+                                    continue;
+                                }
+                                _ => {}
+                            }
+                        }
+                        if let Some(id) = v.receiver_id()
+                            && method == "recv"
+                        {
+                            let future = Value::make_channel_recv(id);
+                            set_reg(regs, fbase, *dst, future);
+                            pc += 1;
+                            continue;
+                        }
+                        // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
+                        // handle above.
+                        if v.is_iter()
+                            && let Some(iter_method) = lang_stdlib::IterMethod::from_name(method)
+                        {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let value =
+                                self.call_iter_method(v, iter_method, method, &arg_values, *span)?;
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // Ring 1 map methods (keys/values/has).
+                        if v.is_map()
+                            && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
+                        {
+                            let arg_values: Vec<Value> =
+                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let value =
+                                self.call_map_method(v, map_method, method, &arg_values, *span)?;
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
+                        // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
+                        if method == "to_bytes" && v.is_list() {
+                            if !args.is_empty() {
                                 return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    "method `to_bytes` takes no arguments".to_string(),
+                                ));
+                            }
+                            let value = match v.packed_bytes() {
+                                Some(buf) => Value::bytes(buf),
+                                None => {
+                                    return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
                                     "`to_bytes` expects a packed list (a `List` of `@packed` structs)"
                                         .to_string(),
                                 ));
-                            }
-                        };
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
-                    // its backing (the iterator retains one reference); a set/map first becomes a list
-                    // of its elements / values (the iteration order `for` uses).
-                    if method == "iter" && (v.is_list() || v.is_set() || v.is_map()) {
-                        if !args.is_empty() {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                "method `iter` takes no arguments".to_string(),
-                            ));
-                        }
-                        let value = if v.is_list() {
-                            Value::iter(v)
-                        } else {
-                            let items = if v.is_set() {
-                                v.set_items()
-                            } else {
-                                v.map_values()
-                            }
-                            .expect("set/map receiver");
-                            for item in &items {
-                                item.inc_ref();
-                            }
-                            let list = Value::list(items);
-                            let iter = Value::iter(list);
-                            // `Value::iter` retained the list; drop this local reference so the
-                            // iterator is its sole owner.
-                            list.release();
-                            iter
-                        };
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // Built-in zero-argument methods on lists/maps/strings.
-                    let result = if !args.is_empty() {
-                        None
-                    } else if method == "count" {
-                        v.list_len()
-                            .or_else(|| v.set_len())
-                            .or_else(|| v.map_len())
-                            .or_else(|| v.as_string().map(|s| s.chars().count()))
-                            .or_else(|| v.bytes_len())
-                            .map(|n| Value::int(n as i64))
-                    } else if method == "enumerate" && v.is_list() {
-                        // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
-                        // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
-                        // temporary boxed list first (then released).
-                        let boxed = v.realize_list();
-                        let items = boxed.list_items().expect("list receiver");
-                        let pairs = items
-                            .iter()
-                            .enumerate()
-                            .map(|(i, &element)| {
-                                retain(element);
-                                Value::tuple(vec![Value::int(i as i64), element])
-                            })
-                            .collect();
-                        boxed.release();
-                        Some(Value::list(pairs))
-                    } else {
-                        None
-                    };
-                    match result {
-                        Some(value) => {
+                                }
+                            };
                             set_reg(regs, fbase, *dst, value);
                             pc += 1;
+                            continue;
                         }
-                        None if !args.is_empty()
-                            && (method == "count" || method == "enumerate") =>
+                        // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
+                        // its backing (the iterator retains one reference); a set/map first becomes a list
+                        // of its elements / values (the iteration order `for` uses).
+                        if method == "iter" && (v.is_list() || v.is_set() || v.is_map()) {
+                            if !args.is_empty() {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    "method `iter` takes no arguments".to_string(),
+                                ));
+                            }
+                            let value = if v.is_list() {
+                                Value::iter(v)
+                            } else {
+                                let items = if v.is_set() {
+                                    v.set_items()
+                                } else {
+                                    v.map_values()
+                                }
+                                .expect("set/map receiver");
+                                for item in &items {
+                                    item.inc_ref();
+                                }
+                                let list = Value::list(items);
+                                let iter = Value::iter(list);
+                                // `Value::iter` retained the list; drop this local reference so the
+                                // iterator is its sole owner.
+                                list.release();
+                                iter
+                            };
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // Built-in zero-argument methods on lists/maps/strings.
+                        let result = if !args.is_empty() {
+                            None
+                        } else if method == "count" {
+                            v.list_len()
+                                .or_else(|| v.set_len())
+                                .or_else(|| v.map_len())
+                                .or_else(|| v.as_string().map(|s| s.chars().count()))
+                                .or_else(|| v.bytes_len())
+                                .map(|n| Value::int(n as i64))
+                        } else if method == "enumerate" && v.is_list() {
+                            // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
+                            // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
+                            // temporary boxed list first (then released).
+                            let boxed = v.realize_list();
+                            let items = boxed.list_items().expect("list receiver");
+                            let pairs = items
+                                .iter()
+                                .enumerate()
+                                .map(|(i, &element)| {
+                                    retain(element);
+                                    Value::tuple(vec![Value::int(i as i64), element])
+                                })
+                                .collect();
+                            boxed.release();
+                            Some(Value::list(pairs))
+                        } else {
+                            None
+                        };
+                        match result {
+                            Some(value) => {
+                                set_reg(regs, fbase, *dst, value);
+                                pc += 1;
+                            }
+                            None if !args.is_empty()
+                                && (method == "count" || method == "enumerate") =>
+                            {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!("method `{method}` takes no arguments"),
+                                ));
+                            }
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!("no method `{method}` on {}", v.type_name()),
+                                ));
+                            }
+                        }
+                    }
+                    Op::Index {
+                        dst,
+                        recv,
+                        index,
+                        span,
+                    } => {
+                        let v = regs[fbase + *recv as usize];
+                        let idx = regs[fbase + *index as usize];
+                        // `o[i]` on a user object lights up the `Index` trait: dispatch to `get`,
+                        // pushing a call frame `[recv, index]` exactly like a method call. An object
+                        // without an `Index` impl has no `get` method, so this reports the missing
+                        // method — matching the tree-walker's `eval_index`.
+                        if v.is_object() {
+                            let type_name = v.shape().unwrap().name.clone();
+                            let Some(&proto) =
+                                self.methods.get(&(type_name.clone(), "get".to_string()))
+                            else {
+                                return Err(self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!("type `{type_name}` has no method `get`"),
+                                ));
+                            };
+                            let callee_chunk = &module.protos[proto as usize];
+                            if callee_chunk.num_params as usize != 2 {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "this method takes {} argument(s) but 1 were supplied",
+                                        callee_chunk.num_params - 1
+                                    ),
+                                ));
+                            }
+                            let new_base =
+                                reserve_window(regs, callee_chunk.num_registers as usize);
+                            retain(v);
+                            regs[new_base] = v;
+                            retain(idx);
+                            regs[new_base + 1] = idx;
+                            frames[top].pc = pc + 1;
+                            frames.push(Frame {
+                                proto,
+                                base: new_base,
+                                pc: 0,
+                                ret_dst: *dst,
+                                ret_transform: RetTransform::None,
+                                upvalues: Vec::new(),
+                            });
+                            continue 'reload;
+                        }
+                        // A built-in list addresses an element by integer position (bounds-checked).
+                        if let Some(len) = v.list_len() {
+                            let Some(i) = idx.as_int() else {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!("list index must be an int, found {}", idx.type_name()),
+                                ));
+                            };
+                            if i < 0 || i as usize >= len {
+                                return Err(self.error(
+                                    DiagnosticCode::IndexOutOfBounds,
+                                    *span,
+                                    format!("index {i} out of bounds for list of length {len}"),
+                                ));
+                            }
+                            // A packed list (P-PACK 2.4) materializes the one indexed element (owned,
+                            // refcount 1) — no full-list materialization, no extra retain. A boxed list
+                            // borrows the element and retains it into `dst`.
+                            let element = if v.is_packed_list() {
+                                v.packed_get(i as usize)
+                            } else {
+                                let element = v.list_get(i as usize).expect("bounds checked above");
+                                retain(element);
+                                element
+                            };
+                            set_reg(regs, fbase, *dst, element);
+                            pc += 1;
+                            continue;
+                        }
+                        // A map looks the value up by its string key; a missing key is `E0018`.
+                        if v.is_map() {
+                            let Some(key) = idx.as_string() else {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "map index must be a string, found {}",
+                                        idx.type_name()
+                                    ),
+                                ));
+                            };
+                            let Some(element) = v.map_get(&key) else {
+                                return Err(self.error(
+                                    DiagnosticCode::KeyNotFound,
+                                    *span,
+                                    format!("map has no key {key:?}"),
+                                ));
+                            };
+                            retain(element);
+                            set_reg(regs, fbase, *dst, element);
+                            pc += 1;
+                            continue;
+                        }
+                        // A string addresses a single character by position (bounds-checked),
+                        // counting by Unicode scalar values to match `len`.
+                        if let Some(s) = v.as_string() {
+                            let Some(i) = idx.as_int() else {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "string index must be an int, found {}",
+                                        idx.type_name()
+                                    ),
+                                ));
+                            };
+                            let count = s.chars().count();
+                            if i < 0 || i as usize >= count {
+                                return Err(self.error(
+                                    DiagnosticCode::IndexOutOfBounds,
+                                    *span,
+                                    format!("index {i} out of bounds for string of length {count}"),
+                                ));
+                            }
+                            let ch = s.chars().nth(i as usize).unwrap().to_string();
+                            set_reg(regs, fbase, *dst, Value::string(&ch));
+                            pc += 1;
+                            continue;
+                        }
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("cannot index a value of type {}", v.type_name()),
+                        ));
+                    }
+                    Op::IndexField {
+                        dst,
+                        recv,
+                        index,
+                        field,
+                        span,
+                    } => {
+                        let v = regs[fbase + *recv as usize];
+                        let idx = regs[fbase + *index as usize];
+                        // Fast path: a packed list decodes the one field's word(s) directly — no element
+                        // materialization (the P-PACK 2.5+ scalar-access win). Any miss (non-int index,
+                        // out of range, or unknown field) falls through to the boxed index-then-load,
+                        // which reproduces the exact diagnostics of the unfused `Index` + `LoadField`.
+                        if v.is_packed_list()
+                            && let Some(i) = idx.as_int()
+                            && i >= 0
+                            && let Some(value) = v.packed_field(i as usize, field)
                         {
+                            set_reg(regs, fbase, *dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // Fallback. The static type guarantees a `List`; bounds-check the index exactly as
+                        // `Op::Index`'s list branch, then read the element's field exactly as
+                        // `Op::LoadField`. A boxed element is borrowed (only its loaded field is retained
+                        // into `dst`); a packed element reached here (unknown field — unreachable for a
+                        // checker-fused site) is materialized owned and released after.
+                        let Some(len) = v.list_len() else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("method `{method}` takes no arguments"),
-                            ));
-                        }
-                        None => {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!("no method `{method}` on {}", v.type_name()),
-                            ));
-                        }
-                    }
-                }
-                Op::Index {
-                    dst,
-                    recv,
-                    index,
-                    span,
-                } => {
-                    let v = regs[fbase + *recv as usize];
-                    let idx = regs[fbase + *index as usize];
-                    // `o[i]` on a user object lights up the `Index` trait: dispatch to `get`,
-                    // pushing a call frame `[recv, index]` exactly like a method call. An object
-                    // without an `Index` impl has no `get` method, so this reports the missing
-                    // method — matching the tree-walker's `eval_index`.
-                    if v.is_object() {
-                        let type_name = v.shape().unwrap().name.clone();
-                        let Some(&proto) =
-                            self.methods.get(&(type_name.clone(), "get".to_string()))
-                        else {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!("type `{type_name}` has no method `get`"),
+                                format!("cannot index a value of type {}", v.type_name()),
                             ));
                         };
-                        let callee_chunk = &module.protos[proto as usize];
-                        if callee_chunk.num_params as usize != 2 {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "this method takes {} argument(s) but 1 were supplied",
-                                    callee_chunk.num_params - 1
-                                ),
-                            ));
-                        }
-                        let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
-                        retain(v);
-                        regs[new_base] = v;
-                        retain(idx);
-                        regs[new_base + 1] = idx;
-                        frames[top].pc = pc + 1;
-                        frames.push(Frame {
-                            proto,
-                            base: new_base,
-                            pc: 0,
-                            ret_dst: *dst,
-                            ret_transform: RetTransform::None,
-                            upvalues: Vec::new(),
-                        });
-                        reload!(frames, module, top, fbase, chunk, pc);
-                        continue;
-                    }
-                    // A built-in list addresses an element by integer position (bounds-checked).
-                    if let Some(len) = v.list_len() {
                         let Some(i) = idx.as_int() else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
@@ -2242,301 +2373,65 @@ impl<'m> Vm<'m> {
                                 format!("index {i} out of bounds for list of length {len}"),
                             ));
                         }
-                        // A packed list (P-PACK 2.4) materializes the one indexed element (owned,
-                        // refcount 1) — no full-list materialization, no extra retain. A boxed list
-                        // borrows the element and retains it into `dst`.
-                        let element = if v.is_packed_list() {
-                            v.packed_get(i as usize)
+                        let packed = v.is_packed_list();
+                        let element = if packed {
+                            v.packed_get(i as usize) // owned (rc 1)
                         } else {
-                            let element = v.list_get(i as usize).expect("bounds checked above");
-                            retain(element);
-                            element
+                            v.list_get(i as usize).expect("bounds checked above") // borrowed
                         };
-                        set_reg(regs, fbase, *dst, element);
-                        pc += 1;
-                        continue;
-                    }
-                    // A map looks the value up by its string key; a missing key is `E0018`.
-                    if v.is_map() {
-                        let Some(key) = idx.as_string() else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("map index must be a string, found {}", idx.type_name()),
-                            ));
-                        };
-                        let Some(element) = v.map_get(&key) else {
-                            return Err(self.error(
-                                DiagnosticCode::KeyNotFound,
-                                *span,
-                                format!("map has no key {key:?}"),
-                            ));
-                        };
-                        retain(element);
-                        set_reg(regs, fbase, *dst, element);
-                        pc += 1;
-                        continue;
-                    }
-                    // A string addresses a single character by position (bounds-checked),
-                    // counting by Unicode scalar values to match `len`.
-                    if let Some(s) = v.as_string() {
-                        let Some(i) = idx.as_int() else {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!("string index must be an int, found {}", idx.type_name()),
-                            ));
-                        };
-                        let count = s.chars().count();
-                        if i < 0 || i as usize >= count {
-                            return Err(self.error(
-                                DiagnosticCode::IndexOutOfBounds,
-                                *span,
-                                format!("index {i} out of bounds for string of length {count}"),
-                            ));
-                        }
-                        let ch = s.chars().nth(i as usize).unwrap().to_string();
-                        set_reg(regs, fbase, *dst, Value::string(&ch));
-                        pc += 1;
-                        continue;
-                    }
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!("cannot index a value of type {}", v.type_name()),
-                    ));
-                }
-                Op::IndexField {
-                    dst,
-                    recv,
-                    index,
-                    field,
-                    span,
-                } => {
-                    let v = regs[fbase + *recv as usize];
-                    let idx = regs[fbase + *index as usize];
-                    // Fast path: a packed list decodes the one field's word(s) directly — no element
-                    // materialization (the P-PACK 2.5+ scalar-access win). Any miss (non-int index,
-                    // out of range, or unknown field) falls through to the boxed index-then-load,
-                    // which reproduces the exact diagnostics of the unfused `Index` + `LoadField`.
-                    if v.is_packed_list()
-                        && let Some(i) = idx.as_int()
-                        && i >= 0
-                        && let Some(value) = v.packed_field(i as usize, field)
-                    {
-                        set_reg(regs, fbase, *dst, value);
-                        pc += 1;
-                        continue;
-                    }
-                    // Fallback. The static type guarantees a `List`; bounds-check the index exactly as
-                    // `Op::Index`'s list branch, then read the element's field exactly as
-                    // `Op::LoadField`. A boxed element is borrowed (only its loaded field is retained
-                    // into `dst`); a packed element reached here (unknown field — unreachable for a
-                    // checker-fused site) is materialized owned and released after.
-                    let Some(len) = v.list_len() else {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("cannot index a value of type {}", v.type_name()),
-                        ));
-                    };
-                    let Some(i) = idx.as_int() else {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("list index must be an int, found {}", idx.type_name()),
-                        ));
-                    };
-                    if i < 0 || i as usize >= len {
-                        return Err(self.error(
-                            DiagnosticCode::IndexOutOfBounds,
-                            *span,
-                            format!("index {i} out of bounds for list of length {len}"),
-                        ));
-                    }
-                    let packed = v.is_packed_list();
-                    let element = if packed {
-                        v.packed_get(i as usize) // owned (rc 1)
-                    } else {
-                        v.list_get(i as usize).expect("bounds checked above") // borrowed
-                    };
-                    let slot = element.shape().and_then(|sh| sh.slot_of(field));
-                    match slot.and_then(|s| element.slot_at(s)) {
-                        Some(value) => {
-                            retain(value);
-                            if packed {
-                                release(element);
-                            }
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                        }
-                        None => {
-                            let err = if element.is_object() {
-                                self.error(
-                                    DiagnosticCode::UnknownName,
-                                    *span,
-                                    format!(
-                                        "type `{}` has no field `{field}`",
-                                        element.shape().unwrap().name
-                                    ),
-                                )
-                            } else {
-                                self.error(
-                                    DiagnosticCode::UnknownName,
-                                    *span,
-                                    format!("no field `{field}` on {}", element.type_name()),
-                                )
-                            };
-                            if packed {
-                                release(element);
-                            }
-                            return Err(err);
-                        }
-                    }
-                }
-                Op::MakeStruct {
-                    dst,
-                    shape,
-                    named,
-                    spread,
-                    reflect,
-                    span,
-                } => {
-                    let shape = self.shapes[*shape as usize].clone();
-                    let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
-                    // `...base` fills declared slots the base provides; named initializers then
-                    // override. A slot left unset by both is a missing-field error (E0009).
-                    if let Some(base_reg) = spread {
-                        let base = regs[fbase + *base_reg as usize];
-                        for (i, field) in shape.fields.iter().enumerate() {
-                            if let Some(value) = base.field(field) {
+                        let slot = element.shape().and_then(|sh| sh.slot_of(field));
+                        match slot.and_then(|s| element.slot_at(s)) {
+                            Some(value) => {
                                 retain(value);
-                                slots[i] = Some(value);
-                            }
-                        }
-                    }
-                    for (slot, reg) in named.iter() {
-                        let value = regs[fbase + *reg as usize];
-                        retain(value);
-                        if let Some(old) = slots[*slot as usize].replace(value) {
-                            release(old);
-                        }
-                    }
-                    // A slot still unset after spread + named is filled from its field default
-                    // (slice 5), run in global scope (empty upvalues — a default resolves globals
-                    // only). A slot with neither a value nor a default violates the
-                    // full-initialization guarantee (E0009).
-                    let mut missing: Vec<String> = Vec::new();
-                    for i in 0..shape.fields.len() {
-                        if slots[i].is_some() {
-                            continue;
-                        }
-                        let field = shape.fields[i].clone();
-                        if let Some(&proto) = self
-                            .field_defaults
-                            .get(&(shape.name.clone(), field.clone()))
-                        {
-                            match self.run_thunk(proto, &[]) {
-                                Ok(value) => slots[i] = Some(value),
-                                Err(abort) => {
-                                    for slot in slots.into_iter().flatten() {
-                                        release(slot);
-                                    }
-                                    return Err(abort);
+                                if packed {
+                                    release(element);
                                 }
+                                set_reg(regs, fbase, *dst, value);
+                                pc += 1;
                             }
-                        } else {
-                            missing.push(field);
+                            None => {
+                                let err = if element.is_object() {
+                                    self.error(
+                                        DiagnosticCode::UnknownName,
+                                        *span,
+                                        format!(
+                                            "type `{}` has no field `{field}`",
+                                            element.shape().unwrap().name
+                                        ),
+                                    )
+                                } else {
+                                    self.error(
+                                        DiagnosticCode::UnknownName,
+                                        *span,
+                                        format!("no field `{field}` on {}", element.type_name()),
+                                    )
+                                };
+                                if packed {
+                                    release(element);
+                                }
+                                return Err(err);
+                            }
                         }
                     }
-                    if !missing.is_empty() {
-                        for slot in slots.into_iter().flatten() {
-                            release(slot);
-                        }
-                        let list = missing
-                            .iter()
-                            .map(|name| format!("`{name}`"))
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        return Err(self.error(
-                            DiagnosticCode::MissingField,
-                            *span,
-                            format!(
-                                "missing field(s) {list} in `{}` literal — every field must be set",
-                                shape.name
-                            ),
-                        ));
-                    }
-                    let slots = slots.into_iter().map(Option::unwrap).collect();
-                    let object = Value::object(shape, slots);
-                    // Stamp the reflected type onto a generic instantiation (R2) so `type_of` recovers
-                    // its type arguments after a `dyn` launder. The object's type is invariant under
-                    // field mutation, so — unlike the collection tags — it is never cleared.
-                    if let Some(idx) = reflect {
-                        object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
-                    }
-                    set_reg(regs, fbase, *dst, object);
-                    pc += 1;
-                }
-                Op::MakeStructInPlace {
-                    dst,
-                    shape,
-                    named,
-                    base,
-                    check,
-                    reflect,
-                    span,
-                } => {
-                    let shape = self.shapes[*shape as usize].clone();
-                    // The base is consumed: take its single reference out of the register without
-                    // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
-                    // below still counts the accumulator's reference and a `dst == base` store is
-                    // safe (the old occupant is now `unit`).
-                    let base_val = regs[fbase + *base as usize];
-                    regs[fbase + *base as usize] = Value::unit();
-                    let same_shape = base_val.object_shape_ptr() == Some(Rc::as_ptr(&shape));
-                    let reuse = match check {
-                        ReuseCheck::Static => {
-                            // The linearity analysis proved sole ownership, so the **refcount** check
-                            // is elided — this is the compile-time-hoisted uniqueness path. The debug
-                            // assertion documents (and, in debug builds, guards) that invariant; a
-                            // failure means the analysis is wrong. The shape is still guarded (a
-                            // well-typed self-update always matches, but a mismatch must fall back to
-                            // copy rather than corrupt the object at the wrong slot layout).
-                            debug_assert!(
-                                base_val.refcount() == 1,
-                                "static record reuse requires a uniquely-owned base"
-                            );
-                            same_shape
-                        }
-                        ReuseCheck::Runtime => same_shape && base_val.refcount() == 1,
-                    };
-                    if reuse {
-                        // Reuse the allocation: overwrite only the changed slots. Every unchanged
-                        // field keeps base's reference, which transfers into the result — base *is*
-                        // the result. The displaced old field value is routed through `release_value`
-                        // (not a plain free) so its `destruct` fires at the right time — matching the
-                        // copy-and-destroy baseline, which would destroy the old base and its fields
-                        // (spec §4/§5). The reuse pass guarantees `base`'s own type has no destructor,
-                        // so reuse never skips a container destructor.
-                        for (slot, reg) in named.iter() {
-                            let v = regs[fbase + *reg as usize];
-                            let old = base_val.replace_slot(*slot as usize, v);
-                            self.release_value(old);
-                        }
-                        // Reuse keeps the base node's existing reflected type (R2): a self-update
-                        // rebuilds a value of the same (generic) type, so the base's tag already carries
-                        // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
-                        set_reg(regs, fbase, *dst, base_val);
-                        pc += 1;
-                    } else {
-                        // Aliased or a different shape: build a fresh object exactly like
-                        // `MakeStruct` (spreading base's fields), then release the consumed base.
+                    Op::MakeStruct {
+                        dst,
+                        shape,
+                        named,
+                        spread,
+                        reflect,
+                        span,
+                    } => {
+                        let shape = self.shapes[*shape as usize].clone();
                         let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
-                        for (i, field) in shape.fields.iter().enumerate() {
-                            if let Some(value) = base_val.field(field) {
-                                retain(value);
-                                slots[i] = Some(value);
+                        // `...base` fills declared slots the base provides; named initializers then
+                        // override. A slot left unset by both is a missing-field error (E0009).
+                        if let Some(base_reg) = spread {
+                            let base = regs[fbase + *base_reg as usize];
+                            for (i, field) in shape.fields.iter().enumerate() {
+                                if let Some(value) = base.field(field) {
+                                    retain(value);
+                                    slots[i] = Some(value);
+                                }
                             }
                         }
                         for (slot, reg) in named.iter() {
@@ -2546,24 +2441,148 @@ impl<'m> Vm<'m> {
                                 release(old);
                             }
                         }
-                        let missing: Vec<&str> = shape
-                            .fields
-                            .iter()
-                            .zip(&slots)
-                            .filter(|(_, slot)| slot.is_none())
-                            .map(|(name, _)| name.as_str())
-                            .collect();
+                        // A slot still unset after spread + named is filled from its field default
+                        // (slice 5), run in global scope (empty upvalues — a default resolves globals
+                        // only). A slot with neither a value nor a default violates the
+                        // full-initialization guarantee (E0009).
+                        let mut missing: Vec<String> = Vec::new();
+                        for i in 0..shape.fields.len() {
+                            if slots[i].is_some() {
+                                continue;
+                            }
+                            let field = shape.fields[i].clone();
+                            if let Some(&proto) = self
+                                .field_defaults
+                                .get(&(shape.name.clone(), field.clone()))
+                            {
+                                match self.run_thunk(proto, &[]) {
+                                    Ok(value) => slots[i] = Some(value),
+                                    Err(abort) => {
+                                        for slot in slots.into_iter().flatten() {
+                                            release(slot);
+                                        }
+                                        return Err(abort);
+                                    }
+                                }
+                            } else {
+                                missing.push(field);
+                            }
+                        }
                         if !missing.is_empty() {
                             for slot in slots.into_iter().flatten() {
                                 release(slot);
                             }
-                            release(base_val);
                             let list = missing
                                 .iter()
                                 .map(|name| format!("`{name}`"))
                                 .collect::<Vec<_>>()
                                 .join(", ");
                             return Err(self.error(
+                            DiagnosticCode::MissingField,
+                            *span,
+                            format!(
+                                "missing field(s) {list} in `{}` literal — every field must be set",
+                                shape.name
+                            ),
+                        ));
+                        }
+                        let slots = slots.into_iter().map(Option::unwrap).collect();
+                        let object = Value::object(shape, slots);
+                        // Stamp the reflected type onto a generic instantiation (R2) so `type_of` recovers
+                        // its type arguments after a `dyn` launder. The object's type is invariant under
+                        // field mutation, so — unlike the collection tags — it is never cleared.
+                        if let Some(idx) = reflect {
+                            object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                        }
+                        set_reg(regs, fbase, *dst, object);
+                        pc += 1;
+                    }
+                    Op::MakeStructInPlace {
+                        dst,
+                        shape,
+                        named,
+                        base,
+                        check,
+                        reflect,
+                        span,
+                    } => {
+                        let shape = self.shapes[*shape as usize].clone();
+                        // The base is consumed: take its single reference out of the register without
+                        // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
+                        // below still counts the accumulator's reference and a `dst == base` store is
+                        // safe (the old occupant is now `unit`).
+                        let base_val = regs[fbase + *base as usize];
+                        regs[fbase + *base as usize] = Value::unit();
+                        let same_shape = base_val.object_shape_ptr() == Some(Rc::as_ptr(&shape));
+                        let reuse = match check {
+                            ReuseCheck::Static => {
+                                // The linearity analysis proved sole ownership, so the **refcount** check
+                                // is elided — this is the compile-time-hoisted uniqueness path. The debug
+                                // assertion documents (and, in debug builds, guards) that invariant; a
+                                // failure means the analysis is wrong. The shape is still guarded (a
+                                // well-typed self-update always matches, but a mismatch must fall back to
+                                // copy rather than corrupt the object at the wrong slot layout).
+                                debug_assert!(
+                                    base_val.refcount() == 1,
+                                    "static record reuse requires a uniquely-owned base"
+                                );
+                                same_shape
+                            }
+                            ReuseCheck::Runtime => same_shape && base_val.refcount() == 1,
+                        };
+                        if reuse {
+                            // Reuse the allocation: overwrite only the changed slots. Every unchanged
+                            // field keeps base's reference, which transfers into the result — base *is*
+                            // the result. The displaced old field value is routed through `release_value`
+                            // (not a plain free) so its `destruct` fires at the right time — matching the
+                            // copy-and-destroy baseline, which would destroy the old base and its fields
+                            // (spec §4/§5). The reuse pass guarantees `base`'s own type has no destructor,
+                            // so reuse never skips a container destructor.
+                            for (slot, reg) in named.iter() {
+                                let v = regs[fbase + *reg as usize];
+                                let old = base_val.replace_slot(*slot as usize, v);
+                                self.release_value(old);
+                            }
+                            // Reuse keeps the base node's existing reflected type (R2): a self-update
+                            // rebuilds a value of the same (generic) type, so the base's tag already carries
+                            // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
+                            set_reg(regs, fbase, *dst, base_val);
+                            pc += 1;
+                        } else {
+                            // Aliased or a different shape: build a fresh object exactly like
+                            // `MakeStruct` (spreading base's fields), then release the consumed base.
+                            let mut slots: Vec<Option<Value>> = vec![None; shape.fields.len()];
+                            for (i, field) in shape.fields.iter().enumerate() {
+                                if let Some(value) = base_val.field(field) {
+                                    retain(value);
+                                    slots[i] = Some(value);
+                                }
+                            }
+                            for (slot, reg) in named.iter() {
+                                let value = regs[fbase + *reg as usize];
+                                retain(value);
+                                if let Some(old) = slots[*slot as usize].replace(value) {
+                                    release(old);
+                                }
+                            }
+                            let missing: Vec<&str> = shape
+                                .fields
+                                .iter()
+                                .zip(&slots)
+                                .filter(|(_, slot)| slot.is_none())
+                                .map(|(name, _)| name.as_str())
+                                .collect();
+                            if !missing.is_empty() {
+                                for slot in slots.into_iter().flatten() {
+                                    release(slot);
+                                }
+                                release(base_val);
+                                let list = missing
+                                    .iter()
+                                    .map(|name| format!("`{name}`"))
+                                    .collect::<Vec<_>>()
+                                    .join(", ");
+                                return Err(self.error(
                                 DiagnosticCode::MissingField,
                                 *span,
                                 format!(
@@ -2571,1179 +2590,1195 @@ impl<'m> Vm<'m> {
                                     shape.name
                                 ),
                             ));
+                            }
+                            let slots = slots.into_iter().map(Option::unwrap).collect();
+                            release(base_val);
+                            let object = Value::object(shape, slots);
+                            if let Some(idx) = reflect {
+                                object
+                                    .set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
+                            }
+                            set_reg(regs, fbase, *dst, object);
+                            pc += 1;
                         }
-                        let slots = slots.into_iter().map(Option::unwrap).collect();
-                        release(base_val);
-                        let object = Value::object(shape, slots);
-                        if let Some(idx) = reflect {
-                            object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
-                        }
-                        set_reg(regs, fbase, *dst, object);
-                        pc += 1;
                     }
-                }
-                Op::MakeOpaque {
-                    dst,
-                    type_name,
-                    keys,
-                    spread,
-                } => {
-                    // An opaque object's shape is built from its (spread ∪ named) keys in sorted
-                    // order, so its display matches the tree-walker's `BTreeMap` field bag.
-                    let mut bag: BTreeMap<String, Value> = BTreeMap::new();
-                    if let Some(base_reg) = spread
-                        && let Some(base) = regs[fbase + *base_reg as usize].shape()
-                    {
-                        let base_val = regs[fbase + *base_reg as usize];
-                        for (i, field) in base.fields.iter().enumerate() {
-                            let value = base_val.slots().unwrap()[i];
+                    Op::MakeOpaque {
+                        dst,
+                        type_name,
+                        keys,
+                        spread,
+                    } => {
+                        // An opaque object's shape is built from its (spread ∪ named) keys in sorted
+                        // order, so its display matches the tree-walker's `BTreeMap` field bag.
+                        let mut bag: BTreeMap<String, Value> = BTreeMap::new();
+                        if let Some(base_reg) = spread
+                            && let Some(base) = regs[fbase + *base_reg as usize].shape()
+                        {
+                            let base_val = regs[fbase + *base_reg as usize];
+                            for (i, field) in base.fields.iter().enumerate() {
+                                let value = base_val.slots().unwrap()[i];
+                                retain(value);
+                                if let Some(old) = bag.insert(field.clone(), value) {
+                                    release(old);
+                                }
+                            }
+                        }
+                        for (key, reg) in keys.iter() {
+                            let value = regs[fbase + *reg as usize];
                             retain(value);
-                            if let Some(old) = bag.insert(field.clone(), value) {
+                            if let Some(old) = bag.insert(key.clone(), value) {
                                 release(old);
                             }
                         }
+                        let fields: Vec<String> = bag.keys().cloned().collect();
+                        let slots: Vec<Value> = bag.into_values().collect();
+                        let shape =
+                            Rc::new(Shape::object(ShapeKind::Opaque, type_name.clone(), fields));
+                        set_reg(regs, fbase, *dst, Value::object(shape, slots));
+                        pc += 1;
                     }
-                    for (key, reg) in keys.iter() {
-                        let value = regs[fbase + *reg as usize];
-                        retain(value);
-                        if let Some(old) = bag.insert(key.clone(), value) {
-                            release(old);
+                    Op::MakeEnum {
+                        dst,
+                        shape,
+                        args,
+                        reflect,
+                    } => {
+                        let shape = self.shapes[*shape as usize].clone();
+                        let mut data = Vec::with_capacity(args.len());
+                        for &r in args.iter() {
+                            let v = regs[fbase + r as usize];
+                            retain(v);
+                            data.push(v);
                         }
-                    }
-                    let fields: Vec<String> = bag.keys().cloned().collect();
-                    let slots: Vec<Value> = bag.into_values().collect();
-                    let shape =
-                        Rc::new(Shape::object(ShapeKind::Opaque, type_name.clone(), fields));
-                    set_reg(regs, fbase, *dst, Value::object(shape, slots));
-                    pc += 1;
-                }
-                Op::MakeEnum {
-                    dst,
-                    shape,
-                    args,
-                    reflect,
-                } => {
-                    let shape = self.shapes[*shape as usize].clone();
-                    let mut data = Vec::with_capacity(args.len());
-                    for &r in args.iter() {
-                        let v = regs[fbase + r as usize];
-                        retain(v);
-                        data.push(v);
-                    }
-                    let value = Value::enum_value(shape, data);
-                    // Stamp the reflected type onto a generic enum-variant construction (R2b.2) so
-                    // `type_of` recovers its type arguments after a `dyn` launder. Like an object's tag,
-                    // an enum value's type is invariant, so it is never cleared.
-                    if let Some(idx) = reflect {
-                        value.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
-                    }
-                    set_reg(regs, fbase, *dst, value);
-                    pc += 1;
-                }
-                Op::EnumFromStr {
-                    dst,
-                    arg,
-                    enum_name,
-                    cases,
-                    some_shape,
-                    none_shape,
-                    panic,
-                    span,
-                } => {
-                    let key = match regs[fbase + *arg as usize].as_string() {
-                        Some(s) => s,
-                        None => {
-                            let kind = if *panic { "from" } else { "try_from" };
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "`{enum_name}.{kind}` expects a string, found {}",
-                                    regs[fbase + *arg as usize].type_name()
-                                ),
-                            ));
+                        let value = Value::enum_value(shape, data);
+                        // Stamp the reflected type onto a generic enum-variant construction (R2b.2) so
+                        // `type_of` recovers its type arguments after a `dyn` launder. Like an object's tag,
+                        // an enum value's type is invariant, so it is never cleared.
+                        if let Some(idx) = reflect {
+                            value.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                         }
-                    };
-                    let matched = cases.iter().find(|(name, _)| *name == key);
-                    let result = match matched {
-                        Some((_, shape_idx)) => {
-                            // Build the payload-free case; its single reference transfers onward.
-                            let shape = self.shapes[*shape_idx as usize].clone();
-                            let case = Value::enum_value(shape, Vec::new());
-                            if *panic {
-                                case
-                            } else {
-                                let some = self.shapes[*some_shape as usize].clone();
-                                Value::enum_value(some, vec![case])
+                        set_reg(regs, fbase, *dst, value);
+                        pc += 1;
+                    }
+                    Op::EnumFromStr {
+                        dst,
+                        arg,
+                        enum_name,
+                        cases,
+                        some_shape,
+                        none_shape,
+                        panic,
+                        span,
+                    } => {
+                        let key = match regs[fbase + *arg as usize].as_string() {
+                            Some(s) => s,
+                            None => {
+                                let kind = if *panic { "from" } else { "try_from" };
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "`{enum_name}.{kind}` expects a string, found {}",
+                                        regs[fbase + *arg as usize].type_name()
+                                    ),
+                                ));
+                            }
+                        };
+                        let matched = cases.iter().find(|(name, _)| *name == key);
+                        let result = match matched {
+                            Some((_, shape_idx)) => {
+                                // Build the payload-free case; its single reference transfers onward.
+                                let shape = self.shapes[*shape_idx as usize].clone();
+                                let case = Value::enum_value(shape, Vec::new());
+                                if *panic {
+                                    case
+                                } else {
+                                    let some = self.shapes[*some_shape as usize].clone();
+                                    Value::enum_value(some, vec![case])
+                                }
+                            }
+                            None if *panic => {
+                                return Err(self.error(
+                                    DiagnosticCode::Panic,
+                                    *span,
+                                    format!("panic: `{enum_name}` has no case `{key}`"),
+                                ));
+                            }
+                            None => {
+                                let none = self.shapes[*none_shape as usize].clone();
+                                Value::enum_value(none, Vec::new())
+                            }
+                        };
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::LoadField {
+                        dst,
+                        obj,
+                        field,
+                        span,
+                        cache,
+                    } => {
+                        let v = regs[fbase + *obj as usize];
+                        // Inline cache: a hit (the receiver's shape pointer matches the cached one) reads
+                        // the memoized slot directly; a miss resolves `slot_of` and refreshes the cache.
+                        // The hit check returns an owned slot so the `&caches[ci]` borrow ends before the
+                        // miss path mutates the same entry.
+                        let ci = *cache as usize;
+                        let hit = match &caches[ci] {
+                            Some((cs, slot)) if v.object_shape_ptr() == Some(Rc::as_ptr(cs)) => {
+                                Some(*slot as usize)
+                            }
+                            _ => None,
+                        };
+                        let cached_slot = match hit {
+                            Some(slot) => Some(slot),
+                            None => match v.shape() {
+                                Some(sh) => sh.slot_of(field).inspect(|&s| {
+                                    caches[ci] = Some((sh.clone(), s as u32));
+                                }),
+                                None => None,
+                            },
+                        };
+                        match cached_slot.and_then(|s| v.slot_at(s)) {
+                            Some(value) => {
+                                retain(value);
+                                set_reg(regs, fbase, *dst, value);
+                                pc += 1;
+                            }
+                            None if v.is_object() => {
+                                return Err(self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!(
+                                        "type `{}` has no field `{field}`",
+                                        v.shape().unwrap().name
+                                    ),
+                                ));
+                            }
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!("no field `{field}` on {}", v.type_name()),
+                                ));
                             }
                         }
-                        None if *panic => {
-                            return Err(self.error(
-                                DiagnosticCode::Panic,
-                                *span,
-                                format!("panic: `{enum_name}` has no case `{key}`"),
-                            ));
-                        }
-                        None => {
-                            let none = self.shapes[*none_shape as usize].clone();
-                            Value::enum_value(none, Vec::new())
-                        }
-                    };
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::LoadField {
-                    dst,
-                    obj,
-                    field,
-                    span,
-                    cache,
-                } => {
-                    let v = regs[fbase + *obj as usize];
-                    // Inline cache: a hit (the receiver's shape pointer matches the cached one) reads
-                    // the memoized slot directly; a miss resolves `slot_of` and refreshes the cache.
-                    // The hit check returns an owned slot so the `&caches[ci]` borrow ends before the
-                    // miss path mutates the same entry.
-                    let ci = *cache as usize;
-                    let hit = match &caches[ci] {
-                        Some((cs, slot)) if v.object_shape_ptr() == Some(Rc::as_ptr(cs)) => {
-                            Some(*slot as usize)
-                        }
-                        _ => None,
-                    };
-                    let cached_slot = match hit {
-                        Some(slot) => Some(slot),
-                        None => match v.shape() {
-                            Some(sh) => sh.slot_of(field).inspect(|&s| {
-                                caches[ci] = Some((sh.clone(), s as u32));
-                            }),
-                            None => None,
-                        },
-                    };
-                    match cached_slot.and_then(|s| v.slot_at(s)) {
-                        Some(value) => {
-                            retain(value);
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                        }
-                        None if v.is_object() => {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!(
-                                    "type `{}` has no field `{field}`",
-                                    v.shape().unwrap().name
-                                ),
-                            ));
-                        }
-                        None => {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!("no field `{field}` on {}", v.type_name()),
-                            ));
-                        }
                     }
-                }
-                Op::SetField {
-                    dst,
-                    obj,
-                    field,
-                    value,
-                    reuse,
-                    span,
-                } => {
-                    let v = regs[fbase + *obj as usize];
-                    let val = regs[fbase + *value as usize];
-                    let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
-                        return Err(self.error(
-                            DiagnosticCode::UnknownName,
-                            *span,
-                            if v.is_object() {
-                                format!("type `{}` has no field `{field}`", v.shape().unwrap().name)
-                            } else {
-                                format!("cannot assign field `{field}` on {}", v.type_name())
-                            },
-                        ));
-                    };
-                    // A reference `class` mutates the shared instance **in place**, regardless of
-                    // refcount or the reuse flag — the change must be visible through every alias
-                    // (object-model slice 2b). A value `struct` keeps copy-on-write below.
-                    let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
-                    if is_class {
-                        let old = v.replace_slot(slot, val);
-                        self.release_value(old);
-                        if *reuse {
-                            // The receiver's reference moves into `dst` (its register cleared, as in
-                            // the struct path); the instance is unchanged-but-mutated.
-                            regs[fbase + *obj as usize] = Value::unit();
-                            set_reg(regs, fbase, *dst, v);
-                        } else {
-                            // The receiver register is untouched (a temp is dropped later by the
-                            // compiler-emitted `Drop`); `dst` takes its own counted reference.
-                            retain(v);
-                            set_reg(regs, fbase, *dst, v);
-                        }
-                    } else if *reuse {
-                        // The receiver's sole reference moves into this op (its register cleared, like
-                        // the map/struct in-place paths), so the `refcount == 1` check below sees the
-                        // accumulator's reference and a `dst == obj` store is safe.
-                        regs[fbase + *obj as usize] = Value::unit();
-                        if v.refcount() == 1 {
-                            // Unique: overwrite the slot in place (`replace_slot` retains the new
-                            // value); the displaced old value's `destruct` fires now (spec §5).
+                    Op::SetField {
+                        dst,
+                        obj,
+                        field,
+                        value,
+                        reuse,
+                        span,
+                    } => {
+                        let v = regs[fbase + *obj as usize];
+                        let val = regs[fbase + *value as usize];
+                        let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                if v.is_object() {
+                                    format!(
+                                        "type `{}` has no field `{field}`",
+                                        v.shape().unwrap().name
+                                    )
+                                } else {
+                                    format!("cannot assign field `{field}` on {}", v.type_name())
+                                },
+                            ));
+                        };
+                        // A reference `class` mutates the shared instance **in place**, regardless of
+                        // refcount or the reuse flag — the change must be visible through every alias
+                        // (object-model slice 2b). A value `struct` keeps copy-on-write below.
+                        let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
+                        if is_class {
                             let old = v.replace_slot(slot, val);
                             self.release_value(old);
-                            set_reg(regs, fbase, *dst, v);
+                            if *reuse {
+                                // The receiver's reference moves into `dst` (its register cleared, as in
+                                // the struct path); the instance is unchanged-but-mutated.
+                                regs[fbase + *obj as usize] = Value::unit();
+                                set_reg(regs, fbase, *dst, v);
+                            } else {
+                                // The receiver register is untouched (a temp is dropped later by the
+                                // compiler-emitted `Drop`); `dst` takes its own counted reference.
+                                retain(v);
+                                set_reg(regs, fbase, *dst, v);
+                            }
+                        } else if *reuse {
+                            // The receiver's sole reference moves into this op (its register cleared, like
+                            // the map/struct in-place paths), so the `refcount == 1` check below sees the
+                            // accumulator's reference and a `dst == obj` store is safe.
+                            regs[fbase + *obj as usize] = Value::unit();
+                            if v.refcount() == 1 {
+                                // Unique: overwrite the slot in place (`replace_slot` retains the new
+                                // value); the displaced old value's `destruct` fires now (spec §5).
+                                let old = v.replace_slot(slot, val);
+                                self.release_value(old);
+                                set_reg(regs, fbase, *dst, v);
+                            } else {
+                                // Aliased: copy with the field replaced, preserving the alias's view, then
+                                // release the consumed receiver reference.
+                                let new = object_copy_with_slot(v, slot, val);
+                                release(v);
+                                set_reg(regs, fbase, *dst, new);
+                            }
                         } else {
-                            // Aliased: copy with the field replaced, preserving the alias's view, then
-                            // release the consumed receiver reference.
+                            // Unmarked: a functional update — copy with the field replaced, the receiver
+                            // register untouched (a temp receiver is dropped by the compiler-emitted Drop).
                             let new = object_copy_with_slot(v, slot, val);
-                            release(v);
                             set_reg(regs, fbase, *dst, new);
                         }
-                    } else {
-                        // Unmarked: a functional update — copy with the field replaced, the receiver
-                        // register untouched (a temp receiver is dropped by the compiler-emitted Drop).
-                        let new = object_copy_with_slot(v, slot, val);
-                        set_reg(regs, fbase, *dst, new);
+                        pc += 1;
                     }
-                    pc += 1;
-                }
-                Op::NextId { dst } => {
-                    let id = self.next_id;
-                    self.next_id += 1;
-                    set_reg(regs, fbase, *dst, Value::int(id as i64));
-                    pc += 1;
-                }
-                Op::Panic { msg, span } => {
-                    let message = regs[fbase + *msg as usize].display();
-                    return Err(self.error(
-                        DiagnosticCode::Panic,
-                        *span,
-                        format!("panic: {message}"),
-                    ));
-                }
-                Op::TryUnwrap {
-                    dst,
-                    src,
-                    on_error,
-                    span,
-                } => {
-                    let v = regs[fbase + *src as usize];
-                    match try_classify(v) {
-                        Some(TryOutcome::Success(inner)) => {
-                            retain(inner);
-                            set_reg(regs, fbase, *dst, inner);
-                            pc += 1;
-                        }
-                        // `Err(_)`/`none`: early-return the whole value from this frame, exactly
-                        // as `Op::Return` does (the M0 `Unwind::Return`).
-                        Some(TryOutcome::Empty) => {
-                            retain(v);
-                            // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
-                            // destructor-relevant ones fire `destruct`, in the drop pass's order. Each
-                            // is cleared to `unit`, so the teardown release below never double-frees.
-                            for (reg, relevant) in on_error.iter() {
-                                let dv = std::mem::replace(
-                                    &mut regs[fbase + *reg as usize],
-                                    Value::unit(),
-                                );
-                                if *relevant {
-                                    self.release_value(dv);
-                                } else {
-                                    release(dv);
-                                }
-                            }
-                            let finished = frames.pop().unwrap();
-                            let n = module.protos[finished.proto as usize].num_registers as usize;
-                            for i in 0..n {
-                                release(regs[finished.base + i]);
-                            }
-                            for u in &finished.upvalues {
-                                release(*u);
-                            }
-                            regs.truncate(finished.base);
-                            // Apply the frame's return transform on every exit path, for the same
-                            // reason `Op::Return` does (a short-circuiting `?` is an early return);
-                            // release the original if the transform replaced it.
-                            let (out, replaced) = finished.ret_transform.apply(v);
-                            if replaced {
-                                release(v);
-                            }
-                            match frames.last() {
-                                Some(caller) => {
-                                    let idx = caller.base + finished.ret_dst as usize;
-                                    let old = regs[idx];
-                                    regs[idx] = out;
-                                    release(old);
-                                }
-                                None => return Ok(out),
-                            }
-                            // `?` short-circuits like an early return — re-derive the caller's window.
-                            reload!(frames, module, top, fbase, chunk, pc);
-                        }
-                        None => {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "`?` expects a `Result` or `Option`, found {}",
-                                    v.type_name()
-                                ),
-                            ));
-                        }
+                    Op::NextId { dst } => {
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        set_reg(regs, fbase, *dst, Value::int(id as i64));
+                        pc += 1;
                     }
-                }
-                Op::Coalesce {
-                    dst,
-                    src,
-                    fallback,
-                    span,
-                } => {
-                    let v = regs[fbase + *src as usize];
-                    match try_classify(v) {
-                        Some(TryOutcome::Success(inner)) => {
-                            retain(inner);
-                            set_reg(regs, fbase, *dst, inner);
-                            pc += 1;
-                        }
-                        // Empty: jump to the fallback expression (which writes `dst`).
-                        Some(TryOutcome::Empty) => pc = *fallback as usize,
-                        None => {
-                            return Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                *span,
-                                format!(
-                                    "`??` expects a `Result` or `Option` on the left, found {}",
-                                    v.type_name()
-                                ),
-                            ));
-                        }
-                    }
-                }
-                Op::Narrow {
-                    dst,
-                    src,
-                    target,
-                    some_shape,
-                    none_shape,
-                } => {
-                    let v = regs[fbase + *src as usize];
-                    let result = if narrow_matches(v, target) {
-                        retain(v);
-                        let shape = self.shapes[*some_shape as usize].clone();
-                        Value::enum_value(shape, vec![v])
-                    } else {
-                        let shape = self.shapes[*none_shape as usize].clone();
-                        Value::enum_value(shape, Vec::new())
-                    };
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::IsType { dst, src, target } => {
-                    let v = regs[fbase + *src as usize];
-                    let result = Value::bool(narrow_matches(v, target));
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::MakeGen { dst, src } => {
-                    // Wrap the step closure into a generator iterator (Track G.1b). `iter_gen` retains
-                    // its own reference to the closure; the source register's reference is released by
-                    // the register's normal end-of-life (exactly as `Op::Narrow` retains its payload).
-                    let step = regs[fbase + *src as usize];
-                    let result = Value::iter_gen(step);
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::MakeFuture { dst, src } => {
-                    // Wrap the lazy thunk closure into a future (Track A.1). `make_future` retains its
-                    // own reference to the closure; the source register's reference is released by the
-                    // register's normal end-of-life (like `Op::MakeGen`).
-                    let thunk = regs[fbase + *src as usize];
-                    let result = Value::make_future(thunk);
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::RunFuture { dst, src, span } => {
-                    // Drive an awaited future to completion (Track A.2/A.3 top-level). See
-                    // `drive_future`: poll; on pending advance the clock and re-poll. The source
-                    // register keeps owning the future; `drive_future` returns an owned result.
-                    let future = regs[fbase + *src as usize];
-                    let value = self.drive_future(future, *span)?;
-                    set_reg(regs, fbase, *dst, value);
-                    pc += 1;
-                }
-                Op::PollFuture { dst, src, span } => {
-                    // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if
-                    // pending. The source register keeps owning the future.
-                    let future = regs[fbase + *src as usize];
-                    let result = match self.poll_once(future, *span)? {
-                        Poll::Ready(value) => make_some(value),
-                        Poll::Pending => make_none(),
-                    };
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::LoadPending { dst } => {
-                    // The async pending sentinel (Track A.3) — what a step returns when it suspends.
-                    set_reg(regs, fbase, *dst, Value::pending());
-                    pc += 1;
-                }
-                Op::ScopeBegin => {
-                    // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
-                    self.scopes.push(Vec::new());
-                    pc += 1;
-                }
-                Op::Spawn { dst, src, .. } => {
-                    // Register the future as a task in the current scope (retaining the scope's own
-                    // reference), yielding a handle that references it by `(scope, task)`. A `spawn`
-                    // outside any scope is E0041 at check, so `self.scopes` is non-empty here.
-                    let future = regs[fbase + *src as usize];
-                    let handle = if self.scopes.is_empty() {
-                        retain(future);
-                        future
-                    } else {
-                        retain(future);
-                        let scope_idx = self.scopes.len() - 1;
-                        let task_idx = self.scopes[scope_idx].len();
-                        self.scopes[scope_idx].push(Task {
-                            future,
-                            result: None,
-                            cancelled: false,
-                        });
-                        Value::make_handle(
-                            ScopeId::from_index(scope_idx),
-                            TaskId::from_index(task_idx),
-                        )
-                    };
-                    set_reg(regs, fbase, *dst, handle);
-                    pc += 1;
-                }
-                Op::SpawnIsolate {
-                    dst,
-                    callee,
-                    args,
-                    span,
-                } => {
-                    // `isolate f(args)` (I.4b). Only the CLI's real (VM) path emits this op; the
-                    // differential/salsa sandbox lowers `isolate` to `Call`+`Spawn`, so it is never
-                    // reached in-oracle. Runs on a real OS thread when the VM is parallel and no
-                    // argument ships a channel; otherwise falls back to a cooperative task (so a
-                    // non-parallel VM — `@test`/`bench` — and channel-shipping isolates never regress).
-                    let callee_val = regs[fbase + *callee as usize];
-                    let arg_vals: Vec<Value> =
-                        args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                    let handle = self.spawn_isolate(callee_val, &arg_vals, *span)?;
-                    set_reg(regs, fbase, *dst, handle);
-                    pc += 1;
-                }
-                Op::ScopeEnd { span } => {
-                    // Join the scope (drive every task to completion), then pop it and release the
-                    // tasks' owned futures and results.
-                    self.join_scope(*span)?;
-                    if let Some(scope) = self.scopes.pop() {
-                        for task in scope {
-                            release(task.future);
-                            if let Some(result) = task.result {
-                                release(result);
-                            }
-                        }
-                    }
-                    pc += 1;
-                }
-                Op::MakeChannel {
-                    dst,
-                    capacity,
-                    span,
-                } => {
-                    // Create a bounded channel and yield its `(Sender, Receiver)` endpoint tuple
-                    // (isolates I.1). The message type is checker-only; only the capacity reaches here.
-                    let cap = regs[fbase + *capacity as usize];
-                    let Some(cap) = cap.as_int() else {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!(
-                                "`channel` expects an int capacity, found {}",
-                                cap.type_name()
-                            ),
-                        ));
-                    };
-                    if cap < 0 {
+                    Op::Panic { msg, span } => {
+                        let message = regs[fbase + *msg as usize].display();
                         return Err(self.error(
                             DiagnosticCode::Panic,
                             *span,
-                            format!("`channel` capacity must be non-negative, found {cap}"),
+                            format!("panic: {message}"),
                         ));
                     }
-                    let id = ChannelId::from_index(self.channels.len());
-                    // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
-                    // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
-                    // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
-                    let channel = if self.parallel_isolates {
-                        Channel::Shared(isolate::ChannelCore::new(cap as usize))
-                    } else {
-                        Channel::Local {
-                            buffer: std::collections::VecDeque::new(),
-                            capacity: cap as usize,
-                            closed: false,
-                        }
-                    };
-                    self.channels.push(channel);
-                    // The two endpoints are fresh (refcount 1); `Value::tuple` takes ownership of
-                    // exactly those references, so no extra retain is needed.
-                    let tuple =
-                        Value::tuple(vec![Value::make_sender(id), Value::make_receiver(id)]);
-                    set_reg(regs, fbase, *dst, tuple);
-                    pc += 1;
-                }
-                Op::AttributesOf { dst, type_name } => {
-                    let result = self.materialize_attributes(type_name);
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::RolesOf { dst } => {
-                    let result = self.materialize_roles();
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::TypeOf { dst, src } => {
-                    let repr = vm_type_repr(&regs[fbase + *src as usize]);
-                    let result = build_type_value(&repr);
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::TypeOfStatic { dst, repr } => {
-                    let result = build_type_value(repr);
-                    set_reg(regs, fbase, *dst, result);
-                    pc += 1;
-                }
-                Op::TypeValue { dst, name } => {
-                    // A bare type name used as a value (an `invoke` receiver) materializes as the
-                    // reflection `Type` ADT — the one representation of "a type as a value", shared
-                    // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
-                    // named type via `reflection_type_name`.
-                    let value = build_type_value(&module.reflection.type_ref_repr(name));
-                    set_reg(regs, fbase, *dst, value);
-                    pc += 1;
-                }
-                Op::Invoke {
-                    dst,
-                    recv,
-                    name,
-                    args,
-                    ok_shape,
-                    err_shape,
-                    ..
-                } => {
-                    let recv_val = regs[fbase + *recv as usize];
-                    let name_val = regs[fbase + *name as usize];
-                    let args_val = regs[fbase + *args as usize];
-                    // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
-                    // the duration of the dispatch, then released after the call frame is built (its
-                    // elements retained into it). `arg_items` below borrows from this temporary.
-                    let mut args_to_release: Option<Value> = None;
-                    // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
-                    // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
-                    // non-list args, non-invokable receiver, unknown name, arity mismatch — is a
-                    // runtime `Err`, never an abort (only a panic *inside* the called body aborts).
-                    let outcome: Result<(u32, bool, Vec<Value>), String> = 'resolve: {
-                        let Some(method) = name_val.as_string() else {
-                            break 'resolve Err(format!(
-                                "invoke name must be a string, found {}",
-                                name_val.type_name()
-                            ));
-                        };
-                        if !args_val.is_list() {
-                            break 'resolve Err(format!(
-                                "invoke args must be a list, found {}",
-                                args_val.type_name()
-                            ));
-                        }
-                        let args_list = args_val.realize_list();
-                        args_to_release = Some(args_list);
-                        let arg_items = args_list.list_items().expect("checked is_list");
-                        // A type handle dispatches an associated function (no receiver); an object
-                        // dispatches an instance method (receiver in register 0). A reflection `Type`
-                        // value (a stored type-ref) names the type for an associated call too.
-                        let (type_name, is_assoc) = if recv_val.is_object() {
-                            (recv_val.shape().unwrap().name.clone(), false)
-                        } else if let Some(tn) = reflection_type_name(recv_val) {
-                            (tn, true)
-                        } else {
-                            break 'resolve Err(format!(
-                                "cannot invoke on a value of type `{}`",
-                                recv_val.type_name()
-                            ));
-                        };
-                        let kind = if is_assoc {
-                            "associated function"
-                        } else {
-                            "method"
-                        };
-                        let Some(&proto) = self.methods.get(&(type_name.clone(), method.clone()))
-                        else {
-                            break 'resolve Err(format!(
-                                "type `{type_name}` has no {kind} `{method}`"
-                            ));
-                        };
-                        // The prototype reserves register 0 for `self` (unit for an associated
-                        // call), so its declared arity is one more than the supplied args; trailing
-                        // defaults widen the accepted range, exactly as `Op::CallMethod`.
-                        let callee_chunk = &module.protos[proto as usize];
-                        let total = callee_chunk.num_params as usize - 1;
-                        let required = total - callee_chunk.defaults.len();
-                        if arg_items.len() < required || arg_items.len() > total {
-                            break 'resolve Err(arity_message(
-                                kind,
-                                required,
-                                total,
-                                arg_items.len(),
-                            ));
-                        }
-                        Ok((proto, is_assoc, arg_items))
-                    };
-                    match outcome {
-                        Err(message) => {
-                            let shape = self.shapes[*err_shape as usize].clone();
-                            let err = Value::enum_value(shape, vec![Value::string(&message)]);
-                            set_reg(regs, fbase, *dst, err);
-                            pc += 1;
-                        }
-                        Ok((proto, is_assoc, arg_items)) => {
-                            let callee_chunk = &module.protos[proto as usize];
-                            let num_registers = callee_chunk.num_registers as usize;
-                            let defaults = callee_chunk.defaults.clone();
-                            let new_base = reserve_window(regs, num_registers);
-                            // An associated call leaves register 0 as unit (no receiver); an instance
-                            // call places the retained receiver there.
-                            if !is_assoc {
-                                retain(recv_val);
-                                regs[new_base] = recv_val;
+                    Op::TryUnwrap {
+                        dst,
+                        src,
+                        on_error,
+                        span,
+                    } => {
+                        let v = regs[fbase + *src as usize];
+                        match try_classify(v) {
+                            Some(TryOutcome::Success(inner)) => {
+                                retain(inner);
+                                set_reg(regs, fbase, *dst, inner);
+                                pc += 1;
                             }
-                            for (i, &arg) in arg_items.iter().enumerate() {
-                                retain(arg);
-                                regs[new_base + i + 1] = arg;
+                            // `Err(_)`/`none`: early-return the whole value from this frame, exactly
+                            // as `Op::Return` does (the M0 `Unwind::Return`).
+                            Some(TryOutcome::Empty) => {
+                                retain(v);
+                                // Drop the frame locals this `?` abandons before unwinding (Phase 4.2c) —
+                                // destructor-relevant ones fire `destruct`, in the drop pass's order. Each
+                                // is cleared to `unit`, so the teardown release below never double-frees.
+                                for (reg, relevant) in on_error.iter() {
+                                    let dv = std::mem::replace(
+                                        &mut regs[fbase + *reg as usize],
+                                        Value::unit(),
+                                    );
+                                    if *relevant {
+                                        self.release_value(dv);
+                                    } else {
+                                        release(dv);
+                                    }
+                                }
+                                let finished = frames.pop().unwrap();
+                                let n =
+                                    module.protos[finished.proto as usize].num_registers as usize;
+                                for i in 0..n {
+                                    release(regs[finished.base + i]);
+                                }
+                                for u in &finished.upvalues {
+                                    release(*u);
+                                }
+                                regs.truncate(finished.base);
+                                // Apply the frame's return transform on every exit path, for the same
+                                // reason `Op::Return` does (a short-circuiting `?` is an early return);
+                                // release the original if the transform replaced it.
+                                let (out, replaced) = finished.ret_transform.apply(v);
+                                if replaced {
+                                    release(v);
+                                }
+                                match frames.last() {
+                                    Some(caller) => {
+                                        let idx = caller.base + finished.ret_dst as usize;
+                                        let old = regs[idx];
+                                        regs[idx] = out;
+                                        release(old);
+                                    }
+                                    None => return Ok(out),
+                                }
+                                // `?` short-circuits like an early return — re-derive the caller's window.
+                                continue 'reload;
                             }
-                            // Fill any omitted trailing parameters from their default thunks (module
-                            // scope only, like a method frame).
-                            let filled = arg_items.len() + 1;
-                            for (reg, proto) in &defaults {
-                                if *reg as usize >= filled {
-                                    let value = self.run_thunk(*proto, &[])?;
-                                    regs[new_base + *reg as usize] = value;
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "`?` expects a `Result` or `Option`, found {}",
+                                        v.type_name()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    Op::Coalesce {
+                        dst,
+                        src,
+                        fallback,
+                        span,
+                    } => {
+                        let v = regs[fbase + *src as usize];
+                        match try_classify(v) {
+                            Some(TryOutcome::Success(inner)) => {
+                                retain(inner);
+                                set_reg(regs, fbase, *dst, inner);
+                                pc += 1;
+                            }
+                            // Empty: jump to the fallback expression (which writes `dst`).
+                            Some(TryOutcome::Empty) => pc = *fallback as usize,
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    *span,
+                                    format!(
+                                        "`??` expects a `Result` or `Option` on the left, found {}",
+                                        v.type_name()
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    Op::Narrow {
+                        dst,
+                        src,
+                        target,
+                        some_shape,
+                        none_shape,
+                    } => {
+                        let v = regs[fbase + *src as usize];
+                        let result = if narrow_matches(v, target) {
+                            retain(v);
+                            let shape = self.shapes[*some_shape as usize].clone();
+                            Value::enum_value(shape, vec![v])
+                        } else {
+                            let shape = self.shapes[*none_shape as usize].clone();
+                            Value::enum_value(shape, Vec::new())
+                        };
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::IsType { dst, src, target } => {
+                        let v = regs[fbase + *src as usize];
+                        let result = Value::bool(narrow_matches(v, target));
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::MakeGen { dst, src } => {
+                        // Wrap the step closure into a generator iterator (Track G.1b). `iter_gen` retains
+                        // its own reference to the closure; the source register's reference is released by
+                        // the register's normal end-of-life (exactly as `Op::Narrow` retains its payload).
+                        let step = regs[fbase + *src as usize];
+                        let result = Value::iter_gen(step);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::MakeFuture { dst, src } => {
+                        // Wrap the lazy thunk closure into a future (Track A.1). `make_future` retains its
+                        // own reference to the closure; the source register's reference is released by the
+                        // register's normal end-of-life (like `Op::MakeGen`).
+                        let thunk = regs[fbase + *src as usize];
+                        let result = Value::make_future(thunk);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::RunFuture { dst, src, span } => {
+                        // Drive an awaited future to completion (Track A.2/A.3 top-level). See
+                        // `drive_future`: poll; on pending advance the clock and re-poll. The source
+                        // register keeps owning the future; `drive_future` returns an owned result.
+                        let future = regs[fbase + *src as usize];
+                        let value = self.drive_future(future, *span)?;
+                        set_reg(regs, fbase, *dst, value);
+                        pc += 1;
+                    }
+                    Op::PollFuture { dst, src, span } => {
+                        // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if
+                        // pending. The source register keeps owning the future.
+                        let future = regs[fbase + *src as usize];
+                        let result = match self.poll_once(future, *span)? {
+                            Poll::Ready(value) => make_some(value),
+                            Poll::Pending => make_none(),
+                        };
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::LoadPending { dst } => {
+                        // The async pending sentinel (Track A.3) — what a step returns when it suspends.
+                        set_reg(regs, fbase, *dst, Value::pending());
+                        pc += 1;
+                    }
+                    Op::ScopeBegin => {
+                        // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
+                        self.scopes.push(Vec::new());
+                        pc += 1;
+                    }
+                    Op::Spawn { dst, src, .. } => {
+                        // Register the future as a task in the current scope (retaining the scope's own
+                        // reference), yielding a handle that references it by `(scope, task)`. A `spawn`
+                        // outside any scope is E0041 at check, so `self.scopes` is non-empty here.
+                        let future = regs[fbase + *src as usize];
+                        let handle = if self.scopes.is_empty() {
+                            retain(future);
+                            future
+                        } else {
+                            retain(future);
+                            let scope_idx = self.scopes.len() - 1;
+                            let task_idx = self.scopes[scope_idx].len();
+                            self.scopes[scope_idx].push(Task {
+                                future,
+                                result: None,
+                                cancelled: false,
+                            });
+                            Value::make_handle(
+                                ScopeId::from_index(scope_idx),
+                                TaskId::from_index(task_idx),
+                            )
+                        };
+                        set_reg(regs, fbase, *dst, handle);
+                        pc += 1;
+                    }
+                    Op::SpawnIsolate {
+                        dst,
+                        callee,
+                        args,
+                        span,
+                    } => {
+                        // `isolate f(args)` (I.4b). Only the CLI's real (VM) path emits this op; the
+                        // differential/salsa sandbox lowers `isolate` to `Call`+`Spawn`, so it is never
+                        // reached in-oracle. Runs on a real OS thread when the VM is parallel and no
+                        // argument ships a channel; otherwise falls back to a cooperative task (so a
+                        // non-parallel VM — `@test`/`bench` — and channel-shipping isolates never regress).
+                        let callee_val = regs[fbase + *callee as usize];
+                        let arg_vals: Vec<Value> =
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                        let handle = self.spawn_isolate(callee_val, &arg_vals, *span)?;
+                        set_reg(regs, fbase, *dst, handle);
+                        pc += 1;
+                    }
+                    Op::ScopeEnd { span } => {
+                        // Join the scope (drive every task to completion), then pop it and release the
+                        // tasks' owned futures and results.
+                        self.join_scope(*span)?;
+                        if let Some(scope) = self.scopes.pop() {
+                            for task in scope {
+                                release(task.future);
+                                if let Some(result) = task.result {
+                                    release(result);
                                 }
                             }
-                            // The result is wrapped in `Result.Ok` as it lands in the caller, so the
-                            // invocation yields a `Result` whichever way the body returns.
-                            let ok = self.shapes[*ok_shape as usize].clone();
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
-                                proto,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::WrapOk(ok),
-                                upvalues: Vec::new(),
-                            });
-                            reload!(frames, module, top, fbase, chunk, pc);
                         }
-                    }
-                    // Release the temporary boxed args list (if the args were materialized from a
-                    // packed list); its elements were retained into the call frame above.
-                    if let Some(list) = args_to_release {
-                        list.release();
-                    }
-                }
-                Op::MatchInt { src, value, fail } => {
-                    if regs[fbase + *src as usize].as_int() == Some(*value) {
                         pc += 1;
-                    } else {
-                        pc = *fail as usize;
                     }
-                }
-                Op::MatchStr { src, value, fail } => {
-                    if regs[fbase + *src as usize].as_string().as_deref() == Some(value) {
-                        pc += 1;
-                    } else {
-                        pc = *fail as usize;
-                    }
-                }
-                Op::MatchBool { src, value, fail } => {
-                    if regs[fbase + *src as usize].as_bool() == Some(*value) {
-                        pc += 1;
-                    } else {
-                        pc = *fail as usize;
-                    }
-                }
-                Op::MatchVariant {
-                    src,
-                    type_name,
-                    variant,
-                    arity,
-                    fail,
-                } => {
-                    let v = regs[fbase + *src as usize];
-                    let matches = v.is_enum()
-                        && v.shape().is_some_and(|shape| {
-                            shape.variant.as_deref() == Some(variant)
-                                && type_name.as_ref().is_none_or(|t| &shape.name == t)
-                        })
-                        && v.enum_data().is_some_and(|d| d.len() == *arity as usize);
-                    if matches {
-                        pc += 1;
-                    } else {
-                        pc = *fail as usize;
-                    }
-                }
-                // A tuple pattern test (object-model slice 4b.2): `src` must be a tuple of exactly
-                // `arity` elements. The elements are then read with `TupleIndex` for sub-patterns.
-                Op::MatchTuple { src, arity, fail } => {
-                    let v = regs[fbase + *src as usize];
-                    let matches = v
-                        .tuple_items()
-                        .is_some_and(|items| items.len() == *arity as usize);
-                    if matches {
-                        pc += 1;
-                    } else {
-                        pc = *fail as usize;
-                    }
-                }
-                Op::ExtractField { dst, src, index } => {
-                    let element = regs[fbase + *src as usize].enum_data().unwrap()[*index as usize];
-                    retain(element);
-                    set_reg(regs, fbase, *dst, element);
-                    pc += 1;
-                }
-                Op::MatchFail { src, span } => {
-                    let shown = regs[fbase + *src as usize].display();
-                    return Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        *span,
-                        format!("no match arm matched the value {shown}"),
-                    ));
-                }
-                Op::Unary { op, dst, src, span } => {
-                    match apply_unary(*op, regs[fbase + *src as usize]) {
-                        Ok(v) => {
-                            // `..xs` (spread) returns the source value unchanged, so the result
-                            // aliases a live heap reference — retain it before `set_reg` releases
-                            // the old occupant of `dst` (which is `src`). A no-op for the fresh
-                            // primitives `Neg`/`Not` produce; mirrors `Op::Move`.
-                            retain(v);
-                            set_reg(regs, fbase, *dst, v);
-                            pc += 1;
+                    Op::MakeChannel {
+                        dst,
+                        capacity,
+                        span,
+                    } => {
+                        // Create a bounded channel and yield its `(Sender, Receiver)` endpoint tuple
+                        // (isolates I.1). The message type is checker-only; only the capacity reaches here.
+                        let cap = regs[fbase + *capacity as usize];
+                        let Some(cap) = cap.as_int() else {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`channel` expects an int capacity, found {}",
+                                    cap.type_name()
+                                ),
+                            ));
+                        };
+                        if cap < 0 {
+                            return Err(self.error(
+                                DiagnosticCode::Panic,
+                                *span,
+                                format!("`channel` capacity must be non-negative, found {cap}"),
+                            ));
                         }
-                        Err(e) => return Err(self.error(e.code, *span, e.text)),
+                        let id = ChannelId::from_index(self.channels.len());
+                        // In a parallel VM (real isolates, I.4c) a channel is a *shared* cross-thread queue
+                        // from birth, so shipping an endpoint into a worker shares one queue; the sandbox
+                        // (and any non-parallel VM) uses the cooperative in-VM `Local` FIFO, unchanged.
+                        let channel = if self.parallel_isolates {
+                            Channel::Shared(isolate::ChannelCore::new(cap as usize))
+                        } else {
+                            Channel::Local {
+                                buffer: std::collections::VecDeque::new(),
+                                capacity: cap as usize,
+                                closed: false,
+                            }
+                        };
+                        self.channels.push(channel);
+                        // The two endpoints are fresh (refcount 1); `Value::tuple` takes ownership of
+                        // exactly those references, so no extra retain is needed.
+                        let tuple =
+                            Value::tuple(vec![Value::make_sender(id), Value::make_receiver(id)]);
+                        set_reg(regs, fbase, *dst, tuple);
+                        pc += 1;
                     }
-                }
-                Op::MaskWidth {
-                    dst,
-                    src,
-                    signed,
-                    bits,
-                } => {
-                    // Reduce an erased fixed-width integer (an `int` value) into its declared width
-                    // (Tier W). Total — the shared helper runs identically in the tree-walker. A
-                    // non-int (only if the checker's IntN guarantee broke) passes through unchanged.
-                    let v = regs[fbase + *src as usize];
-                    let masked = match v.as_int() {
-                        Some(n) => Value::int(lang_stdlib::mask_to_width(n, *signed, *bits)),
-                        None => v,
-                    };
-                    retain(masked);
-                    set_reg(regs, fbase, *dst, masked);
-                    pc += 1;
-                }
-                Op::Binary {
-                    op,
-                    dst,
-                    a,
-                    b,
-                    span,
-                } => {
-                    let left = regs[fbase + *a as usize];
-                    let right = regs[fbase + *b as usize];
-                    // Operator-trait dispatch on a user object or enum value (the unified body's
-                    // in-body `impl` blocks are uniform across kinds — object-model slice 3): an
-                    // arithmetic/concat operator routes to its trait method and uses the result
-                    // directly; `==`/`!=` route to `Equatable::eq` (`!=` negating via the frame's
-                    // return transform); `< <= > >=` route to `Comparable::compare`. The method table
-                    // is keyed by the value's shape name, identical for objects and enums. Built-in
-                    // semantics apply otherwise; the checker guarantees a dispatched method's arity.
-                    let dispatch = if left.is_object() || left.is_enum() {
-                        let type_name = left.shape().unwrap().name.clone();
-                        if let Some(method_name) = op.overload_method() {
-                            self.methods
-                                .get(&(type_name, method_name.to_string()))
-                                .map(|&proto| (proto, RetTransform::None))
-                        } else if let Some(negate) = op.equatable_negation() {
-                            let transform = if negate {
-                                RetTransform::Negate
-                            } else {
-                                RetTransform::None
+                    Op::AttributesOf { dst, type_name } => {
+                        let result = self.materialize_attributes(type_name);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::RolesOf { dst } => {
+                        let result = self.materialize_roles();
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::TypeOf { dst, src } => {
+                        let repr = vm_type_repr(&regs[fbase + *src as usize]);
+                        let result = build_type_value(&repr);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::TypeOfStatic { dst, repr } => {
+                        let result = build_type_value(repr);
+                        set_reg(regs, fbase, *dst, result);
+                        pc += 1;
+                    }
+                    Op::TypeValue { dst, name } => {
+                        // A bare type name used as a value (an `invoke` receiver) materializes as the
+                        // reflection `Type` ADT — the one representation of "a type as a value", shared
+                        // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
+                        // named type via `reflection_type_name`.
+                        let value = build_type_value(&module.reflection.type_ref_repr(name));
+                        set_reg(regs, fbase, *dst, value);
+                        pc += 1;
+                    }
+                    Op::Invoke {
+                        dst,
+                        recv,
+                        name,
+                        args,
+                        ok_shape,
+                        err_shape,
+                        ..
+                    } => {
+                        let recv_val = regs[fbase + *recv as usize];
+                        let name_val = regs[fbase + *name as usize];
+                        let args_val = regs[fbase + *args as usize];
+                        // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
+                        // the duration of the dispatch, then released after the call frame is built (its
+                        // elements retained into it). `arg_items` below borrows from this temporary.
+                        let mut args_to_release: Option<Value> = None;
+                        // Resolve the dispatch by name: either a prototype to call (`Ok`) or a reason it
+                        // failed (`Err(msg)` → `Result.Err`). Every resolution failure — non-string name,
+                        // non-list args, non-invokable receiver, unknown name, arity mismatch — is a
+                        // runtime `Err`, never an abort (only a panic *inside* the called body aborts).
+                        let outcome: Result<(u32, bool, Vec<Value>), String> = 'resolve: {
+                            let Some(method) = name_val.as_string() else {
+                                break 'resolve Err(format!(
+                                    "invoke name must be a string, found {}",
+                                    name_val.type_name()
+                                ));
                             };
-                            self.methods
-                                .get(&(type_name, "eq".to_string()))
-                                .map(|&proto| (proto, transform))
-                        } else if let Some(method_name) = op.comparable_method() {
-                            self.methods
-                                .get(&(type_name, method_name.to_string()))
-                                .map(|&proto| (proto, RetTransform::Ordering(*op)))
+                            if !args_val.is_list() {
+                                break 'resolve Err(format!(
+                                    "invoke args must be a list, found {}",
+                                    args_val.type_name()
+                                ));
+                            }
+                            let args_list = args_val.realize_list();
+                            args_to_release = Some(args_list);
+                            let arg_items = args_list.list_items().expect("checked is_list");
+                            // A type handle dispatches an associated function (no receiver); an object
+                            // dispatches an instance method (receiver in register 0). A reflection `Type`
+                            // value (a stored type-ref) names the type for an associated call too.
+                            let (type_name, is_assoc) = if recv_val.is_object() {
+                                (recv_val.shape().unwrap().name.clone(), false)
+                            } else if let Some(tn) = reflection_type_name(recv_val) {
+                                (tn, true)
+                            } else {
+                                break 'resolve Err(format!(
+                                    "cannot invoke on a value of type `{}`",
+                                    recv_val.type_name()
+                                ));
+                            };
+                            let kind = if is_assoc {
+                                "associated function"
+                            } else {
+                                "method"
+                            };
+                            let Some(&proto) =
+                                self.methods.get(&(type_name.clone(), method.clone()))
+                            else {
+                                break 'resolve Err(format!(
+                                    "type `{type_name}` has no {kind} `{method}`"
+                                ));
+                            };
+                            // The prototype reserves register 0 for `self` (unit for an associated
+                            // call), so its declared arity is one more than the supplied args; trailing
+                            // defaults widen the accepted range, exactly as `Op::CallMethod`.
+                            let callee_chunk = &module.protos[proto as usize];
+                            let total = callee_chunk.num_params as usize - 1;
+                            let required = total - callee_chunk.defaults.len();
+                            if arg_items.len() < required || arg_items.len() > total {
+                                break 'resolve Err(arity_message(
+                                    kind,
+                                    required,
+                                    total,
+                                    arg_items.len(),
+                                ));
+                            }
+                            Ok((proto, is_assoc, arg_items))
+                        };
+                        match outcome {
+                            Err(message) => {
+                                let shape = self.shapes[*err_shape as usize].clone();
+                                let err = Value::enum_value(shape, vec![Value::string(&message)]);
+                                set_reg(regs, fbase, *dst, err);
+                                pc += 1;
+                            }
+                            Ok((proto, is_assoc, arg_items)) => {
+                                let callee_chunk = &module.protos[proto as usize];
+                                let num_registers = callee_chunk.num_registers as usize;
+                                let defaults = callee_chunk.defaults.clone();
+                                let new_base = reserve_window(regs, num_registers);
+                                // An associated call leaves register 0 as unit (no receiver); an instance
+                                // call places the retained receiver there.
+                                if !is_assoc {
+                                    retain(recv_val);
+                                    regs[new_base] = recv_val;
+                                }
+                                for (i, &arg) in arg_items.iter().enumerate() {
+                                    retain(arg);
+                                    regs[new_base + i + 1] = arg;
+                                }
+                                // Fill any omitted trailing parameters from their default thunks (module
+                                // scope only, like a method frame).
+                                let filled = arg_items.len() + 1;
+                                for (reg, proto) in &defaults {
+                                    if *reg as usize >= filled {
+                                        let value = self.run_thunk(*proto, &[])?;
+                                        regs[new_base + *reg as usize] = value;
+                                    }
+                                }
+                                // The result is wrapped in `Result.Ok` as it lands in the caller, so the
+                                // invocation yields a `Result` whichever way the body returns.
+                                let ok = self.shapes[*ok_shape as usize].clone();
+                                frames[top].pc = pc + 1;
+                                frames.push(Frame {
+                                    proto,
+                                    base: new_base,
+                                    pc: 0,
+                                    ret_dst: *dst,
+                                    ret_transform: RetTransform::WrapOk(ok),
+                                    upvalues: Vec::new(),
+                                });
+                                // Release the temporary boxed args list before transferring (its
+                                // elements were already retained into the call frame above); `take`
+                                // leaves the after-match release for the non-transferring `Err` path.
+                                if let Some(list) = args_to_release.take() {
+                                    list.release();
+                                }
+                                continue 'reload;
+                            }
+                        }
+                        // Release the temporary boxed args list (if the args were materialized from a
+                        // packed list); its elements were retained into the call frame above.
+                        if let Some(list) = args_to_release {
+                            list.release();
+                        }
+                    }
+                    Op::MatchInt { src, value, fail } => {
+                        if regs[fbase + *src as usize].as_int() == Some(*value) {
+                            pc += 1;
+                        } else {
+                            pc = *fail as usize;
+                        }
+                    }
+                    Op::MatchStr { src, value, fail } => {
+                        if regs[fbase + *src as usize].as_string().as_deref() == Some(value) {
+                            pc += 1;
+                        } else {
+                            pc = *fail as usize;
+                        }
+                    }
+                    Op::MatchBool { src, value, fail } => {
+                        if regs[fbase + *src as usize].as_bool() == Some(*value) {
+                            pc += 1;
+                        } else {
+                            pc = *fail as usize;
+                        }
+                    }
+                    Op::MatchVariant {
+                        src,
+                        type_name,
+                        variant,
+                        arity,
+                        fail,
+                    } => {
+                        let v = regs[fbase + *src as usize];
+                        let matches = v.is_enum()
+                            && v.shape().is_some_and(|shape| {
+                                shape.variant.as_deref() == Some(variant)
+                                    && type_name.as_ref().is_none_or(|t| &shape.name == t)
+                            })
+                            && v.enum_data().is_some_and(|d| d.len() == *arity as usize);
+                        if matches {
+                            pc += 1;
+                        } else {
+                            pc = *fail as usize;
+                        }
+                    }
+                    // A tuple pattern test (object-model slice 4b.2): `src` must be a tuple of exactly
+                    // `arity` elements. The elements are then read with `TupleIndex` for sub-patterns.
+                    Op::MatchTuple { src, arity, fail } => {
+                        let v = regs[fbase + *src as usize];
+                        let matches = v
+                            .tuple_items()
+                            .is_some_and(|items| items.len() == *arity as usize);
+                        if matches {
+                            pc += 1;
+                        } else {
+                            pc = *fail as usize;
+                        }
+                    }
+                    Op::ExtractField { dst, src, index } => {
+                        let element =
+                            regs[fbase + *src as usize].enum_data().unwrap()[*index as usize];
+                        retain(element);
+                        set_reg(regs, fbase, *dst, element);
+                        pc += 1;
+                    }
+                    Op::MatchFail { src, span } => {
+                        let shown = regs[fbase + *src as usize].display();
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            *span,
+                            format!("no match arm matched the value {shown}"),
+                        ));
+                    }
+                    Op::Unary { op, dst, src, span } => {
+                        match apply_unary(*op, regs[fbase + *src as usize]) {
+                            Ok(v) => {
+                                // `..xs` (spread) returns the source value unchanged, so the result
+                                // aliases a live heap reference — retain it before `set_reg` releases
+                                // the old occupant of `dst` (which is `src`). A no-op for the fresh
+                                // primitives `Neg`/`Not` produce; mirrors `Op::Move`.
+                                retain(v);
+                                set_reg(regs, fbase, *dst, v);
+                                pc += 1;
+                            }
+                            Err(e) => return Err(self.error(e.code, *span, e.text)),
+                        }
+                    }
+                    Op::MaskWidth {
+                        dst,
+                        src,
+                        signed,
+                        bits,
+                    } => {
+                        // Reduce an erased fixed-width integer (an `int` value) into its declared width
+                        // (Tier W). Total — the shared helper runs identically in the tree-walker. A
+                        // non-int (only if the checker's IntN guarantee broke) passes through unchanged.
+                        let v = regs[fbase + *src as usize];
+                        let masked = match v.as_int() {
+                            Some(n) => Value::int(lang_stdlib::mask_to_width(n, *signed, *bits)),
+                            None => v,
+                        };
+                        retain(masked);
+                        set_reg(regs, fbase, *dst, masked);
+                        pc += 1;
+                    }
+                    Op::Binary {
+                        op,
+                        dst,
+                        a,
+                        b,
+                        span,
+                    } => {
+                        let left = regs[fbase + *a as usize];
+                        let right = regs[fbase + *b as usize];
+                        // Operator-trait dispatch on a user object or enum value (the unified body's
+                        // in-body `impl` blocks are uniform across kinds — object-model slice 3): an
+                        // arithmetic/concat operator routes to its trait method and uses the result
+                        // directly; `==`/`!=` route to `Equatable::eq` (`!=` negating via the frame's
+                        // return transform); `< <= > >=` route to `Comparable::compare`. The method table
+                        // is keyed by the value's shape name, identical for objects and enums. Built-in
+                        // semantics apply otherwise; the checker guarantees a dispatched method's arity.
+                        let dispatch = if left.is_object() || left.is_enum() {
+                            let type_name = left.shape().unwrap().name.clone();
+                            if let Some(method_name) = op.overload_method() {
+                                self.methods
+                                    .get(&(type_name, method_name.to_string()))
+                                    .map(|&proto| (proto, RetTransform::None))
+                            } else if let Some(negate) = op.equatable_negation() {
+                                let transform = if negate {
+                                    RetTransform::Negate
+                                } else {
+                                    RetTransform::None
+                                };
+                                self.methods
+                                    .get(&(type_name, "eq".to_string()))
+                                    .map(|&proto| (proto, transform))
+                            } else if let Some(method_name) = op.comparable_method() {
+                                self.methods
+                                    .get(&(type_name, method_name.to_string()))
+                                    .map(|&proto| (proto, RetTransform::Ordering(*op)))
+                            } else {
+                                None
+                            }
                         } else {
                             None
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some((proto, transform)) = dispatch
-                        && module.protos[proto as usize].num_params == 2
-                    {
-                        let callee_chunk = &module.protos[proto as usize];
-                        let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
-                        retain(left);
-                        regs[new_base] = left;
-                        retain(right);
-                        regs[new_base + 1] = right;
-                        frames[top].pc = pc + 1;
-                        frames.push(Frame {
-                            proto,
-                            base: new_base,
-                            pc: 0,
-                            ret_dst: *dst,
-                            ret_transform: transform,
-                            upvalues: Vec::new(),
-                        });
-                        reload!(frames, module, top, fbase, chunk, pc);
-                        continue;
-                    }
-                    // Derived structural comparison: `< <= > >=` on an object whose type
-                    // `@derive(Comparable)`s (and has no hand-written `compare`) — field-wise
-                    // ordering, computed synchronously (no method to call).
-                    if left.is_object()
-                        && op.comparable_method().is_some()
-                        && self
-                            .comparable_derives
-                            .contains(&left.shape().unwrap().name)
-                    {
-                        match structural_compare(left, right) {
-                            Some(ordering) => {
-                                let satisfied =
-                                    op.ordering_satisfies(lang_ast::ordering_variant(ordering));
-                                set_reg(regs, fbase, *dst, Value::bool(satisfied));
-                                pc += 1;
-                            }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "cannot compare {} and {}",
-                                        left.type_name(),
-                                        right.type_name()
-                                    ),
-                                ));
-                            }
-                        }
-                        continue;
-                    }
-                    match apply_binary(*op, left, right) {
-                        Ok(v) => {
-                            set_reg(regs, fbase, *dst, v);
-                            pc += 1;
-                        }
-                        Err(e) => return Err(self.error(e.code, *span, e.text)),
-                    }
-                }
-                Op::WideInt {
-                    op,
-                    dst,
-                    a,
-                    b,
-                    signed,
-                    bits,
-                    span,
-                } => {
-                    // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on erased-int operands,
-                    // read as `signed`/unsigned `bits`-wide. No trait dispatch (ints only).
-                    let left = regs[fbase + *a as usize];
-                    let right = regs[fbase + *b as usize];
-                    match apply_binary_wide(*op, left, right, *signed, *bits) {
-                        Ok(v) => {
-                            set_reg(regs, fbase, *dst, v);
-                            pc += 1;
-                        }
-                        Err(e) => return Err(self.error(e.code, *span, e.text)),
-                    }
-                }
-                Op::WidthIntMethod {
-                    dst,
-                    recv,
-                    method,
-                    arg,
-                    bits,
-                    ..
-                } => {
-                    // Width-exact bit intrinsic (Tier W5): compute within `bits`, not the erased i64.
-                    // The checker guarantees an integer receiver and (for `rotate_*`) an integer arg.
-                    let recv_int = regs[fbase + *recv as usize].as_int().unwrap_or(0);
-                    let amount = match arg {
-                        Some(r) => regs[fbase + *r as usize].as_int().unwrap_or(0),
-                        None => 0,
-                    };
-                    let value = Value::int(lang_stdlib::int_method_width(
-                        recv_int, *method, amount, *bits,
-                    ));
-                    set_reg(regs, fbase, *dst, value);
-                    pc += 1;
-                }
-                Op::RequireBool {
-                    reg,
-                    side,
-                    op,
-                    span,
-                } => {
-                    let v = regs[fbase + *reg as usize];
-                    if v.as_bool().is_none() {
-                        let where_ = match side {
-                            BoolSide::Left => "left",
-                            BoolSide::Right => "right",
                         };
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!(
-                                "`{}` expects a bool on the {where_}, found {}",
-                                op.symbol(),
-                                v.type_name()
-                            ),
-                        ));
-                    }
-                    pc += 1;
-                }
-                Op::RequireCondBool { reg, span } => {
-                    let v = regs[fbase + *reg as usize];
-                    if v.as_bool().is_none() {
-                        return Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            *span,
-                            format!("`if` condition must be a bool, found {}", v.type_name()),
-                        ));
-                    }
-                    pc += 1;
-                }
-                Op::Jump { target } => {
-                    pc = *target as usize;
-                }
-                Op::JumpIfTrue { reg, target } => {
-                    if regs[fbase + *reg as usize].as_bool() == Some(true) {
-                        pc = *target as usize;
-                    } else {
-                        pc += 1;
-                    }
-                }
-                Op::JumpIfFalse { reg, target } => {
-                    if regs[fbase + *reg as usize].as_bool() == Some(false) {
-                        pc = *target as usize;
-                    } else {
-                        pc += 1;
-                    }
-                }
-                Op::Echo { reg } => {
-                    let text = regs[fbase + *reg as usize].display();
-                    self.stdout.push_str(&text);
-                    self.stdout.push('\n');
-                    pc += 1;
-                }
-                Op::Stringify { dst, src, span } => {
-                    let v = regs[fbase + *src as usize];
-                    // A user object or enum value lights up the `Display` trait: render it via its
-                    // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
-                    // method table is keyed by the value's shape name, identical for both kinds
-                    // (object-model slice 3). Matches the tree-walker's `display_value`.
-                    if v.is_object() || v.is_enum() {
-                        let type_name = v.shape().unwrap().name.clone();
-                        if let Some(&proto) = self
-                            .methods
-                            .get(&(type_name.clone(), "to_string".to_string()))
+                        if let Some((proto, transform)) = dispatch
+                            && module.protos[proto as usize].num_params == 2
                         {
                             let callee_chunk = &module.protos[proto as usize];
-                            if callee_chunk.num_params != 1 {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "this method takes {} argument(s) but 0 were supplied",
-                                        callee_chunk.num_params - 1
-                                    ),
-                                ));
-                            }
-                            let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
-                            retain(v);
-                            regs[new_base] = v;
+                            let new_base =
+                                reserve_window(regs, callee_chunk.num_registers as usize);
+                            retain(left);
+                            regs[new_base] = left;
+                            retain(right);
+                            regs[new_base + 1] = right;
                             frames[top].pc = pc + 1;
                             frames.push(Frame {
                                 proto,
                                 base: new_base,
                                 pc: 0,
                                 ret_dst: *dst,
-                                ret_transform: RetTransform::None,
+                                ret_transform: transform,
                                 upvalues: Vec::new(),
                             });
-                            reload!(frames, module, top, fbase, chunk, pc);
-                            continue;
+                            continue 'reload;
                         }
-                    }
-                    // Identity for every other value: the consuming `Echo`/`Concat` stringifies
-                    // it via `display`.
-                    retain(v);
-                    set_reg(regs, fbase, *dst, v);
-                    pc += 1;
-                }
-                Op::Raise { idx } => {
-                    self.diagnostics
-                        .push(chunk.diagnostics[*idx as usize].clone());
-                    return Err(Abort);
-                }
-                Op::Call {
-                    dst,
-                    callee,
-                    args,
-                    span,
-                } => {
-                    let callee_val = regs[fbase + *callee as usize];
-                    match callee_val.as_closure() {
-                        Some(proto_idx) => {
-                            let callee_chunk = &module.protos[proto_idx as usize];
-                            let num_params = callee_chunk.num_params as usize;
-                            let required = num_params - callee_chunk.defaults.len();
-                            if args.len() < required || args.len() > num_params {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    arity_message("function", required, num_params, args.len()),
-                                ));
-                            }
-                            let num_registers = callee_chunk.num_registers as usize;
-                            let defaults = callee_chunk.defaults.clone();
-                            // Move the arguments into the new frame's leading registers, each
-                            // owning a fresh reference.
-                            let new_base = reserve_window(regs, num_registers);
-                            for (i, &arg_reg) in args.iter().enumerate() {
-                                let v = regs[fbase + arg_reg as usize];
-                                retain(v);
-                                regs[new_base + i] = v;
-                            }
-                            // The closure's captured upvalue cells, carried into the frame (one owned
-                            // reference each, released at teardown) so the body can read/write
-                            // through them — and handed to each default thunk, which shares the
-                            // closure's upvalue layout, so a capture-referencing default reads the
-                            // right cell.
-                            let count = callee_val.closure_upvalue_count();
-                            let cells: Vec<Value> =
-                                (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
-                            // Fill any omitted trailing parameters from their default thunks: a
-                            // default whose register is at or beyond the supplied count was not
-                            // passed. (An associated function carries a synthetic unit receiver in
-                            // register 0, already counted among the supplied args.)
-                            let filled = args.len();
-                            for (reg, proto) in &defaults {
-                                if *reg as usize >= filled {
-                                    let value = self.run_thunk(*proto, &cells)?;
-                                    regs[new_base + *reg as usize] = value;
+                        // Derived structural comparison: `< <= > >=` on an object whose type
+                        // `@derive(Comparable)`s (and has no hand-written `compare`) — field-wise
+                        // ordering, computed synchronously (no method to call).
+                        if left.is_object()
+                            && op.comparable_method().is_some()
+                            && self
+                                .comparable_derives
+                                .contains(&left.shape().unwrap().name)
+                        {
+                            match structural_compare(left, right) {
+                                Some(ordering) => {
+                                    let satisfied =
+                                        op.ordering_satisfies(lang_ast::ordering_variant(ordering));
+                                    set_reg(regs, fbase, *dst, Value::bool(satisfied));
+                                    pc += 1;
+                                }
+                                None => {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!(
+                                            "cannot compare {} and {}",
+                                            left.type_name(),
+                                            right.type_name()
+                                        ),
+                                    ));
                                 }
                             }
-                            let mut upvalues = Vec::with_capacity(count);
-                            for &cell in &cells {
-                                retain(cell);
-                                upvalues.push(cell);
-                            }
-                            // Resume after the call once the callee returns.
-                            frames[top].pc = pc + 1;
-                            frames.push(Frame {
-                                proto: proto_idx,
-                                base: new_base,
-                                pc: 0,
-                                ret_dst: *dst,
-                                ret_transform: RetTransform::None,
-                                upvalues,
-                            });
-                            reload!(frames, module, top, fbase, chunk, pc);
+                            continue;
                         }
-                        None => match callee_val.as_native_fn() {
-                            // An indirect call of a first-class builtin (`f = len; f(xs)`). The
-                            // arguments stay owned by their registers (the helper borrows them);
-                            // the result is freshly owned.
-                            Some(func) => {
-                                let arg_vals: Vec<Value> =
-                                    args.iter().map(|&r| regs[fbase + r as usize]).collect();
-                                let result = self.call_native_fn(func, &arg_vals, *span)?;
-                                set_reg(regs, fbase, *dst, result);
+                        match apply_binary(*op, left, right) {
+                            Ok(v) => {
+                                set_reg(regs, fbase, *dst, v);
                                 pc += 1;
                             }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!("{} is not callable", callee_val.type_name()),
-                                ));
-                            }
-                        },
-                    }
-                }
-                Op::Return { src } => {
-                    let raw = regs[fbase + *src as usize];
-                    retain(raw); // keep alive across this frame's teardown
-                    let finished = frames.pop().unwrap();
-                    let n = module.protos[finished.proto as usize].num_registers as usize;
-                    for i in 0..n {
-                        release(regs[finished.base + i]);
-                    }
-                    for u in &finished.upvalues {
-                        release(*u);
-                    }
-                    regs.truncate(finished.base);
-                    // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s
-                    // bool; `< <= > >=` map `compare`'s `Ordering`). When the transform replaces a
-                    // heap value (an `Ordering`) with a fresh `bool`, release the original's
-                    // keep-alive reference so it is not leaked.
-                    let (v, replaced) = finished.ret_transform.apply(raw);
-                    if replaced {
-                        release(raw);
-                    }
-                    match frames.last() {
-                        Some(caller) => {
-                            // Transfer the retained reference into the caller's destination.
-                            let idx = caller.base + finished.ret_dst as usize;
-                            let old = regs[idx];
-                            regs[idx] = v;
-                            release(old);
+                            Err(e) => return Err(self.error(e.code, *span, e.text)),
                         }
-                        // The bottom frame returned: hand the value to `run`'s caller.
-                        None => return Ok(v),
                     }
-                    // Control returns to the caller (or a re-entry frame) — re-derive its window.
-                    reload!(frames, module, top, fbase, chunk, pc);
-                }
-                Op::Halt => {
-                    let finished = frames.pop().unwrap();
-                    let n = module.protos[finished.proto as usize].num_registers as usize;
-                    for i in 0..n {
-                        release(regs[finished.base + i]);
+                    Op::WideInt {
+                        op,
+                        dst,
+                        a,
+                        b,
+                        signed,
+                        bits,
+                        span,
+                    } => {
+                        // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on erased-int operands,
+                        // read as `signed`/unsigned `bits`-wide. No trait dispatch (ints only).
+                        let left = regs[fbase + *a as usize];
+                        let right = regs[fbase + *b as usize];
+                        match apply_binary_wide(*op, left, right, *signed, *bits) {
+                            Ok(v) => {
+                                set_reg(regs, fbase, *dst, v);
+                                pc += 1;
+                            }
+                            Err(e) => return Err(self.error(e.code, *span, e.text)),
+                        }
                     }
-                    for u in &finished.upvalues {
-                        release(*u);
+                    Op::WidthIntMethod {
+                        dst,
+                        recv,
+                        method,
+                        arg,
+                        bits,
+                        ..
+                    } => {
+                        // Width-exact bit intrinsic (Tier W5): compute within `bits`, not the erased i64.
+                        // The checker guarantees an integer receiver and (for `rotate_*`) an integer arg.
+                        let recv_int = regs[fbase + *recv as usize].as_int().unwrap_or(0);
+                        let amount = match arg {
+                            Some(r) => regs[fbase + *r as usize].as_int().unwrap_or(0),
+                            None => 0,
+                        };
+                        let value = Value::int(lang_stdlib::int_method_width(
+                            recv_int, *method, amount, *bits,
+                        ));
+                        set_reg(regs, fbase, *dst, value);
+                        pc += 1;
                     }
-                    regs.truncate(finished.base);
-                    match frames.last() {
-                        // A non-bottom frame falling off the end implicitly returns unit.
-                        Some(caller) => set_reg(regs, caller.base, finished.ret_dst, Value::unit()),
-                        // The bottom frame halted: the program (or re-entrant call) ends.
-                        None => return Ok(Value::unit()),
+                    Op::RequireBool {
+                        reg,
+                        side,
+                        op,
+                        span,
+                    } => {
+                        let v = regs[fbase + *reg as usize];
+                        if v.as_bool().is_none() {
+                            let where_ = match side {
+                                BoolSide::Left => "left",
+                                BoolSide::Right => "right",
+                            };
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!(
+                                    "`{}` expects a bool on the {where_}, found {}",
+                                    op.symbol(),
+                                    v.type_name()
+                                ),
+                            ));
+                        }
+                        pc += 1;
                     }
-                    // Control returns to the caller (or a re-entry frame) — re-derive its window.
-                    reload!(frames, module, top, fbase, chunk, pc);
+                    Op::RequireCondBool { reg, span } => {
+                        let v = regs[fbase + *reg as usize];
+                        if v.as_bool().is_none() {
+                            return Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                *span,
+                                format!("`if` condition must be a bool, found {}", v.type_name()),
+                            ));
+                        }
+                        pc += 1;
+                    }
+                    Op::Jump { target } => {
+                        pc = *target as usize;
+                    }
+                    Op::JumpIfTrue { reg, target } => {
+                        if regs[fbase + *reg as usize].as_bool() == Some(true) {
+                            pc = *target as usize;
+                        } else {
+                            pc += 1;
+                        }
+                    }
+                    Op::JumpIfFalse { reg, target } => {
+                        if regs[fbase + *reg as usize].as_bool() == Some(false) {
+                            pc = *target as usize;
+                        } else {
+                            pc += 1;
+                        }
+                    }
+                    Op::Echo { reg } => {
+                        let text = regs[fbase + *reg as usize].display();
+                        self.stdout.push_str(&text);
+                        self.stdout.push('\n');
+                        pc += 1;
+                    }
+                    Op::Stringify { dst, src, span } => {
+                        let v = regs[fbase + *src as usize];
+                        // A user object or enum value lights up the `Display` trait: render it via its
+                        // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
+                        // method table is keyed by the value's shape name, identical for both kinds
+                        // (object-model slice 3). Matches the tree-walker's `display_value`.
+                        if v.is_object() || v.is_enum() {
+                            let type_name = v.shape().unwrap().name.clone();
+                            if let Some(&proto) = self
+                                .methods
+                                .get(&(type_name.clone(), "to_string".to_string()))
+                            {
+                                let callee_chunk = &module.protos[proto as usize];
+                                if callee_chunk.num_params != 1 {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!(
+                                            "this method takes {} argument(s) but 0 were supplied",
+                                            callee_chunk.num_params - 1
+                                        ),
+                                    ));
+                                }
+                                let new_base =
+                                    reserve_window(regs, callee_chunk.num_registers as usize);
+                                retain(v);
+                                regs[new_base] = v;
+                                frames[top].pc = pc + 1;
+                                frames.push(Frame {
+                                    proto,
+                                    base: new_base,
+                                    pc: 0,
+                                    ret_dst: *dst,
+                                    ret_transform: RetTransform::None,
+                                    upvalues: Vec::new(),
+                                });
+                                continue 'reload;
+                            }
+                        }
+                        // Identity for every other value: the consuming `Echo`/`Concat` stringifies
+                        // it via `display`.
+                        retain(v);
+                        set_reg(regs, fbase, *dst, v);
+                        pc += 1;
+                    }
+                    Op::Raise { idx } => {
+                        self.diagnostics
+                            .push(chunk.diagnostics[*idx as usize].clone());
+                        return Err(Abort);
+                    }
+                    Op::Call {
+                        dst,
+                        callee,
+                        args,
+                        span,
+                    } => {
+                        let callee_val = regs[fbase + *callee as usize];
+                        match callee_val.as_closure() {
+                            Some(proto_idx) => {
+                                let callee_chunk = &module.protos[proto_idx as usize];
+                                let num_params = callee_chunk.num_params as usize;
+                                let required = num_params - callee_chunk.defaults.len();
+                                if args.len() < required || args.len() > num_params {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        arity_message("function", required, num_params, args.len()),
+                                    ));
+                                }
+                                let num_registers = callee_chunk.num_registers as usize;
+                                let defaults = callee_chunk.defaults.clone();
+                                // Move the arguments into the new frame's leading registers, each
+                                // owning a fresh reference.
+                                let new_base = reserve_window(regs, num_registers);
+                                for (i, &arg_reg) in args.iter().enumerate() {
+                                    let v = regs[fbase + arg_reg as usize];
+                                    retain(v);
+                                    regs[new_base + i] = v;
+                                }
+                                // The closure's captured upvalue cells, carried into the frame (one owned
+                                // reference each, released at teardown) so the body can read/write
+                                // through them — and handed to each default thunk, which shares the
+                                // closure's upvalue layout, so a capture-referencing default reads the
+                                // right cell.
+                                let count = callee_val.closure_upvalue_count();
+                                let cells: Vec<Value> =
+                                    (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
+                                // Fill any omitted trailing parameters from their default thunks: a
+                                // default whose register is at or beyond the supplied count was not
+                                // passed. (An associated function carries a synthetic unit receiver in
+                                // register 0, already counted among the supplied args.)
+                                let filled = args.len();
+                                for (reg, proto) in &defaults {
+                                    if *reg as usize >= filled {
+                                        let value = self.run_thunk(*proto, &cells)?;
+                                        regs[new_base + *reg as usize] = value;
+                                    }
+                                }
+                                let mut upvalues = Vec::with_capacity(count);
+                                for &cell in &cells {
+                                    retain(cell);
+                                    upvalues.push(cell);
+                                }
+                                // Resume after the call once the callee returns.
+                                frames[top].pc = pc + 1;
+                                frames.push(Frame {
+                                    proto: proto_idx,
+                                    base: new_base,
+                                    pc: 0,
+                                    ret_dst: *dst,
+                                    ret_transform: RetTransform::None,
+                                    upvalues,
+                                });
+                                continue 'reload;
+                            }
+                            None => match callee_val.as_native_fn() {
+                                // An indirect call of a first-class builtin (`f = len; f(xs)`). The
+                                // arguments stay owned by their registers (the helper borrows them);
+                                // the result is freshly owned.
+                                Some(func) => {
+                                    let arg_vals: Vec<Value> =
+                                        args.iter().map(|&r| regs[fbase + r as usize]).collect();
+                                    let result = self.call_native_fn(func, &arg_vals, *span)?;
+                                    set_reg(regs, fbase, *dst, result);
+                                    pc += 1;
+                                }
+                                None => {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!("{} is not callable", callee_val.type_name()),
+                                    ));
+                                }
+                            },
+                        }
+                    }
+                    Op::Return { src } => {
+                        let raw = regs[fbase + *src as usize];
+                        retain(raw); // keep alive across this frame's teardown
+                        let finished = frames.pop().unwrap();
+                        let n = module.protos[finished.proto as usize].num_registers as usize;
+                        for i in 0..n {
+                            release(regs[finished.base + i]);
+                        }
+                        for u in &finished.upvalues {
+                            release(*u);
+                        }
+                        regs.truncate(finished.base);
+                        // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s
+                        // bool; `< <= > >=` map `compare`'s `Ordering`). When the transform replaces a
+                        // heap value (an `Ordering`) with a fresh `bool`, release the original's
+                        // keep-alive reference so it is not leaked.
+                        let (v, replaced) = finished.ret_transform.apply(raw);
+                        if replaced {
+                            release(raw);
+                        }
+                        match frames.last() {
+                            Some(caller) => {
+                                // Transfer the retained reference into the caller's destination.
+                                let idx = caller.base + finished.ret_dst as usize;
+                                let old = regs[idx];
+                                regs[idx] = v;
+                                release(old);
+                            }
+                            // The bottom frame returned: hand the value to `run`'s caller.
+                            None => return Ok(v),
+                        }
+                        // Control returns to the caller (or a re-entry frame) — re-derive its window.
+                        continue 'reload;
+                    }
+                    Op::Halt => {
+                        let finished = frames.pop().unwrap();
+                        let n = module.protos[finished.proto as usize].num_registers as usize;
+                        for i in 0..n {
+                            release(regs[finished.base + i]);
+                        }
+                        for u in &finished.upvalues {
+                            release(*u);
+                        }
+                        regs.truncate(finished.base);
+                        match frames.last() {
+                            // A non-bottom frame falling off the end implicitly returns unit.
+                            Some(caller) => {
+                                set_reg(regs, caller.base, finished.ret_dst, Value::unit())
+                            }
+                            // The bottom frame halted: the program (or re-entrant call) ends.
+                            None => return Ok(Value::unit()),
+                        }
+                        // Control returns to the caller (or a re-entry frame) — re-derive its window.
+                        continue 'reload;
+                    }
                 }
             }
         }
