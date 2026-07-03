@@ -142,6 +142,10 @@ pub const RETURN_HELPER: &str = "lang_jit_return";
 pub const PREPARE_CALL_HELPER: &str = "lang_jit_prepare_call";
 pub const CALLEE_BASE_HELPER: &str = "lang_jit_callee_base";
 pub const AFTER_CALL_HELPER: &str = "lang_jit_after_call";
+/// The leaf-heap-op helper (J4): runs a single non-dispatching heap/collection op (the interpreter's
+/// exact arm, refcounts included) and returns [`OUTCOME_CONTINUE`] (done — the caller advances) or a
+/// resume pc (it can't handle this instance — a dispatch or an error — so the interpreter runs it).
+pub const LEAF_OP_HELPER: &str = "lang_jit_run_leaf_op";
 
 /// The method JIT: a Cranelift [`JITModule`] plus a per-prototype cache of finalized entry points.
 ///
@@ -166,6 +170,7 @@ pub struct Jit {
     prepare_call_id: FuncId,
     callee_base_id: FuncId,
     after_call_id: FuncId,
+    leaf_op_id: FuncId,
     ctx: cranelift_codegen::Context,
     fb_ctx: FunctionBuilderContext,
 }
@@ -274,6 +279,17 @@ impl Jit {
         let after_call_id = module
             .declare_function(AFTER_CALL_HELPER, Linkage::Import, &after_call_sig)
             .map_err(|e| e.to_string())?;
+        // `run_leaf_op(vm, regs_vec: ptr, base: usize, proto: i32, pc: i32) -> i64`.
+        let mut leaf_sig = module.make_signature();
+        leaf_sig.params.push(AbiParam::new(ptr_ty));
+        leaf_sig.params.push(AbiParam::new(ptr_ty));
+        leaf_sig.params.push(AbiParam::new(ptr_ty));
+        leaf_sig.params.push(AbiParam::new(types::I32));
+        leaf_sig.params.push(AbiParam::new(types::I32));
+        leaf_sig.returns.push(AbiParam::new(types::I64));
+        let leaf_op_id = module
+            .declare_function(LEAF_OP_HELPER, Linkage::Import, &leaf_sig)
+            .map_err(|e| e.to_string())?;
         let ctx = module.make_context();
         Ok(Jit {
             module,
@@ -289,6 +305,7 @@ impl Jit {
             prepare_call_id,
             callee_base_id,
             after_call_id,
+            leaf_op_id,
             ctx,
             fb_ctx: FunctionBuilderContext::new(),
         })
@@ -438,6 +455,7 @@ impl Jit {
                 .module
                 .declare_func_in_func(self.callee_base_id, b.func);
             let after_call_ref = self.module.declare_func_in_func(self.after_call_id, b.func);
+            let leaf_op_ref = self.module.declare_func_in_func(self.leaf_op_id, b.func);
             // The signature of a compiled prototype, imported so a direct call can `call_indirect`
             // another compiled prototype's entry point.
             let callee_sig = b.import_signature(abi_sig.clone());
@@ -446,7 +464,10 @@ impl Jit {
             // registers, so its register writes must be refcount-correct (release the overwritten
             // value, retain a moved heap value). A call-free prototype keeps the immediate invariant
             // (J1/J2/globals) and the faster refcount-free stores.
-            let heap_aware = chunk.code.iter().any(|op| matches!(op, Op::Call { .. }));
+            let heap_aware = chunk
+                .code
+                .iter()
+                .any(|op| matches!(op, Op::Call { .. }) || is_leaf_heap_op(op));
 
             let mut cg = Codegen {
                 b: &mut b,
@@ -468,6 +489,7 @@ impl Jit {
                 prepare_call_ref,
                 callee_base_ref,
                 after_call_ref,
+                leaf_op_ref,
                 callee_sig,
             };
 
@@ -572,8 +594,20 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
         | Op::JumpIfTrue { .. }
         | Op::JumpIfFalse { .. }
         | Op::CondBranch { .. } => true,
+        op if is_leaf_heap_op(op) => true,
         _ => false,
     }
+}
+
+/// The leaf heap/collection ops the JIT runs through the `run_leaf_op` helper (J4) — non-dispatching
+/// ops whose exact interpreter logic (refcounts included) the helper reproduces, bailing on the
+/// dispatch/error cases. A prototype containing one is `heap_aware` (they can put a heap value in a
+/// register).
+fn is_leaf_heap_op(op: &Op) -> bool {
+    matches!(
+        op,
+        Op::MakeRange { .. } | Op::IterSnapshot { .. } | Op::ListLen { .. } | Op::ListGet { .. }
+    )
 }
 
 /// The binary operators J1 compiles natively: integer arithmetic and comparison. (Bitwise/shift and
@@ -701,6 +735,7 @@ struct Codegen<'a, 'b> {
     prepare_call_ref: FuncRef,
     callee_base_ref: FuncRef,
     after_call_ref: FuncRef,
+    leaf_op_ref: FuncRef,
     callee_sig: cranelift_codegen::ir::SigRef,
 }
 
@@ -978,6 +1013,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
         Op::Call { .. } => emit_call(cg, pc, op_blocks),
         Op::Return { src } => emit_return(cg, *src),
+        op if is_leaf_heap_op(op) => emit_leaf_op(cg, pc, op_blocks),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
             let here = cg.pc_const(pc);
@@ -1051,6 +1087,30 @@ fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
     cg.b.switch_to_block(return_blk);
     cg.b.ins().return_(&[after]);
+}
+
+/// A native leaf heap/collection op (P-JIT J4): run it through the `run_leaf_op` helper, which does
+/// the interpreter's exact logic (refcounts included) and returns `OUTCOME_CONTINUE` (done — continue
+/// to `pc + 1`) or a resume pc (it bailed — a dispatch or an error the interpreter must handle).
+fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
+    let vm = cg.vm;
+    let regs_vec = cg.regs_vec;
+    let base = cg.base;
+    let proto = cg.b.ins().iconst(types::I32, cg.proto as i64);
+    let pcv = cg.b.ins().iconst(types::I32, pc as i64);
+    let inst =
+        cg.b.ins()
+            .call(cg.leaf_op_ref, &[vm, regs_vec, base, proto, pcv]);
+    let outcome = cg.b.inst_results(inst)[0];
+    let cont = cg.b.ins().iconst(types::I64, OUTCOME_CONTINUE);
+    let is_cont = cg.b.ins().icmp(IntCC::Equal, outcome, cont);
+    let continue_blk = cg.b.create_block();
+    let return_blk = cg.b.create_block();
+    cg.b.ins().brif(is_cont, continue_blk, &[], return_blk, &[]);
+    cg.b.switch_to_block(continue_blk);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
+    cg.b.switch_to_block(return_blk);
+    cg.b.ins().return_(&[outcome]);
 }
 
 /// A native `Op::Return` (P-JIT J3): hand the return value to the `jit_return` helper, which runs the

@@ -651,6 +651,95 @@ extern "C" fn jit_after_call(
     }
 }
 
+/// Runtime helper for a native leaf heap/collection op (J4): run the `Op` at `proto`/`pc` — the
+/// interpreter's exact arm, refcounts and all — on the shared register stack, and return
+/// `OUTCOME_CONTINUE` when it completed. It handles only the non-dispatching, non-erroring path of
+/// each op; a receiver that would dispatch (a user `Iterable`/`Index`) or a case that would raise
+/// returns the op's own pc, so the interpreter re-runs it. Every early return happens **before** any
+/// register write, so a re-run in the interpreter starts from clean state.
+///
+/// # Safety
+/// `vm`/`regs_vec` must be the live pointers the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_run_leaf_op(
+    vm: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    base: usize,
+    proto: i32,
+    pc: i32,
+) -> i64 {
+    let module = unsafe { (*(vm as *const Vm)).module };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    let bail = pc as i64;
+    match &module.protos[proto as usize].code[pc as usize] {
+        Op::MakeRange {
+            dst,
+            start,
+            end,
+            inclusive,
+            ..
+        } => {
+            let (Some(a), Some(b)) = (
+                regs[base + *start as usize].as_int(),
+                regs[base + *end as usize].as_int(),
+            ) else {
+                return bail; // non-int bounds → interpreter raises the error
+            };
+            let upper = if *inclusive { b.saturating_add(1) } else { b };
+            let elements: Vec<Value> = (a..upper).map(Value::int).collect();
+            set_reg(regs, base, *dst, Value::list(elements));
+            lang_jit::OUTCOME_CONTINUE
+        }
+        Op::IterSnapshot { dst, src, .. } => {
+            let v = regs[base + *src as usize];
+            if v.is_object() {
+                return bail; // `Iterable::iter` dispatch → interpreter
+            }
+            if v.is_packed_list() {
+                set_reg(regs, base, *dst, v.realize_list());
+                return lang_jit::OUTCOME_CONTINUE;
+            }
+            match v
+                .list_items()
+                .or_else(|| v.set_items())
+                .or_else(|| v.map_values())
+            {
+                Some(elements) => {
+                    for &e in &elements {
+                        retain(e);
+                    }
+                    set_reg(regs, base, *dst, Value::list(elements));
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail, // not iterable → interpreter raises the error
+            }
+        }
+        Op::ListLen { dst, src, .. } => match regs[base + *src as usize].list_len() {
+            Some(n) => {
+                set_reg(regs, base, *dst, Value::int(n as i64));
+                lang_jit::OUTCOME_CONTINUE
+            }
+            None => bail,
+        },
+        Op::ListGet { dst, list, index } => {
+            let element = regs[base + *index as usize]
+                .as_int()
+                .filter(|&i| i >= 0)
+                .and_then(|i| regs[base + *list as usize].list_get(i as usize));
+            match element {
+                Some(element) => {
+                    retain(element);
+                    set_reg(regs, base, *dst, element);
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail,
+            }
+        }
+        _ => bail,
+    }
+}
+
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
 /// `RealHost` + `RealExecutor`), so `lang-vm` stays free of `lang-runtime`/tokio. `Send + Sync` so the
 /// worker closure can carry a clone across the thread boundary.
@@ -935,6 +1024,7 @@ impl<'m> Vm<'m> {
             (lang_jit::PREPARE_CALL_HELPER, jit_prepare_call as *const u8),
             (lang_jit::CALLEE_BASE_HELPER, jit_callee_base as *const u8),
             (lang_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
+            (lang_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
         ];
         match lang_jit::Jit::new(helpers) {
             Ok(mut jit) => {
@@ -5245,6 +5335,26 @@ mod tests {
             "NaN/division float result must match the interpreter"
         );
         assert_eq!(jit.stdout, "1.5\n");
+    }
+
+    /// J4 (heap/collections): a `for i in 0..n` loop — the idiomatic range loop, whose `MakeRange` /
+    /// `IterSnapshot` / `ListLen` / `ListGet` internals now run natively (through the leaf-op helper),
+    /// so the whole loop body is native. Refcount-exact (the snapshot list is a heap value) and
+    /// byte-identical to the interpreter.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_for_range_loop_is_native_and_correct() {
+        let src = "fn run(n: int): int {\n  mut acc = 0;\n  for i in 0..n {\n    acc = acc + i;\n  }\n  return acc;\n}\necho run(1000);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the for-range loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(interp, jit, "for-range result must match the interpreter");
+        let expected: i64 = (0..1000).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
     }
 
     /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware

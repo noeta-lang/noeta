@@ -104,7 +104,7 @@ on every eligible program.
 | **J1** | ✅ **DONE.** **Integer fast path** — compile protos whose ops are all in {`LoadConst`(imm), `Move`, `Drop`, `Binary`(int `+ - * / %` and `== != < <= > >=`), `CondBranch`, `Jump`, `JumpIf*`, `Return`/`Halt` as bail points}. Guard-and-bail on non-int operands, zero divisor, and 48-bit overflow. First real native code — **~6–7.5× on register-local integer loops**. (Globals + `WideInt`/bitwise deferred; see below.) | Codegen correctness; NaN-box guards; the first oracle run. |
 | **J2** | ✅ **DONE (floats).** **Float fast path** — native f64 ALU (`+ - * /`) and ordered comparison (`== != < <= > >=`), dispatched from the same `Binary` by a runtime int-vs-float type check; NaN results canonicalized to match `Value::float` bit-for-bit. **~6.5× on float loops.** (f32, tuples, `Narrow`/`IsType` deferred — see below.) | Incremental. |
 | **J3** | ✅ **DONE.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation); heap-aware refcounting for the callee closure/results; **resume-native** re-enters the compiled caller after its callee returns; **native→native direct calls** — a compiled caller `call_indirect`s a compiled callee (value-returning `Return`, capacity-guarded so the register pointer stays valid), skipping the interpreter round-trip on the fast path, falling back to the shared setup otherwise. `fib`-class recursion **~2.3×**; loops ~6–8×. | Call ABI, stack/frame interaction, recursion depth. |
-| **J4** | **Heap & collections** — retain/release inlined, allocation + list/map/set/string/field ops via runtime helpers keeping refcount exact. Most real programs become fully JIT-eligible. | **Refcount exactness** — the leak oracle is the gate. |
+| **J4** | ⏳ **STARTED (slice 1: for-range loops).** **Heap & collections** — a generic `run_leaf_op` helper runs a single non-dispatching heap/collection op (the interpreter's exact arm, refcounts included) and returns "continue" or a resume pc; adding an op is a match arm. Slice 1 lit up `MakeRange`/`IterSnapshot`/`ListLen`/`ListGet`, so `for i in 0..n` loops go native (**~2.6×**). Next: field access, indexing, constructors, string ops. | **Refcount exactness** — the leak oracle is the gate. |
 | **J5** | **Tiering polish + OSR** — on-stack replacement so a hot loop enters tier 1 mid-execution (not only at call boundary); counter tuning; per-op bail replacing whole-proto eligibility; compile-time budget. | Deopt/OSR is subtle; do last. |
 
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
@@ -300,6 +300,30 @@ VM execution core, but reuses the interpreter's own logic so behaviour is identi
 - **Result.** `fib(24)` **~1.27× → ~2.24×**, `fib(28)` ~2.3×, with loops unchanged (`--jit-differential`
   419/0/768-native/0-leak). The remaining distance to loop-like speedup is the per-call setup/refcount
   work that recursion inherently pays; the interpreter round-trip is gone.
+
+## J4 — what landed (slice 1: heap ops via one generic helper)
+
+The heap-op mechanism is deliberately uniform: a single **`jit_run_leaf_op`** helper runs one
+non-dispatching heap/collection op — the interpreter's *exact* arm, refcounts and all — on the shared
+register stack, and returns `OUTCOME_CONTINUE` (done, advance to `pc + 1`) or the op's own pc (it
+can't handle this instance: a receiver that would dispatch to a user method, or a case that would
+raise — the interpreter re-runs it). **Every early return is before any register write**, so a re-run
+starts clean (the same rule J3's `StoreGlobal` fix established). The codegen for any such op is one
+shared `emit_leaf_op` (call the helper, continue or propagate); a prototype containing one is
+`heap_aware`, so the surrounding native writes stay refcount-correct. **Adding an op is a match arm
+plus a name in `is_leaf_heap_op` — no new helper, no new codegen.**
+
+- **Slice 1 — `for i in 0..n`.** Lit up `MakeRange` / `IterSnapshot` / `ListLen` / `ListGet`, so the
+  idiomatic range loop is native (its `IterSnapshot` still bails on a user `Iterable`; a plain range
+  never does). `vm_jit/forrange_*` (interp vs forced JIT): **100k 3.63 → 1.74 ms (~2.1×), 1M 38.7 →
+  14.9 ms (~2.6×)** — below the `while` loop's ~6× because a range materializes an `n`-element list and
+  `ListGet` is a per-iteration helper call, but the idiomatic loop now goes native. `--jit-differential`
+  419/0/768-native/0-leak; new `jit_for_range_loop` test.
+- **Next slices (same mechanism):** field access (`LoadField`/`SetField` via the uncached slot
+  lookup), list/map indexing (`Index`), tuple ops, constructors (`MakeList`/`MakeMap`/`MakeStruct`/…),
+  and string ops (`BuildString`, non-dispatching `Stringify`/`Echo`). Dispatching ops (`CallMethod`,
+  object `Index`, `Display` `Stringify`) keep bailing — they push frames, which the leaf helper does
+  not.
 
 ## Open questions (resolve at sign-off)
 

@@ -948,6 +948,23 @@ fn vm_hot_paths(c: &mut Criterion) {
             jit.bench_with_input(BenchmarkId::new("global_jit", n), &gmodule, |b, module| {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
+            // J4 (heap/collections): a `for i in 0..n` range loop — its MakeRange/IterSnapshot/
+            // ListLen/ListGet internals now run through the leaf-op helper, so the loop is native.
+            let rmodule = compile(&loop_sum_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("forrange_interp", n),
+                &rmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("forrange_jit", n),
+                &rmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
         }
         // Native calls (J3): recursive `fib`, interpreter vs forced JIT. Each frame's pre-call region
         // and both recursive subtrees run native (the callee enters at pc 0); the caller's tail after
