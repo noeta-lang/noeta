@@ -103,7 +103,7 @@ on every eligible program.
 | **J0** | ✅ **DONE.** **Foundation** — `lang-jit` crate + `jit` feature, Cranelift wired, the compiled-code cache + tier-0/1 dispatch seam, the runtime-helper ABI skeleton, hot-counter promotion, and the `--jit-differential` + leak-under-JIT oracle harness. No op compiled yet (every proto bails to tier 0) — proves the *plumbing* and the oracle. | Setup; the ABI/deopt seam is the crux to get right early. |
 | **J1** | ✅ **DONE.** **Integer fast path** — compile protos whose ops are all in {`LoadConst`(imm), `Move`, `Drop`, `Binary`(int `+ - * / %` and `== != < <= > >=`), `CondBranch`, `Jump`, `JumpIf*`, `Return`/`Halt` as bail points}. Guard-and-bail on non-int operands, zero divisor, and 48-bit overflow. First real native code — **~6–7.5× on register-local integer loops**. (Globals + `WideInt`/bitwise deferred; see below.) | Codegen correctness; NaN-box guards; the first oracle run. |
 | **J2** | ✅ **DONE (floats).** **Float fast path** — native f64 ALU (`+ - * /`) and ordered comparison (`== != < <= > >=`), dispatched from the same `Binary` by a runtime int-vs-float type check; NaN results canonicalized to match `Value::float` bit-for-bit. **~6.5× on float loops.** (f32, tuples, `Narrow`/`IsType` deferred — see below.) | Incremental. |
-| **J3** | **Calls** — inline the direct-call fast path (known callee proto, arity match) with a native call into another compiled proto (or a helper trampoline to tier 0); `fib`-class recursion. | Call ABI, stack/frame interaction, recursion depth. |
+| **J3** | ⏳ **DONE (foundation); full win pending.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation), driving the interpreter's own closure-call setup; heap-aware refcounting (retain/release helpers) for the callee closure and results; `fib`-class recursion runs correctly, both subtrees native. **~1.1× so far** — the caller resumes in tier 0 after its first call; the full win needs resume-native-at-pc (below). | Call ABI, stack/frame interaction, recursion depth. |
 | **J4** | **Heap & collections** — retain/release inlined, allocation + list/map/set/string/field ops via runtime helpers keeping refcount exact. Most real programs become fully JIT-eligible. | **Refcount exactness** — the leak oracle is the gate. |
 | **J5** | **Tiering polish + OSR** — on-stack replacement so a hot loop enters tier 1 mid-execution (not only at call boundary); counter tuning; per-op bail replacing whole-proto eligibility; compile-time budget. | Deopt/OSR is subtle; do last. |
 
@@ -246,6 +246,39 @@ was the target. Two changes got it native:
 > arc is complete, so the two speedups (register promotion + native register loops) compose and the
 > destruction-order work is done once, oracle-guarded. See `../perf/vm-throughput/next-gap-investigation.md`
 > Finding 1.
+
+## J3 — what landed (native calls, foundation)
+
+The deepest slice: native calls on the **shared contiguous register stack** (chosen over the simple
+`call_value`-per-call path, which allocates per call and would make `fib` *slower*). It touches the
+VM execution core, but reuses the interpreter's own logic so behaviour is identical by construction.
+
+- **Shared call setup.** The `Op::Call` closure setup (reserve callee window, move args, fill
+  defaults, carry upvalues, push the frame) was factored into `Vm::setup_closure_call`, used by both
+  the interpreter arm and a new `jit_call` runtime helper. Native `Call` compiles to *one call to
+  `jit_call`* (which reads the `Op::Call` back from `proto`/`pc`), then returns its outcome — so the
+  call machinery lives in exactly one place and native calls push onto the **same** frame/register
+  stacks (no per-call allocation). The ABI gained the `Vec<Frame>`/`Vec<Value>` handles for this; the
+  return became an `i64` — a resume pc, `CALLED` (frame pushed), or `ABORTED`.
+- **Heap-aware refcounting.** A call carries heap values in registers (the callee closure from
+  `LoadGlobal`, results), so a **call-bearing prototype** switches to heap-aware codegen: `store_reg`
+  releases the overwritten value, `LoadGlobal`/`Move` retain a moved heap value, `Drop` releases
+  (destructor-aware when IR-relevant) — via `retain`/`release`/`release_value` helpers, all matching
+  the interpreter's exact discipline. A **call-free** prototype (J1/J2/globals) keeps the faster
+  refcount-free stores. Refcounts stay exact *across the tier-0/tier-1 boundary* — a native
+  `LoadGlobal` retain is balanced by an interpreted overwrite, and vice versa.
+- **Result — correctness proven, perf modest so far.** `--jit-differential` **419 matched / 0 skipped
+  / 722 native / 0 divergence / 0 leaks** — the whole corpus's recursion, closures, and
+  destructor-bearing calls run through native calls with exact refcounts. But the speedup is only
+  **~1.1× on `fib`** (fib(24) 11.6 → 10.3 ms): a native `Call` **exits** the compiled function
+  (`CALLED`), so the callee runs native (it enters at pc 0) but the **caller resumes in tier 0** after
+  its first call. Each frame is native up to its first call + both subtrees native; the tail is
+  interpreted. New `jit_recursive_call_is_native_and_correct` test + `vm_jit/fib_*` bench.
+- **The full win — resume-native-at-pc (next).** To keep the caller native after a call, the seam must
+  re-enter the compiled function at an arbitrary resume pc (an entry-pc jump table + firing the seam at
+  every frame re-entry, not just `pc == 0`), so the whole `fib` frame runs native. That is the
+  follow-up that turns the ~1.1× into the real recursion win; the heap-aware machinery and the
+  shared-stack call path it needs are now all in place.
 
 ## Open questions (resolve at sign-off)
 

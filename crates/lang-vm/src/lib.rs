@@ -374,6 +374,18 @@ struct Vm<'m> {
 #[cfg(feature = "jit")]
 const JIT_HOT_THRESHOLD: u32 = 50;
 
+/// What a compiled prototype's tier-1 run tells the interpreter to do next (P-JIT, decoded from the
+/// [`lang_jit::CompiledFn`] `i64` return).
+#[cfg(feature = "jit")]
+enum JitOutcome {
+    /// Resume interpreting this frame at the given bytecode pc (the native code bailed there).
+    Bail(usize),
+    /// A native `Call` pushed a callee frame; re-derive the top frame and run it (`continue 'reload`).
+    Called,
+    /// The frame aborted (a diagnostic is recorded); propagate the unwind.
+    Abort,
+}
+
 // Counts how many times a tier-1 bail stub has called `jit_observe` on this thread — the J0 proof
 // that generated native code actually ran (and reached a runtime helper), used by the tests.
 #[cfg(feature = "jit")]
@@ -410,6 +422,84 @@ fn jit_observe_count() -> u64 {
 extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     vm.global_order.push(g);
+}
+
+/// Runtime helper: bump a value's refcount (heap-aware register moves, J3). No-op on an immediate.
+#[cfg(feature = "jit")]
+extern "C" fn jit_retain(v: u64) {
+    retain(Value::from_bits(v));
+}
+
+/// Runtime helper: drop one reference to a value — the plain, non-destructor release the
+/// interpreter's `set_reg` uses on an overwritten register (J3). No-op on an immediate.
+#[cfg(feature = "jit")]
+extern "C" fn jit_release(v: u64) {
+    release(Value::from_bits(v));
+}
+
+/// Runtime helper: the destructor-aware release for an IR-relevant `Drop` (may run a `destruct`
+/// block if this is the last reference), J3.
+///
+/// # Safety
+/// `vm` must be the live `*mut Vm` the tier-1 ABI passed (see [`jit_note_global_bound`]).
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_release_value(vm: *mut core::ffi::c_void, v: u64) {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    vm.release_value(Value::from_bits(v));
+}
+
+/// Runtime helper for a native `Op::Call` (J3): read the call back from `proto`/`pc` and run the
+/// shared closure-call setup on the interpreter's frame/register stacks (pushing the callee frame or
+/// completing a synchronous first-class-builtin call). Returns the [`lang_jit`] outcome the compiled
+/// function propagates: `OUTCOME_CALLED` (frame pushed), a resume pc (synchronous call done, continue
+/// there), or `OUTCOME_ABORTED` (a diagnostic was recorded).
+///
+/// # Safety
+/// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed; the call runs
+/// synchronously inside `jit_enter`, where no other borrow of them is active.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_call(
+    vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    base: usize,
+    proto: i32,
+    pc: i32,
+) -> i64 {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    let module = vm.module;
+    let Op::Call {
+        dst,
+        callee,
+        args,
+        span,
+    } = &module.protos[proto as usize].code[pc as usize]
+    else {
+        // `emit_call` only emits this helper for an `Op::Call`, so this is unreachable; treat a
+        // mismatch defensively as an abort rather than misbehave.
+        return lang_jit::OUTCOME_ABORTED;
+    };
+    let callee_val = regs[base + *callee as usize];
+    let caller_top = frames.len() - 1;
+    match vm.setup_closure_call(
+        frames,
+        regs,
+        caller_top,
+        base,
+        *dst,
+        callee_val,
+        args,
+        *span,
+        pc as usize + 1,
+    ) {
+        Ok(true) => lang_jit::OUTCOME_CALLED,
+        Ok(false) => pc as i64 + 1,
+        Err(Abort) => lang_jit::OUTCOME_ABORTED,
+    }
 }
 
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
@@ -681,6 +771,13 @@ impl<'m> Vm<'m> {
                 lang_jit::NOTE_GLOBAL_BOUND_HELPER,
                 jit_note_global_bound as *const u8,
             ),
+            (lang_jit::RETAIN_HELPER, jit_retain as *const u8),
+            (lang_jit::RELEASE_HELPER, jit_release as *const u8),
+            (
+                lang_jit::RELEASE_VALUE_HELPER,
+                jit_release_value as *const u8,
+            ),
+            (lang_jit::CALL_HELPER, jit_call as *const u8),
         ];
         match lang_jit::Jit::new(helpers) {
             Ok(mut jit) => {
@@ -696,13 +793,18 @@ impl<'m> Vm<'m> {
     }
 
     /// Tier-0/tier-1 dispatch at frame entry (P-JIT). Called once per fresh frame (`pc == 0`).
-    /// Runs the compiled prototype's native code and returns the **bytecode `pc` at which the
-    /// interpreter should resume** (the deopt contract) — `0` means "interpret the whole frame".
-    /// Returns `None` when the prototype is not compiled and the interpreter should run it as usual.
-    /// Under ordinary (non-forced) execution this also drives hot-counter promotion.
+    /// Runs the compiled prototype's native code and returns what the interpreter should do next
+    /// (the deopt contract). `None` when the prototype is not compiled and the interpreter should run
+    /// it as usual. Under ordinary (non-forced) execution this also drives hot-counter promotion.
     #[cfg(feature = "jit")]
     #[allow(unsafe_code)]
-    fn jit_enter(&mut self, proto: usize, regs: &mut [Value], base: usize) -> Option<u32> {
+    fn jit_enter(
+        &mut self,
+        proto: usize,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        base: usize,
+    ) -> Option<JitOutcome> {
         let f = match self.jit.as_ref().and_then(|j| j.get(proto)) {
             Some(f) => f,
             None => self.jit_maybe_compile(proto)?,
@@ -710,13 +812,29 @@ impl<'m> Vm<'m> {
         let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
         let regs_ptr = regs.as_mut_ptr();
         let globals_ptr = self.globals.as_mut_ptr();
-        // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI; `vm_ptr`,
-        // `regs_ptr`, and `globals_ptr` are live for the duration of the call. The native code touches
-        // only `regs[base..]` (never growing the stack — a compiled prototype makes no call) and the
-        // fixed-size `globals` array (never reallocated), so both pointers stay valid, including across
-        // the `note_global_bound` helper (which pushes to the separate `global_order`). The returned pc
-        // is a valid index into this prototype's code (a bail site or 0).
-        Some(unsafe { f(vm_ptr, regs_ptr, base, globals_ptr) })
+        let frames_ptr = frames as *mut Vec<Frame> as *mut core::ffi::c_void;
+        let regs_vec_ptr = regs as *mut Vec<Value> as *mut core::ffi::c_void;
+        // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI. `regs_ptr` is the
+        // frame data base (native adds `base * 8`); it is used only *before* any call, and a native
+        // `Call` returns immediately (`CALLED`) without touching it again, so a `reserve_window`
+        // realloc inside `jit_call` can't leave it dangling in use. `frames_ptr`/`regs_vec_ptr` let
+        // `jit_call` push the callee frame and grow the shared stacks; `globals` never reallocates.
+        // All pointers are live for the synchronous call.
+        let raw = unsafe {
+            f(
+                vm_ptr,
+                regs_ptr,
+                base,
+                globals_ptr,
+                frames_ptr,
+                regs_vec_ptr,
+            )
+        };
+        Some(match raw {
+            lang_jit::OUTCOME_CALLED => JitOutcome::Called,
+            lang_jit::OUTCOME_ABORTED => JitOutcome::Abort,
+            pc => JitOutcome::Bail(pc as usize),
+        })
     }
 
     /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
@@ -1183,15 +1301,18 @@ impl<'m> Vm<'m> {
             // may run the whole frame in native code; J0 always bails, so control falls straight
             // through to the interpreter below (byte-identical).
             #[cfg(feature = "jit")]
-            if pc == 0
-                && self.jit.is_some()
-                && let Some(resume) = self.jit_enter(proto, regs, fbase)
-            {
-                // Native tier-1 code ran the frame up to a bail point and left the register window in
-                // the state the interpreter expects at `resume`; continue interpreting from there (the
-                // deopt handoff). `resume == 0` means the prototype was a bail stub or bailed at entry,
-                // so the interpreter runs the whole frame — behavior-identical.
-                pc = resume as usize;
+            if pc == 0 && self.jit.is_some() {
+                match self.jit_enter(proto, frames, regs, fbase) {
+                    // Not compiled → interpret as usual.
+                    None => {}
+                    // Native code ran the frame to a bail point and left the register window in the
+                    // state the interpreter expects at `resume`; continue interpreting there.
+                    Some(JitOutcome::Bail(resume)) => pc = resume,
+                    // A native `Call` pushed the callee frame — run it.
+                    Some(JitOutcome::Called) => continue 'reload,
+                    // The frame aborted inside native code (a diagnostic is recorded).
+                    Some(JitOutcome::Abort) => return Err(Abort),
+                }
             }
             loop {
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
@@ -4933,6 +5054,29 @@ mod tests {
             "NaN/division float result must match the interpreter"
         );
         assert_eq!(jit.stdout, "1.5\n");
+    }
+
+    /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware
+    /// `LoadGlobal` (retain), the recursive `Call` handled by the shared setup on the contiguous
+    /// stack, refcounts exact across the tier-0/tier-1 boundary — produces exactly the interpreter's
+    /// result. The `fib` prototype (and the top-level) go native.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_recursive_call_is_native_and_correct() {
+        let src = "fn fib(n: int): int {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\necho fib(20);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the recursive fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "recursive-call result must match the interpreter"
+        );
+        // fib(20) = 6765.
+        assert_eq!(jit.stdout, "6765\n");
     }
 
     /// Native globals (P-JIT): a **top-level** loop with global `mut` accumulators — the natural

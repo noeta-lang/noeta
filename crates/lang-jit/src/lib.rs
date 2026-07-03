@@ -70,8 +70,14 @@ use lang_value::Value;
 /// - `globals` points at the base of the VM's global-slot array (`Vec<Value>`, one word per
 ///   [`lang_bytecode::GlobalId`]); it never grows, so the pointer is stable for the whole run. Native
 ///   `LoadGlobal`/`StoreGlobal`/`TakeGlobal` index it directly.
-/// - The `u32` return is the **bytecode `pc` at which the interpreter should resume** (the deopt
-///   contract above). `0` means "interpret the whole frame" (an ineligible prototype's bail stub).
+/// - `frames` and `regs_vec` are opaque handles to the interpreter's `Vec<Frame>` and `Vec<Value>`
+///   (the frame and register stacks), passed to the `jit_call` helper so a native call can push the
+///   callee frame and grow the shared stack — the contiguous-stack call path (J3). This crate never
+///   dereferences them.
+///
+/// The `i64` return encodes the outcome: a non-negative value is a **resume pc** (the frame bailed
+/// there); [`OUTCOME_CALLED`] means a callee frame was pushed (the interpreter should run it);
+/// [`OUTCOME_ABORTED`] means the frame aborted (a diagnostic is on the VM).
 ///
 /// `extern "C"` so Cranelift's platform calling convention matches the pointer this is transmuted
 /// from.
@@ -80,17 +86,34 @@ pub type CompiledFn = unsafe extern "C" fn(
     regs: *mut Value,
     base: usize,
     globals: *mut Value,
-) -> u32;
+    frames: *mut c_void,
+    regs_vec: *mut c_void,
+) -> i64;
+
+/// [`CompiledFn`] return sentinel: a callee frame was pushed onto the frame stack (a native `Call`);
+/// the interpreter should re-derive the top frame and run it.
+pub const OUTCOME_CALLED: i64 = -1;
+/// [`CompiledFn`] return sentinel: the frame aborted (a diagnostic is recorded on the VM); the
+/// interpreter should propagate the unwind.
+pub const OUTCOME_ABORTED: i64 = -2;
 
 /// The name the bail stub calls to prove the runtime-helper ABI links. The VM registers a pointer
-/// for this symbol when it constructs the [`Jit`]; J4 registers the real `retain`/`release`/`call`
-/// helpers alongside it under the same convention.
+/// for this symbol when it constructs the [`Jit`].
 pub const OBSERVE_HELPER: &str = "lang_jit_observe";
 
 /// The name of the "note a global's first binding" helper. Native `StoreGlobal` writes the slot
 /// itself, then calls this so the VM records the slot in `global_order` for reverse-order teardown
 /// destruction — the one piece of `StoreGlobal` that can't be inlined (a `Vec` push may reallocate).
 pub const NOTE_GLOBAL_BOUND_HELPER: &str = "lang_jit_note_global_bound";
+
+/// Runtime-helper names for the heap/refcount path a call-bearing prototype needs (J3). `retain`
+/// bumps a value's refcount; `release` drops one (matching the interpreter's `set_reg` overwrite);
+/// `release_value` is the destructor-aware drop (for `Drop`-relevant); `call` runs the shared
+/// `Op::Call` setup on the interpreter's stacks.
+pub const RETAIN_HELPER: &str = "lang_jit_retain";
+pub const RELEASE_HELPER: &str = "lang_jit_release";
+pub const RELEASE_VALUE_HELPER: &str = "lang_jit_release_value";
+pub const CALL_HELPER: &str = "lang_jit_call";
 
 /// The method JIT: a Cranelift [`JITModule`] plus a per-prototype cache of finalized entry points.
 ///
@@ -104,11 +127,13 @@ pub struct Jit {
     compiled: Vec<Option<CompiledFn>>,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
-    /// The imported `lang_jit_observe` helper (called by the bail stub), declared once.
+    /// Imported runtime helpers, declared once (see the `*_HELPER` name constants).
     observe_id: FuncId,
-    /// The imported `lang_jit_note_global_bound` helper (called by native `StoreGlobal` on first
-    /// bind), declared once.
     note_bound_id: FuncId,
+    retain_id: FuncId,
+    release_id: FuncId,
+    release_value_id: FuncId,
+    call_id: FuncId,
     ctx: cranelift_codegen::Context,
     fb_ctx: FunctionBuilderContext,
 }
@@ -161,6 +186,33 @@ impl Jit {
         let note_bound_id = module
             .declare_function(NOTE_GLOBAL_BOUND_HELPER, Linkage::Import, &note_sig)
             .map_err(|e| e.to_string())?;
+        // Heap/call helpers (J3). `retain(v: i64)`, `release(v: i64)`, `release_value(vm: ptr, v: i64)`,
+        // and `call(vm, frames, regs_vec: ptr, base: usize, proto: i32, pc: i32) -> i64`.
+        let mut retain_sig = module.make_signature();
+        retain_sig.params.push(AbiParam::new(types::I64));
+        let retain_id = module
+            .declare_function(RETAIN_HELPER, Linkage::Import, &retain_sig)
+            .map_err(|e| e.to_string())?;
+        let release_id = module
+            .declare_function(RELEASE_HELPER, Linkage::Import, &retain_sig)
+            .map_err(|e| e.to_string())?;
+        let mut release_value_sig = module.make_signature();
+        release_value_sig.params.push(AbiParam::new(ptr_ty));
+        release_value_sig.params.push(AbiParam::new(types::I64));
+        let release_value_id = module
+            .declare_function(RELEASE_VALUE_HELPER, Linkage::Import, &release_value_sig)
+            .map_err(|e| e.to_string())?;
+        let mut call_sig = module.make_signature();
+        call_sig.params.push(AbiParam::new(ptr_ty)); // vm
+        call_sig.params.push(AbiParam::new(ptr_ty)); // frames
+        call_sig.params.push(AbiParam::new(ptr_ty)); // regs_vec
+        call_sig.params.push(AbiParam::new(ptr_ty)); // base
+        call_sig.params.push(AbiParam::new(types::I32)); // proto
+        call_sig.params.push(AbiParam::new(types::I32)); // pc
+        call_sig.returns.push(AbiParam::new(types::I64));
+        let call_id = module
+            .declare_function(CALL_HELPER, Linkage::Import, &call_sig)
+            .map_err(|e| e.to_string())?;
         let ctx = module.make_context();
         Ok(Jit {
             module,
@@ -168,6 +220,10 @@ impl Jit {
             native_count: 0,
             observe_id,
             note_bound_id,
+            retain_id,
+            release_id,
+            release_value_id,
+            call_id,
             ctx,
             fb_ctx: FunctionBuilderContext::new(),
         })
@@ -212,15 +268,18 @@ impl Jit {
         Ok(f)
     }
 
-    /// The tier-1 ABI signature: `(vm: ptr, regs: ptr, base: usize, globals: ptr) -> u32`.
+    /// The tier-1 ABI signature: `(vm, regs, base, globals, frames, regs_vec) -> i64` (see
+    /// [`CompiledFn`]).
     fn abi_signature(&self) -> cranelift_codegen::ir::Signature {
         let ptr_ty = self.module.target_config().pointer_type();
         let mut sig = self.module.make_signature();
         sig.params.push(AbiParam::new(ptr_ty)); // vm
-        sig.params.push(AbiParam::new(ptr_ty)); // regs
+        sig.params.push(AbiParam::new(ptr_ty)); // regs (frame data base)
         sig.params.push(AbiParam::new(ptr_ty)); // base (usize == pointer width)
         sig.params.push(AbiParam::new(ptr_ty)); // globals
-        sig.returns.push(AbiParam::new(types::I32)); // resume pc
+        sig.params.push(AbiParam::new(ptr_ty)); // frames (opaque *mut Vec<Frame>)
+        sig.params.push(AbiParam::new(ptr_ty)); // regs_vec (opaque *mut Vec<Value>)
+        sig.returns.push(AbiParam::new(types::I64)); // outcome (resume pc / CALLED / ABORTED)
         sig
     }
 
@@ -259,7 +318,7 @@ impl Jit {
             let vm = b.block_params(block)[0];
             let helper_ref = self.module.declare_func_in_func(self.observe_id, b.func);
             b.ins().call(helper_ref, &[vm]);
-            let zero = b.ins().iconst(types::I32, 0);
+            let zero = b.ins().iconst(types::I64, 0);
             b.ins().return_(&[zero]);
             b.finalize();
         }
@@ -289,21 +348,45 @@ impl Jit {
             let regs = b.block_params(entry)[1];
             let base = b.block_params(entry)[2];
             let globals = b.block_params(entry)[3];
+            let frames = b.block_params(entry)[4];
+            let regs_vec = b.block_params(entry)[5];
             // frame_ptr = regs + base * 8 (Value is 8 bytes). All register access is off this.
             let base_bytes = b.ins().imul_imm(base, 8);
             let frame_ptr = b.ins().iadd(regs, base_bytes);
             let note_bound_ref = self.module.declare_func_in_func(self.note_bound_id, b.func);
+            let retain_ref = self.module.declare_func_in_func(self.retain_id, b.func);
+            let release_ref = self.module.declare_func_in_func(self.release_id, b.func);
+            let release_value_ref = self
+                .module
+                .declare_func_in_func(self.release_value_id, b.func);
+            let call_ref = self.module.declare_func_in_func(self.call_id, b.func);
+
+            // A prototype that makes a call carries heap values (the callee closure, and results) in
+            // registers, so its register writes must be refcount-correct (release the overwritten
+            // value, retain a moved heap value). A call-free prototype keeps the immediate invariant
+            // (J1/J2/globals) and the faster refcount-free stores.
+            let heap_aware = chunk.code.iter().any(|op| matches!(op, Op::Call { .. }));
 
             let mut cg = Codegen {
                 b: &mut b,
                 vm,
                 frame_ptr,
+                base,
                 globals,
+                frames,
+                regs_vec,
+                heap_aware,
+                proto: proto as u32,
                 note_bound_ref,
+                retain_ref,
+                release_ref,
+                release_value_ref,
+                call_ref,
             };
 
             // Parameter guard: if any argument is a heap pointer, bail to pc 0 (interpret the frame).
-            // Establishes the "every register is an immediate" invariant the body relies on.
+            // Keeps heap arguments out of the body (the body's heap values then arise only from
+            // `LoadGlobal`/calls, which the heap-aware path refcounts).
             let mut any_ptr: Option<ClValue> = None;
             for p in 0..chunk.num_params {
                 let v = cg.load_reg(p);
@@ -318,7 +401,7 @@ impl Jit {
                     let bail0 = cg.b.create_block();
                     cg.b.ins().brif(any, bail0, &[], op_blocks[0], &[]);
                     cg.b.switch_to_block(bail0);
-                    let zero = cg.b.ins().iconst(types::I32, 0);
+                    let zero = cg.b.ins().iconst(types::I64, 0);
                     cg.b.ins().return_(&[zero]);
                 }
                 None => {
@@ -331,7 +414,7 @@ impl Jit {
             for (pc, op) in chunk.code.iter().enumerate() {
                 cg.b.switch_to_block(op_blocks[pc]);
                 if !reachable[pc] {
-                    let here = cg.b.ins().iconst(types::I32, pc as i64);
+                    let here = cg.b.ins().iconst(types::I64, pc as i64);
                     cg.b.ins().return_(&[here]);
                     continue;
                 }
@@ -363,6 +446,7 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
         Op::Move { .. } | Op::Drop { .. } => true,
         Op::Binary { op, .. } => supported_binary(*op),
         Op::LoadGlobal { .. } | Op::StoreGlobal { .. } | Op::TakeGlobal { .. } => true,
+        Op::Call { .. } => true,
         Op::Jump { .. }
         | Op::JumpIfTrue { .. }
         | Op::JumpIfFalse { .. }
@@ -438,6 +522,9 @@ fn reachable_pcs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
                 stack.push(*target as usize);
                 stack.push(pc + 1);
             }
+            // A native `Call` exits the compiled function (returns `CALLED`), so it has no native
+            // successor — the interpreter resumes at `pc + 1` after running the callee. Terminal here.
+            Op::Call { .. } => {}
             _ => stack.push(pc + 1), // fast straight-line op
         }
     }
@@ -454,8 +541,22 @@ struct Codegen<'a, 'b> {
     /// The opaque `*mut Vm` (ABI param 0), passed to runtime helpers.
     vm: ClValue,
     frame_ptr: ClValue,
+    /// The frame's base offset (ABI param 2), passed to the call helper.
+    base: ClValue,
     globals: ClValue,
+    /// The opaque `*mut Vec<Frame>` / `*mut Vec<Value>` (ABI params 4/5), passed to the call helper.
+    frames: ClValue,
+    regs_vec: ClValue,
+    /// Whether this prototype carries heap values in registers (it makes a call): register writes then
+    /// release the overwritten value and moved heap values are retained. See [`Codegen::store_reg`].
+    heap_aware: bool,
+    /// This prototype's index, passed to the call helper so it can read the `Op::Call` back.
+    proto: u32,
     note_bound_ref: FuncRef,
+    retain_ref: FuncRef,
+    release_ref: FuncRef,
+    release_value_ref: FuncRef,
+    call_ref: FuncRef,
 }
 
 impl Codegen<'_, '_> {
@@ -469,12 +570,78 @@ impl Codegen<'_, '_> {
         )
     }
 
-    /// Store `v` into register `r`. Sound with no release only under the immediate invariant (the
-    /// old occupant is always an immediate, so the interpreter's release-on-overwrite is a no-op).
+    /// Store `v` into register `r`. In a call-free prototype the overwritten value is always an
+    /// immediate (the interpreter's release-on-overwrite is a no-op), so this is a bare store. In a
+    /// `heap_aware` prototype the old occupant may be a heap value, so it releases it first —
+    /// reproducing the interpreter's `set_reg` (which drops one reference to the old value). The caller
+    /// is responsible for retaining `v` when it is a moved heap value (`LoadGlobal`/`Move`).
     fn store_reg(&mut self, r: Reg, v: ClValue) {
+        if self.heap_aware {
+            let old = self.load_reg(r);
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+            self.release_if_heap(old);
+        } else {
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+        }
+    }
+
+    /// A plain store to register `r` with no release of the old value (the caller has already taken
+    /// ownership of the old value, e.g. `Drop`, or is initializing).
+    fn store_reg_raw(&mut self, r: Reg, v: ClValue) {
         self.b
             .ins()
             .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+    }
+
+    /// Emit `if is_pointer(v) { retain(v) }` — bump the refcount of a moved heap value.
+    fn retain_if_heap(&mut self, v: ClValue) {
+        let heap = self.is_pointer(v);
+        let do_it = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(heap, do_it, &[], cont, &[]);
+        self.b.switch_to_block(do_it);
+        let f = self.retain_ref;
+        self.b.ins().call(f, &[v]);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
+    }
+
+    /// Emit `if is_pointer(v) { release(v) }` — drop one reference to an overwritten heap value
+    /// (matching the interpreter's `set_reg`, which uses the plain, non-destructor release).
+    fn release_if_heap(&mut self, v: ClValue) {
+        let heap = self.is_pointer(v);
+        let do_it = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(heap, do_it, &[], cont, &[]);
+        self.b.switch_to_block(do_it);
+        let f = self.release_ref;
+        self.b.ins().call(f, &[v]);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
+    }
+
+    /// Emit the heap release for a dropped value (`Op::Drop`): the destructor-aware `release_value`
+    /// (which may run a `destruct` block if this is the last reference) when the drop is IR-relevant,
+    /// else the plain `release` — matching the interpreter's `Drop` arm.
+    fn release_dropped_if_heap(&mut self, v: ClValue, relevant: bool) {
+        if !relevant {
+            self.release_if_heap(v);
+            return;
+        }
+        let heap = self.is_pointer(v);
+        let do_it = self.b.create_block();
+        let cont = self.b.create_block();
+        self.b.ins().brif(heap, do_it, &[], cont, &[]);
+        self.b.switch_to_block(do_it);
+        let f = self.release_value_ref;
+        let vm = self.vm;
+        self.b.ins().call(f, &[vm, v]);
+        self.b.ins().jump(cont, &[]);
+        self.b.switch_to_block(cont);
     }
 
     /// `(v & (sign|qnan)) == (sign|qnan)` — is `v` a heap pointer?
@@ -549,9 +716,9 @@ impl Codegen<'_, '_> {
             .store(MemFlagsData::trusted(), v, self.globals, global_offset(g));
     }
 
-    /// A native i32 constant (a resume pc).
+    /// A native i64 outcome constant — a resume pc (bail) for the compiled-fn return.
     fn pc_const(&mut self, pc: usize) -> ClValue {
-        self.b.ins().iconst(types::I32, pc as i64)
+        self.b.ins().iconst(types::I64, pc as i64)
     }
 }
 
@@ -584,19 +751,28 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             next(cg);
         }
         Op::Move { dst, src } => {
-            // Under the immediate invariant `src` is an immediate, so a bit copy (no retain/release)
-            // reproduces the interpreter's refcounted move exactly.
+            // The interpreter's `Move` retains the source then overwrites the destination. A call-free
+            // prototype's `src` is always an immediate (retain is a no-op); a `heap_aware` one retains
+            // a moved heap value, and `store_reg` releases the overwritten destination.
             let v = cg.load_reg(*src);
+            if cg.heap_aware {
+                cg.retain_if_heap(v);
+            }
             cg.store_reg(*dst, v);
             next(cg);
         }
-        Op::Drop { reg, .. } => {
-            // The dropped value is an immediate (invariant) → no `release`/`destruct`; just clear the
-            // slot to `unit`, matching the interpreter's `mem::replace(reg, unit)`.
+        Op::Drop { reg, relevant } => {
+            // Take the value out (leaving `unit`) and drop it. Immediate in a call-free prototype (no
+            // release). In a `heap_aware` prototype a heap value is released — through the
+            // destructor-aware path when the drop is IR-relevant, else the plain release.
+            let v = cg.load_reg(*reg);
             let unit =
                 cg.b.ins()
                     .iconst(types::I64, Value::NANBOX.unit_bits as i64);
-            cg.store_reg(*reg, unit);
+            cg.store_reg_raw(*reg, unit);
+            if cg.heap_aware {
+                cg.release_dropped_if_heap(v, *relevant);
+            }
             next(cg);
         }
         Op::Binary { op, dst, a, b, .. } => emit_binary(cg, *op, *dst, *a, *b, pc, op_blocks),
@@ -655,6 +831,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::LoadGlobal { dst, global, .. } => emit_load_global(cg, *dst, global.0, pc, op_blocks),
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
+        Op::Call { .. } => emit_call(cg, pc),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
             let here = cg.pc_const(pc);
@@ -663,22 +840,49 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
     }
 }
 
-/// `dst = globals[g]` (P-JIT globals). Bails if the slot is unbound (E0005) or holds a heap value
-/// (the interpreter's `retain` is needed there). An immediate global copies with no refcount — the
-/// interpreter's `retain` is a no-op on it — keeping the immediate invariant intact.
+/// A native `Call` (P-JIT J3): hand the whole call to the `jit_call` runtime helper, which reads the
+/// `Op::Call` back from `proto`/`pc` and runs the shared closure-call setup on the interpreter's
+/// frame/register stacks (pushing the callee frame). Whatever it returns — `CALLED` (frame pushed),
+/// a resume pc (a synchronous first-class-builtin call completed), or `ABORTED` — becomes this
+/// compiled function's outcome, so the interpreter runs the callee and resumes the caller in tier 0.
+fn emit_call(cg: &mut Codegen, pc: usize) {
+    let vm = cg.vm;
+    let frames = cg.frames;
+    let regs_vec = cg.regs_vec;
+    let base = cg.base;
+    let proto = cg.b.ins().iconst(types::I32, cg.proto as i64);
+    let pcv = cg.b.ins().iconst(types::I32, pc as i64);
+    let call = cg.call_ref;
+    let inst =
+        cg.b.ins()
+            .call(call, &[vm, frames, regs_vec, base, proto, pcv]);
+    let outcome = cg.b.inst_results(inst)[0];
+    cg.b.ins().return_(&[outcome]);
+}
+
+/// `dst = globals[g]` (P-JIT globals). Bails if the slot is unbound (E0005). A call-free prototype
+/// also bails on a heap global (it would need a `retain`, breaking the immediate invariant); a
+/// `heap_aware` prototype instead retains the heap value (matching the interpreter's `LoadGlobal`
+/// retain) and `store_reg` releases the overwritten destination.
 fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[Block]) {
     let v = cg.load_global(g);
     let unbound = cg.is_unbound(v);
-    let heap = cg.is_pointer(v);
-    let bail_cond = cg.b.ins().bor(unbound, heap);
+    let bail_cond = if cg.heap_aware {
+        unbound
+    } else {
+        let heap = cg.is_pointer(v);
+        cg.b.ins().bor(unbound, heap)
+    };
     let cont = cg.b.create_block();
-    // Guard keeps going when NOT (unbound or heap): invert into a "bail if bail_cond" via a swapped brif.
     let bail = cg.b.create_block();
     cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);
     cg.b.switch_to_block(bail);
     let here = cg.pc_const(pc);
     cg.b.ins().return_(&[here]);
     cg.b.switch_to_block(cont);
+    if cg.heap_aware {
+        cg.retain_if_heap(v);
+    }
     cg.store_reg(dst, v);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
@@ -690,11 +894,12 @@ fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
 /// is a no-op).
 fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &[Block]) {
     let v = cg.load_reg(src);
-    // Match the interpreter's `mem::replace(reg[src], unit)`: the source register is consumed.
+    // Match the interpreter's `mem::replace(reg[src], unit)`: the source is *moved* into the global
+    // (no release — its reference transfers), so use the raw store, not the releasing `store_reg`.
     let unit =
         cg.b.ins()
             .iconst(types::I64, Value::NANBOX.unit_bits as i64);
-    cg.store_reg(src, unit);
+    cg.store_reg_raw(src, unit);
 
     let old = cg.load_global(g);
     let is_unb = cg.is_unbound(old);

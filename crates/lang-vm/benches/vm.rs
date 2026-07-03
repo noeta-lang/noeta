@@ -949,6 +949,18 @@ fn vm_hot_paths(c: &mut Criterion) {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
         }
+        // Native calls (J3): recursive `fib`, interpreter vs forced JIT. Each frame's pre-call region
+        // and both recursive subtrees run native (the callee enters at pc 0); the caller's tail after
+        // its first call resumes in tier 0.
+        for &d in FIB_DEPTHS {
+            let module = compile(&fib_src(d));
+            jit.bench_with_input(BenchmarkId::new("fib_interp", d), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            });
+            jit.bench_with_input(BenchmarkId::new("fib_jit", d), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+        }
         jit.finish();
     }
 }

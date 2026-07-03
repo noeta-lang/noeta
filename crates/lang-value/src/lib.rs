@@ -167,6 +167,13 @@ impl Value {
         self.0 == Value::unbound().0
     }
 
+    /// Reconstruct a value from its raw NaN-boxed word — the inverse of [`Value::bits`]. Used by the
+    /// JIT's runtime helpers (`lang-jit`), which pass a value to the VM as its `u64` bits (the native
+    /// ABI can't carry a `Value` type). The caller must pass bits this crate's encoding produced.
+    pub fn from_bits(bits: u64) -> Value {
+        Value(bits)
+    }
+
     /// A float. Any NaN is canonicalized to the standard quiet NaN so it can never collide
     /// with the tag space (canonical NaN has bit 50 clear; the tag prefix needs it set).
     pub fn float(f: f64) -> Value {
