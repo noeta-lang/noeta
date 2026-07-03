@@ -367,6 +367,10 @@ struct Vm<'m> {
     /// its count crosses [`JIT_HOT_THRESHOLD`] (or immediately under `force_jit`).
     #[cfg(feature = "jit")]
     jit_counters: Vec<u32>,
+    /// The value the bottom frame produced when it returned inside native code (J3): `jit_return`
+    /// parks it here for the dispatch loop to yield as the run's result.
+    #[cfg(feature = "jit")]
+    jit_ret: Value,
 }
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
@@ -382,6 +386,11 @@ enum JitOutcome {
     Bail(usize),
     /// A native `Call` pushed a callee frame; re-derive the top frame and run it (`continue 'reload`).
     Called,
+    /// A native `Return` transferred its result to the caller and popped this frame; re-derive the
+    /// caller frame and continue (`continue 'reload`).
+    Returned,
+    /// The bottom frame returned natively; the run is over — yield its value (on `vm.jit_ret`).
+    Halted,
     /// The frame aborted (a diagnostic is recorded); propagate the unwind.
     Abort,
 }
@@ -499,6 +508,32 @@ extern "C" fn jit_call(
         Ok(true) => lang_jit::OUTCOME_CALLED,
         Ok(false) => pc as i64 + 1,
         Err(Abort) => lang_jit::OUTCOME_ABORTED,
+    }
+}
+
+/// Runtime helper for a native `Op::Return` (J3): run the shared return protocol (transfer the value
+/// to the caller's destination, pop this frame). Returns `OUTCOME_RETURNED` when it transferred to a
+/// caller, or `OUTCOME_HALTED` (parking the value on `vm.jit_ret`) when the bottom frame returned.
+///
+/// # Safety
+/// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_return(
+    vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    raw: u64,
+) -> i64 {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    match vm.do_return(frames, regs, Value::from_bits(raw)) {
+        Some(v) => {
+            vm.jit_ret = v;
+            lang_jit::OUTCOME_HALTED
+        }
+        None => lang_jit::OUTCOME_RETURNED,
     }
 }
 
@@ -756,6 +791,8 @@ impl<'m> Vm<'m> {
             force_jit: false,
             #[cfg(feature = "jit")]
             jit_counters: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_ret: Value::unit(),
         }
     }
 
@@ -778,6 +815,7 @@ impl<'m> Vm<'m> {
                 jit_release_value as *const u8,
             ),
             (lang_jit::CALL_HELPER, jit_call as *const u8),
+            (lang_jit::RETURN_HELPER, jit_return as *const u8),
         ];
         match lang_jit::Jit::new(helpers) {
             Ok(mut jit) => {
@@ -839,6 +877,8 @@ impl<'m> Vm<'m> {
         Some(match raw {
             lang_jit::OUTCOME_CALLED => JitOutcome::Called,
             lang_jit::OUTCOME_ABORTED => JitOutcome::Abort,
+            lang_jit::OUTCOME_RETURNED => JitOutcome::Returned,
+            lang_jit::OUTCOME_HALTED => JitOutcome::Halted,
             pc => JitOutcome::Bail(pc as usize),
         })
     }
@@ -1321,6 +1361,13 @@ impl<'m> Vm<'m> {
                     Some(JitOutcome::Bail(resume)) => pc = resume,
                     // A native `Call` pushed the callee frame — run it.
                     Some(JitOutcome::Called) => continue 'reload,
+                    // A native `Return` transferred to the caller and popped this frame — re-derive
+                    // the caller and continue.
+                    Some(JitOutcome::Returned) => continue 'reload,
+                    // The bottom frame returned natively — yield its value.
+                    Some(JitOutcome::Halted) => {
+                        return Ok(std::mem::replace(&mut self.jit_ret, Value::unit()));
+                    }
                     // The frame aborted inside native code (a diagnostic is recorded).
                     Some(JitOutcome::Abort) => return Err(Abort),
                 }
@@ -4970,33 +5017,22 @@ mod tests {
         compile(&parsed.program).expect("program should be in the M1.0 subset")
     }
 
-    /// P-JIT foundation: the tier-1 path is byte-identical to the interpreter, a prototype with no
-    /// compilable op runs its bail stub (reaching the `lang_jit_observe` helper), and control falls
-    /// cleanly back to tier 0. Proves the seam (Cranelift build + finalize, tier-0/1 dispatch, the
-    /// helper ABI, the deopt handoff) end to end.
+    /// P-JIT foundation: a prototype with no compilable op runs its bail stub — reaching the
+    /// `lang_jit_observe` helper — and control falls cleanly back to tier 0 with a byte-identical
+    /// result. `echo "hi"` is exactly such a program (its only prototype is `LoadConst`(str) /
+    /// `Stringify` / `Echo` / `Halt`, none of them fast). Proves the seam (Cranelift build + finalize,
+    /// tier-0/1 dispatch, the helper ABI, the deopt handoff) end to end.
     #[cfg(feature = "jit")]
     #[test]
     fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
-        // `dbl` (`return x * 2`) compiles to native code; `greet` has no fast op (a heap `LoadConst`
-        // then `Return`) → a bail stub that calls the observe helper; the top-level goes native and
-        // bails at the `Call`/`Stringify`/`Echo` it can't compile.
-        let src = "fn dbl(x: int): int { return x * 2; }\nfn greet(): string { return \"hi\"; }\necho \"${dbl(5)} ${greet()}\";\n";
-        let module = compile_module(src);
-
+        let module = compile_module("echo \"hi\";\n");
         let interp = VmBackend::new().run_module(&module);
         let before = jit_observe_count();
-        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        let jit = VmBackend::new().run_module_jit(&module);
         let entered = jit_observe_count() - before;
 
-        // Byte-identical RunResult — the oracle's core invariant.
         assert_eq!(interp, jit, "tier-1 result must match the interpreter");
-        assert_eq!(jit.stdout, "10 hi\n");
-        // At least one prototype (`dbl`) went native, and the no-fast-op one (`greet`) ran its bail
-        // stub (which calls the observe helper).
-        assert!(
-            stats.native >= 1,
-            "expected a native prototype, got {stats:?}"
-        );
+        assert_eq!(jit.stdout, "hi\n");
         assert!(entered >= 1, "expected the bail stub to run, got {entered}");
     }
 

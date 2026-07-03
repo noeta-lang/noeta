@@ -101,6 +101,15 @@ pub const OUTCOME_CALLED: i64 = -1;
 /// [`CompiledFn`] return sentinel: the frame aborted (a diagnostic is recorded on the VM); the
 /// interpreter should propagate the unwind.
 pub const OUTCOME_ABORTED: i64 = -2;
+/// [`CompiledFn`] return sentinel: the frame ran its `Return` — it transferred the result into its
+/// caller's destination register and popped itself, so the caller is now the top frame. The
+/// interpreter re-derives that caller (`continue 'reload`); a native direct caller resumes with the
+/// result already in place.
+pub const OUTCOME_RETURNED: i64 = -3;
+/// [`CompiledFn`] return sentinel: the **bottom** frame returned (there was no caller). The run is
+/// over; its value is on the VM (`jit_ret`). Only reached via the interpreter seam, never a direct
+/// call.
+pub const OUTCOME_HALTED: i64 = -4;
 
 /// The name the bail stub calls to prove the runtime-helper ABI links. The VM registers a pointer
 /// for this symbol when it constructs the [`Jit`].
@@ -119,6 +128,9 @@ pub const RETAIN_HELPER: &str = "lang_jit_retain";
 pub const RELEASE_HELPER: &str = "lang_jit_release";
 pub const RELEASE_VALUE_HELPER: &str = "lang_jit_release_value";
 pub const CALL_HELPER: &str = "lang_jit_call";
+/// The `Op::Return` helper (J3 native calls): runs the shared return protocol (transfer to the
+/// caller, pop the frame) and returns [`OUTCOME_RETURNED`] or [`OUTCOME_HALTED`].
+pub const RETURN_HELPER: &str = "lang_jit_return";
 
 /// The method JIT: a Cranelift [`JITModule`] plus a per-prototype cache of finalized entry points.
 ///
@@ -139,6 +151,7 @@ pub struct Jit {
     release_id: FuncId,
     release_value_id: FuncId,
     call_id: FuncId,
+    return_id: FuncId,
     ctx: cranelift_codegen::Context,
     fb_ctx: FunctionBuilderContext,
 }
@@ -218,6 +231,16 @@ impl Jit {
         let call_id = module
             .declare_function(CALL_HELPER, Linkage::Import, &call_sig)
             .map_err(|e| e.to_string())?;
+        // `return(vm, frames, regs_vec: ptr, raw: i64) -> i64`.
+        let mut return_sig = module.make_signature();
+        return_sig.params.push(AbiParam::new(ptr_ty));
+        return_sig.params.push(AbiParam::new(ptr_ty));
+        return_sig.params.push(AbiParam::new(ptr_ty));
+        return_sig.params.push(AbiParam::new(types::I64));
+        return_sig.returns.push(AbiParam::new(types::I64));
+        let return_id = module
+            .declare_function(RETURN_HELPER, Linkage::Import, &return_sig)
+            .map_err(|e| e.to_string())?;
         let ctx = module.make_context();
         Ok(Jit {
             module,
@@ -229,6 +252,7 @@ impl Jit {
             release_id,
             release_value_id,
             call_id,
+            return_id,
             ctx,
             fb_ctx: FunctionBuilderContext::new(),
         })
@@ -367,6 +391,7 @@ impl Jit {
                 .module
                 .declare_func_in_func(self.release_value_id, b.func);
             let call_ref = self.module.declare_func_in_func(self.call_id, b.func);
+            let return_ref = self.module.declare_func_in_func(self.return_id, b.func);
 
             // A prototype that makes a call carries heap values (the callee closure, and results) in
             // registers, so its register writes must be refcount-correct (release the overwritten
@@ -389,6 +414,7 @@ impl Jit {
                 release_ref,
                 release_value_ref,
                 call_ref,
+                return_ref,
             };
 
             // Entry-pc dispatch (J3 resume-native): jump to the block for `entry_pc`. `0` is a fresh
@@ -487,7 +513,7 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
         Op::Move { .. } | Op::Drop { .. } => true,
         Op::Binary { op, .. } => supported_binary(*op),
         Op::LoadGlobal { .. } | Op::StoreGlobal { .. } | Op::TakeGlobal { .. } => true,
-        Op::Call { .. } => true,
+        Op::Call { .. } | Op::Return { .. } => true,
         Op::Jump { .. }
         | Op::JumpIfTrue { .. }
         | Op::JumpIfFalse { .. }
@@ -578,9 +604,9 @@ fn reachable_pcs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
                 stack.push(*target as usize);
                 stack.push(pc + 1);
             }
-            // A native `Call` exits the compiled function (returns `CALLED`), so it has no native
-            // successor — the interpreter resumes at `pc + 1` after running the callee. Terminal here.
-            Op::Call { .. } => {}
+            // A native `Call` exits the compiled function (returns `CALLED`, or resumes native after a
+            // direct call); `Return` ends the frame. Neither has an in-frame native successor.
+            Op::Call { .. } | Op::Return { .. } => {}
             _ => stack.push(pc + 1), // fast straight-line op
         }
     }
@@ -613,6 +639,7 @@ struct Codegen<'a, 'b> {
     release_ref: FuncRef,
     release_value_ref: FuncRef,
     call_ref: FuncRef,
+    return_ref: FuncRef,
 }
 
 impl Codegen<'_, '_> {
@@ -888,6 +915,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
         Op::Call { .. } => emit_call(cg, pc),
+        Op::Return { src } => emit_return(cg, *src),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
             let here = cg.pc_const(pc);
@@ -912,6 +940,21 @@ fn emit_call(cg: &mut Codegen, pc: usize) {
     let inst =
         cg.b.ins()
             .call(call, &[vm, frames, regs_vec, base, proto, pcv]);
+    let outcome = cg.b.inst_results(inst)[0];
+    cg.b.ins().return_(&[outcome]);
+}
+
+/// A native `Op::Return` (P-JIT J3): hand the return value to the `jit_return` helper, which runs the
+/// shared return protocol (transfer to the caller's destination, pop this frame) on the interpreter's
+/// stacks, and propagate its outcome (`RETURNED`, or `HALTED` for the bottom frame). Value-returning
+/// so a native direct caller gets its callee's result back without a bail.
+fn emit_return(cg: &mut Codegen, src: Reg) {
+    let raw = cg.load_reg(src);
+    let vm = cg.vm;
+    let frames = cg.frames;
+    let regs_vec = cg.regs_vec;
+    let f = cg.return_ref;
+    let inst = cg.b.ins().call(f, &[vm, frames, regs_vec, raw]);
     let outcome = cg.b.inst_results(inst)[0];
     cg.b.ins().return_(&[outcome]);
 }
