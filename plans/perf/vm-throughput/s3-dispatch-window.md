@@ -1,8 +1,48 @@
 # S3 — Dispatch register window (P-VMT-DISP)
 
-**Goal.** Lower the per-instruction floor. An empty loop runs at **80 ns/iter** (PHP ≈ 3.6) — before
-any real work — because the dispatch loop re-derives the current frame and re-bounds-checks every
-access on every op.
+**Status: DONE.** The dispatch loop now hoists the active frame's register `base`, its prototype
+(`chunk`), and its `pc` into loop-locals that are re-derived **only** on a control transfer — a call
+pushes a frame, a return / short-circuiting `?` pops one — through a `reload!(…)` macro. A
+straight-line op is now just `pc += 1` on the local; a jump assigns the local; neither re-indexes
+`frames` nor re-bounds-checks the prototype table, and `chunk.code.get(pc)` (an `Option` +
+bounds-check) became a direct `chunk.code[pc]` (every prototype ends in `Halt`, so `pc` is always in
+bounds). All safe indexing — **no new `unsafe`** (the all-safe hoist already captured the win; a
+`get_unchecked` pass was not needed).
+
+Result (release, before = the S2 contiguous-register-stack commit, same session):
+
+| bench | S2 (before) | S3 (after) | speedup |
+|--|--:|--:|--:|
+| `loop_sum` 1,000,000 iters — the dispatch floor | 63.0 ms (~63 ns/iter) | 43.1 ms (~43 ns/iter) | **1.46×** |
+| `loop_sum` 100,000 iters | 5.34 ms | 3.98 ms | 1.34× |
+| `fib(28)` | 104.9 ms | 93.2 ms | 1.13× |
+| `fib(24)` | 15.28 ms | 13.83 ms | 1.10× |
+| `fib(20)` | 2.23 ms | 1.99 ms | 1.12× |
+
+The tight arithmetic loop (no per-iteration heap work) is where the win concentrates: the
+per-instruction floor drops ~32% (63 → 43 ns/iter). Call-heavy recursion gains less (~11%) because a
+call's own work — argument marshalling, `retain`/`release`, window reservation — dominates the
+dispatch savings there; those are what S4 (`Op` shrinking) and later slices target.
+
+Behaviour-neutral (pure execution-structure change): differential 419 / 0 skipped / backends agree,
+corpus 430 passed, leak oracle residency 0 on both backends, 118 VM unit tests, clippy clean, miri
+unaffected (no `unsafe` added). Criterion bench `vm_dispatch/loop_sum/{100000,1000000}` added.
+
+**Design note — why a single loop, not a nested one.** The obvious shape for a reload point is an
+outer `'reload: loop { … inner loop … }` with `continue 'reload` on transfer. That works but forces
+the entire ~2700-line match body to re-indent by one level (a huge, noise-only diff). The single-loop
+form keeps `top`/`fbase`/`chunk`/`pc` as `let mut` before the loop and re-derives them via `reload!()`
+exactly at the 12 transfer points (9 call-push sites, the `Return`/`Halt` arms, and the `?`
+short-circuit). Every other op falls straight through the match and loops with the locals it already
+mutated — no label, no re-indent. Because `chunk: &'m Proto` points into `*module` (an `&'m Module`
+copied out of `self`), reassigning the `chunk` local mid-loop is sound: the reference it yields is
+tied to the module's lifetime, not to the variable's storage, so `&mut self` calls in the arms never
+conflict. Local `macro_rules!` is hygienic, so the mutated locals (and `frames`/`module`) are passed
+as macro arguments to resolve in the caller's scope.
+
+**Original goal.** Lower the per-instruction floor. An empty loop ran at **80 ns/iter** (PHP ≈ 3.6) —
+before any real work — because the dispatch loop re-derived the current frame and re-bounds-checked
+every access on every op.
 
 ## Evidence
 

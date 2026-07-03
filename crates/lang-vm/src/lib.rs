@@ -966,37 +966,51 @@ impl<'m> Vm<'m> {
         // `self` field) so it neither borrows `self` in the loop nor leaks across runs; holding the
         // `Rc<Shape>` keeps the cached shape alive, so the pointer key can never alias a freed shape.
         let mut caches: Vec<Option<(Rc<Shape>, u32)>> = vec![None; module.cache_slots as usize];
+        // S3 dispatch window (P-VMT-DISP). The active frame's register base, its prototype, and its
+        // program counter are hoisted into loop-locals and re-derived ONLY when control transfers to
+        // a *different* frame — a call pushes one, a return / short-circuiting `?` pops one — via
+        // `reload!()`. Straight-line ops advance the local `pc` and loop; jumps assign it; neither
+        // re-indexes `frames` nor re-bounds-checks the prototype table, which is what pinned the
+        // empty-loop floor at ~80 ns/iter before this slice. The current frame's register window is
+        // `regs[fbase .. fbase + chunk.num_registers]` (P-VMT-FRAME) and every operand access below
+        // is `regs[fbase + i]`. `chunk` borrows `*module` (an `&'m Module` copied out of `self`), so
+        // it is independent of the `&mut self` the arms use and survives across ops.
+        // The mutated window locals (and `frames`/`module`) are passed in so they resolve in the
+        // caller's scope rather than the macro's own hygiene context.
+        macro_rules! reload {
+            ($frames:expr, $module:expr, $top:ident, $fbase:ident, $chunk:ident, $pc:ident) => {{
+                $top = $frames.len() - 1;
+                $fbase = $frames[$top].base;
+                $chunk = &$module.protos[$frames[$top].proto as usize];
+                $pc = $frames[$top].pc;
+            }};
+        }
+        let mut top = frames.len() - 1;
+        let mut fbase = frames[top].base;
+        let mut chunk = &module.protos[frames[top].proto as usize];
+        let mut pc = frames[top].pc;
         loop {
-            let top = frames.len() - 1;
-            // The current frame's register window is `regs[base .. base + chunk.num_registers]`
-            // (P-VMT-FRAME). Every operand access below is `regs[fbase + i]`. Recomputed each
-            // iteration alongside `top`/`pc`; S3 will hoist these into loop-locals resynced only on
-            // call/return. An op that pushes a callee frame keeps `base` pointing at the *caller*
-            // (so it reads its arguments), and computes the callee's window base separately.
-            let fbase = frames[top].base;
-            let chunk = &module.protos[frames[top].proto as usize];
-            let pc = frames[top].pc;
-            // Every prototype ends with `Halt`, so the pc never runs off the end; guard anyway.
-            let Some(op) = chunk.code.get(pc) else {
-                return Ok(Value::unit());
-            };
+            // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
+            // instead of the `.get()` guard the pre-S3 loop used. A call frame keeps `fbase` on the
+            // *caller* until `reload!()` runs, so a call op reads its arguments before transferring.
+            let op = &chunk.code[pc];
             match op {
                 Op::LoadConst { dst, k } => {
                     let v = materialize(&chunk.consts[*k as usize]);
                     set_reg(regs, fbase, *dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Move { dst, src } => {
                     let v = regs[fbase + *src as usize];
                     retain(v);
                     set_reg(regs, fbase, *dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::LoadGlobal { dst, name, span } => match self.globals.get(name) {
                     Some(&v) => {
                         retain(v);
                         set_reg(regs, fbase, *dst, v);
-                        frames[top].pc += 1;
+                        pc += 1;
                     }
                     None => {
                         return Err(self.error(
@@ -1020,7 +1034,7 @@ impl<'m> Vm<'m> {
                         // First binding of this name: record it for reverse-order destruction.
                         None => self.global_order.push(name.clone()),
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::TakeGlobal { dst, name, span } => {
                     // Move the global's value into `dst`, leaving `unit` — no retain, so the single
@@ -1036,7 +1050,7 @@ impl<'m> Vm<'m> {
                         }
                     };
                     set_reg(regs, fbase, *dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Drop { reg, relevant } => {
                     // Release a dead binding/temporary at its last use and clear it to `unit` (so
@@ -1051,7 +1065,7 @@ impl<'m> Vm<'m> {
                     } else {
                         release(v);
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::ConcatInPlace { dst, lhs, rhs, .. } => {
                     let l = regs[fbase + *lhs as usize];
@@ -1104,7 +1118,7 @@ impl<'m> Vm<'m> {
                         s
                     };
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeClosure {
                     dst,
@@ -1125,41 +1139,41 @@ impl<'m> Vm<'m> {
                     }
                     let v = Value::closure(*proto, upvalues);
                     set_reg(regs, fbase, *dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeCell { dst, src } => {
                     // Box the value into a fresh cell, which owns one reference to it.
                     let v = regs[fbase + *src as usize];
                     retain(v);
                     set_reg(regs, fbase, *dst, Value::cell(v));
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::CellGet { dst, cell } => {
                     let v = regs[fbase + *cell as usize].cell_get();
                     retain(v);
                     set_reg(regs, fbase, *dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::CellSet { cell, src } => {
                     // `cell_set` retains the new occupant and releases the old internally.
                     let v = regs[fbase + *src as usize];
                     regs[fbase + *cell as usize].cell_set(v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::UpvalueGet { dst, index } => {
                     let v = frames[top].upvalues[*index as usize].cell_get();
                     retain(v);
                     set_reg(regs, fbase, *dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::UpvalueSet { index, src } => {
                     let v = regs[fbase + *src as usize];
                     frames[top].upvalues[*index as usize].cell_set(v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::LoadNativeFn { dst, func } => {
                     set_reg(regs, fbase, *dst, Value::native_fn(*func));
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeList {
                     dst,
@@ -1180,7 +1194,7 @@ impl<'m> Vm<'m> {
                         list.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
                     set_reg(regs, fbase, *dst, list);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
                 // buffer (no boxed objects, no retains — the words are copied), then the element
@@ -1194,7 +1208,7 @@ impl<'m> Vm<'m> {
                     let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
                     let list = Value::packed_list(schema, Vec::new());
                     set_reg(regs, fbase, *dst, list);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::FromBytes {
                     dst,
@@ -1229,7 +1243,7 @@ impl<'m> Vm<'m> {
                     }
                     let list = Value::packed_list(schema, bytes);
                     set_reg(regs, fbase, *dst, list);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::ExtCall {
                     dst,
@@ -1283,7 +1297,7 @@ impl<'m> Vm<'m> {
                             ),
                         ));
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::PackedListPush {
                     dst, list, value, ..
@@ -1317,7 +1331,7 @@ impl<'m> Vm<'m> {
                         acc
                     };
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 // A tuple builds exactly like a list (object-model slice 4): retain each element into
                 // the aggregate, which owns one reference to each.
@@ -1329,7 +1343,7 @@ impl<'m> Vm<'m> {
                         elements.push(v);
                     }
                     set_reg(regs, fbase, *dst, Value::tuple(elements));
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
                 // into `dst`. The index is in range by construction (the checker verified it).
@@ -1352,7 +1366,7 @@ impl<'m> Vm<'m> {
                     };
                     retain(element);
                     set_reg(regs, fbase, *dst, element);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeRange {
                     dst,
@@ -1371,7 +1385,7 @@ impl<'m> Vm<'m> {
                             let upper = if *inclusive { b.saturating_add(1) } else { b };
                             let elements: Vec<Value> = (a..upper).map(Value::int).collect();
                             set_reg(regs, fbase, *dst, Value::list(elements));
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         _ => {
                             return Err(self.error(
@@ -1411,7 +1425,7 @@ impl<'m> Vm<'m> {
                         map.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
                     set_reg(regs, fbase, *dst, map);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::RequireMapKey { reg, span } => {
                     let v = regs[fbase + *reg as usize];
@@ -1422,7 +1436,7 @@ impl<'m> Vm<'m> {
                             format!("map keys must be strings, found {}", v.type_name()),
                         ));
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::IterSnapshot { dst, src, span } => {
                     let v = regs[fbase + *src as usize];
@@ -1435,21 +1449,21 @@ impl<'m> Vm<'m> {
                         if let Some(&proto) =
                             self.methods.get(&(type_name.clone(), "iter".to_string()))
                         {
-                            let chunk = &module.protos[proto as usize];
-                            if chunk.num_params != 1 {
+                            let callee_chunk = &module.protos[proto as usize];
+                            if callee_chunk.num_params != 1 {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
                                     format!(
                                         "this method takes {} argument(s) but 0 were supplied",
-                                        chunk.num_params - 1
+                                        callee_chunk.num_params - 1
                                     ),
                                 ));
                             }
-                            let new_base = reserve_window(regs, chunk.num_registers as usize);
+                            let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
                             retain(v);
                             regs[new_base] = v;
-                            frames[top].pc += 1;
+                            frames[top].pc = pc + 1;
                             frames.push(Frame {
                                 proto,
                                 base: new_base,
@@ -1458,6 +1472,7 @@ impl<'m> Vm<'m> {
                                 ret_transform: RetTransform::None,
                                 upvalues: Vec::new(),
                             });
+                            reload!(frames, module, top, fbase, chunk, pc);
                             continue;
                         }
                     }
@@ -1467,7 +1482,7 @@ impl<'m> Vm<'m> {
                     if v.is_packed_list() {
                         let snapshot = v.realize_list();
                         set_reg(regs, fbase, *dst, snapshot);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Snapshot the elements to iterate (a list's elements, a set's canonical
@@ -1493,7 +1508,7 @@ impl<'m> Vm<'m> {
                         }
                     };
                     set_reg(regs, fbase, *dst, snapshot);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::ListLen { dst, src, span } => {
                     // After `IterSnapshot`, `src` is a list for the list/map paths; the only way it
@@ -1503,7 +1518,7 @@ impl<'m> Vm<'m> {
                     match v.list_len() {
                         Some(n) => {
                             set_reg(regs, fbase, *dst, Value::int(n as i64));
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         None => {
                             return Err(self.error(
@@ -1523,7 +1538,7 @@ impl<'m> Vm<'m> {
                         .expect("the loop keeps the index in bounds");
                     retain(element);
                     set_reg(regs, fbase, *dst, element);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 // Streaming `for` step (Track I.2): advance the iterator, binding the element + a bool
                 // continue flag. A `map`/`filter` closure runs here (via `iter_for_next`), so it can
@@ -1545,7 +1560,7 @@ impl<'m> Vm<'m> {
                             set_reg(regs, fbase, *has, Value::bool(false));
                         }
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::CallBuiltin {
                     dst,
@@ -1564,21 +1579,21 @@ impl<'m> Vm<'m> {
                             if let Some(&proto) =
                                 self.methods.get(&(type_name.clone(), "len".to_string()))
                             {
-                                let chunk = &module.protos[proto as usize];
-                                if chunk.num_params != 1 {
+                                let callee_chunk = &module.protos[proto as usize];
+                                if callee_chunk.num_params != 1 {
                                     return Err(self.error(
                                         DiagnosticCode::TypeMismatch,
                                         *span,
                                         format!(
                                             "this method takes {} argument(s) but 0 were supplied",
-                                            chunk.num_params - 1
+                                            callee_chunk.num_params - 1
                                         ),
                                     ));
                                 }
-                                let new_base = reserve_window(regs, chunk.num_registers as usize);
+                                let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
                                 retain(recv);
                                 regs[new_base] = recv;
-                                frames[top].pc += 1;
+                                frames[top].pc = pc + 1;
                                 frames.push(Frame {
                                     proto,
                                     base: new_base,
@@ -1587,6 +1602,7 @@ impl<'m> Vm<'m> {
                                     ret_transform: RetTransform::None,
                                     upvalues: Vec::new(),
                                 });
+                                reload!(frames, module, top, fbase, chunk, pc);
                                 continue;
                             }
                         }
@@ -1598,7 +1614,7 @@ impl<'m> Vm<'m> {
                     let (dst, builtin, span) = (*dst, *builtin, *span);
                     let v = self.call_builtin(builtin, &arg_vals, span)?;
                     set_reg(regs, fbase, dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::CallMethod {
                     dst,
@@ -1632,7 +1648,7 @@ impl<'m> Vm<'m> {
                         let result =
                             self.map_update_in_place(v, map_method, method, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, result);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // In-place list self-update (`xs[i] = v` ⟶ `xs = xs.set(i, v)`): a uniquely-owned
@@ -1643,7 +1659,7 @@ impl<'m> Vm<'m> {
                         regs[fbase + *recv as usize] = Value::unit();
                         let result = self.list_set_in_place(v, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, result);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // In-place set self-update (`s = s.add(x)` / `s = s.remove(x)`): a uniquely-owned,
@@ -1663,7 +1679,7 @@ impl<'m> Vm<'m> {
                         let result =
                             self.set_update_in_place(v, set_method, method, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, result);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // `json.parse(...)` — a Ring 2 native module function call, dispatched before
@@ -1674,7 +1690,7 @@ impl<'m> Vm<'m> {
                         let value =
                             self.call_native_module(&module_name, method, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // An object dispatches to a user method through the type's method table;
@@ -1690,7 +1706,7 @@ impl<'m> Vm<'m> {
                             if self.tojson_derives.contains(&type_name) {
                                 let json = Value::string(&v.to_json());
                                 set_reg(regs, fbase, *dst, json);
-                                frames[top].pc += 1;
+                                pc += 1;
                                 continue;
                             }
                         }
@@ -1721,13 +1737,13 @@ impl<'m> Vm<'m> {
                                 proto
                             }
                         };
-                        let chunk = &module.protos[proto as usize];
+                        let callee_chunk = &module.protos[proto as usize];
                         // The prototype takes the receiver in register 0 and the user arguments
                         // after it, so its declared arity is one more than the supplied args. A
                         // method may have trailing defaulted parameters, so the supplied count is a
                         // range `[total - defaults, total]` (all less the receiver).
-                        let total = chunk.num_params as usize - 1;
-                        let required = total - chunk.defaults.len();
+                        let total = callee_chunk.num_params as usize - 1;
+                        let required = total - callee_chunk.defaults.len();
                         if args.len() < required || args.len() > total {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
@@ -1735,8 +1751,8 @@ impl<'m> Vm<'m> {
                                 arity_message("method", required, total, args.len()),
                             ));
                         }
-                        let num_registers = chunk.num_registers as usize;
-                        let defaults = chunk.defaults.clone();
+                        let num_registers = callee_chunk.num_registers as usize;
+                        let defaults = callee_chunk.defaults.clone();
                         let new_base = reserve_window(regs, num_registers);
                         retain(v);
                         regs[new_base] = v;
@@ -1757,7 +1773,7 @@ impl<'m> Vm<'m> {
                                 regs[new_base + *reg as usize] = value;
                             }
                         }
-                        frames[top].pc += 1;
+                        frames[top].pc = pc + 1;
                         frames.push(Frame {
                             proto,
                             base: new_base,
@@ -1766,6 +1782,7 @@ impl<'m> Vm<'m> {
                             ret_transform: RetTransform::None,
                             upvalues: Vec::new(),
                         });
+                        reload!(frames, module, top, fbase, chunk, pc);
                         continue;
                     }
                     // An enum value dispatches to a user method (the unified body, object-model
@@ -1775,9 +1792,9 @@ impl<'m> Vm<'m> {
                     if v.is_enum() {
                         let type_name = v.shape().unwrap().name.clone();
                         if let Some(&proto) = self.methods.get(&(type_name, method.clone())) {
-                            let chunk = &module.protos[proto as usize];
-                            let total = chunk.num_params as usize - 1;
-                            let required = total - chunk.defaults.len();
+                            let callee_chunk = &module.protos[proto as usize];
+                            let total = callee_chunk.num_params as usize - 1;
+                            let required = total - callee_chunk.defaults.len();
                             if args.len() < required || args.len() > total {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
@@ -1785,8 +1802,8 @@ impl<'m> Vm<'m> {
                                     arity_message("method", required, total, args.len()),
                                 ));
                             }
-                            let num_registers = chunk.num_registers as usize;
-                            let defaults = chunk.defaults.clone();
+                            let num_registers = callee_chunk.num_registers as usize;
+                            let defaults = callee_chunk.defaults.clone();
                             let new_base = reserve_window(regs, num_registers);
                             retain(v);
                             regs[new_base] = v;
@@ -1802,7 +1819,7 @@ impl<'m> Vm<'m> {
                                     regs[new_base + *reg as usize] = value;
                                 }
                             }
-                            frames[top].pc += 1;
+                            frames[top].pc = pc + 1;
                             frames.push(Frame {
                                 proto,
                                 base: new_base,
@@ -1811,6 +1828,7 @@ impl<'m> Vm<'m> {
                                 ret_transform: RetTransform::None,
                                 upvalues: Vec::new(),
                             });
+                            reload!(frames, module, top, fbase, chunk, pc);
                             continue;
                         }
                     }
@@ -1832,7 +1850,7 @@ impl<'m> Vm<'m> {
                             Some(ordering) => {
                                 let value = make_ordering(lang_ast::ordering_variant(ordering));
                                 set_reg(regs, fbase, *dst, value);
-                                frames[top].pc += 1;
+                                pc += 1;
                             }
                             None => {
                                 return Err(self.error(
@@ -1878,7 +1896,7 @@ impl<'m> Vm<'m> {
                             lang_stdlib::Dispatch::Done(output) => {
                                 let value = stdlib_output_to_value(output);
                                 set_reg(regs, fbase, *dst, value);
-                                frames[top].pc += 1;
+                                pc += 1;
                                 continue;
                             }
                             lang_stdlib::Dispatch::Err(error) => {
@@ -1918,7 +1936,7 @@ impl<'m> Vm<'m> {
                         };
                         let value = Value::int(lang_stdlib::int_method(recv_int, int_method, arg));
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
@@ -1938,7 +1956,7 @@ impl<'m> Vm<'m> {
                             lang_stdlib::NumScalar::F32(f) => Value::f32(f),
                         };
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
@@ -1952,7 +1970,7 @@ impl<'m> Vm<'m> {
                         let value =
                             self.call_list_method(v, list_method, method, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Ring 1 set methods (contains/union/intersection).
@@ -1964,7 +1982,7 @@ impl<'m> Vm<'m> {
                         let value =
                             self.call_set_method(v, set_method, method, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // File-handle methods (read_line/read/write/close) — the shared
@@ -1983,7 +2001,7 @@ impl<'m> Vm<'m> {
                             *span,
                         )?;
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
@@ -1997,7 +2015,7 @@ impl<'m> Vm<'m> {
                                 // register's reference is released by its normal end-of-life.
                                 let future = Value::make_channel_send(id, msg);
                                 set_reg(regs, fbase, *dst, future);
-                                frames[top].pc += 1;
+                                pc += 1;
                                 continue;
                             }
                             "close" => {
@@ -2007,7 +2025,7 @@ impl<'m> Vm<'m> {
                                 }
                                 self.channel_progress += 1;
                                 set_reg(regs, fbase, *dst, Value::unit());
-                                frames[top].pc += 1;
+                                pc += 1;
                                 continue;
                             }
                             _ => {}
@@ -2018,7 +2036,7 @@ impl<'m> Vm<'m> {
                     {
                         let future = Value::make_channel_recv(id);
                         set_reg(regs, fbase, *dst, future);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
@@ -2031,7 +2049,7 @@ impl<'m> Vm<'m> {
                         let value =
                             self.call_iter_method(v, iter_method, method, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Ring 1 map methods (keys/values/has).
@@ -2043,7 +2061,7 @@ impl<'m> Vm<'m> {
                         let value =
                             self.call_map_method(v, map_method, method, &arg_values, *span)?;
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
@@ -2068,7 +2086,7 @@ impl<'m> Vm<'m> {
                             }
                         };
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
@@ -2102,7 +2120,7 @@ impl<'m> Vm<'m> {
                             iter
                         };
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Built-in zero-argument methods on lists/maps/strings.
@@ -2137,7 +2155,7 @@ impl<'m> Vm<'m> {
                     match result {
                         Some(value) => {
                             set_reg(regs, fbase, *dst, value);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         None if !args.is_empty()
                             && (method == "count" || method == "enumerate") =>
@@ -2180,23 +2198,23 @@ impl<'m> Vm<'m> {
                                 format!("type `{type_name}` has no method `get`"),
                             ));
                         };
-                        let chunk = &module.protos[proto as usize];
-                        if chunk.num_params as usize != 2 {
+                        let callee_chunk = &module.protos[proto as usize];
+                        if callee_chunk.num_params as usize != 2 {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
                                 format!(
                                     "this method takes {} argument(s) but 1 were supplied",
-                                    chunk.num_params - 1
+                                    callee_chunk.num_params - 1
                                 ),
                             ));
                         }
-                        let new_base = reserve_window(regs, chunk.num_registers as usize);
+                        let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
                         retain(v);
                         regs[new_base] = v;
                         retain(idx);
                         regs[new_base + 1] = idx;
-                        frames[top].pc += 1;
+                        frames[top].pc = pc + 1;
                         frames.push(Frame {
                             proto,
                             base: new_base,
@@ -2205,6 +2223,7 @@ impl<'m> Vm<'m> {
                             ret_transform: RetTransform::None,
                             upvalues: Vec::new(),
                         });
+                        reload!(frames, module, top, fbase, chunk, pc);
                         continue;
                     }
                     // A built-in list addresses an element by integer position (bounds-checked).
@@ -2234,7 +2253,7 @@ impl<'m> Vm<'m> {
                             element
                         };
                         set_reg(regs, fbase, *dst, element);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // A map looks the value up by its string key; a missing key is `E0018`.
@@ -2255,7 +2274,7 @@ impl<'m> Vm<'m> {
                         };
                         retain(element);
                         set_reg(regs, fbase, *dst, element);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // A string addresses a single character by position (bounds-checked),
@@ -2278,7 +2297,7 @@ impl<'m> Vm<'m> {
                         }
                         let ch = s.chars().nth(i as usize).unwrap().to_string();
                         set_reg(regs, fbase, *dst, Value::string(&ch));
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     return Err(self.error(
@@ -2306,7 +2325,7 @@ impl<'m> Vm<'m> {
                         && let Some(value) = v.packed_field(i as usize, field)
                     {
                         set_reg(regs, fbase, *dst, value);
-                        frames[top].pc += 1;
+                        pc += 1;
                         continue;
                     }
                     // Fallback. The static type guarantees a `List`; bounds-check the index exactly as
@@ -2349,7 +2368,7 @@ impl<'m> Vm<'m> {
                                 release(element);
                             }
                             set_reg(regs, fbase, *dst, value);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         None => {
                             let err = if element.is_object() {
@@ -2457,7 +2476,7 @@ impl<'m> Vm<'m> {
                         object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
                     set_reg(regs, fbase, *dst, object);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeStructInPlace {
                     dst,
@@ -2509,7 +2528,7 @@ impl<'m> Vm<'m> {
                         // rebuilds a value of the same (generic) type, so the base's tag already carries
                         // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
                         set_reg(regs, fbase, *dst, base_val);
-                        frames[top].pc += 1;
+                        pc += 1;
                     } else {
                         // Aliased or a different shape: build a fresh object exactly like
                         // `MakeStruct` (spreading base's fields), then release the consumed base.
@@ -2560,7 +2579,7 @@ impl<'m> Vm<'m> {
                             object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                         }
                         set_reg(regs, fbase, *dst, object);
-                        frames[top].pc += 1;
+                        pc += 1;
                     }
                 }
                 Op::MakeOpaque {
@@ -2596,7 +2615,7 @@ impl<'m> Vm<'m> {
                     let shape =
                         Rc::new(Shape::object(ShapeKind::Opaque, type_name.clone(), fields));
                     set_reg(regs, fbase, *dst, Value::object(shape, slots));
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeEnum {
                     dst,
@@ -2619,7 +2638,7 @@ impl<'m> Vm<'m> {
                         value.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
                     set_reg(regs, fbase, *dst, value);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::EnumFromStr {
                     dst,
@@ -2671,7 +2690,7 @@ impl<'m> Vm<'m> {
                         }
                     };
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::LoadField {
                     dst,
@@ -2705,7 +2724,7 @@ impl<'m> Vm<'m> {
                         Some(value) => {
                             retain(value);
                             set_reg(regs, fbase, *dst, value);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         None if v.is_object() => {
                             return Err(self.error(
@@ -2789,13 +2808,13 @@ impl<'m> Vm<'m> {
                         let new = object_copy_with_slot(v, slot, val);
                         set_reg(regs, fbase, *dst, new);
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::NextId { dst } => {
                     let id = self.next_id;
                     self.next_id += 1;
                     set_reg(regs, fbase, *dst, Value::int(id as i64));
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Panic { msg, span } => {
                     let message = regs[fbase + *msg as usize].display();
@@ -2816,7 +2835,7 @@ impl<'m> Vm<'m> {
                         Some(TryOutcome::Success(inner)) => {
                             retain(inner);
                             set_reg(regs, fbase, *dst, inner);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         // `Err(_)`/`none`: early-return the whole value from this frame, exactly
                         // as `Op::Return` does (the M0 `Unwind::Return`).
@@ -2861,6 +2880,8 @@ impl<'m> Vm<'m> {
                                 }
                                 None => return Ok(out),
                             }
+                            // `?` short-circuits like an early return — re-derive the caller's window.
+                            reload!(frames, module, top, fbase, chunk, pc);
                         }
                         None => {
                             return Err(self.error(
@@ -2885,10 +2906,10 @@ impl<'m> Vm<'m> {
                         Some(TryOutcome::Success(inner)) => {
                             retain(inner);
                             set_reg(regs, fbase, *dst, inner);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         // Empty: jump to the fallback expression (which writes `dst`).
-                        Some(TryOutcome::Empty) => frames[top].pc = *fallback as usize,
+                        Some(TryOutcome::Empty) => pc = *fallback as usize,
                         None => {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
@@ -2918,13 +2939,13 @@ impl<'m> Vm<'m> {
                         Value::enum_value(shape, Vec::new())
                     };
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::IsType { dst, src, target } => {
                     let v = regs[fbase + *src as usize];
                     let result = Value::bool(narrow_matches(v, target));
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeGen { dst, src } => {
                     // Wrap the step closure into a generator iterator (Track G.1b). `iter_gen` retains
@@ -2933,7 +2954,7 @@ impl<'m> Vm<'m> {
                     let step = regs[fbase + *src as usize];
                     let result = Value::iter_gen(step);
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeFuture { dst, src } => {
                     // Wrap the lazy thunk closure into a future (Track A.1). `make_future` retains its
@@ -2942,7 +2963,7 @@ impl<'m> Vm<'m> {
                     let thunk = regs[fbase + *src as usize];
                     let result = Value::make_future(thunk);
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::RunFuture { dst, src, span } => {
                     // Drive an awaited future to completion (Track A.2/A.3 top-level). See
@@ -2951,7 +2972,7 @@ impl<'m> Vm<'m> {
                     let future = regs[fbase + *src as usize];
                     let value = self.drive_future(future, *span)?;
                     set_reg(regs, fbase, *dst, value);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::PollFuture { dst, src, span } => {
                     // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if
@@ -2962,17 +2983,17 @@ impl<'m> Vm<'m> {
                         Poll::Pending => make_none(),
                     };
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::LoadPending { dst } => {
                     // The async pending sentinel (Track A.3) — what a step returns when it suspends.
                     set_reg(regs, fbase, *dst, Value::pending());
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::ScopeBegin => {
                     // Open a structured-concurrency scope (Track A.3b): a fresh, empty task list.
                     self.scopes.push(Vec::new());
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Spawn { dst, src, .. } => {
                     // Register the future as a task in the current scope (retaining the scope's own
@@ -2997,7 +3018,7 @@ impl<'m> Vm<'m> {
                         )
                     };
                     set_reg(regs, fbase, *dst, handle);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::SpawnIsolate {
                     dst,
@@ -3015,7 +3036,7 @@ impl<'m> Vm<'m> {
                         args.iter().map(|r| regs[fbase + *r as usize]).collect();
                     let handle = self.spawn_isolate(callee_val, &arg_vals, *span)?;
                     set_reg(regs, fbase, *dst, handle);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::ScopeEnd { span } => {
                     // Join the scope (drive every task to completion), then pop it and release the
@@ -3029,7 +3050,7 @@ impl<'m> Vm<'m> {
                             }
                         }
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MakeChannel {
                     dst,
@@ -3075,28 +3096,28 @@ impl<'m> Vm<'m> {
                     let tuple =
                         Value::tuple(vec![Value::make_sender(id), Value::make_receiver(id)]);
                     set_reg(regs, fbase, *dst, tuple);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::AttributesOf { dst, type_name } => {
                     let result = self.materialize_attributes(type_name);
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::RolesOf { dst } => {
                     let result = self.materialize_roles();
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::TypeOf { dst, src } => {
                     let repr = vm_type_repr(&regs[fbase + *src as usize]);
                     let result = build_type_value(&repr);
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::TypeOfStatic { dst, repr } => {
                     let result = build_type_value(repr);
                     set_reg(regs, fbase, *dst, result);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::TypeValue { dst, name } => {
                     // A bare type name used as a value (an `invoke` receiver) materializes as the
@@ -3105,7 +3126,7 @@ impl<'m> Vm<'m> {
                     // named type via `reflection_type_name`.
                     let value = build_type_value(&module.reflection.type_ref_repr(name));
                     set_reg(regs, fbase, *dst, value);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Invoke {
                     dst,
@@ -3170,9 +3191,9 @@ impl<'m> Vm<'m> {
                         // The prototype reserves register 0 for `self` (unit for an associated
                         // call), so its declared arity is one more than the supplied args; trailing
                         // defaults widen the accepted range, exactly as `Op::CallMethod`.
-                        let chunk = &module.protos[proto as usize];
-                        let total = chunk.num_params as usize - 1;
-                        let required = total - chunk.defaults.len();
+                        let callee_chunk = &module.protos[proto as usize];
+                        let total = callee_chunk.num_params as usize - 1;
+                        let required = total - callee_chunk.defaults.len();
                         if arg_items.len() < required || arg_items.len() > total {
                             break 'resolve Err(arity_message(
                                 kind,
@@ -3188,12 +3209,12 @@ impl<'m> Vm<'m> {
                             let shape = self.shapes[*err_shape as usize].clone();
                             let err = Value::enum_value(shape, vec![Value::string(&message)]);
                             set_reg(regs, fbase, *dst, err);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         Ok((proto, is_assoc, arg_items)) => {
-                            let chunk = &module.protos[proto as usize];
-                            let num_registers = chunk.num_registers as usize;
-                            let defaults = chunk.defaults.clone();
+                            let callee_chunk = &module.protos[proto as usize];
+                            let num_registers = callee_chunk.num_registers as usize;
+                            let defaults = callee_chunk.defaults.clone();
                             let new_base = reserve_window(regs, num_registers);
                             // An associated call leaves register 0 as unit (no receiver); an instance
                             // call places the retained receiver there.
@@ -3217,7 +3238,7 @@ impl<'m> Vm<'m> {
                             // The result is wrapped in `Result.Ok` as it lands in the caller, so the
                             // invocation yields a `Result` whichever way the body returns.
                             let ok = self.shapes[*ok_shape as usize].clone();
-                            frames[top].pc += 1;
+                            frames[top].pc = pc + 1;
                             frames.push(Frame {
                                 proto,
                                 base: new_base,
@@ -3226,6 +3247,7 @@ impl<'m> Vm<'m> {
                                 ret_transform: RetTransform::WrapOk(ok),
                                 upvalues: Vec::new(),
                             });
+                            reload!(frames, module, top, fbase, chunk, pc);
                         }
                     }
                     // Release the temporary boxed args list (if the args were materialized from a
@@ -3236,23 +3258,23 @@ impl<'m> Vm<'m> {
                 }
                 Op::MatchInt { src, value, fail } => {
                     if regs[fbase + *src as usize].as_int() == Some(*value) {
-                        frames[top].pc += 1;
+                        pc += 1;
                     } else {
-                        frames[top].pc = *fail as usize;
+                        pc = *fail as usize;
                     }
                 }
                 Op::MatchStr { src, value, fail } => {
                     if regs[fbase + *src as usize].as_string().as_deref() == Some(value) {
-                        frames[top].pc += 1;
+                        pc += 1;
                     } else {
-                        frames[top].pc = *fail as usize;
+                        pc = *fail as usize;
                     }
                 }
                 Op::MatchBool { src, value, fail } => {
                     if regs[fbase + *src as usize].as_bool() == Some(*value) {
-                        frames[top].pc += 1;
+                        pc += 1;
                     } else {
-                        frames[top].pc = *fail as usize;
+                        pc = *fail as usize;
                     }
                 }
                 Op::MatchVariant {
@@ -3270,9 +3292,9 @@ impl<'m> Vm<'m> {
                         })
                         && v.enum_data().is_some_and(|d| d.len() == *arity as usize);
                     if matches {
-                        frames[top].pc += 1;
+                        pc += 1;
                     } else {
-                        frames[top].pc = *fail as usize;
+                        pc = *fail as usize;
                     }
                 }
                 // A tuple pattern test (object-model slice 4b.2): `src` must be a tuple of exactly
@@ -3283,16 +3305,16 @@ impl<'m> Vm<'m> {
                         .tuple_items()
                         .is_some_and(|items| items.len() == *arity as usize);
                     if matches {
-                        frames[top].pc += 1;
+                        pc += 1;
                     } else {
-                        frames[top].pc = *fail as usize;
+                        pc = *fail as usize;
                     }
                 }
                 Op::ExtractField { dst, src, index } => {
                     let element = regs[fbase + *src as usize].enum_data().unwrap()[*index as usize];
                     retain(element);
                     set_reg(regs, fbase, *dst, element);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::MatchFail { src, span } => {
                     let shown = regs[fbase + *src as usize].display();
@@ -3311,7 +3333,7 @@ impl<'m> Vm<'m> {
                             // primitives `Neg`/`Not` produce; mirrors `Op::Move`.
                             retain(v);
                             set_reg(regs, fbase, *dst, v);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
                     }
@@ -3332,7 +3354,7 @@ impl<'m> Vm<'m> {
                     };
                     retain(masked);
                     set_reg(regs, fbase, *dst, masked);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Binary {
                     op,
@@ -3378,13 +3400,13 @@ impl<'m> Vm<'m> {
                     if let Some((proto, transform)) = dispatch
                         && module.protos[proto as usize].num_params == 2
                     {
-                        let chunk = &module.protos[proto as usize];
-                        let new_base = reserve_window(regs, chunk.num_registers as usize);
+                        let callee_chunk = &module.protos[proto as usize];
+                        let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
                         retain(left);
                         regs[new_base] = left;
                         retain(right);
                         regs[new_base + 1] = right;
-                        frames[top].pc += 1;
+                        frames[top].pc = pc + 1;
                         frames.push(Frame {
                             proto,
                             base: new_base,
@@ -3393,6 +3415,7 @@ impl<'m> Vm<'m> {
                             ret_transform: transform,
                             upvalues: Vec::new(),
                         });
+                        reload!(frames, module, top, fbase, chunk, pc);
                         continue;
                     }
                     // Derived structural comparison: `< <= > >=` on an object whose type
@@ -3409,7 +3432,7 @@ impl<'m> Vm<'m> {
                                 let satisfied =
                                     op.ordering_satisfies(lang_ast::ordering_variant(ordering));
                                 set_reg(regs, fbase, *dst, Value::bool(satisfied));
-                                frames[top].pc += 1;
+                                pc += 1;
                             }
                             None => {
                                 return Err(self.error(
@@ -3428,7 +3451,7 @@ impl<'m> Vm<'m> {
                     match apply_binary(*op, left, right) {
                         Ok(v) => {
                             set_reg(regs, fbase, *dst, v);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
                     }
@@ -3449,7 +3472,7 @@ impl<'m> Vm<'m> {
                     match apply_binary_wide(*op, left, right, *signed, *bits) {
                         Ok(v) => {
                             set_reg(regs, fbase, *dst, v);
-                            frames[top].pc += 1;
+                            pc += 1;
                         }
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
                     }
@@ -3473,7 +3496,7 @@ impl<'m> Vm<'m> {
                         recv_int, *method, amount, *bits,
                     ));
                     set_reg(regs, fbase, *dst, value);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::RequireBool {
                     reg,
@@ -3497,7 +3520,7 @@ impl<'m> Vm<'m> {
                             ),
                         ));
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::RequireCondBool { reg, span } => {
                     let v = regs[fbase + *reg as usize];
@@ -3508,30 +3531,30 @@ impl<'m> Vm<'m> {
                             format!("`if` condition must be a bool, found {}", v.type_name()),
                         ));
                     }
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Jump { target } => {
-                    frames[top].pc = *target as usize;
+                    pc = *target as usize;
                 }
                 Op::JumpIfTrue { reg, target } => {
                     if regs[fbase + *reg as usize].as_bool() == Some(true) {
-                        frames[top].pc = *target as usize;
+                        pc = *target as usize;
                     } else {
-                        frames[top].pc += 1;
+                        pc += 1;
                     }
                 }
                 Op::JumpIfFalse { reg, target } => {
                     if regs[fbase + *reg as usize].as_bool() == Some(false) {
-                        frames[top].pc = *target as usize;
+                        pc = *target as usize;
                     } else {
-                        frames[top].pc += 1;
+                        pc += 1;
                     }
                 }
                 Op::Echo { reg } => {
                     let text = regs[fbase + *reg as usize].display();
                     self.stdout.push_str(&text);
                     self.stdout.push('\n');
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Stringify { dst, src, span } => {
                     let v = regs[fbase + *src as usize];
@@ -3545,21 +3568,21 @@ impl<'m> Vm<'m> {
                             .methods
                             .get(&(type_name.clone(), "to_string".to_string()))
                         {
-                            let chunk = &module.protos[proto as usize];
-                            if chunk.num_params != 1 {
+                            let callee_chunk = &module.protos[proto as usize];
+                            if callee_chunk.num_params != 1 {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
                                     *span,
                                     format!(
                                         "this method takes {} argument(s) but 0 were supplied",
-                                        chunk.num_params - 1
+                                        callee_chunk.num_params - 1
                                     ),
                                 ));
                             }
-                            let new_base = reserve_window(regs, chunk.num_registers as usize);
+                            let new_base = reserve_window(regs, callee_chunk.num_registers as usize);
                             retain(v);
                             regs[new_base] = v;
-                            frames[top].pc += 1;
+                            frames[top].pc = pc + 1;
                             frames.push(Frame {
                                 proto,
                                 base: new_base,
@@ -3568,6 +3591,7 @@ impl<'m> Vm<'m> {
                                 ret_transform: RetTransform::None,
                                 upvalues: Vec::new(),
                             });
+                            reload!(frames, module, top, fbase, chunk, pc);
                             continue;
                         }
                     }
@@ -3575,7 +3599,7 @@ impl<'m> Vm<'m> {
                     // it via `display`.
                     retain(v);
                     set_reg(regs, fbase, *dst, v);
-                    frames[top].pc += 1;
+                    pc += 1;
                 }
                 Op::Raise { idx } => {
                     self.diagnostics
@@ -3636,7 +3660,7 @@ impl<'m> Vm<'m> {
                                 upvalues.push(cell);
                             }
                             // Resume after the call once the callee returns.
-                            frames[top].pc += 1;
+                            frames[top].pc = pc + 1;
                             frames.push(Frame {
                                 proto: proto_idx,
                                 base: new_base,
@@ -3645,6 +3669,7 @@ impl<'m> Vm<'m> {
                                 ret_transform: RetTransform::None,
                                 upvalues,
                             });
+                            reload!(frames, module, top, fbase, chunk, pc);
                         }
                         None => match callee_val.as_native_fn() {
                             // An indirect call of a first-class builtin (`f = len; f(xs)`). The
@@ -3655,7 +3680,7 @@ impl<'m> Vm<'m> {
                                     args.iter().map(|&r| regs[fbase + r as usize]).collect();
                                 let result = self.call_native_fn(func, &arg_vals, *span)?;
                                 set_reg(regs, fbase, *dst, result);
-                                frames[top].pc += 1;
+                                pc += 1;
                             }
                             None => {
                                 return Err(self.error(
@@ -3698,6 +3723,8 @@ impl<'m> Vm<'m> {
                         // The bottom frame returned: hand the value to `run`'s caller.
                         None => return Ok(v),
                     }
+                    // Control returns to the caller (or a re-entry frame) — re-derive its window.
+                    reload!(frames, module, top, fbase, chunk, pc);
                 }
                 Op::Halt => {
                     let finished = frames.pop().unwrap();
@@ -3715,6 +3742,8 @@ impl<'m> Vm<'m> {
                         // The bottom frame halted: the program (or re-entrant call) ends.
                         None => return Ok(Value::unit()),
                     }
+                    // Control returns to the caller (or a re-entry frame) — re-derive its window.
+                    reload!(frames, module, top, fbase, chunk, pc);
                 }
             }
         }

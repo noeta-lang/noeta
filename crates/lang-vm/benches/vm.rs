@@ -302,6 +302,27 @@ fn fib_src(n: usize) -> String {
 
 const FIB_DEPTHS: &[usize] = &[20, 24, 28];
 
+/// S3 (P-VMT-DISP): a tight arithmetic loop with no per-iteration heap work (ints are NaN-boxed),
+/// so its cost is dominated by the raw dispatch floor — the per-op work the interpreter does before
+/// any real computation. Before S3 the loop head re-derived the current frame (`frames.len() - 1`,
+/// `module.protos[..]`) and re-bounds-checked `frames[top].pc` and every operand on every op; S3
+/// hoists the frame window into loop-locals re-derived only on a call/return, so a straight-line op
+/// is just `pc += 1`. Parameterized so the per-iteration cost is visible, not just a constant.
+fn loop_sum_src(n: usize) -> String {
+    format!(
+        "fn sum(n: int): int {{\n    \
+            mut acc = 0;\n    \
+            for i in 0..n {{\n        \
+                acc = acc + i;\n    \
+            }}\n    \
+            return acc;\n\
+         }}\n\
+         echo sum({n});\n"
+    )
+}
+
+const LOOP_ITERS: &[usize] = &[100_000, 1_000_000];
+
 /// Property access through inline caches: read the same object's fields on every
 /// iteration. After the first hit the `p.x`/`p.y` sites go monomorphic, so this
 /// measures the cached LOAD path.
@@ -579,6 +600,18 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     recur.finish();
+
+    // S3 (P-VMT-DISP): the dispatch floor — a tight arithmetic loop whose per-iteration cost is
+    // the interpreter's per-op overhead, not real work. Hoisting the frame window out of the loop
+    // head (re-derived only on call/return) is what this measures.
+    let mut disp = c.benchmark_group("vm_dispatch");
+    for &n in LOOP_ITERS {
+        let module = compile(&loop_sum_src(n));
+        disp.bench_with_input(BenchmarkId::new("loop_sum", n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    disp.finish();
 
     let mut fieldset = c.benchmark_group("vm_field_assign");
     for &n in LOOP_SIZES {
