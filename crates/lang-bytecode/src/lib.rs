@@ -17,6 +17,16 @@ use lang_span::Span;
 /// reusing allocator is a later optimization the disassembly snapshots will make visible.
 pub type Reg = u16;
 
+/// An interned name index into [`Module::names`] (P-VMT-OPSZ). Every instruction-embedded name —
+/// field/method/global names, the ext-call module+func, type names, and `match`-literal strings —
+/// is held as this 4-byte id instead of an inline 24-byte `String`, which is what shrinks `Op` from
+/// two cache lines toward one. The VM resolves it back to `&str` only at the cold lookup sites
+/// (global / method / field resolution, all of which then hit a hashmap or field scan anyway); the
+/// disassembler resolves it for readable output. Distinct newtype (not a bare `u32`) so it can't be
+/// confused with the other u32 indices an op carries (shape, proto, cache slot).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct NameId(pub u32);
+
 /// Which operand of a logical operator is being checked, for the "expects a bool on the
 /// left/right" diagnostic (matching the M0 tree-walker's `eval_logical`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,13 +212,13 @@ pub enum Op {
     /// frame-local register: top-level bindings, function names, and (at runtime) unknowns.
     LoadGlobal {
         dst: Reg,
-        name: String,
+        name: NameId,
         span: Span,
     },
     /// `globals[name] = src` (refcounted: release old binding, retain `src`). Only emitted at
     /// the top level — functions never assign globals in the M1.2 subset.
     StoreGlobal {
-        name: String,
+        name: NameId,
         src: Reg,
     },
     /// `dst = take(globals[name])` — **move** the global's value into `dst`, leaving `unit` in the
@@ -219,7 +229,7 @@ pub enum Op {
     /// unbound (matching `LoadGlobal`).
     TakeGlobal {
         dst: Reg,
-        name: String,
+        name: NameId,
         span: Span,
     },
     /// `drop(reg)` — release the value held in `reg` and leave `unit` in its place. Inserted by the
@@ -414,7 +424,7 @@ pub enum Op {
     CallMethod {
         dst: Reg,
         recv: Reg,
-        method: String,
+        method: NameId,
         args: Box<[Reg]>,
         span: Span,
         /// Inline-cache slot (index into the VM's per-run cache array). Memoizes the last receiver
@@ -451,7 +461,7 @@ pub enum Op {
         dst: Reg,
         recv: Reg,
         index: Reg,
-        field: String,
+        field: NameId,
         span: Span,
     },
     /// `dst = Type { named..., ...spread }` — construct a declared struct/class instance whose
@@ -497,8 +507,8 @@ pub enum Op {
     /// `BTreeMap`-ordered field bag — with no missing/unknown-field checks.
     MakeOpaque {
         dst: Reg,
-        type_name: String,
-        keys: Box<[(String, Reg)]>,
+        type_name: NameId,
+        keys: Box<[(NameId, Reg)]>,
         spread: Option<Reg>,
     },
     /// `dst = <enum variant>` — construct the `(enum, variant)` value whose shape is
@@ -522,8 +532,8 @@ pub enum Op {
     EnumFromStr {
         dst: Reg,
         arg: Reg,
-        enum_name: String,
-        cases: Box<[(String, u32)]>,
+        enum_name: NameId,
+        cases: Box<[(NameId, u32)]>,
         some_shape: u32,
         none_shape: u32,
         panic: bool,
@@ -534,7 +544,7 @@ pub enum Op {
     LoadField {
         dst: Reg,
         obj: Reg,
-        field: String,
+        field: NameId,
         span: Span,
         /// Inline-cache slot (index into the VM's per-run cache array). Memoizes the last receiver
         /// shape → field slot index, so a monomorphic site skips the linear `slot_of` field scan.
@@ -551,7 +561,7 @@ pub enum Op {
     SetField {
         dst: Reg,
         obj: Reg,
-        field: String,
+        field: NameId,
         value: Reg,
         reuse: bool,
         span: Span,
@@ -681,7 +691,7 @@ pub enum Op {
     /// is the attribute type, resolved at compile time (closed-world). Reads `Module::reflection`.
     AttributesOf {
         dst: Reg,
-        type_name: String,
+        type_name: NameId,
     },
     /// `roles_of()`: `dst = List<RoleBinding>` — the `(declaration, Role)` semantic-role index from
     /// the module's reflection info, each entry materialized into a `RoleBinding { target, role }`.
@@ -720,7 +730,7 @@ pub enum Op {
     /// function. The kind is classified at run time from the module's reflection (`type_ref_repr`).
     TypeValue {
         dst: Reg,
-        name: String,
+        name: NameId,
     },
     /// `invoke(recv, name, args)`: `dst = Result<dyn, dyn>` — fallible by-name dispatch. `recv` holds
     /// an object (→ instance method, keyed `(shape, name)`) or a reflection `Type` value (→ associated
@@ -743,8 +753,8 @@ pub enum Op {
     /// type; `None` means `T` had no decoding — a checker error — and the VM raises at `span`).
     ExtCall {
         dst: Reg,
-        module: String,
-        func: String,
+        module: NameId,
+        func: NameId,
         args: Box<[Reg]>,
         recipe: Option<lang_stdlib::TypeRecipe>,
         span: Span,
@@ -758,7 +768,7 @@ pub enum Op {
     },
     MatchStr {
         src: Reg,
-        value: String,
+        value: NameId,
         fail: u32,
     },
     MatchBool {
@@ -770,8 +780,8 @@ pub enum Op {
     /// `type_name` is set, that enum) with `arity` data fields, continue; else jump to `fail`.
     MatchVariant {
         src: Reg,
-        type_name: Option<String>,
-        variant: String,
+        type_name: Option<NameId>,
+        variant: NameId,
         arity: u16,
         fail: u32,
     },
@@ -961,8 +971,10 @@ impl Chunk {
         }
     }
 
-    /// Render the chunk as stable, human-readable disassembly for snapshot tests.
-    pub fn disassemble(&self) -> String {
+    /// Render the chunk as stable, human-readable disassembly for snapshot tests. `names` is the
+    /// owning module's interned name table (P-VMT-OPSZ), used to resolve each op's [`NameId`]s back
+    /// to their strings so the output is unchanged from the pre-interning inline-`String` form.
+    pub fn disassemble(&self, names: &[String]) -> String {
         let mut out = String::new();
         let _ = writeln!(
             out,
@@ -983,7 +995,7 @@ impl Chunk {
         }
         out.push_str("code:\n");
         for (i, op) in self.code.iter().enumerate() {
-            let _ = writeln!(out, "  {i:>3}  {}", op_repr(op, &self.diagnostics));
+            let _ = writeln!(out, "  {i:>3}  {}", op_repr(op, &self.diagnostics, names));
         }
         out
     }
@@ -1091,12 +1103,23 @@ pub struct Module {
     /// inline on the op) so the op stays `Copy`-cheap and the `TypeRepr` — which is `Send` — keeps the
     /// module shareable across isolate threads. Empty for a program with no tagged list literal.
     pub type_reprs: Vec<lang_ast::reflect::TypeRepr>,
+    /// The interned instruction name table (P-VMT-OPSZ): every [`NameId`] in an op indexes here.
+    /// Deduped module-wide by the compiler, so a name used at N sites is stored once. Holds field /
+    /// method / global / type names, ext-call module+func, and `match`-literal strings; the VM
+    /// resolves an id to `&str` only at the cold lookup sites, the disassembler for readable output.
+    pub names: Vec<String>,
 }
 
 impl Module {
     /// The top-level program prototype (always present).
     pub fn main(&self) -> &Chunk {
         &self.protos[0]
+    }
+
+    /// Resolve an interned [`NameId`] to its string (P-VMT-OPSZ). Ids are minted by the compiler
+    /// against this same table, so the index is always in range.
+    pub fn name(&self, id: NameId) -> &str {
+        &self.names[id.0 as usize]
     }
 
     /// The data attributes (`#[...]`) attached to `target`, in source order — the manifest query
@@ -1173,7 +1196,7 @@ impl Module {
             } else {
                 let _ = writeln!(out, "=== proto {i} ===");
             }
-            out.push_str(&proto.disassemble());
+            out.push_str(&proto.disassemble(&self.names));
         }
         out
     }
@@ -1191,13 +1214,15 @@ fn const_repr(c: &Const) -> String {
     }
 }
 
-fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
+fn op_repr(op: &Op, diagnostics: &[Diagnostic], names: &[String]) -> String {
+    // Resolve an interned name id to its string for readable disassembly (P-VMT-OPSZ).
+    let n = |id: &NameId| names[id.0 as usize].as_str();
     match op {
         Op::LoadConst { dst, k } => format!("LoadConst   r{dst} <- k{k}"),
         Op::Move { dst, src } => format!("Move        r{dst} <- r{src}"),
-        Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {name:?}"),
-        Op::StoreGlobal { name, src } => format!("StoreGlobal {name:?} <- r{src}"),
-        Op::TakeGlobal { dst, name, .. } => format!("TakeGlobal  r{dst} <- take({name:?})"),
+        Op::LoadGlobal { dst, name, .. } => format!("LoadGlobal  r{dst} <- {:?}", n(name)),
+        Op::StoreGlobal { name, src } => format!("StoreGlobal {:?} <- r{src}", n(name)),
+        Op::TakeGlobal { dst, name, .. } => format!("TakeGlobal  r{dst} <- take({:?})", n(name)),
         Op::Drop { reg, relevant } => {
             let tag = if *relevant { " ~destruct" } else { "" };
             format!("Drop        r{reg}{tag}")
@@ -1295,7 +1320,8 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
             let marker = if *reuse { " [reuse]" } else { "" };
             format!(
-                "CallMethod  r{dst} <- r{recv}.{method}({}){marker}",
+                "CallMethod  r{dst} <- r{recv}.{}({}){marker}",
+                n(method),
                 args.join(", ")
             )
         }
@@ -1308,7 +1334,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             index,
             field,
             ..
-        } => format!("IndexField  r{dst} <- r{recv}[r{index}].{field}"),
+        } => format!("IndexField  r{dst} <- r{recv}[r{index}].{}", n(field)),
         Op::MakeStruct {
             dst,
             shape,
@@ -1356,11 +1382,18 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             keys,
             spread,
         } => {
-            let mut parts: Vec<String> = keys.iter().map(|(k, r)| format!("{k:?}=r{r}")).collect();
+            let mut parts: Vec<String> = keys
+                .iter()
+                .map(|(k, r)| format!("{:?}=r{r}", n(k)))
+                .collect();
             if let Some(base) = spread {
                 parts.push(format!("..r{base}"));
             }
-            format!("MakeOpaque  r{dst} <- {type_name} {{{}}}", parts.join(", "))
+            format!(
+                "MakeOpaque  r{dst} <- {} {{{}}}",
+                n(type_name),
+                parts.join(", ")
+            )
         }
         Op::MakeEnum {
             dst, shape, args, ..
@@ -1376,11 +1409,11 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             ..
         } => {
             let kind = if *panic { "from" } else { "try_from" };
-            format!("EnumFromStr r{dst} <- {enum_name}.{kind}(r{arg})")
+            format!("EnumFromStr r{dst} <- {}.{kind}(r{arg})", n(enum_name))
         }
         Op::LoadField {
             dst, obj, field, ..
-        } => format!("LoadField   r{dst} <- r{obj}.{field}"),
+        } => format!("LoadField   r{dst} <- r{obj}.{}", n(field)),
         Op::SetField {
             dst,
             obj,
@@ -1390,7 +1423,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             ..
         } => {
             let marker = if *reuse { " [reuse]" } else { "" };
-            format!("SetField    r{dst} <- r{obj}.{field} = r{value}{marker}")
+            format!("SetField    r{dst} <- r{obj}.{} = r{value}{marker}", n(field))
         }
         Op::NextId { dst } => format!("NextId      r{dst}"),
         Op::Panic { msg, .. } => format!("Panic       r{msg}"),
@@ -1421,7 +1454,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             dst, src, target, ..
         } => format!("Narrow      r{dst} <- r{src}.as<{target:?}>()"),
         Op::AttributesOf { dst, type_name } => {
-            format!("AttributesOf r{dst} <- attributes_of::<{type_name}>()")
+            format!("AttributesOf r{dst} <- attributes_of::<{}>()", n(type_name))
         }
         Op::RolesOf { dst } => format!("RolesOf     r{dst} <- roles_of()"),
         Op::TypeOf { dst, src } => format!("TypeOf      r{dst} <- type_of(r{src})"),
@@ -1431,7 +1464,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             format!("FromBytes   r{dst} <- from_bytes(r{src}, schema {schema})")
         }
         Op::TypeOfStatic { dst, repr } => format!("TypeOfStatic r{dst} <- {repr:?}"),
-        Op::TypeValue { dst, name } => format!("TypeValue   r{dst} <- type {name}"),
+        Op::TypeValue { dst, name } => format!("TypeValue   r{dst} <- type {}", n(name)),
         Op::Invoke {
             dst,
             recv,
@@ -1448,7 +1481,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
         } => {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
             format!(
-                "ExtCall     r{dst} <- {module}.{func}::<T>({})",
+                "ExtCall     r{dst} <- {}.{}::<T>({})",
+                n(module),
+                n(func),
                 args.join(", ")
             )
         }
@@ -1492,7 +1527,7 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             format!("MatchInt    r{src} == {value} else -> {fail}")
         }
         Op::MatchStr { src, value, fail } => {
-            format!("MatchStr    r{src} == {value:?} else -> {fail}")
+            format!("MatchStr    r{src} == {:?} else -> {fail}", n(value))
         }
         Op::MatchBool { src, value, fail } => {
             format!("MatchBool   r{src} == {value} else -> {fail}")
@@ -1505,10 +1540,13 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic]) -> String {
             fail,
         } => {
             let qualifier = match type_name {
-                Some(name) => format!("{name}."),
+                Some(name) => format!("{}.", n(name)),
                 None => String::new(),
             };
-            format!("MatchVariant r{src} is {qualifier}{variant}/{arity} else -> {fail}")
+            format!(
+                "MatchVariant r{src} is {qualifier}{}/{arity} else -> {fail}",
+                n(variant)
+            )
         }
         Op::MatchTuple { src, arity, fail } => {
             format!("MatchTuple  r{src} is tuple/{arity} else -> {fail}")

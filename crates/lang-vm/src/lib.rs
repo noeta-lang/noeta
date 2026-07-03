@@ -1003,39 +1003,44 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, v);
                         pc += 1;
                     }
-                    Op::LoadGlobal { dst, name, span } => match self.globals.get(name) {
-                        Some(&v) => {
-                            retain(v);
-                            set_reg(regs, fbase, *dst, v);
-                            pc += 1;
+                    Op::LoadGlobal { dst, name, span } => {
+                        let name = module.name(*name);
+                        match self.globals.get(name) {
+                            Some(&v) => {
+                                retain(v);
+                                set_reg(regs, fbase, *dst, v);
+                                pc += 1;
+                            }
+                            None => {
+                                return Err(self.error(
+                                    DiagnosticCode::UnknownName,
+                                    *span,
+                                    format!("cannot find `{name}` in this scope"),
+                                ));
+                            }
                         }
-                        None => {
-                            return Err(self.error(
-                                DiagnosticCode::UnknownName,
-                                *span,
-                                format!("cannot find `{name}` in this scope"),
-                            ));
-                        }
-                    },
+                    }
                     Op::StoreGlobal { name, src } => {
                         // Transfer ownership from the (dead) source temporary into the global,
                         // rather than retaining a duplicate. This keeps the reference count equal
                         // to the tree-walker's direct-binding model — a lingering temporary would
                         // otherwise inflate the count and hide a reassigned value's last reference,
                         // suppressing its destructor.
+                        let name = module.name(*name);
                         let v = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
-                        match self.globals.insert(name.clone(), v) {
+                        match self.globals.insert(name.to_string(), v) {
                             // Reassigning a global: the previous value is dropped here, running its
                             // destructor if this was its last reference.
                             Some(old) => self.release_value(old),
                             // First binding of this name: record it for reverse-order destruction.
-                            None => self.global_order.push(name.clone()),
+                            None => self.global_order.push(name.to_string()),
                         }
                         pc += 1;
                     }
                     Op::TakeGlobal { dst, name, span } => {
                         // Move the global's value into `dst`, leaving `unit` — no retain, so the single
                         // owning reference transfers and a following `ConcatInPlace` can see uniqueness.
+                        let name = module.name(*name);
                         let v = match self.globals.get_mut(name) {
                             Some(slot) => std::mem::replace(slot, Value::unit()),
                             None => {
@@ -1249,23 +1254,27 @@ impl<'m> Vm<'m> {
                     }
                     Op::ExtCall {
                         dst,
-                        module,
-                        func,
+                        module: mod_id,
+                        func: func_id,
                         args,
                         recipe,
                         span,
                     } => {
+                        // Resolve the interned module/func names (`module` is the outer loop-local
+                        // `&Module`, so bind the op's ids under different names to avoid shadowing it).
+                        let mod_name = module.name(*mod_id);
+                        let func = module.name(*func_id);
                         // A call-site-typed native module call (`json.parse::<T>(s)`). The recipe is
                         // required; its absence was already reported by the checker.
                         let Some(recipe) = recipe else {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("`{module}.{func}::<T>(...)` has no resolved result type"),
+                                format!("`{mod_name}.{func}::<T>(...)` has no resolved result type"),
                             ));
                         };
                         // The only call-site-typed native function today is `json.parse::<T>(text)`.
-                        if module == "json" && func == "parse" {
+                        if mod_name == "json" && func == "parse" {
                             let text = args
                                 .first()
                                 .map(|r| regs[fbase + *r as usize])
@@ -1295,7 +1304,7 @@ impl<'m> Vm<'m> {
                             DiagnosticCode::UnknownName,
                             *span,
                             format!(
-                                "`{module}.{func}::<T>(...)` is not a call-site-typed native function"
+                                "`{mod_name}.{func}::<T>(...)` is not a call-site-typed native function"
                             ),
                         ));
                         }
@@ -1628,6 +1637,8 @@ impl<'m> Vm<'m> {
                         cache,
                         reuse,
                     } => {
+                        // Resolve the interned method name once; every path below wants the `&str`.
+                        let method = module.name(*method);
                         let v = regs[fbase + *recv as usize];
                         // In-place map self-update (Phase 5.1c): a reuse-marked `m = m.set(k,v)` /
                         // `m = m.remove(k)` whose runtime receiver is actually a map consumes the receiver
@@ -1738,7 +1749,7 @@ impl<'m> Vm<'m> {
                                 None => {
                                     let shape = v.shape().unwrap();
                                     let Some(&proto) =
-                                        self.methods.get(&(shape.name.clone(), method.clone()))
+                                        self.methods.get(&(shape.name.clone(), method.to_string()))
                                     else {
                                         return Err(self.error(
                                             DiagnosticCode::UnknownName,
@@ -1806,7 +1817,7 @@ impl<'m> Vm<'m> {
                         // falls through to the built-in paths below.
                         if v.is_enum() {
                             let type_name = v.shape().unwrap().name.clone();
-                            if let Some(&proto) = self.methods.get(&(type_name, method.clone())) {
+                            if let Some(&proto) = self.methods.get(&(type_name, method.to_string())) {
                                 let callee_chunk = &module.protos[proto as usize];
                                 let total = callee_chunk.num_params as usize - 1;
                                 let required = total - callee_chunk.defaults.len();
@@ -2023,7 +2034,7 @@ impl<'m> Vm<'m> {
                         // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
                         // polled); `close` is synchronous. Endpoint validity was checked statically.
                         if let Some(id) = v.sender_id() {
-                            match method.as_str() {
+                            match method {
                                 "send" => {
                                     let msg = regs[fbase + args[0] as usize];
                                     // The future retains its own reference to the message; the arg
@@ -2334,6 +2345,7 @@ impl<'m> Vm<'m> {
                         field,
                         span,
                     } => {
+                        let field = module.name(*field);
                         let v = regs[fbase + *recv as usize];
                         let idx = regs[fbase + *index as usize];
                         // Fast path: a packed list decodes the one field's word(s) directly — no element
@@ -2628,14 +2640,17 @@ impl<'m> Vm<'m> {
                         for (key, reg) in keys.iter() {
                             let value = regs[fbase + *reg as usize];
                             retain(value);
-                            if let Some(old) = bag.insert(key.clone(), value) {
+                            if let Some(old) = bag.insert(module.name(*key).to_string(), value) {
                                 release(old);
                             }
                         }
                         let fields: Vec<String> = bag.keys().cloned().collect();
                         let slots: Vec<Value> = bag.into_values().collect();
-                        let shape =
-                            Rc::new(Shape::object(ShapeKind::Opaque, type_name.clone(), fields));
+                        let shape = Rc::new(Shape::object(
+                            ShapeKind::Opaque,
+                            module.name(*type_name).to_string(),
+                            fields,
+                        ));
                         set_reg(regs, fbase, *dst, Value::object(shape, slots));
                         pc += 1;
                     }
@@ -2672,6 +2687,7 @@ impl<'m> Vm<'m> {
                         panic,
                         span,
                     } => {
+                        let enum_name = module.name(*enum_name);
                         let key = match regs[fbase + *arg as usize].as_string() {
                             Some(s) => s,
                             None => {
@@ -2686,7 +2702,7 @@ impl<'m> Vm<'m> {
                                 ));
                             }
                         };
-                        let matched = cases.iter().find(|(name, _)| *name == key);
+                        let matched = cases.iter().find(|(name, _)| module.name(*name) == key);
                         let result = match matched {
                             Some((_, shape_idx)) => {
                                 // Build the payload-free case; its single reference transfers onward.
@@ -2721,6 +2737,7 @@ impl<'m> Vm<'m> {
                         span,
                         cache,
                     } => {
+                        let field = module.name(*field);
                         let v = regs[fbase + *obj as usize];
                         // Inline cache: a hit (the receiver's shape pointer matches the cached one) reads
                         // the memoized slot directly; a miss resolves `slot_of` and refreshes the cache.
@@ -2775,6 +2792,7 @@ impl<'m> Vm<'m> {
                         reuse,
                         span,
                     } => {
+                        let field = module.name(*field);
                         let v = regs[fbase + *obj as usize];
                         let val = regs[fbase + *value as usize];
                         let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
@@ -3125,7 +3143,7 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::AttributesOf { dst, type_name } => {
-                        let result = self.materialize_attributes(type_name);
+                        let result = self.materialize_attributes(module.name(*type_name));
                         set_reg(regs, fbase, *dst, result);
                         pc += 1;
                     }
@@ -3150,7 +3168,8 @@ impl<'m> Vm<'m> {
                         // reflection `Type` ADT — the one representation of "a type as a value", shared
                         // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
                         // named type via `reflection_type_name`.
-                        let value = build_type_value(&module.reflection.type_ref_repr(name));
+                        let value =
+                            build_type_value(&module.reflection.type_ref_repr(module.name(*name)));
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;
                     }
@@ -3297,7 +3316,9 @@ impl<'m> Vm<'m> {
                         }
                     }
                     Op::MatchStr { src, value, fail } => {
-                        if regs[fbase + *src as usize].as_string().as_deref() == Some(value) {
+                        if regs[fbase + *src as usize].as_string().as_deref()
+                            == Some(module.name(*value))
+                        {
                             pc += 1;
                         } else {
                             pc = *fail as usize;
@@ -3320,8 +3341,9 @@ impl<'m> Vm<'m> {
                         let v = regs[fbase + *src as usize];
                         let matches = v.is_enum()
                             && v.shape().is_some_and(|shape| {
-                                shape.variant.as_deref() == Some(variant)
-                                    && type_name.as_ref().is_none_or(|t| &shape.name == t)
+                                shape.variant.as_deref() == Some(module.name(*variant))
+                                    && type_name
+                                        .is_none_or(|t| module.name(t) == shape.name.as_str())
                             })
                             && v.enum_data().is_some_and(|d| d.len() == *arity as usize);
                         if matches {
