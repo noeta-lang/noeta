@@ -62,7 +62,9 @@ impl JitDiffReport {
             self.matched, self.skipped, self.parse_failed, self.native_protos, self.compiled_protos,
         );
         if self.mismatches.is_empty() && self.leaks.is_empty() {
-            out.push_str("tier 1 agrees with tier 0 and leaks nothing on every compiled program ✓\n");
+            out.push_str(
+                "tier 1 agrees with tier 0 and leaks nothing on every compiled program ✓\n",
+            );
         } else {
             if !self.mismatches.is_empty() {
                 let _ = writeln!(out, "{} RESULT MISMATCH(es):", self.mismatches.len());
@@ -144,7 +146,11 @@ fn compare_tiers(name: &str, text: &str, report: &mut JitDiffReport) {
 }
 
 /// The workspace analogue of [`compare_tiers`] for a multi-file fixture.
-fn compare_tiers_workspace(name: &str, raw: &lang_loader::RawWorkspace, report: &mut JitDiffReport) {
+fn compare_tiers_workspace(
+    name: &str,
+    raw: &lang_loader::RawWorkspace,
+    report: &mut JitDiffReport,
+) {
     let db = LangDatabase::default();
     let ws = lang_db::workspace(&db, &raw.entry, &raw.modules);
 

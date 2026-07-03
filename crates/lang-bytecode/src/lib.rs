@@ -1255,7 +1255,12 @@ fn const_repr(c: &Const) -> String {
     }
 }
 
-fn op_repr(op: &Op, diagnostics: &[Diagnostic], names: &[String], global_names: &[String]) -> String {
+fn op_repr(
+    op: &Op,
+    diagnostics: &[Diagnostic],
+    names: &[String],
+    global_names: &[String],
+) -> String {
     // Resolve an interned name id to its string for readable disassembly (P-VMT-OPSZ).
     let n = |id: &NameId| names[id.0 as usize].as_str();
     // Resolve a global slot to its name (P-VMT-GSLOT).
@@ -1265,7 +1270,9 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic], names: &[String], global_names: 
         Op::Move { dst, src } => format!("Move        r{dst} <- r{src}"),
         Op::LoadGlobal { dst, global, .. } => format!("LoadGlobal  r{dst} <- {:?}", g(global)),
         Op::StoreGlobal { global, src } => format!("StoreGlobal {:?} <- r{src}", g(global)),
-        Op::TakeGlobal { dst, global, .. } => format!("TakeGlobal  r{dst} <- take({:?})", g(global)),
+        Op::TakeGlobal { dst, global, .. } => {
+            format!("TakeGlobal  r{dst} <- take({:?})", g(global))
+        }
         Op::Drop { reg, relevant } => {
             let tag = if *relevant { " ~destruct" } else { "" };
             format!("Drop        r{reg}{tag}")
@@ -1466,7 +1473,10 @@ fn op_repr(op: &Op, diagnostics: &[Diagnostic], names: &[String], global_names: 
             ..
         } => {
             let marker = if *reuse { " [reuse]" } else { "" };
-            format!("SetField    r{dst} <- r{obj}.{} = r{value}{marker}", n(field))
+            format!(
+                "SetField    r{dst} <- r{obj}.{} = r{value}{marker}",
+                n(field)
+            )
         }
         Op::NextId { dst } => format!("NextId      r{dst}"),
         Op::Panic { msg, .. } => format!("Panic       r{msg}"),

@@ -184,7 +184,8 @@ fn jit_differential_tiers_agree() {
     // Every parse-clean program the VM supports must run through the JIT (J0 forces this); the
     // interpreter's own gate already fixes `skipped == 0`, so tier 1 covers the same 100%.
     assert_eq!(
-        report.skipped, 0,
+        report.skipped,
+        0,
         "the JIT oracle must cover 100% of the comparable corpus; got:\n{}",
         report.to_human()
     );

@@ -1454,7 +1454,9 @@ impl<'m> Vm<'m> {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("`{mod_name}.{func}::<T>(...)` has no resolved result type"),
+                                format!(
+                                    "`{mod_name}.{func}::<T>(...)` has no resolved result type"
+                                ),
                             ));
                         };
                         // The only call-site-typed native function today is `json.parse::<T>(text)`.
@@ -2001,7 +2003,8 @@ impl<'m> Vm<'m> {
                         // falls through to the built-in paths below.
                         if v.is_enum() {
                             let type_name = v.shape().unwrap().name.clone();
-                            if let Some(&proto) = self.methods.get(&(type_name, method.to_string())) {
+                            if let Some(&proto) = self.methods.get(&(type_name, method.to_string()))
+                            {
                                 let callee_chunk = &module.protos[proto as usize];
                                 let total = callee_chunk.num_params as usize - 1;
                                 let required = total - callee_chunk.defaults.len();
@@ -4787,8 +4790,14 @@ mod tests {
         assert_eq!(jit.stdout, "20\n");
         // At least one prototype (`dbl`) went native, and the ineligible ones (top-level, `run`) ran
         // their bail stubs (which call the observe helper).
-        assert!(stats.native >= 1, "expected a native prototype, got {stats:?}");
-        assert!(entered >= 1, "expected the bail stubs to run, got {entered}");
+        assert!(
+            stats.native >= 1,
+            "expected a native prototype, got {stats:?}"
+        );
+        assert!(
+            entered >= 1,
+            "expected the bail stubs to run, got {entered}"
+        );
     }
 
     /// J1 (integer fast path): a pure-integer `while`-loop function compiles to native code and, run
@@ -4807,7 +4816,10 @@ mod tests {
         let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
 
         // The `run` prototype (and only it) is J1-eligible.
-        assert!(stats.native >= 1, "the while-loop fn must go native, got {stats:?}");
+        assert!(
+            stats.native >= 1,
+            "the while-loop fn must go native, got {stats:?}"
+        );
         assert_eq!(interp, jit, "tier-1 result must match the interpreter");
         // Independently confirm the value: sum_{i=0}^{999} (i % 7).
         let expected: i64 = (0..1000).map(|i| i % 7).sum();
@@ -4825,7 +4837,10 @@ mod tests {
         let module = compile_module(src);
         let interp = VmBackend::new().run_module(&module);
         let (jit, _) = VmBackend::new().run_module_jit_with_stats(&module);
-        assert_eq!(interp, jit, "overflow-bail result must match the interpreter");
+        assert_eq!(
+            interp, jit,
+            "overflow-bail result must match the interpreter"
+        );
     }
 
     /// Peak heap residency for one program (architecture §0.3) — `reset_peak` before, `live_peak`

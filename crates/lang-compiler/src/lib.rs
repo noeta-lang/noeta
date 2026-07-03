@@ -3485,9 +3485,7 @@ impl<'m> FnCompiler<'m> {
                 ..
             } => {
                 fail_jumps.push(self.code.len());
-                let type_name = type_name
-                    .as_ref()
-                    .map(|n| self.module.intern_name(n));
+                let type_name = type_name.as_ref().map(|n| self.module.intern_name(n));
                 let variant = self.module.intern_name(variant);
                 self.code.push(Op::MatchVariant {
                     src: reg,

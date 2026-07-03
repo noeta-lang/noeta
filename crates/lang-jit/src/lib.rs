@@ -96,7 +96,10 @@ pub struct Jit {
 impl std::fmt::Debug for Jit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Jit")
-            .field("compiled", &self.compiled.iter().filter(|c| c.is_some()).count())
+            .field(
+                "compiled",
+                &self.compiled.iter().filter(|c| c.is_some()).count(),
+            )
             .field("native", &self.native_count)
             .field("protos", &self.compiled.len())
             .finish()
@@ -112,10 +115,14 @@ impl Jit {
     /// rejects the flags — the VM treats that as "JIT unavailable, stay tier 0".
     pub fn new(helpers: &[(&str, *const u8)]) -> Result<Jit, String> {
         let mut flags = settings::builder();
-        flags.set("use_colocated_libcalls", "false").map_err(|e| e.to_string())?;
+        flags
+            .set("use_colocated_libcalls", "false")
+            .map_err(|e| e.to_string())?;
         flags.set("is_pic", "false").map_err(|e| e.to_string())?;
         let isa_builder = cranelift_native::builder().map_err(|m| m.to_string())?;
-        let isa = isa_builder.finish(settings::Flags::new(flags)).map_err(|e| e.to_string())?;
+        let isa = isa_builder
+            .finish(settings::Flags::new(flags))
+            .map_err(|e| e.to_string())?;
         let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
         for (name, ptr) in helpers {
             builder.symbol(*name, *ptr);
@@ -152,7 +159,8 @@ impl Jit {
     /// Idempotent: a second call for an already-compiled prototype returns the cached entry point.
     pub fn compile(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, String> {
         if proto >= self.compiled.len() {
-            self.compiled.resize(module.protos.len().max(proto + 1), None);
+            self.compiled
+                .resize(module.protos.len().max(proto + 1), None);
         }
         if let Some(f) = self.compiled[proto] {
             return Ok(f);
@@ -186,9 +194,13 @@ impl Jit {
             .module
             .declare_function(name, Linkage::Export, &self.ctx.func.signature)
             .map_err(|e| e.to_string())?;
-        self.module.define_function(func_id, &mut self.ctx).map_err(|e| e.to_string())?;
+        self.module
+            .define_function(func_id, &mut self.ctx)
+            .map_err(|e| e.to_string())?;
         self.module.clear_context(&mut self.ctx);
-        self.module.finalize_definitions().map_err(|e| e.to_string())?;
+        self.module
+            .finalize_definitions()
+            .map_err(|e| e.to_string())?;
         let code = self.module.get_finalized_function(func_id);
         // SAFETY: `code` is a finalized function whose Cranelift signature is exactly the
         // `extern "C" fn(ptr, ptr, usize) -> u32` this transmutes to, and it stays valid for as long
@@ -251,7 +263,10 @@ impl Jit {
             let base_bytes = b.ins().imul_imm(base, 8);
             let frame_ptr = b.ins().iadd(regs, base_bytes);
 
-            let mut cg = Codegen { b: &mut b, frame_ptr };
+            let mut cg = Codegen {
+                b: &mut b,
+                frame_ptr,
+            };
 
             // Parameter guard: if any argument is a heap pointer, bail to pc 0 (interpret the frame).
             // Establishes the "every register is an immediate" invariant the body relies on.
@@ -396,19 +411,29 @@ struct Codegen<'a, 'b> {
 impl Codegen<'_, '_> {
     /// Load register `r` (a full NaN-boxed word) from the frame window.
     fn load_reg(&mut self, r: Reg) -> ClValue {
-        self.b.ins().load(types::I64, MemFlagsData::trusted(), self.frame_ptr, reg_offset(r))
+        self.b.ins().load(
+            types::I64,
+            MemFlagsData::trusted(),
+            self.frame_ptr,
+            reg_offset(r),
+        )
     }
 
     /// Store `v` into register `r`. Sound with no release only under the immediate invariant (the
     /// old occupant is always an immediate, so the interpreter's release-on-overwrite is a no-op).
     fn store_reg(&mut self, r: Reg, v: ClValue) {
-        self.b.ins().store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+        self.b
+            .ins()
+            .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
     }
 
     /// `(v & (sign|qnan)) == (sign|qnan)` — is `v` a heap pointer?
     fn is_pointer(&mut self, v: ClValue) -> ClValue {
         let l = Value::NANBOX;
-        let mask = self.b.ins().iconst(types::I64, (l.sign_bit | l.qnan) as i64);
+        let mask = self
+            .b
+            .ins()
+            .iconst(types::I64, (l.sign_bit | l.qnan) as i64);
         let masked = self.b.ins().band(v, mask);
         self.b.ins().icmp(IntCC::Equal, masked, mask)
     }
@@ -416,7 +441,10 @@ impl Codegen<'_, '_> {
     /// `(v & (sign|qnan|int_tag)) == (qnan|int_tag)` — is `v` an immediate small int?
     fn is_small_int(&mut self, v: ClValue) -> ClValue {
         let l = Value::NANBOX;
-        let mask = self.b.ins().iconst(types::I64, (l.sign_bit | l.qnan | l.int_tag) as i64);
+        let mask = self
+            .b
+            .ins()
+            .iconst(types::I64, (l.sign_bit | l.qnan | l.int_tag) as i64);
         let want = self.b.ins().iconst(types::I64, (l.qnan | l.int_tag) as i64);
         let masked = self.b.ins().band(v, mask);
         self.b.ins().icmp(IntCC::Equal, masked, want)
@@ -463,7 +491,9 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::Drop { reg, .. } => {
             // The dropped value is an immediate (invariant) → no `release`/`destruct`; just clear the
             // slot to `unit`, matching the interpreter's `mem::replace(reg, unit)`.
-            let unit = cg.b.ins().iconst(types::I64, Value::NANBOX.unit_bits as i64);
+            let unit =
+                cg.b.ins()
+                    .iconst(types::I64, Value::NANBOX.unit_bits as i64);
             cg.store_reg(*reg, unit);
             next(cg);
         }
@@ -475,15 +505,31 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             // Taken iff the value is exactly `true`; a non-bool is simply not taken (the interpreter's
             // `as_bool() == Some(true)`), so no guard/bail is needed.
             let v = cg.load_reg(*reg);
-            let t = cg.b.ins().iconst(types::I64, Value::NANBOX.true_bits as i64);
+            let t =
+                cg.b.ins()
+                    .iconst(types::I64, Value::NANBOX.true_bits as i64);
             let is_true = cg.b.ins().icmp(IntCC::Equal, v, t);
-            cg.b.ins().brif(is_true, op_blocks[*target as usize], &[], op_blocks[pc + 1], &[]);
+            cg.b.ins().brif(
+                is_true,
+                op_blocks[*target as usize],
+                &[],
+                op_blocks[pc + 1],
+                &[],
+            );
         }
         Op::JumpIfFalse { reg, target } => {
             let v = cg.load_reg(*reg);
-            let fb = cg.b.ins().iconst(types::I64, Value::NANBOX.false_bits as i64);
+            let fb =
+                cg.b.ins()
+                    .iconst(types::I64, Value::NANBOX.false_bits as i64);
             let is_false = cg.b.ins().icmp(IntCC::Equal, v, fb);
-            cg.b.ins().brif(is_false, op_blocks[*target as usize], &[], op_blocks[pc + 1], &[]);
+            cg.b.ins().brif(
+                is_false,
+                op_blocks[*target as usize],
+                &[],
+                op_blocks[pc + 1],
+                &[],
+            );
         }
         Op::CondBranch { reg, target, .. } => {
             // false → jump target; true → fall through; anything else → bail so the interpreter
@@ -494,7 +540,8 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
             let is_false = cg.b.ins().icmp(IntCC::Equal, v, fb);
             let chk_true = cg.b.create_block();
-            cg.b.ins().brif(is_false, op_blocks[*target as usize], &[], chk_true, &[]);
+            cg.b.ins()
+                .brif(is_false, op_blocks[*target as usize], &[], chk_true, &[]);
             cg.b.switch_to_block(chk_true);
             let is_true = cg.b.ins().icmp(IntCC::Equal, v, tb);
             let bail = cg.b.create_block();
