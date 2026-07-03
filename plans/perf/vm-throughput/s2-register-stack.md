@@ -1,6 +1,37 @@
 # S2 — Register stack (P-VMT-FRAME)
 
-**Goal.** Stop heap-allocating a register file on every function call. Today each call does
+**Status: DONE** — built as the contiguous register stack (below), the canonical register-VM
+representation. `Frame` no longer owns a `Vec<Value>`; it carries a `base` cursor into one contiguous
+`regs: Vec<Value>` that each `run` invocation owns and threads through `dispatch`. A call reserves its
+window by extending the stack (`reserve_window`); a return releases the window and truncates back to
+`base`. So an ordinary call — the common case, a `frames.push` on the same stack — allocates nothing
+once the stack has grown to the run's deepest depth.
+
+Result on call-heavy recursion (before = the per-call-alloc path, measured in the same session):
+
+| `fib(n)` | before (alloc per call) | after (register stack) | speedup |
+|--:|--:|--:|--:|
+| 20 | 4.67 ms | 2.15 ms | **2.2×** |
+| 24 | 32.2 ms | 14.9 ms | **2.2×** |
+| 28 | 214.9 ms | 103.6 ms | **2.1×** |
+
+Behaviour-neutral (a pure representation change): differential 419 / 0 skipped / backends agree,
+corpus 430 passed, leak oracle residency 0 on both backends, 118 VM unit tests, clippy clean, no new
+`unsafe`. Criterion bench `vm_recursion/fib/{20,24,28}` added.
+
+**Design note.** An earlier attempt shipped a *register-file pool* (recycle each frame's `Vec`
+through a free list) — same measured win, far smaller diff, but the *less* architecturally sound
+choice: it kept the "each frame owns a scattered heap `Vec`" model, gave no cross-frame cache
+locality, and structurally foreclosed a register-window calling convention (in-place argument
+passing). It was reverted in favour of this contiguous stack. The one worry that made the stack look
+risky — a suspended coroutine frame whose registers must survive while the caller keeps running —
+does **not** arise here: the generator/async model is stackless by compiler CPS transformation
+(`MakeGen` wraps a step closure; suspension is a *returned* `Pending`/yield with resumption state in
+heap closure cells), so no VM frame is ever left suspended mid-stack. Every `run` executes a normal
+LIFO call tree to completion; re-entrant calls (`call_value`/`run_thunk`/`run_destructor`) nest via
+the Rust stack, each owning its own `frames` + `regs`.
+
+**Goal.** Stop heap-allocating a register file on every function call. Before this slice each call did
 `vec![Value::unit(); num_registers]` (a fresh `Vec` alloc + later drop); fib(32) ≈ 7M calls = 7M
 alloc/free pairs.
 

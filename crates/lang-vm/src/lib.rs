@@ -152,7 +152,11 @@ impl Backend for VmBackend {
 /// optional transform applied to the return value as it lands in the caller.
 struct Frame {
     proto: u32,
-    regs: Vec<Value>,
+    /// This frame's register file occupies `regs[base .. base + proto.num_registers]` in the
+    /// dispatch stack's single contiguous `regs: Vec<Value>` (P-VMT-FRAME). A call pushes a frame
+    /// by extending that stack; a return truncates back to `base`. No frame owns its registers, so
+    /// an ordinary call allocates nothing once the stack has grown to the run's deepest depth.
+    base: usize,
     pc: usize,
     ret_dst: u16,
     ret_transform: RetTransform,
@@ -556,9 +560,10 @@ impl<'m> Vm<'m> {
 /// `main` (isolates I.4b). The teardown is unchanged from the original single-function entry.
 fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
     let module = vm.module;
+    let regs = vec![Value::unit(); module.main().num_registers as usize];
     let top = Frame {
         proto: 0,
-        regs: vec![Value::unit(); module.main().num_registers as usize],
+        base: 0,
         pc: 0,
         ret_dst: 0,
         ret_transform: RetTransform::None,
@@ -566,7 +571,7 @@ fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
     };
     // The top-level frame's `Return`/`Halt` yields the program's (discarded) value; release
     // it. On abort `run` has already released every frame register.
-    if let Ok(v) = vm.run(vec![top]) {
+    if let Ok(v) = vm.run(vec![top], regs) {
         release(v);
     }
     // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
@@ -896,7 +901,7 @@ impl<'m> Vm<'m> {
         regs[0] = instance;
         let frame = Frame {
             proto,
-            regs,
+            base: 0,
             pc: 0,
             ret_dst: 0,
             ret_transform: RetTransform::None,
@@ -904,7 +909,7 @@ impl<'m> Vm<'m> {
         };
         // A destructor returns unit (its body is run for its effects); discard it. An abort
         // inside a destructor has already recorded its diagnostic.
-        if let Ok(v) = self.run(vec![frame]) {
+        if let Ok(v) = self.run(vec![frame], regs) {
             release(v);
         }
     }
@@ -912,8 +917,8 @@ impl<'m> Vm<'m> {
     /// Run a frame stack until its bottom frame returns (`Return`) or the program/function
     /// halts (an implicit unit return). Returns the produced value, which the caller owns.
     /// On abort, every register still owned by a frame left on the stack is released here.
-    fn run(&mut self, mut frames: Vec<Frame>) -> Result<Value, Abort> {
-        let result = self.dispatch(&mut frames);
+    fn run(&mut self, mut frames: Vec<Frame>, mut regs: Vec<Value>) -> Result<Value, Abort> {
+        let result = self.dispatch(&mut frames, &mut regs);
         if result.is_err() {
             // Phase 4.2c-ii: a panic unwinds the live frames. Before reclaiming their memory, fire
             // the `destruct` of every live destructor-bearing frame local — innermost frame first,
@@ -923,17 +928,22 @@ impl<'m> Vm<'m> {
             // call stack. Each fired register is cleared to `unit`, so the plain release below (which
             // also reclaims temporaries, never destructor-fired in either backend) never double-frees.
             for fi in (0..frames.len()).rev() {
+                let f_base = frames[fi].base;
                 let proto = frames[fi].proto as usize;
                 let count = self.module.protos[proto].frame_locals.len();
                 for idx in (0..count).rev() {
                     let reg = self.module.protos[proto].frame_locals[idx] as usize;
-                    let v = std::mem::replace(&mut frames[fi].regs[reg], Value::unit());
+                    let v = std::mem::replace(&mut regs[f_base + reg], Value::unit());
                     self.release_value(v);
                 }
             }
+            // Release each live frame's register window from the shared stack (P-VMT-FRAME). A frame
+            // owns `regs[base .. base + num_registers]`; the windows partition the stack, so this
+            // releases every register exactly once.
             for frame in &frames {
-                for r in &frame.regs {
-                    release(*r);
+                let n = self.module.protos[frame.proto as usize].num_registers as usize;
+                for i in 0..n {
+                    release(regs[frame.base + i]);
                 }
                 for u in &frame.upvalues {
                     release(*u);
@@ -945,7 +955,7 @@ impl<'m> Vm<'m> {
 
     /// The dispatch loop. Returns `Ok(value)` once the bottom frame returns (the stack is
     /// then empty), or `Err(Abort)` with the stack left intact for [`Vm::run`] to release.
-    fn dispatch(&mut self, frames: &mut Vec<Frame>) -> Result<Value, Abort> {
+    fn dispatch(&mut self, frames: &mut Vec<Frame>, regs: &mut Vec<Value>) -> Result<Value, Abort> {
         // Copy the shared module reference out so the loop can index prototypes without
         // borrowing `self` — leaving `self.stdout`/`globals`/`diagnostics` free to mutate.
         let module = self.module;
@@ -958,6 +968,12 @@ impl<'m> Vm<'m> {
         let mut caches: Vec<Option<(Rc<Shape>, u32)>> = vec![None; module.cache_slots as usize];
         loop {
             let top = frames.len() - 1;
+            // The current frame's register window is `regs[base .. base + chunk.num_registers]`
+            // (P-VMT-FRAME). Every operand access below is `regs[fbase + i]`. Recomputed each
+            // iteration alongside `top`/`pc`; S3 will hoist these into loop-locals resynced only on
+            // call/return. An op that pushes a callee frame keeps `base` pointing at the *caller*
+            // (so it reads its arguments), and computes the callee's window base separately.
+            let fbase = frames[top].base;
             let chunk = &module.protos[frames[top].proto as usize];
             let pc = frames[top].pc;
             // Every prototype ends with `Halt`, so the pc never runs off the end; guard anyway.
@@ -967,19 +983,19 @@ impl<'m> Vm<'m> {
             match op {
                 Op::LoadConst { dst, k } => {
                     let v = materialize(&chunk.consts[*k as usize]);
-                    set_reg(&mut frames[top].regs, *dst, v);
+                    set_reg(regs, fbase, *dst, v);
                     frames[top].pc += 1;
                 }
                 Op::Move { dst, src } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     retain(v);
-                    set_reg(&mut frames[top].regs, *dst, v);
+                    set_reg(regs, fbase, *dst, v);
                     frames[top].pc += 1;
                 }
                 Op::LoadGlobal { dst, name, span } => match self.globals.get(name) {
                     Some(&v) => {
                         retain(v);
-                        set_reg(&mut frames[top].regs, *dst, v);
+                        set_reg(regs, fbase, *dst, v);
                         frames[top].pc += 1;
                     }
                     None => {
@@ -996,7 +1012,7 @@ impl<'m> Vm<'m> {
                     // to the tree-walker's direct-binding model — a lingering temporary would
                     // otherwise inflate the count and hide a reassigned value's last reference,
                     // suppressing its destructor.
-                    let v = std::mem::replace(&mut frames[top].regs[*src as usize], Value::unit());
+                    let v = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
                     match self.globals.insert(name.clone(), v) {
                         // Reassigning a global: the previous value is dropped here, running its
                         // destructor if this was its last reference.
@@ -1019,7 +1035,7 @@ impl<'m> Vm<'m> {
                             ));
                         }
                     };
-                    set_reg(&mut frames[top].regs, *dst, v);
+                    set_reg(regs, fbase, *dst, v);
                     frames[top].pc += 1;
                 }
                 Op::Drop { reg, relevant } => {
@@ -1029,7 +1045,7 @@ impl<'m> Vm<'m> {
                     // the drop destructor-relevant (Phase 4), route it through `release_value` so a
                     // `destruct` block fires here if this is the final owning reference; otherwise the
                     // value provably reaches no destructor and the plain `release` is used.
-                    let v = std::mem::replace(&mut frames[top].regs[*reg as usize], Value::unit());
+                    let v = std::mem::replace(&mut regs[fbase + *reg as usize], Value::unit());
                     if *relevant {
                         self.release_value(v);
                     } else {
@@ -1038,13 +1054,13 @@ impl<'m> Vm<'m> {
                     frames[top].pc += 1;
                 }
                 Op::ConcatInPlace { dst, lhs, rhs, .. } => {
-                    let l = frames[top].regs[*lhs as usize];
-                    let r = frames[top].regs[*rhs as usize];
+                    let l = regs[fbase + *lhs as usize];
+                    let r = regs[fbase + *rhs as usize];
                     // `lhs` is consumed: clear its register *without* releasing (a direct overwrite,
                     // not `set_reg`), so the refcount below still counts the accumulator's reference
                     // and the single owner is transferred into the result. This also makes a
                     // `dst == lhs` store safe (the old occupant is now `unit`, not the live list).
-                    frames[top].regs[*lhs as usize] = Value::unit();
+                    regs[fbase + *lhs as usize] = Value::unit();
                     let result = if l.is_list() && r.is_list() {
                         if l.is_packed_list()
                             && r.is_packed_list()
@@ -1087,7 +1103,7 @@ impl<'m> Vm<'m> {
                         release(l);
                         s
                     };
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::MakeClosure {
@@ -1101,48 +1117,48 @@ impl<'m> Vm<'m> {
                     let mut upvalues = Vec::with_capacity(captures.len());
                     for capture in captures.iter() {
                         let cell = match capture {
-                            CaptureFrom::Local(reg) => frames[top].regs[*reg as usize],
+                            CaptureFrom::Local(reg) => regs[fbase + *reg as usize],
                             CaptureFrom::Upvalue(index) => frames[top].upvalues[*index as usize],
                         };
                         retain(cell);
                         upvalues.push(cell);
                     }
                     let v = Value::closure(*proto, upvalues);
-                    set_reg(&mut frames[top].regs, *dst, v);
+                    set_reg(regs, fbase, *dst, v);
                     frames[top].pc += 1;
                 }
                 Op::MakeCell { dst, src } => {
                     // Box the value into a fresh cell, which owns one reference to it.
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     retain(v);
-                    set_reg(&mut frames[top].regs, *dst, Value::cell(v));
+                    set_reg(regs, fbase, *dst, Value::cell(v));
                     frames[top].pc += 1;
                 }
                 Op::CellGet { dst, cell } => {
-                    let v = frames[top].regs[*cell as usize].cell_get();
+                    let v = regs[fbase + *cell as usize].cell_get();
                     retain(v);
-                    set_reg(&mut frames[top].regs, *dst, v);
+                    set_reg(regs, fbase, *dst, v);
                     frames[top].pc += 1;
                 }
                 Op::CellSet { cell, src } => {
                     // `cell_set` retains the new occupant and releases the old internally.
-                    let v = frames[top].regs[*src as usize];
-                    frames[top].regs[*cell as usize].cell_set(v);
+                    let v = regs[fbase + *src as usize];
+                    regs[fbase + *cell as usize].cell_set(v);
                     frames[top].pc += 1;
                 }
                 Op::UpvalueGet { dst, index } => {
                     let v = frames[top].upvalues[*index as usize].cell_get();
                     retain(v);
-                    set_reg(&mut frames[top].regs, *dst, v);
+                    set_reg(regs, fbase, *dst, v);
                     frames[top].pc += 1;
                 }
                 Op::UpvalueSet { index, src } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     frames[top].upvalues[*index as usize].cell_set(v);
                     frames[top].pc += 1;
                 }
                 Op::LoadNativeFn { dst, func } => {
-                    set_reg(&mut frames[top].regs, *dst, Value::native_fn(*func));
+                    set_reg(regs, fbase, *dst, Value::native_fn(*func));
                     frames[top].pc += 1;
                 }
                 Op::MakeList {
@@ -1152,7 +1168,7 @@ impl<'m> Vm<'m> {
                 } => {
                     let mut elements = Vec::with_capacity(items.len());
                     for &r in items.iter() {
-                        let v = frames[top].regs[r as usize];
+                        let v = regs[fbase + r as usize];
                         retain(v);
                         elements.push(v);
                     }
@@ -1163,7 +1179,7 @@ impl<'m> Vm<'m> {
                     if let Some(idx) = reflect {
                         list.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
-                    set_reg(&mut frames[top].regs, *dst, list);
+                    set_reg(regs, fbase, *dst, list);
                     frames[top].pc += 1;
                 }
                 // A `List<packed>` literal (P-PACK 2.4): pack each element into a flat raw-primitive
@@ -1177,7 +1193,7 @@ impl<'m> Vm<'m> {
                     // (P-PACK 2.5 streaming construction).
                     let schema = Rc::clone(&self.packed_schemas[*schema as usize]);
                     let list = Value::packed_list(schema, Vec::new());
-                    set_reg(&mut frames[top].regs, *dst, list);
+                    set_reg(regs, fbase, *dst, list);
                     frames[top].pc += 1;
                 }
                 Op::FromBytes {
@@ -1188,7 +1204,7 @@ impl<'m> Vm<'m> {
                 } => {
                     // Deserialize a `bytes` buffer into a flat `List<T>` (P-PACK 4.4): wrap the raw
                     // bytes as a packed list of the interned schema — the inverse of `to_bytes`.
-                    let blob = frames[top].regs[*src as usize];
+                    let blob = regs[fbase + *src as usize];
                     let Some(bytes) = blob.bytes_data() else {
                         return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -1212,7 +1228,7 @@ impl<'m> Vm<'m> {
                         ));
                     }
                     let list = Value::packed_list(schema, bytes);
-                    set_reg(&mut frames[top].regs, *dst, list);
+                    set_reg(regs, fbase, *dst, list);
                     frames[top].pc += 1;
                 }
                 Op::ExtCall {
@@ -1236,7 +1252,7 @@ impl<'m> Vm<'m> {
                     if module == "json" && func == "parse" {
                         let text = args
                             .first()
-                            .map(|r| frames[top].regs[*r as usize])
+                            .map(|r| regs[fbase + *r as usize])
                             .and_then(|v| v.as_string());
                         let Some(text) = text else {
                             return Err(self.error(
@@ -1248,7 +1264,7 @@ impl<'m> Vm<'m> {
                         match lang_stdlib::json::parse_typed(&text, recipe) {
                             Ok(out) => {
                                 let value = materialize_recipe(out);
-                                set_reg(&mut frames[top].regs, *dst, value);
+                                set_reg(regs, fbase, *dst, value);
                             }
                             Err(error) => {
                                 return Err(self.error(
@@ -1272,13 +1288,13 @@ impl<'m> Vm<'m> {
                 Op::PackedListPush {
                     dst, list, value, ..
                 } => {
-                    let acc = frames[top].regs[*list as usize];
-                    let element = frames[top].regs[*value as usize];
+                    let acc = regs[fbase + *list as usize];
+                    let element = regs[fbase + *value as usize];
                     // `list` is the streaming accumulator — a uniquely-owned temp. Clear its register
                     // to `unit` *without* releasing (a direct overwrite, like `ConcatInPlace`), so the
                     // single owning reference transfers into `result` and a `dst == list` store is
                     // safe. `value` is left in its register for the compiler-emitted `Drop` to free.
-                    frames[top].regs[*list as usize] = Value::unit();
+                    regs[fbase + *list as usize] = Value::unit();
                     let result = if acc.is_packed_list() {
                         if acc.packed_push(element) {
                             // Element primitives copied into the buffer (not retained) — the buffer
@@ -1300,7 +1316,7 @@ impl<'m> Vm<'m> {
                         acc.list_push(element);
                         acc
                     };
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 // A tuple builds exactly like a list (object-model slice 4): retain each element into
@@ -1308,11 +1324,11 @@ impl<'m> Vm<'m> {
                 Op::MakeTuple { dst, items } => {
                     let mut elements = Vec::with_capacity(items.len());
                     for &r in items.iter() {
-                        let v = frames[top].regs[r as usize];
+                        let v = regs[fbase + r as usize];
                         retain(v);
                         elements.push(v);
                     }
-                    set_reg(&mut frames[top].regs, *dst, Value::tuple(elements));
+                    set_reg(regs, fbase, *dst, Value::tuple(elements));
                     frames[top].pc += 1;
                 }
                 // Positional projection `receiver.N`: read the Nth element of the tuple, retaining it
@@ -1323,7 +1339,7 @@ impl<'m> Vm<'m> {
                     index,
                     span,
                 } => {
-                    let v = frames[top].regs[*receiver as usize];
+                    let v = regs[fbase + *receiver as usize];
                     let Some(element) = v.tuple_field(*index as usize) else {
                         return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -1335,7 +1351,7 @@ impl<'m> Vm<'m> {
                         ));
                     };
                     retain(element);
-                    set_reg(&mut frames[top].regs, *dst, element);
+                    set_reg(regs, fbase, *dst, element);
                     frames[top].pc += 1;
                 }
                 Op::MakeRange {
@@ -1345,8 +1361,8 @@ impl<'m> Vm<'m> {
                     inclusive,
                     span,
                 } => {
-                    let lo = frames[top].regs[*start as usize];
-                    let hi = frames[top].regs[*end as usize];
+                    let lo = regs[fbase + *start as usize];
+                    let hi = regs[fbase + *end as usize];
                     match (lo.as_int(), hi.as_int()) {
                         (Some(a), Some(b)) => {
                             // `..=` shifts the exclusive upper to `b + 1`; `saturating_add` keeps
@@ -1354,7 +1370,7 @@ impl<'m> Vm<'m> {
                             // fresh int immediates (no refcount), so no retain is needed.
                             let upper = if *inclusive { b.saturating_add(1) } else { b };
                             let elements: Vec<Value> = (a..upper).map(Value::int).collect();
-                            set_reg(&mut frames[top].regs, *dst, Value::list(elements));
+                            set_reg(regs, fbase, *dst, Value::list(elements));
                             frames[top].pc += 1;
                         }
                         _ => {
@@ -1377,10 +1393,10 @@ impl<'m> Vm<'m> {
                 } => {
                     let mut map = BTreeMap::new();
                     for (key_reg, value_reg) in entries.iter() {
-                        let key = frames[top].regs[*key_reg as usize]
+                        let key = regs[fbase + *key_reg as usize]
                             .as_string()
                             .expect("map keys are validated by RequireMapKey");
-                        let value = frames[top].regs[*value_reg as usize];
+                        let value = regs[fbase + *value_reg as usize];
                         retain(value);
                         // A duplicate key keeps the later value (M0 `BTreeMap` semantics); the
                         // displaced value loses its owner, so release it.
@@ -1394,11 +1410,11 @@ impl<'m> Vm<'m> {
                     if let Some(idx) = reflect {
                         map.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
-                    set_reg(&mut frames[top].regs, *dst, map);
+                    set_reg(regs, fbase, *dst, map);
                     frames[top].pc += 1;
                 }
                 Op::RequireMapKey { reg, span } => {
-                    let v = frames[top].regs[*reg as usize];
+                    let v = regs[fbase + *reg as usize];
                     if v.as_string().is_none() {
                         return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -1409,7 +1425,7 @@ impl<'m> Vm<'m> {
                     frames[top].pc += 1;
                 }
                 Op::IterSnapshot { dst, src, span } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     // A user object lights up the `Iterable` trait: `for x in o` iterates the list
                     // its `iter` method returns. The method runs bytecode, so it is pushed as a
                     // call frame; its returned value becomes the snapshot (the following `ListLen`
@@ -1430,13 +1446,13 @@ impl<'m> Vm<'m> {
                                     ),
                                 ));
                             }
-                            let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                            let new_base = reserve_window(regs, chunk.num_registers as usize);
                             retain(v);
-                            new_regs[0] = v;
+                            regs[new_base] = v;
                             frames[top].pc += 1;
                             frames.push(Frame {
                                 proto,
-                                regs: new_regs,
+                                base: new_base,
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::None,
@@ -1450,7 +1466,7 @@ impl<'m> Vm<'m> {
                     // so `ListLen`/`ListGet` never see the flat form.
                     if v.is_packed_list() {
                         let snapshot = v.realize_list();
-                        set_reg(&mut frames[top].regs, *dst, snapshot);
+                        set_reg(regs, fbase, *dst, snapshot);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1476,17 +1492,17 @@ impl<'m> Vm<'m> {
                             ));
                         }
                     };
-                    set_reg(&mut frames[top].regs, *dst, snapshot);
+                    set_reg(regs, fbase, *dst, snapshot);
                     frames[top].pc += 1;
                 }
                 Op::ListLen { dst, src, span } => {
                     // After `IterSnapshot`, `src` is a list for the list/map paths; the only way it
                     // is not is an `Iterable::iter` that returned a non-list, reported here (E0007),
                     // matching the tree-walker's `exec_for`.
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     match v.list_len() {
                         Some(n) => {
-                            set_reg(&mut frames[top].regs, *dst, Value::int(n as i64));
+                            set_reg(regs, fbase, *dst, Value::int(n as i64));
                             frames[top].pc += 1;
                         }
                         None => {
@@ -1499,14 +1515,14 @@ impl<'m> Vm<'m> {
                     }
                 }
                 Op::ListGet { dst, list, index } => {
-                    let idx = frames[top].regs[*index as usize]
+                    let idx = regs[fbase + *index as usize]
                         .as_int()
                         .expect("a loop index is an int") as usize;
-                    let element = frames[top].regs[*list as usize]
+                    let element = regs[fbase + *list as usize]
                         .list_get(idx)
                         .expect("the loop keeps the index in bounds");
                     retain(element);
-                    set_reg(&mut frames[top].regs, *dst, element);
+                    set_reg(regs, fbase, *dst, element);
                     frames[top].pc += 1;
                 }
                 // Streaming `for` step (Track I.2): advance the iterator, binding the element + a bool
@@ -1518,15 +1534,15 @@ impl<'m> Vm<'m> {
                     has,
                     span,
                 } => {
-                    let it = frames[top].regs[*iter as usize];
+                    let it = regs[fbase + *iter as usize];
                     match self.iter_for_next(it, *span)? {
                         Some(element) => {
-                            set_reg(&mut frames[top].regs, *elem, element);
-                            set_reg(&mut frames[top].regs, *has, Value::bool(true));
+                            set_reg(regs, fbase, *elem, element);
+                            set_reg(regs, fbase, *has, Value::bool(true));
                         }
                         None => {
-                            set_reg(&mut frames[top].regs, *elem, Value::unit());
-                            set_reg(&mut frames[top].regs, *has, Value::bool(false));
+                            set_reg(regs, fbase, *elem, Value::unit());
+                            set_reg(regs, fbase, *has, Value::bool(false));
                         }
                     }
                     frames[top].pc += 1;
@@ -1542,7 +1558,7 @@ impl<'m> Vm<'m> {
                     // handled by the synchronous `call_builtin`. (Matches the tree-walker's
                     // `Builtin::Len` object case.)
                     if *builtin == Builtin::Len && args.len() == 1 {
-                        let recv = frames[top].regs[args[0] as usize];
+                        let recv = regs[fbase + args[0] as usize];
                         if recv.is_object() {
                             let type_name = recv.shape().unwrap().name.clone();
                             if let Some(&proto) =
@@ -1559,14 +1575,13 @@ impl<'m> Vm<'m> {
                                         ),
                                     ));
                                 }
-                                let mut new_regs =
-                                    vec![Value::unit(); chunk.num_registers as usize];
+                                let new_base = reserve_window(regs, chunk.num_registers as usize);
                                 retain(recv);
-                                new_regs[0] = recv;
+                                regs[new_base] = recv;
                                 frames[top].pc += 1;
                                 frames.push(Frame {
                                     proto,
-                                    regs: new_regs,
+                                    base: new_base,
                                     pc: 0,
                                     ret_dst: *dst,
                                     ret_transform: RetTransform::None,
@@ -1579,10 +1594,10 @@ impl<'m> Vm<'m> {
                     // Builtins borrow their arguments (the registers keep ownership); the
                     // result is a fresh owned value.
                     let arg_vals: Vec<Value> =
-                        args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        args.iter().map(|r| regs[fbase + *r as usize]).collect();
                     let (dst, builtin, span) = (*dst, *builtin, *span);
                     let v = self.call_builtin(builtin, &arg_vals, span)?;
-                    set_reg(&mut frames[top].regs, dst, v);
+                    set_reg(regs, fbase, dst, v);
                     frames[top].pc += 1;
                 }
                 Op::CallMethod {
@@ -1594,7 +1609,7 @@ impl<'m> Vm<'m> {
                     cache,
                     reuse,
                 } => {
-                    let v = frames[top].regs[*recv as usize];
+                    let v = regs[fbase + *recv as usize];
                     // In-place map self-update (Phase 5.1c): a reuse-marked `m = m.set(k,v)` /
                     // `m = m.remove(k)` whose runtime receiver is actually a map consumes the receiver
                     // register and mutates the sole-owned backing buffer in place (an alias copies). A
@@ -1609,14 +1624,14 @@ impl<'m> Vm<'m> {
                         )
                     {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         // Consume the receiver: take its single reference out of the register without
                         // releasing (a direct overwrite, like `ConcatInPlace`), so the refcount below
                         // still counts the accumulator's reference and a `dst == recv` store is safe.
-                        frames[top].regs[*recv as usize] = Value::unit();
+                        regs[fbase + *recv as usize] = Value::unit();
                         let result =
                             self.map_update_in_place(v, map_method, method, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, result);
+                        set_reg(regs, fbase, *dst, result);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1624,10 +1639,10 @@ impl<'m> Vm<'m> {
                     // list overwrites slot `i` in place (O(1)) instead of copying the whole list.
                     if *reuse && v.is_list() && method == "set" {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
-                        frames[top].regs[*recv as usize] = Value::unit();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                        regs[fbase + *recv as usize] = Value::unit();
                         let result = self.list_set_in_place(v, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, result);
+                        set_reg(regs, fbase, *dst, result);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1643,11 +1658,11 @@ impl<'m> Vm<'m> {
                         )
                     {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
-                        frames[top].regs[*recv as usize] = Value::unit();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                        regs[fbase + *recv as usize] = Value::unit();
                         let result =
                             self.set_update_in_place(v, set_method, method, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, result);
+                        set_reg(regs, fbase, *dst, result);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1655,10 +1670,10 @@ impl<'m> Vm<'m> {
                     // the object/collection paths.
                     if let Some(module_name) = v.native_module_name() {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         let value =
                             self.call_native_module(&module_name, method, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1674,7 +1689,7 @@ impl<'m> Vm<'m> {
                             let type_name = v.shape().unwrap().name.clone();
                             if self.tojson_derives.contains(&type_name) {
                                 let json = Value::string(&v.to_json());
-                                set_reg(&mut frames[top].regs, *dst, json);
+                                set_reg(regs, fbase, *dst, json);
                                 frames[top].pc += 1;
                                 continue;
                             }
@@ -1722,13 +1737,13 @@ impl<'m> Vm<'m> {
                         }
                         let num_registers = chunk.num_registers as usize;
                         let defaults = chunk.defaults.clone();
-                        let mut new_regs = vec![Value::unit(); num_registers];
+                        let new_base = reserve_window(regs, num_registers);
                         retain(v);
-                        new_regs[0] = v;
+                        regs[new_base] = v;
                         for (i, &arg_reg) in args.iter().enumerate() {
-                            let a = frames[top].regs[arg_reg as usize];
+                            let a = regs[fbase + arg_reg as usize];
                             retain(a);
-                            new_regs[i + 1] = a;
+                            regs[new_base + i + 1] = a;
                         }
                         // Fill any omitted trailing parameters from their default thunks. The
                         // receiver and supplied args occupy registers `0..=args.len()`, so a default
@@ -1739,13 +1754,13 @@ impl<'m> Vm<'m> {
                         for (reg, proto) in &defaults {
                             if *reg as usize >= filled {
                                 let value = self.run_thunk(*proto, &[])?;
-                                new_regs[*reg as usize] = value;
+                                regs[new_base + *reg as usize] = value;
                             }
                         }
                         frames[top].pc += 1;
                         frames.push(Frame {
                             proto,
-                            regs: new_regs,
+                            base: new_base,
                             pc: 0,
                             ret_dst: *dst,
                             ret_transform: RetTransform::None,
@@ -1772,25 +1787,25 @@ impl<'m> Vm<'m> {
                             }
                             let num_registers = chunk.num_registers as usize;
                             let defaults = chunk.defaults.clone();
-                            let mut new_regs = vec![Value::unit(); num_registers];
+                            let new_base = reserve_window(regs, num_registers);
                             retain(v);
-                            new_regs[0] = v;
+                            regs[new_base] = v;
                             for (i, &arg_reg) in args.iter().enumerate() {
-                                let a = frames[top].regs[arg_reg as usize];
+                                let a = regs[fbase + arg_reg as usize];
                                 retain(a);
-                                new_regs[i + 1] = a;
+                                regs[new_base + i + 1] = a;
                             }
                             let filled = args.len() + 1;
                             for (reg, proto) in &defaults {
                                 if *reg as usize >= filled {
                                     let value = self.run_thunk(*proto, &[])?;
-                                    new_regs[*reg as usize] = value;
+                                    regs[new_base + *reg as usize] = value;
                                 }
                             }
                             frames[top].pc += 1;
                             frames.push(Frame {
                                 proto,
-                                regs: new_regs,
+                                base: new_base,
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::None,
@@ -1812,11 +1827,11 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         }
-                        let other = frames[top].regs[args[0] as usize];
+                        let other = regs[fbase + args[0] as usize];
                         match compare_primitive(v, other) {
                             Some(ordering) => {
                                 let value = make_ordering(lang_ast::ordering_variant(ordering));
-                                set_reg(&mut frames[top].regs, *dst, value);
+                                set_reg(regs, fbase, *dst, value);
                                 frames[top].pc += 1;
                             }
                             None => {
@@ -1839,7 +1854,7 @@ impl<'m> Vm<'m> {
                     // out of the heap, so the projected args own their strings for the call.
                     if let Some(recv_str) = v.as_string() {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         let arg_strings: Vec<Option<String>> =
                             arg_values.iter().map(|a| a.as_string()).collect();
                         let projected: Vec<lang_stdlib::Arg> = arg_values
@@ -1862,7 +1877,7 @@ impl<'m> Vm<'m> {
                         match lang_stdlib::string_method(&recv_str, method, &projected) {
                             lang_stdlib::Dispatch::Done(output) => {
                                 let value = stdlib_output_to_value(output);
-                                set_reg(&mut frames[top].regs, *dst, value);
+                                set_reg(regs, fbase, *dst, value);
                                 frames[top].pc += 1;
                                 continue;
                             }
@@ -1884,7 +1899,7 @@ impl<'m> Vm<'m> {
                     {
                         let arg = match args.first() {
                             Some(r) => {
-                                let a = frames[top].regs[*r as usize];
+                                let a = regs[fbase + *r as usize];
                                 match a.as_int() {
                                     Some(n) => n,
                                     None => {
@@ -1902,7 +1917,7 @@ impl<'m> Vm<'m> {
                             None => 0,
                         };
                         let value = Value::int(lang_stdlib::int_method(recv_int, int_method, arg));
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1922,7 +1937,7 @@ impl<'m> Vm<'m> {
                             lang_stdlib::NumScalar::F64(f) => Value::float(f),
                             lang_stdlib::NumScalar::F32(f) => Value::f32(f),
                         };
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1933,10 +1948,10 @@ impl<'m> Vm<'m> {
                         && let Some(list_method) = lang_stdlib::ListMethod::from_name(method)
                     {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         let value =
                             self.call_list_method(v, list_method, method, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1945,10 +1960,10 @@ impl<'m> Vm<'m> {
                         && let Some(set_method) = lang_stdlib::SetMethod::from_name(method)
                     {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         let value =
                             self.call_set_method(v, set_method, method, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1959,7 +1974,7 @@ impl<'m> Vm<'m> {
                             lang_stdlib::FileHandleMethod::from_name(method)
                     {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         let value = self.call_file_handle_method(
                             v,
                             handle_method,
@@ -1967,7 +1982,7 @@ impl<'m> Vm<'m> {
                             &arg_values,
                             *span,
                         )?;
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -1977,11 +1992,11 @@ impl<'m> Vm<'m> {
                     if let Some(id) = v.sender_id() {
                         match method.as_str() {
                             "send" => {
-                                let msg = frames[top].regs[args[0] as usize];
+                                let msg = regs[fbase + args[0] as usize];
                                 // The future retains its own reference to the message; the arg
                                 // register's reference is released by its normal end-of-life.
                                 let future = Value::make_channel_send(id, msg);
-                                set_reg(&mut frames[top].regs, *dst, future);
+                                set_reg(regs, fbase, *dst, future);
                                 frames[top].pc += 1;
                                 continue;
                             }
@@ -1991,7 +2006,7 @@ impl<'m> Vm<'m> {
                                     Channel::Shared(core) => core.close(),
                                 }
                                 self.channel_progress += 1;
-                                set_reg(&mut frames[top].regs, *dst, Value::unit());
+                                set_reg(regs, fbase, *dst, Value::unit());
                                 frames[top].pc += 1;
                                 continue;
                             }
@@ -2002,7 +2017,7 @@ impl<'m> Vm<'m> {
                         && method == "recv"
                     {
                         let future = Value::make_channel_recv(id);
-                        set_reg(&mut frames[top].regs, *dst, future);
+                        set_reg(regs, fbase, *dst, future);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2012,10 +2027,10 @@ impl<'m> Vm<'m> {
                         && let Some(iter_method) = lang_stdlib::IterMethod::from_name(method)
                     {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         let value =
                             self.call_iter_method(v, iter_method, method, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2024,10 +2039,10 @@ impl<'m> Vm<'m> {
                         && let Some(map_method) = lang_stdlib::MapMethod::from_name(method)
                     {
                         let arg_values: Vec<Value> =
-                            args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
                         let value =
                             self.call_map_method(v, map_method, method, &arg_values, *span)?;
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2052,7 +2067,7 @@ impl<'m> Vm<'m> {
                                 ));
                             }
                         };
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2086,7 +2101,7 @@ impl<'m> Vm<'m> {
                             list.release();
                             iter
                         };
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2121,7 +2136,7 @@ impl<'m> Vm<'m> {
                     };
                     match result {
                         Some(value) => {
-                            set_reg(&mut frames[top].regs, *dst, value);
+                            set_reg(regs, fbase, *dst, value);
                             frames[top].pc += 1;
                         }
                         None if !args.is_empty()
@@ -2148,8 +2163,8 @@ impl<'m> Vm<'m> {
                     index,
                     span,
                 } => {
-                    let v = frames[top].regs[*recv as usize];
-                    let idx = frames[top].regs[*index as usize];
+                    let v = regs[fbase + *recv as usize];
+                    let idx = regs[fbase + *index as usize];
                     // `o[i]` on a user object lights up the `Index` trait: dispatch to `get`,
                     // pushing a call frame `[recv, index]` exactly like a method call. An object
                     // without an `Index` impl has no `get` method, so this reports the missing
@@ -2176,15 +2191,15 @@ impl<'m> Vm<'m> {
                                 ),
                             ));
                         }
-                        let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                        let new_base = reserve_window(regs, chunk.num_registers as usize);
                         retain(v);
-                        new_regs[0] = v;
+                        regs[new_base] = v;
                         retain(idx);
-                        new_regs[1] = idx;
+                        regs[new_base + 1] = idx;
                         frames[top].pc += 1;
                         frames.push(Frame {
                             proto,
-                            regs: new_regs,
+                            base: new_base,
                             pc: 0,
                             ret_dst: *dst,
                             ret_transform: RetTransform::None,
@@ -2218,7 +2233,7 @@ impl<'m> Vm<'m> {
                             retain(element);
                             element
                         };
-                        set_reg(&mut frames[top].regs, *dst, element);
+                        set_reg(regs, fbase, *dst, element);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2239,7 +2254,7 @@ impl<'m> Vm<'m> {
                             ));
                         };
                         retain(element);
-                        set_reg(&mut frames[top].regs, *dst, element);
+                        set_reg(regs, fbase, *dst, element);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2262,7 +2277,7 @@ impl<'m> Vm<'m> {
                             ));
                         }
                         let ch = s.chars().nth(i as usize).unwrap().to_string();
-                        set_reg(&mut frames[top].regs, *dst, Value::string(&ch));
+                        set_reg(regs, fbase, *dst, Value::string(&ch));
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2279,8 +2294,8 @@ impl<'m> Vm<'m> {
                     field,
                     span,
                 } => {
-                    let v = frames[top].regs[*recv as usize];
-                    let idx = frames[top].regs[*index as usize];
+                    let v = regs[fbase + *recv as usize];
+                    let idx = regs[fbase + *index as usize];
                     // Fast path: a packed list decodes the one field's word(s) directly — no element
                     // materialization (the P-PACK 2.5+ scalar-access win). Any miss (non-int index,
                     // out of range, or unknown field) falls through to the boxed index-then-load,
@@ -2290,7 +2305,7 @@ impl<'m> Vm<'m> {
                         && i >= 0
                         && let Some(value) = v.packed_field(i as usize, field)
                     {
-                        set_reg(&mut frames[top].regs, *dst, value);
+                        set_reg(regs, fbase, *dst, value);
                         frames[top].pc += 1;
                         continue;
                     }
@@ -2333,7 +2348,7 @@ impl<'m> Vm<'m> {
                             if packed {
                                 release(element);
                             }
-                            set_reg(&mut frames[top].regs, *dst, value);
+                            set_reg(regs, fbase, *dst, value);
                             frames[top].pc += 1;
                         }
                         None => {
@@ -2373,7 +2388,7 @@ impl<'m> Vm<'m> {
                     // `...base` fills declared slots the base provides; named initializers then
                     // override. A slot left unset by both is a missing-field error (E0009).
                     if let Some(base_reg) = spread {
-                        let base = frames[top].regs[*base_reg as usize];
+                        let base = regs[fbase + *base_reg as usize];
                         for (i, field) in shape.fields.iter().enumerate() {
                             if let Some(value) = base.field(field) {
                                 retain(value);
@@ -2382,7 +2397,7 @@ impl<'m> Vm<'m> {
                         }
                     }
                     for (slot, reg) in named.iter() {
-                        let value = frames[top].regs[*reg as usize];
+                        let value = regs[fbase + *reg as usize];
                         retain(value);
                         if let Some(old) = slots[*slot as usize].replace(value) {
                             release(old);
@@ -2441,7 +2456,7 @@ impl<'m> Vm<'m> {
                     if let Some(idx) = reflect {
                         object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
-                    set_reg(&mut frames[top].regs, *dst, object);
+                    set_reg(regs, fbase, *dst, object);
                     frames[top].pc += 1;
                 }
                 Op::MakeStructInPlace {
@@ -2458,8 +2473,8 @@ impl<'m> Vm<'m> {
                     // releasing (a direct overwrite, mirroring `ConcatInPlace`), so the refcount
                     // below still counts the accumulator's reference and a `dst == base` store is
                     // safe (the old occupant is now `unit`).
-                    let base_val = frames[top].regs[*base as usize];
-                    frames[top].regs[*base as usize] = Value::unit();
+                    let base_val = regs[fbase + *base as usize];
+                    regs[fbase + *base as usize] = Value::unit();
                     let same_shape = base_val.object_shape_ptr() == Some(Rc::as_ptr(&shape));
                     let reuse = match check {
                         ReuseCheck::Static => {
@@ -2486,14 +2501,14 @@ impl<'m> Vm<'m> {
                         // (spec §4/§5). The reuse pass guarantees `base`'s own type has no destructor,
                         // so reuse never skips a container destructor.
                         for (slot, reg) in named.iter() {
-                            let v = frames[top].regs[*reg as usize];
+                            let v = regs[fbase + *reg as usize];
                             let old = base_val.replace_slot(*slot as usize, v);
                             self.release_value(old);
                         }
                         // Reuse keeps the base node's existing reflected type (R2): a self-update
                         // rebuilds a value of the same (generic) type, so the base's tag already carries
                         // it — matching the tree-walker's reuse path, which keeps the accumulator's tag.
-                        set_reg(&mut frames[top].regs, *dst, base_val);
+                        set_reg(regs, fbase, *dst, base_val);
                         frames[top].pc += 1;
                     } else {
                         // Aliased or a different shape: build a fresh object exactly like
@@ -2506,7 +2521,7 @@ impl<'m> Vm<'m> {
                             }
                         }
                         for (slot, reg) in named.iter() {
-                            let value = frames[top].regs[*reg as usize];
+                            let value = regs[fbase + *reg as usize];
                             retain(value);
                             if let Some(old) = slots[*slot as usize].replace(value) {
                                 release(old);
@@ -2544,7 +2559,7 @@ impl<'m> Vm<'m> {
                         if let Some(idx) = reflect {
                             object.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                         }
-                        set_reg(&mut frames[top].regs, *dst, object);
+                        set_reg(regs, fbase, *dst, object);
                         frames[top].pc += 1;
                     }
                 }
@@ -2558,9 +2573,9 @@ impl<'m> Vm<'m> {
                     // order, so its display matches the tree-walker's `BTreeMap` field bag.
                     let mut bag: BTreeMap<String, Value> = BTreeMap::new();
                     if let Some(base_reg) = spread
-                        && let Some(base) = frames[top].regs[*base_reg as usize].shape()
+                        && let Some(base) = regs[fbase + *base_reg as usize].shape()
                     {
-                        let base_val = frames[top].regs[*base_reg as usize];
+                        let base_val = regs[fbase + *base_reg as usize];
                         for (i, field) in base.fields.iter().enumerate() {
                             let value = base_val.slots().unwrap()[i];
                             retain(value);
@@ -2570,7 +2585,7 @@ impl<'m> Vm<'m> {
                         }
                     }
                     for (key, reg) in keys.iter() {
-                        let value = frames[top].regs[*reg as usize];
+                        let value = regs[fbase + *reg as usize];
                         retain(value);
                         if let Some(old) = bag.insert(key.clone(), value) {
                             release(old);
@@ -2580,7 +2595,7 @@ impl<'m> Vm<'m> {
                     let slots: Vec<Value> = bag.into_values().collect();
                     let shape =
                         Rc::new(Shape::object(ShapeKind::Opaque, type_name.clone(), fields));
-                    set_reg(&mut frames[top].regs, *dst, Value::object(shape, slots));
+                    set_reg(regs, fbase, *dst, Value::object(shape, slots));
                     frames[top].pc += 1;
                 }
                 Op::MakeEnum {
@@ -2592,7 +2607,7 @@ impl<'m> Vm<'m> {
                     let shape = self.shapes[*shape as usize].clone();
                     let mut data = Vec::with_capacity(args.len());
                     for &r in args.iter() {
-                        let v = frames[top].regs[r as usize];
+                        let v = regs[fbase + r as usize];
                         retain(v);
                         data.push(v);
                     }
@@ -2603,7 +2618,7 @@ impl<'m> Vm<'m> {
                     if let Some(idx) = reflect {
                         value.set_reflect(Some(Rc::clone(&self.type_reprs[*idx as usize])));
                     }
-                    set_reg(&mut frames[top].regs, *dst, value);
+                    set_reg(regs, fbase, *dst, value);
                     frames[top].pc += 1;
                 }
                 Op::EnumFromStr {
@@ -2616,7 +2631,7 @@ impl<'m> Vm<'m> {
                     panic,
                     span,
                 } => {
-                    let key = match frames[top].regs[*arg as usize].as_string() {
+                    let key = match regs[fbase + *arg as usize].as_string() {
                         Some(s) => s,
                         None => {
                             let kind = if *panic { "from" } else { "try_from" };
@@ -2625,7 +2640,7 @@ impl<'m> Vm<'m> {
                                 *span,
                                 format!(
                                     "`{enum_name}.{kind}` expects a string, found {}",
-                                    frames[top].regs[*arg as usize].type_name()
+                                    regs[fbase + *arg as usize].type_name()
                                 ),
                             ));
                         }
@@ -2655,7 +2670,7 @@ impl<'m> Vm<'m> {
                             Value::enum_value(none, Vec::new())
                         }
                     };
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::LoadField {
@@ -2665,7 +2680,7 @@ impl<'m> Vm<'m> {
                     span,
                     cache,
                 } => {
-                    let v = frames[top].regs[*obj as usize];
+                    let v = regs[fbase + *obj as usize];
                     // Inline cache: a hit (the receiver's shape pointer matches the cached one) reads
                     // the memoized slot directly; a miss resolves `slot_of` and refreshes the cache.
                     // The hit check returns an owned slot so the `&caches[ci]` borrow ends before the
@@ -2689,7 +2704,7 @@ impl<'m> Vm<'m> {
                     match cached_slot.and_then(|s| v.slot_at(s)) {
                         Some(value) => {
                             retain(value);
-                            set_reg(&mut frames[top].regs, *dst, value);
+                            set_reg(regs, fbase, *dst, value);
                             frames[top].pc += 1;
                         }
                         None if v.is_object() => {
@@ -2719,8 +2734,8 @@ impl<'m> Vm<'m> {
                     reuse,
                     span,
                 } => {
-                    let v = frames[top].regs[*obj as usize];
-                    let val = frames[top].regs[*value as usize];
+                    let v = regs[fbase + *obj as usize];
+                    let val = regs[fbase + *value as usize];
                     let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
                         return Err(self.error(
                             DiagnosticCode::UnknownName,
@@ -2742,48 +2757,48 @@ impl<'m> Vm<'m> {
                         if *reuse {
                             // The receiver's reference moves into `dst` (its register cleared, as in
                             // the struct path); the instance is unchanged-but-mutated.
-                            frames[top].regs[*obj as usize] = Value::unit();
-                            set_reg(&mut frames[top].regs, *dst, v);
+                            regs[fbase + *obj as usize] = Value::unit();
+                            set_reg(regs, fbase, *dst, v);
                         } else {
                             // The receiver register is untouched (a temp is dropped later by the
                             // compiler-emitted `Drop`); `dst` takes its own counted reference.
                             retain(v);
-                            set_reg(&mut frames[top].regs, *dst, v);
+                            set_reg(regs, fbase, *dst, v);
                         }
                     } else if *reuse {
                         // The receiver's sole reference moves into this op (its register cleared, like
                         // the map/struct in-place paths), so the `refcount == 1` check below sees the
                         // accumulator's reference and a `dst == obj` store is safe.
-                        frames[top].regs[*obj as usize] = Value::unit();
+                        regs[fbase + *obj as usize] = Value::unit();
                         if v.refcount() == 1 {
                             // Unique: overwrite the slot in place (`replace_slot` retains the new
                             // value); the displaced old value's `destruct` fires now (spec §5).
                             let old = v.replace_slot(slot, val);
                             self.release_value(old);
-                            set_reg(&mut frames[top].regs, *dst, v);
+                            set_reg(regs, fbase, *dst, v);
                         } else {
                             // Aliased: copy with the field replaced, preserving the alias's view, then
                             // release the consumed receiver reference.
                             let new = object_copy_with_slot(v, slot, val);
                             release(v);
-                            set_reg(&mut frames[top].regs, *dst, new);
+                            set_reg(regs, fbase, *dst, new);
                         }
                     } else {
                         // Unmarked: a functional update — copy with the field replaced, the receiver
                         // register untouched (a temp receiver is dropped by the compiler-emitted Drop).
                         let new = object_copy_with_slot(v, slot, val);
-                        set_reg(&mut frames[top].regs, *dst, new);
+                        set_reg(regs, fbase, *dst, new);
                     }
                     frames[top].pc += 1;
                 }
                 Op::NextId { dst } => {
                     let id = self.next_id;
                     self.next_id += 1;
-                    set_reg(&mut frames[top].regs, *dst, Value::int(id as i64));
+                    set_reg(regs, fbase, *dst, Value::int(id as i64));
                     frames[top].pc += 1;
                 }
                 Op::Panic { msg, span } => {
-                    let message = frames[top].regs[*msg as usize].display();
+                    let message = regs[fbase + *msg as usize].display();
                     return Err(self.error(
                         DiagnosticCode::Panic,
                         *span,
@@ -2796,11 +2811,11 @@ impl<'m> Vm<'m> {
                     on_error,
                     span,
                 } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     match try_classify(v) {
                         Some(TryOutcome::Success(inner)) => {
                             retain(inner);
-                            set_reg(&mut frames[top].regs, *dst, inner);
+                            set_reg(regs, fbase, *dst, inner);
                             frames[top].pc += 1;
                         }
                         // `Err(_)`/`none`: early-return the whole value from this frame, exactly
@@ -2812,7 +2827,7 @@ impl<'m> Vm<'m> {
                             // is cleared to `unit`, so the teardown release below never double-frees.
                             for (reg, relevant) in on_error.iter() {
                                 let dv = std::mem::replace(
-                                    &mut frames[top].regs[*reg as usize],
+                                    &mut regs[fbase + *reg as usize],
                                     Value::unit(),
                                 );
                                 if *relevant {
@@ -2822,12 +2837,14 @@ impl<'m> Vm<'m> {
                                 }
                             }
                             let finished = frames.pop().unwrap();
-                            for r in &finished.regs {
-                                release(*r);
+                            let n = module.protos[finished.proto as usize].num_registers as usize;
+                            for i in 0..n {
+                                release(regs[finished.base + i]);
                             }
                             for u in &finished.upvalues {
                                 release(*u);
                             }
+                            regs.truncate(finished.base);
                             // Apply the frame's return transform on every exit path, for the same
                             // reason `Op::Return` does (a short-circuiting `?` is an early return);
                             // release the original if the transform replaced it.
@@ -2835,11 +2852,11 @@ impl<'m> Vm<'m> {
                             if replaced {
                                 release(v);
                             }
-                            match frames.last_mut() {
+                            match frames.last() {
                                 Some(caller) => {
-                                    let dst = finished.ret_dst as usize;
-                                    let old = caller.regs[dst];
-                                    caller.regs[dst] = out;
+                                    let idx = caller.base + finished.ret_dst as usize;
+                                    let old = regs[idx];
+                                    regs[idx] = out;
                                     release(old);
                                 }
                                 None => return Ok(out),
@@ -2863,11 +2880,11 @@ impl<'m> Vm<'m> {
                     fallback,
                     span,
                 } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     match try_classify(v) {
                         Some(TryOutcome::Success(inner)) => {
                             retain(inner);
-                            set_reg(&mut frames[top].regs, *dst, inner);
+                            set_reg(regs, fbase, *dst, inner);
                             frames[top].pc += 1;
                         }
                         // Empty: jump to the fallback expression (which writes `dst`).
@@ -2891,7 +2908,7 @@ impl<'m> Vm<'m> {
                     some_shape,
                     none_shape,
                 } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     let result = if narrow_matches(v, target) {
                         retain(v);
                         let shape = self.shapes[*some_shape as usize].clone();
@@ -2900,56 +2917,56 @@ impl<'m> Vm<'m> {
                         let shape = self.shapes[*none_shape as usize].clone();
                         Value::enum_value(shape, Vec::new())
                     };
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::IsType { dst, src, target } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     let result = Value::bool(narrow_matches(v, target));
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::MakeGen { dst, src } => {
                     // Wrap the step closure into a generator iterator (Track G.1b). `iter_gen` retains
                     // its own reference to the closure; the source register's reference is released by
                     // the register's normal end-of-life (exactly as `Op::Narrow` retains its payload).
-                    let step = frames[top].regs[*src as usize];
+                    let step = regs[fbase + *src as usize];
                     let result = Value::iter_gen(step);
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::MakeFuture { dst, src } => {
                     // Wrap the lazy thunk closure into a future (Track A.1). `make_future` retains its
                     // own reference to the closure; the source register's reference is released by the
                     // register's normal end-of-life (like `Op::MakeGen`).
-                    let thunk = frames[top].regs[*src as usize];
+                    let thunk = regs[fbase + *src as usize];
                     let result = Value::make_future(thunk);
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::RunFuture { dst, src, span } => {
                     // Drive an awaited future to completion (Track A.2/A.3 top-level). See
                     // `drive_future`: poll; on pending advance the clock and re-poll. The source
                     // register keeps owning the future; `drive_future` returns an owned result.
-                    let future = frames[top].regs[*src as usize];
+                    let future = regs[fbase + *src as usize];
                     let value = self.drive_future(future, *span)?;
-                    set_reg(&mut frames[top].regs, *dst, value);
+                    set_reg(regs, fbase, *dst, value);
                     frames[top].pc += 1;
                 }
                 Op::PollFuture { dst, src, span } => {
                     // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if
                     // pending. The source register keeps owning the future.
-                    let future = frames[top].regs[*src as usize];
+                    let future = regs[fbase + *src as usize];
                     let result = match self.poll_once(future, *span)? {
                         Poll::Ready(value) => make_some(value),
                         Poll::Pending => make_none(),
                     };
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::LoadPending { dst } => {
                     // The async pending sentinel (Track A.3) — what a step returns when it suspends.
-                    set_reg(&mut frames[top].regs, *dst, Value::pending());
+                    set_reg(regs, fbase, *dst, Value::pending());
                     frames[top].pc += 1;
                 }
                 Op::ScopeBegin => {
@@ -2961,7 +2978,7 @@ impl<'m> Vm<'m> {
                     // Register the future as a task in the current scope (retaining the scope's own
                     // reference), yielding a handle that references it by `(scope, task)`. A `spawn`
                     // outside any scope is E0041 at check, so `self.scopes` is non-empty here.
-                    let future = frames[top].regs[*src as usize];
+                    let future = regs[fbase + *src as usize];
                     let handle = if self.scopes.is_empty() {
                         retain(future);
                         future
@@ -2979,7 +2996,7 @@ impl<'m> Vm<'m> {
                             TaskId::from_index(task_idx),
                         )
                     };
-                    set_reg(&mut frames[top].regs, *dst, handle);
+                    set_reg(regs, fbase, *dst, handle);
                     frames[top].pc += 1;
                 }
                 Op::SpawnIsolate {
@@ -2993,11 +3010,11 @@ impl<'m> Vm<'m> {
                     // reached in-oracle. Runs on a real OS thread when the VM is parallel and no
                     // argument ships a channel; otherwise falls back to a cooperative task (so a
                     // non-parallel VM — `@test`/`bench` — and channel-shipping isolates never regress).
-                    let callee_val = frames[top].regs[*callee as usize];
+                    let callee_val = regs[fbase + *callee as usize];
                     let arg_vals: Vec<Value> =
-                        args.iter().map(|r| frames[top].regs[*r as usize]).collect();
+                        args.iter().map(|r| regs[fbase + *r as usize]).collect();
                     let handle = self.spawn_isolate(callee_val, &arg_vals, *span)?;
-                    set_reg(&mut frames[top].regs, *dst, handle);
+                    set_reg(regs, fbase, *dst, handle);
                     frames[top].pc += 1;
                 }
                 Op::ScopeEnd { span } => {
@@ -3021,7 +3038,7 @@ impl<'m> Vm<'m> {
                 } => {
                     // Create a bounded channel and yield its `(Sender, Receiver)` endpoint tuple
                     // (isolates I.1). The message type is checker-only; only the capacity reaches here.
-                    let cap = frames[top].regs[*capacity as usize];
+                    let cap = regs[fbase + *capacity as usize];
                     let Some(cap) = cap.as_int() else {
                         return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -3057,28 +3074,28 @@ impl<'m> Vm<'m> {
                     // exactly those references, so no extra retain is needed.
                     let tuple =
                         Value::tuple(vec![Value::make_sender(id), Value::make_receiver(id)]);
-                    set_reg(&mut frames[top].regs, *dst, tuple);
+                    set_reg(regs, fbase, *dst, tuple);
                     frames[top].pc += 1;
                 }
                 Op::AttributesOf { dst, type_name } => {
                     let result = self.materialize_attributes(type_name);
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::RolesOf { dst } => {
                     let result = self.materialize_roles();
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::TypeOf { dst, src } => {
-                    let repr = vm_type_repr(&frames[top].regs[*src as usize]);
+                    let repr = vm_type_repr(&regs[fbase + *src as usize]);
                     let result = build_type_value(&repr);
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::TypeOfStatic { dst, repr } => {
                     let result = build_type_value(repr);
-                    set_reg(&mut frames[top].regs, *dst, result);
+                    set_reg(regs, fbase, *dst, result);
                     frames[top].pc += 1;
                 }
                 Op::TypeValue { dst, name } => {
@@ -3087,7 +3104,7 @@ impl<'m> Vm<'m> {
                     // with `type_of` and stored type-refs. `Op::Invoke` resolves it back to the
                     // named type via `reflection_type_name`.
                     let value = build_type_value(&module.reflection.type_ref_repr(name));
-                    set_reg(&mut frames[top].regs, *dst, value);
+                    set_reg(regs, fbase, *dst, value);
                     frames[top].pc += 1;
                 }
                 Op::Invoke {
@@ -3099,9 +3116,9 @@ impl<'m> Vm<'m> {
                     err_shape,
                     ..
                 } => {
-                    let recv_val = frames[top].regs[*recv as usize];
-                    let name_val = frames[top].regs[*name as usize];
-                    let args_val = frames[top].regs[*args as usize];
+                    let recv_val = regs[fbase + *recv as usize];
+                    let name_val = regs[fbase + *name as usize];
+                    let args_val = regs[fbase + *args as usize];
                     // A packed args list (P-PACK 2.4) is materialized to a temporary boxed list for
                     // the duration of the dispatch, then released after the call frame is built (its
                     // elements retained into it). `arg_items` below borrows from this temporary.
@@ -3170,23 +3187,23 @@ impl<'m> Vm<'m> {
                         Err(message) => {
                             let shape = self.shapes[*err_shape as usize].clone();
                             let err = Value::enum_value(shape, vec![Value::string(&message)]);
-                            set_reg(&mut frames[top].regs, *dst, err);
+                            set_reg(regs, fbase, *dst, err);
                             frames[top].pc += 1;
                         }
                         Ok((proto, is_assoc, arg_items)) => {
                             let chunk = &module.protos[proto as usize];
                             let num_registers = chunk.num_registers as usize;
                             let defaults = chunk.defaults.clone();
-                            let mut new_regs = vec![Value::unit(); num_registers];
+                            let new_base = reserve_window(regs, num_registers);
                             // An associated call leaves register 0 as unit (no receiver); an instance
                             // call places the retained receiver there.
                             if !is_assoc {
                                 retain(recv_val);
-                                new_regs[0] = recv_val;
+                                regs[new_base] = recv_val;
                             }
                             for (i, &arg) in arg_items.iter().enumerate() {
                                 retain(arg);
-                                new_regs[i + 1] = arg;
+                                regs[new_base + i + 1] = arg;
                             }
                             // Fill any omitted trailing parameters from their default thunks (module
                             // scope only, like a method frame).
@@ -3194,7 +3211,7 @@ impl<'m> Vm<'m> {
                             for (reg, proto) in &defaults {
                                 if *reg as usize >= filled {
                                     let value = self.run_thunk(*proto, &[])?;
-                                    new_regs[*reg as usize] = value;
+                                    regs[new_base + *reg as usize] = value;
                                 }
                             }
                             // The result is wrapped in `Result.Ok` as it lands in the caller, so the
@@ -3203,7 +3220,7 @@ impl<'m> Vm<'m> {
                             frames[top].pc += 1;
                             frames.push(Frame {
                                 proto,
-                                regs: new_regs,
+                                base: new_base,
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::WrapOk(ok),
@@ -3218,21 +3235,21 @@ impl<'m> Vm<'m> {
                     }
                 }
                 Op::MatchInt { src, value, fail } => {
-                    if frames[top].regs[*src as usize].as_int() == Some(*value) {
+                    if regs[fbase + *src as usize].as_int() == Some(*value) {
                         frames[top].pc += 1;
                     } else {
                         frames[top].pc = *fail as usize;
                     }
                 }
                 Op::MatchStr { src, value, fail } => {
-                    if frames[top].regs[*src as usize].as_string().as_deref() == Some(value) {
+                    if regs[fbase + *src as usize].as_string().as_deref() == Some(value) {
                         frames[top].pc += 1;
                     } else {
                         frames[top].pc = *fail as usize;
                     }
                 }
                 Op::MatchBool { src, value, fail } => {
-                    if frames[top].regs[*src as usize].as_bool() == Some(*value) {
+                    if regs[fbase + *src as usize].as_bool() == Some(*value) {
                         frames[top].pc += 1;
                     } else {
                         frames[top].pc = *fail as usize;
@@ -3245,7 +3262,7 @@ impl<'m> Vm<'m> {
                     arity,
                     fail,
                 } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     let matches = v.is_enum()
                         && v.shape().is_some_and(|shape| {
                             shape.variant.as_deref() == Some(variant)
@@ -3261,7 +3278,7 @@ impl<'m> Vm<'m> {
                 // A tuple pattern test (object-model slice 4b.2): `src` must be a tuple of exactly
                 // `arity` elements. The elements are then read with `TupleIndex` for sub-patterns.
                 Op::MatchTuple { src, arity, fail } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     let matches = v
                         .tuple_items()
                         .is_some_and(|items| items.len() == *arity as usize);
@@ -3272,14 +3289,13 @@ impl<'m> Vm<'m> {
                     }
                 }
                 Op::ExtractField { dst, src, index } => {
-                    let element =
-                        frames[top].regs[*src as usize].enum_data().unwrap()[*index as usize];
+                    let element = regs[fbase + *src as usize].enum_data().unwrap()[*index as usize];
                     retain(element);
-                    set_reg(&mut frames[top].regs, *dst, element);
+                    set_reg(regs, fbase, *dst, element);
                     frames[top].pc += 1;
                 }
                 Op::MatchFail { src, span } => {
-                    let shown = frames[top].regs[*src as usize].display();
+                    let shown = regs[fbase + *src as usize].display();
                     return Err(self.error(
                         DiagnosticCode::TypeMismatch,
                         *span,
@@ -3287,14 +3303,14 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 Op::Unary { op, dst, src, span } => {
-                    match apply_unary(*op, frames[top].regs[*src as usize]) {
+                    match apply_unary(*op, regs[fbase + *src as usize]) {
                         Ok(v) => {
                             // `..xs` (spread) returns the source value unchanged, so the result
                             // aliases a live heap reference — retain it before `set_reg` releases
                             // the old occupant of `dst` (which is `src`). A no-op for the fresh
                             // primitives `Neg`/`Not` produce; mirrors `Op::Move`.
                             retain(v);
-                            set_reg(&mut frames[top].regs, *dst, v);
+                            set_reg(regs, fbase, *dst, v);
                             frames[top].pc += 1;
                         }
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
@@ -3309,13 +3325,13 @@ impl<'m> Vm<'m> {
                     // Reduce an erased fixed-width integer (an `int` value) into its declared width
                     // (Tier W). Total — the shared helper runs identically in the tree-walker. A
                     // non-int (only if the checker's IntN guarantee broke) passes through unchanged.
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     let masked = match v.as_int() {
                         Some(n) => Value::int(lang_stdlib::mask_to_width(n, *signed, *bits)),
                         None => v,
                     };
                     retain(masked);
-                    set_reg(&mut frames[top].regs, *dst, masked);
+                    set_reg(regs, fbase, *dst, masked);
                     frames[top].pc += 1;
                 }
                 Op::Binary {
@@ -3325,8 +3341,8 @@ impl<'m> Vm<'m> {
                     b,
                     span,
                 } => {
-                    let left = frames[top].regs[*a as usize];
-                    let right = frames[top].regs[*b as usize];
+                    let left = regs[fbase + *a as usize];
+                    let right = regs[fbase + *b as usize];
                     // Operator-trait dispatch on a user object or enum value (the unified body's
                     // in-body `impl` blocks are uniform across kinds — object-model slice 3): an
                     // arithmetic/concat operator routes to its trait method and uses the result
@@ -3363,15 +3379,15 @@ impl<'m> Vm<'m> {
                         && module.protos[proto as usize].num_params == 2
                     {
                         let chunk = &module.protos[proto as usize];
-                        let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                        let new_base = reserve_window(regs, chunk.num_registers as usize);
                         retain(left);
-                        new_regs[0] = left;
+                        regs[new_base] = left;
                         retain(right);
-                        new_regs[1] = right;
+                        regs[new_base + 1] = right;
                         frames[top].pc += 1;
                         frames.push(Frame {
                             proto,
-                            regs: new_regs,
+                            base: new_base,
                             pc: 0,
                             ret_dst: *dst,
                             ret_transform: transform,
@@ -3392,7 +3408,7 @@ impl<'m> Vm<'m> {
                             Some(ordering) => {
                                 let satisfied =
                                     op.ordering_satisfies(lang_ast::ordering_variant(ordering));
-                                set_reg(&mut frames[top].regs, *dst, Value::bool(satisfied));
+                                set_reg(regs, fbase, *dst, Value::bool(satisfied));
                                 frames[top].pc += 1;
                             }
                             None => {
@@ -3411,7 +3427,7 @@ impl<'m> Vm<'m> {
                     }
                     match apply_binary(*op, left, right) {
                         Ok(v) => {
-                            set_reg(&mut frames[top].regs, *dst, v);
+                            set_reg(regs, fbase, *dst, v);
                             frames[top].pc += 1;
                         }
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
@@ -3428,11 +3444,11 @@ impl<'m> Vm<'m> {
                 } => {
                     // Sign-dependent fixed-width op (Tier W3): `/ % < <= > >=` on erased-int operands,
                     // read as `signed`/unsigned `bits`-wide. No trait dispatch (ints only).
-                    let left = frames[top].regs[*a as usize];
-                    let right = frames[top].regs[*b as usize];
+                    let left = regs[fbase + *a as usize];
+                    let right = regs[fbase + *b as usize];
                     match apply_binary_wide(*op, left, right, *signed, *bits) {
                         Ok(v) => {
-                            set_reg(&mut frames[top].regs, *dst, v);
+                            set_reg(regs, fbase, *dst, v);
                             frames[top].pc += 1;
                         }
                         Err(e) => return Err(self.error(e.code, *span, e.text)),
@@ -3448,15 +3464,15 @@ impl<'m> Vm<'m> {
                 } => {
                     // Width-exact bit intrinsic (Tier W5): compute within `bits`, not the erased i64.
                     // The checker guarantees an integer receiver and (for `rotate_*`) an integer arg.
-                    let recv_int = frames[top].regs[*recv as usize].as_int().unwrap_or(0);
+                    let recv_int = regs[fbase + *recv as usize].as_int().unwrap_or(0);
                     let amount = match arg {
-                        Some(r) => frames[top].regs[*r as usize].as_int().unwrap_or(0),
+                        Some(r) => regs[fbase + *r as usize].as_int().unwrap_or(0),
                         None => 0,
                     };
                     let value = Value::int(lang_stdlib::int_method_width(
                         recv_int, *method, amount, *bits,
                     ));
-                    set_reg(&mut frames[top].regs, *dst, value);
+                    set_reg(regs, fbase, *dst, value);
                     frames[top].pc += 1;
                 }
                 Op::RequireBool {
@@ -3465,7 +3481,7 @@ impl<'m> Vm<'m> {
                     op,
                     span,
                 } => {
-                    let v = frames[top].regs[*reg as usize];
+                    let v = regs[fbase + *reg as usize];
                     if v.as_bool().is_none() {
                         let where_ = match side {
                             BoolSide::Left => "left",
@@ -3484,7 +3500,7 @@ impl<'m> Vm<'m> {
                     frames[top].pc += 1;
                 }
                 Op::RequireCondBool { reg, span } => {
-                    let v = frames[top].regs[*reg as usize];
+                    let v = regs[fbase + *reg as usize];
                     if v.as_bool().is_none() {
                         return Err(self.error(
                             DiagnosticCode::TypeMismatch,
@@ -3498,27 +3514,27 @@ impl<'m> Vm<'m> {
                     frames[top].pc = *target as usize;
                 }
                 Op::JumpIfTrue { reg, target } => {
-                    if frames[top].regs[*reg as usize].as_bool() == Some(true) {
+                    if regs[fbase + *reg as usize].as_bool() == Some(true) {
                         frames[top].pc = *target as usize;
                     } else {
                         frames[top].pc += 1;
                     }
                 }
                 Op::JumpIfFalse { reg, target } => {
-                    if frames[top].regs[*reg as usize].as_bool() == Some(false) {
+                    if regs[fbase + *reg as usize].as_bool() == Some(false) {
                         frames[top].pc = *target as usize;
                     } else {
                         frames[top].pc += 1;
                     }
                 }
                 Op::Echo { reg } => {
-                    let text = frames[top].regs[*reg as usize].display();
+                    let text = regs[fbase + *reg as usize].display();
                     self.stdout.push_str(&text);
                     self.stdout.push('\n');
                     frames[top].pc += 1;
                 }
                 Op::Stringify { dst, src, span } => {
-                    let v = frames[top].regs[*src as usize];
+                    let v = regs[fbase + *src as usize];
                     // A user object or enum value lights up the `Display` trait: render it via its
                     // `to_string` method (which runs bytecode, so it is pushed as a call frame). The
                     // method table is keyed by the value's shape name, identical for both kinds
@@ -3540,13 +3556,13 @@ impl<'m> Vm<'m> {
                                     ),
                                 ));
                             }
-                            let mut new_regs = vec![Value::unit(); chunk.num_registers as usize];
+                            let new_base = reserve_window(regs, chunk.num_registers as usize);
                             retain(v);
-                            new_regs[0] = v;
+                            regs[new_base] = v;
                             frames[top].pc += 1;
                             frames.push(Frame {
                                 proto,
-                                regs: new_regs,
+                                base: new_base,
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::None,
@@ -3558,7 +3574,7 @@ impl<'m> Vm<'m> {
                     // Identity for every other value: the consuming `Echo`/`Concat` stringifies
                     // it via `display`.
                     retain(v);
-                    set_reg(&mut frames[top].regs, *dst, v);
+                    set_reg(regs, fbase, *dst, v);
                     frames[top].pc += 1;
                 }
                 Op::Raise { idx } => {
@@ -3572,7 +3588,7 @@ impl<'m> Vm<'m> {
                     args,
                     span,
                 } => {
-                    let callee_val = frames[top].regs[*callee as usize];
+                    let callee_val = regs[fbase + *callee as usize];
                     match callee_val.as_closure() {
                         Some(proto_idx) => {
                             let callee_chunk = &module.protos[proto_idx as usize];
@@ -3589,11 +3605,11 @@ impl<'m> Vm<'m> {
                             let defaults = callee_chunk.defaults.clone();
                             // Move the arguments into the new frame's leading registers, each
                             // owning a fresh reference.
-                            let mut new_regs = vec![Value::unit(); num_registers];
+                            let new_base = reserve_window(regs, num_registers);
                             for (i, &arg_reg) in args.iter().enumerate() {
-                                let v = frames[top].regs[arg_reg as usize];
+                                let v = regs[fbase + arg_reg as usize];
                                 retain(v);
-                                new_regs[i] = v;
+                                regs[new_base + i] = v;
                             }
                             // The closure's captured upvalue cells, carried into the frame (one owned
                             // reference each, released at teardown) so the body can read/write
@@ -3611,7 +3627,7 @@ impl<'m> Vm<'m> {
                             for (reg, proto) in &defaults {
                                 if *reg as usize >= filled {
                                     let value = self.run_thunk(*proto, &cells)?;
-                                    new_regs[*reg as usize] = value;
+                                    regs[new_base + *reg as usize] = value;
                                 }
                             }
                             let mut upvalues = Vec::with_capacity(count);
@@ -3623,7 +3639,7 @@ impl<'m> Vm<'m> {
                             frames[top].pc += 1;
                             frames.push(Frame {
                                 proto: proto_idx,
-                                regs: new_regs,
+                                base: new_base,
                                 pc: 0,
                                 ret_dst: *dst,
                                 ret_transform: RetTransform::None,
@@ -3636,9 +3652,9 @@ impl<'m> Vm<'m> {
                             // the result is freshly owned.
                             Some(func) => {
                                 let arg_vals: Vec<Value> =
-                                    args.iter().map(|&r| frames[top].regs[r as usize]).collect();
+                                    args.iter().map(|&r| regs[fbase + r as usize]).collect();
                                 let result = self.call_native_fn(func, &arg_vals, *span)?;
-                                set_reg(&mut frames[top].regs, *dst, result);
+                                set_reg(regs, fbase, *dst, result);
                                 frames[top].pc += 1;
                             }
                             None => {
@@ -3652,15 +3668,17 @@ impl<'m> Vm<'m> {
                     }
                 }
                 Op::Return { src } => {
-                    let raw = frames[top].regs[*src as usize];
+                    let raw = regs[fbase + *src as usize];
                     retain(raw); // keep alive across this frame's teardown
                     let finished = frames.pop().unwrap();
-                    for r in &finished.regs {
-                        release(*r);
+                    let n = module.protos[finished.proto as usize].num_registers as usize;
+                    for i in 0..n {
+                        release(regs[finished.base + i]);
                     }
                     for u in &finished.upvalues {
                         release(*u);
                     }
+                    regs.truncate(finished.base);
                     // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s
                     // bool; `< <= > >=` map `compare`'s `Ordering`). When the transform replaces a
                     // heap value (an `Ordering`) with a fresh `bool`, release the original's
@@ -3669,12 +3687,12 @@ impl<'m> Vm<'m> {
                     if replaced {
                         release(raw);
                     }
-                    match frames.last_mut() {
+                    match frames.last() {
                         Some(caller) => {
                             // Transfer the retained reference into the caller's destination.
-                            let dst = finished.ret_dst as usize;
-                            let old = caller.regs[dst];
-                            caller.regs[dst] = v;
+                            let idx = caller.base + finished.ret_dst as usize;
+                            let old = regs[idx];
+                            regs[idx] = v;
                             release(old);
                         }
                         // The bottom frame returned: hand the value to `run`'s caller.
@@ -3683,15 +3701,17 @@ impl<'m> Vm<'m> {
                 }
                 Op::Halt => {
                     let finished = frames.pop().unwrap();
-                    for r in &finished.regs {
-                        release(*r);
+                    let n = module.protos[finished.proto as usize].num_registers as usize;
+                    for i in 0..n {
+                        release(regs[finished.base + i]);
                     }
                     for u in &finished.upvalues {
                         release(*u);
                     }
-                    match frames.last_mut() {
+                    regs.truncate(finished.base);
+                    match frames.last() {
                         // A non-bottom frame falling off the end implicitly returns unit.
-                        Some(caller) => set_reg(&mut caller.regs, finished.ret_dst, Value::unit()),
+                        Some(caller) => set_reg(regs, caller.base, finished.ret_dst, Value::unit()),
                         // The bottom frame halted: the program (or re-entrant call) ends.
                         None => return Ok(Value::unit()),
                     }
@@ -3744,14 +3764,17 @@ impl<'m> Vm<'m> {
                     retain(cell);
                     upvalues.push(cell);
                 }
-                self.run(vec![Frame {
-                    proto,
+                self.run(
+                    vec![Frame {
+                        proto,
+                        base: 0,
+                        pc: 0,
+                        ret_dst: 0,
+                        ret_transform: RetTransform::None,
+                        upvalues,
+                    }],
                     regs,
-                    pc: 0,
-                    ret_dst: 0,
-                    ret_transform: RetTransform::None,
-                    upvalues,
-                }])
+                )
             }
             None => match callee.as_native_fn() {
                 // A first-class builtin passed as the callee (e.g. `map(xs, len)`). The args are
@@ -3791,14 +3814,18 @@ impl<'m> Vm<'m> {
             retain(cell);
             ups.push(cell);
         }
-        self.run(vec![Frame {
-            proto,
-            regs: vec![Value::unit(); num_registers],
-            pc: 0,
-            ret_dst: 0,
-            ret_transform: RetTransform::None,
-            upvalues: ups,
-        }])
+        let regs = vec![Value::unit(); num_registers];
+        self.run(
+            vec![Frame {
+                proto,
+                base: 0,
+                pc: 0,
+                ret_dst: 0,
+                ret_transform: RetTransform::None,
+                upvalues: ups,
+            }],
+            regs,
+        )
     }
 
     /// Dispatch a first-class prelude builtin called indirectly. Reuses `call_builtin` (so the
@@ -3829,14 +3856,17 @@ impl<'m> Vm<'m> {
                 let mut regs = vec![Value::unit(); chunk.num_registers as usize];
                 retain(recv);
                 regs[0] = recv;
-                return self.run(vec![Frame {
-                    proto,
+                return self.run(
+                    vec![Frame {
+                        proto,
+                        base: 0,
+                        pc: 0,
+                        ret_dst: 0,
+                        ret_transform: RetTransform::None,
+                        upvalues: Vec::new(),
+                    }],
                     regs,
-                    pc: 0,
-                    ret_dst: 0,
-                    ret_transform: RetTransform::None,
-                    upvalues: Vec::new(),
-                }]);
+                );
             }
         }
         self.call_builtin(func, args, span)
@@ -4366,10 +4396,22 @@ impl<'m> Vm<'m> {
 }
 
 /// Overwrite a register, releasing the value it held.
-fn set_reg(regs: &mut [Value], dst: u16, value: Value) {
-    let old = regs[dst as usize];
-    regs[dst as usize] = value;
+fn set_reg(regs: &mut [Value], base: usize, dst: u16, value: Value) {
+    let idx = base + dst as usize;
+    let old = regs[idx];
+    regs[idx] = value;
     release(old);
+}
+
+/// Reserve a fresh `n`-slot register window at the top of the dispatch register stack for a callee
+/// frame and return its base (P-VMT-FRAME). Slots are `unit`-initialized; the caller writes the
+/// receiver/arguments into `regs[base..]` and pushes a `Frame { base, .. }`. Growing the stack may
+/// reallocate the backing buffer, so no borrow into `regs` may be held across this call — access is
+/// always by `(base, index)`.
+fn reserve_window(regs: &mut Vec<Value>, n: usize) -> usize {
+    let base = regs.len();
+    regs.resize(base + n, Value::unit());
+    base
 }
 
 #[cfg(test)]

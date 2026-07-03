@@ -284,6 +284,24 @@ fn dispatch_src() -> String {
         .to_string()
 }
 
+/// S2 (P-VMT-FRAME): call-heavy recursion. `fib(n)` performs ~2·fib(n) calls. Before this slice each
+/// call heap-allocated its register file (`vec![Value::unit(); num_registers]`) and freed it on
+/// return; now every frame is a base offset into one contiguous per-run register stack that a call
+/// extends and a return truncates — so an ordinary call allocates nothing once the stack has grown
+/// to the run's deepest depth. Parameterized over depth so the per-call cost, not just a constant, is
+/// visible.
+fn fib_src(n: usize) -> String {
+    format!(
+        "fn fib(n: int): int {{\n    \
+            if n < 2 {{ return n; }}\n    \
+            return fib(n - 1) + fib(n - 2);\n\
+         }}\n\
+         echo fib({n});\n"
+    )
+}
+
+const FIB_DEPTHS: &[usize] = &[20, 24, 28];
+
 /// Property access through inline caches: read the same object's fields on every
 /// iteration. After the first hit the `p.x`/`p.y` sites go monomorphic, so this
 /// measures the cached LOAD path.
@@ -550,6 +568,17 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     gacc.finish();
+
+    // S2 (P-VMT-FRAME): call-heavy recursion — every call previously heap-allocated its register
+    // file; the contiguous per-run register stack removes the per-call alloc after warm-up.
+    let mut recur = c.benchmark_group("vm_recursion");
+    for &n in FIB_DEPTHS {
+        let module = compile(&fib_src(n));
+        recur.bench_with_input(BenchmarkId::new("fib", n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    recur.finish();
 
     let mut fieldset = c.benchmark_group("vm_field_assign");
     for &n in LOOP_SIZES {
