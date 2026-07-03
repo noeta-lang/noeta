@@ -3937,84 +3937,23 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let callee_val = regs[fbase + *callee as usize];
-                        match callee_val.as_closure() {
-                            Some(proto_idx) => {
-                                let callee_chunk = &module.protos[proto_idx as usize];
-                                let num_params = callee_chunk.num_params as usize;
-                                let required = num_params - callee_chunk.defaults.len();
-                                if args.len() < required || args.len() > num_params {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        arity_message("function", required, num_params, args.len()),
-                                    ));
-                                }
-                                let num_registers = callee_chunk.num_registers as usize;
-                                let defaults = callee_chunk.defaults.clone();
-                                // Move the arguments into the new frame's leading registers, each
-                                // owning a fresh reference.
-                                let new_base = reserve_window(regs, num_registers);
-                                for (i, &arg_reg) in args.iter().enumerate() {
-                                    let v = regs[fbase + arg_reg as usize];
-                                    retain(v);
-                                    regs[new_base + i] = v;
-                                }
-                                // The closure's captured upvalue cells, carried into the frame (one owned
-                                // reference each, released at teardown) so the body can read/write
-                                // through them — and handed to each default thunk, which shares the
-                                // closure's upvalue layout, so a capture-referencing default reads the
-                                // right cell.
-                                let count = callee_val.closure_upvalue_count();
-                                let cells: Vec<Value> =
-                                    (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
-                                // Fill any omitted trailing parameters from their default thunks: a
-                                // default whose register is at or beyond the supplied count was not
-                                // passed. (An associated function carries a synthetic unit receiver in
-                                // register 0, already counted among the supplied args.)
-                                let filled = args.len();
-                                for (reg, proto) in &defaults {
-                                    if *reg as usize >= filled {
-                                        let value = self.run_thunk(*proto, &cells)?;
-                                        regs[new_base + *reg as usize] = value;
-                                    }
-                                }
-                                let mut upvalues = Vec::with_capacity(count);
-                                for &cell in &cells {
-                                    retain(cell);
-                                    upvalues.push(cell);
-                                }
-                                // Resume after the call once the callee returns.
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
-                                    proto: proto_idx,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues,
-                                });
-                                continue 'reload;
-                            }
-                            None => match callee_val.as_native_fn() {
-                                // An indirect call of a first-class builtin (`f = len; f(xs)`). The
-                                // arguments stay owned by their registers (the helper borrows them);
-                                // the result is freshly owned.
-                                Some(func) => {
-                                    let arg_vals: Vec<Value> =
-                                        args.iter().map(|&r| regs[fbase + r as usize]).collect();
-                                    let result = self.call_native_fn(func, &arg_vals, *span)?;
-                                    set_reg(regs, fbase, *dst, result);
-                                    pc += 1;
-                                }
-                                None => {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!("{} is not callable", callee_val.type_name()),
-                                    ));
-                                }
-                            },
+                        // Shared closure-call setup (also used by the JIT's `jit_call` helper): pushes
+                        // the callee frame (→ `continue 'reload`) or completes a first-class-builtin
+                        // call synchronously (→ advance to `pc + 1`).
+                        if self.setup_closure_call(
+                            frames,
+                            regs,
+                            top,
+                            fbase,
+                            *dst,
+                            callee_val,
+                            args,
+                            *span,
+                            pc + 1,
+                        )? {
+                            continue 'reload;
                         }
+                        pc += 1;
                     }
                     Op::Return { src } => {
                         let raw = regs[fbase + *src as usize];
@@ -4182,6 +4121,91 @@ impl<'m> Vm<'m> {
             }],
             regs,
         )
+    }
+
+    /// Set up a call to `callee_val` on the shared frame/register stacks — the closure-call machinery
+    /// shared by the `Op::Call` interpreter arm and the JIT's `jit_call` helper (so it lives in one
+    /// place). Reads the arguments from `regs[caller_base + arg_regs[i]]`, moves them into a fresh
+    /// callee window, fills defaults, carries upvalues, saves `resume_pc` on the caller frame, and
+    /// pushes the callee frame. Returns `Ok(true)` when a frame was pushed (the caller should re-derive
+    /// its window — `continue 'reload`), or `Ok(false)` when the call completed synchronously (a
+    /// first-class builtin, result already in `regs[caller_base + dst]`; the caller advances to
+    /// `resume_pc`).
+    #[allow(clippy::too_many_arguments)]
+    fn setup_closure_call(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        caller_top: usize,
+        caller_base: usize,
+        dst: u16,
+        callee_val: Value,
+        arg_regs: &[u16],
+        span: Span,
+        resume_pc: usize,
+    ) -> Result<bool, Abort> {
+        match callee_val.as_closure() {
+            Some(proto_idx) => {
+                let callee_chunk = &self.module.protos[proto_idx as usize];
+                let num_params = callee_chunk.num_params as usize;
+                let required = num_params - callee_chunk.defaults.len();
+                if arg_regs.len() < required || arg_regs.len() > num_params {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        arity_message("function", required, num_params, arg_regs.len()),
+                    ));
+                }
+                let num_registers = callee_chunk.num_registers as usize;
+                let defaults = callee_chunk.defaults.clone();
+                let new_base = reserve_window(regs, num_registers);
+                for (i, &arg_reg) in arg_regs.iter().enumerate() {
+                    let v = regs[caller_base + arg_reg as usize];
+                    retain(v);
+                    regs[new_base + i] = v;
+                }
+                let count = callee_val.closure_upvalue_count();
+                let cells: Vec<Value> = (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
+                let filled = arg_regs.len();
+                for (reg, proto) in &defaults {
+                    if *reg as usize >= filled {
+                        let value = self.run_thunk(*proto, &cells)?;
+                        regs[new_base + *reg as usize] = value;
+                    }
+                }
+                let mut upvalues = Vec::with_capacity(count);
+                for &cell in &cells {
+                    retain(cell);
+                    upvalues.push(cell);
+                }
+                frames[caller_top].pc = resume_pc;
+                frames.push(Frame {
+                    proto: proto_idx,
+                    base: new_base,
+                    pc: 0,
+                    ret_dst: dst,
+                    ret_transform: RetTransform::None,
+                    upvalues,
+                });
+                Ok(true)
+            }
+            None => match callee_val.as_native_fn() {
+                Some(func) => {
+                    let arg_vals: Vec<Value> = arg_regs
+                        .iter()
+                        .map(|&r| regs[caller_base + r as usize])
+                        .collect();
+                    let result = self.call_native_fn(func, &arg_vals, span)?;
+                    set_reg(regs, caller_base, dst, result);
+                    Ok(false)
+                }
+                None => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("{} is not callable", callee_val.type_name()),
+                )),
+            },
+        }
     }
 
     /// Dispatch a first-class prelude builtin called indirectly. Reuses `call_builtin` (so the
