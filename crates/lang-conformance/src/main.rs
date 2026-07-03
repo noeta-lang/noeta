@@ -37,6 +37,11 @@ struct Cli {
     /// live after it returns (residency 0 is the goal). Exits non-zero if any program leaks.
     #[arg(long)]
     check_leaks: bool,
+    /// Run the JIT differential oracle (milestone P-JIT): execute every compilable corpus program
+    /// through the interpreter *and* the forced tier-1 JIT and assert byte-identical results plus
+    /// zero heap residency under JIT. Requires the `jit` build feature. Any divergence or leak fails.
+    #[arg(long)]
+    jit_differential: bool,
     /// The corpus root directory.
     #[arg(long, default_value = "tests/conformance")]
     dir: PathBuf,
@@ -44,7 +49,9 @@ struct Cli {
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
-    if cli.check_leaks {
+    if cli.jit_differential {
+        cmd_jit_differential(cli.file.as_deref(), &cli.dir)
+    } else if cli.check_leaks {
         cmd_leaks(cli.file.as_deref(), &cli.dir)
     } else if cli.differential {
         cmd_differential(cli.file.as_deref(), &cli.dir)
@@ -114,4 +121,28 @@ fn cmd_leaks(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode 
     } else {
         ExitCode::FAILURE
     }
+}
+
+/// Run the JIT differential oracle (P-JIT): interpreter vs forced tier-1 JIT over the corpus. Only
+/// available in a `--features jit` build; otherwise report that and exit non-zero so a plain build
+/// cannot silently "pass" a gate it never ran.
+#[cfg(feature = "jit")]
+fn cmd_jit_differential(file: Option<&std::path::Path>, dir: &std::path::Path) -> ExitCode {
+    let report = lang_conformance::run_jit_differential(dir, file);
+    print!("{}", report.to_human());
+    if report.ok() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+/// Fallback when the binary was built without the `jit` feature: the oracle cannot run.
+#[cfg(not(feature = "jit"))]
+fn cmd_jit_differential(_file: Option<&std::path::Path>, _dir: &std::path::Path) -> ExitCode {
+    eprintln!(
+        "lang-conformance: --jit-differential requires the `jit` feature \
+         (build with `cargo run -p lang-conformance --features jit -- --jit-differential`)"
+    );
+    ExitCode::from(2)
 }

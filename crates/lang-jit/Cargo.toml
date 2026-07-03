@@ -1,0 +1,25 @@
+[package]
+name = "lang-jit"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+lang-bytecode = { workspace = true }
+lang-value = { workspace = true }
+cranelift-jit = "0.133"
+cranelift-module = "0.133"
+cranelift-frontend = "0.133"
+cranelift-codegen = "0.133"
+cranelift-native = "0.133"
+
+# This crate deliberately does NOT inherit the workspace lint table: the JIT transmutes
+# Cranelift-finalized code pointers to `extern "C" fn` and calls them, which is inherently
+# `unsafe`. It re-states the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

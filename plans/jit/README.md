@@ -1,6 +1,6 @@
 # JIT milestone (P-JIT) — closing the scalar/loop/call gap to a JIT engine
 
-**Status: planning (proposal for sign-off).** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
+**Status: J0 DONE (foundation landed); J1+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
 LICM) took the interpreter as far as *interpreter-level* wins go — dispatch is now ~3.3 ns/op, near the
 floor for a `match`-based switch interpreter. The remaining ~10–35× gap to PHP 8.4 on hot scalar / loop
 / call code (`loop 10M` ~35×, `fib(32)` ~17×) is structural: PHP's **tracing JIT** runs the equivalent
@@ -100,7 +100,7 @@ on every eligible program.
 
 | # | Slice | Delivers | Risk |
 |---|---|---|---|
-| **J0** | **Foundation** — `lang-jit` crate + `jit` feature, Cranelift wired, the compiled-code cache + tier-0/1 dispatch seam, the runtime-helper ABI skeleton, hot-counter promotion, and the `--jit-differential` + leak-under-JIT oracle harness. No op compiled yet (every proto bails to tier 0) — proves the *plumbing* and the oracle. | Setup; the ABI/deopt seam is the crux to get right early. |
+| **J0** | ✅ **DONE.** **Foundation** — `lang-jit` crate + `jit` feature, Cranelift wired, the compiled-code cache + tier-0/1 dispatch seam, the runtime-helper ABI skeleton, hot-counter promotion, and the `--jit-differential` + leak-under-JIT oracle harness. No op compiled yet (every proto bails to tier 0) — proves the *plumbing* and the oracle. | Setup; the ABI/deopt seam is the crux to get right early. |
 | **J1** | **Integer fast path** — compile protos whose ops are all in {`LoadConst`(prim), `Move`, `Binary`(int arith/cmp), `WideInt`, `CondBranch`, `Jump`, `JumpIf*`, `LoadGlobal`/`StoreGlobal`/`TakeGlobal` slot, `Return`, `Halt`}. Guard-and-bail on non-int operands. First real native code — accelerates integer loops (`loop 10M`, the ablation loops). | Codegen correctness; NaN-box guards; the first oracle run. |
 | **J2** | **Floats + control** — float ALU, `f32`, tuples make/index, `Narrow`/`IsType`, more branch shapes. Widens the eligible set. | Incremental. |
 | **J3** | **Calls** — inline the direct-call fast path (known callee proto, arity match) with a native call into another compiled proto (or a helper trampoline to tier 0); `fib`-class recursion. | Call ABI, stack/frame interaction, recursion depth. |
@@ -110,14 +110,50 @@ on every eligible program.
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
 before/after, and `git` commit per green slice (standing directive).
 
+## J0 — what landed (foundation)
+
+New crate **`lang-jit`** behind `lang-vm`'s `jit` feature (default build pulls **0** Cranelift crates;
+`--features jit` pulls the 29-crate Cranelift stack — confirmed via `cargo tree`). Pieces:
+
+- **Cranelift wired end to end.** `Jit::new(helpers)` builds a `JITModule` on the host ISA (via
+  `cranelift-native`), registering the runtime-helper symbols. `Jit::compile(module, proto)` emits,
+  finalizes, and caches native code for a prototype, keyed by prototype index (`Vec<Option<CompiledFn>>`).
+- **The tier-1 ABI.** `CompiledFn = unsafe extern "C" fn(vm: *mut c_void, regs: *mut Value, base: usize) -> u8`,
+  operating directly on the shared register stack (`regs[base + i]`, P-VMT-FRAME). The `u8` is an
+  `Outcome` (`Bail` = interpret this frame in tier 0; `Returned` = compiled code did the return
+  protocol, reserved for J1+).
+- **The J0 body is a *bail stub*.** For every prototype, the emitted code calls one runtime helper
+  (`lang_jit_observe`, proving the helper ABI links and the VM pointer round-trips) and returns `Bail`.
+  So tier 1 runs, then hands the frame straight back to the interpreter — byte-identical output, by
+  construction.
+- **Dispatch seam** at the top of the interpreter's `'reload` window (lang-vm), fired only at fresh
+  frame entry (`pc == 0`): consult the compiled cache, call the native entry, act on its `Outcome`.
+  One seam covers every call shape (top-level, `Call`, `CallMethod`, method dispatch) because they all
+  re-enter `'reload`.
+- **Hot-counter promotion.** Per-proto entry counter; a prototype compiles once it crosses
+  `JIT_HOT_THRESHOLD` (50), or immediately under `force_jit`. Workers/isolates never get a JIT
+  (`JITModule` is `!Send`); the deterministic sandbox stays tier 0.
+- **The JIT's own oracle.** `cargo run -p lang-conformance --features jit -- --jit-differential`: runs
+  every corpus program on the interpreter *and* the forced tier-1 JIT (same `SandboxHost`) and asserts
+  byte-identical `RunResult` **and** zero heap residency under JIT. Result: **419 matched, 0 skipped,
+  813 prototypes JIT-compiled, 0 divergence, 0 leaks.** Gated corpus test `jit_differential_tiers_agree`
+  + a lang-vm unit test proving the native stubs actually execute (via the observe counter).
+- **Unsafe discipline.** `lang-vm` downgrades `unsafe_code` from the workspace `forbid` to `deny` so the
+  single native-call site opts in with an explicit `#[allow(unsafe_code)]`; everything else stays
+  unsafe-free. `lang-jit` re-states the lint table minus the forbid (like `lang-value`).
+
+No criterion before/after for J0 — every prototype bails, so there is **no perf delta yet**; the
+benches begin at J1 (integer fast path), the first slice that emits real native arithmetic.
+
 ## Open questions (resolve at sign-off)
 
 - **Method JIT vs tracing.** Proposal: method JIT first (J1–J4), OSR/tracing deferred to J5+. Tracing
   would better handle megamorphic/branchy code but is a much larger harness.
 - **Compile trigger & budget.** A simple call+back-edge counter with a fixed threshold; compilation is
   synchronous on the calling thread in v1 (background compilation is a later refinement).
-- **Cranelift as a hard dep even when gated.** The `jit` feature pulls `cranelift-*`; the default build
-  must stay clean. Confirm the feature-gating keeps `cargo build`/sandbox/conformance dependency-free.
+- **Cranelift as a hard dep even when gated.** ✅ *Resolved in J0.* The `jit` feature pulls `cranelift-*`
+  (29 crates); the default build pulls 0 (confirmed via `cargo tree`), and the sandbox/differential are
+  byte-identical without it.
 - **Debug/observability.** A `--dump-jit` (Cranelift IR / disassembly) analogous to `lang dump`, for the
   same agentic-debugging reasons.
 - **Is the goal worth it?** The strategic call (§"Why this is worth a milestone"): general scalar-loop

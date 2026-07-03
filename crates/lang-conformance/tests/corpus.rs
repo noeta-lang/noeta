@@ -166,3 +166,31 @@ fn differential_backends_agree() {
         report.to_human()
     );
 }
+
+/// The JIT differential gate (milestone P-JIT): every program the VM compiles must produce a
+/// byte-for-byte identical `RunResult` on the forced tier-1 JIT as on the interpreter, and leave
+/// zero heap residency under JIT. Only compiled in a `--features jit` build; the plain build's
+/// `differential_backends_agree` above is unaffected.
+#[cfg(feature = "jit")]
+#[test]
+fn jit_differential_tiers_agree() {
+    let report = lang_conformance::run_jit_differential(&corpus_root(), None);
+    eprintln!("{}", report.to_human());
+    assert!(
+        report.ok(),
+        "tier 1 diverged from tier 0 (or leaked under JIT):\n{}",
+        report.to_human()
+    );
+    // Every parse-clean program the VM supports must run through the JIT (J0 forces this); the
+    // interpreter's own gate already fixes `skipped == 0`, so tier 1 covers the same 100%.
+    assert_eq!(
+        report.skipped, 0,
+        "the JIT oracle must cover 100% of the comparable corpus; got:\n{}",
+        report.to_human()
+    );
+    assert!(
+        report.compiled_protos > 0,
+        "expected the corpus to compile prototypes to native code; got:\n{}",
+        report.to_human()
+    );
+}

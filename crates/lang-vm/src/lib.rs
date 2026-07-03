@@ -138,6 +138,24 @@ impl VmBackend {
             mode,
         )
     }
+
+    /// Execute a module through the tier-1 JIT (milestone P-JIT), forcing every eligible prototype
+    /// through native code — the `--jit-differential` and leak-under-JIT oracle path. It keeps the
+    /// deterministic [`lang_stdlib::SandboxHost`], so its [`RunResult`] is directly comparable to
+    /// [`VmBackend::run_module`]: the only variable is tier 0 vs tier 1. J0 bails on every prototype,
+    /// so the result is identical by construction — which is precisely what the oracle asserts.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit(&self, module: &Module) -> RunResult {
+        lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
+        let mut vm = Vm::load(
+            module,
+            Box::new(lang_stdlib::SandboxHost::new()),
+            Box::new(lang_stdlib::SandboxExecutor::new()),
+        );
+        vm.force_jit = true;
+        vm.init_jit();
+        run_and_teardown(&mut vm, lang_value::CollectorMode::Trace)
+    }
 }
 
 impl Backend for VmBackend {
@@ -308,6 +326,48 @@ struct Vm<'m> {
     inflight_isolates: usize,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+    /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
+    /// host ISA is available. `None` = interpret everything (tier 0). Never populated on a worker
+    /// isolate — Cranelift's `JITModule` is `!Send`, and the deterministic path stays tier 0.
+    #[cfg(feature = "jit")]
+    jit: Option<lang_jit::Jit>,
+    /// When set, every eligible prototype is compiled eagerly and dispatched through tier 1 (the
+    /// `--jit-differential` / leak-under-JIT oracle's "force JIT" switch). Off = ordinary hot-counter
+    /// promotion.
+    #[cfg(feature = "jit")]
+    force_jit: bool,
+    /// Per-prototype tier-1 entry counter, indexed by prototype index; a prototype is compiled once
+    /// its count crosses [`JIT_HOT_THRESHOLD`] (or immediately under `force_jit`).
+    #[cfg(feature = "jit")]
+    jit_counters: Vec<u32>,
+}
+
+/// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
+/// then the JIT compiles it (P-JIT). The `--jit-differential` oracle bypasses this via `force_jit`.
+#[cfg(feature = "jit")]
+const JIT_HOT_THRESHOLD: u32 = 50;
+
+// Counts how many times a tier-1 bail stub has called `jit_observe` on this thread — the J0 proof
+// that generated native code actually ran (and reached a runtime helper), used by the tests.
+#[cfg(feature = "jit")]
+thread_local! {
+    static JIT_OBSERVE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The J0 runtime-helper skeleton (P-JIT): the generated bail stub calls this once per frame entry,
+/// proving a compiled prototype can reach a Rust helper with the live VM pointer under the tier-1
+/// ABI. It only bumps a thread-local counter here; J1+ registers the real `retain`/`release`/`call`
+/// helpers beside it and reconstitutes `&mut Vm` from `vm` to service them.
+#[cfg(feature = "jit")]
+extern "C" fn jit_observe(_vm: *mut core::ffi::c_void) {
+    JIT_OBSERVE_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
+/// This thread's running total of tier-1 bail-stub entries (see [`jit_observe`]). Test-only: the
+/// J0 proof that native code actually ran.
+#[cfg(all(test, feature = "jit"))]
+fn jit_observe_count() -> u64 {
+    JIT_OBSERVE_COUNT.with(|c| c.get())
 }
 
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
@@ -558,7 +618,77 @@ impl<'m> Vm<'m> {
             inflight_isolates: 0,
             stdout: String::new(),
             diagnostics: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit: None,
+            #[cfg(feature = "jit")]
+            force_jit: false,
+            #[cfg(feature = "jit")]
+            jit_counters: Vec::new(),
         }
+    }
+
+    /// Build the tier-1 JIT engine and, when `force_jit` is set, eagerly compile every prototype so
+    /// the whole run goes through tier 1 (the oracle path). Registers the runtime-helper symbols the
+    /// generated code links against. If the host ISA is unavailable the JIT stays `None` and the run
+    /// interprets — behaviour is identical either way (J0 always bails to tier 0).
+    #[cfg(feature = "jit")]
+    fn init_jit(&mut self) {
+        let helpers: &[(&str, *const u8)] = &[(lang_jit::OBSERVE_HELPER, jit_observe as *const u8)];
+        match lang_jit::Jit::new(helpers) {
+            Ok(mut jit) => {
+                if self.force_jit {
+                    for p in 0..self.module.protos.len() {
+                        let _ = jit.compile(self.module, p);
+                    }
+                }
+                self.jit = Some(jit);
+            }
+            Err(_) => self.jit = None,
+        }
+    }
+
+    /// Tier-0/tier-1 dispatch at frame entry (P-JIT). Called once per fresh frame (`pc == 0`).
+    /// Returns the compiled prototype's [`lang_jit::Outcome`] when tier 1 ran, or `None` when the
+    /// prototype is not compiled and the interpreter should run it. Under ordinary (non-forced)
+    /// execution this also drives hot-counter promotion.
+    #[cfg(feature = "jit")]
+    #[allow(unsafe_code)]
+    fn jit_enter(
+        &mut self,
+        proto: usize,
+        regs: &mut [Value],
+        base: usize,
+    ) -> Option<lang_jit::Outcome> {
+        let f = match self.jit.as_ref().and_then(|j| j.get(proto)) {
+            Some(f) => f,
+            None => self.jit_maybe_compile(proto)?,
+        };
+        let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
+        let regs_ptr = regs.as_mut_ptr();
+        // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI; `vm_ptr` and
+        // `regs_ptr` are live for the duration of the call. The J0 stub only bails, so it reads
+        // neither through the pointers; J1+ helpers reconstitute `&mut Vm` from `vm_ptr`.
+        let raw = unsafe { f(vm_ptr, regs_ptr, base) };
+        Some(lang_jit::Outcome::from_raw(raw))
+    }
+
+    /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
+    /// compile it — returning the fresh entry point on the promoting call. `None` while still cold or
+    /// when the JIT is unavailable.
+    #[cfg(feature = "jit")]
+    fn jit_maybe_compile(&mut self, proto: usize) -> Option<lang_jit::CompiledFn> {
+        self.jit.as_ref()?;
+        if proto >= self.jit_counters.len() {
+            self.jit_counters.resize(proto + 1, 0);
+        }
+        self.jit_counters[proto] = self.jit_counters[proto].saturating_add(1);
+        let hot = self.force_jit || self.jit_counters[proto] >= JIT_HOT_THRESHOLD;
+        if !hot {
+            return None;
+        }
+        let module = self.module;
+        let jit = self.jit.as_mut()?;
+        jit.compile(module, proto).ok()
     }
 }
 
@@ -990,8 +1120,24 @@ impl<'m> Vm<'m> {
         'reload: loop {
             let top = frames.len() - 1;
             let fbase = frames[top].base;
-            let chunk = &module.protos[frames[top].proto as usize];
+            let proto = frames[top].proto as usize;
+            let chunk = &module.protos[proto];
             let mut pc = frames[top].pc;
+            // Tier-0/tier-1 dispatch (P-JIT). Only at a fresh frame entry (`pc == 0`): a return-pop
+            // re-enters `'reload` with the caller's saved `pc > 0`, and an in-frame jump never leaves
+            // the inner loop, so `pc == 0` is exactly "this frame is starting". A compiled prototype
+            // may run the whole frame in native code; J0 always bails, so control falls straight
+            // through to the interpreter below (byte-identical).
+            #[cfg(feature = "jit")]
+            if pc == 0
+                && self.jit.is_some()
+                && let Some(lang_jit::Outcome::Returned) = self.jit_enter(proto, regs, fbase)
+            {
+                // The compiled code performed the return protocol itself. Unreachable in J0 (no
+                // prototype returns `Returned`); wired for J1+ so the seam is complete. `Bail` or
+                // "not compiled" falls through to interpret this frame in tier 0.
+                continue 'reload;
+            }
             loop {
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
                 // instead of the `.get()` guard the pre-S3 loop used. A call keeps `fbase` on the
@@ -4585,6 +4731,43 @@ mod tests {
         VmBackend::new()
             .try_run(&parsed.program)
             .expect("program should be in the M1.0 subset")
+    }
+
+    /// Compile a source program to a [`Module`] (or panic if it's outside the VM subset), for the
+    /// tests that need to drive `run_module`/`run_module_jit` directly.
+    #[cfg(feature = "jit")]
+    fn compile_module(src: &str) -> Module {
+        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        compile(&parsed.program).expect("program should be in the M1.0 subset")
+    }
+
+    /// J0 (P-JIT foundation): the tier-1 JIT path is byte-identical to the interpreter, and the
+    /// generated native code *actually runs* — every compiled bail stub reaches the `lang_jit_observe`
+    /// runtime helper. Proves the whole seam (Cranelift build + finalize, tier-0/1 dispatch, the
+    /// helper ABI, and the clean fall-back to the interpreter) end to end.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
+        // A program with a top-level frame and a called function — at least two prototypes to compile.
+        let src = "fn dbl(x: int): int { return x * 2; }\nfn run(n: int): int {\n  mut total = 0;\n  for i in 0..n { total = total + dbl(i); }\n  return total;\n}\necho \"${run(5)}\";\n";
+        let module = compile_module(src);
+
+        let interp = VmBackend::new().run_module(&module);
+        let before = jit_observe_count();
+        let jit = VmBackend::new().run_module_jit(&module);
+        let entered = jit_observe_count() - before;
+
+        // Byte-identical RunResult — the oracle's core invariant.
+        assert_eq!(interp, jit, "tier-1 result must match the interpreter");
+        assert_eq!(jit.stdout, "20\n");
+        // The native stubs really executed: the top-level frame plus every `run`/`dbl` call entered
+        // tier 1 and called the runtime helper (so the count is well above zero).
+        assert!(
+            entered >= 3,
+            "expected many tier-1 frame entries via native stubs, got {entered}"
+        );
     }
 
     /// Peak heap residency for one program (architecture §0.3) — `reset_peak` before, `live_peak`

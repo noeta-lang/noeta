@@ -26,6 +26,8 @@ lang-gc = { path = "crates/lang-gc" }
 lang-bytecode = { path = "crates/lang-bytecode" }
 lang-compiler = { path = "crates/lang-compiler" }
 lang-vm = { path = "crates/lang-vm" }
+# JIT backend (milestone P-JIT): Cranelift tier-1 compiler, behind lang-vm's `jit` feature.
+lang-jit = { path = "crates/lang-jit" }
 lang-db = { path = "crates/lang-db" }
 lang-conformance = { path = "crates/lang-conformance" }
 # Test-only heap-residency probe (dev-dependency; tracking global allocator)
