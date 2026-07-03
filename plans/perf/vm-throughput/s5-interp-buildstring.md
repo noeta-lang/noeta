@@ -1,6 +1,32 @@
 # S5 — Single-pass string interpolation (P-VMT-STR)
 
-**Goal.** Make `"…${x}…"` cost one pass and one allocation, not an N-way concat fold. String
+**Status: DONE.** `lower_interp` now emits a single `Op::BuildString { dst, parts: Box<[StrPart]> }`
+instead of the `LoadConst "" + N×(Stringify + Concat)` left-fold. Each `StrPart` is a constant-pool
+`Literal` or a `Hole` register; the VM sizes one buffer from the literal lengths, then pushes each
+literal verbatim and renders each hole via `display` — no intermediate `String`s, one output
+allocation. A `Display`-object hole still dispatches to `to_string` through the per-hole `Stringify`
+that precedes the build (that op pushes a call frame; `BuildString` itself never does), so semantics
+are byte-identical to the fold. The tree-walker was already single-pass, so this only brings the VM
+to parity — eval is untouched.
+
+Result (release, before = the S3 nested-loop commit, same session):
+
+| bench | before (fold) | after (`BuildString`) | speedup |
+|--|--:|--:|--:|
+| `single_hole` `"word${i}"` 1,000,000 | 303.6 ms | 149.7 ms | **2.03×** |
+| `single_hole` 100,000 | 29.3 ms | 14.2 ms | **2.06×** |
+| `multi_hole` `"${i}-${i}-${i}"` 100,000 | 58.6 ms | 21.4 ms | **2.74×** |
+| `multi_hole` 1,000,000 | ≈586 ms (extrap.) | 214.0 ms | **~2.7×** |
+
+The multi-hole case gains more because the old fold's cost grew O(k²) in the number of parts (each
+intermediate concat reallocated and recopied the accumulator); `BuildString` is O(total length) with
+one allocation regardless of `k`.
+
+Behaviour-neutral (output byte-identical to the fold): differential 419 / 0 skipped / backends agree,
+corpus 430, leak oracle residency 0 on both backends, workspace tests green, clippy clean. Criterion
+bench `vm_interp/{single,multi}_hole/{100000,1000000}` added.
+
+**Original goal.** Make `"…${x}…"` cost one pass and one allocation, not an N-way concat fold. String
 interpolation is the dominant cost in the worst benchmark outlier (wordcount, ~350× behind PHP).
 
 ## Evidence

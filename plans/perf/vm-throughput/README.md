@@ -45,7 +45,7 @@ call heap-allocates its register file (`vec![Value::unit(); n]`).
 | S2 | **P-VMT-FRAME** | ✅ **DONE** — [Register stack](s2-register-stack.md): one contiguous per-run register file, frames are `base` offsets, no per-call alloc. fib(28) 214.9 ms → 103.6 ms (**2.1×**) | high (call-heavy: fib, recursion) | M | yes |
 | S3 | **P-VMT-DISP** | ✅ **DONE** — [Dispatch register window](s3-dispatch-window.md): hoist frame/chunk/pc into loop-locals re-derived only on call/return, direct-index the code stream. Dispatch floor 63 → 43 ns/iter (**1.46×** on a tight loop) | high (every loop; the 80 ns/iter floor) | M | builds on S2 |
 | S4 | **P-VMT-OPSZ** | [Shrink `Op` via name interning](s4-op-interning.md) — 128 B → ~32 B | broad, modest (icache) | M–L (cross-crate) | co-schedule w/ S3 |
-| S5 | **P-VMT-STR** | [Single-pass interpolation](s5-interp-buildstring.md) — one build-string op, not an N-concat fold | medium (string-heavy: wordcount) | S–M | yes |
+| S5 | **P-VMT-STR** | ✅ **DONE** — [Single-pass interpolation](s5-interp-buildstring.md): one `Op::BuildString`, not an N-concat fold. `"word${i}"` 1M 303.6 → 149.7 ms (**2.0×**); multi-hole **2.7×** | medium (string-heavy: wordcount) | S–M | yes |
 
 ## Sequencing (value × independence, ascending risk)
 
