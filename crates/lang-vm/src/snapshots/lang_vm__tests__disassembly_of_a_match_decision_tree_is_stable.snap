@@ -1,6 +1,6 @@
 ---
 source: crates/lang-vm/src/lib.rs
-assertion_line: 4280
+assertion_line: 5856
 expression: module.disassemble()
 ---
 shapes:
@@ -20,25 +20,21 @@ code:
     7  Echo        r0
     8  Halt
 === proto 1 ===
-params: 1, registers: 3
+params: 1, registers: 2
 constants:
   k0 = "empty"
-  k1 = ""
-  k2 = "code "
+  k1 = "code "
 code:
     0  MatchVariant r0 is E.Empty/0 else -> 4
     1  LoadConst   r1 <- k0
     2  Move        r0 <- r1
-    3  Jump        -> 14
-    4  MatchVariant r0 is E.Code/1 else -> 13
+    3  Jump        -> 11
+    4  MatchVariant r0 is E.Code/1 else -> 10
     5  ExtractField r1 <- r0.0
-    6  LoadConst   r2 <- k1
-    7  LoadConst   r0 <- k2
-    8  Binary      r2 <- r2 ~ r0
-    9  Stringify   r0 <- display(r1)
-   10  Binary      r2 <- r2 ~ r0
-   11  Move        r0 <- r2
-   12  Jump        -> 14
-   13  MatchFail   r0
-   14  Return      r0
-   15  Halt
+    6  Stringify   r0 <- display(r1)
+    7  BuildString r1 <- k1 ~ display(r0)
+    8  Move        r0 <- r1
+    9  Jump        -> 11
+   10  MatchFail   r0
+   11  Return      r0
+   12  Halt
