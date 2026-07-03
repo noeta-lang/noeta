@@ -1,7 +1,8 @@
 //! `lang` — the user-facing toolchain binary.
 //!
-//! Exposes `run` (execute a file), `test` (run a program's `@test` blocks), and `repl`
-//! (interactive); all drive the same pipeline crates, so the binary is thin glue. The binary is
+//! Exposes `run` (execute a file), `test` (run a program's `@test` blocks), `dump` (disassemble to
+//! VM bytecode — a debugging aid), and `repl` (interactive); all drive the same pipeline crates, so
+//! the binary is thin glue. The binary is
 //! named `lang` (placeholder pending the real language name). The conformance corpus / differential
 //! / leak harness that tests the *implementation* is a separate dev binary (`lang-conformance`), not
 //! a subcommand here — which is what keeps the `lang test` verb free for a user program's own
@@ -90,6 +91,19 @@ enum Command {
         #[arg(long)]
         profile: Option<String>,
     },
+    /// Disassemble a program to its VM bytecode (a debugging aid: shows the exact opcodes,
+    /// constants, shapes, and method tables `lang run` executes). Compiled with the same pipeline
+    /// as `run`, so the output reflects what actually runs.
+    Dump {
+        /// Path to a `.lang` file.
+        file: PathBuf,
+        /// Activate a dev-tier before disassembling (as `lang run --tier …`). Repeatable.
+        #[arg(long)]
+        tier: Vec<String>,
+        /// Activate the tiers a `lang.toml` build profile makes live. Unioned with any `--tier`.
+        #[arg(long)]
+        profile: Option<String>,
+    },
     /// Start an interactive REPL.
     Repl,
 }
@@ -114,6 +128,11 @@ fn main() -> ExitCode {
             profile,
         } => cmd_bench(&file, iterations, &profile),
         Command::Doc { file, profile } => cmd_doc(&file, &profile),
+        Command::Dump {
+            file,
+            tier,
+            profile,
+        } => cmd_dump(&file, &tier, &profile),
         Command::Repl => cmd_repl(),
     }
 }
@@ -296,6 +315,76 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
                 return ExitCode::from(1);
             }
             exit_code(run_program(&activated.program, &linked.sources))
+        }
+        Ok(Err(load_diagnostics)) => {
+            let mut stderr = io::stderr();
+            for ld in &load_diagnostics {
+                let _ = stderr.write_all(render(&ld.source, &ld.diagnostic).as_bytes());
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// `lang dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
+/// activates any `--tier`/`--profile`, type-checks, and compiles through the **same** pipeline as
+/// `lang run` (`compile_real`), so the disassembly is exactly what the VM executes — the tool for
+/// inspecting codegen (which ops a construct lowers to, whether a reuse/in-place fast path fired,
+/// how names/constants are laid out). A type error prints diagnostics and exits non-zero, like `run`.
+fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
+    let mut active: Vec<String> = match profile {
+        Some(name) => match manifest::resolve_active_tiers(file, name) {
+            Ok(tiers) => tiers,
+            Err(err) => {
+                eprintln!("lang: {err}");
+                return ExitCode::from(1);
+            }
+        },
+        None => Vec::new(),
+    };
+    for tier in tiers {
+        if !active.contains(tier) {
+            active.push(tier.clone());
+        }
+    }
+
+    match lang_loader::load(file) {
+        Err(err) => {
+            eprintln!("lang: cannot read {}: {err}", file.display());
+            ExitCode::from(2)
+        }
+        Ok(Ok(linked)) => {
+            // Check + compile a (possibly tier-activated) program and print its disassembly.
+            let dump = |program: &Program| -> ExitCode {
+                let checked = lang_check::check_all(program);
+                if !checked.diagnostics.is_empty() {
+                    emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
+                    return ExitCode::from(1);
+                }
+                match compile_real(program, &checked) {
+                    Ok(module) => {
+                        print!("{}", module.disassemble());
+                        let _ = io::stdout().flush();
+                        ExitCode::SUCCESS
+                    }
+                    Err(err) => {
+                        eprintln!("lang: {err}");
+                        ExitCode::from(1)
+                    }
+                }
+            };
+            if active.is_empty() {
+                dump(&linked.program)
+            } else {
+                let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
+                let activated = lang_check::activate_tiers(&linked.program, &active_refs);
+                if !activated.diagnostics.is_empty() {
+                    emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
+                    ExitCode::from(1)
+                } else {
+                    dump(&activated.program)
+                }
+            }
         }
         Ok(Err(load_diagnostics)) => {
             let mut stderr = io::stderr();
