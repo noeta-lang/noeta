@@ -1,0 +1,100 @@
+name: CI
+
+# The project's gates, one job each (see docs/Contributing and the crate READMEs):
+#   - test   : the workspace suite, which runs the executable-spec conformance corpus, the
+#              eval↔interpreter differential oracle, the leak oracle (residency 0), IR-lowering
+#              totality, and the drop-safety property — plus every crate's unit tests.
+#   - jit    : the tier-0/tier-1 JIT differential (interpreter vs forced native code, byte-identical
+#              RunResult) and the leak-under-JIT check, behind the `jit` cargo feature.
+#   - clippy : lints, denying warnings, for both the default build and the `jit` feature.
+#   - miri   : the one place `unsafe` lives — the NaN-box value model and the cycle collector —
+#              run under Miri to prove the refcount/heap paths are sound.
+#
+# There is deliberately no `cargo fmt` gate: the tree is not formatted with stable rustfmt, so one
+# would fail on existing code. Add it only alongside a repo-wide reformat.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  test:
+    name: Test & oracles (conformance, differential, leak)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The workspace suite is the spine: tests/corpus.rs runs the conformance corpus, the
+      # eval↔interpreter differential (backends must agree, 0 skipped), the leak oracle (residency 0),
+      # IR-lowering totality, and the drop-safety property — alongside all unit tests. `lang-jit` is
+      # excluded so the default build stays Cranelift-free (the point of the `jit` feature gate); the
+      # `jit` job below owns it.
+      - name: cargo test --workspace (default, Cranelift-free)
+        run: cargo test --workspace --exclude lang-jit --locked
+
+  jit:
+    name: JIT gate (tier-0/1 differential + leak-under-JIT)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # The eval↔interpreter differential never exercises the JIT (it is a real-host accelerator that
+      # falls back to the interpreter), so the JIT ships its own oracle: interpreter vs forced tier-1
+      # native code must produce a byte-identical RunResult and leave zero heap residency.
+      - name: JIT unit tests (lang-vm)
+        run: cargo test -p lang-vm --features jit --locked
+      - name: JIT differential + leak-under-JIT corpus gate
+        run: cargo test -p lang-conformance --features jit --locked
+      - name: JIT differential (coverage summary)
+        run: cargo run -p lang-conformance --features jit --locked -- --jit-differential
+
+  clippy:
+    name: Clippy (deny warnings)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      # Default build excludes `lang-jit` (Cranelift-free, like the `test` job); the jit step lints it.
+      - name: Clippy (default features)
+        run: cargo clippy --workspace --exclude lang-jit --all-targets --locked -- -D warnings
+      # Lint the JIT code path and the `vm_jit` bench, which only compile under the `jit` feature.
+      - name: Clippy (jit feature)
+        run: >
+          cargo clippy -p lang-vm -p lang-jit -p lang-conformance
+          --features "lang-vm/jit lang-conformance/jit" --all-targets --locked -- -D warnings
+
+  miri:
+    name: Miri (unsafe value & collector paths)
+    runs-on: ubuntu-latest
+    env:
+      # Miri interprets ~100× slower, so bound proptest to a small case count — enough to exercise the
+      # NaN-box round-trips and refcount transitions without a runaway. `disable-isolation` lets the
+      # heap's process-global bookkeeping run.
+      PROPTEST_CASES: 16
+      MIRIFLAGS: -Zmiri-disable-isolation
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - uses: Swatinem/rust-cache@v2
+      - name: Miri setup
+        run: cargo miri setup
+      # `lang-value` (the NaN-box value model + heap header) and `lang-gc` (the cycle collector) are the
+      # crates that opt out of the workspace `unsafe_code = "forbid"` for the refcount/collector paths.
+      - name: cargo miri test (lang-value, lang-gc)
+        run: cargo miri test -p lang-value -p lang-gc --locked

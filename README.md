@@ -1,5 +1,7 @@
 # lang *(working title — name TBD)*
 
+[![CI](https://github.com/nsrosenqvist/lang/actions/workflows/ci.yml/badge.svg)](https://github.com/nsrosenqvist/lang/actions/workflows/ci.yml)
+
 > **A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.**
 
 `lang` is a new, general-purpose programming language built from scratch in Rust. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
