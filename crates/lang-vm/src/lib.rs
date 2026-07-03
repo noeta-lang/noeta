@@ -4089,37 +4089,12 @@ impl<'m> Vm<'m> {
                     }
                     Op::Return { src } => {
                         let raw = regs[fbase + *src as usize];
-                        retain(raw); // keep alive across this frame's teardown
-                        let finished = frames.pop().unwrap();
-                        let n = module.protos[finished.proto as usize].num_registers as usize;
-                        for i in 0..n {
-                            release(regs[finished.base + i]);
-                        }
-                        for u in &finished.upvalues {
-                            release(*u);
-                        }
-                        regs.truncate(finished.base);
-                        // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s
-                        // bool; `< <= > >=` map `compare`'s `Ordering`). When the transform replaces a
-                        // heap value (an `Ordering`) with a fresh `bool`, release the original's
-                        // keep-alive reference so it is not leaked.
-                        let (v, replaced) = finished.ret_transform.apply(raw);
-                        if replaced {
-                            release(raw);
-                        }
-                        match frames.last() {
-                            Some(caller) => {
-                                // Transfer the retained reference into the caller's destination.
-                                let idx = caller.base + finished.ret_dst as usize;
-                                let old = regs[idx];
-                                regs[idx] = v;
-                                release(old);
-                            }
+                        match self.do_return(frames, regs, raw) {
                             // The bottom frame returned: hand the value to `run`'s caller.
-                            None => return Ok(v),
+                            Some(v) => return Ok(v),
+                            // Transferred to a caller — re-derive its window.
+                            None => continue 'reload,
                         }
-                        // Control returns to the caller (or a re-entry frame) — re-derive its window.
-                        continue 'reload;
                     }
                     Op::Halt => {
                         let finished = frames.pop().unwrap();
@@ -4337,6 +4312,49 @@ impl<'m> Vm<'m> {
                     format!("{} is not callable", callee_val.type_name()),
                 )),
             },
+        }
+    }
+
+    /// The `Op::Return` protocol, factored so both the interpreter arm and the JIT's `jit_return`
+    /// helper share it (J3 native calls). `raw` is the value being returned (already read from the
+    /// returning frame). Retains it across teardown, pops the finished frame, releases its register
+    /// window and upvalues, truncates the register stack, applies any `ret_transform`, and transfers
+    /// the result into the caller's destination register. Returns `Some(v)` when the **bottom** frame
+    /// returned (there is no caller — `run` should yield `v`), or `None` when it transferred to a
+    /// caller (control resumes in that caller frame).
+    fn do_return(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        raw: Value,
+    ) -> Option<Value> {
+        retain(raw); // keep alive across this frame's teardown
+        let finished = frames.pop().unwrap();
+        let n = self.module.protos[finished.proto as usize].num_registers as usize;
+        for i in 0..n {
+            release(regs[finished.base + i]);
+        }
+        for u in &finished.upvalues {
+            release(*u);
+        }
+        regs.truncate(finished.base);
+        // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s bool; `< <= > >=`
+        // map `compare`'s `Ordering`). When the transform replaces a heap value (an `Ordering`) with a
+        // fresh `bool`, release the original's keep-alive reference so it is not leaked.
+        let (v, replaced) = finished.ret_transform.apply(raw);
+        if replaced {
+            release(raw);
+        }
+        match frames.last() {
+            Some(caller) => {
+                // Transfer the retained reference into the caller's destination.
+                let idx = caller.base + finished.ret_dst as usize;
+                let old = regs[idx];
+                regs[idx] = v;
+                release(old);
+                None
+            }
+            None => Some(v),
         }
     }
 
