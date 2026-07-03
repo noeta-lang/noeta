@@ -41,7 +41,7 @@ call heap-allocates its register file (`vec![Value::unit(); n]`).
 | # | Tag | Slice | Impact | Effort | Independent? |
 |---|---|---|---|---|---|
 | S0 | **P-VMT-CONV** | ✅ **DONE** — [Numeric conversion tower](s0-numeric-conversions.md): `to_float`/`to_f32`/`to_f64` + float→int | correctness gap; unblocks building `f32`/`float` data programmatically | S | yes |
-| S1 | **P-VMT-GACC** | [Global-accumulator reuse](s1-global-accumulator-reuse.md) — kill the top-level collection O(n²) cliff | **huge** (unbounded; 800× at n=40k) | **S** | yes |
+| S1 | **P-VMT-GACC** | ✅ **DONE** — [Global-accumulator reuse](s1-global-accumulator-reuse.md): killed the top-level collection O(n²) cliff (33.5 s → 40 ms at n=40k) | **huge** (unbounded; ~850× at n=40k) | **S** | yes |
 | S2 | **P-VMT-FRAME** | [Register stack](s2-register-stack.md) — one contiguous register file, no per-call alloc | high (call-heavy: fib, recursion) | M | yes |
 | S3 | **P-VMT-DISP** | [Dispatch register window](s3-dispatch-window.md) — hoist frame/chunk/pc, drop redundant bounds checks | high (every loop; the 80 ns/iter floor) | M | builds on S2 |
 | S4 | **P-VMT-OPSZ** | [Shrink `Op` via name interning](s4-op-interning.md) — 128 B → ~32 B | broad, modest (icache) | M–L (cross-crate) | co-schedule w/ S3 |

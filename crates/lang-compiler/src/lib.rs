@@ -2740,30 +2740,51 @@ impl<'m> FnCompiler<'m> {
         // Otherwise the receiver is a value: a runtime-dispatched method call (a user instance
         // method, or a `count`/`enumerate` built-in — the VM decides).
         //
-        // In-place collection self-update (Phase 5.1c): forward the IR reuse token to the op only when
-        // the receiver is a directly-held **local** — its register *is* the binding's sole storage, so
-        // the VM's reuse path can consume it and the runtime sees refcount 1 on the unique path. A
-        // global accumulator is the `TakeGlobal` case (a later slice; the IR interpreter already reuses
-        // it, and reuse is invisible, so the backends still agree). The VM's reuse branch additionally
-        // checks the runtime receiver kind, so a same-named user method only ever costs the flag.
-        let recv_reuse = reuse
-            && matches!(receiver, Atom::Var { name, .. } if matches!(self.resolve(name), Resolved::Local(_)));
-        let recv = self.atom_reg(receiver)?;
-        let args = self.atom_regs(args)?;
+        // In-place collection self-update (Phase 5.1c / S1): forward the IR reuse token to the op when
+        // the receiver's sole reference can be handed to the in-place path — a directly-held **local**
+        // (its register *is* the binding) or a top-level **global** (moved out with `TakeGlobal` so the
+        // in-place op sees refcount 1, the same shape `lower_set_field` uses for a global field-set and
+        // the global struct/list accumulator reuse uses). A celled/captured base — or an unmarked op —
+        // falls through to the copying path (`reuse: false`), always correct value semantics. The VM's
+        // reuse branch additionally checks the runtime receiver kind, so a same-named user method only
+        // ever costs the flag. The trailing `acc = %t` reassignment re-stores the mutated collection
+        // (`StoreGlobal` for a global), so the vacated slot is never observed between the two.
+        //
+        // Args are resolved *before* a `TakeGlobal` so moving the receiver global out cannot vacate a
+        // slot an arg still reads (the reuse pass also guarantees no arg mentions the receiver var).
+        let arg_regs = self.atom_regs(args)?;
+        let (recv, recv_reuse) = match (reuse, receiver) {
+            (true, Atom::Var { name, .. }) => match self.resolve(name) {
+                Resolved::Local(reg) => (reg, true),
+                Resolved::Global => {
+                    let reg = self.alloc_reg();
+                    self.code.push(Op::TakeGlobal {
+                        dst: reg,
+                        name: name.clone(),
+                        span,
+                    });
+                    (reg, true)
+                }
+                _ => (self.atom_reg(receiver)?, false),
+            },
+            _ => (self.atom_reg(receiver)?, false),
+        };
         let cache = self.module.next_cache_slot();
         self.code.push(Op::CallMethod {
             dst,
             recv,
             method: name.to_string(),
-            args,
+            args: arg_regs,
             span,
             cache,
             reuse: recv_reuse,
         });
-        // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path), so
-        // the temp-receiver drop must not also fire — but a reuse receiver is always a `Var` local, not
-        // an owned temp, so `drop_temp_receiver` is already a no-op for it.
-        self.drop_temp_receiver(receiver, recv);
+        // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
+        // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.
+        // Only the copying path can carry an owned temp receiver that still needs its drop.
+        if !recv_reuse {
+            self.drop_temp_receiver(receiver, recv);
+        }
         Ok(())
     }
 

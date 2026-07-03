@@ -1,5 +1,14 @@
 # S1 — Global-accumulator in-place reuse (P-VMT-GACC)
 
+**Status: DONE.** `lower_method` now forwards the reuse token for a **global** receiver via
+`TakeGlobal` (mirroring `lower_set_field`), so a top-level `mut m = {}` accumulator mutates in place.
+Result: top-level map build n=40k **33.5 s → 40 ms (~850×)**, now linear (criterion
+`vm_global_accumulate` map/list/set confirms ~2× per doubling). Aliasing soundness holds — the
+runtime refcount>1 backstop copies when a snapshot aliases the global (corpus
+`collections/map_accumulator_reuse.lang` covers exactly this; differential 419 / 0 skipped / agree,
+corpus 430 passed). Behaviour-neutral (the eval backend already reused globals) → differential green
+by construction.
+
 **Goal.** Remove the **O(n²) cliff** on the most natural scripting idiom: building a collection in a
 top-level `mut` accumulator. `mut m = {}` at module scope makes every `m[k] = v` deep-copy the whole
 `BTreeMap`; the identical loop inside a function is O(n).

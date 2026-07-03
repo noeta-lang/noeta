@@ -362,6 +362,28 @@ fn set_accumulate_src(n: usize) -> String {
     )
 }
 
+/// A **top-level (global)** map accumulator built by `m[k] = i` n times — the idiomatic
+/// script-at-module-scope shape. Was O(n²) even after Phase 5.1c (which reused only function-local
+/// receivers): the compiler dropped the reuse token for a global receiver, so every `set` deep-copied
+/// the whole map. S1 (P-VMT-GACC) moves the global out with `TakeGlobal` so the in-place op sees
+/// refcount 1, bringing it to O(n) — ~850× at n=40000 (33.5 s → 40 ms). The local twin is
+/// `map_accumulate_src`; this is its global counterpart, parameterized so the scaling is visible.
+fn map_accumulate_global_src(n: usize) -> String {
+    format!("mut m = {{}};\nfor i in 0..{n} {{\n    m[\"k${{i}}\"] = i;\n}}\necho m.count();\n")
+}
+
+/// A top-level (global) list index-write accumulator — the global twin of `list_index_write_src`.
+/// O(n²)→O(n) under S1 (global-receiver reuse via `TakeGlobal`).
+fn list_index_write_global_src(n: usize) -> String {
+    format!("mut xs = 0..{n};\nfor i in 0..{n} {{\n    xs[i] = i * 2;\n}}\necho xs.count();\n")
+}
+
+/// A top-level (global) set accumulator — the global twin of `set_accumulate_src`.
+/// O(n² log n)→O(n) under S1 (global-receiver reuse via `TakeGlobal`).
+fn set_accumulate_global_src(n: usize) -> String {
+    format!("mut s = #{{}};\nfor i in 0..{n} {{\n    s = s.add(i);\n}}\necho s.count();\n")
+}
+
 /// A hot method-call + field-read site on the same receiver every iteration — the monomorphic
 /// dispatch/property pattern P-IC (inline caches) targets beyond the existing `property_access`.
 fn member_dispatch_src(n: usize) -> String {
@@ -509,6 +531,25 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     setacc.finish();
+
+    // S1 (P-VMT-GACC): the same collection accumulators built in a **top-level global** — O(n²)
+    // before this slice (the compiler dropped the reuse token for a global receiver), O(n) after.
+    let mut gacc = c.benchmark_group("vm_global_accumulate");
+    for &n in LOOP_SIZES {
+        let map = compile(&map_accumulate_global_src(n));
+        gacc.bench_with_input(BenchmarkId::new("map", n), &map, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let list = compile(&list_index_write_global_src(n));
+        gacc.bench_with_input(BenchmarkId::new("list", n), &list, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+        let set = compile(&set_accumulate_global_src(n));
+        gacc.bench_with_input(BenchmarkId::new("set", n), &set, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    gacc.finish();
 
     let mut fieldset = c.benchmark_group("vm_field_assign");
     for &n in LOOP_SIZES {
