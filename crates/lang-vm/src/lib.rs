@@ -796,6 +796,53 @@ extern "C" fn jit_run_leaf_op(
                 bail // unknown field → interpreter raises the error
             }
         }
+        Op::Index {
+            dst, recv, index, ..
+        } => {
+            let v = regs[base + *recv as usize];
+            let idx = regs[base + *index as usize];
+            // An `Index` trait dispatch (`o[i]` on a user object → `get`) pushes a frame — bail. Every
+            // error case (out-of-bounds, wrong index type, missing key, non-indexable) also bails so the
+            // interpreter raises the exact diagnostic; each of these returns before any register write.
+            if v.is_object() {
+                return bail;
+            }
+            if let Some(len) = v.list_len() {
+                let Some(i) = idx.as_int().filter(|&i| i >= 0 && (i as usize) < len) else {
+                    return bail;
+                };
+                // A packed list materializes the one element (owned, refcount 1); a boxed list borrows
+                // and retains it into `dst` — matching the interpreter exactly.
+                let element = if v.is_packed_list() {
+                    v.packed_get(i as usize)
+                } else {
+                    let element = v.list_get(i as usize).expect("bounds checked above");
+                    retain(element);
+                    element
+                };
+                set_reg(regs, base, *dst, element);
+                lang_jit::OUTCOME_CONTINUE
+            } else if v.is_map() {
+                let Some(element) = idx.as_string().and_then(|key| v.map_get(&key)) else {
+                    return bail; // non-string key or missing key → interpreter raises
+                };
+                retain(element);
+                set_reg(regs, base, *dst, element);
+                lang_jit::OUTCOME_CONTINUE
+            } else if let Some(s) = v.as_string() {
+                let Some(i) = idx
+                    .as_int()
+                    .filter(|&i| i >= 0 && (i as usize) < s.chars().count())
+                else {
+                    return bail;
+                };
+                let ch = s.chars().nth(i as usize).unwrap().to_string();
+                set_reg(regs, base, *dst, Value::string(&ch));
+                lang_jit::OUTCOME_CONTINUE
+            } else {
+                bail // non-indexable → interpreter raises
+            }
+        }
         _ => bail,
     }
 }
@@ -5477,6 +5524,25 @@ mod tests {
             "field-access result must match the interpreter"
         );
         assert_eq!(jit.stdout, "171600\n");
+    }
+
+    /// Subscript indexing (P-JIT J4 slice 3): a hot loop that indexes a list (`xs[i]`), a map
+    /// (`m[key]`), and a nested list-of-keys runs natively through the leaf-op helper's `Op::Index`
+    /// arm (the non-dispatching list/map/string paths; a user `Index` impl and every error case bail)
+    /// and matches the interpreter, including the borrow/retain of each looked-up element.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_indexing_loop_is_native_and_correct() {
+        let src = "fn run(n: int): int {\n  xs = [10, 20, 30, 40, 50];\n  m = { \"a\": 1, \"b\": 2, \"c\": 3 };\n  keys = [\"a\", \"b\", \"c\"];\n  mut total = 0;\n  mut i = 0;\n  while i < n {\n    total = total + xs[i % 5];\n    total = total + m[keys[i % 3]];\n    i = i + 1;\n  }\n  return total;\n}\necho run(30);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the indexing loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(interp, jit, "indexing result must match the interpreter");
+        assert_eq!(jit.stdout, "960\n");
     }
 
     /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware

@@ -367,6 +367,15 @@ fn field_loop_src(n: usize) -> String {
     )
 }
 
+/// J4 slice 3 (P-JIT indexing): a hot loop indexing a list (`xs[i]`) and a map (`m[key]`) — the
+/// `Op::Index` list/map paths run through the leaf-op helper while the loop stays native.
+#[cfg(feature = "jit")]
+fn index_loop_src(n: usize) -> String {
+    format!(
+        "fn run(n: int): int {{\n    xs = [10, 20, 30, 40, 50];\n    m = {{ \"a\": 1, \"b\": 2, \"c\": 3 }};\n    keys = [\"a\", \"b\", \"c\"];\n    mut total = 0;\n    mut i = 0;\n    while i < n {{\n        total = total + xs[i % 5];\n        total = total + m[keys[i % 3]];\n        i = i + 1;\n    }}\n    return total;\n}}\necho run({n});\n"
+    )
+}
+
 /// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
 /// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
 /// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
@@ -988,6 +997,23 @@ fn vm_hot_paths(c: &mut Criterion) {
             jit.bench_with_input(
                 BenchmarkId::new("field_jit", n),
                 &field_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
+            // J4 slice 3 (indexing): a loop indexing a list and a map — Op::Index runs through the
+            // leaf-op helper, keeping the surrounding loop native.
+            let index_module = compile(&index_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("index_interp", n),
+                &index_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("index_jit", n),
+                &index_module,
                 |b, module| {
                     b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
                 },

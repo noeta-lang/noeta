@@ -612,6 +612,7 @@ fn is_leaf_heap_op(op: &Op) -> bool {
             | Op::ListGet { .. }
             | Op::LoadField { .. }
             | Op::SetField { .. }
+            | Op::Index { .. }
     )
 }
 
