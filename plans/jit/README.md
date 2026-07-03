@@ -1,6 +1,6 @@
 # JIT milestone (P-JIT) — closing the scalar/loop/call gap to a JIT engine
 
-**Status: J0 + J1 DONE (integer fast path landed, ~7× on native loops); J2+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
+**Status: J0 + J1 + J2 DONE (integer & float fast paths, ~6–7× on native loops); J3+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
 LICM) took the interpreter as far as *interpreter-level* wins go — dispatch is now ~3.3 ns/op, near the
 floor for a `match`-based switch interpreter. The remaining ~10–35× gap to PHP 8.4 on hot scalar / loop
 / call code (`loop 10M` ~35×, `fib(32)` ~17×) is structural: PHP's **tracing JIT** runs the equivalent
@@ -102,7 +102,7 @@ on every eligible program.
 |---|---|---|---|
 | **J0** | ✅ **DONE.** **Foundation** — `lang-jit` crate + `jit` feature, Cranelift wired, the compiled-code cache + tier-0/1 dispatch seam, the runtime-helper ABI skeleton, hot-counter promotion, and the `--jit-differential` + leak-under-JIT oracle harness. No op compiled yet (every proto bails to tier 0) — proves the *plumbing* and the oracle. | Setup; the ABI/deopt seam is the crux to get right early. |
 | **J1** | ✅ **DONE.** **Integer fast path** — compile protos whose ops are all in {`LoadConst`(imm), `Move`, `Drop`, `Binary`(int `+ - * / %` and `== != < <= > >=`), `CondBranch`, `Jump`, `JumpIf*`, `Return`/`Halt` as bail points}. Guard-and-bail on non-int operands, zero divisor, and 48-bit overflow. First real native code — **~6–7.5× on register-local integer loops**. (Globals + `WideInt`/bitwise deferred; see below.) | Codegen correctness; NaN-box guards; the first oracle run. |
-| **J2** | **Floats + control** — float ALU, `f32`, tuples make/index, `Narrow`/`IsType`, more branch shapes. Widens the eligible set. | Incremental. |
+| **J2** | ✅ **DONE (floats).** **Float fast path** — native f64 ALU (`+ - * /`) and ordered comparison (`== != < <= > >=`), dispatched from the same `Binary` by a runtime int-vs-float type check; NaN results canonicalized to match `Value::float` bit-for-bit. **~6.5× on float loops.** (f32, tuples, `Narrow`/`IsType` deferred — see below.) | Incremental. |
 | **J3** | **Calls** — inline the direct-call fast path (known callee proto, arity match) with a native call into another compiled proto (or a helper trampoline to tier 0); `fib`-class recursion. | Call ABI, stack/frame interaction, recursion depth. |
 | **J4** | **Heap & collections** — retain/release inlined, allocation + list/map/set/string/field ops via runtime helpers keeping refcount exact. Most real programs become fully JIT-eligible. | **Refcount exactness** — the leak oracle is the gate. |
 | **J5** | **Tiering polish + OSR** — on-stack replacement so a hot loop enters tier 1 mid-execution (not only at call boundary); counter tuning; per-op bail replacing whole-proto eligibility; compile-time budget. | Deopt/OSR is subtle; do last. |
@@ -180,6 +180,30 @@ through both at frame entry.
   values, so they need the runtime-helper retain/release path, folded into J4), the fixed-width
   `WideInt` and bitwise/shift ops, and `for`-range loops (they lower to `MakeRange`/`IterSnapshot`,
   outside the op set — a `while` loop is the J1-eligible shape).
+
+## J2 — what landed (float fast path)
+
+Floats are immediates (NaN-boxed, no heap), so they extend J1's zero-refcount invariant with no new
+machinery — the natural next slice. A numeric `Binary` now runtime-dispatches on its operands
+(the bytecode is untyped): **both small ints → the J1 integer path; both f64 floats → the new float
+path; anything else** (mixed int/float, f32, objects) **→ bail** to the interpreter, which does the
+widening/coercion. Eligibility is unchanged — a float `Binary` was already eligible under J1, it just
+bailed every time; J2 makes it compute natively.
+
+- **Native f64.** `fadd`/`fsub`/`fmul`/`fdiv` and `fcmp` with the interpreter's exact predicates:
+  ordered comparisons (false on NaN) for `< <= > >= ==`, unordered `!=` (true on NaN) — matching
+  `partial_cmp`→`None`→false and `!(a==b)`. A NaN arithmetic result is **canonicalized to the standard
+  quiet NaN**, bit-for-bit `Value::float`, so it can never collide with the tag space (and matches the
+  interpreter exactly). `is_float` is `(bits & qnan) != qnan`; the f64 is read/written by `bitcast`.
+- **Bails:** float `%` (`fmod` is a libcall, not an instruction — rare), and any mixed/f32 operand
+  pairing. All correct, just interpreted.
+- **Result.** `--jit-differential` still **419 matched / 0 skipped / 0 divergence / 0 leaks** (69
+  native prototypes — the float path changed *what those prototypes do*, not which are eligible). Bench
+  `vm_jit/float_*` (interp vs forced JIT, register-local f64 `while` loop): **100k 3.83 ms → 0.59 ms
+  (~6.5×)**. lang-vm adds a native float-loop test and a division/NaN/ordered-compare test.
+- **Deferred:** `f32` scalar arithmetic (rare — f32 is mostly packed-list/SIMD territory, which is
+  heap), tuples make/index and `Narrow`/`IsType` (heap values / type machinery → land with the heap
+  slice J4, not here).
 
 ## Open questions (resolve at sign-off)
 

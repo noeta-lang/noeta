@@ -47,7 +47,7 @@
 
 use core::ffi::c_void;
 
-use cranelift_codegen::ir::condcodes::IntCC;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{AbiParam, Block, InstBuilder, MemFlagsData, Value as ClValue, types};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -459,6 +459,20 @@ impl Codegen<'_, '_> {
         self.b.ins().sshr_imm(shl, 16)
     }
 
+    /// `(v & qnan) != qnan` — is `v` an f64 float? (Every tagged value — int/bool/unit/f32/pointer —
+    /// has all the qnan bits set; a float is exactly the words that don't.)
+    fn is_float(&mut self, v: ClValue) -> ClValue {
+        let qnan = self.b.ins().iconst(types::I64, Value::NANBOX.qnan as i64);
+        let masked = self.b.ins().band(v, qnan);
+        self.b.ins().icmp(IntCC::NotEqual, masked, qnan)
+    }
+
+    /// Reinterpret a float word's bits as the f64 it stores (the value is known to be a float — a
+    /// float is stored as its own bit pattern, not tagged).
+    fn bits_to_f64(&mut self, v: ClValue) -> ClValue {
+        self.b.ins().bitcast(types::F64, MemFlagsData::new(), v)
+    }
+
     /// A native i32 constant (a resume pc).
     fn pc_const(&mut self, pc: usize) -> ClValue {
         self.b.ins().iconst(types::I32, pc as i64)
@@ -558,9 +572,10 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
     }
 }
 
-/// Emit an integer `Binary`: guard both operands are small ints (bail otherwise), compute in i64
-/// with the interpreter's wrapping/trapping semantics, and store the boxed result — bailing before
-/// any write on a divisor-zero, a signed-overflow, or an out-of-immediate-range result.
+/// Emit a numeric `Binary`, dispatching on the operands' runtime types (the bytecode is untyped):
+/// both small ints → the integer fast path (J1); both f64 floats → the float fast path (J2);
+/// anything else (mixed int/float, f32, objects, …) → bail to the interpreter, which handles the
+/// widening/coercion and any type error.
 fn emit_binary(
     cg: &mut Codegen,
     op: BinaryOp,
@@ -572,13 +587,41 @@ fn emit_binary(
 ) {
     let va = cg.load_reg(a);
     let vb = cg.load_reg(b);
+
     let a_int = cg.is_small_int(va);
     let b_int = cg.is_small_int(vb);
-    let both = cg.b.ins().band(a_int, b_int);
+    let both_int = cg.b.ins().band(a_int, b_int);
 
-    // Guard: both operands small ints, else bail (the interpreter handles objects/floats/errors).
-    let compute = cg.b.create_block();
-    guard(cg, both, compute, pc);
+    let int_block = cg.b.create_block();
+    let float_check = cg.b.create_block();
+    cg.b.ins().brif(both_int, int_block, &[], float_check, &[]);
+
+    // Integer fast path.
+    cg.b.switch_to_block(int_block);
+    emit_int_binary(cg, op, dst, va, vb, pc, op_blocks);
+
+    // Float fast path (or bail): both operands must be f64 floats.
+    cg.b.switch_to_block(float_check);
+    let a_flt = cg.is_float(va);
+    let b_flt = cg.is_float(vb);
+    let both_flt = cg.b.ins().band(a_flt, b_flt);
+    let float_block = cg.b.create_block();
+    guard(cg, both_flt, float_block, pc);
+    emit_float_binary(cg, op, dst, va, vb, pc, op_blocks);
+}
+
+/// The integer body of a `Binary`, entered with both operands proven small ints (J1). Computes in
+/// i64 with the interpreter's wrapping/trapping semantics and stores the boxed result — bailing
+/// before any write on a zero divisor, a signed overflow, or an out-of-immediate-range result.
+fn emit_int_binary(
+    cg: &mut Codegen,
+    op: BinaryOp,
+    dst: Reg,
+    va: ClValue,
+    vb: ClValue,
+    pc: usize,
+    op_blocks: &[Block],
+) {
     let x = cg.unbox_int(va);
     let y = cg.unbox_int(vb);
 
@@ -647,6 +690,80 @@ fn box_int_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_block
     guard(cg, fits, store, pc);
     let tag = cg.b.ins().iconst(types::I64, (l.qnan | l.int_tag) as i64);
     let boxed = cg.b.ins().bor(lo, tag);
+    cg.store_reg(dst, boxed);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
+}
+
+/// The float body of a `Binary`, entered with both operands proven f64 floats (J2). Computes in f64
+/// and stores the boxed result. Matches the interpreter's `arithmetic`/`compare`: ordered
+/// comparisons (false on NaN, except `!=` which is true on NaN), and a NaN arithmetic result
+/// canonicalized to the standard quiet NaN — exactly `Value::float`. `%` has no Cranelift instruction
+/// (`fmod` is a libcall), so it bails.
+fn emit_float_binary(
+    cg: &mut Codegen,
+    op: BinaryOp,
+    dst: Reg,
+    va: ClValue,
+    vb: ClValue,
+    pc: usize,
+    op_blocks: &[Block],
+) {
+    // Float `%` (fmod) is a libcall, not an instruction — leave it to the interpreter.
+    if op == BinaryOp::Rem {
+        let here = cg.pc_const(pc);
+        cg.b.ins().return_(&[here]);
+        return;
+    }
+    let x = cg.bits_to_f64(va);
+    let y = cg.bits_to_f64(vb);
+    match op {
+        BinaryOp::Add => {
+            let r = cg.b.ins().fadd(x, y);
+            box_float_and_store(cg, dst, r, pc, op_blocks);
+        }
+        BinaryOp::Sub => {
+            let r = cg.b.ins().fsub(x, y);
+            box_float_and_store(cg, dst, r, pc, op_blocks);
+        }
+        BinaryOp::Mul => {
+            let r = cg.b.ins().fmul(x, y);
+            box_float_and_store(cg, dst, r, pc, op_blocks);
+        }
+        BinaryOp::Div => {
+            let r = cg.b.ins().fdiv(x, y);
+            box_float_and_store(cg, dst, r, pc, op_blocks);
+        }
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
+            let cc = match op {
+                BinaryOp::Eq => FloatCC::Equal,
+                BinaryOp::Ne => FloatCC::NotEqual,
+                BinaryOp::Lt => FloatCC::LessThan,
+                BinaryOp::Le => FloatCC::LessThanOrEqual,
+                BinaryOp::Gt => FloatCC::GreaterThan,
+                _ => FloatCC::GreaterThanOrEqual,
+            };
+            let cmp = cg.b.ins().fcmp(cc, x, y);
+            let l = Value::NANBOX;
+            let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
+            let fb = cg.b.ins().iconst(types::I64, l.false_bits as i64);
+            let boxed = cg.b.ins().select(cmp, tb, fb);
+            cg.store_reg(dst, boxed);
+            cg.b.ins().jump(op_blocks[pc + 1], &[]);
+        }
+        _ => unreachable!("supported_binary gate: unexpected op {op:?}"),
+    }
+}
+
+/// Box an f64 arithmetic result to a float word and store it, matching `Value::float`: a NaN result
+/// is canonicalized to the standard quiet NaN (so it can never collide with the tag space), any other
+/// value keeps its own bit pattern.
+fn box_float_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blocks: &[Block]) {
+    let raw = cg.b.ins().bitcast(types::I64, MemFlagsData::new(), r);
+    let is_nan = cg.b.ins().fcmp(FloatCC::Unordered, r, r);
+    let canon =
+        cg.b.ins()
+            .iconst(types::I64, Value::float(f64::NAN).bits() as i64);
+    let boxed = cg.b.ins().select(is_nan, canon, raw);
     cg.store_reg(dst, boxed);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }

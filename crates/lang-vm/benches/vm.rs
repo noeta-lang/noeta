@@ -347,6 +347,16 @@ fn jit_loop_src(n: usize) -> String {
     )
 }
 
+/// J2 (P-JIT float fast path): the same loop shape with an f64 accumulator — a float `Binary` (`*`,
+/// `+`) each iteration alongside the integer counter, so the JIT's runtime int-vs-float dispatch and
+/// the native f64 arithmetic both get exercised.
+#[cfg(feature = "jit")]
+fn jit_float_loop_src(n: usize) -> String {
+    format!(
+        "fn run(n: int): float {{\n    mut total = 0.0;\n    mut i = 0;\n    while i < n {{\n        total = total + 1.5;\n        i = i + 1;\n    }}\n    return total;\n}}\necho run({n});\n"
+    )
+}
+
 /// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
 /// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
 /// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
@@ -911,6 +921,17 @@ fn vm_hot_paths(c: &mut Criterion) {
                 b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
             });
             jit.bench_with_input(BenchmarkId::new("loop_jit", n), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+            let fmodule = compile(&jit_float_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("float_interp", n),
+                &fmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(BenchmarkId::new("float_jit", n), &fmodule, |b, module| {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
         }

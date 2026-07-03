@@ -4843,6 +4843,48 @@ mod tests {
         );
     }
 
+    /// J2 (float fast path): a mixed int/float `while` loop — a float accumulator (`+`) with an
+    /// integer counter (`<`, `+`) — compiles to native code (each homogeneous `Binary` takes its
+    /// int or float branch) and matches the interpreter exactly.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_float_while_loop_is_native_and_correct() {
+        let src = "fn run(n: int): float {\n  mut x = 0.0;\n  mut i = 0;\n  while i < n {\n    x = x + 1.5;\n    i = i + 1;\n  }\n  return x;\n}\necho run(1000);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the float loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "tier-1 float result must match the interpreter"
+        );
+        assert_eq!(jit.stdout, "1500.0\n");
+    }
+
+    /// J2 float division, comparison, and NaN: `6.0 / 4.0` divides natively, `0.0 / 0.0` produces a
+    /// canonicalized NaN, and an ordered float `<` (false on NaN) drives a `CondBranch` — the paths
+    /// most likely to diverge from the interpreter.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_float_division_and_nan_match() {
+        let src = "fn run(): float {\n  mut a = 6.0 / 4.0;\n  mut z = 0.0;\n  mut q = z / z;\n  if q < a { return 0.0; }\n  return a;\n}\necho run();\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the float fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "NaN/division float result must match the interpreter"
+        );
+        assert_eq!(jit.stdout, "1.5\n");
+    }
+
     /// Peak heap residency for one program (architecture §0.3) — `reset_peak` before, `live_peak`
     /// after, so the high-water mark is measured in isolation.
     fn peak_residency(src: &str) -> usize {
