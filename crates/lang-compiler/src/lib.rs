@@ -1089,6 +1089,10 @@ impl<'m> FnCompiler<'m> {
         // `coalesce` therefore **pins the `frame_locals` registers** (when present), keeping each in
         // its own slot so the teardown list stays accurate; temporaries — the bulk of the coalescing
         // win — still coalesce freely.
+        // Hoist loop-invariant primitive-constant loads out of loops (P-VMT-LICM) on the monotonic
+        // code, then coalesce — hoisting first lets coalescing give the pre-header load a slot with
+        // its (now loop-spanning) live range.
+        regalloc::hoist_loop_invariant_consts(&mut chunk);
         regalloc::coalesce(&mut chunk);
         chunk
     }

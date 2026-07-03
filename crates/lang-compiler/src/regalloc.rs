@@ -34,11 +34,148 @@
 //!
 //! [`set_reg`]: ../../lang_vm/index.html
 
-use lang_bytecode::{CaptureFrom, Chunk, Op, Reg, StrPart};
+use lang_bytecode::{CaptureFrom, Chunk, Const, Op, Reg, StrPart};
 
 /// Coalesce `chunk`'s registers in place: rename register numbers onto the smallest set of physical
 /// slots that respects liveness, and shrink `num_registers` to match. Behaviour-preserving — only
 /// *which* slot holds each value changes (and dead values are released earlier).
+/// A constant with no heap allocation and no destructor — safe to materialize **once** and read from
+/// the same register across many loop iterations (P-VMT-LICM). `Str`/`NativeModule` are excluded:
+/// they carry an `Rc`, so sharing one materialization across iterations would change refcount/drop
+/// timing versus the per-iteration re-materialization the loop body expects.
+fn is_primitive_const(c: &Const) -> bool {
+    matches!(
+        c,
+        Const::Unit | Const::Bool(_) | Const::Int(_) | Const::Float(_) | Const::F32(_)
+    )
+}
+
+/// Apply `f` to each jump-target field an op carries (the same set [`patch_jump`] handles), for the
+/// LICM rebuild's target fix-up.
+fn for_each_target_mut(op: &mut Op, mut f: impl FnMut(&mut u32)) {
+    match op {
+        Op::Jump { target }
+        | Op::JumpIfFalse { target, .. }
+        | Op::JumpIfTrue { target, .. }
+        | Op::CondBranch { target, .. } => f(target),
+        Op::Coalesce { fallback, .. } => f(fallback),
+        Op::MatchInt { fail, .. }
+        | Op::MatchStr { fail, .. }
+        | Op::MatchBool { fail, .. }
+        | Op::MatchVariant { fail, .. }
+        | Op::MatchTuple { fail, .. } => f(fail),
+        _ => {}
+    }
+}
+
+/// Hoist loop-invariant primitive-constant loads out of loops (P-VMT-LICM). Runs on the **monotonic**
+/// pre-coalesce code (every value in its own write-once register), *before* [`coalesce`].
+///
+/// A `LoadConst` of a primitive (int/float/bool/f32/unit — see [`is_primitive_const`]) inside a loop
+/// re-materializes the constant every iteration. When its destination register is written only by that
+/// one load and read only as a **borrowing** arithmetic/comparison operand (`Binary`/`WideInt`, which
+/// never clear their inputs), the load is safely hoisted to a pre-header just before the loop: the
+/// value is materialized once and every iteration reads the surviving register. Because the code uses
+/// structured jump targets, the chunk is rebuilt with an old→new index remap and all jumps are fixed
+/// up — no manual per-op arithmetic. Behaviour is identical (a primitive load has no side effect and
+/// the value is invariant), so the VM's result is unchanged; the eval backend never runs this (it
+/// interprets the IR), so the differential is untouched.
+pub fn hoist_loop_invariant_consts(chunk: &mut Chunk) {
+    let n = chunk.code.len();
+    // Loop regions from backward unconditional jumps (`while`/`for` emit a back `Jump` to the top).
+    let loops: Vec<(usize, usize)> = chunk
+        .code
+        .iter()
+        .enumerate()
+        .filter_map(|(j, op)| match op {
+            Op::Jump { target } if *target as usize <= j => Some((*target as usize, j)),
+            _ => None,
+        })
+        .collect();
+    if loops.is_empty() {
+        return;
+    }
+
+    // Per-register: how many ops define it, and whether any *non*-arithmetic op reads it. A register
+    // read only by `Binary`/`WideInt` is never consumed, so hoisting its load can't strand a later
+    // iteration on a cleared slot.
+    let regs = chunk.num_registers as usize;
+    let mut def_count = vec![0u32; regs];
+    let mut nonarith_use = vec![false; regs];
+    // Indices that are jump targets: a `LoadConst` sitting on one is a control-flow merge point (e.g.
+    // the op after an `if`-expression, where `prev + 1` loads its `1`). Moving it would leave the
+    // branches jumping into the pre-header, so such loads are never hoisted.
+    let mut is_target = vec![false; n];
+    for op in &chunk.code {
+        let facts = op_facts(op);
+        if let Some(d) = facts.def {
+            def_count[d as usize] += 1;
+        }
+        if !matches!(op, Op::Binary { .. } | Op::WideInt { .. }) {
+            for u in facts.uses {
+                nonarith_use[u as usize] = true;
+            }
+        }
+        for t in facts.targets {
+            if (t as usize) < n {
+                is_target[t as usize] = true;
+            }
+        }
+    }
+
+    // For each hoistable `LoadConst`, record it under the top of its innermost enclosing loop.
+    let mut hoist_at: Vec<Vec<usize>> = vec![Vec::new(); n];
+    let mut hoisted = vec![false; n];
+    for p in 0..n {
+        if is_target[p] {
+            continue; // a control-flow merge point — moving it would strand its branches
+        }
+        let Op::LoadConst { dst, k } = chunk.code[p] else {
+            continue;
+        };
+        if !is_primitive_const(&chunk.consts[k as usize]) {
+            continue;
+        }
+        let d = dst as usize;
+        if def_count[d] != 1 || nonarith_use[d] {
+            continue;
+        }
+        // Innermost enclosing loop = the one with the greatest top that still contains `p`.
+        let top = loops
+            .iter()
+            .filter(|&&(top, end)| top < p && p <= end)
+            .map(|&(top, _)| top)
+            .max();
+        if let Some(top) = top {
+            hoist_at[top].push(p);
+            hoisted[p] = true;
+        }
+    }
+    if !hoisted.iter().any(|&h| h) {
+        return;
+    }
+
+    // Rebuild: at each loop top, emit its hoisted loads first (the pre-header), then the top's own op;
+    // skip each hoisted load at its original site. `remap[old] = new` for every retained/moved op.
+    let mut new_code: Vec<Op> = Vec::with_capacity(n);
+    let mut remap = vec![0u32; n];
+    for old in 0..n {
+        for &src in &hoist_at[old] {
+            remap[src] = new_code.len() as u32;
+            new_code.push(chunk.code[src].clone());
+        }
+        if hoisted[old] {
+            continue; // already emitted in its loop's pre-header above
+        }
+        remap[old] = new_code.len() as u32;
+        new_code.push(chunk.code[old].clone());
+    }
+    for op in &mut new_code {
+        for_each_target_mut(op, |t| *t = remap[*t as usize]);
+    }
+    chunk.code = new_code;
+}
+
 pub fn coalesce(chunk: &mut Chunk) {
     let n = chunk.num_registers as usize;
     if n == 0 {
