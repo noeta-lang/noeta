@@ -199,6 +199,13 @@ impl Value {
         heap::alloc(Payload::Str(s.to_string()))
     }
 
+    /// A heap string (refcount 1) that **takes ownership** of an already-built `String` — no copy,
+    /// unlike [`Value::string`] which copies a borrowed `&str`. Use when the caller already owns the
+    /// buffer (e.g. `BuildString`'s interpolation output).
+    pub fn from_string(s: String) -> Value {
+        heap::alloc(Payload::Str(s))
+    }
+
     /// A heap byte buffer (`bytes`, refcount 1), taking ownership of `data` (P-PACK 4.4).
     pub fn bytes(data: Vec<u8>) -> Value {
         heap::alloc(Payload::Bytes(data))
@@ -1897,6 +1904,36 @@ impl Value {
     // --- Display (mirrors the M0 tree-walker's `Value::display`) ---
 
     /// The display form used by `echo` and `~` concatenation.
+    /// Append this value's [`display`](Self::display) form to `out` **without** the intermediate
+    /// `String` that `push_str(&self.display())` would allocate. Fast paths cover the values that
+    /// dominate string interpolation — a heap string (append its bytes, no clone), a small int, and a
+    /// bool — and everything else falls back to `display()`, so the rendering is byte-identical.
+    pub fn display_into(self, out: &mut String) {
+        use std::fmt::Write;
+        if let Some(b) = self.as_bool() {
+            out.push_str(if b { "true" } else { "false" });
+        } else if self.is_small_int() {
+            let _ = write!(out, "{}", self.as_int().unwrap());
+        } else if self.is_pointer() {
+            let handled = heap::with_payload(self, |p| match p {
+                Payload::Str(s) => {
+                    out.push_str(s);
+                    true
+                }
+                Payload::Int(i) => {
+                    let _ = write!(out, "{i}");
+                    true
+                }
+                _ => false,
+            });
+            if !handled {
+                out.push_str(&self.display());
+            }
+        } else {
+            out.push_str(&self.display());
+        }
+    }
+
     pub fn display(self) -> String {
         // A packed list (P-PACK 2.4) has no specialized display: materialize a temporary boxed list,
         // render it (identically to the boxed equivalent), and release the temporary.

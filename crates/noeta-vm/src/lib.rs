@@ -4701,11 +4701,13 @@ impl<'m> Vm<'m> {
                                     }
                                 }
                                 StrPart::Hole(r) => {
-                                    out.push_str(&regs[fbase + *r as usize].display());
+                                    // Render directly into the buffer — no per-hole `display()` clone.
+                                    regs[fbase + *r as usize].display_into(&mut out);
                                 }
                             }
                         }
-                        set_reg(regs, fbase, *dst, Value::string(&out));
+                        // Move the finished buffer into the heap string — no second copy.
+                        set_reg(regs, fbase, *dst, Value::from_string(out));
                         pc += 1;
                     }
                     Op::Raise { idx } => {
