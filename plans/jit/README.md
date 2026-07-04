@@ -109,6 +109,8 @@ on every eligible program.
 | **J6** | ✅ **DONE (negative result, documented).** **Native inline cache** — built the call-free native field read (guard on shape pointer + inline slot load, `#[repr(u8)]` + runtime-measured layout), proved correct/leak-free, and **reverted**: the field read is not the bottleneck (`heap_aware` store overhead + dependent-load latency are, both tier-independent). See the J6 section. | Field read was never the bottleneck. |
 | **J7** | ✅ **DONE.** **Bare stores** — the J6 finding's real lever. A forward may-hold-heap dataflow (`heap_in_map`, fails closed) + an ownership-transfer peephole (`transfer_pairs`) elide the refcount work on register stores/`Move`/`Drop` wherever the value is provably immediate. Synergistic: `loop_jit/1M` ~7.4→6.0ms (~19%), `float_jit/1M` ~6.3→4.6ms (~28%). Blocked from going further by int→bigint overflow (accumulators are genuinely may-heap). Pure-numeric-loop lever; field loops unchanged (leaf helper dominates). See the J7 section. | Refcount exactness — leak oracle is the gate. |
 
+| **J8** | **NEXT (planned, own milestone doc): SSA register promotion** — hold live VM registers in Cranelift SSA values instead of round-tripping every operand through the in-memory register stack; spill only at bail/deopt/helper boundaries; then the SSA calling convention for native→native calls. The measured evidence (J6 negative result, J7 partial win, P-CALL S2 finding) all points here. Full staging + design constraints: **[`ssa.md`](ssa.md)** (P-JSSA). | Spill-map/deopt correctness — oracle-gated per slice. |
+
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
 before/after, and `git` commit per green slice (standing directive).
 
