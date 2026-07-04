@@ -1,10 +1,31 @@
 # P-CALL — native call frames (inline the call/return sequence into JIT code)
 
-Status: **S1–S2 done; S3–S4 DROPPED after the S2 measurement (the frame-setup *work*, not the helper
-*call*, is the cost — native `Vec`-header inlining would buy ~2–3% for real memory-corruption risk).**
-The milestone as originally scoped (inline the frame sequence) has a low ceiling; the real lever is
-reducing the per-call *work* — see "Findings" below. Out-of-oracle (JIT is real-host only), gated by
+Status: **S1–S2 done; S3–S4 DROPPED (measured low ceiling). The redirect then landed the real win —
+`bare-store arithmetic in call-bearing protos` (+6% fib), NOT a new int type.** Cumulative over the
+whole fib arc (A+B CallGlobal + S2 + bare-store): **fib +12.2%**, loop +2.9%, assoc +4.2%, wordcount
+−3.3% (a map-heavy codegen-layout artifact). Out-of-oracle (JIT is real-host only), gated by
 `--jit-differential` (byte-identical `RunResult` + leak-under-JIT residency 0).
+
+## Redirect outcomes — pursuing the three "reduce the work" levers
+
+- **#3 fixed-`int` heap-aware tax → DONE via a JIT analysis, not a new type (`779b6c5`, +6% fib / +2.3%
+  loop).** The tax wasn't (only) arbitrary-precision `int` — it was that a call-bearing proto is
+  `heap_aware` and the bare-store analysis *failed closed* on the unmodeled `Call`/`CallGlobal`, so
+  every store (incl. immediate arithmetic temps) paid the release check. Fix: (a) model `Call`/
+  `CallGlobal` in `reg_effect` as `Def { dst, heap: true }` (sound — a call only redefines its result;
+  the interp's post-bail re-entry at pc+1 matches), and (b) treat `Add/Sub/Mul/Div/Rem` results as
+  immediate (sound — the native `Binary` bails to the interpreter *before storing* on 48-bit overflow,
+  float is NaN-boxed). Oracle-proven: an unsound bare store = a skipped release = a leak, and
+  leak-under-JIT residency stays 0. **This is the real fib lever, and it landed without a new int type.**
+- **#1 shrink `Frame` (`upvalues: Vec<Value>` → `Box<[Value]>`) → WASH, reverted.** Built and verified
+  (all oracles green) but measured +0.2% on fib — no signal. Shrinking `Frame` 24→16 B doesn't move the
+  needle (confirms S2: the frame push isn't the bottleneck), and it adds `into_boxed_slice`/`Box::from`
+  copies in the closure path. Not kept.
+- **#2 cheaper register-window init → DEFERRED (not a bolt-on).** Skipping `reserve_window`'s zero-init
+  needs per-call liveness (else `do_return`'s release loop reads garbage → crash); the frames-`Vec`
+  reallocs are startup-only (recursion depth is bounded); skipping the return release loop needs a
+  frame that is all-immediate, which fib is not (`n` + call results are may-heap). It requires a
+  calling-convention change or frame-immediate tracking — its own medium/large track.
 
 ## Findings (S1–S2) — the measurement that redirected the milestone
 
