@@ -463,11 +463,15 @@ impl Jit {
             // A prototype that makes a call carries heap values (the callee closure, and results) in
             // registers, so its register writes must be refcount-correct (release the overwritten
             // value, retain a moved heap value). A call-free prototype keeps the immediate invariant
-            // (J1/J2/globals) and the faster refcount-free stores.
-            let heap_aware = chunk
-                .code
-                .iter()
-                .any(|op| matches!(op, Op::Call { .. }) || is_leaf_heap_op(op));
+            // (J1/J2/globals) and the faster refcount-free stores — UNLESS it has an OSR entry: then
+            // native execution can begin mid-frame (a loop header) with a heap value already live in a
+            // register (the interpreter put it there), so the refcount-correct stores are mandatory,
+            // just as for the resume-native (post-call) entry a call-bearing prototype already forces.
+            let heap_aware = has_osr_entry(chunk)
+                || chunk
+                    .code
+                    .iter()
+                    .any(|op| matches!(op, Op::Call { .. }) || is_leaf_heap_op(op));
 
             let mut cg = Codegen {
                 b: &mut b,
@@ -658,8 +662,11 @@ fn const_immediate_bits(c: &Const) -> Option<u64> {
 }
 
 /// The bytecode pcs at which the interpreter may (re-)enter this prototype's native code: pc 0 (a
-/// fresh frame) plus every `call_pc + 1` (a resume after a native `Call` returned) — J3
-/// resume-native. Those are the only pcs a frame's saved `pc` ever holds at a `'reload` transition.
+/// fresh frame), every `call_pc + 1` (a resume after a native `Call` returned — J3 resume-native),
+/// and every **loop header** (a backward-branch target — J5 OSR). Those are the only pcs a frame's
+/// saved `pc` ever holds when the interpreter re-enters at a `'reload` transition. The loop headers
+/// are what let a long-running loop enter tier 1 *mid-frame* (on-stack replacement) rather than only
+/// at a call boundary — closing the hole where a top-level loop (entered once) never gets hot.
 fn entry_pcs(chunk: &lang_bytecode::Chunk) -> Vec<usize> {
     let n = chunk.code.len();
     let mut pcs = vec![0usize];
@@ -667,8 +674,39 @@ fn entry_pcs(chunk: &lang_bytecode::Chunk) -> Vec<usize> {
         if matches!(op, Op::Call { .. }) && pc + 1 < n {
             pcs.push(pc + 1);
         }
+        if let Some(t) = backward_target(op, pc) {
+            pcs.push(t);
+        }
     }
+    pcs.sort_unstable();
+    pcs.dedup();
     pcs
+}
+
+/// The target of a **backward** branch at `pc` (a loop back-edge), or `None` if `op` is not a branch
+/// or branches forward. A backward-branch target is a loop header — an OSR (on-stack replacement)
+/// entry point (J5). `target <= pc` is the back-edge test (a self-loop `target == pc` counts).
+fn backward_target(op: &Op, pc: usize) -> Option<usize> {
+    let t = match op {
+        Op::Jump { target }
+        | Op::JumpIfTrue { target, .. }
+        | Op::JumpIfFalse { target, .. }
+        | Op::CondBranch { target, .. } => *target as usize,
+        _ => return None,
+    };
+    (t <= pc).then_some(t)
+}
+
+/// Whether this prototype has any OSR (loop-header) entry point — a backward branch (J5). Such a
+/// prototype is compiled `heap_aware` unconditionally: OSR enters mid-frame with whatever the
+/// interpreter left in the registers (a heap value may be live), so every store must be
+/// refcount-correct, exactly the precondition J3 resume-native already relies on.
+fn has_osr_entry(chunk: &lang_bytecode::Chunk) -> bool {
+    chunk
+        .code
+        .iter()
+        .enumerate()
+        .any(|(pc, op)| backward_target(op, pc).is_some())
 }
 
 /// Forward reachability of each bytecode pc in the *native* control-flow graph, seeded from every

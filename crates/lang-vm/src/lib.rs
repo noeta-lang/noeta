@@ -193,6 +193,38 @@ impl VmBackend {
             .unwrap_or_default();
         (result, stats)
     }
+
+    /// Execute a module with **ordinary hot-counter promotion** (the production tiering) — like the
+    /// real `lang run`, a prototype goes native only once hot. Used by the OSR bench.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_hot(&self, module: &Module) -> RunResult {
+        self.run_module_jit_hot_with_stats(module).0
+    }
+
+    /// Like [`VmBackend::run_module_jit_with_stats`] but with **ordinary hot-counter promotion**
+    /// (`force_jit` off) — the real production tiering. A prototype compiles only once it crosses
+    /// [`JIT_HOT_THRESHOLD`] entries *or back-edges* (P-JIT J5 OSR), so this exercises the promotion
+    /// path itself: a top-level loop entered once must still go native via its loop back-edges.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_hot_with_stats(&self, module: &Module) -> (RunResult, JitStats) {
+        lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
+        let mut vm = Vm::load(
+            module,
+            Box::new(lang_stdlib::SandboxHost::new()),
+            Box::new(lang_stdlib::SandboxExecutor::new()),
+        );
+        vm.init_jit(); // force_jit stays false → hot-counter + OSR promotion
+        let result = run_and_teardown(&mut vm, lang_value::CollectorMode::Trace);
+        let stats = vm
+            .jit
+            .as_ref()
+            .map(|j| JitStats {
+                native: j.native_count(),
+                compiled: j.compiled_count(),
+            })
+            .unwrap_or_default();
+        (result, stats)
+    }
 }
 
 /// JIT-coverage counts for one forced-JIT run: how many prototypes were compiled to real native code
@@ -1259,6 +1291,28 @@ impl<'m> Vm<'m> {
         let jit = self.jit.as_mut()?;
         jit.compile(module, proto).ok()
     }
+
+    /// On-stack replacement trigger (P-JIT J5): a taken **backward branch** in prototype `proto` is a
+    /// loop back-edge. Count it toward the hot threshold and, once the prototype crosses it, compile
+    /// the prototype — returning `true` to signal the inner loop to re-enter native code at the loop
+    /// header (the compiled body has an OSR entry block for every loop header). `false` = keep
+    /// interpreting.
+    ///
+    /// This closes the hole where a long-running loop never gets hot: promotion otherwise counts only
+    /// frame *entries*, so a top-level program that is one big loop (its `main` frame entered exactly
+    /// once) would run entirely in tier 0. Counting back-edges makes such a loop promote and jump into
+    /// native code mid-flight.
+    ///
+    /// **One OSR per prototype.** If the prototype is already compiled we do nothing: the frame goes
+    /// native at its next `'reload` anyway, and re-OSRing from tier 0 (after a native op bailed back)
+    /// would risk bouncing tier-0↔tier-1 every iteration for a loop whose body native can't sustain.
+    #[cfg(feature = "jit")]
+    fn jit_osr_backedge(&mut self, proto: usize) -> bool {
+        if self.jit.as_ref().and_then(|j| j.get(proto)).is_some() {
+            return false;
+        }
+        self.jit_maybe_compile(proto).is_some()
+    }
 }
 
 /// Run `main` and tear the VM down (globals, cycle collection, channel drain), returning the program's
@@ -1806,6 +1860,24 @@ impl<'m> Vm<'m> {
                     // The frame aborted inside native code (a diagnostic is recorded).
                     Some(JitOutcome::Abort) => return Err(Abort),
                 }
+            }
+            // OSR back-edge trigger (P-JIT J5): a taken backward branch to `target` is a loop
+            // back-edge. When the JIT is armed (real-host path only — `self.jit` is `None` on the
+            // sandbox/differential path, so this is a single predicted branch there) and the branch
+            // goes backward, count it; once the prototype is hot, compile it and re-enter native at the
+            // loop header by saving `pc` and reloading. `$target` is evaluated against the current `pc`
+            // (the branch's own location) *before* `pc` is reassigned to it.
+            macro_rules! osr_backedge {
+                ($target:expr) => {
+                    #[cfg(feature = "jit")]
+                    {
+                        let _osr_t = $target as usize;
+                        if _osr_t <= pc && self.jit.is_some() && self.jit_osr_backedge(proto) {
+                            frames[top].pc = _osr_t;
+                            continue 'reload;
+                        }
+                    }
+                };
             }
             loop {
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
@@ -4378,10 +4450,12 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::Jump { target } => {
+                        osr_backedge!(*target);
                         pc = *target as usize;
                     }
                     Op::JumpIfTrue { reg, target } => {
                         if regs[fbase + *reg as usize].as_bool() == Some(true) {
+                            osr_backedge!(*target);
                             pc = *target as usize;
                         } else {
                             pc += 1;
@@ -4389,6 +4463,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::JumpIfFalse { reg, target } => {
                         if regs[fbase + *reg as usize].as_bool() == Some(false) {
+                            osr_backedge!(*target);
                             pc = *target as usize;
                         } else {
                             pc += 1;
@@ -4399,7 +4474,10 @@ impl<'m> Vm<'m> {
                         // `RequireCondBool` + `JumpIfFalse` pair it replaces.
                         let v = regs[fbase + *reg as usize];
                         match v.as_bool() {
-                            Some(false) => pc = *target as usize,
+                            Some(false) => {
+                                osr_backedge!(*target);
+                                pc = *target as usize;
+                            }
                             Some(true) => pc += 1,
                             None => {
                                 return Err(self.error(
@@ -5597,6 +5675,55 @@ mod tests {
         );
         // 0*10 + 1*20 + 2*30 + 3*40 = 200.
         assert_eq!(jit.stdout, "200\n");
+    }
+
+    /// OSR (P-JIT J5): a **top-level** loop — the whole program is one `while` loop in `main`, which
+    /// is entered exactly *once*, so entry-count promotion would never make it hot. Under ordinary
+    /// hot-counter promotion (not `force_jit`), it must still go native by counting the loop's
+    /// **back-edges** and entering tier 1 mid-frame at the loop header (on-stack replacement). This is
+    /// the production hole J5 closes.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_osr_top_level_loop_goes_native() {
+        // 200 iterations > JIT_HOT_THRESHOLD (50): the back-edge counter promotes `main` (proto 0)
+        // and OSRs into its loop, even though `main` is entered only once.
+        let src =
+            "mut acc = 0\nmut i = 0\nwhile i < 200 {\n  acc = acc + i\n  i = i + 1\n}\necho acc\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the top-level loop must go native via OSR under hot-counter promotion, got {stats:?}"
+        );
+        assert_eq!(interp, jit, "OSR result must match the interpreter");
+        let expected: i64 = (0..200).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
+    }
+
+    /// OSR refcount-exactness (P-JIT J5): a top-level loop whose body moves **heap** values — a
+    /// top-level struct `b` read (`LoadField`) and written (`SetField`, the struct copy-on-write path)
+    /// each iteration, with the global `b` loaded into a register (a heap value) every pass. It
+    /// promotes and OSRs into native code mid-frame with that heap value live. Forcing `heap_aware`
+    /// for OSR-capable prototypes keeps the register stores refcount-correct; the result must match
+    /// the interpreter (the `--jit-differential` leak check gates residency).
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_osr_heap_body_matches_interpreter() {
+        let src = "struct Box { mut v: int }\nmut b = Box { v: 0 }\nmut i = 0\nwhile i < 100 {\n  b.v = b.v + i\n  i = i + 1\n}\necho b.v\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the heap-body top-level loop must go native via OSR, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "OSR heap-body result must match the interpreter"
+        );
+        let expected: i64 = (0..100).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
     }
 
     /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware

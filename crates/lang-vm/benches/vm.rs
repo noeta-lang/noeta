@@ -1031,6 +1031,20 @@ fn vm_hot_paths(c: &mut Criterion) {
                 b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
             });
         }
+        // OSR (J5): the same top-level global loop, but through **ordinary hot-counter promotion**
+        // (`run_module_jit_hot`, not forced) — the real production path. Before OSR, `main` (entered
+        // once) never crossed the entry threshold, so this loop ran entirely in tier 0 in production;
+        // OSR counts its back-edges and jumps into native code mid-flight. Benched interp vs hot-JIT
+        // so the win from the promotion actually reaching the loop is visible.
+        for &n in LOOP_ITERS {
+            let gmodule = compile(&global_loop_src(n));
+            jit.bench_with_input(BenchmarkId::new("osr_interp", n), &gmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            });
+            jit.bench_with_input(BenchmarkId::new("osr_hot", n), &gmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit_hot(black_box(module))));
+            });
+        }
         jit.finish();
     }
 }

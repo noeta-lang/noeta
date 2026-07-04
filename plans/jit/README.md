@@ -1,6 +1,6 @@
 # JIT milestone (P-JIT) — closing the scalar/loop/call gap to a JIT engine
 
-**Status: J0 + J1 + J2 + native globals DONE (integer/float/global fast paths + per-op bail, ~4–7× on native loops); J3+ pending.** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
+**Status: J0–J5 DONE + production-wired (integer/float/global/call/heap fast paths, leaf-op heap coverage, and OSR tiering; ~4–7× on native loops, ~2.3× on recursion, ~3.5–5.5× on top-level loops under real hot-counter promotion).** The VM-throughput arc (P-VMT: S0–S5 + RMW, GSLOT, CBR,
 LICM) took the interpreter as far as *interpreter-level* wins go — dispatch is now ~3.3 ns/op, near the
 floor for a `match`-based switch interpreter. The remaining ~10–35× gap to PHP 8.4 on hot scalar / loop
 / call code (`loop 10M` ~35×, `fib(32)` ~17×) is structural: PHP's **tracing JIT** runs the equivalent
@@ -105,7 +105,7 @@ on every eligible program.
 | **J2** | ✅ **DONE (floats).** **Float fast path** — native f64 ALU (`+ - * /`) and ordered comparison (`== != < <= > >=`), dispatched from the same `Binary` by a runtime int-vs-float type check; NaN results canonicalized to match `Value::float` bit-for-bit. **~6.5× on float loops.** (f32, tuples, `Narrow`/`IsType` deferred — see below.) | Incremental. |
 | **J3** | ✅ **DONE.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation); heap-aware refcounting for the callee closure/results; **resume-native** re-enters the compiled caller after its callee returns; **native→native direct calls** — a compiled caller `call_indirect`s a compiled callee (value-returning `Return`, capacity-guarded so the register pointer stays valid), skipping the interpreter round-trip on the fast path, falling back to the shared setup otherwise. `fib`-class recursion **~2.3×**; loops ~6–8×. | Call ABI, stack/frame interaction, recursion depth. |
 | **J4** | ✅ **LEAF-OP ARC DONE (slices 1–4).** **Heap & collections** — a generic `run_leaf_op` helper runs a single non-dispatching heap/collection op (the interpreter's exact arm, refcounts included) and returns "continue" or a resume pc; adding an op is a match arm. Slice 1: `MakeRange`/`IterSnapshot`/`ListLen`/`ListGet` → `for i in 0..n` native (**~2.6×**). Slice 2: `LoadField`/`SetField` (store factored into a shared `set_field_fast`, refcount-identical across tiers) — **812/813 protos native**. Slice 3: `Op::Index` (list/map/string subscript). Slice 4: `MakeTuple`/`TupleIndex` (completes `for (i,x) in xs.enumerate()` native). Heap-*dominated* loops are ~1.0–1.1× (each op is a helper call); the win is coverage — a loop mixing heap access with native arithmetic stays native. **Deliberately not leaf-ified** (documented below): dispatch-preceded constructors (`MakeMap`/`RequireMapKey`, `BuildString`/`Stringify`), thunk-running `MakeStruct`/`MakeEnum`. Genuinely fast heap access is the J5 inline cache, not more leaf ops. | **Refcount exactness** — the leak oracle is the gate. |
-| **J5** | **Tiering polish + OSR** — on-stack replacement so a hot loop enters tier 1 mid-execution (not only at call boundary); counter tuning; per-op bail replacing whole-proto eligibility; compile-time budget. | Deopt/OSR is subtle; do last. |
+| **J5** | ✅ **DONE (OSR).** **Tiering polish + OSR** — on-stack replacement so a long-running loop enters tier 1 *mid-frame* at the loop header, not only at a call boundary. Closes the production hole where a top-level program that is one big loop (its `main` frame entered exactly once) never crossed the entry-count threshold and so ran entirely in tier 0 in production — every prior loop win was `force_jit`-only. Back-edge counting drives promotion; loop headers become native (re-)entry points (reusing the J3 resume-native mid-frame-entry machinery); OSR-capable prototypes compile `heap_aware` so mid-frame entry with a live heap value stays refcount-exact. **~3.5–5.5× on a top-level loop under real hot-counter promotion** (was tier-0-only before). Per-op bail + native-globals landed earlier (see below). | Deopt/OSR is subtle; do last. |
 
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
 before/after, and `git` commit per green slice (standing directive).
@@ -394,6 +394,53 @@ hot-counter promotion, so real programs accelerate without any flag.
   isolates, the `@test` runner, backpressure all route through it). CI keeps the library + oracle + docs
   jobs Cranelift-free (excluding `lang-cli`), adds a lean `--no-default-features` CLI build, and gates
   the JIT-enabled CLI (integration + doc samples) in the `jit` job.
+
+## J5 — what landed (OSR / on-stack replacement)
+
+The production hole J5 closes is specific and real: **hot-counter promotion counted only frame
+*entries*.** A program that is one long top-level loop — `mut i = 0; while i < N { … }` at module
+scope — runs entirely inside `main` (prototype 0), which is entered exactly *once*. Its counter
+reached 1, never `JIT_HOT_THRESHOLD` (50), so **it never compiled in production** and ran every
+iteration in tier 0. Every top-level-loop win recorded above (native globals ~4.2×) was measured under
+the oracle's `force_jit`; a real `lang run` of that shape got nothing. OSR fixes exactly this.
+
+- **Back-edge counting drives promotion.** The tier-0 inner loop now treats a **taken backward
+  branch** (`Jump`/`JumpIf*`/`CondBranch` whose `target <= pc`) as a loop back-edge: it bumps the same
+  per-prototype counter frame entry uses and, once hot, compiles the prototype and re-enters native at
+  the loop header. The check is gated on `self.jit.is_some()`, so the deterministic sandbox / worker /
+  no-feature paths (where `jit` is `None`) pay a single predicted branch and never OSR — the
+  differential baseline is untouched.
+- **Loop headers are native (re-)entry points.** `entry_pcs` now includes every backward-branch target
+  alongside pc 0 and the J3 post-call resume pcs; the compiled body gets an entry-pc dispatch arm and a
+  reachable block for each, so native execution can *begin* at a loop header. This reuses the exact
+  mid-frame-entry machinery J3 resume-native built — an OSR entry is just "re-enter this frame at pc P"
+  where P is a loop header instead of a `call_pc + 1`.
+- **Refcount-exact mid-frame entry.** A prototype with any OSR entry compiles `heap_aware`
+  unconditionally: OSR begins execution with whatever the interpreter left in the registers — a heap
+  value may be live — so every register store must release-the-old / retain-the-moved, exactly the
+  precondition a call-bearing prototype already forces. A pure-int loop forced `heap_aware` is
+  unaffected (the extra `is_pointer` checks are no-ops on immediates). The `--jit-differential` leak
+  oracle gates this: **419 matched, 0 divergence, 0 leaks, 812/813 native**, unchanged — the new
+  loop-header blocks and forced-`heap_aware` stores are correct on every corpus program.
+- **One OSR per prototype.** If a prototype is already compiled, a tier-0 back-edge does *not* re-OSR:
+  the frame goes native at its next `'reload` anyway, and re-entering from tier 0 after a native op
+  bailed back would risk bouncing tier-0↔tier-1 every iteration for a loop native can't sustain.
+- **Result.** New `run_module_jit_hot*` harness (ordinary hot-counter promotion, not `force_jit`) +
+  two lang-vm tests: a top-level integer loop entered once goes native via OSR, and a top-level
+  heap-body loop (a struct read/written each iteration, a heap value live at the OSR point) matches the
+  interpreter. Bench `vm_jit/osr_*` (top-level global loop, interpreter vs **hot-counter** JIT — the
+  production path, where before OSR the JIT column would equal the interpreter): **100k 4.43 → 1.27 ms
+  (~3.5×), 1M 49.6 → 8.97 ms (~5.5×)**.
+
+**Deliberately *not* built here — the native inline cache.** The J4 narrative flagged a "native inline
+cache" (guard the receiver's shape pointer, load the field at a cached slot offset in native code, no
+helper call) as the real lever for *heap-access* speed. It is **not** sound to build today: the heap
+object's `Payload` is a plain Rust enum and its slots are a `Vec`, neither of which has a layout the
+JIT may inline into machine code — a `rustc` upgrade that reordered the enum or changed `Vec`'s
+internals would silently corrupt memory under JIT with no compile-time guard. A sound version needs a
+layout-locked accessor from `lang-value` (a `#[repr(C)]` fast header, or an ABI the codegen can target)
+first. Deferred to a future slice; it is orthogonal to OSR (a tiering change, not a heap-layout one),
+which is why J5 is OSR — the highest-value *sound* tiering win — rather than the inline cache.
 
 ## Open questions (resolve at sign-off)
 
