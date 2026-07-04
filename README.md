@@ -1,6 +1,6 @@
 # Noeta
 
-[![CI](https://github.com/nsrosenqvist/lang/actions/workflows/ci.yml/badge.svg)](https://github.com/nsrosenqvist/lang/actions/workflows/ci.yml)
+[![CI](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml/badge.svg)](https://github.com/nsrosenqvist/noeta/actions/workflows/ci.yml)
 
 > **A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.**
 
