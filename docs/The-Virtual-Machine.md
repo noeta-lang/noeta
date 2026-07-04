@@ -4,7 +4,7 @@ How the bytecode backend executes a program: a register machine over NaN-boxed v
 
 ## A register-based bytecode VM
 
-The VM (`lang-vm`) is a Tier-0 **register machine** (Lua/Dalvik style), not a stack machine. Register bytecode issues fewer dispatches per operation than a stack VM and is a friendlier base for a later specializing interpreter or JIT.
+The VM (`lang-vm`) is a Tier-0 **register machine** (Lua/Dalvik style), not a stack machine. Register bytecode issues fewer dispatches per operation than a stack VM and is a friendlier base for the Tier-1 JIT that compiles hot prototypes to native code ([below](#tier-1--the-jit)).
 
 The compiled artifact (pure data in `lang-bytecode`):
 
@@ -65,7 +65,38 @@ Every property-access and method-call site caches the last shape it saw and the 
 
 `LoadField` caches the field slot index (skipping the name scan); `CallMethod` caches the method prototype (skipping the hashmap lookup *and its two string clones*, the dominant cost). Shapes are immutable once created, so a cached `(shape, slot)` never goes stale — a different shape simply misses and refreshes. The cache is VM-only and invisible to `RunResult`, so the differential is unaffected; measured impact is roughly −22% on member dispatch.
 
+## Tier 1 — the JIT
+
+Everything above is **Tier 0**: the interpreter dispatch loop. On top of it sits an optional **Tier 1** — a method-at-a-time [Cranelift](https://cranelift.dev/) JIT (`lang-jit`) that compiles a hot prototype to native machine code. It lives behind a `jit` cargo feature: the default `lang` binary enables it, but a `--no-default-features` build pulls in *zero* Cranelift crates and runs Tier 0 only, byte-for-byte identically. The sandbox, the conformance corpus, and isolate worker threads always run Tier 0 (the JIT's `JITModule` is `!Send`), so the differential oracle's baseline never involves native code.
+
+### The design in one line
+
+**The fast path is native; everything else calls back into the interpreter's own code.** Integer/float arithmetic, comparisons, branches, `LoadConst`/`Move`, and global-slot access compile to real Cranelift IR with the NaN-box tag checks inlined. Anything richer — a call, a heap/collection op — is a call to a *runtime helper* that runs the interpreter's exact arm (refcounts included). So Tier 1 can never *disagree* with Tier 0: the parts it doesn't specialize, it delegates, and the parts it does are guarded.
+
+### The shared stack makes deopt free
+
+A compiled prototype runs on the **same contiguous register stack** the interpreter uses (the payoff of the earlier register-stack rework), with the ABI `fn(vm, regs, base, globals, frames, regs_vec, entry_pc) -> i64`. Because native code reads and writes the interpreter's real registers, **deoptimization costs nothing to set up**: when native code reaches an op it doesn't compile — a `Return`, or a guard that fails (an operand isn't a small int, an add overflows the 48-bit immediate range, an `if` condition isn't a bool) — it simply *returns the bytecode pc of that op*, and the interpreter resumes there over the already-correct register window. Guards always **bail before mutating any state**, so the interpreter re-runs the op cleanly. This guard-and-bail contract is what lets an untyped bytecode be compiled speculatively without a separate deopt-state map.
+
+### Getting hot, and getting in mid-loop (OSR)
+
+Promotion is a per-prototype counter: a prototype crossing `JIT_HOT_THRESHOLD` frame entries **or loop back-edges** is compiled. The back-edge trigger is **on-stack replacement (OSR)** — a long-running loop enters Tier 1 *at its loop header*, mid-frame, rather than only at the next call. Without it a top-level program that is one big loop (its `main` frame entered exactly once) would never get hot; with it, loop headers become native re-entry points, reusing the same mid-frame-entry machinery that re-enters a compiled caller after a call returns.
+
+### Calls stay native
+
+A native `Call` first tries a **direct native→native call** — if the callee is already compiled and the frame math is safe, the caller `call_indirect`s the callee's compiled entry, skipping the interpreter round-trip entirely (recursive `fib` runs frame-to-frame in native code). Otherwise it falls back to a helper that pushes the callee frame for the interpreter. `Return` is value-returning, so a native caller gets its callee's result back without a bail.
+
+### Refcounts across the tier boundary
+
+A prototype that keeps a heap value in a register is compiled **heap-aware**: its register writes release the overwritten value and retain a moved one, matching the interpreter's `set_reg`. A prototype that only ever holds immediates (a pure arithmetic loop) skips all of that. A dataflow refinement (**bare stores**) elides the refcount work even in a heap-aware prototype wherever the analysis proves the value is an immediate — so a numeric loop pays the refcount discipline only on genuinely heap-valued registers.
+
+### The oracle
+
+Tier 1 has its own gate, separate from the eval↔VM differential: **`--jit-differential`** runs every corpus program through the interpreter and through the forced-Tier-1 JIT and asserts a **byte-identical `RunResult`** *and* **zero heap residency** (a leak or double-free under JIT fails it). Because refcount exactness is the thing most likely to drift when native code manages the heap, the leak check is as load-bearing as the output check. At the JIT's current coverage this is 419 programs, 0 divergence, 0 leaks, 812 of 813 prototypes compiled to real native code.
+
+> [!NOTE]
+> **One negative result is worth recording.** A call-free *native inline cache* for field reads was built (guard the receiver's shape pointer, load at a cached slot offset) and **reverted** — measured no faster than the leaf-op helper. Field-bearing loops are bottlenecked by the dependent-load latency of the read and the heap-aware store discipline, both tier-independent, not by the field lookup. The JIT's wins are in native arithmetic, control flow, calls, and OSR'd loops; heap-dominated loops are best left to the interpreter's own inline cache.
+
 ## See also
 
-- [Memory Management](Memory-Management) — the refcount discipline the VM's registers and heap follow.
-- [Performance Techniques](Performance-Techniques) — inline caches, layout, and what was measured.
+- [Memory Management](Memory-Management) — the refcount discipline the VM's registers and heap follow, and what the JIT reproduces across the tier boundary.
+- [Performance Techniques](Performance-Techniques) — inline caches, layout, the JIT, and what was measured.

@@ -10,6 +10,7 @@ A round-up of the performance story, including the numeric-layout work and one i
 | Shapes / hidden classes (flat-slot layout) | `lang-object` | [The Virtual Machine](The-Virtual-Machine) |
 | Inline caches on property/method sites | `lang-vm` | [The Virtual Machine](The-Virtual-Machine) |
 | Register allocation via graph coloring | `lang-compiler` | [The Virtual Machine](The-Virtual-Machine) |
+| Tier-1 Cranelift JIT (hot-counter + OSR) | `lang-jit` | [The Virtual Machine](The-Virtual-Machine#tier-1--the-jit) |
 | Compiled precise reference counting | `lang-ir-passes` | [Memory Management](Memory-Management) |
 | In-place reuse (O(n²) → O(n) appends) | `lang-ir-passes` | [Memory Management](Memory-Management) |
 | Incremental recompilation (salsa) | `lang-db` | [Architecture & Pipeline](Architecture-and-Pipeline) |
@@ -22,6 +23,10 @@ The single biggest performance decision is that memory management is *compiled*,
 ## Dispatch is optimized by layout, not tricks
 
 The VM's speed comes from *cheap, predictable* operations: values are one word (NaN-boxing), objects are flat slot arrays keyed by a shared shape (no per-instance hashmap), shape identity is a pointer compare, and every property/method site caches its last shape (inline caches, ~−22% on member dispatch). See [The Virtual Machine](The-Virtual-Machine).
+
+## A second tier: the JIT
+
+The interpreter above is Tier 0. Hot prototypes are compiled to native code by a **Tier-1 [Cranelift](https://cranelift.dev/) JIT** (`lang-jit`, behind the `jit` cargo feature — on in the shipped binary, absent in a `--no-default-features` build). It is a *method* JIT: integer/float arithmetic, comparisons, branches, and slot access compile to native IR with the NaN-box guards inlined; calls and heap ops call back into the interpreter's own code, so the two tiers can never disagree. Promotion is a hot-counter plus **on-stack replacement (OSR)** so a long-running loop can go native mid-frame, and compiled code runs on the interpreter's own register stack so deopt is a bare pc-return. A dedicated `--jit-differential` oracle asserts the JIT is byte-identical to the interpreter *and* leak-free on every program. Measured speedups: ~6–8× on numeric loops, ~2.3× on recursive calls, ~3.5–5.5× on OSR'd top-level loops; ~19–28% of that came from the bare-store refinement alone. Full mechanism (deopt contract, native calls, refcounts across the tier boundary, and one instructive negative result) in [The Virtual Machine → Tier 1](The-Virtual-Machine#tier-1--the-jit).
 
 ## Numeric layout and SIMD — a case study
 
@@ -50,7 +55,6 @@ For editor-speed feedback, the compiler is a salsa query graph: editing one modu
 Honestly noted, so the picture is complete:
 
 - **Zero-copy cross-thread borrow-share** for isolates (built and miri-proven, unwired — blocked on `Rc<Shape> → Arc<Shape>`). See [Concurrency Internals](Concurrency-Internals).
-- **A Tier-1 self-specializing interpreter and a copy-and-patch JIT** — the IR is "JIT-ready" (a third consumer), but the JIT is a later milestone.
 - **A `gc-arena` tracing path** for destructor-free classes.
 - **Explicit SIMD intrinsics** (`Simd<T, N>` + const generics) as a later track — the current approach deliberately relies on layout + autovectorization instead.
 
