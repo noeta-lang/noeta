@@ -442,11 +442,13 @@ layout-locked accessor from `lang-value` (a `#[repr(C)]` fast header, or an ABI 
 first. Deferred to a future slice; it is orthogonal to OSR (a tiering change, not a heap-layout one),
 which is why J5 is OSR — the highest-value *sound* tiering win — rather than the inline cache.
 
-## J6 — the native inline cache (investigated; the sound version is milestone-scale)
+## J6 — the native inline cache (built, measured, reverted — the field read is not the bottleneck)
 
 The J4/J5 notes both point at a "native inline cache" for field access as the remaining heap-hot lever.
-This section records the investigation and *why the obvious shortcut does not work*, so the next
-attempt starts from the real design.
+The full investigation — helper-internal cache, then a real call-free native read via `#[repr(u8)]` +
+a runtime-measured object layout — found it **does not help**: the bottleneck is `heap_aware` store
+overhead and memory latency, not the `LoadField` path. Both attempts were reverted; this section is the
+record so the effort is not repeated, and points at the real lever (bare stores for immediate values).
 
 **What field access costs in the JIT today.** A `LoadField` runs through the generic `jit_run_leaf_op`
 helper: a native `call` out of the compiled loop, reconstitute `&mut Vm`, a `match` over the leaf-op
@@ -474,22 +476,49 @@ because the helper call dominates both. Reverted; only the reframed comment and 
 bench remain. The lesson: no optimization *inside* the helper can win, because the helper *call* is the
 cost.
 
-**The version that would win — a call-free native read — needs a layout-stable object.** To beat the
-interpreter the JIT must read the field **without a call**: decode the receiver pointer, guard the
-receiver's shape pointer against a per-site cached shape (inline compare), and on a hit load the slot
-value at the cached offset — all as emitted machine code. That requires walking the object's memory in
-native code, which today means the `Payload` **Rust enum** (unstable discriminant + variant field
-offsets) and a `Vec` (unstable internal layout) — not soundly inlinable. The real prerequisite is a
-**layout-stable shaped-object representation**: a `#[repr(C)]` object whose header exposes, at fixed
-offsets `offset_of!` can lock, the shape pointer and a slot-array base pointer (inline slots or a
-stable `{ptr,len}`), so the codegen can emit the guard-and-load against guaranteed offsets with a
-build-time static assertion catching any layout drift. That is a **core heap-representation change**
-touching `lang-value` (the `Obj`/`Payload` model), the GC/cycle-collector, the COW/reuse fast paths,
-and both backends' construction/field ops, all under the miri + differential + leak gates — a
-milestone-scale slice, not a leaf-op-style addition. It is the honest next step for heap-access speed,
-and should be scoped and signed off as its own milestone (like P-VMT or the object-model arc) rather
-than bolted on. Until then, field access is helper-call-bound and the JIT's wins stay in native
-arithmetic/control, calls, and OSR'd loops.
+**The call-free native read — built, measured, and it does NOT win either.** The obvious next step is
+to read the field **without a call**: decode the receiver, guard its shape pointer against a per-site
+cached shape (inline compare), and on a hit load the slot at the cached offset — all as machine code.
+The blocker was thought to be that the `Payload` **Rust enum** has an unspecified layout. That turned
+out to be surmountable *without* a heap re-architecture: `Payload::Object` is fully encapsulated in
+`lang-value`, and a `#[repr(u8)]` on `Payload` gives it a defined layout (RFC 2195), so a
+`lang_value::object_layout()` probe can **measure** the payload / discriminant / shape / slots offsets
+(plus the `Vec`'s runtime-measured data-pointer offset — the probe *caught* that `Vec` does not store
+its pointer first on this build), lock them with a test, and let the JIT bake the runtime-measured
+offsets into code generated in the same process. This was actually implemented: `#[repr(u8)]` +
+`object_layout()` + a lock test, and an `emit_load_field_native` that decodes, tag-checks, shape-word
+guards, and loads the slot inline (only a `jit_field_slot` helper on a cold miss). It is **correct and
+leak-free** — `--jit-differential` 419 / 0-divergence / 0-leak with the native reads on every corpus
+program.
+
+**But it produces no speedup**, so it was reverted. The decisive A/B (bench `vm_jit/mixed_*`, a loop
+mixing several field reads with heavy native arithmetic — the case that should most favour staying
+native):
+
+| mixed loop, 100k | time |
+|---|---|
+| interpreter | 11.6 ms |
+| JIT, leaf-helper `LoadField` | 12.3 ms |
+| JIT, **native-IC** `LoadField` | 12.8 ms |
+
+The JIT is **slower than the interpreter regardless of the `LoadField` implementation**, and the native
+IC is no better than the leaf helper. So `LoadField` was **never the bottleneck**. Two tier-independent
+costs dominate a field-bearing loop: (1) any prototype touching a heap value compiles `heap_aware`, so
+**every register store** — including all the arithmetic temporaries — pays a load-old + `is_pointer`
+branch (and the interpreter's `set_reg` pays the same release-check), and (2) the field read is a chain
+of **dependent memory loads**, latency-bound in either tier. Neither is touched by making the read
+native. This closes the "native inline cache is the heap-perf lever" hypothesis with hard data — the
+same verdict as the helper-internal cache, one level deeper.
+
+**The real lever is the `heap_aware` store overhead, not the field read.** A pure-integer loop is ~6×
+in the JIT; adding one field read drops it *below* the interpreter, because the whole prototype flips
+to refcount-checked stores. The promising direction (a future slice) is to keep stores **bare** where
+the compiler/JIT can prove the stored value is an immediate (an `int`/`float`/`bool` arithmetic temp
+never needs a release), so a field-bearing loop only pays the heap-aware discipline on the genuinely
+heap-valued registers, not on every arithmetic temporary. That is a codegen refinement in `lang-jit`
+(and possibly a compiler liveness/typing hint), not a heap-layout change. Until then, the JIT's wins
+stay in native arithmetic/control, calls, and OSR'd loops, and field-bearing loops are best left to the
+interpreter.
 
 ## Open questions (resolve at sign-off)
 
