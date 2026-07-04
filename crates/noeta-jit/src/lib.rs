@@ -60,6 +60,38 @@ use noeta_ast::BinaryOp;
 use noeta_bytecode::{Const, Module, Op, Reg};
 use noeta_value::Value;
 
+/// The in-memory layout of the VM's call frame and its frame/register stacks — the ABI contract
+/// between `noeta-vm`'s `Frame`/`Vec<Frame>`/`Vec<Value>` and the JIT's native call-frame codegen
+/// (P-CALL: inline the reserve-window / push-Frame / pop sequence with no per-call helper). Every
+/// field is a byte offset or size; `noeta-vm` fills them from `offset_of!`/`size_of!` on its own
+/// `Frame` and a one-time `Vec`-header probe, then hands this to the JIT, which bakes the numbers
+/// into code generated **in the same process** — so a layout change can never desync (a `noeta-vm`
+/// lock test asserts every offset locates the real field). This is the frame analogue of
+/// [`noeta_value::Value::NANBOX`]: the single source of truth so native codegen can't drift.
+#[derive(Debug, Clone, Copy)]
+pub struct FrameLayout {
+    /// `size_of::<Frame>()` — the stride between frames in the `Vec<Frame>` buffer.
+    pub frame_size: usize,
+    /// `align_of::<Frame>()`.
+    pub frame_align: usize,
+    /// Byte offset of each `Frame` scalar field the native fast path writes.
+    pub proto_offset: usize,
+    pub base_offset: usize,
+    pub pc_offset: usize,
+    pub ret_dst_offset: usize,
+    /// Byte offset of the two fields the native fast path initializes to their empty values
+    /// (`ret_transform = None`, `upvalues = Vec::new()`) — a plain top-level `fn` frame carries
+    /// neither a return transform nor upvalues.
+    pub ret_transform_offset: usize,
+    pub upvalues_offset: usize,
+    /// A `Vec<T>` is three pointer-sized words; these are the *word* indices (0, 1, or 2) of its
+    /// data pointer, length, and capacity. The header layout is `T`-independent (only the element
+    /// stride differs), so one probe serves both the `Vec<Frame>` and `Vec<Value>` stacks.
+    pub vec_ptr_word: usize,
+    pub vec_len_word: usize,
+    pub vec_cap_word: usize,
+}
+
 /// A compiled prototype's entry point — the tier-1 ABI.
 ///
 /// - `vm` is an opaque `*mut Vm` (the interpreter reconstitutes `&mut Vm` from it to service

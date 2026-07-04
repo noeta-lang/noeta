@@ -515,6 +515,56 @@ extern "C" fn jit_release_value(vm: *mut core::ffi::c_void, v: u64) {
     vm.release_value(Value::from_bits(v));
 }
 
+/// The layout of [`Frame`] and the `Vec` header — the single source of truth the JIT bakes into its
+/// native call-frame codegen (P-CALL). Filled from `offset_of!`/`size_of!` on *this build's* `Frame`
+/// and a one-time `Vec`-header probe; because the JIT compiles in the same process/build, the numbers
+/// it bakes always match the real layout (a lock test asserts each offset locates its field). See
+/// [`noeta_jit::FrameLayout`].
+#[cfg(feature = "jit")]
+pub fn frame_layout() -> noeta_jit::FrameLayout {
+    let (vec_ptr_word, vec_len_word, vec_cap_word) = vec_header_words();
+    noeta_jit::FrameLayout {
+        frame_size: size_of::<Frame>(),
+        frame_align: align_of::<Frame>(),
+        proto_offset: core::mem::offset_of!(Frame, proto),
+        base_offset: core::mem::offset_of!(Frame, base),
+        pc_offset: core::mem::offset_of!(Frame, pc),
+        ret_dst_offset: core::mem::offset_of!(Frame, ret_dst),
+        ret_transform_offset: core::mem::offset_of!(Frame, ret_transform),
+        upvalues_offset: core::mem::offset_of!(Frame, upvalues),
+        vec_ptr_word,
+        vec_len_word,
+        vec_cap_word,
+    }
+}
+
+/// Identify which of a `Vec`'s three pointer-sized words hold its data pointer, length, and capacity,
+/// by constructing a `Vec` with distinct, recognizable values and reading its raw words. `Vec<T>`'s
+/// header layout is `T`-independent, so a `Vec<usize>` stands in for `Vec<Frame>`/`Vec<Value>`.
+///
+/// # Safety
+/// `transmute_copy` reads the three header words of a live `Vec` by value; it neither moves nor frees
+/// the `Vec`, and `size_of::<Vec<_>>() == size_of::<[usize; 3]>()`.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+fn vec_header_words() -> (usize, usize, usize) {
+    let mut v: Vec<usize> = Vec::with_capacity(97);
+    v.extend_from_slice(&[0usize; 5]); // len = 5
+    let ptr = v.as_ptr() as usize;
+    let len = v.len(); // 5
+    let cap = v.capacity(); // >= 97
+    // ptr (a heap address), len (5), and cap (>= 97) are pairwise distinct, so each word is uniquely
+    // identifiable by value.
+    let words: [usize; 3] = unsafe { core::mem::transmute_copy(&v) };
+    let find = |target: usize| {
+        words
+            .iter()
+            .position(|&w| w == target)
+            .expect("Vec header word not found — layout probe failed")
+    };
+    (find(ptr), find(len), find(cap))
+}
+
 /// Runtime helper for a native `Op::Call` (J3): read the call back from `proto`/`pc` and run the
 /// shared closure-call setup on the interpreter's frame/register stacks (pushing the callee frame or
 /// completing a synchronous first-class-builtin call). Returns the [`noeta_jit`] outcome the compiled
@@ -5606,6 +5656,52 @@ mod tests {
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         compile(&parsed.program).expect("program should be in the M1.0 subset")
+    }
+
+    /// P-CALL S1 lock test: every offset [`frame_layout`] reports must locate the real `Frame` field,
+    /// and the probed `Vec`-header word indices must read back a live `Vec`'s ptr/len/cap. Because the
+    /// JIT bakes these numbers into native code generated in the same build, a silent `Frame`-layout
+    /// or `Vec`-header change would corrupt memory under the JIT; this test fails the build first.
+    #[cfg(feature = "jit")]
+    #[test]
+    #[allow(unsafe_code)]
+    fn frame_layout_locks_the_real_layout() {
+        let l = frame_layout();
+        assert_eq!(l.frame_size, size_of::<Frame>());
+        assert_eq!(l.frame_align, align_of::<Frame>());
+
+        // A sentinel frame: read each scalar field back through its reported offset.
+        let f = Frame {
+            proto: 0x0BAD_F00D,
+            base: 0x1111_2222,
+            pc: 0x3333_4444,
+            ret_dst: 0x5566,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        };
+        let fp = (&f as *const Frame) as usize;
+        unsafe {
+            assert_eq!(*((fp + l.proto_offset) as *const u32), 0x0BAD_F00D);
+            assert_eq!(*((fp + l.base_offset) as *const usize), 0x1111_2222);
+            assert_eq!(*((fp + l.pc_offset) as *const usize), 0x3333_4444);
+            assert_eq!(*((fp + l.ret_dst_offset) as *const u16), 0x5566);
+        }
+        // The two empty-initialized fields must sit within the struct.
+        assert!(l.ret_transform_offset < l.frame_size);
+        assert!(l.upvalues_offset + size_of::<Vec<Value>>() <= l.frame_size);
+
+        // Vec-header words: read a live Vec's ptr/len/cap back through the probed indices.
+        let mut v: Vec<Value> = Vec::with_capacity(64);
+        v.push(Value::unit());
+        v.push(Value::unit());
+        let words: [usize; 3] = unsafe { core::mem::transmute_copy(&v) };
+        assert_eq!(words[l.vec_ptr_word], v.as_ptr() as usize);
+        assert_eq!(words[l.vec_len_word], v.len());
+        assert_eq!(words[l.vec_cap_word], v.capacity());
+        // The three indices are a permutation of {0, 1, 2}.
+        let mut idx = [l.vec_ptr_word, l.vec_len_word, l.vec_cap_word];
+        idx.sort_unstable();
+        assert_eq!(idx, [0, 1, 2]);
     }
 
     /// P-JIT foundation: a prototype with no compilable op runs its bail stub — reaching the
