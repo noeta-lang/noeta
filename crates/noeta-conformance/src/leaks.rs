@@ -160,7 +160,12 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     if let Ok(module) = &noeta_db::bytecode(&db, src).0 {
         let before = noeta_value::live_count() as i64;
         let _ = VmBackend::new().run_module(module);
-        record(report, name, "vm", noeta_value::live_count() as i64 - before);
+        record(
+            report,
+            name,
+            "vm",
+            noeta_value::live_count() as i64 - before,
+        );
         report.vm_measured += 1;
     }
 }
@@ -203,7 +208,12 @@ fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut 
     if let Ok(module) = &noeta_db::linked_bytecode(&db, ws).0 {
         let before = noeta_value::live_count() as i64;
         let _ = VmBackend::new().run_module(module);
-        record(report, name, "vm", noeta_value::live_count() as i64 - before);
+        record(
+            report,
+            name,
+            "vm",
+            noeta_value::live_count() as i64 - before,
+        );
         report.vm_measured += 1;
     }
 }

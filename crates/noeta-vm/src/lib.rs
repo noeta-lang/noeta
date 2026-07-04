@@ -1206,7 +1206,10 @@ impl<'m> Vm<'m> {
             ),
             (noeta_jit::CALL_HELPER, jit_call as *const u8),
             (noeta_jit::RETURN_HELPER, jit_return as *const u8),
-            (noeta_jit::PREPARE_CALL_HELPER, jit_prepare_call as *const u8),
+            (
+                noeta_jit::PREPARE_CALL_HELPER,
+                jit_prepare_call as *const u8,
+            ),
             (noeta_jit::CALLEE_BASE_HELPER, jit_callee_base as *const u8),
             (noeta_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
             (noeta_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
@@ -2805,7 +2808,8 @@ impl<'m> Vm<'m> {
                             let other = regs[fbase + args[0] as usize];
                             match compare_primitive(v, other) {
                                 Some(ordering) => {
-                                    let value = make_ordering(noeta_ast::ordering_variant(ordering));
+                                    let value =
+                                        make_ordering(noeta_ast::ordering_variant(ordering));
                                     set_reg(regs, fbase, *dst, value);
                                     pc += 1;
                                 }
@@ -4386,8 +4390,8 @@ impl<'m> Vm<'m> {
                         {
                             match structural_compare(left, right) {
                                 Some(ordering) => {
-                                    let satisfied =
-                                        op.ordering_satisfies(noeta_ast::ordering_variant(ordering));
+                                    let satisfied = op
+                                        .ordering_satisfies(noeta_ast::ordering_variant(ordering));
                                     set_reg(regs, fbase, *dst, Value::bool(satisfied));
                                     pc += 1;
                                 }

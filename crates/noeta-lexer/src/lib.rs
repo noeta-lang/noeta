@@ -6,9 +6,9 @@
 //!
 //! M0 scope grows one vertical slice at a time.
 
+use logos::Logos;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::{Source, Span};
-use logos::Logos;
 
 /// The lexical category of a token. Declarative `logos` definitions keep the lexer
 /// fast and the token set legible. `logos` resolves overlaps by longest match (so `==`

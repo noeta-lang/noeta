@@ -810,16 +810,18 @@ fn reg_effect(op: &Op, consts: &[Const]) -> Option<RegEffect> {
         },
         Op::Drop { reg, .. } => RegEffect::Clear(*reg),
         Op::StoreGlobal { src, .. } => RegEffect::Clear(*src),
-        Op::LoadGlobal { dst, .. } | Op::TakeGlobal { dst, .. } => {
-            RegEffect::Def { dst: *dst, heap: true }
-        }
+        Op::LoadGlobal { dst, .. } | Op::TakeGlobal { dst, .. } => RegEffect::Def {
+            dst: *dst,
+            heap: true,
+        },
         Op::Binary { op, dst, .. } => RegEffect::Def {
             dst: *dst,
             heap: !binary_result_is_immediate(*op),
         },
-        Op::Unary { dst, .. } | Op::Stringify { dst, .. } => {
-            RegEffect::Def { dst: *dst, heap: true }
-        }
+        Op::Unary { dst, .. } | Op::Stringify { dst, .. } => RegEffect::Def {
+            dst: *dst,
+            heap: true,
+        },
         Op::Jump { .. }
         | Op::JumpIfTrue { .. }
         | Op::JumpIfFalse { .. }
@@ -1802,7 +1804,10 @@ mod tests {
             2,
         );
         let t = transfer_pairs(&c);
-        assert!(!t[1] && !t[2], "a jump-targeted Drop is not a safe transfer");
+        assert!(
+            !t[1] && !t[2],
+            "a jump-targeted Drop is not a safe transfer"
+        );
     }
 
     /// The may-hold-heap analysis: parameters are heap at entry, a comparison result is an immediate,

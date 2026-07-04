@@ -4629,7 +4629,11 @@ fn scalar_to_value(scalar: noeta_stdlib::Scalar) -> Value {
 /// Lift a native-extension result back into a tree-walker `Value`, supplying the result *shape* for
 /// an object result from the function's [`RetTy`] (the same shape as the named argument — e.g.
 /// `vec.add(v, w)` builds a value shaped like `v`).
-fn materialize_ext(out: noeta_stdlib::NativeOut, ret: noeta_stdlib::RetTy, args: &[Value]) -> Value {
+fn materialize_ext(
+    out: noeta_stdlib::NativeOut,
+    ret: noeta_stdlib::RetTy,
+    args: &[Value],
+) -> Value {
     use noeta_stdlib::{NativeOut, RetTy};
     match out {
         NativeOut::Object(fields) => {
