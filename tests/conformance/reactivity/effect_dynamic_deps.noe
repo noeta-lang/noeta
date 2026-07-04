@@ -1,0 +1,26 @@
+// Reactivity S2 — dependency tracking is dynamic: an effect subscribes to exactly the signals it reads
+// *on its most recent run*, and resubscribes each time. This effect reads `a` while `cond` is true and
+// `b` while it is false. So: it prints `a=10` on creation; changing `b` does nothing (not subscribed);
+// changing `a` reruns it (`a=11`); flipping `cond` reruns it and switches its subscription to `b`
+// (`b=21`); after which changing `a` does nothing and changing `b` reruns it (`b=22`). This is the
+// property a naive static-dependency implementation gets wrong.
+// expect: stdout "a=10"
+// expect: stdout "a=11"
+// expect: stdout "b=21"
+// expect: stdout "b=22"
+// expect: exit 0
+a = signal(10)
+b = signal(20)
+cond = signal(true)
+effect(fn() {
+    if cond.get() {
+        echo "a=${a.get()}"
+    } else {
+        echo "b=${b.get()}"
+    }
+})
+b.set(21)
+a.set(11)
+cond.set(false)
+a.set(12)
+b.set(22)

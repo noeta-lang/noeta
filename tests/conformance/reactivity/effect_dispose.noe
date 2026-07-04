@@ -1,0 +1,16 @@
+// Reactivity S2 — a disposed `effect` unsubscribes from every signal and stops rerunning. The effect
+// prints on creation (0) and after the first `.set` (5); after `.dispose()` a further `.set` (99) does
+// not rerun it, though the signal itself still updates (the final `.get()` reads 99). This is the leak
+// oracle's disposal contract observed from the language: no dangling subscription survives.
+// expect: stdout "0"
+// expect: stdout "5"
+// expect: stdout "final=99"
+// expect: exit 0
+count = signal(0)
+e = effect(fn() {
+    echo count.get()
+})
+count.set(5)
+e.dispose()
+count.set(99)
+echo "final=${count.get()}"

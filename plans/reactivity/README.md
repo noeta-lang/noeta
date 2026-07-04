@@ -116,8 +116,19 @@ need a small native-type registration is an S1 detail.
   cases (get/set, independent cells, negative type-mismatch). Conformance 445, differential 434/0-skipped,
   jit-differential 434, leak 0 both backends, workspace green, clippy/fmt clean. `.update` folds in with
   S2's closure-driving machinery.
-- **S2 — `effect`.** Eager run-on-create, rerun-on-change, the flush, disposal handle. Leak oracle is the
-  gate (an undisposed effect = residency > 0). Deterministic effect order asserted in the differential.
+- **S2 — `effect`. DONE.** `effect(fn)` (a `Builtin`) runs its body immediately and reruns it when a
+  signal it read changes; `.dispose()` unsubscribes it; `signal.set`/`.update` now drive a flush. The
+  crux — **`drive_flush`** on each backend: clone the `Rc<ReactiveGraph>` out, then `graph.flush(run)`
+  where `run` invokes each effect body through the backend's call seam (`call_value`/`call`), with the
+  refcount discipline (VM: peek the graph-cloned `GcVal` body via `.get()` and let it drop, since
+  `call_value` only *borrows* the callee) and **deterministic abort capture** (first body to abort by
+  flush order stops the rest and propagates, identically on both backends). `.update(fn)` is the first
+  `.set` that runs a closure (read → call → set → flush). Dependency capture is automatic and *dynamic*:
+  a signal read inside a running effect subscribes it, and each rerun resubscribes — so a `cond ? a : b`
+  effect tracks exactly the branch it took. 4 conformance cases (reacts, dispose, **dynamic
+  resubscription**, deterministic fan-out order). Leak oracle 0 both backends (effect bodies are
+  refcount-exact through the call boundary; dispose/clear free them). Conformance 449, differential
+  438/0-skipped, jit-differential 438, workspace green, clippy/fmt clean.
 - **S3 — `computed`.** Lazy memoization, transitive dependency (computed reading computed), glitch-free
   diamonds through the topological flush. Differential asserts identical recompute counts/order via an
   observable `effect` witnessing a `computed`.

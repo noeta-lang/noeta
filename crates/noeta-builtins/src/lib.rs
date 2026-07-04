@@ -57,8 +57,10 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "all",
     "race",
     "map_bounded",
-    // Reactivity S1: `signal(v)` creates a reactive cell. `computed`/`effect` join in S2/S3.
+    // Reactivity S1/S2: `signal(v)` creates a reactive cell; `effect(fn)` runs a side effect that
+    // reruns when a signal it reads changes. `computed` joins in S3.
     "signal",
+    "effect",
 ];
 
 #[cfg(test)]

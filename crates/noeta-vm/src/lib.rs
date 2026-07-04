@@ -3217,9 +3217,10 @@ impl<'m> Vm<'m> {
                             pc += 1;
                             continue;
                         }
-                        // Reactive handle methods (reactivity S1): `signal.get()` / `signal.set(v)`.
-                        // Validity was checked statically. A signal read never recomputes (only a
-                        // `computed` does, arriving in S3), so the `run` callback is unreachable here.
+                        // Reactive handle methods (reactivity S1/S2): `signal.get()`/`.set(v)`/
+                        // `.update(fn)` and `effect.dispose()`. Validity was checked statically. A
+                        // signal read never recomputes (only a `computed` does, arriving in S3), so the
+                        // `run` callback in `get`/`update` is unreachable.
                         if let Some((_kind, node)) = v.reactive_parts() {
                             match method {
                                 "get" => {
@@ -3234,8 +3235,34 @@ impl<'m> Vm<'m> {
                                     let value = regs[fbase + args[0] as usize];
                                     // The graph retains its own reference to the new content and
                                     // releases the old; the arg register's reference is released by
-                                    // its normal end-of-life.
+                                    // its normal end-of-life. Then flush so subscribed effects rerun.
                                     self.reactive.set(node, GcVal::retained(value));
+                                    self.drive_flush(*span)?;
+                                    set_reg(regs, fbase, *dst, Value::unit());
+                                    pc += 1;
+                                    continue;
+                                }
+                                "update" => {
+                                    // Read-modify-write: read the current value (owned), call the
+                                    // updater with it (which consumes that reference), store the
+                                    // result, then flush.
+                                    let f = regs[fbase + args[0] as usize];
+                                    let current = self
+                                        .reactive
+                                        .read(node, &mut |_v: GcVal| {
+                                            unreachable!("a signal read never recomputes")
+                                        })
+                                        .into_value();
+                                    let updated = self.call_value(f, vec![current], *span)?;
+                                    self.reactive.set(node, GcVal::owned(updated));
+                                    self.drive_flush(*span)?;
+                                    set_reg(regs, fbase, *dst, Value::unit());
+                                    pc += 1;
+                                    continue;
+                                }
+                                "dispose" => {
+                                    // Unsubscribe and free the node; its stored body/content drop.
+                                    self.reactive.dispose(node);
                                     set_reg(regs, fbase, *dst, Value::unit());
                                     pc += 1;
                                     continue;
@@ -5054,6 +5081,34 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Run the reactive graph's pending effects to a fixpoint (reactivity S2), invoking each effect
+    /// body through [`call_value`](Self::call_value). Called after any `signal.set`/`.update` and on
+    /// `effect(...)` creation. The graph is cloned out as an `Rc` first so its `&self` `flush` can
+    /// borrow it while the run callback borrows `self` for `call_value` (different objects, no
+    /// aliasing). An effect body that aborts (a panic or `?`) is captured deterministically: the first
+    /// abort by flush order stops further bodies (subsequent runs no-op) and propagates — identically
+    /// on both backends, since the flush order is a pure function of the graph.
+    fn drive_flush(&mut self, span: Span) -> Result<(), Abort> {
+        let graph = Rc::clone(&self.reactive);
+        let mut aborted = false;
+        graph.flush(&mut |body: GcVal| -> GcVal {
+            if aborted {
+                return GcVal::owned(Value::unit());
+            }
+            // `body` owns the reference the graph cloned for this run. `call_value` only *borrows* the
+            // callee (it does not release it), so peek with `.get()` and let `body` drop — releasing
+            // that reference — when this closure returns. The stored body keeps its own reference.
+            match self.call_value(body.get(), Vec::new(), span) {
+                Ok(result) => GcVal::owned(result),
+                Err(Abort) => {
+                    aborted = true;
+                    GcVal::owned(Value::unit())
+                }
+            }
+        });
+        if aborted { Err(Abort) } else { Ok(()) }
+    }
+
     /// Run a defaulted parameter's zero-argument thunk prototype to its value, on a fresh frame
     /// stack (the same re-entry `map`/`filter` callbacks use). `upvalues` are the calling closure's
     /// captured cells — the thunk is compiled with that same upvalue layout, so a default that
@@ -5765,6 +5820,14 @@ impl<'m> Vm<'m> {
                 // (retained) reference; the register's reference is released by the caller as usual.
                 let id = self.reactive.signal(GcVal::retained(args[0]));
                 Ok(Value::make_reactive(NodeKind::Signal, id))
+            }
+            Builtin::Effect => {
+                self.check_arity(builtin, args, 1, span)?;
+                // `effect(fn)` — register the effect (created queued), retaining the body closure, then
+                // flush to run it once now (subscribing it to the signals it reads).
+                let id = self.reactive.effect(GcVal::retained(args[0]));
+                self.drive_flush(span)?;
+                Ok(Value::make_reactive(NodeKind::Effect, id))
             }
         }
     }

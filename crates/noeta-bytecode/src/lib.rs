@@ -83,6 +83,10 @@ pub enum Builtin {
     /// `signal(v)` — create a reactive cell holding `v` (reactivity S1). Returns a `Signal<T>` handle
     /// whose `.get()`/`.set(v)` read and update it through the VM's reactive graph.
     Signal,
+    /// `effect(fn)` — register a side effect (reactivity S2). Runs `fn` immediately, tracking which
+    /// signals it reads, and reruns it whenever one of them changes. Returns an `Effect` handle with
+    /// `.dispose()`.
+    Effect,
 }
 
 impl Builtin {
@@ -99,6 +103,7 @@ impl Builtin {
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
             Builtin::Signal => "signal",
+            Builtin::Effect => "effect",
         }
     }
 
@@ -115,6 +120,7 @@ impl Builtin {
             "race" => Some(Builtin::Race),
             "map_bounded" => Some(Builtin::MapBounded),
             "signal" => Some(Builtin::Signal),
+            "effect" => Some(Builtin::Effect),
             _ => None,
         }
     }

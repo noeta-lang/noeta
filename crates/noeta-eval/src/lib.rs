@@ -368,6 +368,9 @@ pub enum Builtin {
     /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
     /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
     Signal,
+    /// `effect(fn)` — register a side effect (reactivity S2); the tree-walker twin of the VM's
+    /// `Builtin::Effect`. Runs `fn` immediately, tracks the signals it reads, and reruns on change.
+    Effect,
 }
 
 impl Builtin {
@@ -388,6 +391,7 @@ impl Builtin {
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
             Builtin::Signal => "signal",
+            Builtin::Effect => "effect",
         }
     }
 
@@ -409,6 +413,7 @@ impl Builtin {
         Builtin::Race,
         Builtin::MapBounded,
         Builtin::Signal,
+        Builtin::Effect,
     ];
 }
 
@@ -2188,9 +2193,10 @@ impl Interpreter {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
         }
-        // Reactive handle methods (reactivity S1): `signal.get()` / `signal.set(v)` — the tree-walker
-        // twin of the VM's dispatch. Validity was checked statically. A signal read never recomputes
-        // (only a `computed` does, arriving in S3), so the `run` callback is unreachable here.
+        // Reactive handle methods (reactivity S1/S2): `signal.get()`/`.set(v)`/`.update(fn)` and
+        // `effect.dispose()` — the tree-walker twin of the VM's dispatch. Validity was checked
+        // statically. A signal read never recomputes (only a `computed` does, arriving in S3), so the
+        // `run` callback in `get`/`update` is unreachable.
         if let Value::Reactive(_kind, node) = &receiver {
             let node = *node;
             match name {
@@ -2204,6 +2210,25 @@ impl Interpreter {
                     self.expect_std_arity(name, &args, 1, span)?;
                     let value = args.into_iter().next().unwrap();
                     self.reactive.set(node, value);
+                    self.drive_flush(span)?;
+                    return Ok(Value::Unit);
+                }
+                "update" => {
+                    self.expect_std_arity(name, &args, 1, span)?;
+                    // Read-modify-write: read the current value, call the updater with it, store the
+                    // result, then flush.
+                    let f = args.into_iter().next().unwrap();
+                    let current = self.reactive.read(node, &mut |_v: Value| {
+                        unreachable!("a signal read never recomputes")
+                    });
+                    let updated = self.call(f, vec![current], span)?;
+                    self.reactive.set(node, updated);
+                    self.drive_flush(span)?;
+                    return Ok(Value::Unit);
+                }
+                "dispose" => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    self.reactive.dispose(node);
                     return Ok(Value::Unit);
                 }
                 _ => {}
@@ -3231,6 +3256,32 @@ impl Interpreter {
         }
     }
 
+    /// Run the reactive graph's pending effects to a fixpoint (reactivity S2) — the tree-walker twin of
+    /// the VM's `Vm::drive_flush`. Invokes each effect body through [`call`](Self::call). The graph is
+    /// cloned out as an `Rc` so its `&self` `flush` can borrow it while the run callback borrows `self`
+    /// for `call`. The first effect body to abort (by the deterministic flush order) stops further
+    /// bodies and propagates, identically to the VM.
+    fn drive_flush(&mut self, span: Span) -> Eval<()> {
+        let graph = std::rc::Rc::clone(&self.reactive);
+        let mut abort: Option<Unwind> = None;
+        graph.flush(&mut |body: Value| -> Value {
+            if abort.is_some() {
+                return Value::Unit;
+            }
+            match self.call(body, Vec::new(), span) {
+                Ok(value) => value,
+                Err(unwind) => {
+                    abort = Some(unwind);
+                    Value::Unit
+                }
+            }
+        });
+        match abort {
+            Some(unwind) => Err(unwind),
+            None => Ok(()),
+        }
+    }
+
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
         let required = required_count(&closure.defaults);
         if args.len() < required || args.len() > closure.params.len() {
@@ -3679,6 +3730,15 @@ impl Interpreter {
                 let value = args.into_iter().next().unwrap();
                 let id = self.reactive.signal(value);
                 Ok(Value::Reactive(noeta_reactive::NodeKind::Signal, id))
+            }
+            Builtin::Effect => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                // `effect(fn)` — register the effect (created queued), storing the body closure, then
+                // flush to run it once now (subscribing it to the signals it reads).
+                let body = args.into_iter().next().unwrap();
+                let id = self.reactive.effect(body);
+                self.drive_flush(span)?;
+                Ok(Value::Reactive(noeta_reactive::NodeKind::Effect, id))
             }
         }
     }
