@@ -1,0 +1,23 @@
+// A generator held as a `for`-loop temp runs its captured local's destructor even on an early
+// `break` — the loop owns the iterator and releases it destructor-aware at every exit (exhaustion and
+// break), so a resource captured by the generator is cleaned up.
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "drop gen"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+fn counter(): Iterator<int> {
+    r = Res.new("gen")
+    mut i = 0
+    while i < 5 { yield i; i = i + 1 }
+}
+for x in counter() {
+    echo x
+    if x == 1 { break }
+}
+echo "end"

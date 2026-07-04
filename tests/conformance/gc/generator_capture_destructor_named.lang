@@ -1,0 +1,27 @@
+// A generator held in a NAMED binding is not consumed by iterating it — its captured local's
+// destructor runs at the binding's own scope end (not at loop exit), identically on both backends. The
+// `echo "after loop"` between the loop and scope end pins that timing (a temp iterable would drop at
+// loop exit instead).
+// expect: stdout "0"
+// expect: stdout "1"
+// expect: stdout "after loop"
+// expect: stdout "drop gen"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+fn counter(): Iterator<int> {
+    r = Res.new("gen")
+    mut i = 0
+    while i < 2 { yield i; i = i + 1 }
+}
+fn run(): void {
+    mut g = counter()
+    for x in g { echo x }
+    echo "after loop"
+}
+run()
+echo "end"

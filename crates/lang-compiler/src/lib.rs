@@ -1635,6 +1635,18 @@ impl<'m> FnCompiler<'m> {
         for site in ctx.breaks {
             self.patch_jump(site, end);
         }
+        // A temp iterable is owned by this loop (no binding holds it), so release it destructor-aware at
+        // every loop exit — exhaustion (the `JumpIfFalse` above lands here) and `break` (patched here) —
+        // running a generator's captured destructor-bearing local at the iterator's last reference. A
+        // *named* iterable's binding outlives the loop and is dropped at its own scope end, so it must
+        // not be dropped here (which would also empty the binding). (`continue` re-loops, not here; an
+        // early `return` unwinds past this — the abandoned-on-return case stays a plain release.)
+        if matches!(iterable, Atom::Temp(_)) {
+            self.code.push(Op::Drop {
+                reg: iter,
+                relevant: true,
+            });
+        }
         Ok(())
     }
 

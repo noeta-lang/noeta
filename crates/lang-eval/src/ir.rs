@@ -645,18 +645,10 @@ impl Interpreter {
         // time, so a lazy pipeline never materializes and an early `break` stops it; a `map`/`filter`
         // closure runs inside the advance. A collection keeps the snapshot fast path.
         if stream {
-            // On normal exhaustion the streamed iterator is spent; destroy it destructor-aware so a
-            // generator's captured destructor-bearing local runs at the iterator's last reference (the
-            // VM's `IterForNext`-on-`None` mirror). An early `break`/`return` abandons it — released
-            // plainly, matching the VM, which only consumes on the exhausted branch.
-            let mut exhausted = false;
             loop {
                 let element = match self.iter_value_next(&iterable_value, span)? {
                     Some(e) => e,
-                    None => {
-                        exhausted = true;
-                        break;
-                    }
+                    None => break,
                 };
                 let child = crate::Scope::child(&self.scope);
                 self.bind_for_pattern(&child, pattern, element, span)?;
@@ -667,14 +659,18 @@ impl Interpreter {
                 }
                 self.scope = saved;
                 match flow? {
+                    // An early `return` unwinds past the loop; the iterator is abandoned and released
+                    // plainly (matching the VM, whose post-loop drop is bypassed by a return).
                     Flow::Return(value) => return Ok(Flow::Return(value)),
                     Flow::Break => break,
                     Flow::Continue | Flow::Normal => {}
                 }
             }
-            if exhausted {
-                self.destroy_value(iterable_value);
-            }
+            // At exhaustion or `break`, destroy the streamed iterator destructor-aware so a generator's
+            // captured destructor-bearing local runs at its last reference (the VM's temp-iterable
+            // post-loop drop mirror). A *named* iterable was read by clone, so its `strong_count > 1`
+            // defers here to its binding's scope-end drop; a temp was moved out and is destroyed now.
+            self.destroy_value(iterable_value);
             return Ok(Flow::Normal);
         }
         let elements = self.iter_elements(iterable_value, span)?;

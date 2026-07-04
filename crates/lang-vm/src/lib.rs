@@ -2501,16 +2501,6 @@ impl<'m> Vm<'m> {
                             None => {
                                 set_reg(regs, fbase, *elem, Value::unit());
                                 set_reg(regs, fbase, *has, Value::bool(false));
-                                // The iterator is exhausted (spent). Take it out of its register and
-                                // release it destructor-aware at its last reference, so a generator's
-                                // captured destructor-bearing local runs on normal loop completion (the
-                                // iterator's own register is otherwise reused via the plain release
-                                // path). A still-aliased iterator (held elsewhere) defers.
-                                let spent = std::mem::replace(
-                                    &mut regs[fbase + *iter as usize],
-                                    Value::unit(),
-                                );
-                                self.release_value(spent);
                             }
                         }
                         pc += 1;
