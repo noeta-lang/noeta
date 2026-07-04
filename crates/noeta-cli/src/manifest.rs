@@ -2,7 +2,7 @@
 //!
 //! A *profile* names which dev-tiers are live in a build and which package provides each — the
 //! Cargo-profile / MSBuild-configuration axis. A `--profile` selects a tier set; the front-end tier
-//! filter (`lang run`) and the tier runners (`lang test`/`bench`/`doc`) consume that resolved
+//! filter (`noeta run`) and the tier runners (`noeta test`/`bench`/`doc`) consume that resolved
 //! *active-tier set*, not caring whether it came from a profile, a `--tier` flag, or a default.
 //!
 //! ```toml

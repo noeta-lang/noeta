@@ -849,30 +849,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lang-cli"
-version = "0.0.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "lang-ast",
- "lang-backend",
- "lang-bytecode",
- "lang-check",
- "lang-compiler",
- "lang-diagnostics",
- "lang-eval",
- "lang-lexer",
- "lang-loader",
- "lang-parser",
- "lang-runtime",
- "lang-span",
- "lang-stdlib",
- "lang-vm",
- "predicates",
- "toml",
-]
-
-[[package]]
 name = "lang-compiler"
 version = "0.0.0"
 dependencies = [
@@ -1213,6 +1189,30 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488016bfae457b036d996092f6cb448677611ce4449e970ceaf42695203f218a"
 dependencies = [
  "autocfg",
+]
+
+[[package]]
+name = "noeta-cli"
+version = "0.0.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "lang-ast",
+ "lang-backend",
+ "lang-bytecode",
+ "lang-check",
+ "lang-compiler",
+ "lang-diagnostics",
+ "lang-eval",
+ "lang-lexer",
+ "lang-loader",
+ "lang-parser",
+ "lang-runtime",
+ "lang-span",
+ "lang-stdlib",
+ "lang-vm",
+ "predicates",
+ "toml",
 ]
 
 [[package]]

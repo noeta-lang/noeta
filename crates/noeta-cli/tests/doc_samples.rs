@@ -80,7 +80,7 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     let path = dir.join("main.noe");
     std::fs::write(&path, &sample.code).expect("write sample");
 
-    let output = Command::cargo_bin("lang")
+    let output = Command::cargo_bin("noeta")
         .expect("the `lang` binary builds")
         .current_dir(&dir)
         .arg("run")

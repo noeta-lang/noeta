@@ -1,11 +1,11 @@
-//! `lang` — the user-facing toolchain binary.
+//! `noeta` — the user-facing toolchain binary.
 //!
 //! Exposes `run` (execute a file), `test` (run a program's `@test` blocks), `dump` (disassemble to
 //! VM bytecode — a debugging aid), and `repl` (interactive); all drive the same pipeline crates, so
 //! the binary is thin glue. The binary is
-//! named `lang` (placeholder pending the real language name). The conformance corpus / differential
+//! named `noeta` (the Noeta toolchain binary). The conformance corpus / differential
 //! / leak harness that tests the *implementation* is a separate dev binary (`lang-conformance`), not
-//! a subcommand here — which is what keeps the `lang test` verb free for a user program's own
+//! a subcommand here — which is what keeps the `noeta test` verb free for a user program's own
 //! `@test {}` blocks (object-model slice 6).
 
 use std::io::{self, BufRead, Write};
@@ -29,7 +29,7 @@ use lang_vm::VmBackend;
 mod manifest;
 
 #[derive(Parser)]
-#[command(name = "lang", version, about = "The lang toolchain (working title)")]
+#[command(name = "noeta", version, about = "The Noeta toolchain")]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -92,12 +92,12 @@ enum Command {
         profile: Option<String>,
     },
     /// Disassemble a program to its VM bytecode (a debugging aid: shows the exact opcodes,
-    /// constants, shapes, and method tables `lang run` executes). Compiled with the same pipeline
+    /// constants, shapes, and method tables `noeta run` executes). Compiled with the same pipeline
     /// as `run`, so the output reflects what actually runs.
     Dump {
         /// Path to a `.noe` file.
         file: PathBuf,
-        /// Activate a dev-tier before disassembling (as `lang run --tier …`). Repeatable.
+        /// Activate a dev-tier before disassembling (as `noeta run --tier …`). Repeatable.
         #[arg(long)]
         tier: Vec<String>,
         /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
@@ -224,7 +224,7 @@ fn compile_real(
 /// `!Send`, so it can never carry real inter-isolate parallelism (isolates I.4); the VM's NaN-boxed,
 /// thread-local heap is the one the shared-region borrow-sharing (I.3) and the coming `RealScheduler`
 /// (I.4b) build on. The conformance differential still runs *both* backends over the deterministic
-/// sandbox, so this real-host path is never compared backend-to-backend. Shared by `lang run` and the
+/// sandbox, so this real-host path is never compared backend-to-backend. Shared by `noeta run` and the
 /// `@test` runner so both execute a program identically.
 fn execute_real_host(
     program: &lang_ast::Program,
@@ -326,9 +326,9 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
     }
 }
 
-/// `lang dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
+/// `noeta dump <FILE>` — disassemble the program to its VM bytecode and print it to stdout. Loads,
 /// activates any `--tier`/`--profile`, type-checks, and compiles through the **same** pipeline as
-/// `lang run` (`compile_real`), so the disassembly is exactly what the VM executes — the tool for
+/// `noeta run` (`compile_real`), so the disassembly is exactly what the VM executes — the tool for
 /// inspecting codegen (which ops a construct lowers to, whether a reuse/in-place fast path fired,
 /// how names/constants are laid out). A type error prints diagnostics and exits non-zero, like `run`.
 fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
@@ -426,11 +426,11 @@ struct TestOutcome {
     stdout: String,
 }
 
-/// `lang test <FILE>` — discover the program's `@test` blocks (object-model slice 6) and run each
+/// `noeta test <FILE>` — discover the program's `@test` blocks (object-model slice 6) and run each
 /// as an isolated test. Tests run concurrently (one fresh isolate per test) and, by default, **all**
 /// of them run even after a failure; `--fail-fast` stops at the first failure. A test fails when its
 /// fn aborts — a false `assert`/`panic` (or any runtime error) — and passes when it returns normally.
-/// The program's own top-level "main" effects are not run: `lang test` runs the tests, not the file.
+/// The program's own top-level "main" effects are not run: `noeta test` runs the tests, not the file.
 fn cmd_test(
     file: &std::path::Path,
     fail_fast: bool,
@@ -682,7 +682,7 @@ fn string_attr(test: &TierFn, name: &str) -> Option<String> {
 
 /// Whether a top-level statement is tier-runner *setup* — a declaration or a global binding the
 /// tests/benches may depend on — as opposed to the program's own "main" effects (which the
-/// `lang test`/`lang bench` runners do not run; they run the tier fns, not the file).
+/// `noeta test`/`noeta bench` runners do not run; they run the tier fns, not the file).
 fn is_tier_setup(stmt: &Stmt) -> bool {
     !matches!(
         stmt,
@@ -877,8 +877,8 @@ fn report(outcomes: &[TestOutcome], skipped: &[String], total: usize) -> ExitCod
 /// *interpreted* code and measures at both N and 2N (see [`cmd_bench`]); a heavy body lowers it.
 const DEFAULT_BENCH_ITERATIONS: u64 = 200;
 
-/// `lang bench <FILE>` — discover the program's `@bench` blocks (object-model slice 6) and measure
-/// each. Unlike `lang test`, benchmarks run **sequentially** (concurrency would corrupt timings).
+/// `noeta bench <FILE>` — discover the program's `@bench` blocks (object-model slice 6) and measure
+/// each. Unlike `noeta test`, benchmarks run **sequentially** (concurrency would corrupt timings).
 /// Each bench's per-iteration cost is estimated by a **two-point** measurement: the fn is invoked N
 /// and 2N times in fresh isolates and the per-iteration time is `(t(2N) − t(N)) / N`, which cancels
 /// the fixed per-run overhead (runtime startup, global/setup evaluation, IR lowering — all identical
@@ -1032,7 +1032,7 @@ fn measure_iterations(
 
 /// Lower a program for the real host (untimed) and execute it, returning the result and the
 /// **execution-only** wall-clock duration (lowering excluded). Mirrors [`execute_real_host`]'s
-/// pipeline so a benchmark runs the same Core-IR path a normal `lang run` does.
+/// pipeline so a benchmark runs the same Core-IR path a normal `noeta run` does.
 fn bench_execute(
     program: &Program,
     checked: &lang_check::Checked,
@@ -1061,7 +1061,7 @@ fn fmt_per_iter(ns: f64) -> String {
     }
 }
 
-/// `lang doc <FILE>` — extract the program's `@doc { … }` text blocks (object-model slice 6f) to
+/// `noeta doc <FILE>` — extract the program's `@doc { … }` text blocks (object-model slice 6f) to
 /// stdout, in source order. Each block's verbatim body is dedented (the common leading indentation
 /// and the surrounding blank lines from sitting inside `@doc { … }` are stripped) and preceded by an
 /// HTML-comment header noting its source location — valid markdown that renders to nothing. The

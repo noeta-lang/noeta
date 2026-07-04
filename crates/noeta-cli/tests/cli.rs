@@ -27,7 +27,7 @@ fn temp_program(name: &str, src: &str) -> PathBuf {
 }
 
 fn lang() -> Command {
-    Command::cargo_bin("lang").expect("the `lang` binary builds")
+    Command::cargo_bin("noeta").expect("the `noeta` binary builds")
 }
 
 // --- `run` ------------------------------------------------------------------------
