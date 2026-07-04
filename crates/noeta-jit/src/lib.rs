@@ -1407,15 +1407,25 @@ fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
         &[vm, regs, callee_base, globals, frames, regs_vec, entry0],
     );
     let callee_outcome = cg.b.inst_results(iinst)[0];
-    // `after_call` interprets the callee outcome: continue in place, or an outcome to propagate.
+    let continue_blk = cg.b.create_block();
+    let return_blk = cg.b.create_block();
+    // Hot path inlined (P-CALL S2): a completed direct call returns `OUTCOME_RETURNED` (its result is
+    // already in `dst` via the value-returning `Return`), which `after_call` would only map to
+    // `CONTINUE` — so branch straight to the next op, skipping that per-call helper call. Only a
+    // non-RETURNED outcome (a bail pc that must fix the callee frame's pc, or a nested CALLED/ABORTED)
+    // takes the cold `after_call` path.
+    let returned = cg.b.ins().iconst(types::I64, OUTCOME_RETURNED);
+    let is_returned = cg.b.ins().icmp(IntCC::Equal, callee_outcome, returned);
+    let cold_blk = cg.b.create_block();
+    cg.b.ins()
+        .brif(is_returned, continue_blk, &[], cold_blk, &[]);
+    cg.b.switch_to_block(cold_blk);
     let ainst =
         cg.b.ins()
             .call(cg.after_call_ref, &[vm, frames, callee_outcome]);
     let after = cg.b.inst_results(ainst)[0];
     let cont = cg.b.ins().iconst(types::I64, OUTCOME_CONTINUE);
     let is_cont = cg.b.ins().icmp(IntCC::Equal, after, cont);
-    let continue_blk = cg.b.create_block();
-    let return_blk = cg.b.create_block();
     cg.b.ins().brif(is_cont, continue_blk, &[], return_blk, &[]);
     cg.b.switch_to_block(continue_blk);
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
