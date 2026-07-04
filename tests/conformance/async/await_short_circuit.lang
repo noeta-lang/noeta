@@ -1,0 +1,24 @@
+// Track A.6b — `.await` in a short-circuit `&&`/`||` operand (a conditionally-evaluated value
+// position). The state-machine desugar rewrites `a && b.await` / `a || b.await` into control flow so
+// the guarded await runs only when the operator would evaluate it: `true && _` and `false || _`
+// evaluate their awaited RHS, `false && _` short-circuits (no "checked 99").
+// expect: stdout "checked 5"
+// expect: stdout "checked 3"
+// expect: stdout "11"
+// expect: exit 0
+async fn check(x: int): bool {
+    sleep(1).await
+    echo "checked ${x}"
+    return x > 0
+}
+async fn run(): int {
+    mut count = 0
+    r1 = true && check(5).await
+    if r1 { count = count + 1 }
+    r2 = false || check(3).await
+    if r2 { count = count + 10 }
+    r3 = false && check(99).await
+    if r3 { count = count + 100 }
+    return count
+}
+echo run().await

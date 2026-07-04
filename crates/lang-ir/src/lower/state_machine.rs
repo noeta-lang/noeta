@@ -13,6 +13,7 @@ use std::collections::HashSet;
 
 use lang_ast::{
     BinaryOp, ClosureBody, Expr, ForPattern as AstForPattern, Param, Stmt as AstStmt, StrPart,
+    UnaryOp,
 };
 use lang_span::Span;
 
@@ -926,12 +927,31 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
     }
     match e {
         Expr::Unary { operand, .. } => hoist_in_expr(operand, pre, ctr),
-        Expr::Binary { op, lhs, rhs, .. } => {
-            hoist_in_expr(lhs, pre, ctr);
-            // The RHS of `&&`/`||` is conditional; every other binary evaluates both operands.
-            if !matches!(op, BinaryOp::And | BinaryOp::Or) {
-                hoist_in_expr(rhs, pre, ctr);
+        Expr::Binary { .. } => {
+            // Read the operator and whether the (conditional) RHS holds an await without keeping the
+            // destructuring borrow alive across the rewrites below.
+            let (is_short_circuit, rhs_await) = match &*e {
+                Expr::Binary { op, rhs, .. } => {
+                    (matches!(op, BinaryOp::And | BinaryOp::Or), rhs.has_await())
+                }
+                _ => unreachable!("matched Binary"),
+            };
+            // The LHS is always evaluated unconditionally — hoist its awaits.
+            if let Expr::Binary { lhs, .. } = e {
+                hoist_in_expr(lhs, pre, ctr);
             }
+            if is_short_circuit && rhs_await {
+                // Track A.6b — a short-circuit RHS holding an await becomes control flow so the await
+                // runs only when the operator would evaluate it.
+                desugar_short_circuit_await(e, pre, ctr);
+            } else if !is_short_circuit {
+                // A non-short-circuit binary evaluates both operands unconditionally.
+                if let Expr::Binary { rhs, .. } = e {
+                    hoist_in_expr(rhs, pre, ctr);
+                }
+            }
+            // else: a short-circuit with an await-free RHS — leave it, it evaluates conditionally at
+            // runtime with no suspension inside the guarded operand.
         }
         Expr::Pipeline { left, right, .. } => {
             hoist_in_expr(left, pre, ctr);
@@ -1113,6 +1133,68 @@ fn bare_assign_expr(name: &str, value: Expr, span: Span) -> AstStmt {
         value,
         span,
     }
+}
+
+/// A fresh `mut name = value` binding — the mutable head of a short-circuit-await desugar, later
+/// re-assigned inside the guard.
+fn mut_binding(name: &str, value: Expr, span: Span) -> AstStmt {
+    AstStmt::Binding {
+        mut_decl: true,
+        name: name.to_string(),
+        name_span: span,
+        ty: None,
+        value,
+        span,
+    }
+}
+
+/// Track A.6b — rewrite a short-circuit `lhs && rhs` / `lhs || rhs` whose RHS holds an `.await` into
+/// control flow, so the guarded await runs exactly when the operator would evaluate the RHS:
+///
+/// ```text
+/// x = a && b.await          x = a || b.await
+/// ─────────────────         ─────────────────
+/// mut $scN = a              mut $scN = a
+/// if $scN { $scN = b.await } if !$scN { $scN = b.await }
+/// x = $scN                  x = $scN
+/// ```
+///
+/// `e` is the short-circuit expression (its LHS awaits already hoisted by the caller); it is replaced
+/// with a reference to `$scN` and the two prelude statements are appended to `pre`. The RHS is run
+/// through [`hoist_in_expr`] inside the guard body, so a *nested* short-circuit await (`a && (b &&
+/// c.await)`) desugars recursively. Any other conditional await inside the RHS (a `??` fallback, a
+/// `match` arm) was already rejected by the checker (E0040), so it never reaches here.
+fn desugar_short_circuit_await(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
+    let span = e.span();
+    let name = format!("$sc{}", *ctr);
+    *ctr += 1;
+    let (op, lhs, rhs) = match std::mem::replace(e, ident(&name, span)) {
+        Expr::Binary { op, lhs, rhs, .. } => (op, *lhs, *rhs),
+        _ => unreachable!("caller guarantees a short-circuit Binary"),
+    };
+    // `mut $sc = lhs;` — the LHS's own awaits were already hoisted into `pre` before this call.
+    pre.push(mut_binding(&name, lhs, span));
+    // The guarded body: hoist the RHS's awaits (now in statement position) then `$sc = rhs`.
+    let mut body = Vec::new();
+    let mut rhs = rhs;
+    hoist_in_expr(&mut rhs, &mut body, ctr);
+    body.push(bare_assign_expr(&name, rhs, span));
+    // `&&` runs the RHS iff `$sc` is true; `||` iff it is false.
+    let cond = match op {
+        BinaryOp::And => ident(&name, span),
+        BinaryOp::Or => Expr::Unary {
+            op: UnaryOp::Not,
+            operand: Box::new(ident(&name, span)),
+            span,
+        },
+        _ => unreachable!("caller guarantees `&&`/`||`"),
+    };
+    pre.push(AstStmt::If {
+        cond,
+        then_body: body,
+        else_body: None,
+        span,
+    });
 }
 
 /// `mut name = value` — a fresh declaration (used for a block-local-eligible binding, e.g. a `for`

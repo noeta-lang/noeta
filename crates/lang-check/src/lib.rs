@@ -5189,13 +5189,16 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
     // The span of a guarded operand iff it hosts an await at this callable level.
     let guarded = |g: &Expr| g.has_await().then(|| g.span());
     match e {
-        // Conditional junctions: the guarded operand(s) must be await-free.
+        // Short-circuit `&&`/`||`: the guarded RHS may hold an await — the state-machine desugar
+        // (Track A.6b) rewrites it into control flow so it runs only when the operator evaluates it.
+        // Recurse into the RHS so an await still nested in *another* conditional position inside it
+        // (a `??` fallback, a `match` arm) is caught; a plain (or nested-short-circuit) RHS await is fine.
         Expr::Binary {
             op: BinaryOp::And | BinaryOp::Or,
             lhs,
             rhs,
             ..
-        } => conditional_await_span(lhs).or_else(|| guarded(rhs)),
+        } => conditional_await_span(lhs).or_else(|| conditional_await_span(rhs)),
         Expr::Coalesce {
             value, fallback, ..
         } => conditional_await_span(value).or_else(|| guarded(fallback)),
