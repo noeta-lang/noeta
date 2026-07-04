@@ -1390,6 +1390,21 @@ impl Value {
         }
     }
 
+    /// Call `f` with a **borrowed** `&str` view of this value's string content — no clone, unlike
+    /// [`Self::as_string`]. Returns `Some(f(..))` if this is a heap string, else `None`. Use for
+    /// read-only string work (a `HashMap<String, _>` lookup by `&str`, a comparison) where an owned
+    /// `String` would be pure waste.
+    pub fn with_str<R>(self, f: impl FnOnce(&str) -> R) -> Option<R> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Str(s) => Some(f(s)),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// The function-prototype index, if this is a closure.
     pub fn as_closure(self) -> Option<u32> {
         if self.is_pointer() {

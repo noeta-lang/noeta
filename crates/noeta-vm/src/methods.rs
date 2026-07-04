@@ -904,8 +904,15 @@ impl<'m> Vm<'m> {
             }
             noeta_stdlib::MapMethod::Has => {
                 self.stdlib_arity(name, args, 1, span)?;
-                let key = self.stdlib_string(name, args[0], span)?;
-                Ok(Value::bool(map.map_get(&key).is_some()))
+                // Borrow the key's `&str` for the lookup — no clone.
+                let present = match args[0].with_str(|key| map.map_get(key).is_some()) {
+                    Some(p) => p,
+                    None => {
+                        self.stdlib_string(name, args[0], span)?; // non-string key → the type error
+                        false
+                    }
+                };
+                Ok(Value::bool(present))
             }
             noeta_stdlib::MapMethod::Set => {
                 self.stdlib_arity(name, args, 2, span)?;

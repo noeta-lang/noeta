@@ -938,7 +938,7 @@ extern "C" fn jit_run_leaf_op(
                 set_reg(regs, base, *dst, element);
                 noeta_jit::OUTCOME_CONTINUE
             } else if v.is_map() {
-                let Some(element) = idx.as_string().and_then(|key| v.map_get(&key)) else {
+                let Some(element) = idx.with_str(|key| v.map_get(key)).flatten() else {
                     return bail; // non-string key or missing key → interpreter raises
                 };
                 retain(element);
@@ -3307,27 +3307,34 @@ impl<'m> Vm<'m> {
                         }
                         // A map looks the value up by its string key; a missing key is `E0018`.
                         if v.is_map() {
-                            let Some(key) = idx.as_string() else {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "map index must be a string, found {}",
-                                        idx.type_name()
-                                    ),
-                                ));
-                            };
-                            let Some(element) = v.map_get(&key) else {
-                                return Err(self.error(
-                                    DiagnosticCode::KeyNotFound,
-                                    *span,
-                                    format!("map has no key {key:?}"),
-                                ));
-                            };
-                            retain(element);
-                            set_reg(regs, fbase, *dst, element);
-                            pc += 1;
-                            continue;
+                            // Borrow the key's `&str` for the lookup — no clone on the hot found path;
+                            // the cold error paths clone only for their message.
+                            match idx.with_str(|key| v.map_get(key)) {
+                                Some(Some(element)) => {
+                                    retain(element);
+                                    set_reg(regs, fbase, *dst, element);
+                                    pc += 1;
+                                    continue;
+                                }
+                                Some(None) => {
+                                    let key = idx.as_string().unwrap_or_default();
+                                    return Err(self.error(
+                                        DiagnosticCode::KeyNotFound,
+                                        *span,
+                                        format!("map has no key {key:?}"),
+                                    ));
+                                }
+                                None => {
+                                    return Err(self.error(
+                                        DiagnosticCode::TypeMismatch,
+                                        *span,
+                                        format!(
+                                            "map index must be a string, found {}",
+                                            idx.type_name()
+                                        ),
+                                    ));
+                                }
+                            }
                         }
                         // A string addresses a single character by position (bounds-checked),
                         // counting by Unicode scalar values to match `len`.
