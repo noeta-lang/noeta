@@ -1,7 +1,7 @@
 # Workspace Cargo configuration.
 
 [env]
-# Silence miri's exposed-provenance warning. The value representation (`crates/lang-value`)
+# Silence miri's exposed-provenance warning. The value representation (`crates/noeta-value`)
 # NaN-boxes pointers, which requires an int<->pointer round-trip through the exposed-provenance
 # API (`expose_provenance` / `with_exposed_provenance_mut`). That is the miri-sound way to stash a
 # pointer's address in a tagged `u64` and recover it, but miri's strict-provenance checker still

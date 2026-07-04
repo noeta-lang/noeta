@@ -1,14 +1,14 @@
-# lang-stdlib
+# noeta-stdlib
 
 The shared standard-library and host-capability layer.
 
 ## What this crate is for
 
-`lang-stdlib` is the home of the always-present standard library: the rich **Ring 1** core surface bound to the language's primitive types, the thin **Ring 2** always-shipped modules, and the `Host`/`Executor` capability seam both backends route their side effects through. Ring 3 (regex, crypto, HTTP, timezone date/time, …) is out of scope — it arrives through the native-extension mechanism, not here.
+`noeta-stdlib` is the home of the always-present standard library: the rich **Ring 1** core surface bound to the language's primitive types, the thin **Ring 2** always-shipped modules, and the `Host`/`Executor` capability seam both backends route their side effects through. Ring 3 (regex, crypto, HTTP, timezone date/time, …) is out of scope — it arrives through the native-extension mechanism, not here.
 
 ## The load-bearing idea: shared semantics, differential by construction
 
-The project's spine is the **differential oracle**: the M0 tree-walker (`lang-eval`, frozen as the reference) and the M1 VM (`lang-vm`) must produce identical `RunResult`s for every program. Duplicating stdlib logic across the two backends would put that guarantee at the mercy of two hand-kept-in-sync copies.
+The project's spine is the **differential oracle**: the M0 tree-walker (`noeta-eval`, frozen as the reference) and the M1 VM (`noeta-vm`) must produce identical `RunResult`s for every program. Duplicating stdlib logic across the two backends would put that guarantee at the mercy of two hand-kept-in-sync copies.
 
 Instead: **where a Ring 1 operation is expressible over data that is represented *identically* in both runtimes, its semantics live here once and both backends call into it.** Then the two backends agree not because a test caught a divergence, but because there is only one implementation.
 
@@ -54,10 +54,10 @@ Determinism is a hard requirement across the whole stdlib: no wall-clock, no has
 
 Later milestones grew this crate well past the M1.10 baseline above; all of the following ship:
 
-- **The `Host` capability seam** (`host.rs`) — every host-coupled effect (fs, clock, PRNG, `env`/`args`) goes through one `Host` trait with a deterministic `SandboxHost` (what the differential always runs); the real-disk `RealHost` lives in `lang-runtime`.
-- **`env`/`args`** — process introspection over the host seam (a fixed sandbox fixture; the real environment under `lang run`). No longer deferred.
+- **The `Host` capability seam** (`host.rs`) — every host-coupled effect (fs, clock, PRNG, `env`/`args`) goes through one `Host` trait with a deterministic `SandboxHost` (what the differential always runs); the real-disk `RealHost` lives in `noeta-runtime`.
+- **`env`/`args`** — process introspection over the host seam (a fixed sandbox fixture; the real environment under `noeta run`). No longer deferred.
 - **`fs` streaming + directories + handles** — `read_lines`/`append`, `mkdir`/`is_dir`/`list(dir)`, and the `fs.open` cursor `FileHandle` (`handle.rs`, the first mutable heap value type, shared by both backends), plus `read_bytes`/`write_bytes` and the `*_async` variants.
-- **The async `Executor` seam** (`executor.rs`) — a deterministic `SandboxExecutor` (logical time, in-oracle) behind the `async`/`await`, generator, and iterator surfaces; the real tokio `RealExecutor` lives in `lang-runtime`.
+- **The async `Executor` seam** (`executor.rs`) — a deterministic `SandboxExecutor` (logical time, in-oracle) behind the `async`/`await`, generator, and iterator surfaces; the real tokio `RealExecutor` lives in `noeta-runtime`.
 - **`vec`/`quat`** — scalar 3D math plus the autovectorized `soa_*`/`*_all` bulk kernels over packed buffers.
 - **The native-extension registry** (`registry.rs`) — the neutral `NativeValue` marshalling seam through which `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` are registered as the dogfooded "std" extension, with one shared dispatch function per module so the differential holds by construction. `json.parse::<T>` decodes into a call-site-named type.
 

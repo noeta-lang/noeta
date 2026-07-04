@@ -1,4 +1,4 @@
-# lang-alloc-probe
+# noeta-alloc-probe
 
 A test-only heap-residency probe.
 
@@ -9,4 +9,4 @@ A test-only heap-residency probe.
 
 It is deliberately a standalone crate, depended on only as a `dev-dependency`, so the `unsafe` it needs to implement `GlobalAlloc` stays out of the production runtime crates and the workspace `unsafe_code = "forbid"` quarantine is relaxed in exactly one extra, test-only place. It is `miri`-exempt by nature (it *is* the allocator).
 
-Part of the `lang` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).
+Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).

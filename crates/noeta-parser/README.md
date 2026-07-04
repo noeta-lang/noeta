@@ -1,4 +1,4 @@
-# lang-parser
+# noeta-parser
 
 The parser (a [`chumsky`] parser-combinator grammar).
 
@@ -7,4 +7,4 @@ The parser (a [`chumsky`] parser-combinator grammar).
 
 [`chumsky`]: https://docs.rs/chumsky/1.0.0-alpha.8/chumsky/
 
-Part of the `lang` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md` for the crate map and where each kind of change goes).
+Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md` for the crate map and where each kind of change goes).

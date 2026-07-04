@@ -1,8 +1,8 @@
-# lang-ir-passes
+# noeta-ir-passes
 
 Precise-reference-counting analyses and transforms over the Core IR.
 
-- **Takes in:** the Core IR (`lang-ir`).
+- **Takes in:** the Core IR (`noeta-ir`).
 - **Emits:** the same IR, annotated with reference-counting decisions — last-use/liveness facts, inserted `drop`s, and in-place-reuse tokens.
 
 This crate hosts the passes that make memory management *compiled, not traced*. Because the annotated IR is the single program both backends execute, prompt reclamation lands in both at the same points by construction.
@@ -13,4 +13,4 @@ This crate hosts the passes that make memory management *compiled, not traced*. 
 
 The load-bearing safety direction: every analysis here is **conservative in the "never too early" direction**. Where flow makes a last use uncertain, the value is treated as still live (its drop omitted, reclaimed later by scope teardown). A late drop costs only promptness; an early drop would be a use-after-free and must be impossible by construction. Static analysis is an optimization input — correctness always rests on the runtime refcount plus scope teardown — so a bug in any pass here can cost performance, never memory safety.
 
-Part of the `lang` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).
+Part of the `noeta` compilation pipeline (see the repository `ARCHITECTURE.md` and `AGENTS.md`).

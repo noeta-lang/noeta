@@ -13,7 +13,7 @@ This is a pre-alpha, not-yet-public language implementation built primarily thro
 
 1. Pick the lowest-numbered `todo` slice in `plans/roadmap.md`; set it `in-progress`.
 2. Implement it as a **vertical slice** through the pipeline (grammar/AST → eval op → conformance cases → snapshots). Prefer end-to-end feature slices over diffuse refactors.
-3. **Every feature or fix lands with a conformance corpus entry** (`tests/conformance/**.lang` with `// expect:` headers). This is the iron rule.
+3. **Every feature or fix lands with a conformance corpus entry** (`tests/conformance/**.noe` with `// expect:` headers). This is the iron rule.
 4. Keep it green and clean:
    - `cargo test` (unit + snapshot + conformance + property)
    - `cargo fmt --all`

@@ -10,7 +10,7 @@
 *.swp
 
 # Scratch outputs written by fs/async corpus programs when run from the repo root
-# (e.g. `lang run tests/conformance/std/fs_lines.lang` on the real host).
+# (e.g. `noeta run tests/conformance/std/fs_lines.noe` on the real host).
 /a.txt
 /b.txt
 /c.txt
