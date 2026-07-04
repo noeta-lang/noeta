@@ -472,6 +472,12 @@ impl Jit {
                     .code
                     .iter()
                     .any(|op| matches!(op, Op::Call { .. }) || is_leaf_heap_op(op));
+            // The per-store-site release map (P-JIT bare stores): in a `heap_aware` prototype, a store
+            // releases the overwritten value only where that value may be a heap pointer; where it is
+            // provably an immediate the store is bare (skips the load-old + `is_pointer` release).
+            let nreg = chunk.num_registers as usize;
+            let heap_in = heap_in_map(chunk, heap_aware);
+            let transfer = transfer_pairs(chunk);
 
             let mut cg = Codegen {
                 b: &mut b,
@@ -483,6 +489,10 @@ impl Jit {
                 frames,
                 regs_vec,
                 heap_aware,
+                heap_in,
+                nreg,
+                transfer,
+                cur_pc: 0,
                 proto: proto as u32,
                 note_bound_ref,
                 retain_ref,
@@ -747,6 +757,218 @@ fn reachable_pcs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
     seen
 }
 
+/// Whether a `Binary`'s result is always an immediate — a bool from a comparison (`==`/`<`/…) or a
+/// short-circuiting `&&`/`||`. The arithmetic, bitwise, and shift ops can overflow the 48-bit
+/// immediate range into a heap-boxed big int, and `~` builds a heap string, so those are *not*
+/// guaranteed immediate. Used by the bare-store analysis to decide whether a `Binary`'s destination
+/// may hold a heap value afterwards.
+fn binary_result_is_immediate(op: BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Eq
+            | BinaryOp::Ne
+            | BinaryOp::Identity
+            | BinaryOp::NotIdentity
+            | BinaryOp::Lt
+            | BinaryOp::Le
+            | BinaryOp::Gt
+            | BinaryOp::Ge
+            | BinaryOp::And
+            | BinaryOp::Or
+    )
+}
+
+/// One op's effect on the per-register "may hold a heap value" set (the bare-store analysis,
+/// [`heap_in_map`]). `None` means the op is *not modeled* — its effect on registers is unknown to
+/// this analysis — which opts the whole prototype out (the analysis fails **closed**: every store
+/// keeps its refcount-correct release). Only the ops that appear in a pure-arithmetic loop are
+/// modeled; a call, a leaf/heap op, a closure, an index — anything richer — returns `None`, so the
+/// optimization is confined to exactly the prototypes where it was measured to help and cannot silently
+/// mis-model a heap value.
+enum RegEffect {
+    /// Reads/writes no register the analysis tracks (a branch, `Echo`, `Return`, `Halt`).
+    Inert,
+    /// The op leaves `reg` holding `unit` (a `Drop`, or a `StoreGlobal` that moves its source out).
+    Clear(Reg),
+    /// `dst` is (re)defined; `heap` = whether its new value may be a heap pointer.
+    Def { dst: Reg, heap: bool },
+    /// `dst = src` — `dst` inherits `src`'s heap-ness (a `Move`).
+    Copy { dst: Reg, src: Reg },
+}
+
+/// Model one op's effect on the may-hold-heap set, or `None` if the op is unmodeled (see
+/// [`RegEffect`]). The whitelist is deliberately the pure-arithmetic-loop subset.
+fn reg_effect(op: &Op, consts: &[Const]) -> Option<RegEffect> {
+    Some(match op {
+        Op::LoadConst { dst, k } => RegEffect::Def {
+            dst: *dst,
+            heap: const_immediate_bits(&consts[*k as usize]).is_none(),
+        },
+        Op::Move { dst, src } => RegEffect::Copy {
+            dst: *dst,
+            src: *src,
+        },
+        Op::Drop { reg, .. } => RegEffect::Clear(*reg),
+        Op::StoreGlobal { src, .. } => RegEffect::Clear(*src),
+        Op::LoadGlobal { dst, .. } | Op::TakeGlobal { dst, .. } => {
+            RegEffect::Def { dst: *dst, heap: true }
+        }
+        Op::Binary { op, dst, .. } => RegEffect::Def {
+            dst: *dst,
+            heap: !binary_result_is_immediate(*op),
+        },
+        Op::Unary { dst, .. } | Op::Stringify { dst, .. } => {
+            RegEffect::Def { dst: *dst, heap: true }
+        }
+        Op::Jump { .. }
+        | Op::JumpIfTrue { .. }
+        | Op::JumpIfFalse { .. }
+        | Op::CondBranch { .. }
+        | Op::RequireBool { .. }
+        | Op::RequireCondBool { .. }
+        | Op::Echo { .. }
+        | Op::Return { .. }
+        | Op::Halt => RegEffect::Inert,
+        _ => return None,
+    })
+}
+
+/// The analysis CFG successors of `pc` under *tier-0* (interpreter) semantics — the paths along which a
+/// register's value flows. Every op falls through to `pc + 1` except a jump (to its target), a
+/// conditional branch (both), and the terminators `Return`/`Halt` (none). Modeled only for the
+/// whitelisted ops ([`reg_effect`]); the caller has already rejected any other op.
+fn analysis_succ(op: &Op, pc: usize, n: usize, out: &mut Vec<usize>) {
+    out.clear();
+    match op {
+        Op::Jump { target } => out.push(*target as usize),
+        Op::JumpIfTrue { target, .. }
+        | Op::JumpIfFalse { target, .. }
+        | Op::CondBranch { target, .. } => {
+            out.push(*target as usize);
+            if pc + 1 < n {
+                out.push(pc + 1);
+            }
+        }
+        Op::Return { .. } | Op::Halt => {}
+        _ => {
+            if pc + 1 < n {
+                out.push(pc + 1);
+            }
+        }
+    }
+}
+
+/// The bare-store release map for a prototype: `map[pc * nreg + r]` is whether a store to register `r`
+/// at `pc` must release the value it overwrites. A `false` cell means the old occupant is provably an
+/// immediate, so the store can skip the load-old + `is_pointer` release (the bare-store optimization).
+///
+/// - A non-`heap_aware` prototype already stores bare everywhere (the immediate invariant) → all-false.
+/// - A `heap_aware` prototype the forward analysis can model → the precise may-hold-heap set at each
+///   store site (release iff the overwritten value may be a heap pointer).
+/// - A `heap_aware` prototype with any unmodeled op → all-true (release everywhere, the prior behavior).
+///
+/// **Soundness.** The analysis is a monotone forward may-hold-heap dataflow over the tier-0 CFG
+/// (join = union), seeded with the parameters possibly-heap at entry (`pc 0`). A `false` cell is a
+/// *guarantee* the register holds an immediate there, so skipping the release is a no-op — the
+/// interpreter's `set_reg` would release an immediate, which is itself a no-op. Every modeled op's
+/// [`RegEffect`] only clears a bit (`Drop`/`StoreGlobal` leave `unit`), copies one (`Move`), or sets
+/// one to an over-approximation of its result's heap-ness; an unmodeled op fails the whole map closed.
+/// A `heap_aware` prototype is either call-free (its native code runs to a single bail per activation,
+/// so a loop-header/`pc 0` entry is the only place the interpreter can have left a live register — and
+/// the fixpoint's in-set over-approximates exactly that) or call-bearing (it contains `Op::Call`, which
+/// is unmodeled → all-true), so the analysis is never trusted across a native re-entry it does not
+/// account for.
+fn heap_in_map(chunk: &lang_bytecode::Chunk, heap_aware: bool) -> Vec<bool> {
+    let n = chunk.code.len();
+    let nreg = chunk.num_registers as usize;
+    if !heap_aware {
+        return vec![false; n * nreg];
+    }
+    match heap_at_fixpoint(chunk, n, nreg) {
+        Some(inset) => inset,
+        None => vec![true; n * nreg],
+    }
+}
+
+/// The ownership-transfer peephole map for a prototype (see [`Codegen::transfer`]): pc `i` is marked
+/// when a `Move dst <- src` at `i` is immediately followed by a `Drop src` at `i + 1` — an ownership
+/// transfer whose retain/release pair cancels. Both `i` and `i + 1` are marked. The `Drop` must be
+/// reachable *only* through the `Move` (no branch targets `i + 1`), so that on every path reaching the
+/// `Drop` the `Move` ran first and the pairing holds; a `Drop` that is a jump target is left alone.
+fn transfer_pairs(chunk: &lang_bytecode::Chunk) -> Vec<bool> {
+    let n = chunk.code.len();
+    let mut is_target = vec![false; n + 1];
+    for op in &chunk.code {
+        match op {
+            Op::Jump { target }
+            | Op::JumpIfTrue { target, .. }
+            | Op::JumpIfFalse { target, .. }
+            | Op::CondBranch { target, .. } => is_target[*target as usize] = true,
+            _ => {}
+        }
+    }
+    let mut transfer = vec![false; n];
+    for pc in 0..n {
+        let Op::Move { src, .. } = chunk.code[pc] else {
+            continue;
+        };
+        if pc + 1 < n
+            && !is_target[pc + 1]
+            && matches!(chunk.code[pc + 1], Op::Drop { reg, .. } if reg == src)
+        {
+            transfer[pc] = true;
+            transfer[pc + 1] = true;
+        }
+    }
+    transfer
+}
+
+/// The forward may-hold-heap fixpoint used by [`heap_in_map`], or `None` if any op is unmodeled.
+/// Returns the in-set flattened as `[pc * nreg + r]`: whether register `r` may hold a heap value at the
+/// *start* of op `pc` — which is exactly whether a store to `r` at `pc` overwrites a possibly-heap
+/// value.
+fn heap_at_fixpoint(chunk: &lang_bytecode::Chunk, n: usize, nreg: usize) -> Option<Vec<bool>> {
+    let effects: Vec<RegEffect> = chunk
+        .code
+        .iter()
+        .map(|op| reg_effect(op, &chunk.consts))
+        .collect::<Option<_>>()?;
+
+    // in[pc * nreg + r]: may register `r` hold a heap value at the start of op `pc`. Seed: the
+    // parameters (registers `0..num_params`) may be heap at entry (`pc 0`); every other slot is
+    // `unit`-initialized (an immediate).
+    let mut inset = vec![false; n * nreg];
+    inset[..chunk.num_params as usize].fill(true);
+
+    let mut succ = Vec::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for pc in 0..n {
+            // out = transfer(in[pc], effects[pc]).
+            let mut out = inset[pc * nreg..pc * nreg + nreg].to_vec();
+            match effects[pc] {
+                RegEffect::Inert => {}
+                RegEffect::Clear(r) => out[r as usize] = false,
+                RegEffect::Def { dst, heap } => out[dst as usize] = heap,
+                RegEffect::Copy { dst, src } => out[dst as usize] = out[src as usize],
+            }
+            // Propagate out into each successor's in-set (join = OR).
+            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            for &s in &succ {
+                let base = s * nreg;
+                for (r, &o) in out.iter().enumerate() {
+                    if o && !inset[base + r] {
+                        inset[base + r] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    Some(inset)
+}
+
 /// A thin wrapper over the Cranelift builder carrying the frame base pointer, the globals base
 /// pointer, and the `note_global_bound` helper reference — the context every op-emitter needs. Keeps
 /// [`emit_op`] free of builder plumbing. Register/global access uses *trusted* memory flags (aligned
@@ -770,6 +992,24 @@ struct Codegen<'a, 'b> {
     /// Whether this prototype carries heap values in registers (it makes a call): register writes then
     /// release the overwritten value and moved heap values are retained. See [`Codegen::store_reg`].
     heap_aware: bool,
+    /// Per-op may-hold-heap map, `heap_in[pc * nreg + r]` (P-JIT bare stores): whether register `r` may
+    /// hold a heap pointer at the *start* of op `pc`. A `false` cell is a guarantee the register holds an
+    /// immediate there, so the refcount work keyed on it — releasing an overwritten value, releasing a
+    /// dropped value, retaining a moved value — is a no-op and can be skipped (a bare store/move/drop).
+    /// All-false for a non-`heap_aware` prototype (already bare); all-true for a `heap_aware` prototype
+    /// the analysis cannot model. See [`heap_in_map`] and [`Codegen::may_be_heap`].
+    heap_in: Vec<bool>,
+    /// Register count per frame — the stride into [`Codegen::heap_in`].
+    nreg: usize,
+    /// Ownership-transfer peephole map, indexed by bytecode pc (P-JIT bare stores). A `Move dst <- src`
+    /// immediately followed by `Drop src` is an ownership *transfer*: the interpreter retains `src` in
+    /// the `Move` then releases it in the `Drop`, a pair that cancels exactly regardless of the value's
+    /// type. Both pcs are marked here so the `Move` skips its retain and the `Drop` skips its release —
+    /// a bare copy — while the net refcount is preserved. See [`transfer_pairs`].
+    transfer: Vec<bool>,
+    /// The bytecode pc of the op currently being emitted, so [`Codegen::may_be_heap`] can index
+    /// [`Codegen::heap_in`]. Set at the top of [`emit_op`].
+    cur_pc: usize,
     /// This prototype's index, passed to the call helper so it can read the `Op::Call` back.
     proto: u32,
     note_bound_ref: FuncRef,
@@ -796,13 +1036,22 @@ impl Codegen<'_, '_> {
         )
     }
 
-    /// Store `v` into register `r`. In a call-free prototype the overwritten value is always an
-    /// immediate (the interpreter's release-on-overwrite is a no-op), so this is a bare store. In a
-    /// `heap_aware` prototype the old occupant may be a heap value, so it releases it first —
-    /// reproducing the interpreter's `set_reg` (which drops one reference to the old value). The caller
-    /// is responsible for retaining `v` when it is a moved heap value (`LoadGlobal`/`Move`).
+    /// Whether register `r` may hold a heap pointer at the current op (`cur_pc`) — the bare-store
+    /// analysis ([`heap_in_map`]). `false` is a guarantee it holds an immediate, so any refcount work
+    /// keyed on `r`'s current value (releasing it, retaining it) is a no-op and can be skipped.
+    fn may_be_heap(&self, r: Reg) -> bool {
+        self.heap_in[self.cur_pc * self.nreg + r as usize]
+    }
+
+    /// Store `v` into register `r`. Reproduces the interpreter's `set_reg`, which drops one reference to
+    /// the overwritten value — but only *where that value may be a heap pointer* ([`Codegen::may_be_heap`]
+    /// of `r`). Where the old occupant is provably an immediate (a fresh/`Drop`-ped slot, a bool, an
+    /// immediate arithmetic result) the store is bare — no load-old, no `is_pointer` branch. A call-free
+    /// prototype's map is all-false (every store bare, the immediate invariant), a `heap_aware` one the
+    /// analysis cannot model is all-true (every store releases, as before). The caller is responsible
+    /// for retaining `v` when it is a moved heap value (`LoadGlobal`/`Move`).
     fn store_reg(&mut self, r: Reg, v: ClValue) {
-        if self.heap_aware {
+        if self.may_be_heap(r) {
             let old = self.load_reg(r);
             self.b
                 .ins()
@@ -963,6 +1212,7 @@ fn global_offset(g: u32) -> i32 {
 /// not compile ([`is_fast_op`] is false) bails here — the interpreter runs it and the rest of the
 /// frame.
 fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[Block]) {
+    cg.cur_pc = pc;
     if !is_fast_op(op, consts) {
         let here = cg.pc_const(pc);
         cg.b.ins().return_(&[here]);
@@ -977,26 +1227,30 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             next(cg);
         }
         Op::Move { dst, src } => {
-            // The interpreter's `Move` retains the source then overwrites the destination. A call-free
-            // prototype's `src` is always an immediate (retain is a no-op); a `heap_aware` one retains
-            // a moved heap value, and `store_reg` releases the overwritten destination.
+            // The interpreter's `Move` retains the source then overwrites the destination. The retain is
+            // skipped when this `Move` is the head of an ownership transfer (a `Drop src` follows, whose
+            // release cancels it) or where `src` is provably an immediate (the bare-store analysis);
+            // otherwise it retains the moved heap value. `store_reg` releases the overwritten destination
+            // where it may be heap.
             let v = cg.load_reg(*src);
-            if cg.heap_aware {
+            if !cg.transfer[pc] && cg.may_be_heap(*src) {
                 cg.retain_if_heap(v);
             }
             cg.store_reg(*dst, v);
             next(cg);
         }
         Op::Drop { reg, relevant } => {
-            // Take the value out (leaving `unit`) and drop it. Immediate in a call-free prototype (no
-            // release). In a `heap_aware` prototype a heap value is released — through the
-            // destructor-aware path when the drop is IR-relevant, else the plain release.
+            // Take the value out (leaving `unit`) and drop it. The release is skipped when this `Drop` is
+            // the tail of an ownership transfer (the preceding `Move` took its retain, which this release
+            // would cancel) or where the dropped value is provably an immediate (the bare-store
+            // analysis); otherwise a heap value is released — the destructor-aware path when the drop is
+            // IR-relevant, else the plain release.
             let v = cg.load_reg(*reg);
             let unit =
                 cg.b.ins()
                     .iconst(types::I64, Value::NANBOX.unit_bits as i64);
             cg.store_reg_raw(*reg, unit);
-            if cg.heap_aware {
+            if !cg.transfer[pc] && cg.may_be_heap(*reg) {
                 cg.release_dropped_if_heap(v, *relevant);
             }
             next(cg);
@@ -1474,4 +1728,142 @@ fn guard(cg: &mut Codegen, cond: ClValue, cont: Block, pc: usize) {
     let here = cg.pc_const(pc);
     cg.b.ins().return_(&[here]);
     cg.b.switch_to_block(cont);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lang_bytecode::Chunk;
+    use lang_span::Span;
+
+    fn chunk(code: Vec<Op>, consts: Vec<Const>, num_params: u16, num_registers: u16) -> Chunk {
+        let mut c = Chunk::placeholder();
+        c.code = code;
+        c.consts = consts;
+        c.num_params = num_params;
+        c.num_registers = num_registers;
+        c
+    }
+
+    /// The ownership-transfer peephole marks a `Move dst <- src` immediately followed by `Drop src`.
+    #[test]
+    fn transfer_pairs_marks_move_then_drop_of_source() {
+        let c = chunk(
+            vec![
+                Op::Move { dst: 0, src: 1 },
+                Op::Drop {
+                    reg: 1,
+                    relevant: false,
+                },
+                Op::Halt,
+            ],
+            vec![],
+            0,
+            2,
+        );
+        assert_eq!(transfer_pairs(&c), vec![true, true, false]);
+    }
+
+    /// A `Drop` of a *different* register than the preceding `Move`'s source is not a transfer.
+    #[test]
+    fn transfer_pairs_ignores_drop_of_other_register() {
+        let c = chunk(
+            vec![
+                Op::Move { dst: 0, src: 1 },
+                Op::Drop {
+                    reg: 2,
+                    relevant: false,
+                },
+                Op::Halt,
+            ],
+            vec![],
+            0,
+            3,
+        );
+        assert_eq!(transfer_pairs(&c), vec![false, false, false]);
+    }
+
+    /// A `Drop` that is itself a branch target is reachable without the `Move`, so the retain/release
+    /// pairing cannot be assumed — it is left alone.
+    #[test]
+    fn transfer_pairs_ignores_drop_that_is_a_jump_target() {
+        let c = chunk(
+            vec![
+                Op::Jump { target: 2 },
+                Op::Move { dst: 0, src: 1 },
+                Op::Drop {
+                    reg: 1,
+                    relevant: false,
+                }, // pc 2 — a jump target
+                Op::Halt,
+            ],
+            vec![],
+            0,
+            2,
+        );
+        let t = transfer_pairs(&c);
+        assert!(!t[1] && !t[2], "a jump-targeted Drop is not a safe transfer");
+    }
+
+    /// The may-hold-heap analysis: parameters are heap at entry, a comparison result is an immediate,
+    /// and an arithmetic result may be a heap-boxed big int.
+    #[test]
+    fn heap_in_marks_params_and_arith_but_not_comparisons() {
+        let sp = Span::new(0, 0);
+        let c = chunk(
+            vec![
+                Op::Binary {
+                    op: BinaryOp::Lt,
+                    dst: 1,
+                    a: 0,
+                    b: 0,
+                    span: sp,
+                },
+                Op::Binary {
+                    op: BinaryOp::Add,
+                    dst: 2,
+                    a: 0,
+                    b: 0,
+                    span: sp,
+                },
+                Op::Halt,
+            ],
+            vec![],
+            1, // r0 is a parameter
+            3,
+        );
+        let map = heap_in_map(&c, true);
+        let nreg = 3;
+        let at = |pc: usize, r: usize| map[pc * nreg + r];
+        assert!(at(0, 0), "a parameter may be heap at entry");
+        assert!(!at(0, 1), "a fresh temp is an immediate at entry");
+        assert!(!at(1, 1), "a comparison result is an immediate");
+        assert!(at(2, 2), "an arithmetic result may be heap-boxed");
+    }
+
+    /// A non-`heap_aware` prototype already stores bare everywhere — the map is all-false.
+    #[test]
+    fn heap_in_all_false_when_not_heap_aware() {
+        let c = chunk(vec![Op::Halt], vec![], 1, 2);
+        assert!(heap_in_map(&c, false).iter().all(|b| !*b));
+    }
+
+    /// An unmodeled op (here `MakeTuple`) opts the whole prototype out — the analysis fails closed to
+    /// all-true (every store keeps its refcount-correct release).
+    #[test]
+    fn heap_in_all_true_when_an_op_is_unmodeled() {
+        let c = chunk(
+            vec![
+                Op::MakeTuple {
+                    dst: 0,
+                    items: Box::new([]),
+                },
+                Op::Halt,
+            ],
+            vec![],
+            0,
+            1,
+        );
+        assert!(heap_in_map(&c, true).iter().all(|b| *b));
+    }
 }

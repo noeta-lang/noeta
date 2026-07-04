@@ -1009,6 +1009,7 @@ dependencies = [
  "cranelift-native",
  "lang-ast",
  "lang-bytecode",
+ "lang-span",
  "lang-value",
 ]
 

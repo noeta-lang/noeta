@@ -16,6 +16,9 @@ cranelift-frontend = "0.133"
 cranelift-codegen = "0.133"
 cranelift-native = "0.133"
 
+[dev-dependencies]
+lang-span = { workspace = true }
+
 # This crate deliberately does NOT inherit the workspace lint table: the JIT transmutes
 # Cranelift-finalized code pointers to `extern "C" fn` and calls them, which is inherently
 # `unsafe`. It re-states the rest of the workspace lints minus `unsafe_code = "forbid"`.
