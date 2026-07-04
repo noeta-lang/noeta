@@ -402,7 +402,7 @@ mod tests {
 
     fn db_and_src(text: &str) -> (LangDatabase, SourceProgram) {
         let db = LangDatabase::default();
-        let source = Source::new(SourceId::FIRST, "test.lang", text);
+        let source = Source::new(SourceId::FIRST, "test.noe", text);
         let src = source_program(&db, &source);
         (db, src)
     }
@@ -480,12 +480,12 @@ mod tests {
         let db = LangDatabase::default();
         let entry = Source::new(
             SourceId(0),
-            "main.lang",
+            "main.noe",
             "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n",
         );
         let a = Source::new(
             SourceId(1),
-            "a.lang",
+            "a.noe",
             "namespace App.A;\npub class Foo { pub x: int }\n",
         );
         let ws = workspace(&db, &entry, std::slice::from_ref(&a));
@@ -518,15 +518,15 @@ mod tests {
         let entry_text = "namespace App.Main;\nuse App.A.Foo;\nf = Foo { x: 1 };\necho f.x;\n";
         let a_text = "namespace App.A;\npub class Foo { x: int }\n";
         let raw = lang_loader::RawModule {
-            name: "a.lang".into(),
+            name: "a.noe".into(),
             text: a_text.into(),
         };
         let loader =
-            lang_loader::link("main.lang", entry_text, std::slice::from_ref(&raw)).unwrap();
+            lang_loader::link("main.noe", entry_text, std::slice::from_ref(&raw)).unwrap();
 
         let db = LangDatabase::default();
-        let entry = Source::new(SourceId(0), "main.lang", entry_text);
-        let a = Source::new(SourceId(1), "a.lang", a_text);
+        let entry = Source::new(SourceId(0), "main.noe", entry_text);
+        let a = Source::new(SourceId(1), "a.noe", a_text);
         let ws = workspace(&db, &entry, std::slice::from_ref(&a));
         let salsa = match &linked(&db, ws).0 {
             Ok(p) => p.clone(),
@@ -547,17 +547,17 @@ mod tests {
         let mut db = LangDatabase::default();
         let entry = Source::new(
             SourceId(0),
-            "main.lang",
+            "main.noe",
             "namespace App.Main;\nuse App.A.Foo;\n",
         );
         let a = Source::new(
             SourceId(1),
-            "a.lang",
+            "a.noe",
             "namespace App.A;\npub class Foo { pub x: int }\n",
         );
         let b = Source::new(
             SourceId(2),
-            "b.lang",
+            "b.noe",
             "namespace App.B;\npub class Bar { y: int }\n",
         );
         let entry_src = source_program(&db, &entry);

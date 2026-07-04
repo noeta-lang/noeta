@@ -1,4 +1,4 @@
-//! The project manifest (`lang.toml`) — build **profiles** (object-model slice 6g).
+//! The project manifest (`noeta.toml`) — build **profiles** (object-model slice 6g).
 //!
 //! A *profile* names which dev-tiers are live in a build and which package provides each — the
 //! Cargo-profile / MSBuild-configuration axis. A `--profile` selects a tier set; the front-end tier
@@ -28,14 +28,14 @@ use std::path::{Path, PathBuf};
 use lang_check::BUILTIN_TIERS;
 
 /// The manifest file name, discovered at or above the entry file's directory.
-pub const MANIFEST_NAME: &str = "lang.toml";
+pub const MANIFEST_NAME: &str = "noeta.toml";
 
 /// The sole tier provider available before the package system: the built-in/stdlib tiers. The
 /// provider-string grammar accepts only this; naming any other package is an error until packages
 /// (and their dependency resolution) exist.
 const BUILTIN_PROVIDER: &str = "std";
 
-/// A parsed `lang.toml`: its build profiles, each a (possibly inheriting) tier provider-map.
+/// A parsed `noeta.toml`: its build profiles, each a (possibly inheriting) tier provider-map.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Manifest {
     profiles: BTreeMap<String, Profile>,
@@ -49,7 +49,7 @@ struct Profile {
     tiers: BTreeMap<String, String>,
 }
 
-/// Discover the nearest `lang.toml` at or above `start_dir`, walking up to the filesystem root.
+/// Discover the nearest `noeta.toml` at or above `start_dir`, walking up to the filesystem root.
 pub fn find(start_dir: &Path) -> Option<PathBuf> {
     for dir in start_dir.ancestors() {
         let candidate = dir.join(MANIFEST_NAME);
@@ -60,7 +60,7 @@ pub fn find(start_dir: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Resolve the active-tier set for `profile` from the `lang.toml` discovered at or above `entry`'s
+/// Resolve the active-tier set for `profile` from the `noeta.toml` discovered at or above `entry`'s
 /// directory: load the manifest, follow `extends`, and return the live tier names (sorted). Every
 /// failure — no manifest, parse error, unknown profile/tier, unavailable provider, inheritance
 /// cycle — is a human-readable `Err` the caller prints.
@@ -80,7 +80,7 @@ pub fn resolve_active_tiers(entry: &Path, profile: &str) -> Result<Vec<String>, 
 }
 
 impl Manifest {
-    /// Parse a `lang.toml`'s text into a [`Manifest`], validating every tier name (a built-in tier)
+    /// Parse a `noeta.toml`'s text into a [`Manifest`], validating every tier name (a built-in tier)
     /// and provider (only `"std"` for now). Unknown keys outside `[profiles]` and unknown
     /// profile-level keys are ignored, leaving room for later codegen knobs.
     pub fn parse(text: &str) -> Result<Manifest, String> {

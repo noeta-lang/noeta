@@ -83,7 +83,7 @@ impl JitDiffReport {
     }
 }
 
-/// Run the JIT differential oracle over every `.lang` file under `root` (optionally narrowed to one
+/// Run the JIT differential oracle over every `.noe` file under `root` (optionally narrowed to one
 /// file).
 pub fn run_jit_differential(root: &Path, only: Option<&Path>) -> JitDiffReport {
     let mut cases = Vec::new();

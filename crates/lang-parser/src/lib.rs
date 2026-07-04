@@ -3040,7 +3040,7 @@ mod tests {
     use lang_span::SourceId;
 
     fn parse_str(text: &str) -> Parsed {
-        let source = Source::new(SourceId::FIRST, "test.lang", text);
+        let source = Source::new(SourceId::FIRST, "test.noe", text);
         let lexed = lex(&source);
         parse(&source, &lexed.tokens)
     }
@@ -3595,11 +3595,11 @@ mod tests {
 
     #[test]
     fn full_demo_ast_is_stable() {
-        // The §14 acceptance program (the same bytes `lang run examples/orders.lang` runs)
+        // The §14 acceptance program (the same bytes `lang run examples/orders.noe` runs)
         // must parse with no diagnostics; this snapshot guards the whole grammar at once.
         let src = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../examples/orders.lang"
+            "/../../examples/orders.noe"
         ));
         insta::assert_snapshot!(pretty(src));
     }

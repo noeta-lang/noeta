@@ -68,7 +68,7 @@ fn extract(file: &str, text: &str) -> Vec<Sample> {
     out
 }
 
-/// Run one sample in its own isolated directory (the module loader scans sibling `.lang` files, and
+/// Run one sample in its own isolated directory (the module loader scans sibling `.noe` files, and
 /// an `fs`-writing sample must not touch the repo), returning `Err(message)` on the wrong outcome.
 fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     if sample.tag == "ignore" {
@@ -77,7 +77,7 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     let dir = std::env::temp_dir().join(format!("lang_doc_sample_{idx}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create sample dir");
-    let path = dir.join("main.lang");
+    let path = dir.join("main.noe");
     std::fs::write(&path, &sample.code).expect("write sample");
 
     let output = Command::cargo_bin("lang")

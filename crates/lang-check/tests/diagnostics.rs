@@ -10,7 +10,7 @@ use lang_parser::parse;
 use lang_span::{Source, SourceId};
 
 fn render_checks(src: &str) -> String {
-    let source = Source::new(SourceId::FIRST, "snippet.lang", src);
+    let source = Source::new(SourceId::FIRST, "snippet.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(

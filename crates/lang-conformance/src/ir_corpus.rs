@@ -69,7 +69,7 @@ impl IrCorpusReport {
     }
 }
 
-/// Run every `.lang` file under `root` (optionally narrowed to one file) through the Core-IR
+/// Run every `.noe` file under `root` (optionally narrowed to one file) through the Core-IR
 /// interpreter, reporting coverage. Side effects (e.g. an active drop-audit) are observed by the
 /// caller; this returns only the coverage tally.
 pub fn run_ir_corpus(root: &Path, only: Option<&Path>) -> IrCorpusReport {

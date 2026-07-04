@@ -18,7 +18,7 @@ use lang_span::{Source, SourceId};
 
 /// Source → parsed `Program`. Panics on a parse error — bench programs must parse cleanly.
 fn program(src: &str) -> Program {
-    let source = Source::new(SourceId::FIRST, "bench.lang", src);
+    let source = Source::new(SourceId::FIRST, "bench.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(

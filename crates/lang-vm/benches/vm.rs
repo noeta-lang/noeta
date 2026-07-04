@@ -22,7 +22,7 @@ use lang_vm::VmBackend;
 /// Source → compiled `Module`. Panics if the program falls outside the VM
 /// subset — bench programs must stay compilable so they exercise real opcodes.
 fn compile(src: &str) -> Module {
-    let source = Source::new(SourceId::FIRST, "bench.lang", src);
+    let source = Source::new(SourceId::FIRST, "bench.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     // A parse error would otherwise yield a near-empty `program` that compiles to a trivial module

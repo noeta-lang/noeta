@@ -1,5 +1,5 @@
 //! Unit tests for the checker, driven through the real lexer/parser so the AST shapes are
-//! exactly what the pipeline produces. Conformance `.lang` cases (positive + negative) carry
+//! exactly what the pipeline produces. Conformance `.noe` cases (positive + negative) carry
 //! the end-to-end coverage; these pin specific rules in isolation.
 
 use super::{check, resolve_type_of_sites};
@@ -11,7 +11,7 @@ use lang_span::{Source, SourceId};
 /// Parse `text` and return the resolved full-fidelity `TypeRepr`s for its `type_of` sites, in no
 /// particular order (one program under test has a single site, so order is irrelevant).
 fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
-    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
@@ -22,7 +22,7 @@ fn type_of_reprs(text: &str) -> Vec<TypeRepr> {
 
 /// Parse `text` and return the checker's diagnostic codes (wire form), in order.
 fn codes(text: &str) -> Vec<String> {
-    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(
@@ -921,7 +921,7 @@ fn attribute_argument_type_mismatch_is_reported() {
 /// resulting diagnostic codes.
 fn check_value_against(expr: &str, expected: lang_types::Type) -> Vec<String> {
     let text = format!("__probe = {expr};");
-    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(
@@ -1497,7 +1497,7 @@ fn closure_default_may_reference_a_captured_variable() {
 
 /// Parse `text` and return the checker's per-binding destructor-relevance (Phase 3.2b).
 fn relevance(text: &str) -> super::DestructorRelevance {
-    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(parsed.diagnostics.is_empty(), "must parse cleanly");
@@ -1570,7 +1570,7 @@ use lang_ast::reflect::{PackedKind, PackedLayout};
 
 /// Parse `text` and return the `PackedLayout`s recorded at its list-construction sites.
 fn packed_layouts(text: &str) -> Vec<PackedLayout> {
-    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(
@@ -1664,7 +1664,7 @@ fn primitive_list_is_not_recorded() {
 
 /// Parse + check `text` and return how many `list[i].field` reads the checker marked fusable.
 fn index_field_count(text: &str) -> usize {
-    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(
@@ -1725,7 +1725,7 @@ fn indexed_method_call_is_not_fusable() {
 
 /// Parse + check `text` and return how many `map(...)` calls produce a packed result.
 fn map_packed_count(text: &str) -> usize {
-    let source = Source::new(SourceId::FIRST, "test.lang", text);
+    let source = Source::new(SourceId::FIRST, "test.noe", text);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(

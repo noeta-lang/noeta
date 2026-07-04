@@ -14,14 +14,14 @@ fn workspace() -> PathBuf {
 }
 
 /// Write a one-off program into its own private temp *directory* and return its path. The
-/// directory isolation matters: `lang run` resolves sibling `.lang` modules from the entry's
+/// directory isolation matters: `lang run` resolves sibling `.noe` modules from the entry's
 /// directory (M1.9), so a bare temp file dropped into the shared `std::env::temp_dir()` would make
-/// the loader scan — and parse — every other test's (or stray) `.lang` file as a candidate module.
+/// the loader scan — and parse — every other test's (or stray) `.noe` file as a candidate module.
 /// A dedicated directory guarantees the entry is the only module in scope.
 fn temp_program(name: &str, src: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!("lang_cli_test_{name}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
-    let path = dir.join("main.lang");
+    let path = dir.join("main.noe");
     std::fs::write(&path, src).expect("write temp program");
     path
 }
@@ -71,7 +71,7 @@ fn run_reports_parse_error_and_exits_1() {
 fn run_missing_file_exits_2() {
     lang()
         .arg("run")
-        .arg("/no/such/file.lang")
+        .arg("/no/such/file.noe")
         .assert()
         .failure()
         .code(2)
@@ -403,7 +403,7 @@ fn run_orders_example_produces_the_headline_output() {
     lang()
         .current_dir(workspace())
         .arg("run")
-        .arg("examples/orders.lang")
+        .arg("examples/orders.noe")
         .assert()
         .success()
         .stdout(
@@ -875,13 +875,13 @@ fn doc_unterminated_block_is_reported() {
     lang().arg("doc").arg(&file).assert().failure().code(1);
 }
 
-// --- `--profile` (object-model slice 6g: the `lang.toml` build-profile manifest) ----
+// --- `--profile` (object-model slice 6g: the `noeta.toml` build-profile manifest) ----
 
-/// Write a `lang.toml` alongside a program in its private temp directory, returning the program
+/// Write a `noeta.toml` alongside a program in its private temp directory, returning the program
 /// path. The manifest is discovered by walking up from the entry file's directory.
 fn temp_project(name: &str, manifest: &str, src: &str) -> PathBuf {
     let path = temp_program(name, src);
-    std::fs::write(path.parent().unwrap().join("lang.toml"), manifest).expect("write lang.toml");
+    std::fs::write(path.parent().unwrap().join("noeta.toml"), manifest).expect("write noeta.toml");
     path
 }
 
@@ -895,7 +895,7 @@ const TIERED_PROGRAM: &str = "fn f(x: int): void {\n\
 #[test]
 fn run_profile_activates_its_tiers() {
     // A profile that makes the `debug` tier live compiles the `@debug` block in, exactly as
-    // `--tier debug` would — but driven by `lang.toml`.
+    // `--tier debug` would — but driven by `noeta.toml`.
     let file = temp_project(
         "prof_run",
         "[profiles.dev.tiers]\ndebug = \"std\"\n",
@@ -978,7 +978,7 @@ fn run_unknown_profile_is_an_error() {
 
 #[test]
 fn run_profile_without_manifest_is_an_error() {
-    // `--profile` with no `lang.toml` anywhere above the entry is a clear error, not a silent run.
+    // `--profile` with no `noeta.toml` anywhere above the entry is a clear error, not a silent run.
     let file = temp_program("prof_no_manifest", "echo \"hi\"\n");
     lang()
         .arg("run")
@@ -988,7 +988,7 @@ fn run_profile_without_manifest_is_an_error() {
         .assert()
         .failure()
         .code(1)
-        .stderr(predicate::str::contains("no `lang.toml`"));
+        .stderr(predicate::str::contains("no `noeta.toml`"));
 }
 
 // --- `repl` -----------------------------------------------------------------------

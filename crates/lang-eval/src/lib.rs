@@ -5059,7 +5059,7 @@ mod tests {
     }
 
     fn program_of(text: &str) -> Program {
-        let source = Source::new(SourceId::FIRST, "test.lang", text);
+        let source = Source::new(SourceId::FIRST, "test.noe", text);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         assert!(

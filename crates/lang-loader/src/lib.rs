@@ -1,6 +1,6 @@
 //! Multi-file module loading and linking (M1.9).
 //!
-//! A program is rooted at an *entry* `.lang` file. Sibling `.lang` files in the entry's
+//! A program is rooted at an *entry* `.noe` file. Sibling `.noe` files in the entry's
 //! directory are candidate *modules*, each declaring its identity with `namespace App.Models;`.
 //! The entry's `use App.Models.{User}` declarations resolve against those modules' declared
 //! namespaces; each resolved name's real declaration is **merged into one [`Program`]** ahead of
@@ -78,7 +78,7 @@ pub struct RawWorkspace {
     pub modules: Vec<Source>,
 }
 
-/// Read the entry file and its sibling `.lang` modules into labeled [`Source`]s, without lexing,
+/// Read the entry file and its sibling `.noe` modules into labeled [`Source`]s, without lexing,
 /// parsing, or linking — the file-system front of the salsa module graph. An `io::Error` is only
 /// for a failure to read the entry itself; unreadable siblings are skipped (as in [`read_siblings`]).
 pub fn read_workspace(entry_path: &Path) -> io::Result<RawWorkspace> {
@@ -92,7 +92,7 @@ pub fn read_workspace(entry_path: &Path) -> io::Result<RawWorkspace> {
     Ok(RawWorkspace { entry, modules })
 }
 
-/// Gather the `.lang` files in the entry's directory other than the entry itself, in sorted
+/// Gather the `.noe` files in the entry's directory other than the entry itself, in sorted
 /// order (so SourceId assignment and resolution are deterministic). A read failure yields no
 /// siblings — a lone file simply links to itself.
 fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
@@ -106,7 +106,7 @@ fn read_siblings(entry_path: &Path) -> Vec<RawModule> {
     let mut paths: Vec<std::path::PathBuf> = entries
         .flatten()
         .map(|e| e.path())
-        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "lang"))
+        .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
         .filter(|p| p.file_name() != entry_name)
         .collect();
     paths.sort();
@@ -398,12 +398,12 @@ mod tests {
     #[test]
     fn links_a_used_module_declaration() {
         let models = module(
-            "models.lang",
+            "models.noe",
             "namespace App.Models;\npub class User {\n  name: string\n  id: int\n  fn new(name: string, id: int): User { return User { name: name, id: id }; }\n}\n",
         );
         let entry =
             "namespace App.Main;\nuse App.Models.User;\nu = User.new(\"Ada\", 7);\necho u.name;\n";
-        let linked = link("main.lang", entry, std::slice::from_ref(&models)).unwrap();
+        let linked = link("main.noe", entry, std::slice::from_ref(&models)).unwrap();
         // The real `User` class is merged in; its `use` is dropped (no opaque stub for it).
         assert!(
             linked
@@ -425,7 +425,7 @@ mod tests {
     fn unresolved_use_falls_back_to_opaque_stub() {
         // No sibling provides `App.Models.User`, so the `use` is kept for the opaque-stub fallback.
         let entry = "use App.Models.User;\nu = User { name: \"Ada\" };\n";
-        let linked = link("main.lang", entry, &[]).unwrap();
+        let linked = link("main.noe", entry, &[]).unwrap();
         assert!(
             linked
                 .program
@@ -439,11 +439,11 @@ mod tests {
     fn importing_a_private_declaration_is_e0019() {
         // The namespace exists and declares `User`, but it is not `pub` → a hard error.
         let models = module(
-            "models.lang",
+            "models.noe",
             "namespace App.Models;\nclass User { id: int }\n",
         );
         let entry = "use App.Models.User;\n";
-        let errs = link("main.lang", entry, std::slice::from_ref(&models)).unwrap_err();
+        let errs = link("main.noe", entry, std::slice::from_ref(&models)).unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::UnresolvedImport);
     }
@@ -452,11 +452,11 @@ mod tests {
     fn importing_a_missing_export_is_e0019() {
         // The namespace exists but declares no `Ghost`.
         let models = module(
-            "models.lang",
+            "models.noe",
             "namespace App.Models;\npub class User { id: int }\n",
         );
         let entry = "use App.Models.Ghost;\n";
-        let errs = link("main.lang", entry, std::slice::from_ref(&models)).unwrap_err();
+        let errs = link("main.noe", entry, std::slice::from_ref(&models)).unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::UnresolvedImport);
     }
@@ -465,11 +465,11 @@ mod tests {
     fn an_import_colliding_with_a_local_declaration_is_e0020() {
         // The entry imports `User` but also declares its own `User` — the reference is ambiguous.
         let models = module(
-            "models.lang",
+            "models.noe",
             "namespace App.Models;\npub class User { id: int }\n",
         );
         let entry = "use App.Models.User;\nclass User { name: string }\n";
-        let errs = link("main.lang", entry, std::slice::from_ref(&models)).unwrap_err();
+        let errs = link("main.noe", entry, std::slice::from_ref(&models)).unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::NameCollision);
     }
@@ -478,37 +478,37 @@ mod tests {
     fn two_imports_of_the_same_name_collide() {
         // Two modules each export `User`; importing both leaves an ambiguous reference.
         let models = module(
-            "models.lang",
+            "models.noe",
             "namespace App.Models;\npub class User { id: int }\n",
         );
         let people = module(
-            "people.lang",
+            "people.noe",
             "namespace App.People;\npub class User { name: string }\n",
         );
         let entry = "use App.Models.User;\nuse App.People.User;\n";
-        let errs = link("main.lang", entry, &[models, people]).unwrap_err();
+        let errs = link("main.noe", entry, &[models, people]).unwrap_err();
         assert_eq!(errs.len(), 1);
         assert_eq!(errs[0].diagnostic.code, DiagnosticCode::NameCollision);
     }
 
     #[test]
     fn entry_parse_error_is_reported_against_the_entry() {
-        let errs = link("main.lang", "echo $;", &[]).unwrap_err();
+        let errs = link("main.noe", "echo $;", &[]).unwrap_err();
         assert!(!errs.is_empty());
-        assert!(errs.iter().all(|e| e.source.name() == "main.lang"));
+        assert!(errs.iter().all(|e| e.source.name() == "main.noe"));
     }
 
     #[test]
     fn merged_declaration_spans_carry_the_sibling_source_id() {
         // The `User` class is declared in the sibling (SourceId 1) and merged into the entry
         // program. Its spans — including those deep in a method body — must stay tagged with the
-        // sibling's id so a diagnostic on them renders against `models.lang`, not the entry.
+        // sibling's id so a diagnostic on them renders against `models.noe`, not the entry.
         let models = module(
-            "models.lang",
+            "models.noe",
             "namespace App.Models;\npub class User {\n  id: int\n  fn bad(): int { return 1 / 0; }\n}\n",
         );
         let entry = "use App.Models.User;\nu = User { id: 1 };\n";
-        let linked = link("main.lang", entry, std::slice::from_ref(&models)).unwrap();
+        let linked = link("main.noe", entry, std::slice::from_ref(&models)).unwrap();
 
         // The merged class statement and everything under it belong to source 1 (the sibling).
         let class = linked
@@ -529,6 +529,6 @@ mod tests {
         assert_eq!(entry_stmt.span().source, SourceId(0));
 
         // The source map resolves the sibling id to the sibling file.
-        assert_eq!(linked.sources.source(SourceId(1)).name(), "models.lang");
+        assert_eq!(linked.sources.source(SourceId(1)).name(), "models.noe");
     }
 }

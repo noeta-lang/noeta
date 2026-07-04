@@ -95,7 +95,7 @@ impl DiffReport {
     }
 }
 
-/// Run the differential oracle over every `.lang` file under `root` (optionally narrowed to
+/// Run the differential oracle over every `.noe` file under `root` (optionally narrowed to
 /// one file).
 pub fn run_differential(root: &Path, only: Option<&Path>) -> DiffReport {
     let mut cases = Vec::new();

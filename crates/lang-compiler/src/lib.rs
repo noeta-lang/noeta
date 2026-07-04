@@ -3756,7 +3756,7 @@ mod tests {
 
     /// Compile `src` and return its attribute manifest (the VM-side view of the shared artifact).
     fn manifest(src: &str) -> Vec<AttributeRecord> {
-        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         assert!(
@@ -3806,7 +3806,7 @@ mod tests {
         // what `lang_ast::reflect::build` produces from the AST — the same pure builder the
         // tree-walker calls. So both backends agree on reflection by construction, no drift.
         let src = "#[Entity]\nstruct User { id: int }\nenum Color { Red; Rgb(r: int); }\n";
-        let source = Source::new(SourceId::FIRST, "t.lang", src);
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         let from_module = compile(&parsed.program).expect("compiles").reflection;
@@ -3822,7 +3822,7 @@ mod tests {
         // member names) — the half `attributes_of` materialization and `type_of` will read.
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "struct Point { x: int y: int }\nenum Color { Red; Rgb(r: int); }\n",
         );
         let lexed = lex(&source);

@@ -14,7 +14,7 @@ use lang_parser::parse;
 use lang_span::{Source, SourceId};
 
 fn render_first_failing_stage(src: &str) -> String {
-    let source = Source::new(SourceId::FIRST, "snippet.lang", src);
+    let source = Source::new(SourceId::FIRST, "snippet.noe", src);
     let lexed = lex(&source);
     if !lexed.diagnostics.is_empty() {
         return lexed

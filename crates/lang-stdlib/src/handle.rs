@@ -21,7 +21,7 @@
 //! handle's cursor advance would be lost to a discarded copy). The tree-walker's `Rc<RefCell<…>>` is
 //! therefore the correct minimal encoding of that interior mutability in safe Rust, not a carve-out
 //! to retire; the VM's in-place heap-cell mutation is its ordinary heap-write path. Pinned by
-//! `tests/conformance/std/fs_handle_alias.lang`. (If handles ever become value-semantic, the
+//! `tests/conformance/std/fs_handle_alias.noe`. (If handles ever become value-semantic, the
 //! consistent way — per Swift/Rust — is a `mut` binding + a mutating-receiver method, not COW.)
 //!
 //! ## State model

@@ -59,7 +59,7 @@ mod tests {
 
     #[test]
     fn renders_without_panicking_and_contains_the_code() {
-        let source = Source::new(SourceId::FIRST, "test.lang", "name = 1;\nname = 2;\n");
+        let source = Source::new(SourceId::FIRST, "test.noe", "name = 1;\nname = 2;\n");
         let diag = Diagnostic::error(
             DiagnosticCode::UnknownName,
             Span::new(10, 14),

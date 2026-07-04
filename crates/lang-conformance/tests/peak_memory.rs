@@ -62,7 +62,7 @@ fn vec3_list_src(n: usize, packed: bool) -> String {
 }
 
 fn parse_program(src: &str) -> lang_ast::Program {
-    let source = Source::new(SourceId::FIRST, "peak.lang", src);
+    let source = Source::new(SourceId::FIRST, "peak.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(
@@ -112,7 +112,7 @@ fn eval_runner(program: lang_ast::Program) -> impl FnOnce() -> lang_backend::Run
 /// too. With `@packed` and a producer that stays flat (P-PACK 2.6, VM) both the input and the result
 /// are flat `Vec<u64>` buffers; if the producer silently demoted, the result would balloon to `n`
 /// boxed objects and the residency would jump toward the boxed figure — which the test's ratio guard
-/// then catches. `op` is a `.lang` expression over `data` producing the result list.
+/// then catches. `op` is a `.noe` expression over `data` producing the result list.
 fn producer_vec3_src(n: usize, packed: bool, op: &str) -> String {
     let kw = if packed { "@packed struct" } else { "struct" };
     let mut elems = String::with_capacity(n * 32);
@@ -155,7 +155,7 @@ fn packed_producers_keep_the_list_flat() {
             "map",
             "map(data, fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z })",
         ),
-        // `concat` (`~`) also stays flat (see `packed_set_concat.lang` + the `packed_concat` /
+        // `concat` (`~`) also stays flat (see `packed_set_concat.noe` + the `packed_concat` /
         // `packed_extend_in_place` miri tests); it is omitted here because its result-size growth and
         // `Vec` capacity doubling make the residency ratio too noisy for this half-of-boxed guard.
     ];

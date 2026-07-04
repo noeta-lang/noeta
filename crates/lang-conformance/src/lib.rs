@@ -1,6 +1,6 @@
 //! The conformance harness: the executable specification.
 //!
-//! A conformance case is a `.lang` file with an expectation header:
+//! A conformance case is a `.noe` file with an expectation header:
 //!
 //! ```text
 //! // expect: stdout "Order #1 awaiting payment"
@@ -233,7 +233,7 @@ fn compare(name: &str, expected: &Expectations, actual: &Outcome, stage: Stage) 
     }
 }
 
-/// Run a multi-file case rooted at `entry` (the `main.lang` of a module fixture): sibling
+/// Run a multi-file case rooted at `entry` (the `main.noe` of a module fixture): sibling
 /// modules are loaded and linked (M1.9) and the merged program is checked and run like any
 /// other case. The expectation header lives in the entry file.
 pub fn run_case_path(entry: &Path, display: &str, stage: Stage) -> CaseResult {
@@ -348,18 +348,18 @@ pub fn run_corpus(root: &Path, only: Option<&Path>, stage: Stage) -> Report {
     report
 }
 
-/// One discovered case: its entry `.lang` file and whether it is a multi-file module fixture.
+/// One discovered case: its entry `.noe` file and whether it is a multi-file module fixture.
 pub(crate) struct Case {
     pub entry: PathBuf,
     pub multi: bool,
 }
 
-/// Discover cases under `dir`. A directory that directly contains a `main.lang` is a single
-/// **multi-file** case — its other `.lang` files are that program's modules, not standalone
-/// cases — so discovery does not descend into it. Every other `.lang` file is its own
+/// Discover cases under `dir`. A directory that directly contains a `main.noe` is a single
+/// **multi-file** case — its other `.noe` files are that program's modules, not standalone
+/// cases — so discovery does not descend into it. Every other `.noe` file is its own
 /// single-file case.
 pub(crate) fn collect_cases(dir: &Path, out: &mut Vec<Case>) {
-    let main = dir.join("main.lang");
+    let main = dir.join("main.noe");
     if main.is_file() {
         out.push(Case {
             entry: main,
@@ -374,7 +374,7 @@ pub(crate) fn collect_cases(dir: &Path, out: &mut Vec<Case>) {
         let path = entry.path();
         if path.is_dir() {
             collect_cases(&path, out);
-        } else if path.extension().is_some_and(|ext| ext == "lang") {
+        } else if path.extension().is_some_and(|ext| ext == "noe") {
             out.push(Case {
                 entry: path,
                 multi: false,

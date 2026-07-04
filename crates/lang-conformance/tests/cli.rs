@@ -49,7 +49,7 @@ fn json_output_is_valid_and_reports_passes() {
 fn stage_and_file_filters_work() {
     conformance()
         .current_dir(workspace())
-        .args(["--stage", "parser", "--file", "hello.lang"])
+        .args(["--stage", "parser", "--file", "hello.noe"])
         .assert()
         .success()
         .stdout(predicate::str::contains("1 passed"));

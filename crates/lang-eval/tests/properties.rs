@@ -26,7 +26,7 @@ use proptest::prelude::*;
 /// Drive a source string all the way through the pipeline. This must never panic, whatever
 /// the input — malformed programs surface as diagnostics in the result.
 fn run_pipeline(src: &str) -> RunResult {
-    let source = Source::new(SourceId::FIRST, "prop.lang", src);
+    let source = Source::new(SourceId::FIRST, "prop.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     TreeWalkBackend::new().run(&parsed.program)
@@ -34,7 +34,7 @@ fn run_pipeline(src: &str) -> RunResult {
 
 /// The pretty-printed AST of a source string (the snapshot form).
 fn pretty_of(src: &str) -> String {
-    let source = Source::new(SourceId::FIRST, "prop.lang", src);
+    let source = Source::new(SourceId::FIRST, "prop.noe", src);
     let lexed = lex(&source);
     parse(&source, &lexed.tokens).program.to_pretty_string()
 }
@@ -131,7 +131,7 @@ proptest! {
     /// pretty-print is stable.
     #[test]
     fn valid_programs_parse_and_evaluate_cleanly(src in arb_valid_program()) {
-        let source = Source::new(SourceId::FIRST, "prop.lang", src.clone());
+        let source = Source::new(SourceId::FIRST, "prop.noe", src.clone());
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         prop_assert!(
@@ -145,7 +145,7 @@ proptest! {
     }
 }
 
-/// Collect every `.lang` file under the conformance corpus.
+/// Collect every `.noe` file under the conformance corpus.
 fn corpus_files() -> Vec<PathBuf> {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../tests/conformance");
     let mut files = Vec::new();
@@ -156,7 +156,7 @@ fn corpus_files() -> Vec<PathBuf> {
             let path = entry.expect("readable dir entry").path();
             if path.is_dir() {
                 stack.push(path);
-            } else if path.extension().is_some_and(|ext| ext == "lang") {
+            } else if path.extension().is_some_and(|ext| ext == "noe") {
                 files.push(path);
             }
         }

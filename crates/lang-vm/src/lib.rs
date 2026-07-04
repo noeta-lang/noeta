@@ -5512,7 +5512,7 @@ mod tests {
     use lang_span::{Source, SourceId};
 
     fn run(src: &str) -> RunResult {
-        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         VmBackend::new()
@@ -5524,7 +5524,7 @@ mod tests {
     /// tests that need to drive `run_module`/`run_module_jit` directly.
     #[cfg(feature = "jit")]
     fn compile_module(src: &str) -> Module {
-        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         compile(&parsed.program).expect("program should be in the M1.0 subset")
@@ -5858,7 +5858,7 @@ mod tests {
     }
 
     fn run_with_collector(src: &str, mode: lang_value::CollectorMode) -> RunResult {
-        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         let module = compile(&parsed.program).expect("program should be in the M1.0 subset");
@@ -6938,7 +6938,7 @@ mod tests {
 
     #[test]
     fn disassembly_is_stable() {
-        let source = Source::new(SourceId::FIRST, "t.lang", "mut x = 1;\necho x + 2;\n");
+        let source = Source::new(SourceId::FIRST, "t.noe", "mut x = 1;\necho x + 2;\n");
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);
         let module = compile(&parsed.program).unwrap();
@@ -6951,7 +6951,7 @@ mod tests {
         // build manifest, in source order, keyed by the decorated type.
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "#[Entity]\n#[Route(login, post)]\nclass Account {\n  id: int\n  fn new(id: int): Account { return Account { id: id }; }\n}\n",
         );
         let lexed = lex(&source);
@@ -6978,7 +6978,7 @@ mod tests {
     fn disassembly_of_a_recursive_function_is_stable() {
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "fn fib(n) {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\necho fib(6);\n",
         );
         let lexed = lex(&source);
@@ -6991,7 +6991,7 @@ mod tests {
     fn disassembly_of_a_for_loop_is_stable() {
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "mut total = 0;\nfor n in [1, 2, 3] {\n  total = total + n;\n}\necho total;\n",
         );
         let lexed = lex(&source);
@@ -7006,7 +7006,7 @@ mod tests {
         // shape and method tables, field loads, and enum construction).
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "enum Status { Pending; Paid; }\nclass Order {\n  id: int\n  mut status: Status\n  fn new(id: int): Order { return Order { id: id, status: Status.Pending }; }\n  fn tag(): int { return id; }\n}\no = Order.new(7);\necho o.tag();\n",
         );
         let lexed = lex(&source);
@@ -7024,7 +7024,7 @@ mod tests {
         // `global_self_update_lowers_to_take_global_plus_in_place_reuse`.)
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "class P { x: int }\nfn run(): int {\n  mut acc = P { x: 0 };\n  acc = P { ...acc, x: acc.x + 1 };\n  return acc.x;\n}\necho run();\n",
         );
         let lexed = lex(&source);
@@ -7045,7 +7045,7 @@ mod tests {
         // proof the global path is wired.
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "class P { x: int }\nmut acc = P { x: 0 };\nacc = P { ...acc, x: 5 };\necho acc.x;\n",
         );
         let lexed = lex(&source);
@@ -7067,7 +7067,7 @@ mod tests {
         // interpreter already reuses it, and reuse is invisible, so the backends still agree).
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "fn build(): Map<string, int> {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = i; }\n  return m;\n}\necho build().count();\n",
         );
         let lexed = lex(&source);
@@ -7088,7 +7088,7 @@ mod tests {
         // than the copying `Op::Binary` (`~`).
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "mut g = [\"a\"];\ng ~= [\"b\"];\nfn build(): List<int> {\n  mut acc = [];\n  for i in 0..3 { acc ~= [i]; }\n  return acc;\n}\necho g;\necho build();\n",
         );
         let lexed = lex(&source);
@@ -7110,7 +7110,7 @@ mod tests {
     fn disassembly_of_a_match_decision_tree_is_stable() {
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "enum E { Empty; Code(n: int); }\nfn describe(e): string {\n  return match e {\n    E.Empty => \"empty\",\n    E.Code(n) => \"code ${n}\",\n  };\n}\necho describe(E.Code(7));\n",
         );
         let lexed = lex(&source);
@@ -7123,7 +7123,7 @@ mod tests {
     fn disassembly_of_a_question_propagating_function_is_stable() {
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "fn validate(): int { return Err(\"bad\"); }\nfn place(): int { validate()?; return Ok(\"ok\"); }\necho place();\n",
         );
         let lexed = lex(&source);
@@ -7136,7 +7136,7 @@ mod tests {
     fn disassembly_of_a_map_filter_chain_is_stable() {
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();\n",
         );
         let lexed = lex(&source);
@@ -7153,7 +7153,7 @@ mod tests {
         // `registers` stays small. A borrowed source (`y = x`, an aliased live local) still copies.
         let source = Source::new(
             SourceId::FIRST,
-            "t.lang",
+            "t.noe",
             "fn build(): int {\n  a = 1 + 2;\n  b = a + 3;\n  return b;\n}\necho build();\n",
         );
         let lexed = lex(&source);

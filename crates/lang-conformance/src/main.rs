@@ -1,5 +1,5 @@
 //! `lang-conformance` — the development harness that tests the **language implementation** against
-//! its `.lang` corpus: the expectation runner, the differential oracle (VM vs tree-walker), and the
+//! its `.noe` corpus: the expectation runner, the differential oracle (VM vs tree-walker), and the
 //! leak oracle. This is a dev-only tool (it ships test fixtures and cross-checks two backends), so it
 //! is a **separate binary** from the user-facing `lang` CLI — which keeps the `lang test` verb free
 //! for running a user program's own `@test {}` blocks (object-model slice 6).
@@ -22,7 +22,7 @@ struct Cli {
     /// Emit machine-readable JSON instead of human text.
     #[arg(long)]
     json: bool,
-    /// Only run cases whose path ends with this (e.g. `orders/empty.lang`).
+    /// Only run cases whose path ends with this (e.g. `orders/empty.noe`).
     #[arg(long, value_name = "PATH")]
     file: Option<PathBuf>,
     /// Run only through this pipeline stage: `lexer`, `parser`, or `eval`.

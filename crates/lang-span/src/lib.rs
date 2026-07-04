@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn line_col_lookup() {
-        let src = Source::new(SourceId::FIRST, "test.lang", "ab\ncde\nf");
+        let src = Source::new(SourceId::FIRST, "test.noe", "ab\ncde\nf");
         assert_eq!(src.line_col(0), LineCol { line: 1, col: 1 });
         assert_eq!(src.line_col(1), LineCol { line: 1, col: 2 });
         assert_eq!(src.line_col(3), LineCol { line: 2, col: 1 });
@@ -242,7 +242,7 @@ mod tests {
     fn line_col_handles_multibyte() {
         // "é" is two bytes (offsets 0..2); the column at the following "!" (offset 2)
         // should be 2, because columns count characters, not bytes.
-        let src = Source::new(SourceId::FIRST, "t.lang", "é!");
+        let src = Source::new(SourceId::FIRST, "t.noe", "é!");
         assert_eq!(src.line_col(2), LineCol { line: 1, col: 2 });
     }
 
@@ -250,20 +250,20 @@ mod tests {
     fn source_map_resolves_a_span_to_its_own_source() {
         // Two sources with deliberately different shapes: the same local offset means a different
         // line in each, so resolving through the map (not the entry) is what gets it right.
-        let entry = Source::new(SourceId(0), "main.lang", "echo 1;\n");
-        let sibling = Source::new(SourceId(1), "models.lang", "a\nb\nc / 0;\n");
+        let entry = Source::new(SourceId(0), "main.noe", "echo 1;\n");
+        let sibling = Source::new(SourceId(1), "models.noe", "a\nb\nc / 0;\n");
         let map = SourceMap::new(vec![entry, sibling]);
 
         // A span tagged for the sibling at offset 6 ("/" on line 3) resolves against the sibling.
         let in_sibling = Span::new_in(SourceId(1), 6, 7);
         assert_eq!(map.line_col(in_sibling), LineCol { line: 3, col: 3 });
-        assert_eq!(map.source(SourceId(1)).name(), "models.lang");
+        assert_eq!(map.source(SourceId(1)).name(), "models.noe");
 
         // An entry span resolves against the entry.
         let in_entry = Span::new_in(SourceId(0), 5, 6);
         assert_eq!(map.line_col(in_entry), LineCol { line: 1, col: 6 });
 
         // An out-of-range id falls back to the entry rather than panicking.
-        assert_eq!(map.source(SourceId(9)).name(), "main.lang");
+        assert_eq!(map.source(SourceId(9)).name(), "main.noe");
     }
 }

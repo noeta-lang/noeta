@@ -39,21 +39,21 @@ struct Cli {
 enum Command {
     /// Run a program file.
     Run {
-        /// Path to a `.lang` file.
+        /// Path to a `.noe` file.
         file: PathBuf,
         /// Activate a dev-tier for this run, e.g. `--tier debug` to compile in `@debug { … }`
         /// blocks (object-model slice 6). Repeatable. Without it, every tier block is stripped.
         /// (The interim active-set interface, complementary to `--profile`.)
         #[arg(long)]
         tier: Vec<String>,
-        /// Activate the tiers a build profile makes live (from `lang.toml`), e.g.
+        /// Activate the tiers a build profile makes live (from `noeta.toml`), e.g.
         /// `--profile dev`. Unioned with any `--tier`.
         #[arg(long)]
         profile: Option<String>,
     },
     /// Discover and run a program's `@test` blocks (object-model slice 6).
     Test {
-        /// Path to a `.lang` file.
+        /// Path to a `.noe` file.
         file: PathBuf,
         /// Stop after the first failing test instead of running them all.
         #[arg(long)]
@@ -64,29 +64,29 @@ enum Command {
         /// Run only tests tagged `#[Group("<name>")]` with this group.
         #[arg(long)]
         group: Option<String>,
-        /// Only run when the `test` tier is live in this `lang.toml` build profile; otherwise the
+        /// Only run when the `test` tier is live in this `noeta.toml` build profile; otherwise the
         /// runner does nothing.
         #[arg(long)]
         profile: Option<String>,
     },
     /// Discover and run a program's `@bench` blocks, measuring each (object-model slice 6).
     Bench {
-        /// Path to a `.lang` file.
+        /// Path to a `.noe` file.
         file: PathBuf,
         /// Override the iteration count for every benchmark, taking precedence over a per-bench
         /// `@bench(iterations: N)` directive. Without either, a default count is used.
         #[arg(long)]
         iterations: Option<u64>,
-        /// Only run when the `bench` tier is live in this `lang.toml` build profile; otherwise the
+        /// Only run when the `bench` tier is live in this `noeta.toml` build profile; otherwise the
         /// runner does nothing.
         #[arg(long)]
         profile: Option<String>,
     },
     /// Extract a program's `@doc { … }` text blocks to stdout (object-model slice 6).
     Doc {
-        /// Path to a `.lang` file.
+        /// Path to a `.noe` file.
         file: PathBuf,
-        /// Only extract when the `doc` tier is live in this `lang.toml` build profile; otherwise
+        /// Only extract when the `doc` tier is live in this `noeta.toml` build profile; otherwise
         /// nothing is emitted.
         #[arg(long)]
         profile: Option<String>,
@@ -95,12 +95,12 @@ enum Command {
     /// constants, shapes, and method tables `lang run` executes). Compiled with the same pipeline
     /// as `run`, so the output reflects what actually runs.
     Dump {
-        /// Path to a `.lang` file.
+        /// Path to a `.noe` file.
         file: PathBuf,
         /// Activate a dev-tier before disassembling (as `lang run --tier …`). Repeatable.
         #[arg(long)]
         tier: Vec<String>,
-        /// Activate the tiers a `lang.toml` build profile makes live. Unioned with any `--tier`.
+        /// Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`.
         #[arg(long)]
         profile: Option<String>,
     },
@@ -275,7 +275,7 @@ fn emit_diagnostics_mapped<'a>(
 }
 
 fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -> ExitCode {
-    // The active tier set is the union of any `--profile`'s live tiers (from `lang.toml`) and any
+    // The active tier set is the union of any `--profile`'s live tiers (from `noeta.toml`) and any
     // explicit `--tier` flags, resolved before loading so a bad profile fails fast.
     let mut active: Vec<String> = match profile {
         Some(name) => match manifest::resolve_active_tiers(file, name) {
@@ -293,7 +293,7 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
         }
     }
 
-    // Load + link the program: sibling `.lang` modules the entry `use`s are resolved and merged
+    // Load + link the program: sibling `.noe` modules the entry `use`s are resolved and merged
     // (M1.9); a lone file with no sibling modules links to exactly itself.
     match lang_loader::load(file) {
         Err(err) => {

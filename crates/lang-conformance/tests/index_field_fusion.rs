@@ -12,7 +12,7 @@ use lang_span::{Source, SourceId};
 
 /// Lower `src` with the checker's site maps and return the pretty-printed Core IR.
 fn lowered_ir(src: &str) -> String {
-    let source = Source::new(SourceId::FIRST, "fuse.lang", src);
+    let source = Source::new(SourceId::FIRST, "fuse.noe", src);
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     assert!(
@@ -73,7 +73,7 @@ fn boxed_struct_indexed_field_also_fuses() {
 fn without_the_site_map_the_read_stays_unfused() {
     // The boxed-default `lower` (empty site maps) never fuses — proving the fusion is driven entirely
     // by the checker channel, not the lowering shape.
-    let source = Source::new(SourceId::FIRST, "fuse.lang", "xs = [1]\necho xs\n");
+    let source = Source::new(SourceId::FIRST, "fuse.noe", "xs = [1]\necho xs\n");
     let lexed = lex(&source);
     let parsed = parse(&source, &lexed.tokens);
     let ir = lang_ir::dump(&lang_ir::lower(&parsed.program).expect("total"));

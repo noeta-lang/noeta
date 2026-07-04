@@ -860,7 +860,7 @@ mod tests {
     use lang_span::SourceId;
 
     fn lex_str(text: &str) -> (Source, Lexed) {
-        let source = Source::new(SourceId::FIRST, "test.lang", text);
+        let source = Source::new(SourceId::FIRST, "test.noe", text);
         let lexed = lex(&source);
         (source, lexed)
     }

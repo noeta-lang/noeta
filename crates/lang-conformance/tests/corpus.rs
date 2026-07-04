@@ -12,17 +12,17 @@ fn corpus_root() -> PathBuf {
 
 #[test]
 fn demo_example_and_corpus_case_stay_in_sync() {
-    // The §14 acceptance program lives in two places: `examples/orders.lang` (what
-    // `lang run` executes) and `tests/conformance/demo/orders.lang` (the corpus case with
+    // The §14 acceptance program lives in two places: `examples/orders.noe` (what
+    // `lang run` executes) and `tests/conformance/demo/orders.noe` (the corpus case with
     // its `// expect:` assertions). They are byte-identical mirrors; this guards the drift.
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
-    let example = std::fs::read_to_string(workspace.join("examples/orders.lang"))
-        .expect("examples/orders.lang exists");
-    let corpus = std::fs::read_to_string(workspace.join("tests/conformance/demo/orders.lang"))
-        .expect("tests/conformance/demo/orders.lang exists");
+    let example = std::fs::read_to_string(workspace.join("examples/orders.noe"))
+        .expect("examples/orders.noe exists");
+    let corpus = std::fs::read_to_string(workspace.join("tests/conformance/demo/orders.noe"))
+        .expect("tests/conformance/demo/orders.noe exists");
     assert_eq!(
         example, corpus,
-        "examples/orders.lang and tests/conformance/demo/orders.lang have diverged"
+        "examples/orders.noe and tests/conformance/demo/orders.noe have diverged"
     );
 }
 
