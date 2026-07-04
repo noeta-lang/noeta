@@ -41,7 +41,9 @@ thread_local! {
     /// every [`alloc`] (insert) and every free ([`free`]/[`free_shallow`], remove). A cycle escapes
     /// refcounting but never the registry, so a trace from the live roots can find and reclaim it.
     /// (Always-on, like [`LIVE`]; an intrusive object-list is the perf option Phase 6.4 weighs.)
-    static REGISTRY: RefCell<HashSet<u64>> = RefCell::new(HashSet::new());
+    /// Keyed with the fast [`FxHasher`], not the default SipHash — this set is hit on every alloc and
+    /// free, and the keys are already well-distributed pointer words, so a crypto hash is pure cost.
+    static REGISTRY: RefCell<RegistrySet> = RefCell::new(RegistrySet::default());
     /// Monotonic object-creation counter (object-model slice 2c) — stamps each allocation's
     /// `ObjHeader::seq` so the cycle collector can finalize in a deterministic age order.
     static NEXT_SEQ: Cell<u32> = const { Cell::new(0) };
@@ -194,6 +196,8 @@ pub(crate) struct FxHasher {
     hash: u64,
 }
 
+const FX_K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+
 impl std::hash::Hasher for FxHasher {
     #[inline]
     fn finish(&self) -> u64 {
@@ -201,18 +205,27 @@ impl std::hash::Hasher for FxHasher {
     }
     #[inline]
     fn write(&mut self, bytes: &[u8]) {
-        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
         let mut h = self.hash;
         for &b in bytes {
-            h = (h.rotate_left(5) ^ (b as u64)).wrapping_mul(K);
+            h = (h.rotate_left(5) ^ (b as u64)).wrapping_mul(FX_K);
         }
         self.hash = h;
+    }
+    // A whole-word fast path for `u64` keys (the live-object registry keys on the NaN-boxed pointer
+    // word) — one multiply instead of eight byte rounds, and no SipHash.
+    #[inline]
+    fn write_u64(&mut self, n: u64) {
+        self.hash = (self.hash.rotate_left(5) ^ n).wrapping_mul(FX_K);
     }
 }
 
 /// The map store: a `HashMap` with the fast [`FxHasher`] (see above), so get/insert/remove are O(1)
 /// and cheap. Aliased so the type appears in exactly one place.
 pub(crate) type MapStore = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
+
+/// The live-object registry set — a `HashSet<u64>` (NaN-boxed object words) with the fast
+/// [`FxHasher`] instead of SipHash, since it is touched on every alloc and free.
+type RegistrySet = HashSet<u64, std::hash::BuildHasherDefault<FxHasher>>;
 
 /// are its field values in the shape's declared order; an `Enum`'s slots are its variant's
 /// positional data. Freeing either releases its slots first (see [`free`]).
