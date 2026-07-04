@@ -235,6 +235,10 @@ impl Jit {
             .set("use_colocated_libcalls", "false")
             .map_err(|e| e.to_string())?;
         flags.set("is_pic", "false").map_err(|e| e.to_string())?;
+        // P-JSSA: the SSA promotion leans on Cranelift's mid-end (block-param coalescing, GVN,
+        // dead-load removal of unused entry inits). The default `opt_level=none` was fine for the
+        // memory-form codegen; with block params it is not.
+        flags.set("opt_level", "speed").map_err(|e| e.to_string())?;
         let isa_builder = cranelift_native::builder().map_err(|m| m.to_string())?;
         let isa = isa_builder
             .finish(settings::Flags::new(flags))
@@ -402,6 +406,11 @@ impl Jit {
 
     /// Finalize the current `self.ctx` under `name` and return its entry point.
     fn finalize(&mut self, name: &str) -> Result<CompiledFn, String> {
+        // Debug tool: `NOETA_JIT_DISASM=1` dumps each compiled prototype's final machine code
+        // (vcode form: post-regalloc, real machine instructions) to stderr — the native analogue
+        // of `noeta dump`, for inspecting what the JIT actually emits.
+        let want_disasm = std::env::var_os("NOETA_JIT_DISASM").is_some();
+        self.ctx.set_disasm(want_disasm);
         let func_id = self
             .module
             .declare_function(name, Linkage::Export, &self.ctx.func.signature)
@@ -409,6 +418,12 @@ impl Jit {
         self.module
             .define_function(func_id, &mut self.ctx)
             .map_err(|e| e.to_string())?;
+        if want_disasm
+            && let Some(code) = self.ctx.compiled_code()
+            && let Some(vcode) = &code.vcode
+        {
+            eprintln!("=== {name} ===\n{vcode}");
+        }
         self.module.clear_context(&mut self.ctx);
         self.module
             .finalize_definitions()
@@ -511,6 +526,13 @@ impl Jit {
             let nreg = chunk.num_registers as usize;
             let heap_in = heap_in_map(chunk, heap_aware);
             let transfer = transfer_pairs(chunk);
+            // P-JSSA: the register plan (per-pc liveness + SSA-residency permission) and one SSA
+            // variable per VM register. A prototype whose heap analysis failed closed promotes
+            // nothing (no variable is ever defined or used) — its code is unchanged.
+            let reg_plan = plan::RegPlan::with_heap_in(chunk, &heap_in);
+            let const_bits = plan::const_reg_bits(chunk);
+            let vars: Vec<cranelift_frontend::Variable> =
+                (0..nreg).map(|_| b.declare_var(types::I64)).collect();
 
             let mut cg = Codegen {
                 b: &mut b,
@@ -526,6 +548,9 @@ impl Jit {
                 nreg,
                 transfer,
                 cur_pc: 0,
+                plan: reg_plan,
+                vars,
+                const_bits,
                 proto: proto as u32,
                 note_bound_ref,
                 retain_ref,
@@ -549,9 +574,13 @@ impl Jit {
                 entry_pcs(chunk).into_iter().filter(|&p| p != 0).collect();
             let guarded = cg.b.create_block();
             let bad_entry = cg.b.create_block();
-            // Chain: entry_pc == 0 → guarded; == resume_pc_k → op_blocks[k]; else → bad_entry.
+            // Chain: entry_pc == 0 → guarded; == resume_pc_k → init_k → op_blocks[k]; else →
+            // bad_entry. Every native entry point passes through an init block that loads the SSA
+            // variables from the register slots (P-JSSA) — at an entry the interpreter's slots
+            // are the truth — so every variable is defined on every path before any use.
             let is_zero = cg.b.ins().icmp_imm(IntCC::Equal, entry_pc, 0);
             let mut next = cg.b.create_block();
+            let mut resume_inits: Vec<(usize, Block)> = Vec::new();
             cg.b.ins().brif(is_zero, guarded, &[], next, &[]);
             for (i, &rp) in resume_targets.iter().enumerate() {
                 cg.b.switch_to_block(next);
@@ -561,22 +590,32 @@ impl Jit {
                 } else {
                     bad_entry
                 };
-                cg.b.ins().brif(is_rp, op_blocks[rp], &[], after, &[]);
+                let init = cg.b.create_block();
+                resume_inits.push((rp, init));
+                cg.b.ins().brif(is_rp, init, &[], after, &[]);
                 next = after;
             }
             if resume_targets.is_empty() {
                 cg.b.switch_to_block(next);
                 cg.b.ins().jump(bad_entry, &[]);
             }
+            for (rp, init) in resume_inits {
+                cg.b.switch_to_block(init);
+                cg.load_ssa_vars();
+                cg.b.ins().jump(op_blocks[rp], &[]);
+            }
             // `bad_entry`: an unexpected resume pc — hand the frame back to the interpreter there.
             // (`entry_pc` is pointer-width, i.e. i64 on the 64-bit target, matching the return.)
             cg.b.switch_to_block(bad_entry);
             cg.b.ins().return_(&[entry_pc]);
 
-            // `guarded` (fresh frame, entry_pc == 0): parameter guard, then op block 0. If any argument
-            // is a heap pointer, bail to pc 0 — keeping heap arguments out of the body (the body's heap
-            // values then arise only from `LoadGlobal`/calls, which the heap-aware path refcounts).
+            // `guarded` (fresh frame, entry_pc == 0): parameter guard, then the pc-0 init block
+            // (SSA variables loaded from the guard-proven slots), then op block 0. If any argument
+            // is a heap pointer, bail to pc 0 — keeping heap arguments out of the body (the body's
+            // heap values then arise only from `LoadGlobal`/calls, which the heap-aware path
+            // refcounts).
             cg.b.switch_to_block(guarded);
+            let init0 = cg.b.create_block();
             let mut any_ptr: Option<ClValue> = None;
             for p in 0..chunk.num_params {
                 let v = cg.load_reg(p);
@@ -589,15 +628,18 @@ impl Jit {
             match any_ptr {
                 Some(any) => {
                     let bail0 = cg.b.create_block();
-                    cg.b.ins().brif(any, bail0, &[], op_blocks[0], &[]);
+                    cg.b.ins().brif(any, bail0, &[], init0, &[]);
                     cg.b.switch_to_block(bail0);
                     let zero = cg.b.ins().iconst(types::I64, 0);
                     cg.b.ins().return_(&[zero]);
                 }
                 None => {
-                    cg.b.ins().jump(op_blocks[0], &[]);
+                    cg.b.ins().jump(init0, &[]);
                 }
             }
+            cg.b.switch_to_block(init0);
+            cg.load_ssa_vars();
+            cg.b.ins().jump(op_blocks[0], &[]);
 
             // One block per op. Unreachable pcs (dead code) get a trivial bail so they never touch
             // `frame_ptr` (which only dominates reachable blocks).
@@ -1092,6 +1134,22 @@ struct Codegen<'a, 'b> {
     /// The bytecode pc of the op currently being emitted, so [`Codegen::may_be_heap`] can index
     /// [`Codegen::heap_in`]. Set at the top of [`emit_op`].
     cur_pc: usize,
+    /// P-JSSA: the register plan — per-pc liveness (the bail spill set) and per-pc SSA-residency
+    /// permission (`ssa_ok`, the complement of [`Codegen::heap_in`]). See [`plan::RegPlan`].
+    plan: plan::RegPlan,
+    /// P-JSSA: one Cranelift SSA variable per VM register. Where the plan proves a register
+    /// immediate ([`plan::RegPlan::ssa_ok_at`]), its variable holds the truth and the slot may be
+    /// stale (stale-immediate by the plan's invariant); elsewhere the slot holds the truth. The
+    /// frontend's variable machinery turns defs/uses into block parameters at merges — including
+    /// loop headers — so a promoted loop-carried value never touches memory inside the loop.
+    /// Registers the plan never promotes still get a (never-used) variable so indexing is direct.
+    vars: Vec<cranelift_frontend::Variable>,
+    /// P-JSSA: registers holding one statically-known immediate constant (LICM's hoisted
+    /// constants). Reads inline the constant (feeding Cranelift's constant folding — an operand
+    /// tag check against a known constant folds away); no variable, no entry load, no block
+    /// param, no spill. The slot is written once at the def and stays current. See
+    /// [`plan::const_reg_bits`].
+    const_bits: Vec<Option<u64>>,
     /// This prototype's index, passed to the call helper so it can read the `Op::Call` back.
     proto: u32,
     note_bound_ref: FuncRef,
@@ -1108,7 +1166,9 @@ struct Codegen<'a, 'b> {
 }
 
 impl Codegen<'_, '_> {
-    /// Load register `r` (a full NaN-boxed word) from the frame window.
+    /// Load register `r` (a full NaN-boxed word) from the frame window — the raw slot, bypassing
+    /// SSA residency. Op emitters read through [`Codegen::read_reg`]; this is for the sites where
+    /// the slot is the point (the entry parameter guard, spills, variable initialization).
     fn load_reg(&mut self, r: Reg) -> ClValue {
         self.b.ins().load(
             types::I64,
@@ -1116,6 +1176,36 @@ impl Codegen<'_, '_> {
             self.frame_ptr,
             reg_offset(r),
         )
+    }
+
+    /// Whether register `r` lives in an SSA variable (anywhere): promotable by the plan and not a
+    /// known constant (a constant inlines at each read instead — cheaper than occupying a
+    /// register through the loop).
+    fn is_var(&self, r: Reg) -> bool {
+        self.plan.promotable(r) && self.const_bits[r as usize].is_none()
+    }
+
+    /// Read register `r`'s current value: the inlined constant for a known-constant register, the
+    /// SSA variable where the plan says it is resident (provably immediate at the current op),
+    /// else the slot.
+    fn read_reg(&mut self, r: Reg) -> ClValue {
+        if let Some(bits) = self.const_bits[r as usize] {
+            return self.b.ins().iconst(types::I64, bits as i64);
+        }
+        if self.is_var(r) && self.plan.ssa_ok_at(self.cur_pc, r) {
+            self.b.use_var(self.vars[r as usize])
+        } else {
+            self.load_reg(r)
+        }
+    }
+
+    /// Whether `r` is SSA-resident (provably immediate) at the *next* pc — i.e. whether the value
+    /// being defined by the current (fall-through) op may live purely in the variable. `false` at
+    /// the last pc (no next op; every chunk ends in `Halt`, which defines nothing, so this is
+    /// unreachable in practice).
+    fn ssa_ok_next(&self, r: Reg) -> bool {
+        let i = (self.cur_pc + 1) * self.nreg + r as usize;
+        i < self.heap_in.len() && !self.heap_in[i]
     }
 
     /// Whether register `r` may hold a heap pointer at the current op (`cur_pc`) — the bare-store
@@ -1132,26 +1222,84 @@ impl Codegen<'_, '_> {
     /// prototype's map is all-false (every store bare, the immediate invariant), a `heap_aware` one the
     /// analysis cannot model is all-true (every store releases, as before). The caller is responsible
     /// for retaining `v` when it is a moved heap value (`LoadGlobal`/`Move`).
+    ///
+    /// P-JSSA on top of that: where the old occupant **and** the new value are both provably
+    /// immediate, the write is a pure `def_var` — no memory traffic at all; the slot goes stale
+    /// (stale-*immediate*, so a bail spill or frame-teardown release over it stays a no-op). At a
+    /// heap→immediate transition the slot is written through (the released heap pointer must not
+    /// linger in the slot) and residency begins; an immediate→heap def stays a plain slot store.
     fn store_reg(&mut self, r: Reg, v: ClValue) {
-        if self.may_be_heap(r) {
+        let promotable = self.is_var(r);
+        let ok_now = !self.may_be_heap(r);
+        let ok_next = self.ssa_ok_next(r);
+        if promotable && ok_now && ok_next {
+            self.b.def_var(self.vars[r as usize], v);
+            return;
+        }
+        if ok_now {
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+        } else {
             let old = self.load_reg(r);
             self.b
                 .ins()
                 .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
             self.release_if_heap(old);
-        } else {
-            self.b
-                .ins()
-                .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+        }
+        if promotable && ok_next {
+            self.b.def_var(self.vars[r as usize], v);
         }
     }
 
-    /// A plain store to register `r` with no release of the old value (the caller has already taken
-    /// ownership of the old value, e.g. `Drop`, or is initializing).
+    /// A store to register `r` with no release of the old value (the caller has already taken
+    /// ownership of the old value, e.g. `Drop`, or is initializing). Same SSA-residency rule as
+    /// [`Codegen::store_reg`], minus the release.
     fn store_reg_raw(&mut self, r: Reg, v: ClValue) {
+        let promotable = self.is_var(r);
+        let ok_now = !self.may_be_heap(r);
+        let ok_next = self.ssa_ok_next(r);
+        if promotable && ok_now && ok_next {
+            self.b.def_var(self.vars[r as usize], v);
+            return;
+        }
         self.b
             .ins()
             .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+        if promotable && ok_next {
+            self.b.def_var(self.vars[r as usize], v);
+        }
+    }
+
+    /// P-JSSA: materialize the SSA-resident registers into their slots for a **bail** at `pc` —
+    /// every promotable register that is both resident (`ssa_ok`) and live at `pc`. After this the
+    /// interpreter finds every slot it may read holding exactly what tier 0 would have there; a
+    /// dead register's slot may stay stale-immediate (never read, and its teardown release is a
+    /// no-op). Emitted on cold paths only (bail blocks, pre-helper syncs).
+    fn spill_ssa(&mut self, pc: usize) {
+        for r in 0..self.nreg as u16 {
+            if self.is_var(r) && self.plan.ssa_ok_at(pc, r) && self.plan.live_at(pc, r) {
+                let v = self.b.use_var(self.vars[r as usize]);
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+            }
+        }
+    }
+
+    /// P-JSSA: (re)load every promotable register's variable from its slot. Used at every native
+    /// entry point (fresh pc-0 entry, resume-after-call, OSR header) — where the interpreter's
+    /// slots are the truth — and after a runtime helper that may have written a slot (a call's
+    /// return value, a leaf op's destination). Sound after a helper because [`Codegen::spill_ssa`]
+    /// ran first: a live register's slot was just made current, a helper-written slot is fresh,
+    /// and a dead register's (possibly stale) slot value is never read before its next def.
+    fn load_ssa_vars(&mut self) {
+        for r in 0..self.nreg as u16 {
+            if self.is_var(r) {
+                let v = self.load_reg(r);
+                self.b.def_var(self.vars[r as usize], v);
+            }
+        }
     }
 
     /// Emit `if is_pointer(v) { retain(v) }` — bump the refcount of a moved heap value.
@@ -1296,6 +1444,7 @@ fn global_offset(g: u32) -> i32 {
 fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[Block]) {
     cg.cur_pc = pc;
     if !is_fast_op(op, consts) {
+        cg.spill_ssa(pc);
         let here = cg.pc_const(pc);
         cg.b.ins().return_(&[here]);
         return;
@@ -1314,7 +1463,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             // release cancels it) or where `src` is provably an immediate (the bare-store analysis);
             // otherwise it retains the moved heap value. `store_reg` releases the overwritten destination
             // where it may be heap.
-            let v = cg.load_reg(*src);
+            let v = cg.read_reg(*src);
             if !cg.transfer[pc] && cg.may_be_heap(*src) {
                 cg.retain_if_heap(v);
             }
@@ -1327,7 +1476,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             // would cancel) or where the dropped value is provably an immediate (the bare-store
             // analysis); otherwise a heap value is released — the destructor-aware path when the drop is
             // IR-relevant, else the plain release.
-            let v = cg.load_reg(*reg);
+            let v = cg.read_reg(*reg);
             let unit =
                 cg.b.ins()
                     .iconst(types::I64, Value::NANBOX.unit_bits as i64);
@@ -1344,7 +1493,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::JumpIfTrue { reg, target } => {
             // Taken iff the value is exactly `true`; a non-bool is simply not taken (the interpreter's
             // `as_bool() == Some(true)`), so no guard/bail is needed.
-            let v = cg.load_reg(*reg);
+            let v = cg.read_reg(*reg);
             let t =
                 cg.b.ins()
                     .iconst(types::I64, Value::NANBOX.true_bits as i64);
@@ -1358,7 +1507,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             );
         }
         Op::JumpIfFalse { reg, target } => {
-            let v = cg.load_reg(*reg);
+            let v = cg.read_reg(*reg);
             let fb =
                 cg.b.ins()
                     .iconst(types::I64, Value::NANBOX.false_bits as i64);
@@ -1374,7 +1523,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::CondBranch { reg, target, .. } => {
             // false → jump target; true → fall through; anything else → bail so the interpreter
             // raises E0007 ("`if` condition must be a bool").
-            let v = cg.load_reg(*reg);
+            let v = cg.read_reg(*reg);
             let l = Value::NANBOX;
             let fb = cg.b.ins().iconst(types::I64, l.false_bits as i64);
             let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
@@ -1387,6 +1536,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             let bail = cg.b.create_block();
             cg.b.ins().brif(is_true, op_blocks[pc + 1], &[], bail, &[]);
             cg.b.switch_to_block(bail);
+            cg.spill_ssa(pc);
             let here = cg.pc_const(pc);
             cg.b.ins().return_(&[here]);
         }
@@ -1410,6 +1560,9 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
 /// a resume pc (a synchronous first-class-builtin call completed), or `ABORTED` — becomes this
 /// compiled function's outcome, so the interpreter runs the callee and resumes the caller in tier 0.
 fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
+    // P-JSSA sync point: the call helpers read the argument registers (and, on a bail, any live
+    // register) from the slots, so materialize the SSA-resident live set first.
+    cg.spill_ssa(pc);
     let vm = cg.vm;
     let frames = cg.frames;
     let regs_vec = cg.regs_vec;
@@ -1476,6 +1629,9 @@ fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     let is_cont = cg.b.ins().icmp(IntCC::Equal, after, cont);
     cg.b.ins().brif(is_cont, continue_blk, &[], return_blk, &[]);
     cg.b.switch_to_block(continue_blk);
+    // The callee's return protocol wrote this call's destination slot — reload the SSA variables
+    // from the (now-current) slots before continuing natively.
+    cg.load_ssa_vars();
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
     cg.b.switch_to_block(return_blk);
     cg.b.ins().return_(&[after]);
@@ -1485,6 +1641,9 @@ fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
 /// the interpreter's exact logic (refcounts included) and returns `OUTCOME_CONTINUE` (done — continue
 /// to `pc + 1`) or a resume pc (it bailed — a dispatch or an error the interpreter must handle).
 fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
+    // P-JSSA sync point: the leaf helper reads its operands from (and writes its destination to)
+    // the slots.
+    cg.spill_ssa(pc);
     let vm = cg.vm;
     let regs_vec = cg.regs_vec;
     let base = cg.base;
@@ -1500,6 +1659,8 @@ fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     let return_blk = cg.b.create_block();
     cg.b.ins().brif(is_cont, continue_blk, &[], return_blk, &[]);
     cg.b.switch_to_block(continue_blk);
+    // The helper wrote the op's destination slot — reload the SSA variables before continuing.
+    cg.load_ssa_vars();
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
     cg.b.switch_to_block(return_blk);
     cg.b.ins().return_(&[outcome]);
@@ -1510,7 +1671,10 @@ fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
 /// stacks, and propagate its outcome (`RETURNED`, or `HALTED` for the bottom frame). Value-returning
 /// so a native direct caller gets its callee's result back without a bail.
 fn emit_return(cg: &mut Codegen, src: Reg) {
-    let raw = cg.load_reg(src);
+    // No spill: the frame dies here. The return value travels as the helper's argument; any slot
+    // left stale by SSA residency holds an immediate (the plan's invariant), so the frame
+    // teardown's release loop over the window stays a no-op on it.
+    let raw = cg.read_reg(src);
     let vm = cg.vm;
     let frames = cg.frames;
     let regs_vec = cg.regs_vec;
@@ -1537,6 +1701,7 @@ fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
     let bail = cg.b.create_block();
     cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);
     cg.b.switch_to_block(bail);
+    cg.spill_ssa(pc);
     let here = cg.pc_const(pc);
     cg.b.ins().return_(&[here]);
     cg.b.switch_to_block(cont);
@@ -1563,13 +1728,14 @@ fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &
     let bail = cg.b.create_block();
     cg.b.ins().brif(heap, bail, &[], cont, &[]);
     cg.b.switch_to_block(bail);
+    cg.spill_ssa(pc);
     let here = cg.pc_const(pc);
     cg.b.ins().return_(&[here]);
 
     // Not a heap old value: safe to mutate. Take the source out (moved into the global — no release,
     // its reference transfers) and write the slot; a first bind also records it in `global_order`.
     cg.b.switch_to_block(cont);
-    let v = cg.load_reg(src);
+    let v = cg.read_reg(src);
     let unit =
         cg.b.ins()
             .iconst(types::I64, Value::NANBOX.unit_bits as i64);
@@ -1601,6 +1767,7 @@ fn emit_take_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
     let bail = cg.b.create_block();
     cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);
     cg.b.switch_to_block(bail);
+    cg.spill_ssa(pc);
     let here = cg.pc_const(pc);
     cg.b.ins().return_(&[here]);
     cg.b.switch_to_block(cont);
@@ -1625,8 +1792,8 @@ fn emit_binary(
     pc: usize,
     op_blocks: &[Block],
 ) {
-    let va = cg.load_reg(a);
-    let vb = cg.load_reg(b);
+    let va = cg.read_reg(a);
+    let vb = cg.read_reg(b);
 
     let a_int = cg.is_small_int(va);
     let b_int = cg.is_small_int(vb);
@@ -1808,15 +1975,17 @@ fn box_float_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blo
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
 
-/// Emit a fast-path guard: `brif cond -> cont else bail(pc)`, fill the bail block (which hands
-/// control back to the interpreter at `pc`), and leave the builder positioned in `cont` so the
-/// caller keeps emitting the fast path. `cont` is a caller-created block; `cond` is the
-/// keep-going condition (true = stay in native code). No sealing here — [`FunctionBuilder`] uses no
-/// SSA variables in this codegen (all state is in memory), so `seal_all_blocks` at the end suffices.
+/// Emit a fast-path guard: `brif cond -> cont else bail(pc)`, fill the bail block (which spills
+/// the SSA-resident live registers, then hands control back to the interpreter at `pc`), and
+/// leave the builder positioned in `cont` so the caller keeps emitting the fast path. `cont` is a
+/// caller-created block; `cond` is the keep-going condition (true = stay in native code). No
+/// sealing here — blocks are sealed once at the end (`seal_all_blocks`), which also resolves the
+/// SSA variables' block parameters (P-JSSA).
 fn guard(cg: &mut Codegen, cond: ClValue, cont: Block, pc: usize) {
     let bail = cg.b.create_block();
     cg.b.ins().brif(cond, cont, &[], bail, &[]);
     cg.b.switch_to_block(bail);
+    cg.spill_ssa(pc);
     let here = cg.pc_const(pc);
     cg.b.ins().return_(&[here]);
     cg.b.switch_to_block(cont);

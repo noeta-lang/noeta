@@ -36,21 +36,36 @@ use noeta_bytecode::{Chunk, Op, Reg};
 pub(crate) struct RegPlan {
     live_in: Vec<bool>,
     ssa_ok: Vec<bool>,
+    /// Per register: is `ssa_ok` true at *some* pc? A register that is never promotable gets no
+    /// SSA variable at all, so a prototype whose heap analysis failed closed (`ssa_ok` all-false)
+    /// generates byte-identical code to the pre-P-JSSA backend.
+    promotable: Vec<bool>,
     nreg: usize,
 }
 
-// Consumed by codegen from S1 (straight-line promotion) on; until then only the contract tests
-// read it.
-#[allow(dead_code)]
 impl RegPlan {
-    pub(crate) fn compute(chunk: &Chunk, heap_aware: bool) -> RegPlan {
+    /// Build the plan from an already-computed bare-store map (avoids re-running the heap
+    /// fixpoint the caller needed anyway). `heap_in` is [`crate::heap_in_map`]'s output for this
+    /// chunk.
+    pub(crate) fn with_heap_in(chunk: &Chunk, heap_in: &[bool]) -> RegPlan {
         let nreg = chunk.num_registers as usize;
-        let heap_in = crate::heap_in_map(chunk, heap_aware);
+        let mut promotable = vec![false; nreg];
+        for (i, &h) in heap_in.iter().enumerate() {
+            if !h {
+                promotable[i % nreg.max(1)] = true;
+            }
+        }
         RegPlan {
             live_in: live_in_map(chunk),
             ssa_ok: heap_in.iter().map(|&h| !h).collect(),
+            promotable,
             nreg,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn compute(chunk: &Chunk, heap_aware: bool) -> RegPlan {
+        RegPlan::with_heap_in(chunk, &crate::heap_in_map(chunk, heap_aware))
     }
 
     /// May `r`'s value be read along some tier-0 path from the start of op `pc`?
@@ -61,6 +76,11 @@ impl RegPlan {
     /// May `r` be SSA-resident at `pc` (provably immediate there)?
     pub(crate) fn ssa_ok_at(&self, pc: usize, r: Reg) -> bool {
         self.ssa_ok[pc * self.nreg + r as usize]
+    }
+
+    /// Is `r` promotable anywhere (carries an SSA variable at all)?
+    pub(crate) fn promotable(&self, r: Reg) -> bool {
+        self.promotable[r as usize]
     }
 }
 
@@ -200,6 +220,75 @@ fn live_effect(op: &Op) -> LiveEffect<'_> {
         },
         _ => LiveEffect::Unmodeled,
     }
+}
+
+/// Registers that provably hold one statically-known immediate constant at every read the frame
+/// can execute: written exactly once in the whole chunk, by a `LoadConst` of an immediate, with
+/// no read reachable from the frame's start (pc 0) without passing through that def. Reads of
+/// such a register can be **inlined as the constant** — it then needs no SSA variable at all (no
+/// entry load, no loop block param, no register pressure) and its slot, written once at the def,
+/// is always current (no spills). This is exactly the shape LICM's hoisted-constant registers
+/// have (defined once in a loop pre-header, read in the loop). Mid-frame native entries (OSR /
+/// resume-after-call) don't weaken the reachability argument: they resume a frame in which
+/// tier 0 already executed everything up to that pc — including the def.
+///
+/// Fails safe: any op the liveness model doesn't cover disqualifies every register (an unmodeled
+/// op could write anything), a parameter register is never constant (the caller writes it
+/// invisibly at frame setup), and a second write of any kind (including a `Drop`'s clearing)
+/// disqualifies.
+pub(crate) fn const_reg_bits(chunk: &Chunk) -> Vec<Option<u64>> {
+    let n = chunk.code.len();
+    let nreg = chunk.num_registers as usize;
+    let mut writes: Vec<Vec<usize>> = vec![Vec::new(); nreg];
+    let mut reads: Vec<Vec<usize>> = vec![Vec::new(); nreg];
+    for (pc, op) in chunk.code.iter().enumerate() {
+        match live_effect(op) {
+            LiveEffect::Modeled { reads: rs, def } => {
+                rs.for_each(|r| reads[r as usize].push(pc));
+                if let Some(d) = def {
+                    writes[d as usize].push(pc);
+                }
+            }
+            LiveEffect::Unmodeled => return vec![None; nreg],
+        }
+    }
+    let mut out = vec![None; nreg];
+    for r in chunk.num_params as usize..nreg {
+        let [def_pc] = writes[r][..] else { continue };
+        let Op::LoadConst { k, .. } = &chunk.code[def_pc] else {
+            continue;
+        };
+        let Some(bits) = crate::const_immediate_bits(&chunk.consts[*k as usize]) else {
+            continue;
+        };
+        if !any_read_bypasses_def(chunk, n, def_pc, &reads[r]) {
+            out[r] = Some(bits);
+        }
+    }
+    out
+}
+
+/// Is any of `read_pcs` reachable from pc 0 along a path that never executes `def_pc`? (BFS over
+/// [`succ_all`], refusing to expand `def_pc`.) If not, every executed read observes the def.
+fn any_read_bypasses_def(chunk: &Chunk, n: usize, def_pc: usize, read_pcs: &[usize]) -> bool {
+    let mut seen = vec![false; n];
+    let mut stack = vec![0usize];
+    let mut succ = Vec::new();
+    while let Some(pc) = stack.pop() {
+        if pc >= n || seen[pc] {
+            continue;
+        }
+        seen[pc] = true;
+        if read_pcs.contains(&pc) {
+            return true;
+        }
+        if pc == def_pc {
+            continue; // paths through the def are fine — don't expand it
+        }
+        succ_all(&chunk.code[pc], pc, n, &mut succ);
+        stack.extend_from_slice(&succ);
+    }
+    false
 }
 
 /// The tier-0 successors of `pc` for **every** op (cf. the module docs on soundness): each

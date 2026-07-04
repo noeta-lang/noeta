@@ -72,9 +72,8 @@ deliberately separate, last slice (S5) that can be dropped if its measured value
 
 | # | Slice | Delivers | Risk |
 |---|---|---|---|
-| **S0** | **Region liveness + value-location maps.** Per-pc live-in/live-out over the tier-0 CFG (reuse `reachable_pcs`/`reg_effect` machinery), classified immediate-vs-may-heap by `heap_in_map`. A `ValueLoc` table per pc: each register is `InSlot` or `Ssa(var)`. No codegen change — landed as analysis + unit tests locking the contract (the J7 pattern). | Analysis only; fails closed to `InSlot`. |
-| **S1** | **Straight-line promotion.** Within each basic block, an immediate register written then read stays an SSA value; slot stores happen only at block exit and bail edges (spill the block's dirty SSA values, then return the resume pc — bail-before-mutate becomes *spill-then-bail*, same interpreter contract). First measurable win: intra-block load/store traffic gone. | Spill-map correctness at bail edges — oracle-gated. |
-| **S2** | **Cross-block promotion (the payoff).** Live immediate registers cross CFG edges as **block parameters**; the loop-carried accumulator/counter never touches memory inside the loop. Entry points (pc 0, OSR headers, resume-after-call) load their live-in set from slots once. `LoadConst`/LICM/GVN become Cranelift's problem. Expect the bulk of the loop-benchmark win here. | Block-param plumbing across the per-pc block layout; OSR entry state. |
+| **S0** | ✅ **DONE.** **Region liveness + value-location maps** (`noeta-jit/src/plan.rs`). Per-pc backward liveness over sound all-op successors (`succ_all` covers the `Match*`/`Coalesce` edges the arithmetic-whitelist `analysis_succ` never sees; unmodeled op = reads-all, fail-closed **per op**) + `ssa_ok` = the complement of the J7 bare-store map. 6 contract-locking tests. | Analysis only; fails closed to `InSlot`. |
+| **S1+S2** | ✅ **DONE (one slice — see "What landed" below).** Promotion via **`cranelift-frontend` `Variable`s** (`declare_var`/`def_var`/`use_var`), which build the block parameters at merges automatically — straight-line *and* cross-block (loop headers included) in one mechanism, which is why the two planned slices collapsed into one. Plus **known-constant register inlining** (`plan::const_reg_bits`) and `opt_level=speed`. fnloop **1.36×**, toploop **1.18×**, float loop **1.23×**; `--jit-differential` 0-div/0-leak first run. | Spill-map correctness at bail edges — oracle-gated. |
 | **S3** | **Skip the register-window zero-init** (P-CALL deferred lever #2). With definite-assignment from S0, a frame whose registers are all written-before-read (or covered by entry spills) doesn't need `reserve_window`'s zero-fill; `do_return`'s release loop instead walks a recorded live-set (or the frame spills unit to dead slots at deopt only). Removes a per-call `memset`-shaped cost. | Frame-teardown contract; leak oracle is the judge. |
 | **S4** | **SSA calling convention for native→native direct calls.** A direct call passes args as SSA values (Cranelift call args) and receives the return value in a register; the callee's frame is materialized (slots + `Frame` push) **only on its deopt path**. The caller's frame-setup work (zero-init + retain-immediates + push/pop) disappears on the all-native path — the actual `fib` lever P-CALL identified. Fallback: any non-direct-able call keeps today's `jit_prepare_call` protocol. | The deopt path must reconstruct a frame mid-call ("frame reconstruction") — the subtlest slice; do after S1–S3 are proven. |
 | **S5** | **(Optional, measure-first) heap values in SSA.** Ownership-aware promotion of may-heap registers (spill = store + the release tier-0 would have done at the overwrite). Only if a workload demonstrates the win after S1–S4; J6's lesson says don't assume. | Refcount bookkeeping — highest risk, lowest proven value. Drop by default. |
@@ -83,6 +82,60 @@ Each slice lands only with: `--jit-differential` 0-divergence / 0-leak at full c
 standard differential + leak oracle untouched (sandbox is tier-0 by construction), criterion
 before/after on `vm_jit/*` (`loop`, `float`, `osr`, `global`, `fib`, `mixed`, `widefield` — the last
 two must not regress), and the pinned xlang loop/fib numbers recorded in this doc.
+
+## S1+S2 — what landed (Variables, constant inlining, and the boxing finding)
+
+**Mechanism.** One `cranelift-frontend` `Variable` (i64) per VM register. Reads (`read_reg`) use
+the variable exactly where the plan proves the register immediate (`ssa_ok`); writes (`store_reg`)
+are a pure `def_var` where both the old and new occupant are provably immediate, a write-through +
+`def_var` at a heap→immediate transition (the released pointer must not linger in the slot), and
+the plain J7-refined slot store elsewhere. Every native entry point (guarded pc-0, resume,
+OSR header) passes through an init block that `def_var`s all variables from the slots, so every
+variable is defined on every path. Bail edges spill resident ∩ live (`spill_ssa`) before returning
+the resume pc — *spill-then-bail*, same interpreter contract; helper ops (`jit_call`,
+`jit_run_leaf_op`) spill before and reload after (sound because pre-spill made live slots current,
+a helper-written slot is fresh, and a dead register's stale value is never read before its next
+def). `seal_all_blocks` at the end resolves all block params. A prototype whose heap analysis
+failed closed (leaf-op/field code) gets **no** variables — byte-identical codegen, no regression.
+
+**Two things the first measurement forced:**
+- **`opt_level=speed`.** At Cranelift's default `none`, block-param code was **2× slower** than the
+  memory form (fnloop 54→79 ms) — the SSA form needs the mid-end. With `speed` it flipped to a win.
+  Cost: ~1–3 ms compile time per hot proto (visible as ~2% on the leaf-op `forrange`, whose codegen
+  is otherwise unchanged).
+- **Known-constant register inlining** (`plan::const_reg_bits`). Promoting LICM's hoisted-constant
+  registers made the globals loop **5% slower**: with ~7 live ABI pointers plus the retain/release
+  helper calls on `LoadGlobal`/`StoreGlobal`'s cold paths, regalloc pushed the promoted constants
+  to the machine stack — same traffic as the frame slots, plus shuffling (read straight off the
+  `NOETA_JIT_DISASM=1` dump, a debug tool added in this slice). A register written exactly once by
+  a `LoadConst` of an immediate, with no read reachable from pc 0 that bypasses the def, is now
+  read as an **inlined `iconst`** instead: no variable, no block param, no pressure — and the
+  egraph folds its tag checks and unboxing statically. That flipped toploop to +18% and widened
+  fnloop's win.
+
+**Measured (pinned, interleaved min-of-9, end-to-end `noeta run`):** fn-local int loop 10M
+53.7→39.4 ms (**1.36×**), top-level globals loop 10M 70.7→59.9 ms (**1.18×**), float loop
+36.6→29.8 ms (**1.23×**), fib(32) ~1.02× (its lever is S4), strcat/assoc/struct-field loops
+neutral (1.00–1.01×). Gates: `--jit-differential` 432/0-divergence/0-leak (890/891 native),
+standard differential 432/0, conformance 443, leak 0, workspace green, clippy+fmt clean.
+
+**The finding that reshapes the next slice: with loads/stores gone, the NaN-box chain is the
+floor.** The promoted loop still pays, per op: two `is_small_int` tag checks, two unbox
+shift-pairs, the 48-bit overflow fit-check, and a re-box — because a `Variable` holds the *boxed*
+word, and the egraph cannot fold box/unbox chains through loop-header block params (they are
+opaque φs). LuaJIT/PHP-JIT keep hot values **unboxed with checks hoisted out of the loop**. So the
+next slice is **typed promotion (T1)**: a forward numeric-kind dataflow in the plan (lattice
+`{Bot, Int, Bool, Imm}` describing the *native-path* state — a natively-completed arith `Binary`
+with statically-int operands is Int, a comparison is Bool, merges meet), plus a second **raw**
+variable per register holding the unboxed value. Def sites with a statically-known kind define
+both forms (box once); reads at statically-Int pcs use the raw form and skip the tag checks and
+unboxing entirely; `CondBranch` on a statically-Bool register branches on the raw bit (no
+false/true/bail compare chain); spills always store the boxed form. Kind analysis is per-op
+fail-closed like liveness. Expected: the remaining ~2–3× on fnloop-class loops.
+
+The globals loop's ceiling after T1 is the globals array itself (every iteration re-loads/stores
+`i`/`total` slots with unbound/heap guards) — its lever is register-allocating top-level locals
+(the deferred deeper-F1, a compiler track, out of P-JSSA's scope).
 
 ## Design notes (constraints discovered by J0–J7 that S1+ must honour)
 
