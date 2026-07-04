@@ -335,6 +335,76 @@ fn global_loop_src(n: usize) -> String {
 
 const LOOP_ITERS: &[usize] = &[100_000, 1_000_000];
 
+/// J1 (P-JIT integer fast path): a pure-integer `while` loop in a function (register-local `i`/`total`,
+/// no globals, no calls) — the shape the JIT compiles to native machine code. The `while` form (not
+/// `for i in 0..n`, which materializes a range list) keeps the whole body in the J1 op set:
+/// `LoadConst`/`Binary`/`CondBranch`/`Move`/`Drop`/`Jump`. Benched interpreter vs forced-JIT so the
+/// native win is directly visible.
+#[cfg(feature = "jit")]
+fn jit_loop_src(n: usize) -> String {
+    format!(
+        "fn run(n: int): int {{\n    mut total = 0;\n    mut i = 0;\n    while i < n {{\n        total = total + (i % 7);\n        i = i + 1;\n    }}\n    return total;\n}}\necho run({n});\n"
+    )
+}
+
+/// J2 (P-JIT float fast path): the same loop shape with an f64 accumulator — a float `Binary` (`*`,
+/// `+`) each iteration alongside the integer counter, so the JIT's runtime int-vs-float dispatch and
+/// the native f64 arithmetic both get exercised.
+#[cfg(feature = "jit")]
+fn jit_float_loop_src(n: usize) -> String {
+    format!(
+        "fn run(n: int): float {{\n    mut total = 0.0;\n    mut i = 0;\n    while i < n {{\n        total = total + 1.5;\n        i = i + 1;\n    }}\n    return total;\n}}\necho run({n});\n"
+    )
+}
+
+/// J4 slice 2 (P-JIT field access): a hot loop reading (`LoadField`) and writing (`SetField`) the
+/// fields of a mutable `struct`, so the leaf-op helper's field paths get exercised on the fast path
+/// while the surrounding loop stays native.
+#[cfg(feature = "jit")]
+fn field_loop_src(n: usize) -> String {
+    format!(
+        "struct Point {{\n    mut x: int\n    mut y: int\n}}\nfn run(n: int): int {{\n    mut p = Point {{ x: 0, y: 0 }};\n    mut i = 0;\n    while i < n {{\n        p.x = p.x + i;\n        p.y = p.y + p.x;\n        i = i + 1;\n    }}\n    return p.x + p.y;\n}}\necho run({n});\n"
+    )
+}
+
+/// P-JIT field-read floor: a **read-only** hot loop over a WIDE struct, reading the last field
+/// (worst-case `slot_of` scan) each iteration — no `SetField`, so the loop is pure `LoadField` +
+/// native arithmetic. This isolates the per-`LoadField` leaf-helper-call cost: the JIT stays *below*
+/// the tier-0 interpreter here (whose `LoadField` is a call-free match arm with its own inline
+/// cache), which is why a *helper-internal* inline cache was found not to help — only a call-free
+/// native field read (guard + slot load emitted as machine code, needing a layout-stable object
+/// representation) would cross this floor. Kept as the bench that will show that win when it lands.
+#[cfg(feature = "jit")]
+fn wide_field_read_src(n: usize) -> String {
+    let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
+    let inits: Vec<String> = (0..8).map(|i| format!("f{i}: {i}")).collect();
+    format!(
+        "struct Wide {{ {} }}\n\
+         fn run(n: int): int {{\n    \
+            w = Wide {{ {} }};\n    \
+            mut acc = 0;\n    \
+            mut i = 0;\n    \
+            while i < n {{\n        \
+                acc = acc + w.f7;\n        \
+                i = i + 1;\n    \
+            }}\n    \
+            return acc;\n\
+         }}\n\
+         echo run({n});\n",
+        fields.join("; "),
+        inits.join(", "),
+    )
+}
+
+/// J4 slice 3 (P-JIT indexing): a hot loop indexing a list (`xs[i]`) and a map (`m[key]`) — the
+/// `Op::Index` list/map paths run through the leaf-op helper while the loop stays native.
+#[cfg(feature = "jit")]
+fn index_loop_src(n: usize) -> String {
+    format!(
+        "fn run(n: int): int {{\n    xs = [10, 20, 30, 40, 50];\n    m = {{ \"a\": 1, \"b\": 2, \"c\": 3 }};\n    keys = [\"a\", \"b\", \"c\"];\n    mut total = 0;\n    mut i = 0;\n    while i < n {{\n        total = total + xs[i % 5];\n        total = total + m[keys[i % 3]];\n        i = i + 1;\n    }}\n    return total;\n}}\necho run({n});\n"
+    )
+}
+
 /// S5 (P-VMT-STR): string-interpolation throughput. Before S5 the compiler lowered a `"…${x}…"` to
 /// `LoadConst "" + N×(Stringify + Concat)` — an intermediate `String` per part, the accumulator
 /// reallocated on every step. S5 lowers it to a single `Op::BuildString` (one pass, one output
@@ -887,6 +957,143 @@ fn vm_hot_paths(c: &mut Criterion) {
         }
     }
     col.finish();
+
+    // J1 (P-JIT): the integer fast path. A register-local integer `while` loop, run through the
+    // interpreter (tier 0) and the forced JIT (tier 1) so the native speedup is directly visible.
+    #[cfg(feature = "jit")]
+    {
+        let mut jit = c.benchmark_group("vm_jit");
+        for &n in LOOP_ITERS {
+            let module = compile(&jit_loop_src(n));
+            jit.bench_with_input(BenchmarkId::new("loop_interp", n), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            });
+            jit.bench_with_input(BenchmarkId::new("loop_jit", n), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+            let fmodule = compile(&jit_float_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("float_interp", n),
+                &fmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(BenchmarkId::new("float_jit", n), &fmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+            // Native globals: the same arithmetic loop but **top-level** (global `i`/`total`) — the
+            // scripting shape. Per-op bail compiles proto 0 (LoadGlobal/StoreGlobal inlined), bailing
+            // only at the trailing `echo`.
+            let gmodule = compile(&global_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("global_interp", n),
+                &gmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(BenchmarkId::new("global_jit", n), &gmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+            // J4 (heap/collections): a `for i in 0..n` range loop — its MakeRange/IterSnapshot/
+            // ListLen/ListGet internals now run through the leaf-op helper, so the loop is native.
+            let rmodule = compile(&loop_sum_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("forrange_interp", n),
+                &rmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("forrange_jit", n),
+                &rmodule,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
+            // J4 slice 2 (field access): a loop reading/writing `struct` fields — LoadField/SetField
+            // run through the leaf-op helper, keeping the surrounding loop native.
+            let field_module = compile(&field_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("field_interp", n),
+                &field_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("field_jit", n),
+                &field_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
+            // P-JIT field-read floor: a read-only loop over a wide struct's last field — the JIT stays
+            // below the tier-0 interpreter here (per-LoadField leaf-helper-call cost), the floor a
+            // future call-free native field read would cross.
+            let wide_module = compile(&wide_field_read_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("widefield_interp", n),
+                &wide_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("widefield_jit", n),
+                &wide_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
+            // J4 slice 3 (indexing): a loop indexing a list and a map — Op::Index runs through the
+            // leaf-op helper, keeping the surrounding loop native.
+            let index_module = compile(&index_loop_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("index_interp", n),
+                &index_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("index_jit", n),
+                &index_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
+        }
+        // Native calls (J3): recursive `fib`, interpreter vs forced JIT. Each frame's pre-call region
+        // and both recursive subtrees run native (the callee enters at pc 0); the caller's tail after
+        // its first call resumes in tier 0.
+        for &d in FIB_DEPTHS {
+            let module = compile(&fib_src(d));
+            jit.bench_with_input(BenchmarkId::new("fib_interp", d), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            });
+            jit.bench_with_input(BenchmarkId::new("fib_jit", d), &module, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+            });
+        }
+        // OSR (J5): the same top-level global loop, but through **ordinary hot-counter promotion**
+        // (`run_module_jit_hot`, not forced) — the real production path. Before OSR, `main` (entered
+        // once) never crossed the entry threshold, so this loop ran entirely in tier 0 in production;
+        // OSR counts its back-edges and jumps into native code mid-flight. Benched interp vs hot-JIT
+        // so the win from the promotion actually reaching the loop is visible.
+        for &n in LOOP_ITERS {
+            let gmodule = compile(&global_loop_src(n));
+            jit.bench_with_input(BenchmarkId::new("osr_interp", n), &gmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+            });
+            jit.bench_with_input(BenchmarkId::new("osr_hot", n), &gmodule, |b, module| {
+                b.iter(|| black_box(VmBackend::new().run_module_jit_hot(black_box(module))));
+            });
+        }
+        jit.finish();
+    }
 }
 
 criterion_group!(benches, vm_hot_paths);

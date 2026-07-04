@@ -21,18 +21,24 @@ lang-check = { workspace = true }
 lang-stdlib = { workspace = true }
 lang-compiler = { workspace = true }
 lang-vm = { workspace = true }
+lang-bytecode = { workspace = true }
 lang-db = { workspace = true }
 lang-loader = { workspace = true }
 clap = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
+[features]
+# Enable the JIT (P-JIT) and its `--jit-differential` oracle. Off by default: the harness builds and
+# runs the eval↔interpreter differential without pulling Cranelift. `cargo run -p lang-conformance
+# --features jit -- --jit-differential` turns it on.
+jit = ["lang-vm/jit"]
+
 [dev-dependencies]
 insta = { workspace = true }
 assert_cmd = { workspace = true }
 predicates = { workspace = true }
 serde_json = { workspace = true }
-lang-bytecode = { workspace = true }
 lang-alloc-probe = { workspace = true }
 
 [lints]

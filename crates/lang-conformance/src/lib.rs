@@ -29,6 +29,8 @@ use lang_span::{Source, SourceId, SourceMap};
 mod differential;
 mod expectation;
 mod ir_corpus;
+#[cfg(feature = "jit")]
+mod jit_differential;
 mod leaks;
 mod reference;
 mod report;
@@ -36,6 +38,8 @@ mod report;
 pub use differential::{DiffReport, Mismatch, run_differential};
 pub use expectation::{ErrorExpectation, Expectations};
 pub use ir_corpus::{IrCorpusReport, run_ir_corpus};
+#[cfg(feature = "jit")]
+pub use jit_differential::{JitDiffReport, run_jit_differential};
 pub use leaks::{Leak, LeakReport, run_leak_check};
 pub use report::{CaseResult, CaseStatus, Report};
 

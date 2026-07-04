@@ -40,6 +40,36 @@ ops already exist — it is a field-type swap plus a `Vec` in the VM.
 **Later refinement:** register-allocate top-level locals that no nested `fn` captures (turn `i`/`total`
 into pure frame registers, no global array at all). Bigger; do slot-indexing first.
 
+### Spike result (investigated + benchmarked — DEFERRED, low ROI)
+
+Spiked as a post-compile bytecode pass on proto 0 (promote globals used only in `main`, first-referenced
+by a store, to fresh registers; `LoadGlobal→Move`, `StoreGlobal→Drop+Move+Drop`, `TakeGlobal→Move+Drop`,
+refcount-matched exactly, final value dropped before `Halt`). Findings:
+
+- **Ceiling is small.** The gap between an all-global loop and the identical function-local loop —
+  which is exactly what full promotion would close — is only **~5% in the interpreter** (`global_loop`
+  44ms vs `loop_sum` 39ms/1M; global-slot-indexing already made a global access nearly a bare `Vec`
+  index) and **~30% in the JIT** (`global_jit` ~9.2ms vs `loop_jit` ~6.3ms/1M). So the prize is narrow:
+  top-level scripting loops that also get hot enough to JIT.
+- **The cheap approach is a net LOSS.** The bytecode pass made it *slower* (interp 44→60ms, JIT
+  9.2→9.4ms): it turns `LoadGlobal→temp` into `Move reg→temp` (no win — the `Binary` still reads the
+  temp, not the promoted register), and `StoreGlobal` (1 op) into `Drop+Move+Drop` (3 ops) — **14
+  ops/iter vs the global 10 and the frontend-local 11.** A peephole can't restructure the redundant
+  load-into-temp that a frontend register allocator simply never emits; reaching the ceiling would mean
+  re-running copy-propagation + coalescing on the promoted code. **So this must be a frontend change**
+  (allocate the local as a register from the start, reads hit it directly), which needs `main` to carry
+  a base scope (`declare_local` panics with none) — real surgery.
+- **Teardown-order hazard is real and observable.** Adversarial test (two top-level `destruct`-bearing
+  objects, one promoted/`main`-only, one kept global because a `fn` reads it): destruction order
+  diverges — baseline `drop b; drop g; drop a`, promoted `drop b; drop a; drop g` (`g` moves to the
+  end). Refcount matching was exact (leak oracle 0) and the corpus differential stayed green (no corpus
+  program hits the mix), but a sound version **must** gate promotion to non-destructor-bearing bindings
+  (needs type info from the checker) or promote all-or-nothing per teardown group.
+
+**Recommendation: defer.** Marginal interpreter win, a narrow JIT win, and the sound version needs
+frontend surgery + destructor-order gating. Better ROI elsewhere. If revisited, do it in the frontend,
+not as a bytecode pass.
+
 ## Finding 2 — read-modify-write on a collection copies instead of reusing (the 250× outlier) — ✅ DONE (`094cc1a`, P-VMT-RMW)
 
 **Fixed.** `insert_drops` runs before `thread_reuse`, so reading the receiver earlier in the block

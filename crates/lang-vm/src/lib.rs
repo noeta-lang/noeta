@@ -68,7 +68,12 @@ impl VmBackend {
     /// Compile and run a program, or report that it falls outside the supported subset.
     pub fn try_run(&self, program: &Program) -> Result<RunResult, Unsupported> {
         let module = compile(program)?;
-        Ok(execute(&module, Box::new(lang_stdlib::SandboxHost::new())))
+        // The differential harness path stays pure tier-0 (see `run_module`).
+        Ok(execute(
+            &module,
+            Box::new(lang_stdlib::SandboxHost::new()),
+            false,
+        ))
     }
 
     /// Execute an already-compiled [`Module`]. This is the seam the salsa graph (`lang-db`)
@@ -77,7 +82,9 @@ impl VmBackend {
     /// without the VM crate depending on the database. Runs against a deterministic
     /// [`lang_stdlib::SandboxHost`] — the host the conformance differential always uses.
     pub fn run_module(&self, module: &Module) -> RunResult {
-        execute(module, Box::new(lang_stdlib::SandboxHost::new()))
+        // The sandbox path is the `--jit-differential` oracle's pure tier-0 baseline, so it never
+        // auto-JITs (the oracle's tier-1 tier is `run_module_jit`'s explicit `force_jit`).
+        execute(module, Box::new(lang_stdlib::SandboxHost::new()), false)
     }
 
     /// Execute a module against a caller-provided [`lang_stdlib::Host`] (M2.3). The CLI/REPL pass
@@ -88,7 +95,9 @@ impl VmBackend {
         module: &Module,
         host: Box<dyn lang_stdlib::Host>,
     ) -> RunResult {
-        execute(module, host)
+        // A real-host production run (`lang bench`, single-isolate CLI): drive the tier-1 JIT under
+        // ordinary hot-counter promotion (P-JIT). A no-op without the `jit` feature.
+        execute(module, host, true)
     }
 
     /// Execute a module against a caller-provided host *and* async executor (Track A.4). The CLI
@@ -100,7 +109,14 @@ impl VmBackend {
         host: Box<dyn lang_stdlib::Host>,
         executor: Box<dyn lang_stdlib::Executor>,
     ) -> RunResult {
-        execute_with_collector(module, host, executor, lang_value::CollectorMode::Trace)
+        // Real-host production run with a real async executor: hot-counter JIT (P-JIT).
+        execute_with_collector(
+            module,
+            host,
+            executor,
+            lang_value::CollectorMode::Trace,
+            true,
+        )
     }
 
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
@@ -121,6 +137,10 @@ impl VmBackend {
         vm.parallel_isolates = true;
         vm.isolate_module = Some(Arc::clone(&module));
         vm.isolate_factory = Some(factory);
+        // The main isolate is a real-host production run: enable the hot-counter JIT (P-JIT). Worker
+        // isolates load through `Vm::load` and stay tier-0 (Cranelift's `JITModule` is `!Send`).
+        #[cfg(feature = "jit")]
+        vm.init_jit();
         run_and_teardown(&mut vm, lang_value::CollectorMode::Trace)
     }
 
@@ -136,8 +156,84 @@ impl VmBackend {
             Box::new(lang_stdlib::SandboxHost::new()),
             Box::new(lang_stdlib::SandboxExecutor::new()),
             mode,
+            false,
         )
     }
+
+    /// Execute a module through the tier-1 JIT (milestone P-JIT), forcing every eligible prototype
+    /// through native code — the `--jit-differential` and leak-under-JIT oracle path. It keeps the
+    /// deterministic [`lang_stdlib::SandboxHost`], so its [`RunResult`] is directly comparable to
+    /// [`VmBackend::run_module`]: the only variable is tier 0 vs tier 1 — which is precisely what the
+    /// oracle asserts.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit(&self, module: &Module) -> RunResult {
+        self.run_module_jit_with_stats(module).0
+    }
+
+    /// Like [`VmBackend::run_module_jit`] but also returns how many prototypes were compiled (native
+    /// vs total) — the JIT-coverage numbers the oracle reports and the tests assert on.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_with_stats(&self, module: &Module) -> (RunResult, JitStats) {
+        lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
+        let mut vm = Vm::load(
+            module,
+            Box::new(lang_stdlib::SandboxHost::new()),
+            Box::new(lang_stdlib::SandboxExecutor::new()),
+        );
+        vm.force_jit = true;
+        vm.init_jit();
+        let result = run_and_teardown(&mut vm, lang_value::CollectorMode::Trace);
+        let stats = vm
+            .jit
+            .as_ref()
+            .map(|j| JitStats {
+                native: j.native_count(),
+                compiled: j.compiled_count(),
+            })
+            .unwrap_or_default();
+        (result, stats)
+    }
+
+    /// Execute a module with **ordinary hot-counter promotion** (the production tiering) — like the
+    /// real `lang run`, a prototype goes native only once hot. Used by the OSR bench.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_hot(&self, module: &Module) -> RunResult {
+        self.run_module_jit_hot_with_stats(module).0
+    }
+
+    /// Like [`VmBackend::run_module_jit_with_stats`] but with **ordinary hot-counter promotion**
+    /// (`force_jit` off) — the real production tiering. A prototype compiles only once it crosses
+    /// [`JIT_HOT_THRESHOLD`] entries *or back-edges* (P-JIT J5 OSR), so this exercises the promotion
+    /// path itself: a top-level loop entered once must still go native via its loop back-edges.
+    #[cfg(feature = "jit")]
+    pub fn run_module_jit_hot_with_stats(&self, module: &Module) -> (RunResult, JitStats) {
+        lang_value::set_collector_mode(lang_value::CollectorMode::Trace);
+        let mut vm = Vm::load(
+            module,
+            Box::new(lang_stdlib::SandboxHost::new()),
+            Box::new(lang_stdlib::SandboxExecutor::new()),
+        );
+        vm.init_jit(); // force_jit stays false → hot-counter + OSR promotion
+        let result = run_and_teardown(&mut vm, lang_value::CollectorMode::Trace);
+        let stats = vm
+            .jit
+            .as_ref()
+            .map(|j| JitStats {
+                native: j.native_count(),
+                compiled: j.compiled_count(),
+            })
+            .unwrap_or_default();
+        (result, stats)
+    }
+}
+
+/// JIT-coverage counts for one forced-JIT run: how many prototypes were compiled to real native code
+/// (`native`) out of the total that were compiled at all (`compiled`, native + bail stubs).
+#[cfg(feature = "jit")]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct JitStats {
+    pub native: usize,
+    pub compiled: usize,
 }
 
 impl Backend for VmBackend {
@@ -260,10 +356,12 @@ struct Vm<'m> {
     /// their instances synthesizes a structural JSON serializer.
     tojson_derives: HashSet<String>,
     /// The per-run global slots (P-VMT-GSLOT), indexed by [`GlobalId`] — sized to
-    /// `module.global_names.len()`. `None` is an unbound slot (a `LoadGlobal`/`TakeGlobal` of one
-    /// raises E0005); the compiler assigns a dense slot to every top-level binding and `fn` name so
-    /// access is a `Vec` index, not a `HashMap` hash+probe on the name.
-    globals: Vec<Option<Value>>,
+    /// `module.global_names.len()`. A slot holds [`Value::unbound`] until first bound (a
+    /// `LoadGlobal`/`TakeGlobal` of an unbound slot raises E0005); the compiler assigns a dense slot
+    /// to every top-level binding and `fn` name so access is a `Vec` index, not a `HashMap`
+    /// hash+probe. `Vec<Value>` (not `Vec<Option<Value>>`) so a slot is a single 8-byte word with a
+    /// layout the JIT can access soundly (P-JIT globals) — and half the size / a cheaper unbound check.
+    globals: Vec<Value>,
     /// Global slots in **binding order** (each pushed the first time its slot is stored), so globals
     /// are destroyed at program end in reverse binding order (the deterministic "program order" the
     /// spec requires) — the same order the pre-slot name-keyed `global_order` produced.
@@ -308,6 +406,512 @@ struct Vm<'m> {
     inflight_isolates: usize,
     stdout: String,
     diagnostics: Vec<Diagnostic>,
+    /// The tier-1 JIT engine (milestone P-JIT), present only when the `jit` feature is on *and* the
+    /// host ISA is available. `None` = interpret everything (tier 0). Never populated on a worker
+    /// isolate — Cranelift's `JITModule` is `!Send`, and the deterministic path stays tier 0.
+    #[cfg(feature = "jit")]
+    jit: Option<lang_jit::Jit>,
+    /// When set, every eligible prototype is compiled eagerly and dispatched through tier 1 (the
+    /// `--jit-differential` / leak-under-JIT oracle's "force JIT" switch). Off = ordinary hot-counter
+    /// promotion.
+    #[cfg(feature = "jit")]
+    force_jit: bool,
+    /// Per-prototype tier-1 entry counter, indexed by prototype index; a prototype is compiled once
+    /// its count crosses [`JIT_HOT_THRESHOLD`] (or immediately under `force_jit`).
+    #[cfg(feature = "jit")]
+    jit_counters: Vec<u32>,
+    /// The value the bottom frame produced when it returned inside native code (J3): `jit_return`
+    /// parks it here for the dispatch loop to yield as the run's result.
+    #[cfg(feature = "jit")]
+    jit_ret: Value,
+    /// The callee window base a `jit_prepare_call` reserved for a native direct call (J3): the
+    /// compiled caller reads it back (via `jit_callee_base`) to `call_indirect` the callee.
+    #[cfg(feature = "jit")]
+    jit_callee_base: usize,
+}
+
+/// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
+/// then the JIT compiles it (P-JIT). The `--jit-differential` oracle bypasses this via `force_jit`.
+#[cfg(feature = "jit")]
+const JIT_HOT_THRESHOLD: u32 = 50;
+
+/// What a compiled prototype's tier-1 run tells the interpreter to do next (P-JIT, decoded from the
+/// [`lang_jit::CompiledFn`] `i64` return).
+#[cfg(feature = "jit")]
+enum JitOutcome {
+    /// Resume interpreting this frame at the given bytecode pc (the native code bailed there).
+    Bail(usize),
+    /// A native `Call` pushed a callee frame; re-derive the top frame and run it (`continue 'reload`).
+    Called,
+    /// A native `Return` transferred its result to the caller and popped this frame; re-derive the
+    /// caller frame and continue (`continue 'reload`).
+    Returned,
+    /// The bottom frame returned natively; the run is over — yield its value (on `vm.jit_ret`).
+    Halted,
+    /// The frame aborted (a diagnostic is recorded); propagate the unwind.
+    Abort,
+}
+
+// Counts how many times a tier-1 bail stub has called `jit_observe` on this thread — the J0 proof
+// that generated native code actually ran (and reached a runtime helper), used by the tests.
+#[cfg(feature = "jit")]
+thread_local! {
+    static JIT_OBSERVE_COUNT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The J0 runtime-helper skeleton (P-JIT): the generated bail stub calls this once per frame entry,
+/// proving a compiled prototype can reach a Rust helper with the live VM pointer under the tier-1
+/// ABI. It only bumps a thread-local counter here; J1+ registers the real `retain`/`release`/`call`
+/// helpers beside it and reconstitutes `&mut Vm` from `vm` to service them.
+#[cfg(feature = "jit")]
+extern "C" fn jit_observe(_vm: *mut core::ffi::c_void) {
+    JIT_OBSERVE_COUNT.with(|c| c.set(c.get().wrapping_add(1)));
+}
+
+/// This thread's running total of tier-1 bail-stub entries (see [`jit_observe`]). Test-only: the
+/// J0 proof that native code actually ran.
+#[cfg(all(test, feature = "jit"))]
+fn jit_observe_count() -> u64 {
+    JIT_OBSERVE_COUNT.with(|c| c.get())
+}
+
+/// Runtime helper for native `StoreGlobal` (P-JIT globals): the compiled code has already written the
+/// slot; this records `g` in `global_order` so program-end teardown destroys globals in reverse
+/// binding order (the one part of a first-time `StoreGlobal` that can't be inlined — a `Vec` push may
+/// reallocate). Called only on the unbound→bound transition, matching the interpreter's `None` arm.
+///
+/// # Safety
+/// `vm` must be the live `*mut Vm` the tier-1 ABI passed; the call happens synchronously inside
+/// `jit_enter`, where no other borrow of `*vm` is active.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_note_global_bound(vm: *mut core::ffi::c_void, g: u32) {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    vm.global_order.push(g);
+}
+
+/// Runtime helper: bump a value's refcount (heap-aware register moves, J3). No-op on an immediate.
+#[cfg(feature = "jit")]
+extern "C" fn jit_retain(v: u64) {
+    retain(Value::from_bits(v));
+}
+
+/// Runtime helper: drop one reference to a value — the plain, non-destructor release the
+/// interpreter's `set_reg` uses on an overwritten register (J3). No-op on an immediate.
+#[cfg(feature = "jit")]
+extern "C" fn jit_release(v: u64) {
+    release(Value::from_bits(v));
+}
+
+/// Runtime helper: the destructor-aware release for an IR-relevant `Drop` (may run a `destruct`
+/// block if this is the last reference), J3.
+///
+/// # Safety
+/// `vm` must be the live `*mut Vm` the tier-1 ABI passed (see [`jit_note_global_bound`]).
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_release_value(vm: *mut core::ffi::c_void, v: u64) {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    vm.release_value(Value::from_bits(v));
+}
+
+/// Runtime helper for a native `Op::Call` (J3): read the call back from `proto`/`pc` and run the
+/// shared closure-call setup on the interpreter's frame/register stacks (pushing the callee frame or
+/// completing a synchronous first-class-builtin call). Returns the [`lang_jit`] outcome the compiled
+/// function propagates: `OUTCOME_CALLED` (frame pushed), a resume pc (synchronous call done, continue
+/// there), or `OUTCOME_ABORTED` (a diagnostic was recorded).
+///
+/// # Safety
+/// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed; the call runs
+/// synchronously inside `jit_enter`, where no other borrow of them is active.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_call(
+    vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    base: usize,
+    proto: i32,
+    pc: i32,
+) -> i64 {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    let module = vm.module;
+    let Op::Call {
+        dst,
+        callee,
+        args,
+        span,
+    } = &module.protos[proto as usize].code[pc as usize]
+    else {
+        // `emit_call` only emits this helper for an `Op::Call`, so this is unreachable; treat a
+        // mismatch defensively as an abort rather than misbehave.
+        return lang_jit::OUTCOME_ABORTED;
+    };
+    let callee_val = regs[base + *callee as usize];
+    let caller_top = frames.len() - 1;
+    match vm.setup_closure_call(
+        frames,
+        regs,
+        caller_top,
+        base,
+        *dst,
+        callee_val,
+        args,
+        *span,
+        pc as usize + 1,
+    ) {
+        Ok(true) => lang_jit::OUTCOME_CALLED,
+        Ok(false) => pc as i64 + 1,
+        Err(Abort) => lang_jit::OUTCOME_ABORTED,
+    }
+}
+
+/// Runtime helper for a native `Op::Return` (J3): run the shared return protocol (transfer the value
+/// to the caller's destination, pop this frame). Returns `OUTCOME_RETURNED` when it transferred to a
+/// caller, or `OUTCOME_HALTED` (parking the value on `vm.jit_ret`) when the bottom frame returned.
+///
+/// # Safety
+/// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_return(
+    vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    raw: u64,
+) -> i64 {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    match vm.do_return(frames, regs, Value::from_bits(raw)) {
+        Some(v) => {
+            vm.jit_ret = v;
+            lang_jit::OUTCOME_HALTED
+        }
+        None => lang_jit::OUTCOME_RETURNED,
+    }
+}
+
+/// Runtime helper for a native direct call (J3 native→native): decide whether the `Op::Call` at
+/// `pc` can be called directly and, if so, set up the callee frame on the shared stacks and return
+/// the callee's compiled entry pointer (as an `i64`); otherwise return `0` (the caller falls back to
+/// `jit_call`). Direct-able means: a closure callee, plain arity (no defaults), no upvalues, an
+/// already-compiled callee, and stack capacity for the callee window without a reallocation (so the
+/// caller's register pointer stays valid across the indirect call).
+///
+/// # Safety
+/// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_prepare_call(
+    vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    base: usize,
+    proto: i32,
+    pc: i32,
+) -> i64 {
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    let module = vm.module;
+    let Op::Call {
+        dst, callee, args, ..
+    } = &module.protos[proto as usize].code[pc as usize]
+    else {
+        return 0;
+    };
+    let callee_val = regs[base + *callee as usize];
+    let Some(callee_proto) = callee_val.as_closure() else {
+        return 0; // a first-class builtin / non-callable → fall back
+    };
+    let cc = &module.protos[callee_proto as usize];
+    // Plain arity (no default-filling) and no upvalues — else the general setup path handles it.
+    if args.len() != cc.num_params as usize || callee_val.closure_upvalue_count() != 0 {
+        return 0;
+    }
+    let num_regs = cc.num_registers as usize;
+    // The callee must already be compiled, and its window must fit without reallocating the register
+    // stack (which would dangle the caller's pointer).
+    let Some(f) = vm.jit.as_ref().and_then(|j| j.get(callee_proto as usize)) else {
+        return 0;
+    };
+    if regs.len() + num_regs > regs.capacity() {
+        return 0;
+    }
+    // Set up the callee frame (like `setup_closure_call`'s closure arm, minus defaults/upvalues).
+    let new_base = reserve_window(regs, num_regs);
+    for (i, &arg_reg) in args.iter().enumerate() {
+        let v = regs[base + arg_reg as usize];
+        retain(v);
+        regs[new_base + i] = v;
+    }
+    let caller_top = frames.len() - 1;
+    frames[caller_top].pc = pc as usize + 1;
+    frames.push(Frame {
+        proto: callee_proto,
+        base: new_base,
+        pc: 0,
+        ret_dst: *dst,
+        ret_transform: RetTransform::None,
+        upvalues: Vec::new(),
+    });
+    vm.jit_callee_base = new_base;
+    f as usize as i64
+}
+
+/// Runtime helper: read back the callee base a preceding `jit_prepare_call` reserved (J3).
+///
+/// # Safety
+/// `vm` must be the live `*mut Vm` the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_callee_base(vm: *mut core::ffi::c_void) -> usize {
+    let vm = unsafe { &*(vm as *const Vm) };
+    vm.jit_callee_base
+}
+
+/// Runtime helper: interpret a direct callee's outcome for its native caller (J3). `RETURNED` → the
+/// caller continues in place (`OUTCOME_CONTINUE`, result already in its destination). Otherwise the
+/// callee did not complete natively — a bail sets the (still-live) callee frame's pc so the
+/// interpreter resumes it there, and the caller propagates `CALLED`; `CALLED`/`ABORTED` pass through.
+///
+/// # Safety
+/// `frames` must be the live pointer the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_after_call(
+    _vm: *mut core::ffi::c_void,
+    frames: *mut core::ffi::c_void,
+    callee_outcome: i64,
+) -> i64 {
+    let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
+    match callee_outcome {
+        lang_jit::OUTCOME_RETURNED => lang_jit::OUTCOME_CONTINUE,
+        lang_jit::OUTCOME_CALLED => lang_jit::OUTCOME_CALLED,
+        lang_jit::OUTCOME_ABORTED => lang_jit::OUTCOME_ABORTED,
+        // A bail pc: the callee frame is still the top; point it at its resume pc so the interpreter
+        // runs it there, and tell the caller a frame is pending (CALLED). (HALTED can't occur — a
+        // direct callee always has a caller — so it also lands here defensively as a re-run.)
+        bail_pc => {
+            if let Some(top) = frames.last_mut() {
+                top.pc = bail_pc.max(0) as usize;
+            }
+            lang_jit::OUTCOME_CALLED
+        }
+    }
+}
+
+/// Runtime helper for a native leaf heap/collection op (J4): run the `Op` at `proto`/`pc` — the
+/// interpreter's exact arm, refcounts and all — on the shared register stack, and return
+/// `OUTCOME_CONTINUE` when it completed. It handles only the non-dispatching, non-erroring path of
+/// each op; a receiver that would dispatch (a user `Iterable`/`Index`) or a case that would raise
+/// returns the op's own pc, so the interpreter re-runs it. Every early return happens **before** any
+/// register write, so a re-run in the interpreter starts from clean state.
+///
+/// # Safety
+/// `vm`/`regs_vec` must be the live pointers the tier-1 ABI passed.
+#[cfg(feature = "jit")]
+#[allow(unsafe_code)]
+extern "C" fn jit_run_leaf_op(
+    vm: *mut core::ffi::c_void,
+    regs_vec: *mut core::ffi::c_void,
+    base: usize,
+    proto: i32,
+    pc: i32,
+) -> i64 {
+    // Reconstitute `&mut Vm` (some leaf ops, e.g. `SetField`, release displaced values through
+    // `self`); `regs_vec` points at the dispatch loop's local register stack, disjoint from the VM.
+    let vm = unsafe { &mut *(vm as *mut Vm) };
+    let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
+    let module = vm.module;
+    let bail = pc as i64;
+    match &module.protos[proto as usize].code[pc as usize] {
+        Op::MakeRange {
+            dst,
+            start,
+            end,
+            inclusive,
+            ..
+        } => {
+            let (Some(a), Some(b)) = (
+                regs[base + *start as usize].as_int(),
+                regs[base + *end as usize].as_int(),
+            ) else {
+                return bail; // non-int bounds → interpreter raises the error
+            };
+            let upper = if *inclusive { b.saturating_add(1) } else { b };
+            let elements: Vec<Value> = (a..upper).map(Value::int).collect();
+            set_reg(regs, base, *dst, Value::list(elements));
+            lang_jit::OUTCOME_CONTINUE
+        }
+        Op::IterSnapshot { dst, src, .. } => {
+            let v = regs[base + *src as usize];
+            if v.is_object() {
+                return bail; // `Iterable::iter` dispatch → interpreter
+            }
+            if v.is_packed_list() {
+                set_reg(regs, base, *dst, v.realize_list());
+                return lang_jit::OUTCOME_CONTINUE;
+            }
+            match v
+                .list_items()
+                .or_else(|| v.set_items())
+                .or_else(|| v.map_values())
+            {
+                Some(elements) => {
+                    for &e in &elements {
+                        retain(e);
+                    }
+                    set_reg(regs, base, *dst, Value::list(elements));
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail, // not iterable → interpreter raises the error
+            }
+        }
+        Op::ListLen { dst, src, .. } => match regs[base + *src as usize].list_len() {
+            Some(n) => {
+                set_reg(regs, base, *dst, Value::int(n as i64));
+                lang_jit::OUTCOME_CONTINUE
+            }
+            None => bail,
+        },
+        Op::ListGet { dst, list, index } => {
+            let element = regs[base + *index as usize]
+                .as_int()
+                .filter(|&i| i >= 0)
+                .and_then(|i| regs[base + *list as usize].list_get(i as usize));
+            match element {
+                Some(element) => {
+                    retain(element);
+                    set_reg(regs, base, *dst, element);
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail,
+            }
+        }
+        Op::LoadField {
+            dst, obj, field, ..
+        } => {
+            // The interpreter's inline-cache lookup (`caches` is loop-local) is skipped here; the
+            // cache-miss resolution — `slot_of` then `slot_at` — is the same read and is bailed on
+            // exactly where the interpreter would raise (unknown field / non-object receiver). A
+            // tier-1 inline cache on this path was measured (J6 investigation) and does *not* help: a
+            // shape-pointer guard costs about as much as the short field-name scan it would replace,
+            // and the real floor is this helper call itself — only a call-free native read (which
+            // needs a layout-stable object representation) beats the interpreter. See plans/jit.
+            let field = module.name(*field);
+            let v = regs[base + *obj as usize];
+            match v
+                .shape()
+                .and_then(|sh| sh.slot_of(field))
+                .and_then(|s| v.slot_at(s))
+            {
+                Some(value) => {
+                    retain(value);
+                    set_reg(regs, base, *dst, value);
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail, // unknown field / non-object → interpreter raises the error
+            }
+        }
+        Op::SetField {
+            dst,
+            obj,
+            field,
+            value,
+            reuse,
+            ..
+        } => {
+            let field = module.name(*field);
+            if vm.set_field_fast(regs, base, *dst, *obj, field, *value, *reuse) {
+                lang_jit::OUTCOME_CONTINUE
+            } else {
+                bail // unknown field → interpreter raises the error
+            }
+        }
+        Op::Index {
+            dst, recv, index, ..
+        } => {
+            let v = regs[base + *recv as usize];
+            let idx = regs[base + *index as usize];
+            // An `Index` trait dispatch (`o[i]` on a user object → `get`) pushes a frame — bail. Every
+            // error case (out-of-bounds, wrong index type, missing key, non-indexable) also bails so the
+            // interpreter raises the exact diagnostic; each of these returns before any register write.
+            if v.is_object() {
+                return bail;
+            }
+            if let Some(len) = v.list_len() {
+                let Some(i) = idx.as_int().filter(|&i| i >= 0 && (i as usize) < len) else {
+                    return bail;
+                };
+                // A packed list materializes the one element (owned, refcount 1); a boxed list borrows
+                // and retains it into `dst` — matching the interpreter exactly.
+                let element = if v.is_packed_list() {
+                    v.packed_get(i as usize)
+                } else {
+                    let element = v.list_get(i as usize).expect("bounds checked above");
+                    retain(element);
+                    element
+                };
+                set_reg(regs, base, *dst, element);
+                lang_jit::OUTCOME_CONTINUE
+            } else if v.is_map() {
+                let Some(element) = idx.as_string().and_then(|key| v.map_get(&key)) else {
+                    return bail; // non-string key or missing key → interpreter raises
+                };
+                retain(element);
+                set_reg(regs, base, *dst, element);
+                lang_jit::OUTCOME_CONTINUE
+            } else if let Some(s) = v.as_string() {
+                let Some(i) = idx
+                    .as_int()
+                    .filter(|&i| i >= 0 && (i as usize) < s.chars().count())
+                else {
+                    return bail;
+                };
+                let ch = s.chars().nth(i as usize).unwrap().to_string();
+                set_reg(regs, base, *dst, Value::string(&ch));
+                lang_jit::OUTCOME_CONTINUE
+            } else {
+                bail // non-indexable → interpreter raises
+            }
+        }
+        Op::MakeTuple { dst, items } => {
+            // Retain each element into a fresh tuple (no bail path — construction never fails). The
+            // retains land in the local `elements`, then the tuple is stored, so nothing leaks.
+            let mut elements = Vec::with_capacity(items.len());
+            for &r in items.iter() {
+                let v = regs[base + r as usize];
+                retain(v);
+                elements.push(v);
+            }
+            set_reg(regs, base, *dst, Value::tuple(elements));
+            lang_jit::OUTCOME_CONTINUE
+        }
+        Op::TupleIndex {
+            dst,
+            receiver,
+            index,
+            ..
+        } => {
+            // Positional projection `receiver.N`, retaining the element into `dst` — the companion to
+            // the native `ListGet` for `for (i, x) in xs.enumerate()` loops. Out of range bails so the
+            // interpreter raises (the checker makes this unreachable for well-typed code).
+            let v = regs[base + *receiver as usize];
+            match v.tuple_field(*index as usize) {
+                Some(element) => {
+                    retain(element);
+                    set_reg(regs, base, *dst, element);
+                    lang_jit::OUTCOME_CONTINUE
+                }
+                None => bail,
+            }
+        }
+        _ => bail,
+    }
 }
 
 /// Builds a fresh host + async executor for a worker isolate (isolates I.4b). Injected by the CLI (its
@@ -443,13 +1047,15 @@ fn vm_fs_async_request(func: &str, args: &[Value]) -> Option<lang_stdlib::IoRequ
     lang_stdlib::IoRequest::from_fs_async(func, &strings)
 }
 
-/// Execute a compiled module, capturing stdout, exit code, and diagnostics.
-fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>) -> RunResult {
+/// Execute a compiled module, capturing stdout, exit code, and diagnostics. `jit` enables the
+/// hot-counter tier-1 JIT (real-host production paths); the sandbox differential passes `false`.
+fn execute(module: &Module, host: Box<dyn lang_stdlib::Host>, jit: bool) -> RunResult {
     execute_with_collector(
         module,
         host,
         Box::new(lang_stdlib::SandboxExecutor::new()),
         lang_value::CollectorMode::Trace,
+        jit,
     )
 }
 
@@ -463,9 +1069,18 @@ fn execute_with_collector(
     host: Box<dyn lang_stdlib::Host>,
     executor: Box<dyn lang_stdlib::Executor>,
     mode: lang_value::CollectorMode,
+    jit: bool,
 ) -> RunResult {
     lang_value::set_collector_mode(mode);
     let mut vm = Vm::load(module, host, executor);
+    // Real-host production paths pass `jit = true` to arm the hot-counter tier-1 JIT (P-JIT). A
+    // no-op without the `jit` feature; the `jit` binding is unused there, so quiet the warning.
+    #[cfg(feature = "jit")]
+    if jit {
+        vm.init_jit();
+    }
+    #[cfg(not(feature = "jit"))]
+    let _ = jit;
     run_and_teardown(&mut vm, mode)
 }
 
@@ -543,7 +1158,7 @@ impl<'m> Vm<'m> {
             destruct_reachable,
             comparable_derives,
             tojson_derives,
-            globals: vec![None; module.global_names.len()],
+            globals: vec![Value::unbound(); module.global_names.len()],
             global_order: Vec::new(),
             next_id: 1,
             host,
@@ -558,7 +1173,149 @@ impl<'m> Vm<'m> {
             inflight_isolates: 0,
             stdout: String::new(),
             diagnostics: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit: None,
+            #[cfg(feature = "jit")]
+            force_jit: false,
+            #[cfg(feature = "jit")]
+            jit_counters: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_ret: Value::unit(),
+            #[cfg(feature = "jit")]
+            jit_callee_base: 0,
         }
+    }
+
+    /// Build the tier-1 JIT engine and, when `force_jit` is set, eagerly compile every prototype so
+    /// the whole run goes through tier 1 (the oracle path). Registers the runtime-helper symbols the
+    /// generated code links against. If the host ISA is unavailable the JIT stays `None` and the run
+    /// interprets — behaviour is identical either way (J0 always bails to tier 0).
+    #[cfg(feature = "jit")]
+    fn init_jit(&mut self) {
+        let helpers: &[(&str, *const u8)] = &[
+            (lang_jit::OBSERVE_HELPER, jit_observe as *const u8),
+            (
+                lang_jit::NOTE_GLOBAL_BOUND_HELPER,
+                jit_note_global_bound as *const u8,
+            ),
+            (lang_jit::RETAIN_HELPER, jit_retain as *const u8),
+            (lang_jit::RELEASE_HELPER, jit_release as *const u8),
+            (
+                lang_jit::RELEASE_VALUE_HELPER,
+                jit_release_value as *const u8,
+            ),
+            (lang_jit::CALL_HELPER, jit_call as *const u8),
+            (lang_jit::RETURN_HELPER, jit_return as *const u8),
+            (lang_jit::PREPARE_CALL_HELPER, jit_prepare_call as *const u8),
+            (lang_jit::CALLEE_BASE_HELPER, jit_callee_base as *const u8),
+            (lang_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
+            (lang_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
+        ];
+        match lang_jit::Jit::new(helpers) {
+            Ok(mut jit) => {
+                if self.force_jit {
+                    for p in 0..self.module.protos.len() {
+                        let _ = jit.compile(self.module, p);
+                    }
+                }
+                self.jit = Some(jit);
+            }
+            Err(_) => self.jit = None,
+        }
+    }
+
+    /// Tier-0/tier-1 dispatch at a frame `'reload` (P-JIT). `entry_pc` is where native execution
+    /// should resume — `0` for a fresh frame, or a post-call resume pc when re-entering a compiled
+    /// frame after its callee returned (J3 resume-native). Returns what the interpreter should do next
+    /// (the deopt contract). `None` when the prototype is not compiled and the interpreter should run
+    /// it as usual. Hot-counter promotion happens only on a fresh entry (`entry_pc == 0`), so a resume
+    /// never compiles — it only re-enters an already-native frame.
+    #[cfg(feature = "jit")]
+    #[allow(unsafe_code)]
+    fn jit_enter(
+        &mut self,
+        proto: usize,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        base: usize,
+        entry_pc: usize,
+    ) -> Option<JitOutcome> {
+        let f = match self.jit.as_ref().and_then(|j| j.get(proto)) {
+            Some(f) => f,
+            // Only a fresh entry drives compilation; a resume at a compiled-away frame just interprets.
+            None if entry_pc == 0 => self.jit_maybe_compile(proto)?,
+            None => return None,
+        };
+        let vm_ptr = self as *mut Vm as *mut core::ffi::c_void;
+        let regs_ptr = regs.as_mut_ptr();
+        let globals_ptr = self.globals.as_mut_ptr();
+        let frames_ptr = frames as *mut Vec<Frame> as *mut core::ffi::c_void;
+        let regs_vec_ptr = regs as *mut Vec<Value> as *mut core::ffi::c_void;
+        // SAFETY: `f` is a finalized tier-1 entry point with the `CompiledFn` ABI. `regs_ptr` is the
+        // frame data base (native adds `base * 8`); it is used only *before* any call, and a native
+        // `Call` returns immediately (`CALLED`) without touching it again, so a `reserve_window`
+        // realloc inside `jit_call` can't leave it dangling in use. `frames_ptr`/`regs_vec_ptr` let
+        // `jit_call` push the callee frame and grow the shared stacks; `globals` never reallocates.
+        // All pointers are live for the synchronous call.
+        let raw = unsafe {
+            f(
+                vm_ptr,
+                regs_ptr,
+                base,
+                globals_ptr,
+                frames_ptr,
+                regs_vec_ptr,
+                entry_pc,
+            )
+        };
+        Some(match raw {
+            lang_jit::OUTCOME_CALLED => JitOutcome::Called,
+            lang_jit::OUTCOME_ABORTED => JitOutcome::Abort,
+            lang_jit::OUTCOME_RETURNED => JitOutcome::Returned,
+            lang_jit::OUTCOME_HALTED => JitOutcome::Halted,
+            pc => JitOutcome::Bail(pc as usize),
+        })
+    }
+
+    /// Bump prototype `proto`'s entry counter and, once it is hot (or immediately under `force_jit`),
+    /// compile it — returning the fresh entry point on the promoting call. `None` while still cold or
+    /// when the JIT is unavailable.
+    #[cfg(feature = "jit")]
+    fn jit_maybe_compile(&mut self, proto: usize) -> Option<lang_jit::CompiledFn> {
+        self.jit.as_ref()?;
+        if proto >= self.jit_counters.len() {
+            self.jit_counters.resize(proto + 1, 0);
+        }
+        self.jit_counters[proto] = self.jit_counters[proto].saturating_add(1);
+        let hot = self.force_jit || self.jit_counters[proto] >= JIT_HOT_THRESHOLD;
+        if !hot {
+            return None;
+        }
+        let module = self.module;
+        let jit = self.jit.as_mut()?;
+        jit.compile(module, proto).ok()
+    }
+
+    /// On-stack replacement trigger (P-JIT J5): a taken **backward branch** in prototype `proto` is a
+    /// loop back-edge. Count it toward the hot threshold and, once the prototype crosses it, compile
+    /// the prototype — returning `true` to signal the inner loop to re-enter native code at the loop
+    /// header (the compiled body has an OSR entry block for every loop header). `false` = keep
+    /// interpreting.
+    ///
+    /// This closes the hole where a long-running loop never gets hot: promotion otherwise counts only
+    /// frame *entries*, so a top-level program that is one big loop (its `main` frame entered exactly
+    /// once) would run entirely in tier 0. Counting back-edges makes such a loop promote and jump into
+    /// native code mid-flight.
+    ///
+    /// **One OSR per prototype.** If the prototype is already compiled we do nothing: the frame goes
+    /// native at its next `'reload` anyway, and re-OSRing from tier 0 (after a native op bailed back)
+    /// would risk bouncing tier-0↔tier-1 every iteration for a loop whose body native can't sustain.
+    #[cfg(feature = "jit")]
+    fn jit_osr_backedge(&mut self, proto: usize) -> bool {
+        if self.jit.as_ref().and_then(|j| j.get(proto)).is_some() {
+            return false;
+        }
+        self.jit_maybe_compile(proto).is_some()
     }
 }
 
@@ -588,7 +1345,12 @@ fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
     // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
     // and global release has had a chance to buffer the cycle's roots.
     if mode == lang_value::CollectorMode::Trace {
-        let roots: Vec<Value> = vm.globals.iter().filter_map(|c| *c).collect();
+        let roots: Vec<Value> = vm
+            .globals
+            .iter()
+            .copied()
+            .filter(|v| !v.is_unbound())
+            .collect();
         let garbage = collect_trace(&roots);
         vm.reclaim_cycle_garbage(garbage);
     }
@@ -605,7 +1367,8 @@ fn run_and_teardown(vm: &mut Vm, mode: lang_value::CollectorMode) -> RunResult {
     // Destroy the globals at program end in reverse declaration order, running each
     // destructor on its last reference — the deterministic destruction the spec requires.
     for slot in vm.global_order.clone().into_iter().rev() {
-        if let Some(v) = vm.globals[slot as usize].take() {
+        let v = std::mem::replace(&mut vm.globals[slot as usize], Value::unbound());
+        if !v.is_unbound() {
             vm.release_value(v);
         }
     }
@@ -665,7 +1428,7 @@ fn run_isolate_worker(
     // same `Arc<Module>`, so a global's `GlobalId` is identical on both sides (P-VMT-GSLOT).
     for (slot, wire) in &wire_globals {
         let value = isolate::rebuild(wire, &wvm.shapes, &mut wvm.channels);
-        wvm.globals[*slot as usize] = Some(value);
+        wvm.globals[*slot as usize] = value;
         wvm.global_order.push(*slot);
     }
     let arg_vals: Vec<Value> = wire_args
@@ -698,7 +1461,8 @@ fn run_isolate_worker(
     // Tear the worker down so its thread-local heap returns to zero residency: destroy globals in
     // reverse declaration order, then drain any channel buffers.
     for slot in wvm.global_order.clone().into_iter().rev() {
-        if let Some(value) = wvm.globals[slot as usize].take() {
+        let value = std::mem::replace(&mut wvm.globals[slot as usize], Value::unbound());
+        if !value.is_unbound() {
             wvm.release_value(value);
         }
     }
@@ -885,6 +1649,76 @@ impl<'m> Vm<'m> {
         value.gc_free_shallow();
     }
 
+    /// Perform `Op::SetField`'s store into `regs` — the reference-`class` in-place mutation, the value-
+    /// `struct` copy-on-write, and the `reuse` fast path — returning `true` when the field exists and
+    /// the store happened, or `false` when `obj` has no such field (the caller raises the E0022-family
+    /// error or, from the tier-1 leaf helper, bails so the interpreter re-runs and raises it). Factored
+    /// so the interpreter arm and the JIT leaf helper (P-JIT J4) share one implementation and are
+    /// refcount-identical by construction. The `false` path performs **no** mutation, so a leaf-helper
+    /// bail re-runs from clean state (the bail-before-mutate rule).
+    // The operands mirror `Op::SetField`'s fields one-to-one; both call sites already hold them
+    // destructured, so an explicit parameter list is clearer here than a wrapper struct.
+    #[allow(clippy::too_many_arguments)]
+    fn set_field_fast(
+        &mut self,
+        regs: &mut [Value],
+        base: usize,
+        dst: u16,
+        obj: u16,
+        field: &str,
+        value: u16,
+        reuse: bool,
+    ) -> bool {
+        let v = regs[base + obj as usize];
+        let val = regs[base + value as usize];
+        let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
+            return false;
+        };
+        // A reference `class` mutates the shared instance **in place**, regardless of refcount or the
+        // reuse flag — the change must be visible through every alias (object-model slice 2b). A value
+        // `struct` keeps copy-on-write below.
+        let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
+        if is_class {
+            let old = v.replace_slot(slot, val);
+            self.release_value(old);
+            if reuse {
+                // The receiver's reference moves into `dst` (its register cleared, as in the struct
+                // path); the instance is unchanged-but-mutated.
+                regs[base + obj as usize] = Value::unit();
+                set_reg(regs, base, dst, v);
+            } else {
+                // The receiver register is untouched (a temp is dropped later by the compiler-emitted
+                // `Drop`); `dst` takes its own counted reference.
+                retain(v);
+                set_reg(regs, base, dst, v);
+            }
+        } else if reuse {
+            // The receiver's sole reference moves into this op (its register cleared, like the
+            // map/struct in-place paths), so the `refcount == 1` check below sees the accumulator's
+            // reference and a `dst == obj` store is safe.
+            regs[base + obj as usize] = Value::unit();
+            if v.refcount() == 1 {
+                // Unique: overwrite the slot in place (`replace_slot` retains the new value); the
+                // displaced old value's `destruct` fires now (spec §5).
+                let old = v.replace_slot(slot, val);
+                self.release_value(old);
+                set_reg(regs, base, dst, v);
+            } else {
+                // Aliased: copy with the field replaced, preserving the alias's view, then release the
+                // consumed receiver reference.
+                let new = object_copy_with_slot(v, slot, val);
+                release(v);
+                set_reg(regs, base, dst, new);
+            }
+        } else {
+            // Unmarked: a functional update — copy with the field replaced, the receiver register
+            // untouched (a temp receiver is dropped by the compiler-emitted Drop).
+            let new = object_copy_with_slot(v, slot, val);
+            set_reg(regs, base, dst, new);
+        }
+        true
+    }
+
     /// Whether `value`'s subtree may contain a destructor — the container-before-contained
     /// field-walk gate (spec §4, Phase 4.3). An object/enum is decided by its type name against the
     /// checker's destruct-reachability set; a list/map/set is always walked because its element
@@ -926,6 +1760,13 @@ impl<'m> Vm<'m> {
     /// halts (an implicit unit return). Returns the produced value, which the caller owns.
     /// On abort, every register still owned by a frame left on the stack is released here.
     fn run(&mut self, mut frames: Vec<Frame>, mut regs: Vec<Value>) -> Result<Value, Abort> {
+        // Give the register stack generous headroom up front (P-JIT J3): a native direct call only
+        // fires when the callee window fits without reallocating (so the caller's register pointer
+        // stays valid), so a pre-reserved buffer keeps common recursion on the fast path. A deeper
+        // stack simply reallocates once and the direct-call check re-passes at the new capacity, so
+        // this only affects performance, never correctness — and is a no-op without the `jit` feature.
+        #[cfg(feature = "jit")]
+        regs.reserve(8192usize.saturating_sub(regs.len()));
         let result = self.dispatch(&mut frames, &mut regs);
         if result.is_err() {
             // Phase 4.2c-ii: a panic unwinds the live frames. Before reclaiming their memory, fire
@@ -990,8 +1831,58 @@ impl<'m> Vm<'m> {
         'reload: loop {
             let top = frames.len() - 1;
             let fbase = frames[top].base;
-            let chunk = &module.protos[frames[top].proto as usize];
+            let proto = frames[top].proto as usize;
+            let chunk = &module.protos[proto];
             let mut pc = frames[top].pc;
+            // Tier-0/tier-1 dispatch (P-JIT). Only at a fresh frame entry (`pc == 0`): a return-pop
+            // re-enters `'reload` with the caller's saved `pc > 0`, and an in-frame jump never leaves
+            // the inner loop, so `pc == 0` is exactly "this frame is starting". A compiled prototype
+            // may run the whole frame in native code; J0 always bails, so control falls straight
+            // through to the interpreter below (byte-identical).
+            // Fire at every frame `'reload`, not only fresh entries: after a native `Call`'s callee
+            // returns, the interpreter re-enters the caller at its resume pc and native execution
+            // picks up there (J3 resume-native). `entry_pc = pc` is 0 for a fresh frame or the saved
+            // resume pc otherwise; the compiled code jumps to that block (or bails if it has no entry
+            // for it).
+            #[cfg(feature = "jit")]
+            if self.jit.is_some() {
+                match self.jit_enter(proto, frames, regs, fbase, pc) {
+                    // Not compiled → interpret as usual.
+                    None => {}
+                    // Native code ran the frame to a bail point and left the register window in the
+                    // state the interpreter expects at `resume`; continue interpreting there.
+                    Some(JitOutcome::Bail(resume)) => pc = resume,
+                    // A native `Call` pushed the callee frame — run it.
+                    Some(JitOutcome::Called) => continue 'reload,
+                    // A native `Return` transferred to the caller and popped this frame — re-derive
+                    // the caller and continue.
+                    Some(JitOutcome::Returned) => continue 'reload,
+                    // The bottom frame returned natively — yield its value.
+                    Some(JitOutcome::Halted) => {
+                        return Ok(std::mem::replace(&mut self.jit_ret, Value::unit()));
+                    }
+                    // The frame aborted inside native code (a diagnostic is recorded).
+                    Some(JitOutcome::Abort) => return Err(Abort),
+                }
+            }
+            // OSR back-edge trigger (P-JIT J5): a taken backward branch to `target` is a loop
+            // back-edge. When the JIT is armed (real-host path only — `self.jit` is `None` on the
+            // sandbox/differential path, so this is a single predicted branch there) and the branch
+            // goes backward, count it; once the prototype is hot, compile it and re-enter native at the
+            // loop header by saving `pc` and reloading. `$target` is evaluated against the current `pc`
+            // (the branch's own location) *before* `pc` is reassigned to it.
+            macro_rules! osr_backedge {
+                ($target:expr) => {
+                    #[cfg(feature = "jit")]
+                    {
+                        let _osr_t = $target as usize;
+                        if _osr_t <= pc && self.jit.is_some() && self.jit_osr_backedge(proto) {
+                            frames[top].pc = _osr_t;
+                            continue 'reload;
+                        }
+                    }
+                };
+            }
             loop {
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
                 // instead of the `.get()` guard the pre-S3 loop used. A call keeps `fbase` on the
@@ -1010,26 +1901,22 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::LoadGlobal { dst, global, span } => {
-                        // Direct slot index — no name hashing (P-VMT-GSLOT). `Option<Value>` is `Copy`,
-                        // so the match copies the slot out and the `self.globals` borrow ends before the
-                        // unbound arm needs `&mut self` for `self.error`.
-                        match self.globals[global.0 as usize] {
-                            Some(v) => {
-                                retain(v);
-                                set_reg(regs, fbase, *dst, v);
-                                pc += 1;
-                            }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::UnknownName,
-                                    *span,
-                                    format!(
-                                        "cannot find `{}` in this scope",
-                                        module.global_name(*global)
-                                    ),
-                                ));
-                            }
+                        // Direct slot index — no name hashing (P-VMT-GSLOT). An unbound slot holds the
+                        // `Value::unbound` sentinel (P-JIT globals); every other value is a real binding.
+                        let v = self.globals[global.0 as usize];
+                        if v.is_unbound() {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "cannot find `{}` in this scope",
+                                    module.global_name(*global)
+                                ),
+                            ));
                         }
+                        retain(v);
+                        set_reg(regs, fbase, *dst, v);
+                        pc += 1;
                     }
                     Op::StoreGlobal { global, src } => {
                         // Transfer ownership from the (dead) source temporary into the global,
@@ -1038,35 +1925,34 @@ impl<'m> Vm<'m> {
                         // otherwise inflate the count and hide a reassigned value's last reference,
                         // suppressing its destructor.
                         let v = std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
-                        match self.globals[global.0 as usize].replace(v) {
-                            // Reassigning a global: the previous value is dropped here, running its
-                            // destructor if this was its last reference.
-                            Some(old) => self.release_value(old),
+                        let old = std::mem::replace(&mut self.globals[global.0 as usize], v);
+                        if old.is_unbound() {
                             // First binding of this slot: record it for reverse-order destruction.
-                            None => self.global_order.push(global.0),
+                            self.global_order.push(global.0);
+                        } else {
+                            // Reassigning: the previous value is dropped here, running its destructor
+                            // if this was its last reference.
+                            self.release_value(old);
                         }
                         pc += 1;
                     }
                     Op::TakeGlobal { dst, global, span } => {
                         // Move the global's value into `dst`, leaving `unit` — no retain, so the single
                         // owning reference transfers and a following `ConcatInPlace` can see uniqueness.
-                        // An unbound slot is left untouched (it stays `None`) and raises E0005.
-                        let taken = self.globals[global.0 as usize]
-                            .as_mut()
-                            .map(|slot| std::mem::replace(slot, Value::unit()));
-                        let v = match taken {
-                            Some(v) => v,
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::UnknownName,
-                                    *span,
-                                    format!(
-                                        "cannot find `{}` in this scope",
-                                        module.global_name(*global)
-                                    ),
-                                ));
-                            }
-                        };
+                        // An unbound slot raises E0005 (and is left unbound); a bound slot stays bound
+                        // (to `unit`), matching the pre-refactor `Option` semantics.
+                        if self.globals[global.0 as usize].is_unbound() {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "cannot find `{}` in this scope",
+                                    module.global_name(*global)
+                                ),
+                            ));
+                        }
+                        let v =
+                            std::mem::replace(&mut self.globals[global.0 as usize], Value::unit());
                         set_reg(regs, fbase, *dst, v);
                         pc += 1;
                     }
@@ -1286,7 +2172,9 @@ impl<'m> Vm<'m> {
                             return Err(self.error(
                                 DiagnosticCode::TypeMismatch,
                                 *span,
-                                format!("`{mod_name}.{func}::<T>(...)` has no resolved result type"),
+                                format!(
+                                    "`{mod_name}.{func}::<T>(...)` has no resolved result type"
+                                ),
                             ));
                         };
                         // The only call-site-typed native function today is `json.parse::<T>(text)`.
@@ -1833,7 +2721,8 @@ impl<'m> Vm<'m> {
                         // falls through to the built-in paths below.
                         if v.is_enum() {
                             let type_name = v.shape().unwrap().name.clone();
-                            if let Some(&proto) = self.methods.get(&(type_name, method.to_string())) {
+                            if let Some(&proto) = self.methods.get(&(type_name, method.to_string()))
+                            {
                                 let callee_chunk = &module.protos[proto as usize];
                                 let total = callee_chunk.num_params as usize - 1;
                                 let required = total - callee_chunk.defaults.len();
@@ -2809,9 +3698,10 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let field = module.name(*field);
-                        let v = regs[fbase + *obj as usize];
-                        let val = regs[fbase + *value as usize];
-                        let Some(slot) = v.shape().and_then(|sh| sh.slot_of(field)) else {
+                        // The store (class in-place / struct COW / reuse) is shared with the tier-1 JIT
+                        // leaf helper (P-JIT J4); a `false` return is the field-not-found error path.
+                        if !self.set_field_fast(regs, fbase, *dst, *obj, field, *value, *reuse) {
+                            let v = regs[fbase + *obj as usize];
                             return Err(self.error(
                                 DiagnosticCode::UnknownName,
                                 *span,
@@ -2824,48 +3714,6 @@ impl<'m> Vm<'m> {
                                     format!("cannot assign field `{field}` on {}", v.type_name())
                                 },
                             ));
-                        };
-                        // A reference `class` mutates the shared instance **in place**, regardless of
-                        // refcount or the reuse flag — the change must be visible through every alias
-                        // (object-model slice 2b). A value `struct` keeps copy-on-write below.
-                        let is_class = v.shape().is_some_and(|s| s.kind == ShapeKind::Class);
-                        if is_class {
-                            let old = v.replace_slot(slot, val);
-                            self.release_value(old);
-                            if *reuse {
-                                // The receiver's reference moves into `dst` (its register cleared, as in
-                                // the struct path); the instance is unchanged-but-mutated.
-                                regs[fbase + *obj as usize] = Value::unit();
-                                set_reg(regs, fbase, *dst, v);
-                            } else {
-                                // The receiver register is untouched (a temp is dropped later by the
-                                // compiler-emitted `Drop`); `dst` takes its own counted reference.
-                                retain(v);
-                                set_reg(regs, fbase, *dst, v);
-                            }
-                        } else if *reuse {
-                            // The receiver's sole reference moves into this op (its register cleared, like
-                            // the map/struct in-place paths), so the `refcount == 1` check below sees the
-                            // accumulator's reference and a `dst == obj` store is safe.
-                            regs[fbase + *obj as usize] = Value::unit();
-                            if v.refcount() == 1 {
-                                // Unique: overwrite the slot in place (`replace_slot` retains the new
-                                // value); the displaced old value's `destruct` fires now (spec §5).
-                                let old = v.replace_slot(slot, val);
-                                self.release_value(old);
-                                set_reg(regs, fbase, *dst, v);
-                            } else {
-                                // Aliased: copy with the field replaced, preserving the alias's view, then
-                                // release the consumed receiver reference.
-                                let new = object_copy_with_slot(v, slot, val);
-                                release(v);
-                                set_reg(regs, fbase, *dst, new);
-                            }
-                        } else {
-                            // Unmarked: a functional update — copy with the field replaced, the receiver
-                            // register untouched (a temp receiver is dropped by the compiler-emitted Drop).
-                            let new = object_copy_with_slot(v, slot, val);
-                            set_reg(regs, fbase, *dst, new);
                         }
                         pc += 1;
                     }
@@ -3606,10 +4454,12 @@ impl<'m> Vm<'m> {
                         pc += 1;
                     }
                     Op::Jump { target } => {
+                        osr_backedge!(*target);
                         pc = *target as usize;
                     }
                     Op::JumpIfTrue { reg, target } => {
                         if regs[fbase + *reg as usize].as_bool() == Some(true) {
+                            osr_backedge!(*target);
                             pc = *target as usize;
                         } else {
                             pc += 1;
@@ -3617,6 +4467,7 @@ impl<'m> Vm<'m> {
                     }
                     Op::JumpIfFalse { reg, target } => {
                         if regs[fbase + *reg as usize].as_bool() == Some(false) {
+                            osr_backedge!(*target);
                             pc = *target as usize;
                         } else {
                             pc += 1;
@@ -3627,7 +4478,10 @@ impl<'m> Vm<'m> {
                         // `RequireCondBool` + `JumpIfFalse` pair it replaces.
                         let v = regs[fbase + *reg as usize];
                         match v.as_bool() {
-                            Some(false) => pc = *target as usize,
+                            Some(false) => {
+                                osr_backedge!(*target);
+                                pc = *target as usize;
+                            }
                             Some(true) => pc += 1,
                             None => {
                                 return Err(self.error(
@@ -3738,118 +4592,32 @@ impl<'m> Vm<'m> {
                         span,
                     } => {
                         let callee_val = regs[fbase + *callee as usize];
-                        match callee_val.as_closure() {
-                            Some(proto_idx) => {
-                                let callee_chunk = &module.protos[proto_idx as usize];
-                                let num_params = callee_chunk.num_params as usize;
-                                let required = num_params - callee_chunk.defaults.len();
-                                if args.len() < required || args.len() > num_params {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        arity_message("function", required, num_params, args.len()),
-                                    ));
-                                }
-                                let num_registers = callee_chunk.num_registers as usize;
-                                let defaults = callee_chunk.defaults.clone();
-                                // Move the arguments into the new frame's leading registers, each
-                                // owning a fresh reference.
-                                let new_base = reserve_window(regs, num_registers);
-                                for (i, &arg_reg) in args.iter().enumerate() {
-                                    let v = regs[fbase + arg_reg as usize];
-                                    retain(v);
-                                    regs[new_base + i] = v;
-                                }
-                                // The closure's captured upvalue cells, carried into the frame (one owned
-                                // reference each, released at teardown) so the body can read/write
-                                // through them — and handed to each default thunk, which shares the
-                                // closure's upvalue layout, so a capture-referencing default reads the
-                                // right cell.
-                                let count = callee_val.closure_upvalue_count();
-                                let cells: Vec<Value> =
-                                    (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
-                                // Fill any omitted trailing parameters from their default thunks: a
-                                // default whose register is at or beyond the supplied count was not
-                                // passed. (An associated function carries a synthetic unit receiver in
-                                // register 0, already counted among the supplied args.)
-                                let filled = args.len();
-                                for (reg, proto) in &defaults {
-                                    if *reg as usize >= filled {
-                                        let value = self.run_thunk(*proto, &cells)?;
-                                        regs[new_base + *reg as usize] = value;
-                                    }
-                                }
-                                let mut upvalues = Vec::with_capacity(count);
-                                for &cell in &cells {
-                                    retain(cell);
-                                    upvalues.push(cell);
-                                }
-                                // Resume after the call once the callee returns.
-                                frames[top].pc = pc + 1;
-                                frames.push(Frame {
-                                    proto: proto_idx,
-                                    base: new_base,
-                                    pc: 0,
-                                    ret_dst: *dst,
-                                    ret_transform: RetTransform::None,
-                                    upvalues,
-                                });
-                                continue 'reload;
-                            }
-                            None => match callee_val.as_native_fn() {
-                                // An indirect call of a first-class builtin (`f = len; f(xs)`). The
-                                // arguments stay owned by their registers (the helper borrows them);
-                                // the result is freshly owned.
-                                Some(func) => {
-                                    let arg_vals: Vec<Value> =
-                                        args.iter().map(|&r| regs[fbase + r as usize]).collect();
-                                    let result = self.call_native_fn(func, &arg_vals, *span)?;
-                                    set_reg(regs, fbase, *dst, result);
-                                    pc += 1;
-                                }
-                                None => {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!("{} is not callable", callee_val.type_name()),
-                                    ));
-                                }
-                            },
+                        // Shared closure-call setup (also used by the JIT's `jit_call` helper): pushes
+                        // the callee frame (→ `continue 'reload`) or completes a first-class-builtin
+                        // call synchronously (→ advance to `pc + 1`).
+                        if self.setup_closure_call(
+                            frames,
+                            regs,
+                            top,
+                            fbase,
+                            *dst,
+                            callee_val,
+                            args,
+                            *span,
+                            pc + 1,
+                        )? {
+                            continue 'reload;
                         }
+                        pc += 1;
                     }
                     Op::Return { src } => {
                         let raw = regs[fbase + *src as usize];
-                        retain(raw); // keep alive across this frame's teardown
-                        let finished = frames.pop().unwrap();
-                        let n = module.protos[finished.proto as usize].num_registers as usize;
-                        for i in 0..n {
-                            release(regs[finished.base + i]);
-                        }
-                        for u in &finished.upvalues {
-                            release(*u);
-                        }
-                        regs.truncate(finished.base);
-                        // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s
-                        // bool; `< <= > >=` map `compare`'s `Ordering`). When the transform replaces a
-                        // heap value (an `Ordering`) with a fresh `bool`, release the original's
-                        // keep-alive reference so it is not leaked.
-                        let (v, replaced) = finished.ret_transform.apply(raw);
-                        if replaced {
-                            release(raw);
-                        }
-                        match frames.last() {
-                            Some(caller) => {
-                                // Transfer the retained reference into the caller's destination.
-                                let idx = caller.base + finished.ret_dst as usize;
-                                let old = regs[idx];
-                                regs[idx] = v;
-                                release(old);
-                            }
+                        match self.do_return(frames, regs, raw) {
                             // The bottom frame returned: hand the value to `run`'s caller.
-                            None => return Ok(v),
+                            Some(v) => return Ok(v),
+                            // Transferred to a caller — re-derive its window.
+                            None => continue 'reload,
                         }
-                        // Control returns to the caller (or a re-entry frame) — re-derive its window.
-                        continue 'reload;
                     }
                     Op::Halt => {
                         let finished = frames.pop().unwrap();
@@ -3983,6 +4751,134 @@ impl<'m> Vm<'m> {
             }],
             regs,
         )
+    }
+
+    /// Set up a call to `callee_val` on the shared frame/register stacks — the closure-call machinery
+    /// shared by the `Op::Call` interpreter arm and the JIT's `jit_call` helper (so it lives in one
+    /// place). Reads the arguments from `regs[caller_base + arg_regs[i]]`, moves them into a fresh
+    /// callee window, fills defaults, carries upvalues, saves `resume_pc` on the caller frame, and
+    /// pushes the callee frame. Returns `Ok(true)` when a frame was pushed (the caller should re-derive
+    /// its window — `continue 'reload`), or `Ok(false)` when the call completed synchronously (a
+    /// first-class builtin, result already in `regs[caller_base + dst]`; the caller advances to
+    /// `resume_pc`).
+    #[allow(clippy::too_many_arguments)]
+    fn setup_closure_call(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        caller_top: usize,
+        caller_base: usize,
+        dst: u16,
+        callee_val: Value,
+        arg_regs: &[u16],
+        span: Span,
+        resume_pc: usize,
+    ) -> Result<bool, Abort> {
+        match callee_val.as_closure() {
+            Some(proto_idx) => {
+                let callee_chunk = &self.module.protos[proto_idx as usize];
+                let num_params = callee_chunk.num_params as usize;
+                let required = num_params - callee_chunk.defaults.len();
+                if arg_regs.len() < required || arg_regs.len() > num_params {
+                    return Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        arity_message("function", required, num_params, arg_regs.len()),
+                    ));
+                }
+                let num_registers = callee_chunk.num_registers as usize;
+                let defaults = callee_chunk.defaults.clone();
+                let new_base = reserve_window(regs, num_registers);
+                for (i, &arg_reg) in arg_regs.iter().enumerate() {
+                    let v = regs[caller_base + arg_reg as usize];
+                    retain(v);
+                    regs[new_base + i] = v;
+                }
+                let count = callee_val.closure_upvalue_count();
+                let cells: Vec<Value> = (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
+                let filled = arg_regs.len();
+                for (reg, proto) in &defaults {
+                    if *reg as usize >= filled {
+                        let value = self.run_thunk(*proto, &cells)?;
+                        regs[new_base + *reg as usize] = value;
+                    }
+                }
+                let mut upvalues = Vec::with_capacity(count);
+                for &cell in &cells {
+                    retain(cell);
+                    upvalues.push(cell);
+                }
+                frames[caller_top].pc = resume_pc;
+                frames.push(Frame {
+                    proto: proto_idx,
+                    base: new_base,
+                    pc: 0,
+                    ret_dst: dst,
+                    ret_transform: RetTransform::None,
+                    upvalues,
+                });
+                Ok(true)
+            }
+            None => match callee_val.as_native_fn() {
+                Some(func) => {
+                    let arg_vals: Vec<Value> = arg_regs
+                        .iter()
+                        .map(|&r| regs[caller_base + r as usize])
+                        .collect();
+                    let result = self.call_native_fn(func, &arg_vals, span)?;
+                    set_reg(regs, caller_base, dst, result);
+                    Ok(false)
+                }
+                None => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("{} is not callable", callee_val.type_name()),
+                )),
+            },
+        }
+    }
+
+    /// The `Op::Return` protocol, factored so both the interpreter arm and the JIT's `jit_return`
+    /// helper share it (J3 native calls). `raw` is the value being returned (already read from the
+    /// returning frame). Retains it across teardown, pops the finished frame, releases its register
+    /// window and upvalues, truncates the register stack, applies any `ret_transform`, and transfers
+    /// the result into the caller's destination register. Returns `Some(v)` when the **bottom** frame
+    /// returned (there is no caller — `run` should yield `v`), or `None` when it transferred to a
+    /// caller (control resumes in that caller frame).
+    fn do_return(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        raw: Value,
+    ) -> Option<Value> {
+        retain(raw); // keep alive across this frame's teardown
+        let finished = frames.pop().unwrap();
+        let n = self.module.protos[finished.proto as usize].num_registers as usize;
+        for i in 0..n {
+            release(regs[finished.base + i]);
+        }
+        for u in &finished.upvalues {
+            release(*u);
+        }
+        regs.truncate(finished.base);
+        // An operator-dispatch frame may post-process its result (`!=` negates `eq`'s bool; `< <= > >=`
+        // map `compare`'s `Ordering`). When the transform replaces a heap value (an `Ordering`) with a
+        // fresh `bool`, release the original's keep-alive reference so it is not leaked.
+        let (v, replaced) = finished.ret_transform.apply(raw);
+        if replaced {
+            release(raw);
+        }
+        match frames.last() {
+            Some(caller) => {
+                // Transfer the retained reference into the caller's destination.
+                let idx = caller.base + finished.ret_dst as usize;
+                let old = regs[idx];
+                regs[idx] = v;
+                release(old);
+                None
+            }
+            None => Some(v),
+        }
     }
 
     /// Dispatch a first-class prelude builtin called indirectly. Reuses `call_builtin` (so the
@@ -4585,6 +5481,301 @@ mod tests {
         VmBackend::new()
             .try_run(&parsed.program)
             .expect("program should be in the M1.0 subset")
+    }
+
+    /// Compile a source program to a [`Module`] (or panic if it's outside the VM subset), for the
+    /// tests that need to drive `run_module`/`run_module_jit` directly.
+    #[cfg(feature = "jit")]
+    fn compile_module(src: &str) -> Module {
+        let source = Source::new(SourceId::FIRST, "test.lang", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        compile(&parsed.program).expect("program should be in the M1.0 subset")
+    }
+
+    /// P-JIT foundation: a prototype with no compilable op runs its bail stub — reaching the
+    /// `lang_jit_observe` helper — and control falls cleanly back to tier 0 with a byte-identical
+    /// result. `echo "hi"` is exactly such a program (its only prototype is `LoadConst`(str) /
+    /// `Stringify` / `Echo` / `Halt`, none of them fast). Proves the seam (Cranelift build + finalize,
+    /// tier-0/1 dispatch, the helper ABI, the deopt handoff) end to end.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_foundation_bails_to_identical_result_and_runs_native_stubs() {
+        let module = compile_module("echo \"hi\";\n");
+        let interp = VmBackend::new().run_module(&module);
+        let before = jit_observe_count();
+        let jit = VmBackend::new().run_module_jit(&module);
+        let entered = jit_observe_count() - before;
+
+        assert_eq!(interp, jit, "tier-1 result must match the interpreter");
+        assert_eq!(jit.stdout, "hi\n");
+        assert!(entered >= 1, "expected the bail stub to run, got {entered}");
+    }
+
+    /// J1 (integer fast path): a pure-integer `while`-loop function compiles to native code and, run
+    /// through the forced JIT, produces exactly the interpreter's result. This exercises the whole
+    /// integer op set — `LoadConst`, `Binary` (`+`/`%`/`<`), `CondBranch`, `Move`, `Drop`, `Jump` —
+    /// natively, with the `Return` bailing to tier 0.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_integer_while_loop_is_native_and_correct() {
+        // sum of (i % 7) for i in 0..n — arithmetic, remainder, comparison, and a back-edge, all in
+        // registers (no globals, no calls) → J1-eligible.
+        let src = "fn run(n: int): int {\n  mut total = 0;\n  mut i = 0;\n  while i < n {\n    total = total + (i % 7);\n    i = i + 1;\n  }\n  return total;\n}\necho run(1000);\n";
+        let module = compile_module(src);
+
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+
+        // The `run` prototype (and only it) is J1-eligible.
+        assert!(
+            stats.native >= 1,
+            "the while-loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(interp, jit, "tier-1 result must match the interpreter");
+        // Independently confirm the value: sum_{i=0}^{999} (i % 7).
+        let expected: i64 = (0..1000).map(|i| i % 7).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
+    }
+
+    /// J1 deopt: a would-be big-int result (overflowing the 48-bit immediate range) bails from native
+    /// code to the interpreter, which heap-boxes it — so the JIT and interpreter still agree.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_integer_overflow_bails_and_matches() {
+        // 2^40 * 2^40 = 2^80 wraps in i64 and, at each doubling, eventually exceeds the 48-bit
+        // immediate range, forcing the overflow-bail path; the interpreter's wrapping result must match.
+        let src = "fn run(n: int): int {\n  mut x = 1;\n  mut i = 0;\n  while i < n {\n    x = x * 3;\n    i = i + 1;\n  }\n  return x;\n}\necho run(60);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, _) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert_eq!(
+            interp, jit,
+            "overflow-bail result must match the interpreter"
+        );
+    }
+
+    /// J2 (float fast path): a mixed int/float `while` loop — a float accumulator (`+`) with an
+    /// integer counter (`<`, `+`) — compiles to native code (each homogeneous `Binary` takes its
+    /// int or float branch) and matches the interpreter exactly.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_float_while_loop_is_native_and_correct() {
+        let src = "fn run(n: int): float {\n  mut x = 0.0;\n  mut i = 0;\n  while i < n {\n    x = x + 1.5;\n    i = i + 1;\n  }\n  return x;\n}\necho run(1000);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the float loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "tier-1 float result must match the interpreter"
+        );
+        assert_eq!(jit.stdout, "1500.0\n");
+    }
+
+    /// J2 float division, comparison, and NaN: `6.0 / 4.0` divides natively, `0.0 / 0.0` produces a
+    /// canonicalized NaN, and an ordered float `<` (false on NaN) drives a `CondBranch` — the paths
+    /// most likely to diverge from the interpreter.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_float_division_and_nan_match() {
+        let src = "fn run(): float {\n  mut a = 6.0 / 4.0;\n  mut z = 0.0;\n  mut q = z / z;\n  if q < a { return 0.0; }\n  return a;\n}\necho run();\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the float fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "NaN/division float result must match the interpreter"
+        );
+        assert_eq!(jit.stdout, "1.5\n");
+    }
+
+    /// J4 (heap/collections): a `for i in 0..n` loop — the idiomatic range loop, whose `MakeRange` /
+    /// `IterSnapshot` / `ListLen` / `ListGet` internals now run natively (through the leaf-op helper),
+    /// so the whole loop body is native. Refcount-exact (the snapshot list is a heap value) and
+    /// byte-identical to the interpreter.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_for_range_loop_is_native_and_correct() {
+        let src = "fn run(n: int): int {\n  mut acc = 0;\n  for i in 0..n {\n    acc = acc + i;\n  }\n  return acc;\n}\necho run(1000);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the for-range loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(interp, jit, "for-range result must match the interpreter");
+        let expected: i64 = (0..1000).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
+    }
+
+    /// Field access (P-JIT J4 slice 2): a hot loop that reads (`LoadField`) and writes (`SetField`,
+    /// the struct copy-on-write / reuse path) object fields runs natively through the leaf-op helper
+    /// and matches the interpreter — the store logic is the shared `set_field_fast`, so refcounts are
+    /// identical across the tier boundary (the `--jit-differential` leak check gates that).
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_field_access_loop_is_native_and_correct() {
+        let src = "struct Point {\n  mut x: int\n  mut y: int\n}\nfn run(n: int): int {\n  mut p = Point { x: 0, y: 0 };\n  mut i = 0;\n  while i < n {\n    p.x = p.x + i;\n    p.y = p.y + p.x;\n    i = i + 1;\n  }\n  return p.x + p.y;\n}\necho run(100);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the field-access loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "field-access result must match the interpreter"
+        );
+        assert_eq!(jit.stdout, "171600\n");
+    }
+
+    /// Subscript indexing (P-JIT J4 slice 3): a hot loop that indexes a list (`xs[i]`), a map
+    /// (`m[key]`), and a nested list-of-keys runs natively through the leaf-op helper's `Op::Index`
+    /// arm (the non-dispatching list/map/string paths; a user `Index` impl and every error case bail)
+    /// and matches the interpreter, including the borrow/retain of each looked-up element.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_indexing_loop_is_native_and_correct() {
+        let src = "fn run(n: int): int {\n  xs = [10, 20, 30, 40, 50];\n  m = { \"a\": 1, \"b\": 2, \"c\": 3 };\n  keys = [\"a\", \"b\", \"c\"];\n  mut total = 0;\n  mut i = 0;\n  while i < n {\n    total = total + xs[i % 5];\n    total = total + m[keys[i % 3]];\n    i = i + 1;\n  }\n  return total;\n}\necho run(30);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the indexing loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(interp, jit, "indexing result must match the interpreter");
+        assert_eq!(jit.stdout, "960\n");
+    }
+
+    /// Tuple construction + projection (P-JIT J4 slice 4): a `for (i, x) in xs.enumerate()` loop —
+    /// `enumerate` yields `(int, T)` tuples (native `ListGet`) that the destructuring reads with
+    /// `TupleIndex` — runs natively through the leaf-op helper and matches the interpreter, including
+    /// the retain of each projected element.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_tuple_enumerate_loop_is_native_and_correct() {
+        let src = "fn run(): int {\n  xs = [10, 20, 30, 40];\n  mut total = 0;\n  for (i, x) in xs.enumerate() {\n    total = total + i * x;\n  }\n  return total;\n}\necho run();\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the enumerate loop fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "tuple-enumerate result must match the interpreter"
+        );
+        // 0*10 + 1*20 + 2*30 + 3*40 = 200.
+        assert_eq!(jit.stdout, "200\n");
+    }
+
+    /// OSR (P-JIT J5): a **top-level** loop — the whole program is one `while` loop in `main`, which
+    /// is entered exactly *once*, so entry-count promotion would never make it hot. Under ordinary
+    /// hot-counter promotion (not `force_jit`), it must still go native by counting the loop's
+    /// **back-edges** and entering tier 1 mid-frame at the loop header (on-stack replacement). This is
+    /// the production hole J5 closes.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_osr_top_level_loop_goes_native() {
+        // 200 iterations > JIT_HOT_THRESHOLD (50): the back-edge counter promotes `main` (proto 0)
+        // and OSRs into its loop, even though `main` is entered only once.
+        let src =
+            "mut acc = 0\nmut i = 0\nwhile i < 200 {\n  acc = acc + i\n  i = i + 1\n}\necho acc\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the top-level loop must go native via OSR under hot-counter promotion, got {stats:?}"
+        );
+        assert_eq!(interp, jit, "OSR result must match the interpreter");
+        let expected: i64 = (0..200).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
+    }
+
+    /// OSR refcount-exactness (P-JIT J5): a top-level loop whose body moves **heap** values — a
+    /// top-level struct `b` read (`LoadField`) and written (`SetField`, the struct copy-on-write path)
+    /// each iteration, with the global `b` loaded into a register (a heap value) every pass. It
+    /// promotes and OSRs into native code mid-frame with that heap value live. Forcing `heap_aware`
+    /// for OSR-capable prototypes keeps the register stores refcount-correct; the result must match
+    /// the interpreter (the `--jit-differential` leak check gates residency).
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_osr_heap_body_matches_interpreter() {
+        let src = "struct Box { mut v: int }\nmut b = Box { v: 0 }\nmut i = 0\nwhile i < 100 {\n  b.v = b.v + i\n  i = i + 1\n}\necho b.v\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_hot_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the heap-body top-level loop must go native via OSR, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "OSR heap-body result must match the interpreter"
+        );
+        let expected: i64 = (0..100).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
+    }
+
+    /// Native calls (P-JIT J3): recursive `fib` — the callee closure loaded via a heap-aware
+    /// `LoadGlobal` (retain), the recursive `Call` handled by the shared setup on the contiguous
+    /// stack, refcounts exact across the tier-0/tier-1 boundary — produces exactly the interpreter's
+    /// result. The `fib` prototype (and the top-level) go native.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_recursive_call_is_native_and_correct() {
+        let src = "fn fib(n: int): int {\n  if n < 2 { return n; }\n  return fib(n - 1) + fib(n - 2);\n}\necho fib(20);\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        assert!(
+            stats.native >= 1,
+            "the recursive fn must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "recursive-call result must match the interpreter"
+        );
+        // fib(20) = 6765.
+        assert_eq!(jit.stdout, "6765\n");
+    }
+
+    /// Native globals (P-JIT): a **top-level** loop with global `mut` accumulators — the natural
+    /// scripting shape — compiles natively (LoadGlobal/StoreGlobal inlined; first-bind via the
+    /// `note_global_bound` helper; `echo` at the end bails) and matches the interpreter. This exercises
+    /// per-op bail (the top-level prototype has `Echo`/`Stringify` it can't compile) plus the
+    /// unbound→bound global transition.
+    #[cfg(feature = "jit")]
+    #[test]
+    fn jit_global_top_level_loop_is_native_and_correct() {
+        let src = "mut total = 0;\nmut i = 0;\nwhile i < 1000 {\n  total = total + (i % 7);\n  i = i + 1;\n}\necho total;\n";
+        let module = compile_module(src);
+        let interp = VmBackend::new().run_module(&module);
+        let (jit, stats) = VmBackend::new().run_module_jit_with_stats(&module);
+        // The top-level prototype (proto 0) itself goes native here.
+        assert!(
+            stats.native >= 1,
+            "the top-level global loop must go native, got {stats:?}"
+        );
+        assert_eq!(
+            interp, jit,
+            "native-globals result must match the interpreter"
+        );
+        let expected: i64 = (0..1000).map(|i| i % 7).sum();
+        assert_eq!(jit.stdout, format!("{expected}\n"));
     }
 
     /// Peak heap residency for one program (architecture §0.3) — `reset_peak` before, `live_peak`
