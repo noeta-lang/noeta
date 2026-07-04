@@ -45,6 +45,8 @@
 //! build, the deterministic sandbox, and the conformance differential never pull Cranelift and are
 //! byte-identical without it — the same discipline that gates the real-thread isolates.
 
+mod plan;
+
 use core::ffi::c_void;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
@@ -958,7 +960,7 @@ fn analysis_succ(op: &Op, pc: usize, n: usize, out: &mut Vec<usize>) {
 /// the fixpoint's in-set over-approximates exactly that) or call-bearing (it contains `Op::Call`, which
 /// is unmodeled → all-true), so the analysis is never trusted across a native re-entry it does not
 /// account for.
-fn heap_in_map(chunk: &noeta_bytecode::Chunk, heap_aware: bool) -> Vec<bool> {
+pub(crate) fn heap_in_map(chunk: &noeta_bytecode::Chunk, heap_aware: bool) -> Vec<bool> {
     let n = chunk.code.len();
     let nreg = chunk.num_registers as usize;
     if !heap_aware {
