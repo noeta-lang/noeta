@@ -4828,7 +4828,6 @@ impl<'m> Vm<'m> {
                     ));
                 }
                 let num_registers = callee_chunk.num_registers as usize;
-                let defaults = callee_chunk.defaults.clone();
                 let new_base = reserve_window(regs, num_registers);
                 for (i, &arg_reg) in arg_regs.iter().enumerate() {
                     let v = regs[caller_base + arg_reg as usize];
@@ -4836,19 +4835,29 @@ impl<'m> Vm<'m> {
                     regs[new_base + i] = v;
                 }
                 let count = callee_val.closure_upvalue_count();
-                let cells: Vec<Value> = (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
-                let filled = arg_regs.len();
-                for (reg, proto) in &defaults {
-                    if *reg as usize >= filled {
-                        let value = self.run_thunk(*proto, &cells)?;
-                        regs[new_base + *reg as usize] = value;
+                // Fast path (B): a plain function — no defaults to fill and no upvalues to carry —
+                // skips the defaults clone, the cell collection, the default-thunk loop, and the
+                // upvalue vector entirely. This is the shape of every top-level `fn` call.
+                let upvalues = if callee_chunk.defaults.is_empty() && count == 0 {
+                    Vec::new()
+                } else {
+                    let defaults = callee_chunk.defaults.clone();
+                    let cells: Vec<Value> =
+                        (0..count).map(|i| callee_val.closure_upvalue(i)).collect();
+                    let filled = arg_regs.len();
+                    for (reg, proto) in &defaults {
+                        if *reg as usize >= filled {
+                            let value = self.run_thunk(*proto, &cells)?;
+                            regs[new_base + *reg as usize] = value;
+                        }
                     }
-                }
-                let mut upvalues = Vec::with_capacity(count);
-                for &cell in &cells {
-                    retain(cell);
-                    upvalues.push(cell);
-                }
+                    let mut upvalues = Vec::with_capacity(count);
+                    for &cell in &cells {
+                        retain(cell);
+                        upvalues.push(cell);
+                    }
+                    upvalues
+                };
                 frames[caller_top].pc = resume_pc;
                 frames.push(Frame {
                     proto: proto_idx,
