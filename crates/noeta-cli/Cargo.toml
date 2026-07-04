@@ -11,6 +11,7 @@ name = "noeta"
 path = "src/main.rs"
 
 [dependencies]
+mimalloc = { version = "0.1", default-features = false }
 noeta-span = { workspace = true }
 noeta-ast = { workspace = true }
 noeta-backend = { workspace = true }

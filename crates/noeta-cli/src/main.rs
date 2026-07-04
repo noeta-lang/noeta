@@ -8,6 +8,13 @@
 //! a subcommand here — which is what keeps the `noeta test` verb free for a user program's own
 //! `@test {}` blocks (object-model slice 6).
 
+// The runtime is allocation-heavy (every heap value — strings, lists, maps, objects — is a boxed
+// `Obj`), so the toolchain binary uses mimalloc instead of the system allocator. Correctness is
+// unaffected (the leak oracle counts live objects, not allocator behavior); it is a throughput win
+// on allocation-bound programs.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 use std::io::{self, BufRead, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
