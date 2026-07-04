@@ -1,0 +1,28 @@
+// A generator's destructor-bearing local runs its destructor when the generator is driven to
+// exhaustion and released — here `counter()` is a temp consumed by the `for` loop, so `r`'s
+// destructor fires when the loop exhausts the iterator (the spec's last-reference rule).
+// expect: stdout "using gen"
+// expect: stdout "0"
+// expect: stdout "using gen"
+// expect: stdout "1"
+// expect: stdout "drop gen"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+fn counter(): Iterator<int> {
+    r = Res.new("gen")
+    mut i = 0
+    while i < 2 {
+        echo "using ${r.tag}"
+        yield i
+        i = i + 1
+    }
+}
+for x in counter() {
+    echo x
+}
+echo "end"

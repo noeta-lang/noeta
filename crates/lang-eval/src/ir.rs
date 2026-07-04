@@ -645,10 +645,18 @@ impl Interpreter {
         // time, so a lazy pipeline never materializes and an early `break` stops it; a `map`/`filter`
         // closure runs inside the advance. A collection keeps the snapshot fast path.
         if stream {
+            // On normal exhaustion the streamed iterator is spent; destroy it destructor-aware so a
+            // generator's captured destructor-bearing local runs at the iterator's last reference (the
+            // VM's `IterForNext`-on-`None` mirror). An early `break`/`return` abandons it — released
+            // plainly, matching the VM, which only consumes on the exhausted branch.
+            let mut exhausted = false;
             loop {
                 let element = match self.iter_value_next(&iterable_value, span)? {
                     Some(e) => e,
-                    None => break,
+                    None => {
+                        exhausted = true;
+                        break;
+                    }
                 };
                 let child = crate::Scope::child(&self.scope);
                 self.bind_for_pattern(&child, pattern, element, span)?;
@@ -663,6 +671,9 @@ impl Interpreter {
                     Flow::Break => break,
                     Flow::Continue | Flow::Normal => {}
                 }
+            }
+            if exhausted {
+                self.destroy_value(iterable_value);
             }
             return Ok(Flow::Normal);
         }
