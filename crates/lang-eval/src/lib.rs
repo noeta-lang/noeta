@@ -1294,9 +1294,76 @@ impl Interpreter {
             // destructors — so its `Rc<Vec<u64>>` simply drops here, reclaiming the buffer.
             Value::List(ListRepr::Packed(_)) => {}
             Value::Map(entries, _) => self.destroy_map(entries),
-            // Scalars/functions/types/handles bear no destructor (a function's *captured* values
-            // are Phase-6 territory); their `Rc`/value drops here, reclaiming memory.
+            // A closure/future/generator that reaches its last reference destroys the values it
+            // captured — a destructor-bearing local that outlives its defining scope inside a returned
+            // closure, an async fn, or a generator (the VM's twin: `release_value` recursing into the
+            // closure/future/iterator's cells). Container-before-contained, deferring to the true last
+            // reference of each capture.
+            Value::Function(c) => self.destroy_closure(c),
+            Value::Future(inner) => self.destroy_boxed(inner),
+            Value::Iter(state) => self.destroy_iter(state),
+            // Scalars/types/handles bear no destructor; their `Rc`/value drops here, reclaiming memory.
             _ => {}
+        }
+    }
+
+    /// Destroy a closure at its last reference: run the destructors of the values it captured. A
+    /// closure captures its whole definition scope by `Rc<Scope>`; a captured value dies with the
+    /// closure only when the closure holds the scope's **last** reference (else the scope — and its
+    /// bindings — outlive this closure, shared with another closure or a live frame). Walks the
+    /// captured scope chain, destroying each level this closure uniquely holds, in **reverse
+    /// declaration order** (`Scope::order`) — the spec's deterministic destruction order, matching the
+    /// VM's cell walk. `destroy_value` on each binding defers a still-aliased capture to its own last
+    /// reference. A capture *cycle* (a closure holding the scope that captures it) keeps a strong
+    /// count > 1, so it is not reclaimed here — the Phase-6 exit reaper still breaks those.
+    fn destroy_closure(&mut self, closure: Rc<Closure>) {
+        let Ok(closure) = Rc::try_unwrap(closure) else {
+            return; // aliased — destruction defers to the last reference.
+        };
+        // `Scope`/`Closure` have a `Drop` (leak bookkeeping), so fields cannot be moved out; clone the
+        // captured-scope handle, then release the closure's own reference so the strong count reflects
+        // only outside holders.
+        let mut scope = closure.captured.clone();
+        drop(closure);
+        loop {
+            // The closure must hold the scope's sole reference for its bindings to die now.
+            if Rc::strong_count(&scope) != 1 {
+                break; // shared — its bindings outlive this closure.
+            }
+            // Take the bindings out before running any destructor (which may re-enter and allocate);
+            // `Scope::drop` only does leak bookkeeping, so an emptied scope reclaims cleanly.
+            let order = scope.order.take();
+            let mut vars = scope.vars.take();
+            for name in order.iter().rev() {
+                if let Some(binding) = vars.remove(name) {
+                    self.destroy_value(binding.value);
+                }
+            }
+            // Ascend to the parent this scope uniquely held (clone the handle, drop this scope).
+            let parent = scope.parent.clone();
+            drop(scope);
+            match parent {
+                Some(p) => scope = p,
+                None => break,
+            }
+        }
+    }
+
+    /// Destroy a boxed single value (an async `Future`'s wrapped thunk/step closure) at its last
+    /// reference, recursing so a captured destructor-bearing local runs.
+    fn destroy_boxed(&mut self, inner: Rc<Value>) {
+        if let Ok(value) = Rc::try_unwrap(inner) {
+            self.destroy_value(value);
+        }
+    }
+
+    /// Destroy an iterator/generator at its last reference: a generator (`IterState::Gen`) owns a step
+    /// closure whose cells hold the generator body's locals, so recurse into it.
+    fn destroy_iter(&mut self, state: Rc<RefCell<IterState>>) {
+        if let Ok(state) = Rc::try_unwrap(state)
+            && let IterState::Gen { step } = state.into_inner()
+        {
+            self.destroy_value(step);
         }
     }
 

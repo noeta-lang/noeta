@@ -5157,6 +5157,11 @@ fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         Type::Union(members) => members.iter().any(|m| type_relevant(m, reachable)),
         // A tuple is relevant exactly when one of its elements is (like a list).
         Type::Tuple(elements) => elements.iter().any(|e| type_relevant(e, reachable)),
+        // A `Future`/`Iterator` (an async future, a generator, or a lazy iterator) captures the locals
+        // of the expression that built it in an opaque step closure — like a `Fn` value, its captures
+        // are invisible in its type arguments, so a `Future<int>` may still hold a destructor-bearing
+        // captured local. Conservatively relevant, so its drop is destructor-aware (matching `Fn`).
+        Type::Named(name, _) if name == "Future" || name == "Iterator" => true,
         // A declared type: relevant if it (transitively) reaches a destructor, or any type argument
         // does (covers generic containers like `Box<Resource>`).
         Type::Named(name, args) => {

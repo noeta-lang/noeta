@@ -1643,8 +1643,20 @@ impl<'m> Vm<'m> {
         if let Some(proto) = own {
             self.run_destructor(proto, value);
         }
-        for child in value.gc_children() {
-            self.release_value(child);
+        // Children are released container-before-contained in the spec's destruction order: an
+        // object's/list's fields in declared/iteration order, but a **closure's captured upvalues in
+        // reverse capture order** — the reverse-declaration order the tree-walker uses at scope exit
+        // (`Scope::order` reversed), so a multi-capture closure destroys its captures identically on
+        // both backends.
+        let children = value.gc_children();
+        if value.is_closure() {
+            for child in children.into_iter().rev() {
+                self.release_value(child);
+            }
+        } else {
+            for child in children {
+                self.release_value(child);
+            }
         }
         value.gc_free_shallow();
     }
@@ -1728,7 +1740,22 @@ impl<'m> Vm<'m> {
     fn subtree_owns_destructor(&self, value: Value) -> bool {
         match value.shape() {
             Some(shape) => self.destruct_reachable.contains(&shape.name),
-            None => value.is_list() || value.is_map() || value.is_set(),
+            // A list/map/set is always walked (its element types are erased). A closure/cell/future/
+            // generator may hold a destructor-bearing value it captured — an async fn's hoisted locals,
+            // or a value captured by a closure that outlives its defining scope — so walk it too, but
+            // only when the program defines any destructor at all (destructor-free code keeps the
+            // plain-free fast path). `release_value`'s refcount guard defers a still-aliased capture's
+            // destructor to its true last reference.
+            None => {
+                value.is_list()
+                    || value.is_map()
+                    || value.is_set()
+                    || (!self.destruct_reachable.is_empty()
+                        && (value.is_closure()
+                            || value.is_cell()
+                            || value.is_future()
+                            || value.is_iter()))
+            }
         }
     }
 

@@ -1,0 +1,20 @@
+// A destructor-bearing value captured by a closure that OUTLIVES its defining scope runs its
+// destructor when the closure reaches its last reference (spec §2 — destruction defers to the final
+// reference). `make` returns a closure capturing `r`; `r`'s `destruct` fires when the global holding
+// the closure is torn down at program end, not lost.
+// expect: stdout "held by captured"
+// expect: stdout "end"
+// expect: stdout "drop captured"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+fn make(): () -> string {
+    r = Res.new("captured")
+    return fn(): string { return "held by ${r.tag}" }
+}
+mut g = make()
+echo g()
+echo "end"

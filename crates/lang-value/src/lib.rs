@@ -261,6 +261,12 @@ impl Value {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Cell(_)))
     }
 
+    /// Whether this is a user closure (`Payload::Closure`, carrying captured upvalues) — not a native
+    /// builtin function. Used by the destructor walk to reach a closure's captured values.
+    pub fn is_closure(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Closure { .. }))
+    }
+
     /// A first-class prelude builtin value (`len`/`map`/`filter`/`sum`).
     pub fn native_fn(func: Builtin) -> Value {
         heap::alloc(Payload::NativeFn(func))

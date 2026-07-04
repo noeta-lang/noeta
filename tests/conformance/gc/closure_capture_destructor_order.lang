@@ -1,0 +1,22 @@
+// Multiple destructor-bearing values captured by one closure are destroyed in reverse capture
+// (declaration) order — the spec's deterministic destruction order — identically on both backends.
+// expect: stdout "abc"
+// expect: stdout "end"
+// expect: stdout "drop c"
+// expect: stdout "drop b"
+// expect: stdout "drop a"
+// expect: exit 0
+class R {
+    pub tag: string
+    fn new(t: string): R { return R { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+fn make(): () -> string {
+    a = R.new("a")
+    b = R.new("b")
+    c = R.new("c")
+    return fn(): string { return a.tag ~ b.tag ~ c.tag }
+}
+mut g = make()
+echo g()
+echo "end"
