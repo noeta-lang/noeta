@@ -10,7 +10,7 @@
 //! is shared-nothing per isolate, so no value crosses a thread boundary.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::ptr;
 use std::rc::Rc;
 
@@ -183,6 +183,37 @@ pub fn collector_mode() -> CollectorMode {
 /// `Object` and `Enum` are the M1.4 shaped aggregates. Each pairs a shared [`Shape`] handle
 /// (the layout — same shape for same-built aggregates, so identity is a cheap `Rc` pointer
 /// comparison) with a flat slot array it **owns one reference to each of**. An `Object`'s slots
+/// A fast, deterministic string hasher (the `FxHash` rustc uses) for the map store. Rust's default
+/// `HashMap` hasher is SipHash — DoS-resistant but ~3× slower on the short keys maps typically hold,
+/// slower even than a `BTreeMap`'s fast-diverging comparisons. Iteration order is never observed
+/// (every accessor sorts by key), so the hasher only needs speed, not randomness; this is
+/// deterministic (seed 0). Not hash-flood-resistant — acceptable for a general runtime (PHP/Lua use
+/// non-crypto hashes too), revisitable if adversarial input ever matters.
+#[derive(Default)]
+pub(crate) struct FxHasher {
+    hash: u64,
+}
+
+impl std::hash::Hasher for FxHasher {
+    #[inline]
+    fn finish(&self) -> u64 {
+        self.hash
+    }
+    #[inline]
+    fn write(&mut self, bytes: &[u8]) {
+        const K: u64 = 0x51_7c_c1_b7_27_22_0a_95;
+        let mut h = self.hash;
+        for &b in bytes {
+            h = (h.rotate_left(5) ^ (b as u64)).wrapping_mul(K);
+        }
+        self.hash = h;
+    }
+}
+
+/// The map store: a `HashMap` with the fast [`FxHasher`] (see above), so get/insert/remove are O(1)
+/// and cheap. Aliased so the type appears in exactly one place.
+pub(crate) type MapStore = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
+
 /// are its field values in the shape's declared order; an `Enum`'s slots are its variant's
 /// positional data. Freeing either releases its slots first (see [`free`]).
 pub(crate) enum Payload {
@@ -213,7 +244,10 @@ pub(crate) enum Payload {
     /// display, and equality are deterministic and identical to the tree-walker. It owns one
     /// reference to each element, freed like a list's.
     Set(Vec<Value>),
-    Map(BTreeMap<String, Value>),
+    // A `HashMap` for O(1) get/insert/remove (the hot path). Iteration order is unobservable: every
+    // order-observing accessor (`map_keys`/`map_values`/`map_entries`/`repr`/`to_native_deep`) sorts
+    // by key, so maps still present and compare in deterministic sorted order (differential-safe).
+    Map(MapStore),
     /// A flat `List<packed>` (P-PACK 2.4, byte-addressed since 3.2b): the elements packed as raw
     /// primitive bytes, one contiguous `Vec<u8>` of `schema.byte_size` bytes per element (an `f32`
     /// field is 4 bytes, the others 8), interpreted through the shared `schema`. A GC **leaf** — it
@@ -755,7 +789,15 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Set(items)
         | Payload::Object { slots: items, .. }
         | Payload::Enum { data: items, .. } => items.iter().copied().for_each(&mut push),
-        Payload::Map(entries) => entries.values().copied().for_each(&mut push),
+        // Sorted-key order: `children` feeds `release_value`'s destructor walk, and destruct order is
+        // observable, so it must be deterministic and match the tree-walker's sorted map (values that
+        // are immediates — e.g. every entry in an int-valued map — are excluded by `push`, so this
+        // sort only runs for maps that actually hold destructor-reachable references).
+        Payload::Map(entries) => {
+            let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+            kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+            kv.into_iter().for_each(|(_, &v)| push(v));
+        }
         Payload::Closure { upvalues, .. } => upvalues.iter().copied().for_each(&mut push),
         Payload::Cell(inner) => push(*inner),
         // An iterator owns one reference to each source it holds.

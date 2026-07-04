@@ -1271,10 +1271,12 @@ impl Value {
         }
     }
 
-    /// A heap map (refcount 1), keyed by owned strings, iterating in sorted-key order. As
-    /// with [`Value::list`], the map takes ownership of one reference to each value.
+    /// A heap map (refcount 1), keyed by owned strings, presenting in sorted-key order. As with
+    /// [`Value::list`], the map takes ownership of one reference to each value. The caller passes a
+    /// `BTreeMap` (a convenient sorted builder); it is stored internally as a `HashMap` for O(1)
+    /// access, and every order-observing accessor re-sorts, so nothing observable changes.
     pub fn map(entries: BTreeMap<String, Value>) -> Value {
-        heap::alloc(Payload::Map(entries))
+        heap::alloc(Payload::Map(entries.into_iter().collect()))
     }
 
     /// A heap object (refcount 1): a struct/class/opaque instance laying out `slots` in the
@@ -1709,7 +1711,12 @@ impl Value {
     pub fn map_values(self) -> Option<Vec<Value>> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Map(entries) => Some(entries.values().copied().collect()),
+                Payload::Map(entries) => {
+                    // Sorted-key order (the map is a HashMap internally).
+                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    Some(kv.into_iter().map(|(_, v)| *v).collect())
+                }
                 _ => None,
             })
         } else {
@@ -1722,7 +1729,11 @@ impl Value {
     pub fn map_keys(self) -> Option<Vec<String>> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Map(entries) => Some(entries.keys().cloned().collect()),
+                Payload::Map(entries) => {
+                    let mut keys: Vec<String> = entries.keys().cloned().collect();
+                    keys.sort_unstable();
+                    Some(keys)
+                }
                 _ => None,
             })
         } else {
@@ -1781,7 +1792,11 @@ impl Value {
     pub fn map_entries(self) -> Option<BTreeMap<String, Value>> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Map(entries) => Some(entries.clone()),
+                // Collect the internal HashMap into a sorted BTreeMap (the return type callers rely
+                // on for deterministic, sorted iteration).
+                Payload::Map(entries) => {
+                    Some(entries.iter().map(|(k, v)| (k.clone(), *v)).collect())
+                }
                 _ => None,
             })
         } else {
@@ -1931,7 +1946,9 @@ impl Value {
                     format!("{{{}}}", parts.join(", "))
                 }
                 Payload::Map(entries) => {
-                    let parts: Vec<String> = entries
+                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    let parts: Vec<String> = kv
                         .iter()
                         .map(|(k, v)| format!("{k:?}: {}", v.repr()))
                         .collect();
@@ -2036,12 +2053,16 @@ impl Value {
                 Payload::List(items) | Payload::Tuple(items) | Payload::Set(items) => {
                     NativeValue::List(items.iter().map(|v| v.to_native_deep()).collect())
                 }
-                Payload::Map(entries) => NativeValue::Map(
-                    entries
-                        .iter()
-                        .map(|(k, v)| (k.clone(), v.to_native_deep()))
-                        .collect(),
-                ),
+                Payload::Map(entries) => {
+                    // NativeValue::Map is an ordered Vec; present in sorted-key order.
+                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
+                    NativeValue::Map(
+                        kv.into_iter()
+                            .map(|(k, v)| (k.clone(), v.to_native_deep()))
+                            .collect(),
+                    )
+                }
                 Payload::Object { shape, slots } => NativeValue::Map(
                     shape
                         .fields
