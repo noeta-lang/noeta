@@ -797,7 +797,11 @@ extern "C" fn jit_run_leaf_op(
         } => {
             // The interpreter's inline-cache lookup (`caches` is loop-local) is skipped here; the
             // cache-miss resolution — `slot_of` then `slot_at` — is the same read and is bailed on
-            // exactly where the interpreter would raise (unknown field / non-object receiver).
+            // exactly where the interpreter would raise (unknown field / non-object receiver). A
+            // tier-1 inline cache on this path was measured (J6 investigation) and does *not* help: a
+            // shape-pointer guard costs about as much as the short field-name scan it would replace,
+            // and the real floor is this helper call itself — only a call-free native read (which
+            // needs a layout-stable object representation) beats the interpreter. See plans/jit.
             let field = module.name(*field);
             let v = regs[base + *obj as usize];
             match v

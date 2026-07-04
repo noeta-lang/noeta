@@ -442,6 +442,55 @@ layout-locked accessor from `lang-value` (a `#[repr(C)]` fast header, or an ABI 
 first. Deferred to a future slice; it is orthogonal to OSR (a tiering change, not a heap-layout one),
 which is why J5 is OSR — the highest-value *sound* tiering win — rather than the inline cache.
 
+## J6 — the native inline cache (investigated; the sound version is milestone-scale)
+
+The J4/J5 notes both point at a "native inline cache" for field access as the remaining heap-hot lever.
+This section records the investigation and *why the obvious shortcut does not work*, so the next
+attempt starts from the real design.
+
+**What field access costs in the JIT today.** A `LoadField` runs through the generic `jit_run_leaf_op`
+helper: a native `call` out of the compiled loop, reconstitute `&mut Vm`, a `match` over the leaf-op
+set, then `slot_of` (a **field-name string scan** over the shape's fields) + `slot_at` + retain +
+store. The tier-0 interpreter's `LoadField` is a *call-free* `match` arm **with** an inline cache
+(shape-pointer-keyed, skips the scan). So on a field-read-dominated loop the JIT is actually **slower
+than the interpreter** — the per-`LoadField` helper *call* is the floor, and the interpreter has no
+call.
+
+**The shortcut that does not help — a helper-internal inline cache.** The natural idea: give the JIT
+leaf helper its own shape-keyed cache (a VM-owned array indexed by each op's existing `cache` slot, the
+tier-0 mechanism) so monomorphic `LoadField`s skip the `slot_of` scan. Built and **measured** (bench
+`vm_jit/widefield_*`, a read-only loop over an 8-field struct reading the last field — worst-case scan):
+
+| | 100k | 1M |
+|---|---|---|
+| interpreter (tier 0, cached) | 3.77 ms | — |
+| JIT, scan every access | 4.58 ms | 41.5 ms |
+| JIT, helper-internal inline cache | 5.26 ms | 40.8 ms |
+
+The cache is a **wash-to-slight-loss**: the shape-pointer guard (`object_shape_ptr` → decode +
+`with_payload` + `Rc::as_ptr`, plus the cache-array lookup) costs about as much as the short
+field-name scan it replaces, and *neither moves the floor* — the JIT stays above the interpreter
+because the helper call dominates both. Reverted; only the reframed comment and the `widefield_*` floor
+bench remain. The lesson: no optimization *inside* the helper can win, because the helper *call* is the
+cost.
+
+**The version that would win — a call-free native read — needs a layout-stable object.** To beat the
+interpreter the JIT must read the field **without a call**: decode the receiver pointer, guard the
+receiver's shape pointer against a per-site cached shape (inline compare), and on a hit load the slot
+value at the cached offset — all as emitted machine code. That requires walking the object's memory in
+native code, which today means the `Payload` **Rust enum** (unstable discriminant + variant field
+offsets) and a `Vec` (unstable internal layout) — not soundly inlinable. The real prerequisite is a
+**layout-stable shaped-object representation**: a `#[repr(C)]` object whose header exposes, at fixed
+offsets `offset_of!` can lock, the shape pointer and a slot-array base pointer (inline slots or a
+stable `{ptr,len}`), so the codegen can emit the guard-and-load against guaranteed offsets with a
+build-time static assertion catching any layout drift. That is a **core heap-representation change**
+touching `lang-value` (the `Obj`/`Payload` model), the GC/cycle-collector, the COW/reuse fast paths,
+and both backends' construction/field ops, all under the miri + differential + leak gates — a
+milestone-scale slice, not a leaf-op-style addition. It is the honest next step for heap-access speed,
+and should be scoped and signed off as its own milestone (like P-VMT or the object-model arc) rather
+than bolted on. Until then, field access is helper-call-bound and the JIT's wins stay in native
+arithmetic/control, calls, and OSR'd loops.
+
 ## Open questions (resolve at sign-off)
 
 - **Method JIT vs tracing.** Proposal: method JIT first (J1–J4), OSR/tracing deferred to J5+. Tracing

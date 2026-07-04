@@ -367,6 +367,35 @@ fn field_loop_src(n: usize) -> String {
     )
 }
 
+/// P-JIT field-read floor: a **read-only** hot loop over a WIDE struct, reading the last field
+/// (worst-case `slot_of` scan) each iteration — no `SetField`, so the loop is pure `LoadField` +
+/// native arithmetic. This isolates the per-`LoadField` leaf-helper-call cost: the JIT stays *below*
+/// the tier-0 interpreter here (whose `LoadField` is a call-free match arm with its own inline
+/// cache), which is why a *helper-internal* inline cache was found not to help — only a call-free
+/// native field read (guard + slot load emitted as machine code, needing a layout-stable object
+/// representation) would cross this floor. Kept as the bench that will show that win when it lands.
+#[cfg(feature = "jit")]
+fn wide_field_read_src(n: usize) -> String {
+    let fields: Vec<String> = (0..8).map(|i| format!("f{i}: int")).collect();
+    let inits: Vec<String> = (0..8).map(|i| format!("f{i}: {i}")).collect();
+    format!(
+        "struct Wide {{ {} }}\n\
+         fn run(n: int): int {{\n    \
+            w = Wide {{ {} }};\n    \
+            mut acc = 0;\n    \
+            mut i = 0;\n    \
+            while i < n {{\n        \
+                acc = acc + w.f7;\n        \
+                i = i + 1;\n    \
+            }}\n    \
+            return acc;\n\
+         }}\n\
+         echo run({n});\n",
+        fields.join("; "),
+        inits.join(", "),
+    )
+}
+
 /// J4 slice 3 (P-JIT indexing): a hot loop indexing a list (`xs[i]`) and a map (`m[key]`) — the
 /// `Op::Index` list/map paths run through the leaf-op helper while the loop stays native.
 #[cfg(feature = "jit")]
@@ -997,6 +1026,24 @@ fn vm_hot_paths(c: &mut Criterion) {
             jit.bench_with_input(
                 BenchmarkId::new("field_jit", n),
                 &field_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
+                },
+            );
+            // P-JIT field-read floor: a read-only loop over a wide struct's last field — the JIT stays
+            // below the tier-0 interpreter here (per-LoadField leaf-helper-call cost), the floor a
+            // future call-free native field read would cross.
+            let wide_module = compile(&wide_field_read_src(n));
+            jit.bench_with_input(
+                BenchmarkId::new("widefield_interp", n),
+                &wide_module,
+                |b, module| {
+                    b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+                },
+            );
+            jit.bench_with_input(
+                BenchmarkId::new("widefield_jit", n),
+                &wide_module,
                 |b, module| {
                     b.iter(|| black_box(VmBackend::new().run_module_jit(black_box(module))));
                 },
