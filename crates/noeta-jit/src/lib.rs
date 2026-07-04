@@ -750,6 +750,24 @@ fn has_osr_entry(chunk: &noeta_bytecode::Chunk) -> bool {
         .any(|(pc, op)| backward_target(op, pc).is_some())
 }
 
+/// Whether OSR-compiling this prototype is worthwhile: it has at least one loop whose body native
+/// code can **sustain** — every op between a loop header and its back-edge compiles to native code
+/// ([`is_fast_op`]). A loop whose body contains a bail op exits native on the first such op *every*
+/// iteration (a tier-0↔tier-1 bounce that costs more than just interpreting the loop), so a prototype
+/// whose only loops bail is left in the interpreter. The loop body is over-approximated as the pc
+/// range `[header, back_edge]` — conservative (an occasional bail in a rarely-taken branch declines a
+/// loop that is mostly native-able), which errs toward not regressing a heap-op-dominated loop.
+pub fn worth_osr(chunk: &noeta_bytecode::Chunk) -> bool {
+    let code = &chunk.code;
+    code.iter().enumerate().any(|(pc, op)| {
+        backward_target(op, pc).is_some_and(|header| {
+            code[header..=pc]
+                .iter()
+                .all(|o| is_fast_op(o, &chunk.consts))
+        })
+    })
+}
+
 /// Forward reachability of each bytecode pc in the *native* control-flow graph, seeded from every
 /// native entry point ([`entry_pcs`]) — a fresh frame (pc 0) and every post-call resume pc. A non-fast
 /// op is terminal — it bails (returns its pc), so it has no native successor — which is why this
