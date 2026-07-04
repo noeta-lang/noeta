@@ -3985,9 +3985,13 @@ impl<'m> Vm<'m> {
                         self.join_scope(*span)?;
                         if let Some(scope) = self.scopes.pop() {
                             for task in scope {
-                                release(task.future);
+                                // Destructor-aware: a task's future holds the async body's captured
+                                // locals in its state-machine cells. A completed task's cells are spent,
+                                // but a **cancelled** task (a `race` loser) abandoned its future mid-body
+                                // with a live captured value — release it here so its destructor runs.
+                                self.release_value(task.future);
                                 if let Some(result) = task.result {
-                                    release(result);
+                                    self.release_value(result);
                                 }
                             }
                         }

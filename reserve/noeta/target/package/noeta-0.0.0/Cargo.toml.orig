@@ -1,0 +1,19 @@
+# Independent workspace root so this placeholder publishes in isolation,
+# without pulling in the main `lang-*` build graph one directory up.
+[workspace]
+
+[package]
+name = "noeta"
+version = "0.0.0"
+edition = "2021"
+rust-version = "1.85"
+description = "The Noeta programming language (.noe). Name reservation placeholder — not yet released."
+license = "MIT"
+homepage = "https://noeta.dev"
+repository = "https://github.com/nsrosenqvist/lang"
+readme = "README.md"
+keywords = ["language", "interpreter", "compiler", "scripting", "embedded"]
+categories = ["development-tools", "compilers"]
+
+[lints.rust]
+unsafe_code = "forbid"

@@ -1,0 +1,31 @@
+// Completed concurrent tasks run their captured locals' destructors — once each, at the scope join —
+// on both backends, no double-run or leak.
+// expect: stdout "using task1"
+// expect: stdout "using task2"
+// expect: stdout "drop task1"
+// expect: stdout "drop task2"
+// expect: stdout "3"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+async fn work(n: int): int {
+    r = Res.new("task${n}")
+    sleep(1).await
+    echo "using ${r.tag}"
+    return n
+}
+async fn run(): int {
+    mut sum = 0
+    concurrent {
+        a = spawn work(1)
+        b = spawn work(2)
+        sum = a.await + b.await
+    }
+    return sum
+}
+echo run().await
+echo "end"

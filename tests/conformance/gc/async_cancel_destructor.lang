@@ -1,0 +1,32 @@
+// A cancelled async task (a `race` loser) runs its captured local's destructor: the concurrent scope
+// releases each task's future destructor-aware at join, so the loser's abandoned state is cleaned up.
+// `fast` wins the race; `slow` is cancelled at its `sleep` with `r` still live.
+// expect: stdout "drop slow"
+// expect: stdout "2"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+async fn slow(): int {
+    r = Res.new("slow")
+    sleep(10).await
+    echo "slow using ${r.tag}"
+    return 1
+}
+async fn fast(): int {
+    sleep(1).await
+    return 2
+}
+async fn run(): int {
+    concurrent {
+        a = spawn slow()
+        b = spawn fast()
+        w = race([a, b])
+    }
+    return w
+}
+echo run().await
+echo "end"

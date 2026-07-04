@@ -262,7 +262,17 @@ impl Interpreter {
             // releasing the tasks' futures and results (automatic under `Rc`).
             lang_ir::Stmt::ScopeEnd { span } => {
                 self.join_scope(*span)?;
-                self.scopes.pop();
+                if let Some(scope) = self.scopes.pop() {
+                    // Destructor-aware release of each task's future/result (the VM's `ScopeEnd` mirror):
+                    // a **cancelled** task (a `race` loser) abandoned its future mid-body with a live
+                    // captured value, whose destructor must run at its last reference here.
+                    for task in scope {
+                        self.destroy_value(task.future);
+                        if let Some(result) = task.result {
+                            self.destroy_value(result);
+                        }
+                    }
+                }
                 Ok(Flow::Normal)
             }
             lang_ir::Stmt::If {
