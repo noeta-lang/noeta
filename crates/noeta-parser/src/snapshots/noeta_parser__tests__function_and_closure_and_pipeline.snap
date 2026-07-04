@@ -1,0 +1,17 @@
+---
+source: crates/noeta-parser/src/lib.rs
+assertion_line: 530
+expression: "pretty(\"fn double(n: int): int { return n * 2; } echo 5 |> double |> double;\")"
+---
+(program @0..68
+  (fn double [n] @0..40
+    (return @25..38
+      (binary "*" @32..37
+        (ident n @32..33)
+        (int 2 @36..37))))
+  (echo @41..68
+    (pipeline @46..67
+      (pipeline @46..57
+        (int 5 @46..47)
+        (ident double @51..57))
+      (ident double @61..67))))

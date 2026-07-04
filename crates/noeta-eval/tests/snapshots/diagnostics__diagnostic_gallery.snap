@@ -1,0 +1,97 @@
+---
+source: crates/noeta-eval/tests/diagnostics.rs
+expression: out
+---
+================ E0001 unexpected character ================
+[E0001] Error: unexpected character `$`
+   ╭─[ snippet.noe:1:6 ]
+   │
+ 1 │ echo $;
+   │      ┬  
+   │      ╰── unexpected character `$`
+───╯
+
+================ E0002 unterminated string ================
+[E0002] Error: unterminated string literal
+   ╭─[ snippet.noe:1:6 ]
+   │
+ 1 │ echo "oops;
+   │      ───┬──  
+   │         ╰──── unterminated string literal
+   │ 
+   │ Help: add a closing `"` to terminate the string
+───╯
+
+================ E0003 unexpected token ================
+[E0003] Error: found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+   ╭─[ snippet.noe:1:6 ]
+   │
+ 1 │ echo ;
+   │      ┬  
+   │      ╰── found '`;`' expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+───╯
+
+================ E0004 unexpected end of input ================
+[E0004] Error: found end of input expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+   ╭─[ snippet.noe:1:8 ]
+   │
+ 1 │ x = 1 +
+   │        │ 
+   │        ╰─ found end of input expected '`-`', '`!`', '`spawn`', '`isolate`', 'an integer literal', 'an f32 literal', 'a fixed-width integer literal', 'a float literal', 'a string literal', 'a raw string literal', 'a template string literal', '`true`', '`false`', '`fn`', '`if`', '`match`', '`attributes_of`', '`type_of`', '`from_bytes`', '`channel`', '`roles_of`', '`invoke`', 'an identifier', '`[`', '`{`', '`#`', or '`(`'
+───╯
+
+================ E0005 unknown name ================
+[E0005] Error: cannot find `missing` in this scope
+   ╭─[ snippet.noe:1:6 ]
+   │
+ 1 │ echo missing;
+   │      ───┬───  
+   │         ╰───── cannot find `missing` in this scope
+───╯
+
+================ E0006 immutable assignment ================
+[E0006] Error: cannot assign to `x`, which is immutable
+   ╭─[ snippet.noe:2:1 ]
+   │
+ 2 │ x = 2;
+   │ ┬  
+   │ ╰── cannot assign to `x`, which is immutable
+   │ 
+   │ Help: declare it with `mut x = ...` to allow reassignment
+───╯
+
+================ E0007 type mismatch ================
+[E0007] Error: cannot apply `+` to int and bool
+   ╭─[ snippet.noe:1:6 ]
+   │
+ 1 │ echo 1 + true;
+   │      ────┬───  
+   │          ╰───── cannot apply `+` to int and bool
+───╯
+
+================ E0008 division by zero ================
+[E0008] Error: division by zero
+   ╭─[ snippet.noe:1:6 ]
+   │
+ 1 │ echo 1 / 0;
+   │      ──┬──  
+   │        ╰──── division by zero
+───╯
+
+================ E0009 missing field ================
+[E0009] Error: missing field(s) `y` in `P` literal — every field must be set
+   ╭─[ snippet.noe:2:5 ]
+   │
+ 2 │ p = P { x: 1 };
+   │     ─────┬────  
+   │          ╰────── missing field(s) `y` in `P` literal — every field must be set
+───╯
+
+================ E0010 panic ================
+[E0010] Error: panic: boom
+   ╭─[ snippet.noe:1:1 ]
+   │
+ 1 │ panic("boom");
+   │ ──────┬──────  
+   │       ╰──────── panic: boom
+───╯

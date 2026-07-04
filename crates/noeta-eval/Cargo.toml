@@ -1,0 +1,34 @@
+[package]
+name = "noeta-eval"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-ast = { workspace = true }
+noeta-ir = { workspace = true }
+noeta-ir-passes = { workspace = true }
+noeta-builtins = { workspace = true }
+noeta-backend = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-check = { workspace = true }
+
+[dev-dependencies]
+# Front-end crates, for end-to-end convenience in unit tests only (no production
+# dependency — the lexer/parser do not depend on the evaluator).
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+insta = { workspace = true }
+proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "eval"
+harness = false
+
+[lints]
+workspace = true

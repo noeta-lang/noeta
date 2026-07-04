@@ -1,0 +1,18 @@
+[package]
+name = "noeta-ir-passes"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-ir = { workspace = true }
+noeta-span = { workspace = true }
+
+[dev-dependencies]
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+
+[lints]
+workspace = true

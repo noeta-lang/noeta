@@ -1,0 +1,16 @@
+---
+source: crates/noeta-ir/tests/golden.rs
+expression: "lower_dump(\"f = fn(n) => n + 1;\\nr = match f(2) {\\n  3 => \\\"three\\\",\\n  _ => \\\"other\\\",\\n};\\necho r;\\n\")"
+---
+program (temps: 3)
+  let %0 = closure fn(n)
+  f = %0
+  let %1 = call f(2)
+  %2 = match %1 {
+    3 =>
+      tail "three"
+    _ =>
+      tail "other"
+  }
+  r = %2
+  echo r

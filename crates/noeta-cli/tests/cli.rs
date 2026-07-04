@@ -1,7 +1,7 @@
 //! End-to-end tests for the `lang` binary itself: the `run` and `repl` subcommands, driven through
 //! a real process so the CLI glue, exit codes, stdout/stderr split, and the REPL's interactive
 //! behaviour are all exercised (none of which the library-level tests can reach). The conformance
-//! corpus runner moved to its own dev binary (`lang-conformance`), with its CLI tests alongside it.
+//! corpus runner moved to its own dev binary (`noeta-conformance`), with its CLI tests alongside it.
 
 use std::path::PathBuf;
 
@@ -19,7 +19,7 @@ fn workspace() -> PathBuf {
 /// the loader scan — and parse — every other test's (or stray) `.noe` file as a candidate module.
 /// A dedicated directory guarantees the entry is the only module in scope.
 fn temp_program(name: &str, src: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("lang_cli_test_{name}"));
+    let dir = std::env::temp_dir().join(format!("noeta_cli_test_{name}"));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     let path = dir.join("main.noe");
     std::fs::write(&path, src).expect("write temp program");
@@ -259,7 +259,7 @@ fn run_reads_the_real_environment() {
 #[test]
 fn run_does_real_disk_io() {
     // `fs.write`/`fs.read` hit the REAL disk (RealHost), relative to the working directory.
-    let dir = std::env::temp_dir().join("lang_cli_realfs_dir");
+    let dir = std::env::temp_dir().join("noeta_cli_realfs_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let _ = std::fs::remove_file(dir.join("e2e.txt"));
     let file = temp_program(
@@ -287,7 +287,7 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
     // CLI's real executor the reads hit the REAL disk and run concurrently on tokio; here two files
     // are read in a `concurrent` block and awaited for their contents. (Conformance covers the
     // deterministic sandbox path; this proves the real-disk, real-executor path.)
-    let dir = std::env::temp_dir().join("lang_cli_async_read_dir");
+    let dir = std::env::temp_dir().join("noeta_cli_async_read_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     std::fs::write(dir.join("a.txt"), "alpha").expect("write a");
     std::fs::write(dir.join("b.txt"), "beta").expect("write b");
@@ -318,7 +318,7 @@ fn run_reads_files_asynchronously_on_the_real_executor() {
 fn run_writes_files_asynchronously_on_the_real_executor() {
     // Track A.10: `fs.write_async`/`append_async` hit the REAL disk via the real executor's tokio
     // runtime, awaited like any future. A write/append/read round-trip lands on disk.
-    let dir = std::env::temp_dir().join("lang_cli_async_write_dir");
+    let dir = std::env::temp_dir().join("noeta_cli_async_write_dir");
     std::fs::create_dir_all(&dir).expect("create work dir");
     let _ = std::fs::remove_file(dir.join("w.txt"));
     let src = "use std.{fs}\n\

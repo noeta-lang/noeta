@@ -25,7 +25,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use lang_check::BUILTIN_TIERS;
+use noeta_check::BUILTIN_TIERS;
 
 /// The manifest file name, discovered at or above the entry file's directory.
 pub const MANIFEST_NAME: &str = "noeta.toml";

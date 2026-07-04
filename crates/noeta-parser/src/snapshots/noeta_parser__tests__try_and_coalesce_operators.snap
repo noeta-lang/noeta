@@ -1,0 +1,22 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"fn place(items): int { validate(items)?; user = find(1) ?? guest(); return Ok(user); }\")"
+---
+(program @0..86
+  (fn place [items] @0..86
+    (expr-stmt @23..40
+      (try @23..39
+        (call @23..38
+          (ident validate @23..31)
+          (ident items @32..37))))
+    (binding user @41..67
+      (coalesce @48..66
+        (call @48..55
+          (ident find @48..52)
+          (int 1 @53..54))
+        (call @59..66
+          (ident guest @59..64))))
+    (return @68..84
+      (call @75..83
+        (ident Ok @75..77)
+        (ident user @78..82)))))

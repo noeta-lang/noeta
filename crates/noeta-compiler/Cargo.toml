@@ -1,0 +1,26 @@
+[package]
+name = "noeta-compiler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-ast = { workspace = true }
+noeta-ir = { workspace = true }
+noeta-ir-passes = { workspace = true }
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-builtins = { workspace = true }
+noeta-object = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-check = { workspace = true }
+
+[dev-dependencies]
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+
+[lints]
+workspace = true

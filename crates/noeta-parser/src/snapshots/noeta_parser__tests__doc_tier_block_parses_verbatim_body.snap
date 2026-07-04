@@ -1,0 +1,9 @@
+---
+source: crates/noeta-parser/src/lib.rs
+assertion_line: 3116
+expression: "pretty(\"@doc {\\n  # Heading\\n  Some *markdown* with `code`.\\n}\\necho 1\")"
+---
+(program @0..58
+  (tier doc @0..51 :text "\n  # Heading\n  Some *markdown* with `code`.\n")
+  (echo @52..58
+    (int 1 @57..58)))

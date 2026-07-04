@@ -4,7 +4,7 @@
 //! VM bytecode — a debugging aid), and `repl` (interactive); all drive the same pipeline crates, so
 //! the binary is thin glue. The binary is
 //! named `noeta` (the Noeta toolchain binary). The conformance corpus / differential
-//! / leak harness that tests the *implementation* is a separate dev binary (`lang-conformance`), not
+//! / leak harness that tests the *implementation* is a separate dev binary (`noeta-conformance`), not
 //! a subcommand here — which is what keeps the `noeta test` verb free for a user program's own
 //! `@test {}` blocks (object-model slice 6).
 
@@ -17,14 +17,14 @@ use std::thread;
 use std::time::Instant;
 
 use clap::{Parser, Subcommand};
-use lang_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
-use lang_check::TierFn;
-use lang_diagnostics::{Diagnostic, DiagnosticCode, render};
-use lang_eval::{Session, SessionOutput};
-use lang_lexer::{TokenKind, lex};
-use lang_parser::parse;
-use lang_span::{Source, SourceId, SourceMap, Span};
-use lang_vm::VmBackend;
+use noeta_ast::{AttrArg, AttrValue, Expr, Program, Stmt};
+use noeta_check::TierFn;
+use noeta_diagnostics::{Diagnostic, DiagnosticCode, render};
+use noeta_eval::{Session, SessionOutput};
+use noeta_lexer::{TokenKind, lex};
+use noeta_parser::parse;
+use noeta_span::{Source, SourceId, SourceMap, Span};
+use noeta_vm::VmBackend;
 
 mod manifest;
 
@@ -157,11 +157,11 @@ fn tier_active_in_profile(
 /// Type-check and run a program, writing stdout to the real stdout and rendering any diagnostics to
 /// stderr — each against the source its span belongs to (via the `SourceMap`). Returns the process
 /// exit code. `program` is the loaded program, possibly after dev-tier activation (`cmd_run`).
-fn run_program(program: &lang_ast::Program, sources: &SourceMap) -> i32 {
+fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
     // The loader already lexed + parsed (and reported any lex/parse errors); type-check then run.
     // One `check_all` produces both the gate diagnostics and the `type_of` site map the backend
     // needs, so the checker runs exactly once (it previously ran again inside the backend).
-    let checked = lang_check::check_all(program);
+    let checked = noeta_check::check_all(program);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(sources, checked.diagnostics.iter());
         return 1;
@@ -191,10 +191,10 @@ fn run_program(program: &lang_ast::Program, sources: &SourceMap) -> i32 {
 /// `Err` here does not mean "ordinary unsupported user program"; it means that invariant broke, and
 /// we surface it rather than silently downgrading to a different backend.
 fn compile_real(
-    program: &lang_ast::Program,
-    checked: &lang_check::Checked,
-) -> Result<lang_bytecode::Module, String> {
-    lang_compiler::compile_with_sites(
+    program: &noeta_ast::Program,
+    checked: &noeta_check::Checked,
+) -> Result<noeta_bytecode::Module, String> {
+    noeta_compiler::compile_with_sites(
         program,
         checked.type_of_sites.clone(),
         checked.packed_list_sites.clone(),
@@ -227,20 +227,20 @@ fn compile_real(
 /// sandbox, so this real-host path is never compared backend-to-backend. Shared by `noeta run` and the
 /// `@test` runner so both execute a program identically.
 fn execute_real_host(
-    program: &lang_ast::Program,
-    checked: &lang_check::Checked,
-) -> Result<lang_backend::RunResult, String> {
+    program: &noeta_ast::Program,
+    checked: &noeta_check::Checked,
+) -> Result<noeta_backend::RunResult, String> {
     let module = std::sync::Arc::new(compile_real(program, checked)?);
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
-    // clock / async state is independent. Injected here (not in `lang-vm`) so the VM crate needs no
-    // `lang-runtime`/tokio dependency. A worker that cannot start its runtime panics the worker thread,
+    // clock / async state is independent. Injected here (not in `noeta-vm`) so the VM crate needs no
+    // `noeta-runtime`/tokio dependency. A worker that cannot start its runtime panics the worker thread,
     // which surfaces as an isolate failure at the `.await`.
-    let factory: lang_vm::IsolateFactory = std::sync::Arc::new(|| {
-        let host: Box<dyn lang_stdlib::Host> =
-            Box::new(lang_runtime::RealHost::new().expect("cannot start an isolate's runtime"));
-        let executor: Box<dyn lang_stdlib::Executor> = Box::new(
-            lang_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
+    let factory: noeta_vm::IsolateFactory = std::sync::Arc::new(|| {
+        let host: Box<dyn noeta_stdlib::Host> =
+            Box::new(noeta_runtime::RealHost::new().expect("cannot start an isolate's runtime"));
+        let executor: Box<dyn noeta_stdlib::Executor> = Box::new(
+            noeta_runtime::RealExecutor::new().expect("cannot start an isolate's async executor"),
         );
         (host, executor)
     });
@@ -295,7 +295,7 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
 
     // Load + link the program: sibling `.noe` modules the entry `use`s are resolved and merged
     // (M1.9); a lone file with no sibling modules links to exactly itself.
-    match lang_loader::load(file) {
+    match noeta_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
             ExitCode::from(2)
@@ -309,7 +309,7 @@ fn cmd_run(file: &std::path::Path, tiers: &[String], profile: &Option<String>) -
                 return exit_code(run_program(&linked.program, &linked.sources));
             }
             let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-            let activated = lang_check::activate_tiers(&linked.program, &active_refs);
+            let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
             if !activated.diagnostics.is_empty() {
                 emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
                 return ExitCode::from(1);
@@ -348,7 +348,7 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) 
         }
     }
 
-    match lang_loader::load(file) {
+    match noeta_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
             ExitCode::from(2)
@@ -356,7 +356,7 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) 
         Ok(Ok(linked)) => {
             // Check + compile a (possibly tier-activated) program and print its disassembly.
             let dump = |program: &Program| -> ExitCode {
-                let checked = lang_check::check_all(program);
+                let checked = noeta_check::check_all(program);
                 if !checked.diagnostics.is_empty() {
                     emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
                     return ExitCode::from(1);
@@ -377,7 +377,7 @@ fn cmd_dump(file: &std::path::Path, tiers: &[String], profile: &Option<String>) 
                 dump(&linked.program)
             } else {
                 let active_refs: Vec<&str> = active.iter().map(String::as_str).collect();
-                let activated = lang_check::activate_tiers(&linked.program, &active_refs);
+                let activated = noeta_check::activate_tiers(&linked.program, &active_refs);
                 if !activated.diagnostics.is_empty() {
                     emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
                     ExitCode::from(1)
@@ -441,7 +441,7 @@ fn cmd_test(
     if let Some(code) = profile_gate(file, profile, "test") {
         return code;
     }
-    let linked = match lang_loader::load(file) {
+    let linked = match noeta_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
             return ExitCode::from(2);
@@ -458,7 +458,7 @@ fn cmd_test(
 
     // Activate the `test` tier: inline its `@test` blocks as ordinary top-level declarations and
     // collect the test fns. An unknown-tier block is an E0036 (a typo must not silently vanish).
-    let activated = lang_check::activate_tiers(&linked.program, &["test"]);
+    let activated = noeta_check::activate_tiers(&linked.program, &["test"]);
     if !activated.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
         return ExitCode::from(1);
@@ -466,7 +466,7 @@ fn cmd_test(
 
     // Type-check the activated program once, so a broken test is a compile error reported a single
     // time here rather than redundantly inside every per-test run.
-    let checked = lang_check::check_all(&activated.program);
+    let checked = noeta_check::check_all(&activated.program);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return ExitCode::from(1);
@@ -637,7 +637,7 @@ fn data_rows(test: &TierFn) -> Option<Vec<AttrValue>> {
     let attr = test
         .attrs
         .iter()
-        .find(|a| a.name == lang_ast::reflect::TEST_ATTR_DATA)?;
+        .find(|a| a.name == noeta_ast::reflect::TEST_ATTR_DATA)?;
     attr.args.iter().find_map(|arg| match &arg.value {
         AttrValue::List(items) => Some(items.clone()),
         _ => None,
@@ -648,14 +648,14 @@ fn data_rows(test: &TierFn) -> Option<Vec<AttrValue>> {
 fn test_is_skipped(test: &TierFn) -> bool {
     test.attrs
         .iter()
-        .any(|a| a.name == lang_ast::reflect::TEST_ATTR_SKIP)
+        .any(|a| a.name == noeta_ast::reflect::TEST_ATTR_SKIP)
 }
 
 /// The report label for a skipped test: its display name, plus a `(reason)` when `#[Skip("reason")]`
 /// gave one.
 fn skip_label(test: &TierFn) -> String {
     let name = test_display_name(test);
-    match string_attr(test, lang_ast::reflect::TEST_ATTR_SKIP) {
+    match string_attr(test, noeta_ast::reflect::TEST_ATTR_SKIP) {
         Some(reason) if !reason.is_empty() => format!("{name} ({reason})"),
         _ => name,
     }
@@ -663,12 +663,12 @@ fn skip_label(test: &TierFn) -> String {
 
 /// A test's display name — the string in `#[Name("…")]` if present, else the fn's own name.
 fn test_display_name(test: &TierFn) -> String {
-    string_attr(test, lang_ast::reflect::TEST_ATTR_NAME).unwrap_or_else(|| test.name.clone())
+    string_attr(test, noeta_ast::reflect::TEST_ATTR_NAME).unwrap_or_else(|| test.name.clone())
 }
 
 /// A test's group — the string in `#[Group("…")]` if present, for `--group` filtering.
 fn test_group(test: &TierFn) -> Option<String> {
-    string_attr(test, lang_ast::reflect::TEST_ATTR_GROUP)
+    string_attr(test, noeta_ast::reflect::TEST_ATTR_GROUP)
 }
 
 /// The first string-valued argument of the attribute named `name` on `test`, if any.
@@ -791,7 +791,7 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
     stmts.push(call_stmt(&case.fn_name, args, case.span));
     let program = Program { stmts, span };
 
-    let checked = lang_check::check_all(&program);
+    let checked = noeta_check::check_all(&program);
     if !checked.diagnostics.is_empty() {
         return TestOutcome {
             name: display,
@@ -892,7 +892,7 @@ fn cmd_bench(
     if let Some(code) = profile_gate(file, profile, "bench") {
         return code;
     }
-    let linked = match lang_loader::load(file) {
+    let linked = match noeta_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
             return ExitCode::from(2);
@@ -909,7 +909,7 @@ fn cmd_bench(
 
     // Activate the `bench` tier: inline its `@bench` blocks as ordinary top-level declarations and
     // collect the bench fns (with their directive args). An unknown-tier block is an E0036.
-    let activated = lang_check::activate_tiers(&linked.program, &["bench"]);
+    let activated = noeta_check::activate_tiers(&linked.program, &["bench"]);
     if !activated.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, activated.diagnostics.iter());
         return ExitCode::from(1);
@@ -917,7 +917,7 @@ fn cmd_bench(
 
     // Type-check once, so a broken benchmark is a compile error reported here rather than inside
     // every per-bench run.
-    let checked = lang_check::check_all(&activated.program);
+    let checked = noeta_check::check_all(&activated.program);
     if !checked.diagnostics.is_empty() {
         emit_diagnostics_mapped(&linked.sources, checked.diagnostics.iter());
         return ExitCode::from(1);
@@ -978,7 +978,7 @@ fn cmd_bench(
 /// override of the default iteration count. Resolved through the shared tier-arg schema, so both the
 /// positional (`@bench(1000)`) and named (`@bench(iterations: 1000)`) forms work identically.
 fn iterations_arg(args: &[AttrArg]) -> Option<u64> {
-    match lang_check::bind_tier_args("bench", args)
+    match noeta_check::bind_tier_args("bench", args)
         .values
         .get("iterations")
     {
@@ -1007,7 +1007,7 @@ fn measure_iterations(
         span: bench.span,
     };
 
-    let checked = lang_check::check_all(&program);
+    let checked = noeta_check::check_all(&program);
     if !checked.diagnostics.is_empty() {
         return Err(checked.diagnostics[0].message.clone());
     }
@@ -1035,10 +1035,10 @@ fn measure_iterations(
 /// pipeline so a benchmark runs the same Core-IR path a normal `noeta run` does.
 fn bench_execute(
     program: &Program,
-    checked: &lang_check::Checked,
-) -> Result<(lang_backend::RunResult, std::time::Duration), String> {
+    checked: &noeta_check::Checked,
+) -> Result<(noeta_backend::RunResult, std::time::Duration), String> {
     let host =
-        lang_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
+        noeta_runtime::RealHost::new().map_err(|err| format!("cannot start the runtime: {err}"))?;
     // Compile to bytecode untimed (isolates I.4a — the real path is the VM), then time execution
     // alone, so the measurement excludes both lowering and bytecode generation.
     let module = compile_real(program, checked)?;
@@ -1071,7 +1071,7 @@ fn cmd_doc(file: &std::path::Path, profile: &Option<String>) -> ExitCode {
     if let Some(code) = profile_gate(file, profile, "doc") {
         return code;
     }
-    let linked = match lang_loader::load(file) {
+    let linked = match noeta_loader::load(file) {
         Err(err) => {
             eprintln!("lang: cannot read {}: {err}", file.display());
             return ExitCode::from(2);
@@ -1086,7 +1086,7 @@ fn cmd_doc(file: &std::path::Path, profile: &Option<String>) -> ExitCode {
         }
     };
 
-    let docs = lang_check::collect_docs(&linked.program);
+    let docs = noeta_check::collect_docs(&linked.program);
     if docs.is_empty() {
         eprintln!("lang: no `@doc` blocks found");
         return ExitCode::SUCCESS;
@@ -1358,7 +1358,7 @@ fn repl_step(session: &mut Session, buffer: &str, entry_no: &mut u32) -> ReplSte
 /// signature of a multi-line REPL entry still being typed. A single net depth across all three kinds
 /// is enough to decide *incompleteness* (the parser validates correct nesting once the buffer is
 /// balanced); a buffer that closes more than it opens (net ≤ 0) is left to the parser to report.
-fn unclosed_delimiters(tokens: &[lang_lexer::Token]) -> bool {
+fn unclosed_delimiters(tokens: &[noeta_lexer::Token]) -> bool {
     let mut depth: i32 = 0;
     for token in tokens {
         match token.kind {
@@ -1389,7 +1389,7 @@ fn exit_code(code: i32) -> ExitCode {
 mod tests {
     use super::*;
 
-    fn toks(src: &str) -> Vec<lang_lexer::Token> {
+    fn toks(src: &str) -> Vec<noeta_lexer::Token> {
         lex(&Source::new(SourceId::FIRST, "<t>", src.to_string())).tokens
     }
 

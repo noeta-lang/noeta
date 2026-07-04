@@ -11,39 +11,39 @@ rust-version = "1.95"
 
 [workspace.dependencies]
 # Internal crates (path deps; the pipeline DAG)
-lang-span = { path = "crates/lang-span" }
-lang-diagnostics = { path = "crates/lang-diagnostics" }
-lang-ast = { path = "crates/lang-ast" }
-lang-lexer = { path = "crates/lang-lexer" }
-lang-parser = { path = "crates/lang-parser" }
-lang-builtins = { path = "crates/lang-builtins" }
-lang-backend = { path = "crates/lang-backend" }
-lang-eval = { path = "crates/lang-eval" }
+noeta-span = { path = "crates/noeta-span" }
+noeta-diagnostics = { path = "crates/noeta-diagnostics" }
+noeta-ast = { path = "crates/noeta-ast" }
+noeta-lexer = { path = "crates/noeta-lexer" }
+noeta-parser = { path = "crates/noeta-parser" }
+noeta-builtins = { path = "crates/noeta-builtins" }
+noeta-backend = { path = "crates/noeta-backend" }
+noeta-eval = { path = "crates/noeta-eval" }
 # M1 runtime crates (NaN-boxed values → register bytecode VM)
-lang-object = { path = "crates/lang-object" }
-lang-value = { path = "crates/lang-value" }
-lang-gc = { path = "crates/lang-gc" }
-lang-bytecode = { path = "crates/lang-bytecode" }
-lang-compiler = { path = "crates/lang-compiler" }
-lang-vm = { path = "crates/lang-vm" }
-# JIT backend (milestone P-JIT): Cranelift tier-1 compiler, behind lang-vm's `jit` feature.
-lang-jit = { path = "crates/lang-jit" }
-lang-db = { path = "crates/lang-db" }
-lang-conformance = { path = "crates/lang-conformance" }
+noeta-object = { path = "crates/noeta-object" }
+noeta-value = { path = "crates/noeta-value" }
+noeta-gc = { path = "crates/noeta-gc" }
+noeta-bytecode = { path = "crates/noeta-bytecode" }
+noeta-compiler = { path = "crates/noeta-compiler" }
+noeta-vm = { path = "crates/noeta-vm" }
+# JIT backend (milestone P-JIT): Cranelift tier-1 compiler, behind noeta-vm's `jit` feature.
+noeta-jit = { path = "crates/noeta-jit" }
+noeta-db = { path = "crates/noeta-db" }
+noeta-conformance = { path = "crates/noeta-conformance" }
 # Test-only heap-residency probe (dev-dependency; tracking global allocator)
-lang-alloc-probe = { path = "crates/lang-alloc-probe" }
+noeta-alloc-probe = { path = "crates/noeta-alloc-probe" }
 # Core IR (memory-management migration: ANF lowering target)
-lang-ir = { path = "crates/lang-ir" }
+noeta-ir = { path = "crates/noeta-ir" }
 # Core IR passes (memory-management migration: precise-RC analyses + transforms)
-lang-ir-passes = { path = "crates/lang-ir-passes" }
+noeta-ir-passes = { path = "crates/noeta-ir-passes" }
 # M1 type checker (Thrust B)
-lang-types = { path = "crates/lang-types" }
-lang-check = { path = "crates/lang-check" }
+noeta-types = { path = "crates/noeta-types" }
+noeta-check = { path = "crates/noeta-check" }
 # M1 modules (Thrust C)
-lang-loader = { path = "crates/lang-loader" }
-lang-stdlib = { path = "crates/lang-stdlib" }
+noeta-loader = { path = "crates/noeta-loader" }
+noeta-stdlib = { path = "crates/noeta-stdlib" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
-lang-runtime = { path = "crates/lang-runtime" }
+noeta-runtime = { path = "crates/noeta-runtime" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"

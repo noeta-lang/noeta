@@ -1,0 +1,48 @@
+[package]
+name = "noeta-vm"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-ast = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-backend = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-value = { workspace = true }
+noeta-gc = { workspace = true }
+noeta-span = { workspace = true }
+noeta-object = { workspace = true }
+noeta-stdlib = { workspace = true }
+# Tier-1 JIT (milestone P-JIT), optional — only pulled in under the `jit` feature.
+noeta-jit = { workspace = true, optional = true }
+
+[features]
+# The Cranelift method JIT (P-JIT). Off by default: without it the crate never pulls Cranelift,
+# and the interpreter/sandbox/differential are byte-identical — the same gating the real-thread
+# isolates use. `noeta-conformance` turns it on to run the `--jit-differential` oracle.
+jit = ["dep:noeta-jit"]
+
+[dev-dependencies]
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+insta = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "vm"
+harness = false
+
+# This crate re-states the workspace lint table with one change: `unsafe_code` is `deny` (not the
+# workspace's `forbid`) so the single tier-1 JIT dispatch site (P-JIT) — which calls a
+# Cranelift-finalized `extern "C"` function pointer — can opt in with an explicit
+# `#[allow(unsafe_code)]`. Everything else in the crate stays unsafe-free (`deny` catches it).
+[lints.rust]
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

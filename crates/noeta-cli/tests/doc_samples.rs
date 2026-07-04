@@ -15,7 +15,7 @@
 //!
 //! ```` ```console ````, ```` ```toml ````, and other languages are ignored entirely.
 //!
-//! When you add or edit a sample, run `cargo test -p lang-cli --test doc_samples`. If a genuinely
+//! When you add or edit a sample, run `cargo test -p noeta-cli --test doc_samples`. If a genuinely
 //! complete example fails, fix the example (or the code it documents); only tag `ignore` when the
 //! block truly cannot stand alone.
 
@@ -74,7 +74,7 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     if sample.tag == "ignore" {
         return Ok(());
     }
-    let dir = std::env::temp_dir().join(format!("lang_doc_sample_{idx}"));
+    let dir = std::env::temp_dir().join(format!("noeta_doc_sample_{idx}"));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("create sample dir");
     let path = dir.join("main.noe");

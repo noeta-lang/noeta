@@ -11,20 +11,20 @@ name = "noeta"
 path = "src/main.rs"
 
 [dependencies]
-lang-span = { workspace = true }
-lang-ast = { workspace = true }
-lang-backend = { workspace = true }
-lang-diagnostics = { workspace = true }
-lang-lexer = { workspace = true }
-lang-parser = { workspace = true }
-lang-eval = { workspace = true }
-lang-vm = { workspace = true }
-lang-compiler = { workspace = true }
-lang-bytecode = { workspace = true }
-lang-check = { workspace = true }
-lang-loader = { workspace = true }
-lang-runtime = { workspace = true }
-lang-stdlib = { workspace = true }
+noeta-span = { workspace = true }
+noeta-ast = { workspace = true }
+noeta-backend = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-eval = { workspace = true }
+noeta-vm = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-check = { workspace = true }
+noeta-loader = { workspace = true }
+noeta-runtime = { workspace = true }
+noeta-stdlib = { workspace = true }
 clap = { workspace = true }
 toml = { workspace = true }
 
@@ -33,7 +33,7 @@ toml = { workspace = true }
 # `bench` drive the tier-1 JIT under hot-counter promotion. `--no-default-features` builds a
 # Cranelift-free interpreter-only binary (identical behaviour, smaller build).
 default = ["jit"]
-jit = ["lang-vm/jit"]
+jit = ["noeta-vm/jit"]
 
 [dev-dependencies]
 assert_cmd = { workspace = true }

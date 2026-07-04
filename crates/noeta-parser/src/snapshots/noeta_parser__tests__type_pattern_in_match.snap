@@ -1,0 +1,16 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"x = match v { is int => 1, is List<int> => 2, is int | string => 3, _ => 0 };\")"
+---
+(program @0..77
+  (binding x @0..77
+    (match @4..76
+      (ident v @10..11)
+      (arm is int
+        (int 1 @24..25))
+      (arm is List<int>
+        (int 2 @43..44))
+      (arm is int | string
+        (int 3 @65..66))
+      (arm _
+        (int 0 @73..74)))))

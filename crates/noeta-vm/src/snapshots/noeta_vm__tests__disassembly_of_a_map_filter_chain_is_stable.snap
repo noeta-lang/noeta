@@ -1,0 +1,49 @@
+---
+source: crates/noeta-vm/src/lib.rs
+assertion_line: 7641
+expression: module.disassemble()
+---
+=== main ===
+params: 0, registers: 5
+constants:
+  k0 = 1
+  k1 = 2
+  k2 = 3
+  k3 = 4
+code:
+    0  LoadConst   r1 <- k0
+    1  LoadConst   r2 <- k1
+    2  LoadConst   r3 <- k2
+    3  LoadConst   r4 <- k3
+    4  MakeList    r0 <- [r1, r2, r3, r4]  ; reflect #0
+    5  MakeClosure r1 <- proto 1 [0 captures]
+    6  CallBuiltin r2 <- filter(r0, r1)
+    7  MakeClosure r0 <- proto 2 [0 captures]
+    8  CallBuiltin r1 <- map(r2, r0)
+    9  CallBuiltin r0 <- sum(r1)
+   10  Stringify   r1 <- display(r0)
+   11  Echo        r1
+   12  Halt
+=== proto 1 ===
+params: 1, registers: 3
+constants:
+  k0 = 2
+  k1 = 0
+code:
+    0  LoadConst   r2 <- k0
+    1  Binary      r1 <- r0 % r2
+    2  Drop        r0
+    3  LoadConst   r2 <- k1
+    4  Binary      r0 <- r1 == r2
+    5  Return      r0
+    6  Halt
+=== proto 2 ===
+params: 1, registers: 3
+constants:
+  k0 = 10
+code:
+    0  LoadConst   r2 <- k0
+    1  Binary      r1 <- r0 * r2
+    2  Drop        r0
+    3  Return      r1
+    4  Halt

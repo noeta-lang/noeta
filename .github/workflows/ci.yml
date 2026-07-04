@@ -47,13 +47,13 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # The workspace suite is the spine: the conformance corpus, the eval↔interpreter differential
       # (backends must agree, 0 skipped), the leak oracle (residency 0), IR-lowering totality, and the
-      # drop-safety property — alongside all unit tests. `lang-jit` is excluded, and `noeta-cli` too:
+      # drop-safety property — alongside all unit tests. `noeta-jit` is excluded, and `noeta-cli` too:
       # the shipped CLI now defaults to the `jit` feature (P-JIT), so building it here would pull
       # Cranelift into this job through feature unification. Excluding it keeps this the Cranelift-free
       # library + oracle proof; the `jit` job owns the JIT-enabled CLI, and the lean-CLI build below
       # proves the Cranelift-free binary still compiles (the point of the feature gate).
       - name: cargo test --workspace (default, Cranelift-free)
-        run: cargo test --workspace --exclude lang-jit --exclude noeta-cli --locked
+        run: cargo test --workspace --exclude noeta-jit --exclude noeta-cli --locked
       # The `lang` binary is JIT-enabled by default; prove `--no-default-features` still yields a
       # working interpreter-only CLI (identical behaviour, no Cranelift).
       - name: lean CLI build (--no-default-features, Cranelift-free)
@@ -83,12 +83,12 @@ jobs:
       # The eval↔interpreter differential never exercises the JIT (it is a real-host accelerator that
       # falls back to the interpreter), so the JIT ships its own oracle: interpreter vs forced tier-1
       # native code must produce a byte-identical RunResult and leave zero heap residency.
-      - name: JIT unit tests (lang-vm)
-        run: cargo test -p lang-vm --features jit --locked
+      - name: JIT unit tests (noeta-vm)
+        run: cargo test -p noeta-vm --features jit --locked
       - name: JIT differential + leak-under-JIT corpus gate
-        run: cargo test -p lang-conformance --features jit --locked
+        run: cargo test -p noeta-conformance --features jit --locked
       - name: JIT differential (coverage summary)
-        run: cargo run -p lang-conformance --features jit --locked -- --jit-differential
+        run: cargo run -p noeta-conformance --features jit --locked -- --jit-differential
       # The shipped CLI defaults to the `jit` feature, so its integration tests and doc-sample gate now
       # exercise the production hot-counter JIT end-to-end (real-host `lang run`/`test`). Gate that path.
       - name: JIT-enabled CLI (integration + doc samples)
@@ -103,16 +103,16 @@ jobs:
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2
-      # Default build excludes `lang-jit` and `noeta-cli` (both pull Cranelift — noeta-cli via its
+      # Default build excludes `noeta-jit` and `noeta-cli` (both pull Cranelift — noeta-cli via its
       # default `jit` feature; kept Cranelift-free here, like the `test` job); the jit step lints them.
       - name: Clippy (default features)
-        run: cargo clippy --workspace --exclude lang-jit --exclude noeta-cli --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude noeta-jit --exclude noeta-cli --all-targets --locked -- -D warnings
       # Lint the JIT code path, the `vm_jit` bench, and the JIT-enabled CLI — they only pull Cranelift
       # under the `jit` feature (noeta-cli by default).
       - name: Clippy (jit feature)
         run: >
-          cargo clippy -p lang-vm -p lang-jit -p lang-conformance -p noeta-cli
-          --features "lang-vm/jit lang-conformance/jit" --all-targets --locked -- -D warnings
+          cargo clippy -p noeta-vm -p noeta-jit -p noeta-conformance -p noeta-cli
+          --features "noeta-vm/jit noeta-conformance/jit" --all-targets --locked -- -D warnings
 
   miri:
     name: Miri (unsafe value & collector paths)
@@ -131,7 +131,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Miri setup
         run: cargo miri setup
-      # `lang-value` (the NaN-box value model + heap header) and `lang-gc` (the cycle collector) are the
+      # `noeta-value` (the NaN-box value model + heap header) and `noeta-gc` (the cycle collector) are the
       # crates that opt out of the workspace `unsafe_code = "forbid"` for the refcount/collector paths.
-      - name: cargo miri test (lang-value, lang-gc)
-        run: cargo miri test -p lang-value -p lang-gc --locked
+      - name: cargo miri test (noeta-value, noeta-gc)
+        run: cargo miri test -p noeta-value -p noeta-gc --locked

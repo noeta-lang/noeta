@@ -1,8 +1,0 @@
----
-source: crates/lang-lexer/src/lib.rs
-assertion_line: 151
-expression: "dump_tokens(&source, &lexed)"
----
-EchoKw @0..4 "echo"
-StringLit @5..9 "\"hi\""
-Semicolon @9..10 ";"

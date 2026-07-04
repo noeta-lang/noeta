@@ -1,0 +1,189 @@
+---
+source: crates/noeta-parser/src/lib.rs
+assertion_line: 2978
+expression: pretty(src)
+---
+(program @0..2685
+  (namespace App.Orders @668..689)
+  (use App.Models [User] @691..711)
+  (struct Item [price qty] @713..750)
+  (enum-backed Status [Pending Paid Refunded] @752..846)
+  (enum OrderError [Empty NegativePrice(index)] @848..909)
+  (class Order [id customer items mut status] @911..1525
+    (fn new [id customer items] @1006..1162
+      (return @1074..1156
+        (object Order @1081..1155
+          (field id @1089..1095
+            (ident id @1093..1095))
+          (field customer @1097..1115
+            (ident customer @1107..1115))
+          (field items @1117..1129
+            (ident items @1124..1129))
+          (field status @1131..1153
+            (member Pending @1139..1153
+              (ident Status @1139..1145))))))
+    (fn total [] @1168..1260
+      (return @1196..1254
+        (pipeline @1203..1253
+          (pipeline @1203..1244
+            (ident items @1203..1208)
+            (call @1212..1244
+              (ident map @1212..1215)
+              (closure [it] @1216..1243
+                (binary "*" @1226..1243
+                  (member price @1226..1234
+                    (ident it @1226..1228))
+                  (member qty @1237..1243
+                    (ident it @1237..1239))))))
+          (call @1248..1253
+            (ident sum @1248..1251)))))
+    (fn label [] @1266..1523
+      (return @1295..1517
+        (match @1302..1516
+          (ident status @1308..1314)
+          (arm Status.Pending
+            (interp @1348..1379
+              (lit "Order #")
+              (hole
+                (ident id @1358..1360))
+              (lit " awaiting payment")))
+          (arm Status.Paid
+            (interp @1412..1449
+              (lit "Order #")
+              (hole
+                (ident id @1422..1424))
+              (lit " paid: ")
+              (hole
+                (member name @1434..1447
+                  (ident customer @1434..1442)))))
+          (arm Status.Refunded
+            (interp @1482..1505
+              (lit "Order #")
+              (hole
+                (ident id @1492..1494))
+              (lit " refunded")))))))
+  (fn validate [items] @1527..1821
+    (if @1590..1657
+      (binary "==" @1593..1611
+        (call @1593..1606
+          (member count @1593..1604
+            (ident items @1593..1598)))
+        (int 0 @1610..1611))
+      (then
+        (return @1622..1651
+          (call @1629..1650
+            (ident Err @1629..1632)
+            (member Empty @1633..1649
+              (ident OrderError @1633..1643))))))
+    (for [(i, item)] @1662..1802
+      (call @1679..1696
+        (member enumerate @1679..1694
+          (ident items @1679..1684)))
+      (if @1707..1796
+        (binary "<" @1710..1724
+          (member price @1710..1720
+            (ident item @1710..1714))
+          (int 0 @1723..1724))
+        (then
+          (return @1739..1786
+            (call @1746..1785
+              (ident Err @1746..1749)
+              (call @1750..1784
+                (member NegativePrice @1750..1774
+                  (ident OrderError @1750..1760))
+                (ident i @1782..1783)))))))
+    (return @1807..1819
+      (call @1814..1818
+        (ident Ok @1814..1816))))
+  (fn place [items customer] @1823..1973
+    (expr-stmt @1900..1917
+      (try @1900..1916
+        (call @1900..1915
+          (ident validate @1900..1908)
+          (ident items @1909..1914))))
+    (return @1922..1971
+      (call @1929..1970
+        (ident Ok @1929..1931)
+        (call @1932..1969
+          (member new @1932..1941
+            (ident Order @1932..1937))
+          (call @1942..1951
+            (ident next_id @1942..1949))
+          (ident customer @1953..1961)
+          (ident items @1963..1968)))))
+  (fn describe [items customer] @1994..2336
+    (return @2055..2334
+      (match @2062..2333
+        (call @2068..2090
+          (ident place @2068..2073)
+          (ident items @2074..2079)
+          (ident customer @2081..2089))
+        (arm Ok(order)
+          (call @2115..2128
+            (member label @2115..2126
+              (ident order @2115..2120))))
+        (arm Err(error)
+          (match @2152..2326
+            (ident error @2158..2163)
+            (arm OrderError.Empty
+              (str "Cannot place an empty order" @2209..2238))
+            (arm OrderError.NegativePrice(i)
+              (interp @2283..2315
+                (lit "Item ")
+                (hole
+                  (ident i @2291..2292))
+                (lit " has a negative price"))))))))
+  (binding customer @2338..2379
+    (object User @2349..2378
+      (field name @2356..2376
+        (str "Ada Lovelace" @2362..2376))))
+  (binding items @2380..2449
+    (list @2388..2448
+      (object Item @2389..2417
+        (field price @2396..2407
+          (float 9.99 @2403..2407))
+        (field qty @2409..2415
+          (int 2 @2414..2415)))
+      (object Item @2419..2447
+        (field price @2426..2437
+          (float 4.5 @2433..2437))
+        (field qty @2439..2445
+          (int 1 @2444..2445)))))
+  (binding order @2451..2482
+    (call @2459..2481
+      (ident place @2459..2464)
+      (ident items @2465..2470)
+      (ident customer @2472..2480)))
+  (echo @2483..2566
+    (match @2488..2565
+      (ident order @2494..2499)
+      (arm Ok(o)
+        (interp @2516..2538
+          (lit "Placed: ")
+          (hole
+            (call @2527..2536
+              (member label @2527..2534
+                (ident o @2527..2528))))))
+      (arm Err(e)
+        (str "Failed" @2554..2562))))
+  (echo @2567..2598
+    (call @2572..2597
+      (ident describe @2572..2580)
+      (ident items @2581..2586)
+      (ident customer @2588..2596)))
+  (echo @2599..2627
+    (call @2604..2626
+      (ident describe @2604..2612)
+      (list @2613..2615)
+      (ident customer @2617..2625)))
+  (echo @2628..2684
+    (call @2633..2683
+      (ident describe @2633..2641)
+      (list @2642..2672
+        (object Item @2643..2671
+          (field price @2650..2661
+            (unary "-" @2657..2661
+              (float 1 @2658..2661)))
+          (field qty @2663..2669
+            (int 1 @2668..2669))))
+      (ident customer @2674..2682))))

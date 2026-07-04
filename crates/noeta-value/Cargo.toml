@@ -1,0 +1,31 @@
+[package]
+name = "noeta-value"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-ast = { workspace = true }
+# A first-class prelude builtin value (`Payload::NativeFn`) stores the `Builtin` id it dispatches
+# on. noeta-bytecode does not depend on noeta-value, so this adds no dependency cycle.
+noeta-bytecode = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-object = { workspace = true }
+# The M2.5 file handle stores `noeta_stdlib::FileHandle` directly so its cursor logic is shared
+# verbatim with the tree-walker (differential-by-construction). noeta-stdlib has no internal deps,
+# so this adds no dependency cycle.
+noeta-stdlib = { workspace = true }
+
+[dev-dependencies]
+proptest = { workspace = true }
+
+# This crate deliberately does NOT inherit the workspace lint table: it is one of the
+# few crates allowed `unsafe` (the NaN-box pointer round-trip and heap-header access).
+# It re-states the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

@@ -1,0 +1,15 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"echo 0..n - 1; echo 1..=10;\")"
+---
+(program @0..27
+  (echo @0..14
+    (range @5..13
+      (int 0 @5..6)
+      (binary "-" @8..13
+        (ident n @8..9)
+        (int 1 @12..13))))
+  (echo @15..27
+    (range-incl @20..26
+      (int 1 @20..21)
+      (int 10 @24..26))))

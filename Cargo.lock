@@ -797,303 +797,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
-name = "lang-alloc-probe"
-version = "0.0.0"
-
-[[package]]
-name = "lang-ast"
-version = "0.0.0"
-dependencies = [
- "lang-span",
-]
-
-[[package]]
-name = "lang-backend"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-diagnostics",
-]
-
-[[package]]
-name = "lang-builtins"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-span",
-]
-
-[[package]]
-name = "lang-bytecode"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-diagnostics",
- "lang-object",
- "lang-span",
- "lang-stdlib",
-]
-
-[[package]]
-name = "lang-check"
-version = "0.0.0"
-dependencies = [
- "insta",
- "lang-ast",
- "lang-diagnostics",
- "lang-lexer",
- "lang-parser",
- "lang-span",
- "lang-stdlib",
- "lang-types",
-]
-
-[[package]]
-name = "lang-compiler"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-builtins",
- "lang-bytecode",
- "lang-check",
- "lang-diagnostics",
- "lang-ir",
- "lang-ir-passes",
- "lang-lexer",
- "lang-object",
- "lang-parser",
- "lang-span",
- "lang-stdlib",
-]
-
-[[package]]
-name = "lang-conformance"
-version = "0.0.0"
-dependencies = [
- "assert_cmd",
- "clap",
- "insta",
- "lang-alloc-probe",
- "lang-ast",
- "lang-backend",
- "lang-bytecode",
- "lang-check",
- "lang-compiler",
- "lang-db",
- "lang-diagnostics",
- "lang-eval",
- "lang-ir",
- "lang-ir-passes",
- "lang-lexer",
- "lang-loader",
- "lang-parser",
- "lang-span",
- "lang-stdlib",
- "lang-value",
- "lang-vm",
- "predicates",
- "serde",
- "serde_json",
-]
-
-[[package]]
-name = "lang-db"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-bytecode",
- "lang-check",
- "lang-compiler",
- "lang-diagnostics",
- "lang-lexer",
- "lang-loader",
- "lang-parser",
- "lang-span",
- "lang-stdlib",
- "salsa",
-]
-
-[[package]]
-name = "lang-diagnostics"
-version = "0.0.0"
-dependencies = [
- "ariadne",
- "lang-span",
- "serde",
-]
-
-[[package]]
-name = "lang-eval"
-version = "0.0.0"
-dependencies = [
- "criterion",
- "insta",
- "lang-ast",
- "lang-backend",
- "lang-builtins",
- "lang-check",
- "lang-diagnostics",
- "lang-ir",
- "lang-ir-passes",
- "lang-lexer",
- "lang-parser",
- "lang-span",
- "lang-stdlib",
- "proptest",
-]
-
-[[package]]
-name = "lang-gc"
-version = "0.0.0"
-dependencies = [
- "lang-object",
- "lang-value",
-]
-
-[[package]]
-name = "lang-ir"
-version = "0.0.0"
-dependencies = [
- "insta",
- "lang-ast",
- "lang-diagnostics",
- "lang-lexer",
- "lang-parser",
- "lang-span",
- "lang-stdlib",
- "lang-types",
-]
-
-[[package]]
-name = "lang-ir-passes"
-version = "0.0.0"
-dependencies = [
- "lang-ir",
- "lang-lexer",
- "lang-parser",
- "lang-span",
-]
-
-[[package]]
-name = "lang-jit"
-version = "0.0.0"
-dependencies = [
- "cranelift-codegen",
- "cranelift-frontend",
- "cranelift-jit",
- "cranelift-module",
- "cranelift-native",
- "lang-ast",
- "lang-bytecode",
- "lang-span",
- "lang-value",
-]
-
-[[package]]
-name = "lang-lexer"
-version = "0.0.0"
-dependencies = [
- "insta",
- "lang-diagnostics",
- "lang-span",
- "logos",
-]
-
-[[package]]
-name = "lang-loader"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-diagnostics",
- "lang-lexer",
- "lang-parser",
- "lang-span",
-]
-
-[[package]]
-name = "lang-object"
-version = "0.0.0"
-
-[[package]]
-name = "lang-parser"
-version = "0.0.0"
-dependencies = [
- "chumsky",
- "insta",
- "lang-ast",
- "lang-diagnostics",
- "lang-lexer",
- "lang-span",
- "proptest",
-]
-
-[[package]]
-name = "lang-runtime"
-version = "0.0.0"
-dependencies = [
- "criterion",
- "lang-stdlib",
- "tokio",
-]
-
-[[package]]
-name = "lang-span"
-version = "0.0.0"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "lang-stdlib"
-version = "0.0.0"
-dependencies = [
- "bytemuck",
- "criterion",
- "serde_json",
-]
-
-[[package]]
-name = "lang-types"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-span",
-]
-
-[[package]]
-name = "lang-value"
-version = "0.0.0"
-dependencies = [
- "lang-ast",
- "lang-bytecode",
- "lang-diagnostics",
- "lang-object",
- "lang-stdlib",
- "proptest",
-]
-
-[[package]]
-name = "lang-vm"
-version = "0.0.0"
-dependencies = [
- "criterion",
- "insta",
- "lang-ast",
- "lang-backend",
- "lang-bytecode",
- "lang-compiler",
- "lang-diagnostics",
- "lang-gc",
- "lang-jit",
- "lang-lexer",
- "lang-object",
- "lang-parser",
- "lang-span",
- "lang-stdlib",
- "lang-value",
-]
-
-[[package]]
 name = "libc"
 version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1192,27 +895,324 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-alloc-probe"
+version = "0.0.0"
+
+[[package]]
+name = "noeta-ast"
+version = "0.0.0"
+dependencies = [
+ "noeta-span",
+]
+
+[[package]]
+name = "noeta-backend"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-diagnostics",
+]
+
+[[package]]
+name = "noeta-builtins"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-span",
+]
+
+[[package]]
+name = "noeta-bytecode"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-object",
+ "noeta-span",
+ "noeta-stdlib",
+]
+
+[[package]]
+name = "noeta-check"
+version = "0.0.0"
+dependencies = [
+ "insta",
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-types",
+]
+
+[[package]]
 name = "noeta-cli"
 version = "0.0.0"
 dependencies = [
  "assert_cmd",
  "clap",
- "lang-ast",
- "lang-backend",
- "lang-bytecode",
- "lang-check",
- "lang-compiler",
- "lang-diagnostics",
- "lang-eval",
- "lang-lexer",
- "lang-loader",
- "lang-parser",
- "lang-runtime",
- "lang-span",
- "lang-stdlib",
- "lang-vm",
+ "noeta-ast",
+ "noeta-backend",
+ "noeta-bytecode",
+ "noeta-check",
+ "noeta-compiler",
+ "noeta-diagnostics",
+ "noeta-eval",
+ "noeta-lexer",
+ "noeta-loader",
+ "noeta-parser",
+ "noeta-runtime",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-vm",
  "predicates",
  "toml",
+]
+
+[[package]]
+name = "noeta-compiler"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-builtins",
+ "noeta-bytecode",
+ "noeta-check",
+ "noeta-diagnostics",
+ "noeta-ir",
+ "noeta-ir-passes",
+ "noeta-lexer",
+ "noeta-object",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+]
+
+[[package]]
+name = "noeta-conformance"
+version = "0.0.0"
+dependencies = [
+ "assert_cmd",
+ "clap",
+ "insta",
+ "noeta-alloc-probe",
+ "noeta-ast",
+ "noeta-backend",
+ "noeta-bytecode",
+ "noeta-check",
+ "noeta-compiler",
+ "noeta-db",
+ "noeta-diagnostics",
+ "noeta-eval",
+ "noeta-ir",
+ "noeta-ir-passes",
+ "noeta-lexer",
+ "noeta-loader",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-value",
+ "noeta-vm",
+ "predicates",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "noeta-db"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-bytecode",
+ "noeta-check",
+ "noeta-compiler",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-loader",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+ "salsa",
+]
+
+[[package]]
+name = "noeta-diagnostics"
+version = "0.0.0"
+dependencies = [
+ "ariadne",
+ "noeta-span",
+ "serde",
+]
+
+[[package]]
+name = "noeta-eval"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "insta",
+ "noeta-ast",
+ "noeta-backend",
+ "noeta-builtins",
+ "noeta-check",
+ "noeta-diagnostics",
+ "noeta-ir",
+ "noeta-ir-passes",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+ "proptest",
+]
+
+[[package]]
+name = "noeta-gc"
+version = "0.0.0"
+dependencies = [
+ "noeta-object",
+ "noeta-value",
+]
+
+[[package]]
+name = "noeta-ir"
+version = "0.0.0"
+dependencies = [
+ "insta",
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-types",
+]
+
+[[package]]
+name = "noeta-ir-passes"
+version = "0.0.0"
+dependencies = [
+ "noeta-ir",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+]
+
+[[package]]
+name = "noeta-jit"
+version = "0.0.0"
+dependencies = [
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "noeta-ast",
+ "noeta-bytecode",
+ "noeta-span",
+ "noeta-value",
+]
+
+[[package]]
+name = "noeta-lexer"
+version = "0.0.0"
+dependencies = [
+ "insta",
+ "logos",
+ "noeta-diagnostics",
+ "noeta-span",
+]
+
+[[package]]
+name = "noeta-loader"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-parser",
+ "noeta-span",
+]
+
+[[package]]
+name = "noeta-object"
+version = "0.0.0"
+
+[[package]]
+name = "noeta-parser"
+version = "0.0.0"
+dependencies = [
+ "chumsky",
+ "insta",
+ "noeta-ast",
+ "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-span",
+ "proptest",
+]
+
+[[package]]
+name = "noeta-runtime"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "noeta-stdlib",
+ "tokio",
+]
+
+[[package]]
+name = "noeta-span"
+version = "0.0.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "noeta-stdlib"
+version = "0.0.0"
+dependencies = [
+ "bytemuck",
+ "criterion",
+ "serde_json",
+]
+
+[[package]]
+name = "noeta-types"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-span",
+]
+
+[[package]]
+name = "noeta-value"
+version = "0.0.0"
+dependencies = [
+ "noeta-ast",
+ "noeta-bytecode",
+ "noeta-diagnostics",
+ "noeta-object",
+ "noeta-stdlib",
+ "proptest",
+]
+
+[[package]]
+name = "noeta-vm"
+version = "0.0.0"
+dependencies = [
+ "criterion",
+ "insta",
+ "noeta-ast",
+ "noeta-backend",
+ "noeta-bytecode",
+ "noeta-compiler",
+ "noeta-diagnostics",
+ "noeta-gc",
+ "noeta-jit",
+ "noeta-lexer",
+ "noeta-object",
+ "noeta-parser",
+ "noeta-span",
+ "noeta-stdlib",
+ "noeta-value",
 ]
 
 [[package]]

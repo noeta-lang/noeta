@@ -1,0 +1,21 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"a = if n > 0 then 1 else 2; b = if v is int then v else 0;\")"
+---
+(program @0..58
+  (binding a @0..27
+    (match @4..26
+      (binary ">" @7..12
+        (ident n @7..8)
+        (int 0 @11..12))
+      (arm true
+        (int 1 @18..19))
+      (arm false
+        (int 2 @25..26))))
+  (binding b @28..58
+    (match @32..57
+      (ident v @35..36)
+      (arm is int
+        (ident v @49..50))
+      (arm _
+        (int 0 @56..57)))))

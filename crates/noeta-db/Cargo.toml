@@ -1,0 +1,30 @@
+[package]
+name = "noeta-db"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-ast = { workspace = true }
+noeta-lexer = { workspace = true }
+noeta-parser = { workspace = true }
+noeta-bytecode = { workspace = true }
+noeta-compiler = { workspace = true }
+noeta-check = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-loader = { workspace = true }
+salsa = { workspace = true }
+
+# This crate deliberately does NOT inherit the workspace lint table: the salsa
+# `Update` impls for the pass-through result newtypes are `unsafe` (a small,
+# audited always-replace surface — see the `replace_update!` macro). It re-states
+# the rest of the workspace lints minus `unsafe_code = "forbid"`.
+[lints.rust]
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }

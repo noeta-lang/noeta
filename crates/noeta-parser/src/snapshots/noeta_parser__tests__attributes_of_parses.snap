@@ -1,0 +1,7 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"x = attributes_of::<Route>();\")"
+---
+(program @0..29
+  (binding x @0..29
+    (attributes_of Route @4..28)))

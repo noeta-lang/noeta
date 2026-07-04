@@ -1,0 +1,14 @@
+---
+source: crates/noeta-parser/src/lib.rs
+expression: "pretty(\"fn f(x: dyn): ?int { a = x.as<int>(); b = x.as<List<int>>(); return a; }\")"
+---
+(program @0..72
+  (fn f [x] @0..72
+    (binding a @21..37
+      (as int @25..36
+        (ident x @25..26)))
+    (binding b @38..60
+      (as List<int> @42..59
+        (ident x @42..43)))
+    (return @61..70
+      (ident a @68..69))))

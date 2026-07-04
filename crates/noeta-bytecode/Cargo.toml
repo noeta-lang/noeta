@@ -1,0 +1,17 @@
+[package]
+name = "noeta-bytecode"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-ast = { workspace = true }
+noeta-stdlib = { workspace = true }
+noeta-span = { workspace = true }
+noeta-diagnostics = { workspace = true }
+noeta-object = { workspace = true }
+
+[lints]
+workspace = true
