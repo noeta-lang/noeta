@@ -2657,6 +2657,7 @@ impl<'m> Vm<'m> {
                         span,
                         cache,
                         reuse,
+                        consume_key,
                     } => {
                         // Resolve the interned method name once; every path below wants the `&str`.
                         let method = module.name(*method);
@@ -2685,6 +2686,7 @@ impl<'m> Vm<'m> {
                                 map_method,
                                 method,
                                 &arg_values,
+                                *consume_key,
                                 *span,
                             )?;
                             set_reg(regs, fbase, *dst, result);
@@ -7266,7 +7268,7 @@ mod tests {
         let module = compile(&parsed.program).unwrap();
         let disasm = module.disassemble();
         assert!(
-            disasm.contains("[reuse]"),
+            disasm.contains("[reuse"),
             "expected a reuse-marked method call for a local map self-update, got:\n{disasm}"
         );
     }

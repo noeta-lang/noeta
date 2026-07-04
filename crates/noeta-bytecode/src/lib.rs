@@ -448,6 +448,12 @@ pub enum Op {
         /// happens to be named `set`), takes the ordinary borrowing dispatch — so reuse stays
         /// observationally invisible. Always `false` for a non-self-update call.
         reuse: bool,
+        /// Consume-key token: set on a map `set`/`remove` whose **key** argument (`args[0]`) is a
+        /// single-use temporary (`Atom::Temp` — a freshly-built value, never a source variable that
+        /// might be read again). It lets the map update **move** the key's `String` buffer into the
+        /// `HashMap<String, _>` instead of cloning it. Only honored when the runtime receiver really
+        /// is a map and the key is a sole-owned string (checked in the VM); `false` otherwise.
+        consume_key: bool,
     },
     /// `dst = recv[index]` — index access (the `Index` trait / list element access), mirroring
     /// the tree-walker's `eval_index`. On an object it dispatches to the `get` method (pushing a
@@ -1376,10 +1382,16 @@ fn op_repr(
             method,
             args,
             reuse,
+            consume_key,
             ..
         } => {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
-            let marker = if *reuse { " [reuse]" } else { "" };
+            let marker = match (*reuse, *consume_key) {
+                (true, true) => " [reuse,consume_key]",
+                (true, false) => " [reuse]",
+                (false, true) => " [consume_key]",
+                (false, false) => "",
+            };
             format!(
                 "CallMethod  r{dst} <- r{recv}.{}({}){marker}",
                 n(method),

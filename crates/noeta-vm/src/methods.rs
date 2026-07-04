@@ -997,6 +997,7 @@ impl<'m> Vm<'m> {
         method: noeta_stdlib::MapMethod,
         name: &str,
         args: &[Value],
+        consume_key: bool,
         span: Span,
     ) -> Result<Value, Abort> {
         if map.refcount() != 1 {
@@ -1008,7 +1009,7 @@ impl<'m> Vm<'m> {
         match method {
             noeta_stdlib::MapMethod::Set => {
                 self.stdlib_arity(name, args, 2, span)?;
-                let key = self.stdlib_string(name, args[0], span)?;
+                let key = self.map_update_key(consume_key, args[0], name, span)?;
                 let value = args[1];
                 // The map gains an owned reference to the new value.
                 retain(value);
@@ -1019,7 +1020,7 @@ impl<'m> Vm<'m> {
             }
             noeta_stdlib::MapMethod::Remove => {
                 self.stdlib_arity(name, args, 1, span)?;
-                let key = self.stdlib_string(name, args[0], span)?;
+                let key = self.map_update_key(consume_key, args[0], name, span)?;
                 if let Some(old) = map.map_remove(&key) {
                     self.release_value(old);
                 }
@@ -1027,6 +1028,25 @@ impl<'m> Vm<'m> {
             }
             // Only `set`/`remove` are routed to the in-place path by the dispatch guard.
             _ => unreachable!("non-update map method on the in-place path"),
+        }
+    }
+
+    /// Extract the owned `String` key for an in-place map `set`/`remove`. When `consume_key` is set
+    /// (the compiler proved the key is a single-use temporary) and the key value is a sole-owned
+    /// string, **move** its buffer out instead of cloning it — the register still holds the value
+    /// (now an empty string, freed later), and a single-use temp is never read again. Otherwise clone
+    /// (and raise the type error for a non-string), exactly as before.
+    fn map_update_key(
+        &mut self,
+        consume_key: bool,
+        key: Value,
+        name: &str,
+        span: Span,
+    ) -> Result<String, Abort> {
+        if consume_key && key.is_string() && key.refcount() == 1 {
+            Ok(key.take_string_in_place())
+        } else {
+            self.stdlib_string(name, key, span)
         }
     }
 

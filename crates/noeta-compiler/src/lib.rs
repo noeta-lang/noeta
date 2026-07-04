@@ -2872,6 +2872,12 @@ impl<'m> FnCompiler<'m> {
         //
         // Args are resolved *before* a `TakeGlobal` so moving the receiver global out cannot vacate a
         // slot an arg still reads (the reuse pass also guarantees no arg mentions the receiver var).
+        // Consume the key of a map `set`/`remove` when it is a single-use temporary (`Atom::Temp` — a
+        // freshly-built value, e.g. an interpolation, never a source variable that could be read
+        // again), so the VM can move its buffer into the map instead of cloning it (see
+        // `Op::CallMethod::consume_key`). The VM re-checks the receiver is a map and the key is sole-owned.
+        let consume_key =
+            matches!(name, "set" | "remove") && matches!(args.first(), Some(Atom::Temp(_)));
         let arg_regs = self.atom_regs(args)?;
         let (recv, recv_reuse) = match (reuse, receiver) {
             (true, Atom::Var { name, .. }) => match self.resolve(name) {
@@ -2900,6 +2906,7 @@ impl<'m> FnCompiler<'m> {
             span,
             cache,
             reuse: recv_reuse,
+            consume_key,
         });
         // A reuse-marked call consumes the receiver itself (the VM clears it on the in-place path); the
         // receiver is always a `Var` (never an owned `Temp`), so `drop_temp_receiver` is a no-op there.

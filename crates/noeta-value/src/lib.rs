@@ -1656,6 +1656,24 @@ impl Value {
         heap::set_reflect(self, None);
     }
 
+    /// Move this string's buffer out, leaving it empty. Requires sole ownership (`refcount() == 1`)
+    /// and a single-use value (the caller must not read it again) — used to hand a freshly-built
+    /// map key straight to the `HashMap` instead of cloning it. The now-empty `Payload::Str` is a
+    /// valid, cheap-to-free object, so the caller's later `Drop`/overwrite of the register is sound.
+    pub fn take_string_in_place(self) -> String {
+        debug_assert!(
+            self.is_string() && heap::refcount(self) == 1,
+            "take_string_in_place requires a uniquely-owned string"
+        );
+        heap::with_payload_mut(self, |p| {
+            if let Payload::Str(buf) = p {
+                std::mem::take(buf)
+            } else {
+                String::new()
+            }
+        })
+    }
+
     /// Append `s` to this string's buffer in place. Requires sole ownership (the COW invariant), so
     /// the caller must have checked `refcount() == 1` — this is what turns a `s = s ~ x` accumulator
     /// loop from O(n²) copies into amortized O(n) (`String`'s geometric growth), mirroring
