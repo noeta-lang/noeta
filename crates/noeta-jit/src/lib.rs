@@ -768,6 +768,15 @@ pub fn worth_osr(chunk: &noeta_bytecode::Chunk) -> bool {
     })
 }
 
+/// Whether compiling this prototype is worthwhile at all (the entry path *and* OSR). A loopless
+/// prototype — a recursive function like `fib`, straight-line code — is worth compiling: it runs its
+/// body once per activation with no per-iteration bail bounce. A prototype *with* a loop is worth it
+/// only if some loop is native-sustainable ([`worth_osr`]); one whose every loop bails would bounce
+/// tier-0↔tier-1 every iteration, slower than just interpreting it.
+pub fn worth_compiling(chunk: &noeta_bytecode::Chunk) -> bool {
+    !has_osr_entry(chunk) || worth_osr(chunk)
+}
+
 /// Forward reachability of each bytecode pc in the *native* control-flow graph, seeded from every
 /// native entry point ([`entry_pcs`]) — a fresh frame (pc 0) and every post-call resume pc. A non-fast
 /// op is terminal — it bails (returns its pc), so it has no native successor — which is why this

@@ -425,7 +425,7 @@ struct Vm<'m> {
     /// Checked once when a proto first goes hot; keeps a heap-op-dominated loop in the interpreter
     /// (which is faster for it than the tier-0↔tier-1 bounce) without a per-iteration re-scan.
     #[cfg(feature = "jit")]
-    osr_declined: Vec<bool>,
+    jit_declined: Vec<bool>,
     /// The value the bottom frame produced when it returned inside native code (J3): `jit_return`
     /// parks it here for the dispatch loop to yield as the run's result.
     #[cfg(feature = "jit")]
@@ -1265,7 +1265,7 @@ impl<'m> Vm<'m> {
             #[cfg(feature = "jit")]
             jit_counters: Vec::new(),
             #[cfg(feature = "jit")]
-            osr_declined: Vec::new(),
+            jit_declined: Vec::new(),
             #[cfg(feature = "jit")]
             jit_ret: Value::unit(),
             #[cfg(feature = "jit")]
@@ -1373,12 +1373,25 @@ impl<'m> Vm<'m> {
     #[cfg(feature = "jit")]
     fn jit_maybe_compile(&mut self, proto: usize) -> Option<noeta_jit::CompiledFn> {
         self.jit.as_ref()?;
+        // Already found not worth compiling (a prototype whose only loops bail) → keep interpreting.
+        if self.jit_declined.get(proto).copied().unwrap_or(false) {
+            return None;
+        }
         if proto >= self.jit_counters.len() {
             self.jit_counters.resize(proto + 1, 0);
         }
         self.jit_counters[proto] = self.jit_counters[proto].saturating_add(1);
         let hot = self.force_jit || self.jit_counters[proto] >= JIT_HOT_THRESHOLD;
         if !hot {
+            return None;
+        }
+        // A prototype dominated by a bailing loop bounces tier-0↔tier-1 every iteration, slower than
+        // the interpreter — decline it once (the oracle's `force_jit` compiles everything anyway).
+        if !self.force_jit && !noeta_jit::worth_compiling(&self.module.protos[proto]) {
+            if proto >= self.jit_declined.len() {
+                self.jit_declined.resize(proto + 1, false);
+            }
+            self.jit_declined[proto] = true;
             return None;
         }
         let module = self.module;
@@ -1406,7 +1419,7 @@ impl<'m> Vm<'m> {
             return false;
         }
         // Already found un-sustainable (all loops bail) → keep interpreting, no per-iteration re-scan.
-        if self.osr_declined.get(proto).copied().unwrap_or(false) {
+        if self.jit_declined.get(proto).copied().unwrap_or(false) {
             return false;
         }
         // Bump the back-edge counter; only decide once the prototype is hot. `force_jit` (the oracle)
@@ -1421,10 +1434,10 @@ impl<'m> Vm<'m> {
         if !self.force_jit && !noeta_jit::worth_osr(&self.module.protos[proto]) {
             // A heap-op-dominated loop: native would bounce tier-0↔tier-1 every iteration, slower than
             // the interpreter. Decline OSR for this prototype, once and for good.
-            if proto >= self.osr_declined.len() {
-                self.osr_declined.resize(proto + 1, false);
+            if proto >= self.jit_declined.len() {
+                self.jit_declined.resize(proto + 1, false);
             }
-            self.osr_declined[proto] = true;
+            self.jit_declined[proto] = true;
             return false;
         }
         let module = self.module;
