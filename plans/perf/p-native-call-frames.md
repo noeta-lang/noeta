@@ -1,7 +1,34 @@
 # P-CALL — native call frames (inline the call/return sequence into JIT code)
 
-Status: **proposal for sign-off.** Milestone-scale (multi-slice), out-of-oracle (JIT is real-host
-only), gated end-to-end by `--jit-differential` (byte-identical `RunResult` + leak-under-JIT residency 0).
+Status: **S1–S2 done; S3–S4 DROPPED after the S2 measurement (the frame-setup *work*, not the helper
+*call*, is the cost — native `Vec`-header inlining would buy ~2–3% for real memory-corruption risk).**
+The milestone as originally scoped (inline the frame sequence) has a low ceiling; the real lever is
+reducing the per-call *work* — see "Findings" below. Out-of-oracle (JIT is real-host only), gated by
+`--jit-differential` (byte-identical `RunResult` + leak-under-JIT residency 0).
+
+## Findings (S1–S2) — the measurement that redirected the milestone
+
+- **S1 (`2ac6d4f`, done):** locked the `Frame`/`Vec`-header layout (`noeta_jit::FrameLayout`,
+  `noeta_vm::frame_layout()` + probe + lock test). Behaviour-neutral foundation.
+- **S2 (`775f96f`, done — the measurement-first slice):** inlined the direct-call hot return path
+  (`OUTCOME_RETURNED` → continue, skipping the `jit_after_call` helper). Rigorous pinned/interleaved
+  A/B (fib(35), n=25): **+2.3% min / +2.8% median**; loop control +0.0%. So **removing one bare
+  hot-path helper call = ~2.4% ≈ ~0.7 ns/call.**
+- **Conclusion:** fib is ~30 ns/call. Two helper calls per direct call, so removing *both* (full
+  native inlining) recovers ~5% total. The remaining ~25 ns is the frame-setup **work** — reserve
+  the register window (zero-init N slots), retain args, push/pop the `Frame` — which native inlining
+  does **not** remove (it does the same work in machine code). **The per-call cost is the work, not
+  the call overhead.** S3's native `Vec`-header writes (unsafe, realloc-hazard) would buy only the
+  other ~2.4% → **not worth the risk.** DROPPED.
+- **The real lever (redirect):** cut the per-call *work*, not the call overhead —
+  1. **Shrink `Frame`.** `upvalues: Vec<Value>` (24 B, empty for every top-level fn) → `Option<Box<[Value]>>`
+     (8 B) or a niche-packed form: smaller push, no empty-`Vec` write. Touches upvalue code; medium.
+  2. **Cheaper register-window init.** `reserve_window` unit-initializes `num_registers` slots every
+     call; a calling convention that passes args in the window and lets the callee init-before-read
+     (GC-safe) would cut the zeroing. Larger.
+  3. **The fixed-`int` heap-aware tax** (see the companion lever below) — likely the biggest single
+     numeric-call win, and orthogonal to frames.
+  These are separate tracks, each with its own measurement; none is "inline the sequence."
 
 ## Why
 
@@ -40,20 +67,19 @@ Concretely, a new `noeta_vm::frame_layout()` / `stack_layout()` returns:
   dangle the caller's register pointer → bail to the helper, exactly as `jit_prepare_call` already
   guards capacity today).
 
-## Slices (each ends green on `--jit-differential`, with a fib before/after)
+## Slices (as executed)
 
-- **S1 — lock the layout (behaviour-neutral).** `frame_layout()`/`stack_layout()` + lock tests. No
-  codegen change. Gate: differential 431/0, jit-differential 431/0 unchanged, miri-clean.
-- **S2 — native window + args.** Emit the register-window reserve (capacity-guarded) and the arg
-  copy (with the heap-aware retain where a param may be heap) inline; still call the helper for the
-  Frame push. Isolates the cheap half. Measure fib.
-- **S3 — native Frame push/pop (the payoff).** Emit the `Frame` write at measured offsets + `len`
-  bump for the plain-fn shape; on return, native pop + `len` decrement + window truncate. Helper
-  remains the fallback for: closures with upvalues, default-filling arity, capacity overflow,
-  non-closure callees. Measure fib — this is where the number moves.
-- **S4 — native return transfer.** Inline the value-returning `Return` → caller-dst transfer
-  (extends J3's `jit_return`). Close the loop so a fib frame runs fully native, helper-free, except
-  the cold fallbacks.
+- **S1 — lock the layout (behaviour-neutral). DONE `2ac6d4f`.** `frame_layout()` + `FrameLayout` +
+  `Vec`-header probe + lock test. jit-differential 431/0 unchanged.
+- **S2 — inline the hot return path (measurement-first). DONE `775f96f`.** `OUTCOME_RETURNED` →
+  continue in native, skip `jit_after_call` on the hot path. +2.4% fib. This slice's job was to
+  *measure* whether the helper-call round-trip or the frame-setup work dominates — see Findings. It
+  answered: the work dominates.
+- **S3 — native Frame push/pop. DROPPED.** Would emit unsafe `Vec`-header writes (bump `len`, write
+  the frame at `ptr + len*stride`) with a realloc-dangles-the-pointer hazard. The S2 measurement
+  shows it buys ~2–3% for that risk (it removes the `jit_prepare_call` *call* but not its *work*).
+  Not worth it. The S1 `FrameLayout` foundation stays in place should this ever be revisited.
+- **S4 — native return transfer. DROPPED** (same reasoning — the return work is inherent).
 
 ## Refcount + soundness posture (non-negotiable)
 
@@ -63,12 +89,14 @@ stack makes the tier boundary free — P-VMT-FRAME's payoff). Bail-before-mutate
 op cleanly. The **leak-under-JIT oracle** is the proof obligation for every slice — a mis-balanced
 retain/release on the inlined push/pop shows up as non-zero residency immediately.
 
-## Expected payoff, honestly
+## Expected payoff — REVISED by measurement
 
-The helper round-trip is the bulk of the ~27 ns/call overhead, so S3+S4 could plausibly bring fib
-from ~33 ns/call toward **~10 ns** — CPython/PHP-baseline territory, a **~2–3× on fib** and a broad
-lift on all call-heavy code (Noeta's weakest axis). It will **not** reach LuaJIT's ~2 ns/call: that
-needs trace-based cross-call inlining, a different (tracing-JIT) architecture, explicitly out of scope.
+The original estimate (~2–3× on fib from inlining the frame sequence) was **wrong**, and the S2
+measurement is why we found out cheaply. The helper *round-trip* is **not** the bulk of the per-call
+cost — it is ~0.7 ns/call per helper (~2.4% each). The bulk is the frame-setup **work** (~25 of ~30
+ns/call), which native inlining reproduces rather than removes. Realized: **S2's +2.4%, banked, safe.**
+Ceiling of the whole "inline the sequence" idea: **~5%.** To actually move fib you must cut the work
+(shrink `Frame`, cheaper window init, or the fixed-`int` tax) — separate tracks, above.
 
 ## Companion lever (separate, not part of this milestone)
 
