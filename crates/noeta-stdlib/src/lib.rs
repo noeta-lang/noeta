@@ -409,6 +409,10 @@ pub enum MapMethod {
     /// `remove(key)` → a **new** map without `key` (a no-op copy if `key` is absent). Value semantics,
     /// same in-place-reuse treatment as [`MapMethod::Set`].
     Remove,
+    /// `get_or(key, default)` → the value at `key`, or `default` if `key` is absent. The fused,
+    /// allocation-free read-with-default: one probe where `if m.has(k) then m[k] else d` costs two
+    /// (and no `Option` box, which is why this is not `get() -> ?V`).
+    GetOr,
 }
 
 impl MapMethod {
@@ -419,6 +423,7 @@ impl MapMethod {
             "has" => Some(MapMethod::Has),
             "set" => Some(MapMethod::Set),
             "remove" => Some(MapMethod::Remove),
+            "get_or" => Some(MapMethod::GetOr),
             _ => None,
         }
     }

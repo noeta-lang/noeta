@@ -3023,6 +3023,11 @@ impl Interpreter {
                 new.remove(key);
                 Ok(Value::map_value(Rc::new(new)))
             }
+            noeta_stdlib::MapMethod::GetOr => {
+                self.expect_std_arity(name, args, 2, span)?;
+                let key = self.expect_std_string(name, &args[0], span)?;
+                Ok(entries.get(key).cloned().unwrap_or_else(|| args[1].clone()))
+            }
         }
     }
 

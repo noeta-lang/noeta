@@ -268,6 +268,8 @@ fn map_method(name: &str, val: &Type) -> Option<Type> {
         "values" => list(val.clone()),
         "has" => Type::Bool,
         "count" => Type::Int,
+        // `get_or(key, default)` — the value at `key`, or `default`. Both are `V`.
+        "get_or" => val.clone(),
         // `set`/`remove` return a new map of the same type (keys are always strings).
         "set" | "remove" => Type::Map(Box::new(Type::String), Box::new(val.clone())),
         // `iter()` yields the map's **values** (the iteration order `for` uses).
@@ -386,6 +388,7 @@ fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
         "keys" | "values" | "count" | "iter" => vec![],
         "has" | "remove" => vec![Type::String], // runtime map keys are strings
         "set" => vec![Type::String, val.clone()], // `set(key, value)`
+        "get_or" => vec![Type::String, val.clone()], // `get_or(key, default)`
         _ => return None,
     })
 }

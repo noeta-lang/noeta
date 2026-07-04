@@ -1,0 +1,22 @@
+// `get_or(key, default)` — the fused, allocation-free read-with-default: one probe where
+// `if m.has(k) then m[k] else d` costs two. Hit, miss, heap-valued hit/miss (exercising the
+// retain-on-return paths in both backends), and the RMW counting idiom it exists for.
+// expect: stdout "1"
+// expect: stdout "42"
+// expect: stdout "[1, 2]"
+// expect: stdout "[9]"
+// expect: stdout "7"
+// expect: exit 0
+m = {"a": 1, "b": 2}
+echo m.get_or("a", 0)
+echo m.get_or("z", 42)
+lists = {"xs": [1, 2]}
+echo lists.get_or("xs", [9])
+echo lists.get_or("nope", [9])
+mut counts: Map<string, int> = {}
+mut i = 0
+while i < 7 {
+    counts["k"] = counts.get_or("k", 0) + 1
+    i = i + 1
+}
+echo counts["k"]

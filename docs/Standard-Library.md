@@ -79,6 +79,7 @@ echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 | `keys` | `keys() -> List<string>` | `{"b":2,"a":1}.keys()` → `["a", "b"]` |
 | `values` | `values() -> List<V>` | `{"b":2,"a":1}.values()` → `[1, 2]` |
 | `has` | `has(key: string) -> bool` | `{"a":1}.has("a")` → `true` |
+| `get_or` | `get_or(key: string, default: V) -> V` | `{"a":1}.get_or("z", 0)` → `0` — one probe where `if m.has(k) then m[k] else d` costs two |
 | `set` | `set(key: string, v: V) -> Map<string, V>` | new map with the entry added/updated |
 | `remove` | `remove(key: string) -> Map<string, V>` | new map without the key |
 | `count` | `count() -> int` | number of entries |

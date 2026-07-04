@@ -937,6 +937,22 @@ impl<'m> Vm<'m> {
                 }
                 Ok(Value::map(new))
             }
+            noeta_stdlib::MapMethod::GetOr => {
+                self.stdlib_arity(name, args, 2, span)?;
+                // Borrow the key's `&str` for the single probe — no clone.
+                let found = match args[0].with_str(|key| map.map_get(key)) {
+                    Some(found) => found,
+                    None => {
+                        self.stdlib_string(name, args[0], span)?; // non-string key → the type error
+                        None
+                    }
+                };
+                // Hit: the value is borrowed from the map. Miss: `default` is borrowed from the
+                // caller's argument register. Either way the result register is a new owner.
+                let out = found.unwrap_or(args[1]);
+                retain(out);
+                Ok(out)
+            }
         }
     }
 
