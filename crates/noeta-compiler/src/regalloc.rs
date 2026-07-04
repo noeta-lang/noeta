@@ -512,6 +512,10 @@ fn op_facts(op: &Op) -> OpFacts {
             f.uses.push(*callee);
             f.uses.extend(args.iter().copied());
         }
+        Op::CallGlobal { dst, args, .. } => {
+            f.def = Some(*dst);
+            f.uses.extend(args.iter().copied());
+        }
         Op::SpawnIsolate {
             dst, callee, args, ..
         } => {
@@ -957,6 +961,12 @@ fn remap_op(op: &mut Op, colors: &[usize]) {
         } => {
             m(dst);
             m(callee);
+            for r in args.iter_mut() {
+                m(r);
+            }
+        }
+        Op::CallGlobal { dst, args, .. } => {
+            m(dst);
             for r in args.iter_mut() {
                 m(r);
             }

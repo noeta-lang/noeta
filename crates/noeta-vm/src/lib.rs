@@ -538,28 +538,47 @@ extern "C" fn jit_call(
     let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
     let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
     let module = vm.module;
-    let Op::Call {
-        dst,
-        callee,
-        args,
-        span,
-    } = &module.protos[proto as usize].code[pc as usize]
-    else {
-        // `emit_call` only emits this helper for an `Op::Call`, so this is unreachable; treat a
+    // `emit_call` emits this helper for `Op::Call` *and* `Op::CallGlobal`; source the callee from a
+    // register (Call) or straight from its global slot (CallGlobal — a known top-level `fn`, read
+    // without a retain, exactly like the interpreter arm).
+    let (dst, callee_val, args, span) = match &module.protos[proto as usize].code[pc as usize] {
+        Op::Call {
+            dst,
+            callee,
+            args,
+            span,
+        } => (*dst, regs[base + *callee as usize], args, *span),
+        Op::CallGlobal {
+            dst,
+            global,
+            args,
+            span,
+        } => {
+            let cv = vm.globals[global.0 as usize];
+            if cv.is_unbound() {
+                let msg = format!(
+                    "cannot find `{}` in this scope",
+                    module.global_name(*global)
+                );
+                let _ = vm.error(DiagnosticCode::UnknownName, *span, msg);
+                return noeta_jit::OUTCOME_ABORTED;
+            }
+            (*dst, cv, args, *span)
+        }
+        // `emit_call` only emits this helper for a call op, so this is unreachable; treat a
         // mismatch defensively as an abort rather than misbehave.
-        return noeta_jit::OUTCOME_ABORTED;
+        _ => return noeta_jit::OUTCOME_ABORTED,
     };
-    let callee_val = regs[base + *callee as usize];
     let caller_top = frames.len() - 1;
     match vm.setup_closure_call(
         frames,
         regs,
         caller_top,
         base,
-        *dst,
+        dst,
         callee_val,
         args,
-        *span,
+        span,
         pc as usize + 1,
     ) {
         Ok(true) => noeta_jit::OUTCOME_CALLED,
@@ -617,13 +636,23 @@ extern "C" fn jit_prepare_call(
     let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
     let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
     let module = vm.module;
-    let Op::Call {
-        dst, callee, args, ..
-    } = &module.protos[proto as usize].code[pc as usize]
-    else {
-        return 0;
+    // Direct-call setup for `Op::Call` or `Op::CallGlobal`; the callee comes from a register or its
+    // global slot. An unbound `CallGlobal` slot falls back to `jit_call`, which raises the E0005.
+    let (dst, callee_val, args) = match &module.protos[proto as usize].code[pc as usize] {
+        Op::Call {
+            dst, callee, args, ..
+        } => (*dst, regs[base + *callee as usize], args),
+        Op::CallGlobal {
+            dst, global, args, ..
+        } => {
+            let cv = vm.globals[global.0 as usize];
+            if cv.is_unbound() {
+                return 0;
+            }
+            (*dst, cv, args)
+        }
+        _ => return 0,
     };
-    let callee_val = regs[base + *callee as usize];
     let Some(callee_proto) = callee_val.as_closure() else {
         return 0; // a first-class builtin / non-callable → fall back
     };
@@ -654,7 +683,7 @@ extern "C" fn jit_prepare_call(
         proto: callee_proto,
         base: new_base,
         pc: 0,
-        ret_dst: *dst,
+        ret_dst: dst,
         ret_transform: RetTransform::None,
         upvalues: Vec::new(),
     });
@@ -4636,6 +4665,42 @@ impl<'m> Vm<'m> {
                         // Shared closure-call setup (also used by the JIT's `jit_call` helper): pushes
                         // the callee frame (→ `continue 'reload`) or completes a first-class-builtin
                         // call synchronously (→ advance to `pc + 1`).
+                        if self.setup_closure_call(
+                            frames,
+                            regs,
+                            top,
+                            fbase,
+                            *dst,
+                            callee_val,
+                            args,
+                            *span,
+                            pc + 1,
+                        )? {
+                            continue 'reload;
+                        }
+                        pc += 1;
+                    }
+                    Op::CallGlobal {
+                        dst,
+                        global,
+                        args,
+                        span,
+                    } => {
+                        // A statically-known top-level `fn`: read the callee straight from its
+                        // global slot. No retain — the slot owns the reference for the whole call,
+                        // so there is no matching release either; net refcount-neutral, exactly as
+                        // `LoadGlobal` (retain) balanced by the register overwrite (release) would be.
+                        let callee_val = self.globals[global.0 as usize];
+                        if callee_val.is_unbound() {
+                            return Err(self.error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!(
+                                    "cannot find `{}` in this scope",
+                                    module.global_name(*global)
+                                ),
+                            ));
+                        }
                         if self.setup_closure_call(
                             frames,
                             regs,

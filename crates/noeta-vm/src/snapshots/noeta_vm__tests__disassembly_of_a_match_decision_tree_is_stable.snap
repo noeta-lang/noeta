@@ -1,12 +1,12 @@
 ---
 source: crates/noeta-vm/src/lib.rs
-assertion_line: 5856
+assertion_line: 7160
 expression: module.disassemble()
 ---
 shapes:
   s0 = enum E.Code(n)
 === main ===
-params: 0, registers: 3
+params: 0, registers: 2
 constants:
   k0 = 7
 code:
@@ -14,11 +14,10 @@ code:
     1  StoreGlobal "describe" <- r0
     2  LoadConst   r1 <- k0
     3  MakeEnum    r0 <- shape s0(r1)
-    4  LoadGlobal  r2 <- "describe"
-    5  Call        r1 <- r2(r0)
-    6  Stringify   r0 <- display(r1)
-    7  Echo        r0
-    8  Halt
+    4  CallGlobal  r1 <- "describe"(r0)
+    5  Stringify   r0 <- display(r1)
+    6  Echo        r0
+    7  Halt
 === proto 1 ===
 params: 1, registers: 2
 constants:

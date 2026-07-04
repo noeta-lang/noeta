@@ -830,6 +830,17 @@ pub enum Op {
         args: Box<[Reg]>,
         span: Span,
     },
+    /// `dst = f(args)` where `f` is a statically-known top-level `fn` bound to global slot
+    /// `global` (immutable, zero upvalues). Reads the callee closure straight from its slot —
+    /// no `LoadGlobal` into a register, so no retain/release churn on the callee per call (perf
+    /// A). Semantically identical to `LoadGlobal t <- global; Call dst <- t(args)`, including the
+    /// unbound-slot diagnostic (E0005).
+    CallGlobal {
+        dst: Reg,
+        global: GlobalId,
+        args: Box<[Reg]>,
+        span: Span,
+    },
     /// Return `src` from the current frame to the caller's destination register (or end the
     /// program if returning from the top-level frame).
     Return {
@@ -1611,6 +1622,12 @@ fn op_repr(
         } => {
             let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
             format!("Call        r{dst} <- r{callee}({})", args.join(", "))
+        }
+        Op::CallGlobal {
+            dst, global, args, ..
+        } => {
+            let args: Vec<String> = args.iter().map(|r| format!("r{r}")).collect();
+            format!("CallGlobal  r{dst} <- {:?}({})", g(global), args.join(", "))
         }
         Op::Return { src } => format!("Return      r{src}"),
         Op::Unary { op, dst, src, .. } => format!("Unary       r{dst} <- {} r{src}", op.symbol()),

@@ -221,6 +221,7 @@ fn compile_inner(
         structural_eq_types: HashSet::new(),
         types: HashMap::new(),
         module_globals: HashMap::new(),
+        module_fns: HashSet::new(),
         type_of_sites,
         cache_slots: 0,
         type_reprs: Vec::new(),
@@ -330,6 +331,10 @@ struct ModuleCompiler {
     /// is compiled so a nested function can resolve a global (and check its mutability on
     /// assignment) and so the free-variable analysis can tell a global from a captured local.
     module_globals: HashMap<String, bool>,
+    /// The names of top-level `fn` declarations — immutable, zero-upvalue globals bound once to a
+    /// closure. A call whose callee resolves to one of these lowers to a direct [`Op::CallGlobal`]
+    /// instead of `LoadGlobal` + `Op::Call` (perf A). Populated in [`Self::register_globals`].
+    module_fns: HashSet<String>,
     /// The concrete static type the checker resolved for each `type_of(value)` site (keyed by the
     /// `Expr::TypeOf` span), harvested from the *same* program the tree-walker harvests, so both
     /// backends bake identical full-fidelity `Type` constants (`type_of` fidelity A, P2.3). A site
@@ -402,6 +407,7 @@ impl ModuleCompiler {
                 }
                 noeta_ast::Stmt::Fn(decl) => {
                     self.module_globals.insert(decl.name.clone(), false);
+                    self.module_fns.insert(decl.name.clone());
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
                     for imported in names {
@@ -2778,6 +2784,24 @@ impl<'m> FnCompiler<'m> {
                 }
                 _ => unsupported("prelude function not in the VM subset"),
             };
+        }
+        // A statically-known top-level `fn` (immutable, zero-upvalue global) — call it directly
+        // through its slot, skipping the `LoadGlobal` + per-call retain/release of the callee
+        // closure (perf A). Guarded on the name still resolving to the global: a local binding of
+        // the same name shadows it, in which case the ordinary indirect call below applies.
+        if let Atom::Var { name, .. } = callee
+            && self.module.module_fns.contains(name)
+            && matches!(self.resolve(name), Resolved::Global)
+        {
+            let global = self.module.intern_global(name);
+            let args = self.atom_regs(args)?;
+            self.code.push(Op::CallGlobal {
+                dst,
+                global,
+                args,
+                span,
+            });
+            return Ok(());
         }
         let callee_reg = self.atom_reg(callee)?;
         let args = self.atom_regs(args)?;

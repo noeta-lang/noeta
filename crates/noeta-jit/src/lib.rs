@@ -468,10 +468,9 @@ impl Jit {
             // register (the interpreter put it there), so the refcount-correct stores are mandatory,
             // just as for the resume-native (post-call) entry a call-bearing prototype already forces.
             let heap_aware = has_osr_entry(chunk)
-                || chunk
-                    .code
-                    .iter()
-                    .any(|op| matches!(op, Op::Call { .. }) || is_leaf_heap_op(op));
+                || chunk.code.iter().any(|op| {
+                    matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) || is_leaf_heap_op(op)
+                });
             // The per-store-site release map (P-JIT bare stores): in a `heap_aware` prototype, a store
             // releases the overwritten value only where that value may be a heap pointer; where it is
             // provably an immediate the store is bare (skips the load-old + `is_pointer` release).
@@ -603,7 +602,7 @@ fn is_fast_op(op: &Op, consts: &[Const]) -> bool {
         Op::Move { .. } | Op::Drop { .. } => true,
         Op::Binary { op, .. } => supported_binary(*op),
         Op::LoadGlobal { .. } | Op::StoreGlobal { .. } | Op::TakeGlobal { .. } => true,
-        Op::Call { .. } | Op::Return { .. } => true,
+        Op::Call { .. } | Op::CallGlobal { .. } | Op::Return { .. } => true,
         Op::Jump { .. }
         | Op::JumpIfTrue { .. }
         | Op::JumpIfFalse { .. }
@@ -681,7 +680,7 @@ fn entry_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<usize> {
     let n = chunk.code.len();
     let mut pcs = vec![0usize];
     for (pc, op) in chunk.code.iter().enumerate() {
-        if matches!(op, Op::Call { .. }) && pc + 1 < n {
+        if matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) && pc + 1 < n {
             pcs.push(pc + 1);
         }
         if let Some(t) = backward_target(op, pc) {
@@ -748,9 +747,10 @@ fn reachable_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<bool> {
                 stack.push(*target as usize);
                 stack.push(pc + 1);
             }
-            // A native `Call` exits the compiled function (returns `CALLED`, or resumes native after a
-            // direct call); `Return` ends the frame. Neither has an in-frame native successor.
-            Op::Call { .. } | Op::Return { .. } => {}
+            // A native `Call`/`CallGlobal` exits the compiled function (returns `CALLED`, or resumes
+            // native after a direct call); `Return` ends the frame. None has an in-frame native
+            // successor.
+            Op::Call { .. } | Op::CallGlobal { .. } | Op::Return { .. } => {}
             _ => stack.push(pc + 1), // fast straight-line op
         }
     }
@@ -1313,7 +1313,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::LoadGlobal { dst, global, .. } => emit_load_global(cg, *dst, global.0, pc, op_blocks),
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
-        Op::Call { .. } => emit_call(cg, pc, op_blocks),
+        Op::Call { .. } | Op::CallGlobal { .. } => emit_call(cg, pc, op_blocks),
         Op::Return { src } => emit_return(cg, *src),
         op if is_leaf_heap_op(op) => emit_leaf_op(cg, pc, op_blocks),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).

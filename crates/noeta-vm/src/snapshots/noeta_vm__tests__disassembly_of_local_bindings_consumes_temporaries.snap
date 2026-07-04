@@ -1,5 +1,6 @@
 ---
 source: crates/noeta-vm/src/lib.rs
+assertion_line: 7203
 expression: module.disassemble()
 ---
 === main ===
@@ -7,11 +8,10 @@ params: 0, registers: 2
 code:
     0  MakeClosure r0 <- proto 1 [0 captures]
     1  StoreGlobal "build" <- r0
-    2  LoadGlobal  r1 <- "build"
-    3  Call        r0 <- r1()
-    4  Stringify   r1 <- display(r0)
-    5  Echo        r1
-    6  Halt
+    2  CallGlobal  r0 <- "build"()
+    3  Stringify   r1 <- display(r0)
+    4  Echo        r1
+    5  Halt
 === proto 1 ===
 params: 0, registers: 3
 constants:

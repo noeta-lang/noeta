@@ -1,21 +1,20 @@
 ---
 source: crates/noeta-vm/src/lib.rs
-assertion_line: 5759
+assertion_line: 7028
 expression: module.disassemble()
 ---
 === main ===
-params: 0, registers: 3
+params: 0, registers: 2
 constants:
   k0 = 6
 code:
     0  MakeClosure r0 <- proto 1 [0 captures]
     1  StoreGlobal "fib" <- r0
-    2  LoadGlobal  r1 <- "fib"
-    3  LoadConst   r2 <- k0
-    4  Call        r0 <- r1(r2)
-    5  Stringify   r1 <- display(r0)
-    6  Echo        r1
-    7  Halt
+    2  LoadConst   r1 <- k0
+    3  CallGlobal  r0 <- "fib"(r1)
+    4  Stringify   r1 <- display(r0)
+    5  Echo        r1
+    6  Halt
 === proto 1 ===
 params: 1, registers: 4
 constants:
@@ -29,13 +28,11 @@ code:
     3  Return      r0
     4  LoadConst   r2 <- k1
     5  Binary      r1 <- r0 - r2
-    6  LoadGlobal  r3 <- "fib"
-    7  Call        r2 <- r3(r1)
-    8  LoadConst   r3 <- k2
-    9  Binary      r1 <- r0 - r3
-   10  Drop        r0 ~destruct
-   11  LoadGlobal  r3 <- "fib"
-   12  Call        r0 <- r3(r1)
-   13  Binary      r1 <- r2 + r0
-   14  Return      r1
-   15  Halt
+    6  CallGlobal  r2 <- "fib"(r1)
+    7  LoadConst   r3 <- k2
+    8  Binary      r1 <- r0 - r3
+    9  Drop        r0 ~destruct
+   10  CallGlobal  r0 <- "fib"(r1)
+   11  Binary      r1 <- r2 + r0
+   12  Return      r1
+   13  Halt
