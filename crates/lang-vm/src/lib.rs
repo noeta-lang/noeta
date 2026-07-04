@@ -3902,10 +3902,16 @@ impl<'m> Vm<'m> {
                     }
                     Op::RunFuture { dst, src, span } => {
                         // Drive an awaited future to completion (Track A.2/A.3 top-level). See
-                        // `drive_future`: poll; on pending advance the clock and re-poll. The source
-                        // register keeps owning the future; `drive_future` returns an owned result.
-                        let future = regs[fbase + *src as usize];
+                        // `drive_future`: poll; on pending advance the clock and re-poll; it borrows the
+                        // future and returns an owned result. `.await` **consumes** the future (a spent
+                        // future cannot be awaited again — a second await already deadlocks), so take it
+                        // out of the source register and release it destructor-aware here, at its last
+                        // reference: a destructor-bearing local captured in the async fn's state (held in
+                        // the future's step-closure cells) runs now rather than being lost.
+                        let future =
+                            std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
                         let value = self.drive_future(future, *span)?;
+                        self.release_value(future);
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;
                     }

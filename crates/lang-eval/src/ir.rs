@@ -1288,8 +1288,15 @@ impl Interpreter {
             // [`Interpreter::drive_future`]. A non-future (only reachable via the uncheck­ed property
             // test) passes straight through so evaluation stays total.
             lang_ir::Rvalue::RunFuture { future, span } => {
+                // `.await` consumes the future (a spent future cannot be awaited again — double-await
+                // already deadlocks). Drive it, then destroy it so a destructor-bearing local captured
+                // in the async fn's state runs at the future's last reference (matching the VM's
+                // take-and-release). For a temp source `eval_ir_atom` already moved it out, so this
+                // holds the sole reference; a still-live binding source keeps a reference and defers.
                 let future = self.eval_ir_atom(future, frame)?;
-                self.drive_future(future, *span)
+                let value = self.drive_future(future.clone(), *span)?;
+                self.destroy_value(future);
+                Ok(value)
             }
             // Poll a future once (Track A.3 state machine): `some(v)` if ready, `none` if pending —
             // the tree-walker mirror of the VM's `Op::PollFuture`.

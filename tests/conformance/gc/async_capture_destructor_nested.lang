@@ -1,0 +1,25 @@
+// A destructor-bearing local of an async fn awaited *by another async fn* still runs: the outer
+// future holds the inner future in its state-machine cells, so releasing the outer future at the
+// top-level await cascades into the inner future's captured local.
+// expect: stdout "using inner"
+// expect: stdout "drop inner"
+// expect: stdout "4"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+async fn inner(): int {
+    r = Res.new("inner")
+    sleep(1).await
+    echo "using ${r.tag}"
+    return 3
+}
+async fn outer(): int {
+    x = inner().await
+    return x + 1
+}
+echo outer().await
+echo "end"

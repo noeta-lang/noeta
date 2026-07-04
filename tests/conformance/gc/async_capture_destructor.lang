@@ -1,0 +1,22 @@
+// An async fn's destructor-bearing local runs its destructor when the future is driven to completion
+// and released (spec §2 — the future is `.await`-consumed, so its captured state dies at that last
+// reference). Here `work()`'s future is a temp consumed by the top-level `.await`, so `r`'s destructor
+// fires right after the await completes.
+// expect: stdout "using async"
+// expect: stdout "drop async"
+// expect: stdout "7"
+// expect: stdout "end"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+async fn work(): int {
+    r = Res.new("async")
+    sleep(1).await
+    echo "using ${r.tag}"
+    return 7
+}
+echo work().await
+echo "end"
