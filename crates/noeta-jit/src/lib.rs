@@ -789,11 +789,15 @@ fn reachable_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<bool> {
     seen
 }
 
-/// Whether a `Binary`'s result is always an immediate — a bool from a comparison (`==`/`<`/…) or a
-/// short-circuiting `&&`/`||`. The arithmetic, bitwise, and shift ops can overflow the 48-bit
-/// immediate range into a heap-boxed big int, and `~` builds a heap string, so those are *not*
-/// guaranteed immediate. Used by the bare-store analysis to decide whether a `Binary`'s destination
-/// may hold a heap value afterwards.
+/// Whether a `Binary`'s result — as produced by *native code* — is always an immediate. Used by the
+/// bare-store analysis to decide whether a `Binary`'s destination may hold a heap value afterwards.
+///
+/// A comparison (`==`/`<`/…) or short-circuit `&&`/`||` yields a bool. **Arithmetic yields an
+/// immediate too, in the JIT:** the native `Binary` guards the 48-bit range and *bails to the
+/// interpreter before storing* on an overflowing (would-be heap-boxed) integer result, and the float
+/// path is NaN-boxed — so a register holding a *completed* native arithmetic result is provably
+/// immediate at every point the interpreter can re-enter (the boxing case already left native code).
+/// `~` (`Concat`) and other heap-building ops stay may-heap.
 fn binary_result_is_immediate(op: BinaryOp) -> bool {
     matches!(
         op,
@@ -807,6 +811,11 @@ fn binary_result_is_immediate(op: BinaryOp) -> bool {
             | BinaryOp::Ge
             | BinaryOp::And
             | BinaryOp::Or
+            | BinaryOp::Add
+            | BinaryOp::Sub
+            | BinaryOp::Mul
+            | BinaryOp::Div
+            | BinaryOp::Rem
     )
 }
 
@@ -851,6 +860,16 @@ fn reg_effect(op: &Op, consts: &[Const]) -> Option<RegEffect> {
             heap: !binary_result_is_immediate(*op),
         },
         Op::Unary { dst, .. } | Op::Stringify { dst, .. } => RegEffect::Def {
+            dst: *dst,
+            heap: true,
+        },
+        // A call redefines only its destination (the result, which may be a heap value) and reads its
+        // args; from the *caller's* register view nothing else changes. Modeling it — rather than
+        // failing the whole map closed — lets a call-bearing prototype (every recursive/helper fn)
+        // bare-store its provably-immediate arithmetic temps. The interpreter's re-entry after a call
+        // that bails resumes at `pc + 1` with exactly this state (result in `dst`, other caller
+        // registers preserved), so the forward dataflow's out-set there over-approximates it.
+        Op::Call { dst, .. } | Op::CallGlobal { dst, .. } => RegEffect::Def {
             dst: *dst,
             heap: true,
         },
