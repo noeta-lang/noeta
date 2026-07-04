@@ -1,0 +1,32 @@
+// A generator held as a `for`-loop temp runs its captured local's destructor even on an early
+// `return` out of the loop — the compiler drops the loop's temp iterator destructor-aware on the
+// return path (and eval mirrors it), so a resource captured by the generator is cleaned up.
+// expect: stdout "using gen"
+// expect: stdout "0"
+// expect: stdout "using gen"
+// expect: stdout "1"
+// expect: stdout "drop gen"
+// expect: stdout "99"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+fn counter(): Iterator<int> {
+    r = Res.new("gen")
+    mut i = 0
+    while i < 5 {
+        echo "using ${r.tag}"
+        yield i
+        i = i + 1
+    }
+}
+fn run(): int {
+    for x in counter() {
+        echo x
+        if x == 1 { return 99 }
+    }
+    return 0
+}
+echo run()

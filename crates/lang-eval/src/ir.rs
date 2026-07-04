@@ -668,12 +668,23 @@ impl Interpreter {
                     self.fire_aborted_scope();
                 }
                 self.scope = saved;
-                match flow? {
-                    // An early `return` unwinds past the loop; the iterator is abandoned and released
-                    // plainly (matching the VM, whose post-loop drop is bypassed by a return).
-                    Flow::Return(value) => return Ok(Flow::Return(value)),
-                    Flow::Break => break,
-                    Flow::Continue | Flow::Normal => {}
+                match flow {
+                    // An early `return` or a `?` propagation (`Unwind::Return`) unwinds past the loop;
+                    // destroy the streamed iterator here so a generator's captured local runs its
+                    // destructor (the VM's return_stmt / TryUnwrap-`on_error` iterator-drop mirror). A
+                    // named iterable defers via its `strong_count`; a temp is destroyed now.
+                    Ok(Flow::Return(value)) => {
+                        self.destroy_value(iterable_value);
+                        return Ok(Flow::Return(value));
+                    }
+                    Err(Unwind::Return(value)) => {
+                        self.destroy_value(iterable_value);
+                        return Err(Unwind::Return(value));
+                    }
+                    // An abort was already routed through `fire_aborted_scope`; propagate it unchanged.
+                    Err(e) => return Err(e),
+                    Ok(Flow::Break) => break,
+                    Ok(Flow::Continue) | Ok(Flow::Normal) => {}
                 }
             }
             // At exhaustion or `break`, destroy the streamed iterator destructor-aware so a generator's

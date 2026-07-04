@@ -951,6 +951,11 @@ struct LoopCtx {
     /// Code positions of `continue` jumps — patched to the loop's continue target (the `while`
     /// condition re-test, or the `for` index increment).
     continues: Vec<usize>,
+    /// For a `for`-loop streaming a **temp** iterator this loop owns (`for x in gen()`), the iterator's
+    /// register. A `return` inside the body unwinds past the loop's post-loop drop, so it must drop this
+    /// iterator destructor-aware itself (running a generator's captured destructor). `None` for `while`
+    /// loops and for-loops over a named/snapshotted iterable (whose value is dropped elsewhere).
+    stream_iter: Option<Reg>,
 }
 
 #[derive(Clone, Copy)]
@@ -1415,6 +1420,21 @@ impl<'m> FnCompiler<'m> {
     }
 
     fn return_stmt(&mut self, value: Option<&Atom>, _span: Span) -> Result<(), Unsupported> {
+        // A `return` unwinds past every enclosing `for`-loop's post-loop iterator drop, so drop each
+        // owned temp iterator destructor-aware here — innermost first (reverse-scope order) — running a
+        // generator's captured local's destructor. (Named/snapshotted iterables carry `None`.)
+        let iters: Vec<Reg> = self
+            .loops
+            .iter()
+            .rev()
+            .filter_map(|ctx| ctx.stream_iter)
+            .collect();
+        for iter in iters {
+            self.code.push(Op::Drop {
+                reg: iter,
+                relevant: true,
+            });
+        }
         let src = match value {
             Some(atom) => self.atom_reg(atom)?,
             None => {
@@ -1605,6 +1625,11 @@ impl<'m> FnCompiler<'m> {
 
         self.scopes.push(HashMap::new());
         self.loops.push(LoopCtx::default());
+        // A temp iterable is owned by this loop; record its register so an early `return` inside the
+        // body drops it destructor-aware (a named iterable's binding is dropped at its own scope end).
+        if matches!(iterable, Atom::Temp(_)) {
+            self.loops.last_mut().unwrap().stream_iter = Some(iter);
+        }
         let result = (|| {
             match pattern {
                 ForPattern::Single { name, .. } => {
@@ -2483,13 +2508,19 @@ impl<'m> FnCompiler<'m> {
                 // Resolve the drop pass's error-path locals to registers; on the `Err`/`none` path the
                 // VM drops these (firing destructors) before unwinding (Phase 4.2c). Owned frame-locals
                 // always resolve to a register; anything else is conservatively skipped.
-                let on_error: Vec<(Reg, bool)> = on_error
+                let mut on_error: Vec<(Reg, bool)> = on_error
                     .iter()
                     .filter_map(|d| match self.resolve(&d.name) {
                         Resolved::Local(reg) => Some((reg, d.relevant)),
                         _ => None,
                     })
                     .collect();
+                // A `?` propagation, like an explicit `return`, unwinds past every enclosing for-loop's
+                // post-loop iterator drop — so drop each owned temp iterator destructor-aware on the
+                // error path too (innermost first), running a generator's captured local's destructor.
+                for iter in self.loops.iter().rev().filter_map(|ctx| ctx.stream_iter) {
+                    on_error.push((iter, true));
+                }
                 self.code.push(Op::TryUnwrap {
                     dst,
                     src,

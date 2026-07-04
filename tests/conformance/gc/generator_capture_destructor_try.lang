@@ -1,0 +1,31 @@
+// A `?` propagation out of a `for` loop over a temp generator also runs the generator's captured
+// local's destructor — the `?`'s error-path drops (`TryUnwrap` on_error / eval's `Unwind::Return`)
+// include the loop's owned iterator.
+// expect: stdout "u gen"
+// expect: stdout "got 0"
+// expect: stdout "u gen"
+// expect: stdout "drop gen"
+// expect: stdout "none"
+// expect: exit 0
+class Res {
+    pub tag: string
+    fn new(t: string): Res { return Res { tag: t } }
+    destruct { echo "drop ${tag}" }
+}
+fn gen(): Iterator<int> {
+    r = Res.new("gen")
+    mut i = 0
+    while i < 3 { echo "u ${r.tag}"; yield i; i = i + 1 }
+}
+fn maybe(x: int): ?int {
+    if x == 1 { return none }
+    return some(x)
+}
+fn run(): ?int {
+    for a in gen() {
+        v = maybe(a)?
+        echo "got ${v}"
+    }
+    return some(0)
+}
+echo run()
