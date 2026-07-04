@@ -1898,10 +1898,12 @@ mod tests {
         );
     }
 
-    /// The may-hold-heap analysis: parameters are heap at entry, a comparison result is an immediate,
-    /// and an arithmetic result may be a heap-boxed big int.
+    /// The may-hold-heap analysis: parameters are heap at entry; a comparison result is an
+    /// immediate, and so is a completed arithmetic result — native `Binary` bails to the
+    /// interpreter *before* storing when the result would overflow the 48-bit immediate range,
+    /// so a result that was stored natively is always immediate.
     #[test]
-    fn heap_in_marks_params_and_arith_but_not_comparisons() {
+    fn heap_in_marks_params_but_not_binary_results() {
         let sp = Span::new(0, 0);
         let c = chunk(
             vec![
@@ -1931,7 +1933,10 @@ mod tests {
         assert!(at(0, 0), "a parameter may be heap at entry");
         assert!(!at(0, 1), "a fresh temp is an immediate at entry");
         assert!(!at(1, 1), "a comparison result is an immediate");
-        assert!(at(2, 2), "an arithmetic result may be heap-boxed");
+        assert!(
+            !at(2, 2),
+            "a natively-stored arithmetic result is an immediate (overflow bails before the store)"
+        );
     }
 
     /// A non-`heap_aware` prototype already stores bare everywhere — the map is all-false.
