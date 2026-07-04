@@ -17,6 +17,10 @@ noeta-object = { workspace = true }
 # verbatim with the tree-walker (differential-by-construction). noeta-stdlib has no internal deps,
 # so this adds no dependency cycle.
 noeta-stdlib = { workspace = true }
+# A `signal`/`computed`/`effect` handle value carries a `noeta_reactive::NodeId` (an index into the
+# VM's reactive graph) tagged with its `NodeKind`. noeta-reactive is a value-generic leaf crate with
+# no internal deps, so this adds no dependency cycle.
+noeta-reactive = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

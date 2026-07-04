@@ -68,11 +68,24 @@ impl NodeId {
 /// Which flavor of reactive node this is. Determines read semantics (a `Signal` returns its stored
 /// value; a `Computed` recomputes-on-read when dirty; an `Effect` is never read, only run) and dirty
 /// propagation (a dirtied `Computed` propagates lazily; a dirtied `Effect` is queued to run).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NodeKind {
     Signal,
     Computed,
     Effect,
+}
+
+impl NodeKind {
+    /// The surface type name — the reserved `Named` type the checker uses (`Signal<T>`/`Computed<T>`/
+    /// `Effect`) and the name a handle value reports from `type_name`. Both backends and the checker
+    /// key on these identical strings.
+    pub fn type_name(self) -> &'static str {
+        match self {
+            NodeKind::Signal => "Signal",
+            NodeKind::Computed => "Computed",
+            NodeKind::Effect => "Effect",
+        }
+    }
 }
 
 /// One node in the reactive graph.
@@ -463,6 +476,40 @@ impl<V: Clone> ReactiveGraph<V> {
         n.content = None;
         n.body = None;
         inner.free.push(node);
+    }
+
+    /// Visit every value the graph currently holds — each live node's `content` (a signal's value or a
+    /// computed's memo) and `body` (a computed/effect closure) — by shared reference, without touching
+    /// its lifetime. A backend whose value type is externally refcounted uses this to feed the graph's
+    /// held values into its **GC root set**: a value reachable only through the graph is otherwise
+    /// invisible to a mark-from-roots collector, which would reclaim it as garbage and leave the graph
+    /// holding a dangling reference (a double-free at [`clear`](Self::clear)). Registering them as roots
+    /// is the reactive analogue of scanning the channel buffers or the register stack.
+    pub fn for_each_value(&self, mut f: impl FnMut(&V)) {
+        let inner = self.inner.borrow();
+        for node in &inner.nodes {
+            if !node.live {
+                continue;
+            }
+            if let Some(content) = &node.content {
+                f(content);
+            }
+            if let Some(body) = &node.body {
+                f(body);
+            }
+        }
+    }
+
+    /// Drop every node, releasing all stored values. Called at program end so a backend whose value
+    /// type manages an external refcount (the VM's `GcVal`) returns to zero residency — dropping each
+    /// `Node<V>` drops its `content`/`body`, firing that value type's `Drop`. After this the graph is
+    /// empty (as if freshly constructed).
+    pub fn clear(&self) {
+        let mut inner = self.inner.borrow_mut();
+        inner.nodes.clear();
+        inner.free.clear();
+        inner.computing.clear();
+        inner.queue.clear();
     }
 
     /// The number of live nodes — for the leak assertion in tests (create N, dispose N, expect 0).

@@ -30,6 +30,11 @@ pub(super) const FUTURE: &str = "Future";
 pub(super) const SENDER: &str = "Sender";
 pub(super) const RECEIVER: &str = "Receiver";
 
+/// Reserved built-in type name for a reactive cell (reactivity S1). `signal(v: T)` yields a
+/// `Signal<T>` carrying its value type as its single argument; `.get()` reads `T`, `.set(v: T)`
+/// updates it. (`computed`/`effect` join in S2/S3.)
+pub(super) const SIGNAL: &str = "Signal";
+
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
@@ -110,8 +115,21 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Named(n, args) if n == RECEIVER => {
             receiver_method(name, args.first().unwrap_or(&Type::Dyn))
         }
+        Type::Named(n, args) if n == SIGNAL => {
+            signal_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
         _ => None,
     }
+}
+
+/// A `Signal<T>` cell (reactivity S1): `get()` reads the current value `T`; `set(v: T)` updates it
+/// (yielding nothing).
+fn signal_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "get" => elem.clone(),
+        "set" => Type::Unit,
+        _ => return None,
+    })
 }
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
@@ -313,6 +331,16 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
             "recv" => vec![],
             _ => return None,
         }),
+        // `Signal<T>` (reactivity S1): `get()` takes nothing; `set(v: T)` takes the value type, so a
+        // mistyped update is rejected statically.
+        Type::Named(n, args) if n == SIGNAL => {
+            let elem = args.first().cloned().unwrap_or(Type::Dyn);
+            Some(match name {
+                "get" => vec![],
+                "set" => vec![elem],
+                _ => return None,
+            })
+        }
         _ => None,
     }
 }
@@ -461,6 +489,12 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         // `sleep(ms)` — a leaf timer future (Track A.2). Returns `Future<void>`, so `sleep(ms).await`
         // yields `void`; awaiting it suspends until the executor clock reaches the deadline.
         "sleep" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
+        // `signal(v: T) -> Signal<T>` (reactivity S1) — the value type rides as the single type arg
+        // so `.get()` recovers `T` and `.set()` requires `T`.
+        "signal" => Type::Named(
+            SIGNAL.to_string(),
+            vec![args.first().cloned().unwrap_or(Type::Unknown)],
+        ),
         // `all(List<Future<T>>) -> List<T>` — await every future, results in order (Track A.9).
         "all" => list(future_elem(args.first())),
         // `race(List<Future<T>>) -> T` — the first result; the losers are cancelled (Track A.9).

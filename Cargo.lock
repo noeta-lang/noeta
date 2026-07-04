@@ -1078,6 +1078,7 @@ dependencies = [
  "noeta-ir-passes",
  "noeta-lexer",
  "noeta-parser",
+ "noeta-reactive",
  "noeta-span",
  "noeta-stdlib",
  "proptest",
@@ -1213,6 +1214,7 @@ dependencies = [
  "noeta-bytecode",
  "noeta-diagnostics",
  "noeta-object",
+ "noeta-reactive",
  "noeta-stdlib",
  "proptest",
 ]
@@ -1233,6 +1235,7 @@ dependencies = [
  "noeta-lexer",
  "noeta-object",
  "noeta-parser",
+ "noeta-reactive",
  "noeta-span",
  "noeta-stdlib",
  "noeta-value",

@@ -80,6 +80,9 @@ pub enum Builtin {
     /// `map_bounded(items, n, f)` — apply the async `f` to each item, at most `n` in flight at once,
     /// returning the results as a `List<B>` in item order (Track A.9, bounded-parallelism map).
     MapBounded,
+    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1). Returns a `Signal<T>` handle
+    /// whose `.get()`/`.set(v)` read and update it through the VM's reactive graph.
+    Signal,
 }
 
 impl Builtin {
@@ -95,6 +98,7 @@ impl Builtin {
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
+            Builtin::Signal => "signal",
         }
     }
 
@@ -110,6 +114,7 @@ impl Builtin {
             "all" => Some(Builtin::All),
             "race" => Some(Builtin::Race),
             "map_bounded" => Some(Builtin::MapBounded),
+            "signal" => Some(Builtin::Signal),
             _ => None,
         }
     }

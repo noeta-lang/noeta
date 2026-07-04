@@ -101,9 +101,21 @@ need a small native-type registration is an S1 detail.
   peek, dynamic-dependency resubscription, and set-inside-effect coalescing into the flush. `unsafe`-free,
   clippy/fmt/**miri** all clean. The determinism + glitch-freedom + no-leak proofs live here, before any
   backend or syntax exists.
-- **S1 — `signal` in both backends.** `signal(0)` value + `.get`/`.set`/`.update`, wired through the
-  shared core via each backend's call seam. Dependency capture works but consumers are only effects (S2)
-  — so S1 lands with S2 or stubs reads. Conformance + differential + leak green.
+- **S1 — `signal` in both backends. DONE.** `signal(v)` (a `Builtin`, added to `PRELUDE_NAMES` + both
+  backends' `Builtin` enums) + `.get()`/`.set(v)`, wired through the shared `ReactiveGraph` on each
+  backend (`Rc<ReactiveGraph<…>>` so a flush can borrow the graph and `self` independently). Observable
+  closure-free via get-after-set, so it stands alone without S2. Value repr: `Payload::Reactive(NodeKind,
+  NodeId)` (VM) / `Value::Reactive(…)` (eval), a GC leaf carrying `noeta_reactive::{NodeId, NodeKind}`
+  (shared, not duplicated). **Refcount discipline:** the VM stores a RAII `GcVal` (Clone=retain,
+  Drop=release) so the graph's internal clones/drops keep the manual refcount exact; eval's `Rc`-Value is
+  correct for free. Checker: reserved `Signal<T>` type + `prelude_return` + `signal_method`/params, so
+  `.set` type-checks (**E0007** on mismatch) and `.get()` recovers `T`. **The leak oracle earned its
+  keep:** the trace cycle-collector reclaimed a signal's content (held only by the graph, invisible to
+  the from-roots sweep) and `clear()` then double-freed it — fixed by feeding the graph's held values in
+  as **GC roots** (`for_each_value`), the reactive analogue of scanning channel buffers. 3 conformance
+  cases (get/set, independent cells, negative type-mismatch). Conformance 445, differential 434/0-skipped,
+  jit-differential 434, leak 0 both backends, workspace green, clippy/fmt clean. `.update` folds in with
+  S2's closure-driving machinery.
 - **S2 — `effect`.** Eager run-on-create, rerun-on-change, the flush, disposal handle. Leak oracle is the
   gate (an undisposed effect = residency > 0). Deterministic effect order asserted in the differential.
 - **S3 — `computed`.** Lazy memoization, transitive dependency (computed reading computed), glitch-free

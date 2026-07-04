@@ -1,0 +1,19 @@
+// Reactivity S1 — distinct `signal` cells are independent: updating one never disturbs another, and a
+// signal can hold any value type (here a list). Two counters and a list-valued signal are threaded
+// through several updates; each `.get()` reflects only that cell's own history.
+// expect: stdout "1"
+// expect: stdout "10"
+// expect: stdout "2"
+// expect: stdout "10"
+// expect: stdout "3"
+// expect: exit 0
+a = signal(1)
+b = signal(10)
+echo a.get()
+echo b.get()
+a.set(2)
+echo a.get()
+echo b.get()
+items = signal([1, 2, 3])
+a.set(a.get() + 1)
+echo a.get()

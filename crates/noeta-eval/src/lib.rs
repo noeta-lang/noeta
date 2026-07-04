@@ -365,6 +365,9 @@ pub enum Builtin {
     /// `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` concurrently, results
     /// as a `List<B>` in item order (Track A.9).
     MapBounded,
+    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
+    /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
+    Signal,
 }
 
 impl Builtin {
@@ -384,6 +387,7 @@ impl Builtin {
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
+            Builtin::Signal => "signal",
         }
     }
 
@@ -404,6 +408,7 @@ impl Builtin {
         Builtin::All,
         Builtin::Race,
         Builtin::MapBounded,
+        Builtin::Signal,
     ];
 }
 
@@ -1092,6 +1097,13 @@ struct Interpreter {
     /// round — a channel op that unblocks a sibling is progress even when no task *completes*.
     channels: Vec<Channel>,
     channel_progress: u64,
+    /// The reactive graph (reactivity S1): the tree-walker twin of the VM's `reactive` field. Every
+    /// `signal(v)`/`computed(fn)`/`effect(fn)` allocates a node here; a `Reactive` handle references
+    /// one by [`NodeId`]. Held behind `Rc` so a flush can borrow the graph and the interpreter
+    /// independently (the graph's methods are `&self`, interior-mutable). The stored values are plain
+    /// `Value`s — `Rc`-shared, so the graph's clones/drops are refcount-correct for free, no wrapper
+    /// needed (unlike the VM's `GcVal`). Cleared at program end so held values drop.
+    reactive: std::rc::Rc<noeta_reactive::ReactiveGraph<Value>>,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `noeta_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
@@ -1166,6 +1178,7 @@ impl Interpreter {
             scopes: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
+            reactive: std::rc::Rc::new(noeta_reactive::ReactiveGraph::new()),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
         }
@@ -2174,6 +2187,27 @@ impl Interpreter {
         {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
+        }
+        // Reactive handle methods (reactivity S1): `signal.get()` / `signal.set(v)` — the tree-walker
+        // twin of the VM's dispatch. Validity was checked statically. A signal read never recomputes
+        // (only a `computed` does, arriving in S3), so the `run` callback is unreachable here.
+        if let Value::Reactive(_kind, node) = &receiver {
+            let node = *node;
+            match name {
+                "get" => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    return Ok(self.reactive.read(node, &mut |_v: Value| {
+                        unreachable!("a signal read never recomputes")
+                    }));
+                }
+                "set" => {
+                    self.expect_std_arity(name, &args, 1, span)?;
+                    let value = args.into_iter().next().unwrap();
+                    self.reactive.set(node, value);
+                    return Ok(Value::Unit);
+                }
+                _ => {}
+            }
         }
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file handle above.
         if let Value::Iter(state) = &receiver
@@ -3638,6 +3672,14 @@ impl Interpreter {
                     }
                 }
             }
+            Builtin::Signal => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                // `signal(v)` — allocate a reactive cell holding `v`. `args` is owned here, so the
+                // value moves straight into the graph (an `Rc` clone keeps it live).
+                let value = args.into_iter().next().unwrap();
+                let id = self.reactive.signal(value);
+                Ok(Value::Reactive(noeta_reactive::NodeKind::Signal, id))
+            }
         }
     }
 
@@ -4371,6 +4413,7 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         | Value::AsyncIo(_)
         | Value::Sender(_)
         | Value::Receiver(_)
+        | Value::Reactive(..)
         | Value::ChannelSend(..)
         | Value::ChannelRecv(_) => TypeRepr::Dyn,
     }
@@ -4826,6 +4869,9 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         | Value::ChannelRecv(_) => NativeValue::Str("<future>".to_string()),
         Value::Sender(_) => NativeValue::Str("<sender>".to_string()),
         Value::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
+        Value::Reactive(kind, _) => {
+            NativeValue::Str(format!("<{}>", kind.type_name().to_ascii_lowercase()))
+        }
         Value::Pending => NativeValue::Str("<pending>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),
