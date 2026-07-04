@@ -106,6 +106,8 @@ on every eligible program.
 | **J3** | ✅ **DONE.** **Calls** — native `Op::Call` on the shared contiguous stack (no per-call allocation); heap-aware refcounting for the callee closure/results; **resume-native** re-enters the compiled caller after its callee returns; **native→native direct calls** — a compiled caller `call_indirect`s a compiled callee (value-returning `Return`, capacity-guarded so the register pointer stays valid), skipping the interpreter round-trip on the fast path, falling back to the shared setup otherwise. `fib`-class recursion **~2.3×**; loops ~6–8×. | Call ABI, stack/frame interaction, recursion depth. |
 | **J4** | ✅ **LEAF-OP ARC DONE (slices 1–4).** **Heap & collections** — a generic `run_leaf_op` helper runs a single non-dispatching heap/collection op (the interpreter's exact arm, refcounts included) and returns "continue" or a resume pc; adding an op is a match arm. Slice 1: `MakeRange`/`IterSnapshot`/`ListLen`/`ListGet` → `for i in 0..n` native (**~2.6×**). Slice 2: `LoadField`/`SetField` (store factored into a shared `set_field_fast`, refcount-identical across tiers) — **812/813 protos native**. Slice 3: `Op::Index` (list/map/string subscript). Slice 4: `MakeTuple`/`TupleIndex` (completes `for (i,x) in xs.enumerate()` native). Heap-*dominated* loops are ~1.0–1.1× (each op is a helper call); the win is coverage — a loop mixing heap access with native arithmetic stays native. **Deliberately not leaf-ified** (documented below): dispatch-preceded constructors (`MakeMap`/`RequireMapKey`, `BuildString`/`Stringify`), thunk-running `MakeStruct`/`MakeEnum`. Genuinely fast heap access is the J5 inline cache, not more leaf ops. | **Refcount exactness** — the leak oracle is the gate. |
 | **J5** | ✅ **DONE (OSR).** **Tiering polish + OSR** — on-stack replacement so a long-running loop enters tier 1 *mid-frame* at the loop header, not only at a call boundary. Closes the production hole where a top-level program that is one big loop (its `main` frame entered exactly once) never crossed the entry-count threshold and so ran entirely in tier 0 in production — every prior loop win was `force_jit`-only. Back-edge counting drives promotion; loop headers become native (re-)entry points (reusing the J3 resume-native mid-frame-entry machinery); OSR-capable prototypes compile `heap_aware` so mid-frame entry with a live heap value stays refcount-exact. **~3.5–5.5× on a top-level loop under real hot-counter promotion** (was tier-0-only before). Per-op bail + native-globals landed earlier (see below). | Deopt/OSR is subtle; do last. |
+| **J6** | ✅ **DONE (negative result, documented).** **Native inline cache** — built the call-free native field read (guard on shape pointer + inline slot load, `#[repr(u8)]` + runtime-measured layout), proved correct/leak-free, and **reverted**: the field read is not the bottleneck (`heap_aware` store overhead + dependent-load latency are, both tier-independent). See the J6 section. | Field read was never the bottleneck. |
+| **J7** | ✅ **DONE.** **Bare stores** — the J6 finding's real lever. A forward may-hold-heap dataflow (`heap_in_map`, fails closed) + an ownership-transfer peephole (`transfer_pairs`) elide the refcount work on register stores/`Move`/`Drop` wherever the value is provably immediate. Synergistic: `loop_jit/1M` ~7.4→6.0ms (~19%), `float_jit/1M` ~6.3→4.6ms (~28%). Blocked from going further by int→bigint overflow (accumulators are genuinely may-heap). Pure-numeric-loop lever; field loops unchanged (leaf helper dominates). See the J7 section. | Refcount exactness — leak oracle is the gate. |
 
 Each slice: `--jit-differential` 0-divergence, leak residency 0 under forced JIT, a criterion
 before/after, and `git` commit per green slice (standing directive).
@@ -512,13 +514,59 @@ same verdict as the helper-internal cache, one level deeper.
 
 **The real lever is the `heap_aware` store overhead, not the field read.** A pure-integer loop is ~6×
 in the JIT; adding one field read drops it *below* the interpreter, because the whole prototype flips
-to refcount-checked stores. The promising direction (a future slice) is to keep stores **bare** where
-the compiler/JIT can prove the stored value is an immediate (an `int`/`float`/`bool` arithmetic temp
-never needs a release), so a field-bearing loop only pays the heap-aware discipline on the genuinely
-heap-valued registers, not on every arithmetic temporary. That is a codegen refinement in `lang-jit`
-(and possibly a compiler liveness/typing hint), not a heap-layout change. Until then, the JIT's wins
-stay in native arithmetic/control, calls, and OSR'd loops, and field-bearing loops are best left to the
-interpreter.
+to refcount-checked stores. The promising direction is to keep stores **bare** where the JIT can prove
+the overwritten value is an immediate — a codegen refinement in `lang-jit`, not a heap-layout change.
+That is **J7** (below).
+
+## J7 — bare stores (elide refcount work where the value is provably immediate)
+
+The J6 finding's "real lever," built and shipped. A `heap_aware` prototype made **every** register
+store/`Move`/`Drop` refcount-correct (load-old + `is_pointer` release, `is_pointer` retain), even for
+the arithmetic temporaries that never hold a heap value. That scaffolding — a load + a
+never-taken branch per op, ~3–4× the real work — is what pins a field-bearing loop below the
+interpreter and taxes even pure-arithmetic loops.
+
+**What confirmed the hypothesis.** Forcing every store bare (an unsound A/B, valid only for timing a
+loop with no heap in registers) cut `loop_jit/1M` 7.4ms → 5.7ms (~23%). So the store overhead is real
+and worth attacking — but a *sound* version must keep the releases wherever a value genuinely may be
+heap.
+
+**The blocker: int overflow.** `int` is arbitrary-precision — `a + b` past the 48-bit immediate range
+heap-boxes a big int (`Value::int(i64)`). So an accumulator/counter register is *genuinely* may-heap:
+its Drop and its `Move`'s retain cannot be elided. A pure heap-analysis therefore leaves the hot
+accumulator ops in place and, measured alone, is a wash.
+
+**Two sound, composable refinements** (both in `lang-jit`, gated by the leak-under-JIT oracle):
+
+- **`heap_in_map`** — a forward may-hold-heap dataflow over the tier-0 CFG, seeded with the parameters
+  possibly-heap at entry. Per store site it says whether the overwritten value may be a heap pointer;
+  where it provably cannot (a fresh/`Drop`-ped slot, a bool, an immediate arithmetic result) the store
+  is bare. It **fails closed**: any unmodeled op opts the whole prototype out (all-true = prior
+  behavior), and modeling is confined to the pure-arithmetic-loop subset, so a call or leaf op keeps
+  the old discipline. The fixpoint's in-set at a loop header over-approximates exactly what tier-0 can
+  leave there, which is why a call-free `heap_aware` prototype (native runs once per activation, so an
+  OSR header / `pc 0` is the only place the interpreter can have left a live register) is sound; a
+  call-bearing prototype contains `Op::Call`, which is unmodeled, so it stays all-true.
+
+- **`transfer_pairs`** — an ownership-transfer peephole: `Move dst <- src` immediately followed by
+  `Drop src` is a transfer whose retain (in the `Move`) and release (in the `Drop`) cancel *exactly*,
+  regardless of the value's type. Both are emitted bare. This is what removes the retain+release on the
+  transient arithmetic temporaries that the overflow-to-bigint semantics keep may-heap — the ops the
+  dataflow alone cannot touch. Sound by construction (refcount-neutral algebra); guarded so a `Drop`
+  that is a branch target (reachable without its `Move`) is left alone.
+
+**The two are synergistic.** Measured on the register-local integer loop, the dataflow alone is a wash
+and the peephole alone is a wash (either leaves enough scaffolding to bottleneck the dependency chain),
+but **together** they cut `loop_jit/1M` ~7.4ms → ~6.0ms (~19%) and `float_jit/1M` ~6.3ms → ~4.6ms
+(~28%, floats are never heap so more of the loop goes bare). The residual vs the unsound fully-bare
+build is the genuinely-needed release of the previous accumulator/counter value (a possible big int) —
+correct, not overhead.
+
+**Scope, honestly.** This is the pure-numeric-loop lever, not the heap one: the field-read floor is
+unchanged (the leaf-op helper dominates there, exactly as J6 found — `field_jit` is a wash under
+forced-bare). Field-bearing loops remain best served by the interpreter until a call-free native field
+read lands. Validation: `--jit-differential` 419/0-divergence/0-leak, plus unit tests locking the
+analysis contract (`heap_in_map`/`transfer_pairs`).
 
 ## Open questions (resolve at sign-off)
 
