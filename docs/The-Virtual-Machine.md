@@ -4,9 +4,9 @@ How the bytecode backend executes a program: a register machine over NaN-boxed v
 
 ## A register-based bytecode VM
 
-The VM (`lang-vm`) is a Tier-0 **register machine** (Lua/Dalvik style), not a stack machine. Register bytecode issues fewer dispatches per operation than a stack VM and is a friendlier base for the Tier-1 JIT that compiles hot prototypes to native code ([below](#tier-1--the-jit)).
+The VM (`noeta-vm`) is a Tier-0 **register machine** (Lua/Dalvik style), not a stack machine. Register bytecode issues fewer dispatches per operation than a stack VM and is a friendlier base for the Tier-1 JIT that compiles hot prototypes to native code ([below](#tier-1--the-jit)).
 
-The compiled artifact (pure data in `lang-bytecode`):
+The compiled artifact (pure data in `noeta-bytecode`):
 
 - **`Op`** — the opcode set: arithmetic and branching, `Call`/`Return`, `MakeList`/`MakeMap` and iteration ops, `CallBuiltin`, the object-model ops (`MakeRecord`/`MakeEnum`/`LoadField`/`CallMethod`), and ops added by later tracks (`MakeStructInPlace` for reuse, drop ops for RC, `MakeChannel`/`SpawnIsolate`/`ExtCall`).
 - **`Chunk`** — one function prototype: its `code`, constant pool, `num_params`, `num_registers`, and `frame_locals` (destructor-teardown pins). `Chunk::disassemble` gives stable text for snapshot tests.
@@ -16,7 +16,7 @@ Execution is frame-based: each call pushes a `Frame` with its own register file,
 
 ### Register allocation
 
-IR→bytecode first allocates registers *monotonically* (every temporary and local gets a fresh slot living to teardown); a bytecode→bytecode post-pass (`lang-compiler`'s `regalloc::coalesce`) then reclaims the waste by graph coloring:
+IR→bytecode first allocates registers *monotonically* (every temporary and local gets a fresh slot living to teardown); a bytecode→bytecode post-pass (`noeta-compiler`'s `regalloc::coalesce`) then reclaims the waste by graph coloring:
 
 1. **Liveness** — a backward dataflow to a fixpoint over the real control-flow graph.
 2. **Interference graph** — a definition interferes with everything in its `live_out`, plus a def↔use edge forbidding one op's source and destination sharing a slot.
@@ -26,7 +26,7 @@ The payoff is both smaller per-activation register arrays and *prompt* reclamati
 
 ## NaN-boxing
 
-Every runtime value is a single 64-bit word — `struct Value(u64)` in `lang-value`. Doubles are stored natively; everything else is encoded in the payload of a quiet NaN with a small type tag, and heap pointers live in the low 48 bits:
+Every runtime value is a single 64-bit word — `struct Value(u64)` in `noeta-value`. Doubles are stored natively; everything else is encoded in the payload of a quiet NaN with a small type tag, and heap pointers live in the low 48 bits:
 
 ```
 float      : any bits where (bits & QNAN) != QNAN     (a real double)
@@ -42,11 +42,11 @@ Why: a fat `enum Value` would be 16+ bytes and branchy; NaN-boxing keeps values 
 A heap pointer refers to an `Obj` = a `#[repr(C)]` header + a `Payload`. The payload variants cover everything heap-allocated: `Str`, `Bytes`, boxed `Int`, `Closure { proto, upvalues }`, `Cell` (a mutable upvalue cell), `List`, `Tuple`, `Set`, `Map`, `PackedList { schema, bytes }` (a flat unboxed numeric buffer), shaped `Object`/`Enum`, `FileHandle`, channel `Sender`/`Receiver`, and iterator state. The header carries the `refcount`, a monotonic creation `seq` (for deterministic destruction tie-breaks), the cycle collector's `color`/`buffered` flags, and the isolates `shared` bit.
 
 > [!NOTE]
-> **`lang-value` is the one crate whose core value model uses `unsafe`** — the NaN-box pointer round-trip and heap-header access. It opts out of the workspace's `unsafe_code = "forbid"` lint and is miri-gated. It also emits the refcount primitives and the operator semantics (`apply_binary`, `structural_compare`, …) that *both* backends share, so structural equality and ordering cannot diverge. The VM and compiler crates are themselves `unsafe`-free.
+> **`noeta-value` is the one crate whose core value model uses `unsafe`** — the NaN-box pointer round-trip and heap-header access. It opts out of the workspace's `unsafe_code = "forbid"` lint and is miri-gated. It also emits the refcount primitives and the operator semantics (`apply_binary`, `structural_compare`, …) that *both* backends share, so structural equality and ordering cannot diverge. The VM and compiler crates are themselves `unsafe`-free.
 
 ## Shapes (hidden classes)
 
-Objects are not per-instance hashmaps. Each aggregate points to a **shape** (a V8/JSC-style hidden class) describing its layout; the fields live in a flat inline slot array indexed by the shape. This is `lang-object`, pure layout data below `lang-value` in the DAG.
+Objects are not per-instance hashmaps. Each aggregate points to a **shape** (a V8/JSC-style hidden class) describing its layout; the fields live in a flat inline slot array indexed by the shape. This is `noeta-object`, pure layout data below `noeta-value` in the DAG.
 
 - A `Shape` records the type name, the ordered slot names, and enum-variant info; `ShapeKind` is `Struct`/`Class`/`Opaque`/`Enum`; `slot_of(name)` resolves a field name to a slot index.
 - The compiler emits a flat shape table into the `Module`; the VM wraps each entry in an `Rc<Shape>` once at startup and clones that handle into every value of that shape — so **shape identity is a cheap pointer comparison**, which is exactly what the inline cache keys on.
@@ -67,7 +67,7 @@ Every property-access and method-call site caches the last shape it saw and the 
 
 ## Tier 1 — the JIT
 
-Everything above is **Tier 0**: the interpreter dispatch loop. On top of it sits an optional **Tier 1** — a method-at-a-time [Cranelift](https://cranelift.dev/) JIT (`lang-jit`) that compiles a hot prototype to native machine code. It lives behind a `jit` cargo feature: the default `lang` binary enables it, but a `--no-default-features` build pulls in *zero* Cranelift crates and runs Tier 0 only, byte-for-byte identically. The sandbox, the conformance corpus, and isolate worker threads always run Tier 0 (the JIT's `JITModule` is `!Send`), so the differential oracle's baseline never involves native code.
+Everything above is **Tier 0**: the interpreter dispatch loop. On top of it sits an optional **Tier 1** — a method-at-a-time [Cranelift](https://cranelift.dev/) JIT (`noeta-jit`) that compiles a hot prototype to native machine code. It lives behind a `jit` cargo feature: the default `noeta` binary enables it, but a `--no-default-features` build pulls in *zero* Cranelift crates and runs Tier 0 only, byte-for-byte identically. The sandbox, the conformance corpus, and isolate worker threads always run Tier 0 (the JIT's `JITModule` is `!Send`), so the differential oracle's baseline never involves native code.
 
 ### The design in one line
 

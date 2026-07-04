@@ -6,8 +6,8 @@ Programs span multiple files. Each file declares a `namespace`, imports with `us
 
 A file declares its module path with `namespace`:
 
-```lang
-// models.lang
+```noeta
+// models.noe
 namespace App.Models;
 
 pub class User {
@@ -21,7 +21,7 @@ pub class User {
 
 Import a declaration by its full path. Grouped imports share a prefix:
 
-```lang ignore
+```noeta ignore
 namespace App.Main;
 
 use App.Models.User;                       // single import
@@ -40,7 +40,7 @@ A declaration is **module-private by default**. Only `pub` items can be imported
 - A genuinely unknown type name is E0013.
 - Importing a name the file *also* declares locally (or imports twice) is a collision, E0020.
 
-```lang
+```noeta
 namespace App.Models;
 
 pub class User { pub name: string }    // importable
@@ -51,7 +51,7 @@ Field and method visibility inside a type is separate — see [Structs, Classes 
 
 ## How it resolves
 
-When you run an entry file, the loader parses it and its sibling `.lang` modules (each declaring its own `namespace`), resolves the entry's `use` declarations to the real `pub` declarations, and merges everything into one program that runs unchanged. Diagnostics from a merged-in module resolve to *that file's* coordinates.
+When you run an entry file, the loader parses it and its sibling `.noe` modules (each declaring its own `namespace`), resolves the entry's `use` declarations to the real `pub` declarations, and merges everything into one program that runs unchanged. Diagnostics from a merged-in module resolve to *that file's* coordinates.
 
 The module graph is incremental: editing one module recomputes only its dependents (see [Architecture & Pipeline](Architecture-and-Pipeline)).
 
@@ -59,7 +59,7 @@ The module graph is incremental: editing one module recomputes only its dependen
 
 The stdlib is imported the same way, under the `std` namespace:
 
-```lang
+```noeta
 use std.{math, json, fs}
 
 echo math.sqrt(16.0)

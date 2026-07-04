@@ -1,9 +1,9 @@
 # Benchmarking
 
-Micro-benchmarks live in the file they measure, inside a `@bench` block — the sibling of the `@test` block. On a normal run they strip away; `lang bench` activates and times them.
+Micro-benchmarks live in the file they measure, inside a `@bench` block — the sibling of the `@test` block. On a normal run they strip away; `noeta bench` activates and times them.
 
 ```console
-$ lang bench sort.lang
+$ noeta bench sort.noe
 running 2 benchmarks
   sum_100                    412ns/iter  (1000 iterations)
   sum_10                      38ns/iter  (200 iterations)
@@ -15,7 +15,7 @@ running 2 benchmarks
 
 A benchmark is a function inside a `@bench` block (or the `@bench fn` annotation form). Like tests, it uses `assert` for correctness and *fails* if it aborts:
 
-```lang
+```noeta
 fn sum_to(n: int): int {
     mut total = 0
     for i in 1..=n { total += i }
@@ -49,13 +49,13 @@ The reported unit adapts to the magnitude: `ns`, `µs`, `ms`, or `s`.
 ## Command reference
 
 ```
-lang bench [OPTIONS] <FILE>
+noeta bench [OPTIONS] <FILE>
 ```
 
 | Flag | Effect |
 |---|---|
 | `--iterations <N>` | Override the iteration count for every benchmark. |
-| `--profile <NAME>` | Only run when the `bench` tier is live in this `lang.toml` build profile; otherwise no-op with exit `0`. |
+| `--profile <NAME>` | Only run when the `bench` tier is live in this `noeta.toml` build profile; otherwise no-op with exit `0`. |
 
 ### Output and exit codes
 
@@ -70,9 +70,9 @@ running <N> benchmarks
 Exit `0` when nothing failed, `1` otherwise. `no benchmarks found` exits `0`.
 
 > [!NOTE]
-> `lang bench` measures *your program's* `@bench` blocks. It is unrelated to the `criterion` benches the compiler developers run against the VM itself (`cargo bench -p lang-vm`) — those are covered in the [Contributing guide](Contributing).
+> `noeta bench` measures *your program's* `@bench` blocks. It is unrelated to the `criterion` benches the compiler developers run against the VM itself (`cargo bench -p noeta-vm`) — those are covered in the [Contributing guide](Contributing).
 
 ## See also
 
 - [Testing](Testing) — the `@test` sibling.
-- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model and `lang.toml` profiles.
+- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model and `noeta.toml` profiles.

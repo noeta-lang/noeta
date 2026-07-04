@@ -1,12 +1,12 @@
-# lang *(working title — name TBD)*
+# Noeta
 
 [![CI](https://github.com/nsrosenqvist/lang/actions/workflows/ci.yml/badge.svg)](https://github.com/nsrosenqvist/lang/actions/workflows/ci.yml)
 
 > **A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.**
 
-`lang` is a new, general-purpose programming language built from scratch in Rust. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
+Noeta is a new, general-purpose programming language built from scratch in Rust. It reads cleanly and familiarly, but underneath it pairs an ML-grade type system with a runtime engineered for correctness and speed.
 
-```lang
+```noeta
 enum OrderError { Empty; NegativePrice(index: int) }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
@@ -35,20 +35,20 @@ echo match validate(cart) {
 - **Batteries and tooling.** A layered standard library and a toolchain that runs, tests, benchmarks, and documents your code — `run`, `repl`, `test`, `bench`, `doc`.
 
 > [!NOTE]
-> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, and the CLI all ship today. The larger north-star vision — server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP/WS server, desktop packaging, an embedded LSP, and an agentic MCP surface — is the roadmap, not yet built. The [wiki](docs/Home.md) marks the boundary between the two everywhere. The `lang-` crate prefix and the binary name `lang` are placeholders pending the real name.
+> **Status: pre-alpha, not public.** The **language core and tooling are complete and usable** — full syntax, the type system, traits/generics/derives, modules, the standard library, real host IO, concurrency, and the CLI all ship today. The larger north-star vision — server-side reactivity (`signal`/`computed`/`effect`), a bundled HTTP/WS server, desktop packaging, an embedded LSP, and an agentic MCP surface — is the roadmap, not yet built. The [wiki](docs/Home.md) marks the boundary between the two everywhere.
 
 ## Try it
 
 Requires a recent stable Rust toolchain (1.95+).
 
 ```sh
-cargo build                                 # build the workspace + the `lang` binary
-echo 'echo "hello"' > hello.lang
-cargo run -p lang-cli -- run hello.lang     # -> hello
-cargo run -p lang-cli -- repl               # interactive REPL
+cargo build                                 # build the workspace + the `noeta` binary
+echo 'echo "hello"' > hello.noe
+cargo run -p noeta-cli -- run hello.noe     # -> hello
+cargo run -p noeta-cli -- repl               # interactive REPL
 ```
 
-To put `lang` on your `PATH`: `cargo install --path crates/lang-cli`.
+To put `noeta` on your `PATH`: `cargo install --path crates/noeta-cli`.
 
 ## Documentation
 

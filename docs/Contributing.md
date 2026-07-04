@@ -2,7 +2,7 @@
 
 This page is the developer's entry point to *building* the language — the compiler, not programs in it. It complements the in-repo `AGENTS.md` (the exhaustive conventions reference) and `ARCHITECTURE.md` (the technical overview); this page orients you and points at them.
 
-`lang` is a pre-alpha, not-yet-public implementation built primarily through agentic engineering, so the discipline below is written to be followed by humans and AI agents alike.
+Noeta is a pre-alpha, not-yet-public implementation built primarily through agentic engineering, so the discipline below is written to be followed by humans and AI agents alike.
 
 ## Orientation
 
@@ -17,10 +17,10 @@ This page is the developer's entry point to *building* the language — the comp
 ## Build & run
 
 ```sh
-cargo build                                  # build the workspace + the `lang` binary
+cargo build                                  # build the workspace + the `noeta` binary
 cargo test                                   # unit + snapshot + conformance + property tests
-cargo run -p lang-cli -- run file.lang       # run a program (or use ./target/debug/lang)
-cargo run -p lang-conformance -- --differential   # the differential oracle (dev harness)
+cargo run -p noeta-cli -- run file.noe       # run a program (or use ./target/debug/noeta)
+cargo run -p noeta-conformance -- --differential   # the differential oracle (dev harness)
 ```
 
 You need a recent stable Rust (1.95+).
@@ -31,20 +31,20 @@ Source flows through sharp, single-purpose crates: lexer → parser → checker 
 
 ## The differential oracle is the spine
 
-The language is implemented twice — a reference interpreter (`lang-eval`) and a bytecode VM (`lang-vm`) — and the conformance harness asserts their observable output is byte-for-byte identical on every corpus program, with a hard **`0 skipped`** gate. This is the backbone of the test strategy. Two rules follow:
+The language is implemented twice — a reference interpreter (`noeta-eval`) and a bytecode VM (`noeta-vm`) — and the conformance harness asserts their observable output is byte-for-byte identical on every corpus program, with a hard **`0 skipped`** gate. This is the backbone of the test strategy. Two rules follow:
 
-1. **A feature lands in both backends** (or is explicitly oracle-exempt). Shared semantics go in `lang-stdlib` so the two agree by construction rather than by luck.
+1. **A feature lands in both backends** (or is explicitly oracle-exempt). Shared semantics go in `noeta-stdlib` so the two agree by construction rather than by luck.
 2. **The differential must stay green** — `--differential` at 0 skipped, backends agree — after every change.
 
 ## The new-feature template
 
 A language feature is added as a **vertical slice**, in this order:
 
-1. **Grammar / AST** — token(s) in `lang-lexer`, node(s) in `lang-ast`, production in `lang-parser` (keep surface sugar as its own AST node).
-2. **Checker rule** — typing/inference in `lang-check` (+ a new `Type` form in `lang-types` if needed); add a negative conformance case for any new static-error class.
-3. **Lowering** — AST → IR in `lang-ir` (+ `lang-ir-passes` if the feature introduces owned heap values needing drops/reuse).
-4. **Both backends** — evaluation in `lang-eval` **and** bytecode in `lang-compiler`/`lang-vm`; keep shared semantics in `lang-stdlib`.
-5. **Conformance cases** — `tests/conformance/**.lang` with `// expect:` headers, including error cases; must run `--differential` at 0 skipped.
+1. **Grammar / AST** — token(s) in `noeta-lexer`, node(s) in `noeta-ast`, production in `noeta-parser` (keep surface sugar as its own AST node).
+2. **Checker rule** — typing/inference in `noeta-check` (+ a new `Type` form in `noeta-types` if needed); add a negative conformance case for any new static-error class.
+3. **Lowering** — AST → IR in `noeta-ir` (+ `noeta-ir-passes` if the feature introduces owned heap values needing drops/reuse).
+4. **Both backends** — evaluation in `noeta-eval` **and** bytecode in `noeta-compiler`/`noeta-vm`; keep shared semantics in `noeta-stdlib`.
+5. **Conformance cases** — `tests/conformance/**.noe` with `// expect:` headers, including error cases; must run `--differential` at 0 skipped.
 6. **Snapshot update** — review `insta` snapshots deliberately; never blind-accept.
 
 > **The iron rule: every feature or fix lands with a conformance corpus entry.** Prefer vertical-slice tasks ("implement `~` end to end") over diffuse refactors — a slice's done-condition is "its conformance cases pass."
@@ -52,12 +52,12 @@ A language feature is added as a **vertical slice**, in this order:
 ## Testing architecture
 
 - **Per-stage snapshots** (`insta`) — tokens, AST, and rendered diagnostics are pinned at each boundary.
-- **Conformance corpus** (`tests/conformance/**.lang`) — executable end-to-end behavior with `// expect:` headers, run through both backends and asserted identical.
+- **Conformance corpus** (`tests/conformance/**.noe`) — executable end-to-end behavior with `// expect:` headers, run through both backends and asserted identical.
 - **Property tests** (`proptest`) — invariants like parse→print→parse round-trips, and the static-≤-dynamic last-use property for the RC passes.
 - **The leak oracle** — heap residency must be 0 at clean exit, both backends, whole corpus.
-- **miri** — covers the quarantined `unsafe` (`lang-value`, `lang-gc`, the `lang-db` newtype, a `lang-stdlib` reinterpret, and the test-only `lang-alloc-probe`). The VM and compiler are themselves `unsafe`-free.
+- **miri** — covers the quarantined `unsafe` (`noeta-value`, `noeta-gc`, the `noeta-db` newtype, a `noeta-stdlib` reinterpret, and the test-only `noeta-alloc-probe`). The VM and compiler are themselves `unsafe`-free.
 - **Coverage** — measured with `cargo-llvm-cov` (never tarpaulin, which can't see the subprocess-driven CLI tests). `cargo llvm-cov --workspace --summary-only`.
-- **Benchmarks** — `cargo bench -p lang-vm` runs the `criterion` benches over the VM hot paths; a VM-touching change should check for no regression.
+- **Benchmarks** — `cargo bench -p noeta-vm` runs the `criterion` benches over the VM hot paths; a VM-touching change should check for no regression.
 
 ## Before you're done
 

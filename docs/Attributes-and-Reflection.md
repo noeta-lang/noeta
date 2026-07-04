@@ -16,7 +16,7 @@ Generates trait implementations from a type's shape. Covered in [Generics & Trai
 
 A `#[Foo(...)]` attribute *is* a struct constructed in annotation position. The struct opts in by being marked `@attribute`:
 
-```lang
+```noeta
 @attribute
 struct Route { path: string  method: string = "GET" }
 
@@ -39,7 +39,7 @@ The `#[Skip]` / `#[Name]` / `#[Group]` / `#[Data]` attributes used by the [test 
 
 Rides on an `@attribute` struct and confers a typed architectural role on every declaration the attribute annotates, indexed at build time (zero runtime cost). Only a struct marked `@attribute` may carry `@role`, and the variant must be fieldless.
 
-```lang
+```noeta
 @attribute(Function, Method)
 @role(Semantic.EntryPoint)
 struct Route { path: string }
@@ -49,7 +49,7 @@ struct Route { path: string }
 
 Marks an **enum** (only) as a source of role variants. The language ships a built-in `Semantic` enum (`EntryPoint`, `PersistenceBoundary`, `TrustBoundary`, `Sink`, `Layer`); any project enum marked `@semantic` becomes role-eligible:
 
-```lang
+```noeta
 @semantic enum WebRole { Controller; Middleware; ErrorHandler }
 ```
 
@@ -70,7 +70,7 @@ A handful of prelude functions expose type and metadata at runtime.
 
 Returns the value's runtime head-constructor as the prelude `Type` ADT, which you can `match`:
 
-```lang
+```noeta
 echo match type_of(5) {
     Type.Int    => "int",
     Type.String => "string",
@@ -84,7 +84,7 @@ echo match type_of(5) {
 
 Materializes every `#[T(...)]` attribute in the program — each entry's `.value` is a real `T`, and `.target` is the annotated declaration's name:
 
-```lang ignore
+```noeta ignore
 routes = attributes_of::<Route>()
 for r in routes {
     echo "${r.target} -> ${r.value.path}"
@@ -99,7 +99,7 @@ The compile-time `(declaration, role)` index built from `@role(...)` tags — ea
 
 Fallible dispatch by name — `recv` is a value (→ an instance method) or a bare type name (→ an associated function). Returns `Err` on an unknown name, a non-string name, or an arity mismatch:
 
-```lang ignore
+```noeta ignore
 echo match invoke(Shape.new(2, 3), "area", []) {
     Ok(v)  => "area = ${v}",
     Err(e) => "no such method",

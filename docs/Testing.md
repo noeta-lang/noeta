@@ -1,9 +1,9 @@
 # Testing
 
-Tests live *in the same file as the code they test*, inside a `@test` block. On a normal `lang run` those blocks strip away — they never compile or execute. `lang test` activates them and runs each one in isolation.
+Tests live *in the same file as the code they test*, inside a `@test` block. On a normal `noeta run` those blocks strip away — they never compile or execute. `noeta test` activates them and runs each one in isolation.
 
 ```console
-$ lang test math.lang
+$ noeta test math.noe
 running 2 tests on 8 threads
   ok    adds
   ok    subtracts
@@ -15,7 +15,7 @@ running 2 tests on 8 threads
 
 A test is an ordinary function inside a `@test` block. Assert with the prelude `assert`:
 
-```lang
+```noeta
 fn add(a: int, b: int): int { return a + b }
 
 @test {
@@ -26,7 +26,7 @@ fn add(a: int, b: int): int { return a + b }
 
 There is an equivalent **annotation form** — `@test fn …` is exactly a one-item block:
 
-```lang
+```noeta
 @test fn adds(): void { assert(add(1, 2) == 3) }
 ```
 
@@ -38,7 +38,7 @@ A test's return type is optional; both `fn adds()` and `fn adds(): void` work.
 ## Isolation and concurrency
 
 - The activated program is type-checked **once**, so a broken test is one compile error, not one per run.
-- Each test runs as `<shared setup> + <call the test fn>` in a **fresh real-host isolate**, so one test can never observe another's state. The shared setup is the file's declarations and globals with its top-level "main" effects removed — so a top-level `echo` in the file under test does *not* run during `lang test`.
+- Each test runs as `<shared setup> + <call the test fn>` in a **fresh real-host isolate**, so one test can never observe another's state. The shared setup is the file's declarations and globals with its top-level "main" effects removed — so a top-level `echo` in the file under test does *not* run during `noeta test`.
 - Tests run **in parallel** across worker threads (default: the machine's parallelism, capped at the test count). Results are gathered by declaration index and reported in **declaration order**, deterministically, regardless of finish order.
 - By default all tests run even after a failure. `--fail-fast` stops after the first failure and drains the workers.
 
@@ -53,7 +53,7 @@ Lead a test with any of these prelude attributes to change how it runs or is rep
 | `#[Group("…")]` | Tags the test for `--group` filtering. |
 | `#[Data([…])]` | Parameterized — runs once per row, reported as `name[row]`. |
 
-```lang
+```noeta
 @test {
     #[Skip("flaky until fixed")]
     fn not_ready(): void { assert(false) }
@@ -76,7 +76,7 @@ Notes on `#[Data]`:
 ## Command reference
 
 ```
-lang test [OPTIONS] <FILE>
+noeta test [OPTIONS] <FILE>
 ```
 
 | Flag | Effect |
@@ -84,7 +84,7 @@ lang test [OPTIONS] <FILE>
 | `--fail-fast` | Stop after the first failing test. |
 | `-j, --jobs <N>` | Number of tests to run concurrently (default: machine parallelism). |
 | `--group <NAME>` | Run only tests tagged `#[Group("<NAME>")]`. |
-| `--profile <NAME>` | Only run when the `test` tier is live in this `lang.toml` build profile; otherwise no-op with exit `0`. |
+| `--profile <NAME>` | Only run when the `test` tier is live in this `noeta.toml` build profile; otherwise no-op with exit `0`. |
 
 ### Report format
 
@@ -106,5 +106,5 @@ running <N> tests on <J> threads[, <K> skipped]
 ## See also
 
 - [Benchmarking](Benchmarking) — the `@bench` sibling of `@test`.
-- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model these blocks belong to, and `lang.toml` profiles.
+- [Documentation & Dev Tiers](Documentation-and-Tiers) — the tier model these blocks belong to, and `noeta.toml` profiles.
 - [Attributes & Reflection](Attributes-and-Reflection) — how `#[…]` attributes work in general.

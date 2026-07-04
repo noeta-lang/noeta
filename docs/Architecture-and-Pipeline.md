@@ -7,24 +7,24 @@ The implementation is a workspace of ~25 small Rust crates forming a strict depe
 ## The pipeline
 
 ```
-source (.lang)
-   │  lang-lexer (logos)
+source (.noe)
+   │  noeta-lexer (logos)
    ▼
-tokens ──► lang-parser (chumsky) ──► AST (lang-ast)
+tokens ──► noeta-parser (chumsky) ──► AST (noeta-ast)
                                        │
                                        ▼
-                             lang-check (types + local inference)   ── a shared front-end:
+                             noeta-check (types + local inference)   ── a shared front-end:
                                        │                                a program with type errors
                                        ▼                                is rejected before it runs
-                             lang-ir (ANF lowering)
+                             noeta-ir (ANF lowering)
                                        │
                                        ▼
-                             lang-ir-passes (liveness ─► drop insertion ─► in-place reuse)
+                             noeta-ir-passes (liveness ─► drop insertion ─► in-place reuse)
                                        │
                         ┌──────────────┴───────────────────────────────┐
                         ▼                                               ▼
-                   lang-eval                              lang-compiler ─► Chunk/Module
-              (the reference interpreter)                                ─► lang-vm (register VM)
+                   noeta-eval                              noeta-compiler ─► Chunk/Module
+              (the reference interpreter)                                ─► noeta-vm (register VM)
                         │                                               │
                         └───────────────────► RunResult ◄──────────────┘
                               (observable output; the two are asserted identical)
@@ -36,40 +36,40 @@ Each stage is a separate crate with an explicit input and output type and no hid
 
 The language is implemented **twice**:
 
-- **`lang-eval`** — a tree/IR-walking interpreter with an `Rc`-based value model.
-- **`lang-vm`** — a register-based bytecode VM over NaN-boxed 64-bit words.
+- **`noeta-eval`** — a tree/IR-walking interpreter with an `Rc`-based value model.
+- **`noeta-vm`** — a register-based bytecode VM over NaN-boxed 64-bit words.
 
 Both implement one trait — `trait Backend { fn run(&self, program: &Program) -> RunResult }` — and the conformance harness runs every program through *both*, asserting their `RunResult` (stdout + exit code + diagnostics) is byte-for-byte identical, with a hard **`0 skipped`** gate.
 
-Why build it twice? A second independent implementation is a continuously-running oracle: any divergence between the two is a bug in one of them, caught mechanically instead of by hand-written expected output. Crucially, the comparison is on *observable behavior*, not internal representation — which is exactly what frees the two backends to use completely different value models (an `Rc` enum vs. NaN-boxed words). This oracle is the spine of the whole test strategy, and it constrains the design: any shared semantics that both backends must agree on live *once*, in `lang-stdlib`, so they cannot drift.
+Why build it twice? A second independent implementation is a continuously-running oracle: any divergence between the two is a bug in one of them, caught mechanically instead of by hand-written expected output. Crucially, the comparison is on *observable behavior*, not internal representation — which is exactly what frees the two backends to use completely different value models (an `Rc` enum vs. NaN-boxed words). This oracle is the spine of the whole test strategy, and it constrains the design: any shared semantics that both backends must agree on live *once*, in `noeta-stdlib`, so they cannot drift.
 
 > [!NOTE]
-> **A precise nuance.** The differential's reference used to be the AST tree-walker. Since the memory-management migration, the reference is the **Core-IR interpreter** (the same `lang-eval` machinery, now interpreting the RC-annotated ANF IR) — because the AST walker fired destructors only at global teardown and so could no longer reproduce last-use destruction. The live differential is now *Core-IR interpreter ↔ VM*: two genuinely different memory machines (Rust `Rc` vs. a manual refcount heap) executing the *same* RC-annotated IR. The AST walk survives as a performance baseline and property-test helper.
+> **A precise nuance.** The differential's reference used to be the AST tree-walker. Since the memory-management migration, the reference is the **Core-IR interpreter** (the same `noeta-eval` machinery, now interpreting the RC-annotated ANF IR) — because the AST walker fired destructors only at global teardown and so could no longer reproduce last-use destruction. The live differential is now *Core-IR interpreter ↔ VM*: two genuinely different memory machines (Rust `Rc` vs. a manual refcount heap) executing the *same* RC-annotated IR. The AST walk survives as a performance baseline and property-test helper.
 
 ## Incremental compilation (salsa)
 
-The pipeline is not just a straight line of function calls — it is expressed as a graph of memoized **queries** using [salsa](https://github.com/salsa-rs/salsa) 0.27 (the framework rust-analyzer is built on), in the `lang-db` crate. The `SourceProgram` input feeds tracked queries `tokens → ast → checked → bytecode`; the module graph adds `Workspace → linked → linked_checked → linked_bytecode`. Editing one module recomputes only its transitive dependents.
+The pipeline is not just a straight line of function calls — it is expressed as a graph of memoized **queries** using [salsa](https://github.com/salsa-rs/salsa) 0.27 (the framework rust-analyzer is built on), in the `noeta-db` crate. The `SourceProgram` input feeds tracked queries `tokens → ast → checked → bytecode`; the module graph adds `Workspace → linked → linked_checked → linked_bytecode`. Editing one module recomputes only its transitive dependents.
 
 This is not a separate feature bolted on — it is the *same* query graph that would power a responsive LSP, hot-module-reload blast-radius analysis, and agent-local change verification. The sharp crate seams are what make the queries mechanical. (salsa needs memoized returns to be `Update + PartialEq`; the three foreign artifacts are wrapped in local newtypes with conservative "always-changed" impls — the crate's only, miri-gated, `unsafe`.)
 
 ## Diagnostics as data
 
-Every diagnostic is a typed variant with a stable `E0xxx` code, defined once in `lang-diagnostics` and rendered in exactly one place (over `ariadne`). Stages never format error strings themselves — they emit `Diagnostic` values that flow to the one renderer. This is what lets a negative conformance test assert with a `// expect: error E0xxx` header, and what lets the checker promote a would-be runtime error to a compile-time one while keeping the differential green: the diagnostic *is* the observable result, identical on both backends.
+Every diagnostic is a typed variant with a stable `E0xxx` code, defined once in `noeta-diagnostics` and rendered in exactly one place (over `ariadne`). Stages never format error strings themselves — they emit `Diagnostic` values that flow to the one renderer. This is what lets a negative conformance test assert with a `// expect: error E0xxx` header, and what lets the checker promote a would-be runtime error to a compile-time one while keeping the differential green: the diagnostic *is* the observable result, identical on both backends.
 
 ## Crate map
 
-The dependency edges form a strict DAG (no back-edges). `lang-span` is depended on by everyone; `lang-cli` depends on nearly everything; the two backends are siblings that meet only at the `Backend`/`RunResult` seam.
+The dependency edges form a strict DAG (no back-edges). `noeta-span` is depended on by everyone; `noeta-cli` depends on nearly everything; the two backends are siblings that meet only at the `Backend`/`RunResult` seam.
 
 | Layer | Crates |
 |---|---|
-| Shared vocabulary | `lang-span`, `lang-diagnostics`, `lang-ast` |
-| Frontend | `lang-lexer` (logos), `lang-parser` (chumsky) |
-| Types | `lang-types` (the `Type` lattice + trait registry), `lang-check` (the checker) |
-| IR & memory | `lang-ir` (ANF), `lang-ir-passes` (liveness → drops → reuse) |
-| Backends | `lang-backend` (the seam), `lang-eval` (reference), `lang-compiler` + `lang-bytecode` + `lang-vm` (the VM), `lang-builtins` |
-| VM value model | `lang-object` (shapes), `lang-value` (NaN-boxed values — the one `unsafe` crate), `lang-gc` (cycle collector) |
-| Runtime & host | `lang-stdlib` (shared semantics + `Host`), `lang-runtime` (the real host) |
-| Tooling | `lang-loader` (modules), `lang-db` (salsa), `lang-conformance` (the harness), `lang-cli` (the binary) |
+| Shared vocabulary | `noeta-span`, `noeta-diagnostics`, `noeta-ast` |
+| Frontend | `noeta-lexer` (logos), `noeta-parser` (chumsky) |
+| Types | `noeta-types` (the `Type` lattice + trait registry), `noeta-check` (the checker) |
+| IR & memory | `noeta-ir` (ANF), `noeta-ir-passes` (liveness → drops → reuse) |
+| Backends | `noeta-backend` (the seam), `noeta-eval` (reference), `noeta-compiler` + `noeta-bytecode` + `noeta-vm` (the VM), `noeta-builtins` |
+| VM value model | `noeta-object` (shapes), `noeta-value` (NaN-boxed values — the one `unsafe` crate), `noeta-gc` (cycle collector) |
+| Runtime & host | `noeta-stdlib` (shared semantics + `Host`), `noeta-runtime` (the real host) |
+| Tooling | `noeta-loader` (modules), `noeta-db` (salsa), `noeta-conformance` (the harness), `noeta-cli` (the binary) |
 
 Each crate carries its own `README.md` as its primary documentation. The following pages go deep on the individual techniques:
 

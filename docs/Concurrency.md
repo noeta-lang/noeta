@@ -6,7 +6,7 @@ The language has lazy iterators, generators, `async`/`await` with structured con
 
 `xs.iter()` produces an `Iterator<T>` — a **reference** value with a shared cursor. Adapters are lazy and fuse (no intermediate lists are built); a terminal like `.collect()` or `.sum()` drives them.
 
-```lang
+```noeta
 echo [1, 2, 3, 4, 5].iter()
     .map(fn(n) => n * 10)
     .filter(fn(n) => n > 15)
@@ -20,7 +20,7 @@ Adapters: `.map(f)`, `.filter(pred)`, `.take(n)`, `.drop(n)`, `.chain(it)`, `.en
 
 A function that contains `yield` **is** a generator, and must return `Iterator<T>`. `yield expr` produces the next element; a bare `return;` ends iteration. `yield` may appear inside `if`/`while`/`for` — it is flattened into a state machine — and generators may be infinite (consumed lazily):
 
-```lang
+```noeta
 fn naturals(): Iterator<int> {
     mut n = 0
     while true {
@@ -38,7 +38,7 @@ echo naturals().take(5).collect()   // [0, 1, 2, 3, 4]
 - **`async fn f(): T`** — calling it yields a `Future<T>` without running the body.
 - **`expr.await`** — postfix; suspends until the future resolves, then unwraps it. Awaiting a non-future is E0040. Top-level `await` is allowed.
 
-```lang
+```noeta
 async fn nap(name: string, ms: int): int {
     echo "${name} start"
     sleep(ms).await
@@ -56,7 +56,7 @@ A `concurrent { … }` scope runs tasks concurrently and joins them at the closi
 - **`spawn expr()`** schedules a future as a task, yielding a handle you can `.await`.
 - **`isolate f(args)`** runs in a fresh isolate (own heap, true parallelism); its arguments and result must be `Send` (see below).
 
-```lang
+```noeta
 async fn work(name: string, ms: int): int {
     sleep(ms).await
     return ms
@@ -92,7 +92,7 @@ Sending a `!Send` value across an isolate is E0042.
 
 A bounded, typed channel connects tasks or isolates:
 
-```lang
+```noeta
 async fn produce(tx: Sender<int>): void {
     for i in 0..5 { tx.send(i).await }
     tx.close()
@@ -127,4 +127,4 @@ concurrent {
 
 ## Determinism
 
-In the sandbox executor (used for the differential oracle) time is a logical clock, so interleavings are reproducible and both backends agree. On the CLI, `lang run` uses a real (tokio) executor and real OS-thread isolates. See [Concurrency Internals](Concurrency-Internals) for the "simulate deterministically, deploy real" design.
+In the sandbox executor (used for the differential oracle) time is a logical clock, so interleavings are reproducible and both backends agree. On the CLI, `noeta run` uses a real (tokio) executor and real OS-thread isolates. See [Concurrency Internals](Concurrency-Internals) for the "simulate deterministically, deploy real" design.

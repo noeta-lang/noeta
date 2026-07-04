@@ -1,37 +1,37 @@
-# The `lang` CLI
+# The `noeta` CLI
 
-The `lang` binary is the whole toolchain. It has six subcommands:
+The `noeta` binary is the whole toolchain. It has six subcommands:
 
 | Command | Purpose |
 |---|---|
-| [`lang run`](#lang-run) | Type-check and execute a program. |
-| [`lang repl`](#lang-repl) | Interactive REPL. |
-| [`lang dump`](#lang-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
-| [`lang test`](Testing) | Discover and run `@test` blocks. |
-| [`lang bench`](Benchmarking) | Discover and measure `@bench` blocks. |
-| [`lang doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
+| [`noeta run`](#noeta-run) | Type-check and execute a program. |
+| [`noeta repl`](#noeta-repl) | Interactive REPL. |
+| [`noeta dump`](#noeta-dump) | Disassemble a program to its VM bytecode (a debugging aid). |
+| [`noeta test`](Testing) | Discover and run `@test` blocks. |
+| [`noeta bench`](Benchmarking) | Discover and measure `@bench` blocks. |
+| [`noeta doc`](Documentation-and-Tiers) | Extract `@doc { … }` prose to stdout. |
 
-Run `lang --help` or `lang <command> --help` for the authoritative flag list.
+Run `noeta --help` or `noeta <command> --help` for the authoritative flag list.
 
 > [!NOTE]
-> There is intentionally no `build`, `fmt`, `check`, `lsp`, or `serve` subcommand yet. The language-conformance/differential harness that developers use is a *separate* dev binary (`lang-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor and AI tooling status is on [Editor & AI Tooling](Editor-and-AI-Tooling).
+> There is intentionally no `build`, `fmt`, `check`, `lsp`, or `serve` subcommand yet. The language-conformance/differential harness that developers use is a *separate* dev binary (`noeta-conformance`), deliberately kept out of the shipped CLI so the `test` verb stays free for your program's own tests. Editor and AI tooling status is on [Editor & AI Tooling](Editor-and-AI-Tooling).
 
 ---
 
-## `lang run`
+## `noeta run`
 
 ```
-lang run [OPTIONS] <FILE>
+noeta run [OPTIONS] <FILE>
 ```
 
-Loads, type-checks, and executes a `.lang` file on the **real host** — real `env`/`args`, real-disk IO, a per-isolate async runtime — using the bytecode VM. Any sibling `.lang` modules the entry file `use`s are resolved and merged automatically (see [Modules](Modules)).
+Loads, type-checks, and executes a `.noe` file on the **real host** — real `env`/`args`, real-disk IO, a per-isolate async runtime — using the bytecode VM. Any sibling `.noe` modules the entry file `use`s are resolved and merged automatically (see [Modules](Modules)).
 
 **Options**
 
 | Flag | Effect |
 |---|---|
 | `--tier <NAME>` | Activate a dev-tier for this run, e.g. `--tier debug` compiles in `@debug { … }` blocks. Repeatable. Without it, every tier block is stripped. |
-| `--profile <NAME>` | Activate the tiers a `lang.toml` build profile makes live. Unioned with any `--tier`. |
+| `--profile <NAME>` | Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`. |
 
 The active-tier set is the profile's live tiers ∪ any `--tier` flags, resolved *before* loading (a bad profile fails fast). With an empty active set — the default — every `@test`/`@bench`/`@doc`/`@debug` block strips away and the program runs as written. See [Documentation & Dev Tiers](Documentation-and-Tiers).
 
@@ -46,16 +46,16 @@ The active-tier set is the profile's live tiers ∪ any `--tier` flags, resolved
 **Example**
 
 ```console
-$ lang run hello.lang
+$ noeta run hello.noe
 hello
 ```
 
 ---
 
-## `lang repl`
+## `noeta repl`
 
 ```
-lang repl
+noeta repl
 ```
 
 Starts an interactive session. The prompt is `» `; a continuation line (inside an unclosed delimiter) shows `… `. Multi-line input is detected by counting unclosed `(`/`[`/`{` across lexer tokens, so braces inside strings and `${…}` never miscount.
@@ -85,13 +85,13 @@ Bindings persist across entries (unlike a compiled program, where a value is des
 
 ---
 
-## `lang dump`
+## `noeta dump`
 
 ```
-lang dump [OPTIONS] <FILE>
+noeta dump [OPTIONS] <FILE>
 ```
 
-Disassembles a program to the register-bytecode the VM executes and prints it to stdout — **a developer/debugging aid**, not part of the normal build/run flow. It runs the *same* front end and code generator as [`lang run`](#lang-run) (load → type-check → lower → compile), so what you see is exactly what would execute; a type error prints diagnostics and exits non-zero, just like `run`.
+Disassembles a program to the register-bytecode the VM executes and prints it to stdout — **a developer/debugging aid**, not part of the normal build/run flow. It runs the *same* front end and code generator as [`noeta run`](#noeta-run) (load → type-check → lower → compile), so what you see is exactly what would execute; a type error prints diagnostics and exits non-zero, just like `run`.
 
 Use it to answer "how does this construct actually compile?" — which opcodes a loop or method call lowers to, whether an in-place/reuse fast path fired, or how names and constants are laid out. It is the first tool to reach for when working on codegen or interpreter performance.
 
@@ -100,14 +100,14 @@ Use it to answer "how does this construct actually compile?" — which opcodes a
 | Flag | Effect |
 |---|---|
 | `--tier <NAME>` | Disassemble with a dev-tier active (e.g. `--tier debug` compiles in `@debug { … }` blocks). Repeatable. |
-| `--profile <NAME>` | Activate the tiers a `lang.toml` build profile makes live. Unioned with any `--tier`. |
+| `--profile <NAME>` | Activate the tiers a `noeta.toml` build profile makes live. Unioned with any `--tier`. |
 
 **Output.** The module's side tables first (shapes, packed schemas, method/destructor tables — only those that are non-empty), then `=== main ===` and each numbered function prototype (`=== proto N ===`). Each prototype lists its parameter/register counts, its constant pool, and its numbered instructions. The text is stable and human-readable — the same form the VM's disassembly snapshot tests assert — so it diffs cleanly across changes.
 
 **Example.** The body of a recursive `fib` shows the two `LoadGlobal "fib"` that resolve the callee and the `Call` frames:
 
 ```console
-$ lang dump fib.lang
+$ noeta dump fib.noe
 ...
 === proto 1 ===
 params: 1, registers: 4
@@ -141,10 +141,10 @@ The opcode set and prototype/side-table layout are described in [The Virtual Mac
 
 ## The tier subcommands
 
-`lang test`, `lang bench`, and `lang doc` each operate on the dev-tier content co-located in a source file. They are documented on their own pages:
+`noeta test`, `noeta bench`, and `noeta doc` each operate on the dev-tier content co-located in a source file. They are documented on their own pages:
 
 - **[Testing](Testing)** — `@test` blocks, `assert`, metadata attributes, isolation, and concurrency.
 - **[Benchmarking](Benchmarking)** — `@bench` blocks and the timing method.
-- **[Documentation & Dev Tiers](Documentation-and-Tiers)** — `@doc` extraction, the tier model, and `lang.toml` build profiles.
+- **[Documentation & Dev Tiers](Documentation-and-Tiers)** — `@doc` extraction, the tier model, and `noeta.toml` build profiles.
 
-All three accept `--profile <NAME>`, which acts as a **gate**: if the named `lang.toml` profile does not make that tier live, the command prints a notice and no-ops with exit `0`. With no `--profile`, they always proceed.
+All three accept `--profile <NAME>`, which acts as a **gate**: if the named `noeta.toml` profile does not make that tier live, the command prints a notice and no-ops with exit `0`. With no `--profile`, they always proceed.

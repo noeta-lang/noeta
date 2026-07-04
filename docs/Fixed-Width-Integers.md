@@ -6,7 +6,7 @@ Beyond `int` (a 64-bit signed integer), the language has eight explicit fixed-wi
 
 `i8 i16 i32 i64 u8 u16 u32 u64` — written with a suffix on an integer literal (any radix, `_` separators allowed):
 
-```lang
+```noeta
 a = 255u8
 b = 0xFFi32
 c = 0b1010u16
@@ -19,7 +19,7 @@ d = 1_000u32
 
 Arithmetic **wraps** at the type's width, sign-appropriately:
 
-```lang
+```noeta
 echo 255u8 + 1u8      // 0     (unsigned wrap mod 256)
 echo 127i8 + 1i8      // -128  (signed wrap)
 echo -128i8           // the min signed i8 (bare 128i8 would overflow)
@@ -41,7 +41,7 @@ The bitwise operators work on both `int` and the fixed-width types:
 | `>>` | right shift |
 | `!` | complement (on `int`/fixed-width); logical NOT on `bool` |
 
-```lang
+```noeta
 echo 5 & 3            // 1
 echo 0xF0 | 0x0F      // 255
 echo 0b1100 ^ 0b1010  // 6
@@ -58,7 +58,7 @@ echo !0               // -1     (bitwise complement:  !x == -(x + 1))
 
 Every integer carries bit-manipulation methods (width-relative on a fixed-width receiver):
 
-```lang
+```noeta
 echo (0b1011).count_ones()     // 3
 echo (1).rotate_left(4)        // 16
 ```
@@ -73,13 +73,13 @@ echo (1).rotate_left(4)        // 16
 
 Conversions are total (`to_i8`, `to_u8`, …, `to_i64`, `to_u64`, `to_int`), with Rust-`as` semantics — widening is lossless, narrowing truncates, and crossing signedness reinterprets:
 
-```lang
+```noeta
 echo (300).to_u8()    // 44   (300 mod 256)
 ```
 
 The same `to_*` family bridges the **integer and float domains** in both directions — `to_float` (an alias `to_f64`), `to_f32`, and, on a `float`/`f32`, `to_int` / `to_i8` … / `to_u64`:
 
-```lang
+```noeta
 echo (5).to_f32()        // 5.0   (int -> f32; build f32 data from a computed int)
 echo (2.5).to_f32()      // 2.5   (float -> f32, rounds to nearest)
 echo (2.5f32).to_float() // 2.5   (f32 -> float, exact widening)
@@ -93,7 +93,7 @@ Int→float is value-preserving (rounding to nearest on `f32`); float→int trun
 
 The `@packed` directive marks a **struct** as a *packed value type*: a `List` of it is stored as a flat, unboxed, contiguous numeric buffer rather than an array of heap-object pointers. This is a pure *representation* change — the flat layout is invisible to program behavior (a packed list `==`, displays, and iterates exactly like a boxed one), but it is dramatically more cache-friendly and unlocks vectorized bulk math.
 
-```lang
+```noeta
 @packed struct V { x: int  y: int }
 
 mut acc = [V { x: 0, y: 0 }, V { x: 1, y: 1 }, V { x: 2, y: 2 }]
@@ -112,7 +112,7 @@ Rules:
 
 By default a packed list is *row-major* (array-of-structs). `@packed(layout: column)` stores it **column-major** (struct-of-arrays) — each field in its own contiguous column. This is, again, a pure performance attribute invisible to results, but it is the layout the autovectorized bulk kernels reduce fastest.
 
-```lang
+```noeta
 @packed(layout: column) struct P { r: int  g: int  b: int  opaque: bool }
 
 ps = [P { r: 255, g: 0, b: 128, opaque: true }, P { r: 1, g: 2, b: 3, opaque: false }]
@@ -125,7 +125,7 @@ echo ps.reverse()      // [P {r: 1, ...}, P {r: 255, ...}]
 
 A `List` of a packed type round-trips through an opaque `bytes` buffer with `.to_bytes()` and `from_bytes::<T>(...)`:
 
-```lang
+```noeta
 @packed struct V3 { x: f32  y: f32  z: f32 }
 
 xs = [V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }, V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }]
@@ -141,7 +141,7 @@ echo blob.count()                       // 24  (2 elements × 3 × 4-byte f32)
 
 The flat/column layout is what makes the `vec.*_all` bulk kernels fast — they take the autovectorized struct-of-arrays path over a column buffer:
 
-```lang
+```noeta
 use std.{vec}
 @packed(layout: column) struct V3 { x: f32  y: f32  z: f32 }
 

@@ -10,7 +10,7 @@ The motivating case is `acc ~= [x]` in a loop: if every append copied, it would 
 
 ## In-place reuse
 
-A dedicated IR pass (`lang-ir-passes`, `reuse.rs`) recognizes **self-updates** — a binding rebound to a value computed from its own old contents — and marks the constructor with an *in-place-reuse token*:
+A dedicated IR pass (`noeta-ir-passes`, `reuse.rs`) recognizes **self-updates** — a binding rebound to a value computed from its own old contents — and marks the constructor with an *in-place-reuse token*:
 
 ```
 acc = Type { ...acc, f: v }      →  Object { spread: acc, reuse: true }
@@ -33,7 +33,7 @@ Why an IR at all? Three reasons, the first decisive:
 
 The model is Lean 4's (precise RC + reuse + a runtime `RC == 1` check), adapted to shared-nothing isolates.
 
-**The IR** (`lang-ir`) is ANF: `Atom`s (trivially-evaluable operands), `Rvalue`s (the compound operations), `Stmt`s (including `Bind` and `DropVar`), and structured control flow with scope markers. Lowering itself adds no RC annotations — the passes fill them in:
+**The IR** (`noeta-ir`) is ANF: `Atom`s (trivially-evaluable operands), `Rvalue`s (the compound operations), `Stmt`s (including `Bind` and `DropVar`), and structured control flow with scope markers. Lowering itself adds no RC annotations — the passes fill them in:
 
 1. **Liveness** — last-use / liveness analysis.
 2. **Drop insertion** — with three placement rules of increasing coverage: **last use** (a value dropped right after its final read), **scope exit** (owned locals still live at a scope's end, dropped in reverse-construction order), and **early exit** (values abandoned at a `return`/`break`/`continue`, dropped innermost-first before the terminator).
@@ -49,9 +49,9 @@ Static analysis is an **optimization input, never a soundness requirement**. Cor
 
 ## Cycle collection
 
-Reference counting cannot reclaim reference cycles. Under value semantics an ordinary object *can't* form one (a shared mutation copies) — the only cycles are closure/scope self-captures, which become reachable once mutable fields exist. So a backup collector (`lang-gc`) is load-bearing, running only at safepoints.
+Reference counting cannot reclaim reference cycles. Under value semantics an ordinary object *can't* form one (a shared mutation copies) — the only cycles are closure/scope self-captures, which become reachable once mutable fields exist. So a backup collector (`noeta-gc`) is load-bearing, running only at safepoints.
 
-`lang-gc` owns the *policy* (`retain`/`release` and the collection algorithm); the `unsafe` refcount/graph *mechanism* lives in `lang-value`'s heap. Two collectors were built and benchmarked head to head:
+`noeta-gc` owns the *policy* (`retain`/`release` and the collection algorithm); the `unsafe` refcount/graph *mechanism* lives in `noeta-value`'s heap. Two collectors were built and benchmarked head to head:
 
 | | **Trace** (default) | **TrialDeletion** (behind a flag) |
 |---|---|---|

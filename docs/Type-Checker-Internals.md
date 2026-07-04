@@ -1,6 +1,6 @@
 # The Type Checker
 
-The user-facing behavior of the type system is on [The Type System](Type-System). This page is how the checker (`lang-check` over `lang-types`) actually works.
+The user-facing behavior of the type system is on [The Type System](Type-System). This page is how the checker (`noeta-check` over `noeta-types`) actually works.
 
 ## Bidirectional checking with local inference
 
@@ -15,9 +15,9 @@ Signatures are required at named boundaries (which give the checker its expected
 
 ## The type lattice
 
-`lang-types` is the pure-data `Type` lattice: `Int`/`Float`/`Bool`/`String`/`Unit`, `List`/`Map`/`Option`/`Result`, `Named`, `Fn`, unions, and the top `Unknown`. (The Hindley–Milner inference-variable slot was removed once the engine settled on bidirectional-with-subtyping.) `Type::from_ref` structurally desugars surface annotations (including `?T → Option<T>`); predicates like `is_numeric`/`is_gradual` are what the checks key off.
+`noeta-types` is the pure-data `Type` lattice: `Int`/`Float`/`Bool`/`String`/`Unit`, `List`/`Map`/`Option`/`Result`, `Named`, `Fn`, unions, and the top `Unknown`. (The Hindley–Milner inference-variable slot was removed once the engine settled on bidirectional-with-subtyping.) `Type::from_ref` structurally desugars surface annotations (including `?T → Option<T>`); predicates like `is_numeric`/`is_gradual` are what the checks key off.
 
-`lang-types` also owns the **built-in trait registry** — `BuiltinTrait`, `BUILTIN_TRAITS`, and `operator_trait` — the fixed set an `impl` block or `@derive(...)` may name. Each entry records its required method and arity, the operator it overloads, and whether it is derivable. The registry's operator→method map is lock-stepped to the backends' `BinaryOp::overload_method` by a unit test, so the checker's view and the runtime's view of operator dispatch cannot drift.
+`noeta-types` also owns the **built-in trait registry** — `BuiltinTrait`, `BUILTIN_TRAITS`, and `operator_trait` — the fixed set an `impl` block or `@derive(...)` may name. Each entry records its required method and arity, the operator it overloads, and whether it is derivable. The registry's operator→method map is lock-stepped to the backends' `BinaryOp::overload_method` by a unit test, so the checker's view and the runtime's view of operator dispatch cannot drift.
 
 ## Gradual by construction, static at the boundaries
 
@@ -42,7 +42,7 @@ The inferred-static track layered on required signatures at named boundaries, ch
 
 ## Why it can't drift from the backends
 
-The checker runs upstream of *both* execution backends, so a rejected program never reaches either — its diagnostics are its entire observable result, identical regardless of backend. Combined with the operator-table unit test and the shared `lang-stdlib` semantics, the type system's decisions are pinned to the runtime's behavior by construction, and the differential oracle proves it on every program in the corpus.
+The checker runs upstream of *both* execution backends, so a rejected program never reaches either — its diagnostics are its entire observable result, identical regardless of backend. Combined with the operator-table unit test and the shared `noeta-stdlib` semantics, the type system's decisions are pinned to the runtime's behavior by construction, and the differential oracle proves it on every program in the corpus.
 
 ## See also
 

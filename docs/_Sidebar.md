@@ -5,7 +5,7 @@
 - [Language Tour](Language-Tour)
 
 **Tools**
-- [The `lang` CLI](The-CLI)
+- [The `noeta` CLI](The-CLI)
 - [Testing](Testing)
 - [Benchmarking](Benchmarking)
 - [Documentation & Dev Tiers](Documentation-and-Tiers)

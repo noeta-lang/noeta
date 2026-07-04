@@ -6,7 +6,7 @@ Generic types and functions, the built-in trait set that operators dispatch thro
 
 Type parameters `<T>`, `<A, B>` go on functions, structs, classes, and enums. They are **erased at runtime** (one shape serves every instantiation).
 
-```lang
+```noeta
 class Box<T> {
     pub value: T
     fn new(v: T): Box<T> { return Box { value: v } }
@@ -24,7 +24,7 @@ The element type is **tracked through instances and literals**: `Box.new(42)` is
 
 Constrain a parameter to a built-in trait with `<T: Trait>`:
 
-```lang
+```noeta
 fn max<T: Comparable>(a: T, b: T): T {
     if a > b { return a }
     return b
@@ -61,7 +61,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 
 Implement a trait **in the type's body** with `impl Trait { }` (uniform across class, struct, and enum):
 
-```lang
+```noeta
 class Money {
     amount: int
     fn new(a: int): Money { return Money { amount: a } }
@@ -89,7 +89,7 @@ There is also a **standalone** `impl Trait for T { }` (marker/empty-body only fo
 | `Clone` | A structural clone. |
 | `Serialize<Json>` | Synthesizes `to_json()`. |
 
-```lang ignore
+```noeta ignore
 @derive(Equatable, Comparable, Display, Clone)
 class Point {
     x: int

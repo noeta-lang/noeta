@@ -2,7 +2,7 @@
 
 The `std` namespace holds modules you import explicitly with `use std.{name}`. Unused modules tree-shake away. An unknown function on a module is E0005; misuse maps onto a diagnostic code as noted per module.
 
-```lang
+```noeta
 use std.{math, json, fs}
 ```
 
@@ -36,7 +36,7 @@ A deterministic seeded PRNG (SplitMix64). The default seed is fixed, so even un-
 | `int` | `int(lo: int, hi: int) -> int` | Inclusive `[lo, hi]`; `lo > hi` is E0007. |
 | `float` | `float() -> float` | In `[0, 1)`. |
 
-```lang
+```noeta
 use std.{random}
 random.seed(42)
 echo random.int(1, 6)     // reproducible roll
@@ -55,7 +55,7 @@ A logical monotonic clock — no wall-clock, so programs stay deterministic.
 
 ## `env` and `args`
 
-Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER=lang`, args `["lang", "run"]`; `lang run` uses the real process environment.
+Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER=noeta`, args `["noeta", "run"]`; `noeta run` uses the real process environment.
 
 | Function | Signature | Notes |
 |---|---|---|
@@ -65,7 +65,7 @@ Host introspection. Under the sandbox the fixture is `HOME=/home/sandbox`, `USER
 
 ## `fs`
 
-File IO. Under `lang run` this is real disk; the conformance sandbox uses an in-memory VFS. A missing file, a bad mode, or a non-UTF-8 read is E0021. Listings are sorted.
+File IO. Under `noeta run` this is real disk; the conformance sandbox uses an in-memory VFS. A missing file, a bad mode, or a non-UTF-8 read is E0021. Listings are sorted.
 
 | Function | Signature |
 |---|---|
@@ -93,7 +93,7 @@ File IO. Under `lang run` this is real disk; the conformance sandbox uses an in-
 | `write` | `write(chunk: string) -> void` | Write/append handles only. |
 | `close` | `close() -> void` | Flushes a write/append buffer — you must close to persist. |
 
-```lang
+```noeta
 use std.{fs}
 out = fs.open("log.txt", "w")
 out.write("alpha\n")
@@ -111,7 +111,7 @@ echo reader.read_line() ?? "<eof>"   // alpha
 | `parse` | `parse(text: string) -> dyn` | Objects → maps, arrays → lists, `null` → unit. Malformed is E0007. |
 | `parse::<T>` | `parse::<T>(text: string) -> T` | **Typed** decode into a real value. |
 
-```lang ignore
+```noeta ignore
 use std.{json}
 echo json.stringify({"b": 2, "a": 1})               // {"a":1,"b":2}
 
@@ -127,7 +127,7 @@ The typed form supports nested structs, `List<T>`, `Map`, and optional fields (a
 
 Scalar 3D vector and quaternion math over any struct with the right shape — a `Vec3` is any struct with three `f32` fields, a `Quat` any struct with four. Result-shape operations return the *same* struct type as the input.
 
-```lang ignore
+```noeta ignore
 use std.{vec}
 a = V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }
 b = V3 { x: 4.0f32, y: 5.0f32, z: 6.0f32 }

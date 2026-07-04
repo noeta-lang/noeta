@@ -4,7 +4,7 @@ The surface — iterators, generators, `async`/`await`, isolates, channels — i
 
 ## One stackless substrate
 
-Iterators, generators, and `async`/`await` are three surfaces over **one stackless state-machine transform**, done in the shared `lang-ir` lowering.
+Iterators, generators, and `async`/`await` are three surfaces over **one stackless state-machine transform**, done in the shared `noeta-ir` lowering.
 
 Why stackless is *forced*: coroutines must suspend and resume. A **stackful** model (a real per-coroutine stack) the VM could do cleanly — but the reference interpreter rides the Rust call stack and has no frame to save, yielding *two different* suspension implementations that would have to be proven observably identical. That is exactly the divergence the differential oracle exists to prevent. A **stackless** transform instead rewrites a coroutine into a state machine, so **neither backend suspends at runtime** — a coroutine is an ordinary object with a `next()`/`poll` method, and both backends run it identically by construction.
 

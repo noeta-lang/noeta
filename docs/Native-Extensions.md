@@ -3,7 +3,7 @@
 Native modules (like `math`, `json`, `fs`) are not hardcoded into the runtime — they are registered through one uniform seam, and the core `std` modules are the *dogfooded* extension registered *through* that seam rather than special-cased.
 
 > [!NOTE]
-> This is implementation/runtime plumbing. There is **no third-party package system yet**, so you cannot ship your own native extension crate today — the registry is the internal mechanism, and the API is being proven by having core use it. The `lang.toml` provider grammar exists and is validated, but the only accepted provider is `"std"` (see [Documentation & Dev Tiers](Documentation-and-Tiers#build-profiles--langtoml)).
+> This is implementation/runtime plumbing. There is **no third-party package system yet**, so you cannot ship your own native extension crate today — the registry is the internal mechanism, and the API is being proven by having core use it. The `noeta.toml` provider grammar exists and is validated, but the only accepted provider is `"std"` (see [Documentation & Dev Tiers](Documentation-and-Tiers#build-profiles--noetatoml)).
 
 ## Why a registry
 
@@ -11,7 +11,7 @@ Hardcoding native modules created four parallel seams that could drift: a `Nativ
 
 ## The seam
 
-The registry (`lang-stdlib`, `registry.rs`) is built on a **neutral value-marshalling** layer:
+The registry (`noeta-stdlib`, `registry.rs`) is built on a **neutral value-marshalling** layer:
 
 - `NativeValue` — the argument view: `Scalar`, `Str`, `Bytes`, `Object { fields }`, `Packed { layout, bytes }`, `List`, and so on.
 - `NativeOut` — the result view.
@@ -28,11 +28,11 @@ trait Extension {
 }
 ```
 
-`params` and `ret` use `SigType`, a small signature vocabulary (lang-stdlib cannot see the checker's `Type`); `lang-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read.
+`params` and `ret` use `SigType`, a small signature vocabulary (noeta-stdlib cannot see the checker's `Type`); `noeta-check` maps each `SigType` to a real `Type`, so the registry is the single source of truth that *both* the checker and both backends read.
 
 ## The `Host` capability
 
-All host-coupled effects — filesystem, clock, PRNG, `env`/`args` — go through one `Host` trait. Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG — what the differential always runs) and `RealHost` (real disk, real env, per-isolate tokio — what `lang run` uses, never differential-tested). This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler.
+All host-coupled effects — filesystem, clock, PRNG, `env`/`args` — go through one `Host` trait. Two implementations exist: `SandboxHost` (deterministic in-memory VFS, logical clock, seeded RNG — what the differential always runs) and `RealHost` (real disk, real env, per-isolate tokio — what `noeta run` uses, never differential-tested). This is the same "simulate deterministically, deploy real" split as the async executor and isolate scheduler.
 
 ## Case study: `json.parse::<T>`
 
@@ -41,7 +41,7 @@ The motivating consumer is a native function that builds a value of a type named
 ## Status
 
 - **Shipped (Phases A + B):** the registry and neutral marshalling seam; `math`/`random`/`time`/`env`/`args`/`fs`/`vec`/`quat`/`json` all migrated onto it; the old `NativeModule` enum deleted; `json.parse::<T>` working end to end.
-- **Deferred:** `ExtType` (native first-class *types*, like an `Image`), columnar kernels via extensions (blocked on a raw-buffer ABI capability), and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. Extracting a stable `lang-native` ABI crate is planned for the package-manager milestone.
+- **Deferred:** `ExtType` (native first-class *types*, like an `Image`), columnar kernels via extensions (blocked on a raw-buffer ABI capability), and the package/dependency manager that would let `vec`/`quat` physically leave core and third parties register their own crates. Extracting a stable `noeta-native` ABI crate is planned for the package-manager milestone.
 
 ## See also
 

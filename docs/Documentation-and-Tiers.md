@@ -1,6 +1,6 @@
 # Documentation & Dev Tiers
 
-`@test`, `@bench`, `@doc`, and `@debug` are **dev tiers** — kinds of content you co-locate with your code that are stripped from a normal build and activated only by the right tool. This page covers `@doc` (extractable prose), the tier model that unifies all four, and the `lang.toml` build profiles that decide which tiers are live.
+`@test`, `@bench`, `@doc`, and `@debug` are **dev tiers** — kinds of content you co-locate with your code that are stripped from a normal build and activated only by the right tool. This page covers `@doc` (extractable prose), the tier model that unifies all four, and the `noeta.toml` build profiles that decide which tiers are live.
 
 ---
 
@@ -8,7 +8,7 @@
 
 A `@doc { … }` block holds verbatim prose (Markdown). Its body is captured **un-parsed** by the lexer, so Markdown punctuation — `#`, `*`, backticks, `%` — never lexes as language tokens. The surrounding program still compiles and runs normally.
 
-```lang
+```noeta
 @doc {
     # Adder
 
@@ -21,8 +21,8 @@ fn add(a: int, b: int): int { return a + b }
 Extract every `@doc` block to stdout:
 
 ```console
-$ lang doc adder.lang
-<!-- adder.lang:1 -->
+$ noeta doc adder.noe
+<!-- adder.noe:1 -->
 # Adder
 
 `add(a, b)` returns **a + b**. Pure; no side effects.
@@ -33,7 +33,7 @@ $ lang doc adder.lang
 - No `@doc` blocks → a notice on stderr, exit `0`.
 
 ```
-lang doc [OPTIONS] <FILE>
+noeta doc [OPTIONS] <FILE>
 ```
 
 The only flag is `--profile <NAME>`, which gates extraction on the `doc` tier being live in that profile.
@@ -45,21 +45,21 @@ The only flag is `--profile <NAME>`, which gates extraction on the `doc` tier be
 There are two orthogonal ideas:
 
 - A **tier** is a *kind of co-located content* — a property of the **source**. Built-in tiers: `test`, `bench`, `debug` (all *code*), and `doc` (*text*).
-- A **profile** is a *build configuration* — a property of the **build invocation** (in `lang.toml`) — that decides which tiers are live.
+- A **profile** is a *build configuration* — a property of the **build invocation** (in `noeta.toml`) — that decides which tiers are live.
 
 ### How activation works
 
-On a normal `lang run`, the active-tier set is empty: every `@<tier> { … }` block is **stripped before lowering**. It never reaches the type checker or either backend, so tier content can never affect a production build — the stripping is by construction, not a dead-code pass.
+On a normal `noeta run`, the active-tier set is empty: every `@<tier> { … }` block is **stripped before lowering**. It never reaches the type checker or either backend, so tier content can never affect a production build — the stripping is by construction, not a dead-code pass.
 
 When a tier *is* active, its block's items are **inlined** into the top-level program (the block is pure grouping sugar), and the lifted functions gain white-box access to private fields (see [Testing](Testing)). A block is resolved wherever it appears — top-level *and* nested inside a function body, loop, or branch.
 
-Each tool activates its own tier: `lang test` activates `test`, `lang bench` activates `bench`, `lang doc` activates `doc`. The `debug` tier has no dedicated command — you activate it explicitly.
+Each tool activates its own tier: `noeta test` activates `test`, `noeta bench` activates `bench`, `noeta doc` activates `doc`. The `debug` tier has no dedicated command — you activate it explicitly.
 
 ### `@debug` — conditional inline code
 
 `@debug { … }` is code in *statement* position: instrumentation you want compiled in only sometimes.
 
-```lang
+```noeta
 fn f(x: int): void {
     @debug { echo "debug: x is ${x}" }
     echo "result: ${x * 2}"
@@ -67,9 +67,9 @@ fn f(x: int): void {
 ```
 
 ```console
-$ lang run prog.lang              # @debug stripped
+$ noeta run prog.noe              # @debug stripped
 result: 10
-$ lang run prog.lang --tier debug # @debug compiled in
+$ noeta run prog.noe --tier debug # @debug compiled in
 debug: x is 5
 result: 10
 ```
@@ -80,7 +80,7 @@ result: 10
 
 `@<tier> fn …` is exactly a one-item block — sugar for wrapping a single function:
 
-```lang
+```noeta
 @test fn adds(): void { assert(add(1, 2) == 3) }
 ```
 
@@ -95,9 +95,9 @@ A tier directive can take arguments — `@bench(iterations: 1000)` (or positiona
 
 ---
 
-## Build profiles — `lang.toml`
+## Build profiles — `noeta.toml`
 
-A `lang.toml` at (or above) your entry file's directory defines named build profiles. Each maps tier names to the package that provides them:
+A `noeta.toml` at (or above) your entry file's directory defines named build profiles. Each maps tier names to the package that provides them:
 
 ```toml
 [profiles.dev.tiers]
@@ -113,7 +113,7 @@ doc = "std"
 
 - A profile's **active tiers** are the tier names in its (inheritance-merged) map.
 - `extends = "<base>"` inherits another profile's tiers; the child's own entries override the base's. Cycles are detected and rejected.
-- `--profile <NAME>` on `lang run` activates those tiers (unioned with `--tier`). On `lang test`/`bench`/`doc`, `--profile` acts as a **gate** — the tool no-ops if the profile does not make its tier live.
+- `--profile <NAME>` on `noeta run` activates those tiers (unioned with `--tier`). On `noeta test`/`bench`/`doc`, `--profile` acts as a **gate** — the tool no-ops if the profile does not make its tier live.
 
 > [!NOTE]
 > **What works today vs. what is stubbed.** The full profile grammar works now: parsing, `extends` inheritance, tier-name validation, provider string-vs-table forms, cycle detection, and unknown-profile errors. But the *only* accepted provider is the built-in `"std"` — naming any other package is an error, because there is no package system yet. The grammar is validated now so the manifest shape is locked; cross-package providers land with the package manager.
@@ -127,4 +127,4 @@ The `@<tier>` blocks above are distinct from the four **decorator directives** �
 ## See also
 
 - [Testing](Testing) · [Benchmarking](Benchmarking) — the runnable tiers.
-- [The `lang` CLI](The-CLI) — the commands that drive tiers.
+- [The `noeta` CLI](The-CLI) — the commands that drive tiers.

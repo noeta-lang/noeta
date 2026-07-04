@@ -1,6 +1,6 @@
 # Language Tour
 
-A guided, example-driven walk through the whole language in one sitting. Every snippet runs with `lang run`. If you have not built the toolchain yet, start with [Getting Started](Getting-Started).
+A guided, example-driven walk through the whole language in one sitting. Every snippet runs with `noeta run`. If you have not built the toolchain yet, start with [Getting Started](Getting-Started).
 
 This tour teaches by building up. For the exhaustive rules on any topic, follow the links to the reference pages.
 
@@ -10,7 +10,7 @@ This tour teaches by building up. For the exhaustive rules on any topic, follow 
 
 A binding names a value. Bindings are immutable by default; add `mut` to reassign.
 
-```lang
+```noeta
 name = "Ada"        // immutable
 mut count = 0       // mutable
 count = count + 1
@@ -20,13 +20,13 @@ echo count          // 2
 
 Reassigning an immutable binding is a compile error. You can annotate a binding's type — it is checked, then erased at runtime:
 
-```lang
+```noeta
 xs: List<int> = [1, 2, 3]
 ```
 
 The primitive types are `int` (64-bit, wraps on overflow), `float`, `f32`, `bool`, `string`, and `void`. Number literals support underscores and radix prefixes:
 
-```lang
+```noeta
 echo 1_000_000     // 1000000
 echo 0xFF          // 255
 echo 0b1010        // 10
@@ -41,7 +41,7 @@ echo 1.5e3         // 1500.0
 
 There are three string forms:
 
-```lang
+```noeta
 name = "Niro"
 echo "Hello ${name}"          // "..."  interpolated: ${expr} embeds any expression
 echo 'literal ${name}'        // '...'  raw: no interpolation, no escapes but \' and \\
@@ -53,7 +53,7 @@ echo `
 
 The `~` operator concatenates (display-concatenating non-strings):
 
-```lang
+```noeta
 echo "users/" ~ 42 ~ "/profile"    // users/42/profile
 ```
 
@@ -65,7 +65,7 @@ Strings carry a rich method set — `.upper()`, `.trim()`, `.split(",")`, `.repl
 
 `if`/`else if`/`else` with mandatory braces:
 
-```lang
+```noeta
 n = 1
 if n == 0 {
     echo "zero"
@@ -78,7 +78,7 @@ if n == 0 {
 
 `if … then … else` is also an **expression** (note the `then` keyword):
 
-```lang
+```noeta
 n = 50
 label = if n > 10 then "big" else "small"
 echo label                    // big
@@ -86,7 +86,7 @@ echo label                    // big
 
 `while` and `for … in`:
 
-```lang
+```noeta
 mut i = 0
 while i < 3 { echo i; i += 1 }
 
@@ -105,7 +105,7 @@ for (i, x) in ["a", "b"].enumerate() {      // destructure the (index, value) tu
 
 Named functions require types on their parameters and return value. Bodies infer everything else.
 
-```lang
+```noeta
 fn add(a: int, b: int): int {
     return a + b
 }
@@ -121,7 +121,7 @@ echo fib(10)       // 55
 
 Trailing parameters can have **defaults**:
 
-```lang
+```noeta
 fn greet(name: string, greeting: string = "Hello"): string {
     return "${greeting}, ${name}!"
 }
@@ -131,7 +131,7 @@ echo greet("Ada", "Hi")     // Hi, Ada!
 
 Return several values with a **tuple**:
 
-```lang
+```noeta
 fn divmod(a: int, b: int): (int, int) {
     return (a / b, a % b)
 }
@@ -142,7 +142,7 @@ fn divmod(a: int, b: int): (int, int) {
 
 Closures are `fn(x) => expr` (arrow) or `fn(x) { … }` (block). Their types are inferred:
 
-```lang
+```noeta
 inc = fn(x) => x + 1
 twice = fn(f, x) => f(f(x))
 echo twice(inc, 10)         // 12
@@ -150,7 +150,7 @@ echo twice(inc, 10)         // 12
 
 The pipe `|>` threads a value as the first argument of the next call, which reads left-to-right:
 
-```lang
+```noeta
 echo [1, 2, 3, 4]
     |> filter(fn(n) => n % 2 == 0)
     |> map(fn(n) => n * 10)
@@ -168,7 +168,7 @@ Two aggregate kinds, distinguished by **semantics**:
 - **`struct`** — a *value*. No identity; compares field-by-field; assigning a field copies-on-write.
 - **`class`** — a *reference*. Has identity (`===`); shared by reference; a `mut` field mutates in place, visible to every alias.
 
-```lang
+```noeta
 struct Point { x: int  y: int }        // value type
 
 class Counter {
@@ -189,7 +189,7 @@ Fields are private by default; mark them `pub` to read from outside, `mut` to al
 
 **Enums** model a closed set of alternatives, optionally carrying data:
 
-```lang
+```noeta
 enum Status { Pending; Paid; Refunded }
 
 enum OrderError {
@@ -213,7 +213,7 @@ All three kinds share the same body grammar — they can hold methods and `impl 
 
 `match` is an expression, and it is checked for exhaustiveness — a missing case (with no `_`) is a compile error:
 
-```lang ignore
+```noeta ignore
 fn label(s: Status): string {
     return match s {
         Status.Pending  => "awaiting payment",
@@ -225,7 +225,7 @@ fn label(s: Status): string {
 
 Patterns bind payloads, destructure tuples, and match literals:
 
-```lang
+```noeta
 fn classify(p: (int, int)): string {
     return match p {
         (0, 0) => "origin",
@@ -244,7 +244,7 @@ fn classify(p: (int, int)): string {
 
 Lists, maps, and sets — all value-semantic (copy-on-write):
 
-```lang
+```noeta
 xs = [1, 2, 3]
 echo xs[0]                     // 1
 echo len(xs)                   // 3
@@ -262,7 +262,7 @@ echo s.contains(2)             // true
 
 Lazy **iterators** let you compose transformations without building intermediate lists:
 
-```lang
+```noeta
 echo [1, 2, 3, 4, 5].iter()
     .map(fn(n) => n * 10)
     .take(3)
@@ -280,7 +280,7 @@ Absence and failure are ordinary values.
 - **`Option`** — `?T`. Constructed with `some(x)` / `none`.
 - **`Result<T, E>`** — constructed with `Ok(x)` / `Err(e)`.
 
-```lang
+```noeta
 fn pick(hit: bool): ?int {
     if hit { return some(7) }
     return none
@@ -292,7 +292,7 @@ echo pick(false) ?? 0          // 0
 
 The `?` operator propagates a failure, early-returning it from the current function:
 
-```lang ignore
+```noeta ignore
 fn validate(items: List<Item>): Result<void, OrderError> {
     if items.count() == 0 { return Err(OrderError.Empty) }
     return Ok()
@@ -312,7 +312,7 @@ fn place(items: List<Item>): Result<Order, OrderError> {
 
 Type parameters are erased at runtime, and can be bounded by a built-in trait:
 
-```lang
+```noeta
 class Box<T> {
     pub value: T
     fn new(v: T): Box<T> { return Box { value: v } }
@@ -326,7 +326,7 @@ fn max<T: Comparable>(a: T, b: T): T {
 
 Operators dispatch through a fixed set of built-in traits (`Equatable` → `==`, `Comparable` → `<`, `Display` → `echo`, `Add` → `+`, …). Implement them in a type's body, or synthesize them with `@derive`:
 
-```lang
+```noeta
 @derive(Equatable, Comparable, Display)
 class Money {
     amount: int
@@ -344,8 +344,8 @@ echo Money.new(5) < Money.new(9)     // true
 
 Split code across files with `namespace` and `use`. Declarations are private unless marked `pub`:
 
-```lang
-// models.lang
+```noeta
+// models.noe
 namespace App.Models;
 
 pub class User {
@@ -354,8 +354,8 @@ pub class User {
 }
 ```
 
-```lang ignore
-// main.lang
+```noeta ignore
+// main.noe
 namespace App.Main;
 use App.Models.User;
 
@@ -364,7 +364,7 @@ echo User.new("Ada").name        // Ada
 
 The standard library is imported the same way:
 
-```lang
+```noeta
 use std.{math, json}
 
 echo math.sqrt(16.0)             // 4.0
@@ -379,7 +379,7 @@ echo json.stringify([1, 2, 3])   // [1,2,3]
 
 `async fn`, `.await`, and a structured `concurrent { }` scope; `spawn` for concurrent tasks, `isolate` for true-parallel ones, and typed channels for message passing:
 
-```lang
+```noeta
 async fn work(name: string, ms: int): int {
     echo "${name} start"
     sleep(ms).await
@@ -399,9 +399,9 @@ concurrent {
 
 ## A capstone
 
-Putting it together — a small order pipeline (this is `examples/orders.lang`, trimmed):
+Putting it together — a small order pipeline (this is `examples/orders.noe`, trimmed):
 
-```lang
+```noeta
 namespace Demo;
 
 struct Item { price: float  qty: int }
@@ -435,7 +435,7 @@ echo match validate(items) {
 ```
 
 ```console
-$ lang run orders.lang
+$ noeta run orders.noe
 total: 24.48
 ```
 

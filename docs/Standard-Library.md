@@ -28,7 +28,7 @@ Splitting on `""` yields characters. Also: index `s[i]` returns the i-th charact
 
 Construct with `[a, b, c]`; an empty list in an ambiguous position needs a type (`xs: List<int> = []`).
 
-```lang
+```noeta
 mut xs = [1, 2, 3]
 echo xs[0]              // 1  (index; out of bounds is E0016)
 echo [...xs, 4]        // [1, 2, 3, 4]  (spread)
@@ -53,7 +53,7 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 
 **Prelude free functions** over lists compose with the pipe:
 
-```lang
+```noeta
 echo len([1, 2, 3])                                 // 3
 echo [1,2,3,4] |> filter(fn(n) => n % 2 == 0)
               |> map(fn(n) => n * 10)
@@ -66,7 +66,7 @@ echo [1,2,3,4] |> filter(fn(n) => n % 2 == 0)
 
 String-keyed; keys iterate and print in sorted order. Empty is `{}`.
 
-```lang
+```noeta
 host = "h"; scheme = "https"
 mut m = {"a": 1, "b": 2}
 echo m["a"]            // 1  (missing key is E0018)
@@ -90,7 +90,7 @@ Iterating a map (`for v in m`) yields values; equality is structural (order-inde
 
 Sorted and de-duplicated; not indexable. Display form `{1, 2, 3}`; empty `#{}`.
 
-```lang
+```noeta
 s = #{3, 1, 2, 1}     // set literal (sugar for [...].to_set())
 echo s                // {1, 2, 3}
 echo s.contains(2)    // true
@@ -131,7 +131,7 @@ Full treatment in [Error Handling](Error-Handling). In brief:
 | `count` | `count() -> int` | drain and count |
 | `sum` | `sum() -> int \| float` | drain and total |
 
-```lang
+```noeta
 echo [1,2,3,4,5].iter().map(fn(n) => n * 10).take(3).collect()   // [10, 20, 30]
 echo [1,2,3].iter().zip(["a","b","c"].iter()).collect()          // [(1, "a"), (2, "b"), (3, "c")]
 ```

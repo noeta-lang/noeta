@@ -1,5 +1,5 @@
-//! Documentation quality gate: every ```` ```lang ```` code sample in the `docs/` wiki must compile
-//! and run cleanly through the `lang` binary. This keeps the docs honest — a sample that stops
+//! Documentation quality gate: every ```` ```noeta ```` code sample in the `docs/` wiki must compile
+//! and run cleanly through the `noeta` binary. This keeps the docs honest — a sample that stops
 //! working (a renamed method, a changed diagnostic, a dropped feature) fails CI instead of quietly
 //! misleading readers.
 //!
@@ -7,11 +7,11 @@
 //!
 //! A fenced block's info string selects how it is checked:
 //!
-//! * ```` ```lang ```` — a complete program; it **must** run to a zero exit (`lang run` succeeds).
-//! * ```` ```lang ignore ```` — an illustrative fragment (references a type defined elsewhere on the
+//! * ```` ```noeta ```` — a complete program; it **must** run to a zero exit (`noeta run` succeeds).
+//! * ```` ```noeta ignore ```` — an illustrative fragment (references a type defined elsewhere on the
 //!   page, or shows declaration syntax in isolation). Not executed, exactly like a Rust `ignore`
 //!   doctest. Keep these to a minimum; prefer a self-contained runnable block.
-//! * ```` ```lang error ```` — a sample that is *meant* to fail (an error demo); it must exit non-zero.
+//! * ```` ```noeta error ```` — a sample that is *meant* to fail (an error demo); it must exit non-zero.
 //!
 //! ```` ```console ````, ```` ```toml ````, and other languages are ignored entirely.
 //!
@@ -27,7 +27,7 @@ fn docs_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../docs")
 }
 
-/// One extracted fenced `lang` sample.
+/// One extracted fenced `noeta` sample.
 struct Sample {
     file: String,
     /// 1-based line of the opening fence, for a clickable failure location.
@@ -36,16 +36,16 @@ struct Sample {
     code: String,
 }
 
-/// Pull every ```` ```lang[ tag] ```` block out of a markdown source.
+/// Pull every ```` ```noeta[ tag] ```` block out of a markdown source.
 fn extract(file: &str, text: &str) -> Vec<Sample> {
     let lines: Vec<&str> = text.lines().collect();
     let mut out = Vec::new();
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim_start();
-        if let Some(rest) = trimmed.strip_prefix("```lang") {
-            // A real `lang` fence: nothing after `lang` (untagged) or a whitespace-separated tag.
-            // Guards against `lang`-prefixed info strings like ```` ```language ````.
+        if let Some(rest) = trimmed.strip_prefix("```noeta") {
+            // A real `noeta` fence: nothing after `noeta` (untagged) or a whitespace-separated tag.
+            // Guards against `noeta`-prefixed info strings (a defensive check, as with `language`).
             if rest.is_empty() || rest.starts_with(char::is_whitespace) {
                 let tag = rest.trim().to_string();
                 let open = i + 1;
@@ -81,12 +81,12 @@ fn check(sample: &Sample, idx: usize) -> Result<(), String> {
     std::fs::write(&path, &sample.code).expect("write sample");
 
     let output = Command::cargo_bin("noeta")
-        .expect("the `lang` binary builds")
+        .expect("the `noeta` binary builds")
         .current_dir(&dir)
         .arg("run")
         .arg(&path)
         .output()
-        .expect("spawn lang");
+        .expect("spawn noeta");
     let _ = std::fs::remove_dir_all(&dir);
 
     let ran = output.status.success();
@@ -131,7 +131,7 @@ fn doc_samples_compile_and_run() {
     }
     assert!(
         !samples.is_empty(),
-        "found no `lang` code samples in {dir:?}"
+        "found no `noeta` code samples in {dir:?}"
     );
 
     let mut failures = Vec::new();

@@ -1,6 +1,6 @@
 # The Type System
 
-`lang` is **inferred-static**: types are checked at compile time, signatures are required at named boundaries, and bodies are inferred. `dyn` is the single explicit escape into dynamic typing. This page covers the surface — the type forms you write and the operations that move between them. For how the checker works internally, see [The Type Checker](Type-Checker-Internals).
+Noeta is **inferred-static**: types are checked at compile time, signatures are required at named boundaries, and bodies are inferred. `dyn` is the single explicit escape into dynamic typing. This page covers the surface — the type forms you write and the operations that move between them. For how the checker works internally, see [The Type Checker](Type-Checker-Internals).
 
 ## The shape of it
 
@@ -8,7 +8,7 @@
 - **Inference is local.** Bindings and closures infer their types from their initializers and bodies; there is no whole-program type reconstruction.
 - A program with type errors is **rejected before it runs** — the type checker is a shared front-end upstream of both execution backends.
 
-```lang
+```noeta
 fn add(a: int, b: int): int { return a + b }   // signature required
 xs = [1, 2, 3]                                  // inferred List<int>
 sq = fn(n) => n * n                             // inferred (int) -> int
@@ -32,7 +32,7 @@ sq = fn(n) => n * n                             // inferred (int) -> int
 
 There is no `null`. Absence is the value `none`; presence is `some(x)`. See [Error Handling](Error-Handling) for `?`/`??` and the full story.
 
-```lang
+```noeta
 fn head(xs: List<int>): ?int { return xs.first() }
 echo head([]) ?? -1     // -1
 ```
@@ -41,7 +41,7 @@ echo head([]) ?? -1     // -1
 
 A union is a **closed** dynamic: a value is *one of* a known, finite set of types.
 
-```lang
+```noeta
 fn parse(s: string): int | string {
     // returns the number, or the original string on failure
 }
@@ -56,7 +56,7 @@ fn parse(s: string): int | string {
 
 `dyn` is the escape hatch: any value fits, and nothing is known statically. Unlike a union, `dyn` is *open* — no finite set of `is T` arms can exhaust it, so a `match` over `dyn` requires a `_` arm (E0011 without one).
 
-```lang
+```noeta
 d: dyn = 42
 echo d is int          // true
 echo d is string       // false
@@ -66,7 +66,7 @@ echo d is string       // false
 
 **`x is T`** is a plain `bool` head-constructor test — well-formed even on a concrete `x`. Generics are erased, so `x is List<int>` really tests "is `x` a list."
 
-```lang
+```noeta
 enum Color { Red; Green }
 d: dyn = Color.Green
 echo d is Enum          // true
@@ -74,7 +74,7 @@ echo d is Enum          // true
 
 **`.as<T>()`** is a *checked narrowing* of a `dyn` or union to `?T` — `some(x)` if the runtime head constructor is `T`, else `none`. Narrowing an already-concrete (non-dynamic) value is E0028.
 
-```lang
+```noeta
 struct Point { x: int  y: int }
 
 fn as_point(x: dyn): ?Point { return x.as<Point>() }
@@ -92,7 +92,7 @@ An `is` test also **flow-narrows**: inside `if x is T { … }` the checker sees 
 
 `Struct`, `Class`, `Enum`, and `Record` are supertypes of every declared type of that kind — useful for runtime kind tests against a `dyn`:
 
-```lang
+```noeta
 enum Color { Red; Green }
 d: dyn = Color.Green
 echo d is Enum              // true

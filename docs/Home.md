@@ -1,8 +1,8 @@
-# The `lang` Wiki
+# The Noeta Wiki
 
 > **A language for shipping reactive applications as single binaries — web, desktop, or service — with a type system that makes illegal states unrepresentable.**
 
-`lang` *(working title — the name is still TBD)* is a new, general-purpose programming language built from scratch in Rust. It pairs an approachable, modern surface with an ML-grade type system (algebraic data types, `Result`-typed errors, exhaustive matching, real generics) and a runtime engineered for correctness and speed: a register-based bytecode VM over NaN-boxed values, a shape-based object model with inline caches, compiled precise reference counting with in-place reuse, and a cycle collector.
+Noeta is a new, general-purpose programming language built from scratch in Rust. It pairs an approachable, modern surface with an ML-grade type system (algebraic data types, `Result`-typed errors, exhaustive matching, real generics) and a runtime engineered for correctness and speed: a register-based bytecode VM over NaN-boxed values, a shape-based object model with inline caches, compiled precise reference counting with in-place reuse, and a cycle collector.
 
 This wiki is the complete documentation for the language, its tooling, its design, and how to contribute.
 
@@ -28,8 +28,8 @@ Learn the language from zero.
 - [Language Tour](Language-Tour)
 
 ### 2 · Bundled tools
-Everything the `lang` binary does beyond running code.
-- [The `lang` CLI](The-CLI)
+Everything the `noeta` binary does beyond running code.
+- [The `noeta` CLI](The-CLI)
 - [Testing](Testing)
 - [Benchmarking](Benchmarking)
 - [Documentation & Dev Tiers](Documentation-and-Tiers)
@@ -69,7 +69,7 @@ Build the compiler, run the tests, and add a feature.
 
 ## The thirty-second taste
 
-```lang
+```noeta
 namespace Demo;
 
 struct Item { price: float  qty: int }
@@ -106,6 +106,6 @@ echo match validate(items) {
 ```
 
 ```console
-$ lang run demo.lang
+$ noeta run demo.noe
 total: 24.48
 ```

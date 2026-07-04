@@ -1,12 +1,12 @@
 # Syntax Basics
 
-The lexical foundation: comments, statement termination, bindings, primitive types, literals, strings, and operators. Everything here runs with `lang run`.
+The lexical foundation: comments, statement termination, bindings, primitive types, literals, strings, and operators. Everything here runs with `noeta run`.
 
 ## Comments
 
 `//` starts a line comment (to end of line); `/* … */` is a block comment. Block comments **nest**, so you can comment out a region that already contains a block comment.
 
-```lang
+```noeta
 // a line comment
 echo 1        // trailing comment
 
@@ -22,7 +22,7 @@ A block comment may span a statement boundary — like a line continuation, the 
 
 **Semicolons are optional** — a newline ends a statement. A `;` is still valid, and required to put two statements on one line.
 
-```lang
+```noeta
 echo "a"
 echo "b"
 echo "c"; echo "d"   // two statements, one line
@@ -30,7 +30,7 @@ echo "c"; echo "d"   // two statements, one line
 
 A line **continues** onto the next (no statement break inserted) when the break is clearly mid-expression — the next line starts with an infix/postfix operator, `.`, `|>`, `??`, `..`, a comma, `=>`, `->`, a closing bracket, or a clause keyword (`else`, `then`, `in`, `as`, `is`), or the current line ends with an open `(`/`[`:
 
-```lang
+```noeta
 total = 1 +          // trailing operator → continues
         2 + 3
 scaled = [1, 2, 3]
@@ -45,7 +45,7 @@ Type, `struct`, and `class` bodies are newline-separated — fields need no term
 
 `echo` prints one value, followed by a newline, using the value's `Display` form.
 
-```lang
+```noeta
 echo "hello"    // hello
 echo 1 + 2      // 3
 echo [1, 2, 3]  // [1, 2, 3]
@@ -55,7 +55,7 @@ echo [1, 2, 3]  // [1, 2, 3]
 
 `name = expr` binds immutably; `mut name = expr` binds mutably. Reassigning an immutable binding is an error (E0006).
 
-```lang
+```noeta
 x = 10               // immutable
 mut total = 0        // mutable
 total = total + 5    // ok
@@ -63,7 +63,7 @@ total = total + 5    // ok
 
 A binding may carry a type annotation, which is a **checked boundary** (mismatch is E0007), erased at runtime:
 
-```lang
+```noeta
 xs: List<int> = [1, 2, 3]
 count: int = 3
 ```
@@ -72,7 +72,7 @@ count: int = 3
 
 **Compound assignment** `name OP= expr` desugars to `name = name OP expr` for `+= -= *= /= %= ~=`:
 
-```lang
+```noeta
 mut n = 10;  n += 5;  n *= 2;   echo n     // 30
 mut acc = [];  acc ~= [1];  acc ~= [2];  echo acc   // [1, 2]  (list append)
 mut s = "a";  s ~= "b";  echo s            // ab
@@ -95,7 +95,7 @@ mut s = "a";  s ~= "b";  echo s            // ab
 
 There are also [fixed-width integers](Fixed-Width-Integers) (`i8`…`u64`) and the abstract kind-types `Enum`/`Struct`/`Class`.
 
-```lang
+```noeta
 echo 9223372036854775807 + 1   // -9223372036854775808  (int wraps)
 ```
 
@@ -103,7 +103,7 @@ echo 9223372036854775807 + 1   // -9223372036854775808  (int wraps)
 
 Underscores may separate digits anywhere; `0x`/`0o`/`0b` are radix prefixes; a `.` or `e` makes a literal a `float`.
 
-```lang
+```noeta
 echo 1_000_000   // 1000000
 echo 0xFF        // 255
 echo 0b1010      // 10
@@ -118,7 +118,7 @@ echo 3.141_592   // 3.141592
 
 Written with an `f32` suffix. The widening lattice is `int < f32 < float`: `f32 op int → f32`, `f32 op float → float`. It is observably lower-precision than `float`:
 
-```lang
+```noeta
 x = 1.5f32
 echo x + 2.0f32        // 3.5
 echo 0.1f32 + 0.2f32   // 0.3     (float would give 0.30000000000000004)
@@ -129,7 +129,7 @@ echo -1.5f32           // -1.5    (unary negation stays f32)
 
 **`"..."` — interpolated.** `${expr}` embeds any expression; bare `{`/`}` are literal.
 
-```lang
+```noeta
 name = "Niro"
 echo "Hello ${name}"         // Hello Niro
 echo "sum is ${1 + 2 * 3}"   // sum is 7
@@ -139,7 +139,7 @@ echo "say \"hi\""            // say "hi"
 
 **`'...'` — raw.** No interpolation; the only escapes are `\'` and `\\`.
 
-```lang
+```noeta
 echo 'plain ${name} {braces} $dollar'   // literal, verbatim
 echo 'tab\tnot-expanded'                // backslash-t literal
 echo 'quote: it\'s'                     // quote: it's
@@ -147,7 +147,7 @@ echo 'quote: it\'s'                     // quote: it's
 
 **`` `...` `` — dedented template.** Multiline, interpolates like `"..."`, but strips the common leading indentation and the leading/trailing blank line — ideal for SQL, HTML, or email bodies.
 
-```lang
+```noeta
 name = "Ada"
 echo `
     Dear ${name},
@@ -176,14 +176,14 @@ String methods (`.upper()`, `.split(",")`, …) are covered in the [Standard Lib
 
 **`~` concatenation** — joins two lists into a new list, or display-concatenates operands into a string:
 
-```lang
+```noeta
 echo [1, 2] ~ [3, 4]              // [1, 2, 3, 4]
 echo "users/" ~ 42 ~ "/profile"  // users/42/profile
 ```
 
 **`|>` pipe** — threads the left value as the *first argument* of the right call, reading left-to-right:
 
-```lang
+```noeta
 fn inc(x: int): int { return x + 1 }
 fn add(a: int, b: int): int { return a + b }
 echo 5 |> inc |> inc      // inc(inc(5))  -> 7
@@ -194,7 +194,7 @@ echo 5 |> add(10)         // add(5, 10)   -> 15
 
 **Ranges** eagerly build a `List<int>`. `..` binds looser than `+`/`-`, so `0..n-1` means `0..(n-1)`; an empty range is `[]`:
 
-```lang
+```noeta
 echo 0..5    // [0, 1, 2, 3, 4]
 echo 0..=5   // [0, 1, 2, 3, 4, 5]
 echo 5..2    // []

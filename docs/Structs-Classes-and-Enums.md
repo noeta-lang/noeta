@@ -15,7 +15,7 @@ The language has two aggregate kinds and one sum kind. `struct` and `class` shar
 
 The choice is about whether a value *is* its contents (a `Point` is its `x` and `y`) or has an *identity* that persists across mutation (an `Order` you keep updating).
 
-```lang ignore
+```noeta ignore
 struct Point { x: int  y: int }        // value type
 
 class Order {
@@ -27,7 +27,7 @@ class Order {
 
 Aliasing makes the difference concrete:
 
-```lang
+```noeta
 class Box { pub mut n: int
     fn new(v: int): Box { return Box { n: v } }
 }
@@ -54,7 +54,7 @@ Fields are declared `name: T`, one per line (or `;`-separated). They are **priva
 - Assigning a non-`mut` field is E0033.
 - A private field is readable inside *any* method of the declaring type, on *any* value of that type (`other.x`), not just `self`.
 
-```lang
+```noeta
 class Account {
     pub name: string      // readable outside
     mut balance: int      // assignable, but private (read only inside methods)
@@ -65,7 +65,7 @@ class Account {
 
 `name: T = expr` makes a field **optional** in a literal, filled at construction. Defaults are evaluated in the type's **definition (global) scope** — they resolve globals only, never `self`, siblings, or the call site. A heap default (like a list) is rebuilt on each construction.
 
-```lang
+```noeta
 struct Cfg {
     name: string
     retries: int = 3
@@ -78,27 +78,27 @@ cfg = Cfg { name: "svc" }   // retries = 3, tags = [1, 2]
 
 The all-fields literal `T { f: v, … }` must set every non-defaulted field (a missing one is E0009).
 
-```lang ignore
+```noeta ignore
 p = Point { x: 1, y: 2 }
 ```
 
 **Field-init shorthand** puns an in-scope variable of the same name:
 
-```lang ignore
+```noeta ignore
 name = "Ada"; email = "ada@x.io"
 u = User { name, email }    // ≡ User { name: name, email: email }
 ```
 
 The **empty literal** `T {}` is valid iff every field has a default:
 
-```lang ignore
+```noeta ignore
 c = Cfg { name: "x" }   // ok
 d = Defaults {}         // ok only if every field of Defaults has a default
 ```
 
 **Spread** `T { ...base, f: override }` copies every field from `base`, then applies overrides. The original is unchanged (structural update):
 
-```lang ignore
+```noeta ignore
 a = Money { amount: 100, currency: "USD" }
 b = Money { amount: 300, ...a }    // amount: 300, currency: "USD"
 ```
@@ -107,7 +107,7 @@ b = Money { amount: 300, ...a }    // amount: 300, currency: "USD"
 
 Methods live in the type body. Inside a method, a **bare field name reads the field** off the receiver — no `self.` needed:
 
-```lang
+```noeta
 class Counter {
     pub mut n: int
     fn new(): Counter { return Counter { n: 10 } }   // associated function (no self)
@@ -124,7 +124,7 @@ class Counter {
 
 **Associated functions** take no receiver (constructors are the usual case) and are called on the bare type name; **methods** dispatch on a value:
 
-```lang ignore
+```noeta ignore
 c = Counter.new()   // associated function
 c.set_then_read()   // method
 ```
@@ -133,7 +133,7 @@ c.set_then_read()   // method
 
 A `class` may declare `destruct { … }`, which runs when the instance is dropped — at its **last use**, not at scope end (see [Memory Management](Memory-Management)). Locals drop in reverse declaration order. A container that owns a class (e.g. a generic `Box<T>` holding one) fires its destructor transitively.
 
-```lang
+```noeta
 class File {
     path: string
     destruct { echo "closing ${path}" }
@@ -144,7 +144,7 @@ class File {
 
 An `enum` is a closed set of variants — plain, payload-carrying, or string-backed. Variants are `;`-separated.
 
-```lang
+```noeta
 enum Status { Pending; Paid; Refunded }                 // plain
 
 enum OrderError {
@@ -160,7 +160,7 @@ enum Direction: string {                                 // string-backed
 
 Construct with `Enum.Variant` (or `Enum.Variant(payload)`), compare with `==`, and destructure in a `match`:
 
-```lang
+```noeta
 enum OrderError { Empty; NegativePrice(index: int) }
 
 e = OrderError.NegativePrice(index: 2)
@@ -172,7 +172,7 @@ echo match e {
 
 Enums share the unified body grammar — they can hold methods and `impl Trait { }` blocks. An **instance method's `self` is the whole enum value** (reach the payload by matching); associated functions are called on the type name:
 
-```lang
+```noeta
 enum Level {
     Low; Mid; High
     fn rank(): int {
@@ -188,7 +188,7 @@ A **string-backed** enum gets `Enum.try_from(s): ?Enum` (name-matched, `none` on
 
 Tuples are anonymous, positional, value-semantic aggregates. A literal needs **2 or more** elements — `(x)` is just a parenthesized expression, and `()` is unit.
 
-```lang
+```noeta
 fn divmod(a: int, b: int): (int, int) { return (a / b, a % b) }
 
 p = (1, "two", 3.0)

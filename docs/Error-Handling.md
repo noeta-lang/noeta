@@ -6,7 +6,7 @@ No `null`, no exceptions. Absence and failure are ordinary values you pass, matc
 
 An optional value is either `some(x)` or `none`. The type is written `?T`.
 
-```lang
+```noeta
 fn pick(hit: bool): ?int {
     if hit { return some(7) }
     return none
@@ -24,7 +24,7 @@ Many stdlib operations return options — `[1, 2, 3].first()` → `some(1)`, `[]
 
 A result is either `Ok(x)` or `Err(e)`. Use `Ok()` (no argument) for `Result<void, E>`.
 
-```lang ignore
+```noeta ignore
 enum OrderError { Empty; NegativePrice(index: int) }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
@@ -42,7 +42,7 @@ echo match validate([]) {
 
 On a `Result` or `Option`, the postfix `?` unwraps the success value, or **early-returns** the `Err`/`none` from the enclosing function. Using `?` on any other type is E0012.
 
-```lang ignore
+```noeta ignore
 fn place(items: List<Item>): Result<Order, OrderError> {
     validate(items)?                        // returns the Err here if invalid
     return Ok(Order.new(next_id(), items))
@@ -51,7 +51,7 @@ fn place(items: List<Item>): Result<Order, OrderError> {
 
 This lets you write the happy path linearly while failures short-circuit outward:
 
-```lang ignore
+```noeta ignore
 fn pipeline(path: string): Result<Report, Error> {
     raw    = fs_read(path)?      // returns Err on read failure
     parsed = parse(raw)?         // returns Err on parse failure
@@ -63,7 +63,7 @@ fn pipeline(path: string): Result<Report, Error> {
 
 `expr ?? fallback` unwraps a `some`, or evaluates the fallback for a `none`/absent value. It short-circuits — the fallback runs only when needed:
 
-```lang ignore
+```noeta ignore
 echo find(false) ?? "guest"      // "guest" if find returns none
 
 mut present = some(5)
@@ -78,7 +78,7 @@ For genuinely unrecoverable states:
 - `panic(msg)` aborts the program (recorded as E0010) with a nonzero exit; output produced before it is kept.
 - `assert(cond)` / `assert(cond, msg)` checks a condition and panics if it is false. It is the basis of the [test runner](Testing); the message is materialized only on failure.
 
-```lang
+```noeta
 balance = 5
 assert(balance >= 0, "balance went negative")
 ```

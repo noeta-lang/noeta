@@ -6,15 +6,15 @@ A round-up of the performance story, including the numeric-layout work and one i
 
 | Technique | Where | Page |
 |---|---|---|
-| NaN-boxed values (pointer-sized, cache-friendly) | `lang-value` | [The Virtual Machine](The-Virtual-Machine) |
-| Shapes / hidden classes (flat-slot layout) | `lang-object` | [The Virtual Machine](The-Virtual-Machine) |
-| Inline caches on property/method sites | `lang-vm` | [The Virtual Machine](The-Virtual-Machine) |
-| Register allocation via graph coloring | `lang-compiler` | [The Virtual Machine](The-Virtual-Machine) |
-| Tier-1 Cranelift JIT (hot-counter + OSR) | `lang-jit` | [The Virtual Machine](The-Virtual-Machine#tier-1--the-jit) |
-| Compiled precise reference counting | `lang-ir-passes` | [Memory Management](Memory-Management) |
-| In-place reuse (O(n²) → O(n) appends) | `lang-ir-passes` | [Memory Management](Memory-Management) |
-| Incremental recompilation (salsa) | `lang-db` | [Architecture & Pipeline](Architecture-and-Pipeline) |
-| Numeric layout + autovectorization | `lang-stdlib` | this page |
+| NaN-boxed values (pointer-sized, cache-friendly) | `noeta-value` | [The Virtual Machine](The-Virtual-Machine) |
+| Shapes / hidden classes (flat-slot layout) | `noeta-object` | [The Virtual Machine](The-Virtual-Machine) |
+| Inline caches on property/method sites | `noeta-vm` | [The Virtual Machine](The-Virtual-Machine) |
+| Register allocation via graph coloring | `noeta-compiler` | [The Virtual Machine](The-Virtual-Machine) |
+| Tier-1 Cranelift JIT (hot-counter + OSR) | `noeta-jit` | [The Virtual Machine](The-Virtual-Machine#tier-1--the-jit) |
+| Compiled precise reference counting | `noeta-ir-passes` | [Memory Management](Memory-Management) |
+| In-place reuse (O(n²) → O(n) appends) | `noeta-ir-passes` | [Memory Management](Memory-Management) |
+| Incremental recompilation (salsa) | `noeta-db` | [Architecture & Pipeline](Architecture-and-Pipeline) |
+| Numeric layout + autovectorization | `noeta-stdlib` | this page |
 
 ## Memory management is a performance feature
 
@@ -26,7 +26,7 @@ The VM's speed comes from *cheap, predictable* operations: values are one word (
 
 ## A second tier: the JIT
 
-The interpreter above is Tier 0. Hot prototypes are compiled to native code by a **Tier-1 [Cranelift](https://cranelift.dev/) JIT** (`lang-jit`, behind the `jit` cargo feature — on in the shipped binary, absent in a `--no-default-features` build). It is a *method* JIT: integer/float arithmetic, comparisons, branches, and slot access compile to native IR with the NaN-box guards inlined; calls and heap ops call back into the interpreter's own code, so the two tiers can never disagree. Promotion is a hot-counter plus **on-stack replacement (OSR)** so a long-running loop can go native mid-frame, and compiled code runs on the interpreter's own register stack so deopt is a bare pc-return. A dedicated `--jit-differential` oracle asserts the JIT is byte-identical to the interpreter *and* leak-free on every program. Measured speedups: ~6–8× on numeric loops, ~2.3× on recursive calls, ~3.5–5.5× on OSR'd top-level loops; ~19–28% of that came from the bare-store refinement alone. Full mechanism (deopt contract, native calls, refcounts across the tier boundary, and one instructive negative result) in [The Virtual Machine → Tier 1](The-Virtual-Machine#tier-1--the-jit).
+The interpreter above is Tier 0. Hot prototypes are compiled to native code by a **Tier-1 [Cranelift](https://cranelift.dev/) JIT** (`noeta-jit`, behind the `jit` cargo feature — on in the shipped binary, absent in a `--no-default-features` build). It is a *method* JIT: integer/float arithmetic, comparisons, branches, and slot access compile to native IR with the NaN-box guards inlined; calls and heap ops call back into the interpreter's own code, so the two tiers can never disagree. Promotion is a hot-counter plus **on-stack replacement (OSR)** so a long-running loop can go native mid-frame, and compiled code runs on the interpreter's own register stack so deopt is a bare pc-return. A dedicated `--jit-differential` oracle asserts the JIT is byte-identical to the interpreter *and* leak-free on every program. Measured speedups: ~6–8× on numeric loops, ~2.3× on recursive calls, ~3.5–5.5× on OSR'd top-level loops; ~19–28% of that came from the bare-store refinement alone. Full mechanism (deopt contract, native calls, refcounts across the tier boundary, and one instructive negative result) in [The Virtual Machine → Tier 1](The-Virtual-Machine#tier-1--the-jit).
 
 ## Numeric layout and SIMD — a case study
 
@@ -44,7 +44,7 @@ So the type system distinguishes flexible dynamic objects (the default) from **p
 The shipped win instead comes from a **struct-of-arrays layout that unlocks LLVM autovectorization**: an opt-in `SoaVec3` columnar type (three contiguous `f32` columns), built once from a `List<Vec3>` via an O(n) transpose and reduced many times, giving **2.7×–4×** on `dot`/`length`. The surface is the `vec.soa*` family (`soa`, `soa_dot`, `soa_length`, `soa_add`, `soa_scale`, …).
 
 > [!NOTE]
-> The column→`&[f32]` reinterpret in the shipped path is done via the safe, checked `bytemuck` crate (falling back to the byte-read path when a buffer is misaligned), so `lang-stdlib` stays `unsafe`-free there. The lesson: *the right layout plus the compiler's autovectorizer beat hand-written intrinsics here* — measure before reaching for SIMD.
+> The column→`&[f32]` reinterpret in the shipped path is done via the safe, checked `bytemuck` crate (falling back to the byte-read path when a buffer is misaligned), so `noeta-stdlib` stays `unsafe`-free there. The lesson: *the right layout plus the compiler's autovectorizer beat hand-written intrinsics here* — measure before reaching for SIMD.
 
 ## Incremental compilation
 

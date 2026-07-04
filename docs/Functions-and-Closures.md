@@ -6,7 +6,7 @@ Named functions, default parameters, multiple return, closures, and the pipe ope
 
 `fn name(params): Ret { body }`. At this named boundary, **parameter types and the return type are mandatory** (a missing type is E0022). Bodies infer everything else.
 
-```lang
+```noeta
 fn add(a: int, b: int): int {
     return a + b
 }
@@ -23,7 +23,7 @@ fn fib(n: int): int {
 
 A **trailing** parameter may have a default `name: T = expr`. A required parameter may not follow a defaulted one (E0026).
 
-```lang
+```noeta
 fn greet(name: string, greeting: string = "Hello"): string {
     return "${greeting}, ${name}!"
 }
@@ -38,7 +38,7 @@ echo greet("Ada", "Hi")   // Hi, Ada!
 
 Return a [tuple](Structs-Classes-and-Enums#tuples) to hand back several values, and destructure at the call site:
 
-```lang
+```noeta
 fn divmod(a: int, b: int): (int, int) {
     return (a / b, a % b)
 }
@@ -49,7 +49,7 @@ fn divmod(a: int, b: int): (int, int) {
 
 A closure is `fn(params) => expr` (arrow) or `fn(params) { … }` (block, with `return`). Unlike named functions, a closure's parameter and return types are **optional** — they are inferred:
 
-```lang
+```noeta
 add_base = fn(x) => x + base            // arrow; captures `base`
 sumsq    = fn(xs) { mut t = 0; for x in xs { t = t + x * x }; return t }   // block body
 classify = fn(n): string { if n > 0 { return "pos" }; return "nonpos" }    // return annotation
@@ -59,7 +59,7 @@ twice    = fn(f, x) => f(f(x))          // higher-order
 
 Closures **capture their environment**, including `mut` cells that outlive the frame that created them:
 
-```lang
+```noeta
 fn make_counter(): () -> int {
     mut n = 0
     return fn() { n = n + 1; return n }   // captures and mutates `n`
@@ -73,7 +73,7 @@ echo c()   // 2
 
 Function types are first-class surface syntax — write them in annotations and signatures:
 
-```lang
+```noeta
 apply: (int) -> int = fn(x) => x + 1
 fn run(f: (int) -> int, x: int): int { return f(x) }
 ```
@@ -84,7 +84,7 @@ The prelude builtins (`len`, `sum`, `map`, `filter`) are themselves first-class 
 
 `|>` threads the left value as the **first argument** of the right call. It turns nested calls into a left-to-right pipeline:
 
-```lang
+```noeta
 fn inc(x: int): int { return x + 1 }
 fn add(a: int, b: int): int { return a + b }
 

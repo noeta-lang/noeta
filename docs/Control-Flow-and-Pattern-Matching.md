@@ -6,7 +6,7 @@ Conditionals, loops, and `match` — including the expression forms and flow-nar
 
 Statement form, braces required:
 
-```lang
+```noeta
 n = 1
 if n == 0 {
     echo "zero"
@@ -24,7 +24,7 @@ if n == 0 {
 
 With the `then` keyword, `if` is an **expression** usable anywhere. It desugars to a two-arm `match`:
 
-```lang
+```noeta
 fn size(n: int): string {
     return if n > 10 then "big" else "small"
 }
@@ -34,7 +34,7 @@ label = if size(50) == "big" then 9 else 0   // as a binding's value
 
 A `cond is T` test **narrows** the scrutinee's type inside the `then` arm:
 
-```lang
+```noeta
 fn describe(x: dyn): string {
     return if x is int then "int ${x}" else "other"
 }
@@ -44,7 +44,7 @@ fn describe(x: dyn): string {
 
 Top-tested loop:
 
-```lang
+```noeta
 mut i = 0
 while i < 3 {
     echo i
@@ -56,7 +56,7 @@ while i < 3 {
 
 Iterates lists, ranges, sets, maps, iterators, or any `Iterable`. The loop pattern may destructure a tuple:
 
-```lang
+```noeta
 mut total = 0
 for n in [1, 2, 3, 4] { total = total + n }
 for i in 0..3 { echo i }
@@ -71,7 +71,7 @@ Iterating a map yields its values; iterating a set yields elements in sorted ord
 
 Both work in `while` and `for`, including inside a nested `if`. `break` outside any loop is E0024.
 
-```lang
+```noeta
 for n in 0..100 {
     if n == 5 { break }
     if n % 2 == 0 { continue }
@@ -83,7 +83,7 @@ for n in 0..100 {
 
 `match scrut { pat => expr, … }` is an **expression**, and it is checked for **exhaustiveness** — a missing case with no `_` is E0011.
 
-```lang ignore
+```noeta ignore
 fn label(s: Status): string {
     return match s {
         Status.Pending  => "awaiting payment",
@@ -106,7 +106,7 @@ fn label(s: Status): string {
 | Result | `Ok(v)`, `Err(e)` |
 | Type | `is int`, `is string`, `is Point` (on unions / `dyn`) |
 
-```lang ignore
+```noeta ignore
 fn classify(p: (int, int)): string {
     return match p {
         (0, 0) => "origin",
@@ -127,7 +127,7 @@ echo match place(items, customer) {
 - A **union** (`A | B`) is a *closed* world — a `match` over it is exhaustive with **no `_`** (one `is` arm per member).
 - **`dyn`** is *open* — a finite set of `is T` arms can never exhaust it, so a `_` arm is required (E0011 without one).
 
-```lang
+```noeta
 fn kind(x: int | string): string {
     return match x {
         is int    => "int",
@@ -140,7 +140,7 @@ fn kind(x: int | string): string {
 
 An `is` test narrows a variable's type in the block it guards:
 
-```lang ignore
+```noeta ignore
 fn area(x: dyn): float {
     if x is Circle {
         return 3.14159 * x.r * x.r   // x is Circle here

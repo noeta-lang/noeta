@@ -22,7 +22,7 @@ use std::collections::BTreeMap;
 /// the success path of `env.get`/`env.keys` is testable and identical across
 /// backends.
 pub fn sandbox_vars() -> BTreeMap<String, String> {
-    [("HOME", "/home/sandbox"), ("USER", "lang")]
+    [("HOME", "/home/sandbox"), ("USER", "noeta")]
         .into_iter()
         .map(|(k, v)| (k.to_string(), v.to_string()))
         .collect()
@@ -31,7 +31,7 @@ pub fn sandbox_vars() -> BTreeMap<String, String> {
 /// The deterministic argument vector the sandbox presents (program name + a
 /// representative argument).
 pub fn sandbox_args() -> Vec<String> {
-    vec!["lang".to_string(), "run".to_string()]
+    vec!["noeta".to_string(), "run".to_string()]
 }
 
 /// The canonical "no such environment variable" error for `env.get` (→ `E0021`),

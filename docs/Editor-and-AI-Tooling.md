@@ -3,7 +3,7 @@
 This page describes where editor integration and the agentic tooling surface stand today, honestly.
 
 > [!IMPORTANT]
-> **Neither an LSP server nor an MCP endpoint ships yet.** Both are on the roadmap (milestone M2/M3), not in the current toolchain. There is no `lang-lsp`, `lang-server`, or `lang-mcp` crate, and no `lsp`/`serve` subcommand. Today's tooling is the CLI: [`run`](The-CLI), [`repl`](The-CLI), [`test`](Testing), [`bench`](Benchmarking), and [`doc`](Documentation-and-Tiers).
+> **Neither an LSP server nor an MCP endpoint ships yet.** Both are on the roadmap (milestone M2/M3), not in the current toolchain. There is no `noeta-lsp`, `noeta-server`, or `noeta-mcp` crate, and no `lsp`/`serve` subcommand. Today's tooling is the CLI: [`run`](The-CLI), [`repl`](The-CLI), [`test`](Testing), [`bench`](Benchmarking), and [`doc`](Documentation-and-Tiers).
 
 ## What exists today
 
@@ -23,11 +23,11 @@ The design intent, not yet shipped:
 
 When these land, this page will document them. Until then, treat any mention of "the LSP" or "MCP tools" in the design documents as forward-looking.
 
-## Using `lang` with an editor now
+## Using `noeta` with an editor now
 
 In the meantime:
 
-- Point your editor's build/run task at `lang run <file>`; diagnostics print with source spans and stable codes.
-- `lang doc` extracts your `@doc { … }` prose as Markdown — usable in a docs pipeline today.
-- `lang dump <file>` prints the VM bytecode a program compiles to — useful for an agent (or human) reasoning about *what actually runs*: which opcodes a construct lowers to, whether a reuse/in-place fast path fired, how names and constants are laid out. See [The CLI](The-CLI#lang-dump).
-- The `.lang` extension has no bundled TextMate/Tree-sitter grammar yet; most editors' generic highlighting handles the C-family surface reasonably.
+- Point your editor's build/run task at `noeta run <file>`; diagnostics print with source spans and stable codes.
+- `noeta doc` extracts your `@doc { … }` prose as Markdown — usable in a docs pipeline today.
+- `noeta dump <file>` prints the VM bytecode a program compiles to — useful for an agent (or human) reasoning about *what actually runs*: which opcodes a construct lowers to, whether a reuse/in-place fast path fired, how names and constants are laid out. See [The CLI](The-CLI#noeta-dump).
+- The `.noe` extension has no bundled TextMate/Tree-sitter grammar yet; most editors' generic highlighting handles the C-family surface reasonably.

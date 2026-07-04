@@ -3,36 +3,36 @@
 This page gets you from a clean checkout to running your own program in a few minutes.
 
 > [!NOTE]
-> `lang` is pre-alpha and not yet published as a released binary. You build the toolchain from source with a recent stable Rust. The binary is named `lang`; source files use the `.lang` extension. The name is a working title.
+> Noeta is pre-alpha and not yet published as a released binary. You build the toolchain from source with a recent stable Rust. The binary is named `noeta`; source files use the `.noe` extension.
 
 ## 1 · Build the toolchain
 
 You need a recent stable Rust toolchain (1.95+). Then, from the repository root:
 
 ```sh
-cargo build                 # builds the whole workspace, including the `lang` binary
+cargo build                 # builds the whole workspace, including the `noeta` binary
 ```
 
-The binary lands at `target/debug/lang`. For a fast optimized build use `cargo build --release` (→ `target/release/lang`). To put `lang` on your `PATH`:
+The binary lands at `target/debug/noeta`. For a fast optimized build use `cargo build --release` (→ `target/release/noeta`). To put `noeta` on your `PATH`:
 
 ```sh
-cargo install --path crates/lang-cli
+cargo install --path crates/noeta-cli
 ```
 
-Everywhere below, `lang` means "the built binary." If you have not installed it, substitute `cargo run -p lang-cli --` for `lang` — e.g. `cargo run -p lang-cli -- run hello.lang`.
+Everywhere below, `noeta` means "the built binary." If you have not installed it, substitute `cargo run -p noeta-cli --` for `noeta` — e.g. `cargo run -p noeta-cli -- run hello.noe`.
 
 ## 2 · Hello, world
 
-Create `hello.lang`:
+Create `hello.noe`:
 
-```lang
+```noeta
 echo "hello";
 ```
 
 Run it:
 
 ```console
-$ lang run hello.lang
+$ noeta run hello.noe
 hello
 ```
 
@@ -40,7 +40,7 @@ That is a complete program. There is **no `main` function** and no boilerplate �
 
 Semicolons are optional; a newline ends a statement. This is equally valid:
 
-```lang
+```noeta
 echo "hello"
 ```
 
@@ -48,7 +48,7 @@ echo "hello"
 
 `echo` and a couple of bindings already give you something useful:
 
-```lang
+```noeta
 name = "Ada"
 greeting = "Hello, ${name}!"
 echo greeting
@@ -61,7 +61,7 @@ echo "sum 1..5 = ${total}"
 ```
 
 ```console
-$ lang run first.lang
+$ noeta run first.noe
 Hello, Ada!
 sum 1..5 = 15
 ```
@@ -80,7 +80,7 @@ The [Language Tour](Language-Tour) builds from here through functions, data mode
 For quick experiments, start an interactive session:
 
 ```console
-$ lang repl
+$ noeta repl
 » 1 + 2 * 3
 7
 » name = "world"
@@ -104,21 +104,21 @@ Multi-line input is detected automatically — an unclosed `{`, `(`, or `[` cont
 
 ## 5 · The rest of the toolchain
 
-The `lang` binary is more than a runner. In brief:
+The `noeta` binary is more than a runner. In brief:
 
 | Command | What it does |
 |---|---|
-| `lang run <file>` | Type-check and execute a program. |
-| `lang repl` | Interactive REPL. |
-| `lang test <file>` | Run the program's `@test` blocks. See [Testing](Testing). |
-| `lang bench <file>` | Run and measure its `@bench` blocks. See [Benchmarking](Benchmarking). |
-| `lang doc <file>` | Extract its `@doc { … }` prose to stdout. See [Documentation & Dev Tiers](Documentation-and-Tiers). |
+| `noeta run <file>` | Type-check and execute a program. |
+| `noeta repl` | Interactive REPL. |
+| `noeta test <file>` | Run the program's `@test` blocks. See [Testing](Testing). |
+| `noeta bench <file>` | Run and measure its `@bench` blocks. See [Benchmarking](Benchmarking). |
+| `noeta doc <file>` | Extract its `@doc { … }` prose to stdout. See [Documentation & Dev Tiers](Documentation-and-Tiers). |
 
-Run `lang <command> --help` for the flags of any command.
+Run `noeta <command> --help` for the flags of any command.
 
 ## Exit codes
 
-`lang run` exits `0` on success, `1` on a type error / runtime error (a program's own exit code passes through), and `2` if the file cannot be read.
+`noeta run` exits `0` on success, `1` on a type error / runtime error (a program's own exit code passes through), and `2` if the file cannot be read.
 
 ## Where to go next
 
