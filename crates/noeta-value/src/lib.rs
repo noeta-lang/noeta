@@ -1438,6 +1438,11 @@ impl Value {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Map(_)))
     }
 
+    /// Whether this is a heap string.
+    pub fn is_string(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Str(_)))
+    }
+
     /// Whether this is a heap set.
     pub fn is_set(self) -> bool {
         self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Set(_)))
@@ -1625,6 +1630,22 @@ impl Value {
         // reused node does not carry the original literal's element type. The tag survives pure
         // aliasing only — matching the tree-walker, which produces a fresh untagged list here.
         heap::set_reflect(self, None);
+    }
+
+    /// Append `s` to this string's buffer in place. Requires sole ownership (the COW invariant), so
+    /// the caller must have checked `refcount() == 1` — this is what turns a `s = s ~ x` accumulator
+    /// loop from O(n²) copies into amortized O(n) (`String`'s geometric growth), mirroring
+    /// [`Self::list_extend`] for lists.
+    pub fn str_push_in_place(self, s: &str) {
+        debug_assert!(
+            self.is_string() && heap::refcount(self) == 1,
+            "str_push_in_place requires a uniquely-owned string (the COW invariant)"
+        );
+        heap::with_payload_mut(self, |p| {
+            if let Payload::Str(buf) = p {
+                buf.push_str(s);
+            }
+        });
     }
 
     /// Push one `element` onto this boxed list's backing buffer **in place**, taking ownership of the

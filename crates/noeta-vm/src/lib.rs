@@ -2127,8 +2127,16 @@ impl<'m> Vm<'m> {
                                 release(l);
                                 Value::list(items)
                             }
+                        } else if l.is_string() && l.refcount() == 1 {
+                            // Sole owner of a string accumulator: append `rhs`'s display form to its
+                            // buffer in place (amortized O(1)), mirroring the list path — the single
+                            // reference moves into the result. This is what makes `s = s ~ x` in a loop
+                            // O(n) instead of O(n²) (the `format!` below copies all of `l` each time).
+                            l.str_push_in_place(&r.display());
+                            l
                         } else {
-                            // Non-list operand: display concatenation, identical to `Op::Binary`'s `~`.
+                            // Aliased accumulator or non-string lhs: display concatenation into a fresh
+                            // string (preserves immutable semantics), identical to `Op::Binary`'s `~`.
                             let s = Value::string(&format!("{}{}", l.display(), r.display()));
                             release(l);
                             s
