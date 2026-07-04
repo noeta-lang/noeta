@@ -90,11 +90,17 @@ need a small native-type registration is an S1 detail.
 
 ## Slices (proposal)
 
-- **S0 — graph core + unit tests (no language surface).** Build `ReactiveGraph` standalone: node table,
-  dependency edges, dirty propagation, current-subscriber stack, topological glitch-free flush. Drive it
-  with a fake "recompute = call this Rust closure" to prove diamonds recompute once, in a deterministic
-  order, with no leaks. Pure `noeta-value`/new-crate unit tests. **The determinism + glitch-freedom proof
-  lives here**, before any backend or syntax exists.
+- **S0 — graph core + unit tests (no language surface). DONE.** New leaf crate **`noeta-reactive`**: a
+  value-generic `ReactiveGraph<V>` (node arena + free-list, bidirectional dependency edges, the
+  current-computing stack for auto-subscription, lazy-memo `computed`, eager queued `effect`, a
+  deterministic batched flush) driven by a backend-supplied `run: &mut dyn FnMut(V) -> V` closure seam.
+  Reentrancy (a recompute runs a closure that reenters to read its deps) is handled by `RefCell` interior
+  mutability with the discipline that **no borrow is held across `run`**. 9 property tests prove:
+  signal round-trip, effect run-once/rerun, computed laziness+memoization, **diamond sink recomputes once
+  glitch-free**, deterministic effect order by `NodeId`, dispose-unsubscribes-and-frees-no-leak, untracked
+  peek, dynamic-dependency resubscription, and set-inside-effect coalescing into the flush. `unsafe`-free,
+  clippy/fmt/**miri** all clean. The determinism + glitch-freedom + no-leak proofs live here, before any
+  backend or syntax exists.
 - **S1 — `signal` in both backends.** `signal(0)` value + `.get`/`.set`/`.update`, wired through the
   shared core via each backend's call seam. Dependency capture works but consumers are only effects (S2)
   — so S1 lands with S2 or stubs reads. Conformance + differential + leak green.

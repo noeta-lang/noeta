@@ -1169,6 +1169,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "noeta-reactive"
+version = "0.0.0"
+
+[[package]]
 name = "noeta-runtime"
 version = "0.0.0"
 dependencies = [
