@@ -299,6 +299,14 @@ pub(crate) fn parse_f32_literal(text: &str) -> f32 {
     cleaned.parse().unwrap_or(0.0)
 }
 
+/// Parse an `f64` literal's source text into an `f64`, stripping the `f64` suffix and `_` separators
+/// (P-NUM-SYM). The lexer's `F64Lit` regex guarantees the `f64` suffix and a well-formed numeric body.
+pub(crate) fn parse_f64_literal(text: &str) -> f64 {
+    let body = text.strip_suffix("f64").unwrap_or(text);
+    let cleaned: String = body.chars().filter(|&c| c != '_').collect();
+    cleaned.parse().unwrap_or(0.0)
+}
+
 /// Parse a fixed-width integer literal's source text (Tier W) into its `(magnitude, signed, bits)`,
 /// stripping the width suffix and `_` separators and honouring the `0x`/`0o`/`0b` radix prefix. The
 /// magnitude is the **unsigned** parsed value (a leading `-` is a separate unary op); `None` means it

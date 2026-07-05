@@ -128,6 +128,10 @@ pub struct Checked {
     /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
     /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
     pub width_sites: HashMap<Span, (bool, u8)>,
+    /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — the type-directed hint
+    /// that makes lowering emit a narrow `Const::F32` instead of the default `Const::Float`. A pure
+    /// function of the program (both backends narrow identically), like the other site maps.
+    pub f32_literal_sites: HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -156,6 +160,7 @@ pub fn check_all(program: &Program) -> Checked {
         index_field_sites: checker.sites.index_field_sites,
         for_stream_sites: checker.sites.for_stream_sites,
         width_sites: checker.sites.width_sites,
+        f32_literal_sites: checker.sites.f32_literal_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -461,6 +466,9 @@ struct SiteMaps {
     /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
     /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
     width_sites: HashMap<Span, (bool, u8)>,
+    /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM) — lowering reads this (via
+    /// [`Checked::f32_literal_sites`]) to emit a narrow `Const::F32` for the literal.
+    f32_literal_sites: HashSet<Span>,
 }
 
 #[derive(Default)]
@@ -2632,11 +2640,18 @@ impl Checker {
                 expected.clone()
             }
             // A bare float literal coerces into an **`f64`** context — `mut x: f64 = 1.5`,
-            // `f(1.5)` where the parameter is `f64` (P-NUM-SYM). This is representation-free: `f64`
-            // is bit-identical to `float`, so the literal still lowers to a 64-bit float value; only
-            // its static type is pinned to the strict `f64`. (`f32` is a *distinct* 32-bit
-            // representation, so it keeps requiring its `1.5f32` suffix — no adaptation here.)
+            // `f(1.5)` where the parameter is `f64` (P-NUM-SYM). Representation-free: `f64` is
+            // bit-identical to `float`, so the literal still lowers to a 64-bit float value; only its
+            // static type is pinned to the strict `f64`.
             Expr::Float { .. } if matches!(expected, Type::F64) => Type::F64,
+            // A bare float literal also coerces into an **`f32`** context — `mut x: f32 = 1.5`. Unlike
+            // `f64`, `f32` is a *distinct 32-bit* representation, so the literal's span is recorded so
+            // lowering narrows it to a `Const::F32` (type-directed). The suffixed `1.5f32` form
+            // (`Expr::F32`) is unaffected — it is already an `f32`.
+            Expr::Float { span, .. } if matches!(expected, Type::F32) => {
+                self.sites.f32_literal_sites.insert(*span);
+                Type::F32
+            }
             // Default: synthesize the actual type, then require it to be a subtype of the
             // expectation.
             _ => {
@@ -2698,6 +2713,7 @@ impl Checker {
             Expr::Int { .. } => Type::Int,
             Expr::Float { .. } => Type::Float,
             Expr::F32 { .. } => Type::F32,
+            Expr::F64 { .. } => Type::F64,
             Expr::IntN {
                 magnitude,
                 signed,
@@ -5295,6 +5311,7 @@ fn conditional_await_span(e: &Expr) -> Option<Span> {
         | Expr::IntN { .. }
         | Expr::Float { .. }
         | Expr::F32 { .. }
+        | Expr::F64 { .. }
         | Expr::Bool { .. }
         | Expr::Ident { .. }
         | Expr::AttributesOf { .. }

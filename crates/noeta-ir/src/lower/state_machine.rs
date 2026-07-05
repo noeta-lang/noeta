@@ -1039,6 +1039,7 @@ fn hoist_in_expr(e: &mut Expr, pre: &mut Vec<AstStmt>, ctr: &mut u32) {
         | Expr::IntN { .. }
         | Expr::Float { .. }
         | Expr::F32 { .. }
+        | Expr::F64 { .. }
         | Expr::Bool { .. }
         | Expr::Ident { .. }
         | Expr::AttributesOf { .. }

@@ -150,6 +150,7 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
         checked.ext_call_sites.clone(),
         checked.for_stream_sites.clone(),
         checked.width_sites.clone(),
+        checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
         &checked.destructor_relevance,
     );
@@ -208,6 +209,7 @@ fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut 
         checked.ext_call_sites.clone(),
         checked.for_stream_sites.clone(),
         checked.width_sites.clone(),
+        checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
         &checked.destructor_relevance,
     );

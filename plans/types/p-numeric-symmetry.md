@@ -4,8 +4,9 @@
 conformance 464, differential 0-skip/agree, jit-differential 453/0-div/0-leak, workspace 711,
 CLI 59, miri 55, clippy+fmt clean.
 
-Deferred (noted below): bare-float→`f32` literal adaptation and an explicit `f64` literal suffix —
-both literal-ergonomics only; the type structure is symmetric now.
+**Literal ergonomics now DONE too** (follow-up commit): the `f64` suffix (`1.5f64`) and bare-float→
+`f32` adaptation both landed — the two tiers are symmetric down to literal syntax. See the
+"Literal ergonomics" section below.
 
 ## Decision (user, 2026-07-05)
 
@@ -42,12 +43,24 @@ compile-time coercion. So:
 - Backends: unchanged for arithmetic (f64 = float path; f32 unchanged). `to_f64`/`to_f32` already
   exist in the conversion tower.
 
-## Deferred
+## Literal ergonomics (done, follow-up commit)
 
-- **Bare-float → `f32` literal adaptation** (`mut x: f32 = 1.5` without the suffix). Needs
-  type-directed 32-bit lowering in both backends (f32 is a *distinct* representation, unlike f64).
-  `f32` keeps requiring its `1.5f32` suffix — the status quo, no regression. A follow-up ergonomic.
-- An explicit `f64` literal suffix (`1.5f64`) — adaptation + annotation cover the common case.
+Both float literal escapes now match the integer tier:
+
+- **`f64` suffix** (`1.5f64`, `5f64`) — full lexer/parser/AST (`Expr::F64`) plumbing; lowers to a
+  plain `Const::Float` (f64 ≡ float). This is the expression-position escape (the bare-literal
+  adaptation only fires where a type is expected).
+- **Bare-float → `f32` adaptation** (`mut x: f32 = 1.5`) — type-directed: the checker records the
+  adapted literal's span in `f32_literal_sites` (a new `LoweringSites`/`Checked` field, threaded
+  like `width_sites`), and lowering narrows it to `Const::F32(v as f32)`. Both backends share the
+  lowering, so the differential agrees (verified). `f32` precision matches the suffixed form for
+  ordinary literals (double-rounding via `as f32` is a rare theoretical ULP edge, deterministic and
+  differential-safe).
+
+Note: **argument-position** literal adaptation (`f(5)` where the param is `i64`, or `f(1.5)` for
+`f32`) is a pre-existing, *uniform* limitation across the whole fixed-width tier — literals adapt at
+bindings, not at call args, for `i64`/`u8`/`f32`/`f64` alike. Not changed here (a separate,
+tier-wide enhancement if wanted).
 
 ## Gates (per slice)
 

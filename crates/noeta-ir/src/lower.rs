@@ -91,6 +91,11 @@ pub struct LoweringSites<'a> {
     /// Collection-construction sites → the resolved element [`noeta_ast::reflect::TypeRepr`] baked onto
     /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder (R1 reflection).
     pub construction_sites: &'a HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// Bare float-literal spans the checker adapted into an `f32` context (`mut x: f32 = 1.5`,
+    /// P-NUM-SYM). Unlike `f64` (bit-identical to `float`), `f32` is a *distinct 32-bit*
+    /// representation, so an adapted literal must lower to a narrow [`Const::F32`] rather than the
+    /// default [`Const::Float`] — this set is that type-directed hint.
+    pub f32_literal_sites: &'a HashSet<Span>,
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
@@ -105,6 +110,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     let stream = HashSet::new();
     let width = HashMap::new();
     let construction = HashMap::new();
+    let f32_lits = HashSet::new();
     lower_with_sites(
         program,
         LoweringSites {
@@ -114,6 +120,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
             for_stream_sites: &stream,
             width_sites: &width,
             construction_sites: &construction,
+            f32_literal_sites: &f32_lits,
         },
     )
 }
@@ -679,8 +686,16 @@ impl Lowerer<'_> {
             // the corresponding negative i64 — the correct erased pattern). Width/signedness lived in
             // the type and have already been range-checked (E0044); nothing survives to runtime.
             Expr::IntN { magnitude, .. } => Ok(Atom::Const(Const::Int(*magnitude as i64))),
+            // A bare float literal is `float` by default, but lowers to a narrow `f32` const where
+            // the checker adapted it into an `f32` context (P-NUM-SYM). `as f32` round-to-nearest
+            // matches the runtime narrowing; both backends share this lowering, so they agree.
+            Expr::Float { value, span } if self.sites.f32_literal_sites.contains(span) => {
+                Ok(Atom::Const(Const::F32(*value as f32)))
+            }
             Expr::Float { value, .. } => Ok(Atom::Const(Const::Float(*value))),
             Expr::F32 { value, .. } => Ok(Atom::Const(Const::F32(*value))),
+            // `f64` is bit-identical to `float`: lower to a plain 64-bit float constant.
+            Expr::F64 { value, .. } => Ok(Atom::Const(Const::Float(*value))),
             Expr::Bool { value, .. } => Ok(Atom::Const(Const::Bool(*value))),
             // The async desugar's pending sentinel (`$pending`, Track A.3) — a synthetic name (the
             // lexer forbids `$`, so it can never collide with a source identifier) the state machine
