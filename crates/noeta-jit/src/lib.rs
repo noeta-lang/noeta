@@ -531,7 +531,10 @@ impl Jit {
             // nothing (no variable is ever defined or used) — its code is unchanged.
             let reg_plan = plan::RegPlan::with_heap_in(chunk, &heap_in);
             let const_bits = plan::const_reg_bits(chunk);
+            let kinds = kind_in_map(chunk);
             let vars: Vec<cranelift_frontend::Variable> =
+                (0..nreg).map(|_| b.declare_var(types::I64)).collect();
+            let raw_vars: Vec<cranelift_frontend::Variable> =
                 (0..nreg).map(|_| b.declare_var(types::I64)).collect();
 
             let mut cg = Codegen {
@@ -550,6 +553,8 @@ impl Jit {
                 cur_pc: 0,
                 plan: reg_plan,
                 vars,
+                raw_vars,
+                kinds,
                 const_bits,
                 proto: proto as u32,
                 note_bound_ref,
@@ -601,11 +606,12 @@ impl Jit {
             }
             for (rp, init) in resume_inits {
                 cg.b.switch_to_block(init);
-                // Every mid-frame entry (seam resume or OSR header) verifies the analysis's
-                // immediate claims against tier-0's actual slots before any native code trusts
-                // them — see `guard_immediate_claims`.
-                cg.guard_immediate_claims(rp);
+                // Every mid-frame entry (seam resume or OSR header) verifies the analyses'
+                // immediate/kind claims against tier-0's actual slots before any native code
+                // trusts them — see `guard_entry_claims`.
+                cg.guard_entry_claims(rp);
                 cg.load_ssa_vars();
+                cg.init_raw_vars(rp);
                 cg.b.ins().jump(op_blocks[rp], &[]);
             }
             // `bad_entry`: an unexpected resume pc — hand the frame back to the interpreter there.
@@ -643,6 +649,7 @@ impl Jit {
             }
             cg.b.switch_to_block(init0);
             cg.load_ssa_vars();
+            cg.init_raw_vars(0);
             cg.b.ins().jump(op_blocks[0], &[]);
 
             // One block per op. Unreachable pcs (dead code) get a trivial bail so they never touch
@@ -1108,6 +1115,157 @@ fn heap_at_fixpoint(chunk: &noeta_bytecode::Chunk, n: usize, nreg: usize) -> Opt
     Some(inset)
 }
 
+/// A register's statically-known **immediate kind** (P-JSSA T1 typed promotion). Where the kind
+/// analysis ([`kind_in_map`]) proves a register `Int`/`Bool`/`Float` at a pc, the codegen skips
+/// the NaN-box tag checks and (for `Int`/`Bool`) works on a second, **raw** SSA variable holding
+/// the unboxed value — the box/unbox chain the egraph cannot fold through loop-header block
+/// params disappears from the loop body entirely.
+///
+/// The lattice: `Bot < {Int, Bool, Float} < Imm`, join = equality-or-`Imm`. A typed kind is a
+/// *claim* with the same contract as the bare-store analysis's immediate claims: true along
+/// native paths by construction (a native int `Binary` bails before storing a non-fitting
+/// result), and **verified at every mid-frame entry** against tier-0's actual slots
+/// ([`Codegen::guard_entry_claims`]) — tier 0 can heap-box an overflow where the claim says
+/// `Int`, and the guard catches exactly that (subsuming the plain `is_pointer` check).
+///
+/// Invariant (locked by a test): a typed kind implies the bare-store analysis proves the
+/// register immediate there (`kind ∈ {Int, Bool, Float}` ⇒ `!heap_in`) — both transfers mark
+/// the same may-heap defs, so a kind claim never outlives its immediate claim.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Kind {
+    /// No analyzed path has defined the register yet (an unreached cell) — the join identity.
+    Bot,
+    /// A small int (48-bit immediate). Raw form: the sign-extended i64.
+    Int,
+    /// A bool. Raw form: 0 or 1 in an i64.
+    Bool,
+    /// An f64. No raw form — a NaN-boxed float's word *is* its bit pattern; the win is skipping
+    /// the type dispatch, not the (identity) unboxing.
+    Float,
+    /// An immediate of statically-unknown kind (or a cell outside the promoted region).
+    Imm,
+}
+
+impl Kind {
+    fn join(self, other: Kind) -> Kind {
+        match (self, other) {
+            (Kind::Bot, k) | (k, Kind::Bot) => k,
+            (a, b) if a == b => a,
+            _ => Kind::Imm,
+        }
+    }
+}
+
+/// The kind a `LoadConst` of this constant leaves in its destination. Heap constants (strings,
+/// big ints, native modules) are `Imm` — irrelevant, since their defs are also may-heap in the
+/// bare-store analysis, so no typed claim survives past them.
+fn const_kind(c: &Const) -> Kind {
+    match const_immediate_bits(c) {
+        None => Kind::Imm,
+        Some(_) => match c {
+            Const::Int(_) => Kind::Int,
+            Const::Bool(_) => Kind::Bool,
+            Const::Float(_) => Kind::Float,
+            _ => Kind::Imm, // unit, f32
+        },
+    }
+}
+
+/// The kind of a statically-known immediate word (a [`plan::const_reg_bits`] constant register).
+fn classify_immediate_bits(bits: u64) -> Kind {
+    let l = Value::NANBOX;
+    if bits & (l.sign_bit | l.qnan | l.int_tag) == l.qnan | l.int_tag {
+        Kind::Int
+    } else if bits == l.true_bits || bits == l.false_bits {
+        Kind::Bool
+    } else if bits & l.qnan != l.qnan {
+        Kind::Float
+    } else {
+        Kind::Imm // unit, f32
+    }
+}
+
+/// The forward kind fixpoint (T1 typed promotion): `map[pc * nreg + r]` = register `r`'s
+/// statically-known kind at the *start* of op `pc`, over the same tier-0 CFG and the same
+/// modeled-op whitelist as the bare-store analysis ([`reg_effect`] — any unmodeled op fails the
+/// whole map closed to `Imm`, which emits exactly today's generic code). Transfer highlights:
+/// a comparison defines `Bool`; arithmetic defines `Int`/`Float` only when *both* operands
+/// already have that kind (else `Imm` — tier 0 may coerce or produce either); everything
+/// may-heap (params at entry, globals, call results, heap constants) defines `Imm`, keeping the
+/// typed⇒immediate invariant aligned with [`heap_at_fixpoint`] by construction.
+pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
+    let n = chunk.code.len();
+    let nreg = chunk.num_registers as usize;
+    let all_imm = || vec![Kind::Imm; n * nreg];
+    if chunk
+        .code
+        .iter()
+        .any(|op| reg_effect(op, &chunk.consts).is_none())
+    {
+        return all_imm();
+    }
+    let mut inset = vec![Kind::Bot; n * nreg];
+    // Seed pc 0: parameters hold caller values of unknown kind; locals hold `unit`. All `Imm`.
+    let row0 = nreg.min(inset.len());
+    inset[..row0].fill(Kind::Imm);
+    let mut succ = Vec::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for pc in 0..n {
+            let mut out = inset[pc * nreg..pc * nreg + nreg].to_vec();
+            match &chunk.code[pc] {
+                Op::LoadConst { dst, k } => {
+                    out[*dst as usize] = const_kind(&chunk.consts[*k as usize]);
+                }
+                Op::Move { dst, src } => out[*dst as usize] = out[*src as usize],
+                Op::Drop { reg, .. } => out[*reg as usize] = Kind::Imm, // leaves `unit`
+                Op::StoreGlobal { src, .. } => out[*src as usize] = Kind::Imm,
+                Op::LoadGlobal { dst, .. }
+                | Op::TakeGlobal { dst, .. }
+                | Op::Call { dst, .. }
+                | Op::CallGlobal { dst, .. }
+                | Op::Unary { dst, .. }
+                | Op::Stringify { dst, .. } => out[*dst as usize] = Kind::Imm,
+                Op::Binary { op, dst, a, b, .. } => {
+                    out[*dst as usize] = match op {
+                        BinaryOp::Eq
+                        | BinaryOp::Ne
+                        | BinaryOp::Lt
+                        | BinaryOp::Le
+                        | BinaryOp::Gt
+                        | BinaryOp::Ge => Kind::Bool,
+                        BinaryOp::Add
+                        | BinaryOp::Sub
+                        | BinaryOp::Mul
+                        | BinaryOp::Div
+                        | BinaryOp::Rem => match (out[*a as usize], out[*b as usize]) {
+                            (Kind::Int, Kind::Int) => Kind::Int,
+                            (Kind::Float, Kind::Float) => Kind::Float,
+                            _ => Kind::Imm,
+                        },
+                        _ => Kind::Imm, // `~`, `&&`/`||`, identity — bail ops here; tier 0 decides
+                    };
+                }
+                // Inert for registers (the reg_effect whitelist guarantees nothing else appears).
+                _ => {}
+            }
+            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            for &s in &succ {
+                let base = s * nreg;
+                for (r, &o) in out.iter().enumerate() {
+                    let j = inset[base + r].join(o);
+                    if j != inset[base + r] {
+                        inset[base + r] = j;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    inset
+}
+
 /// A thin wrapper over the Cranelift builder carrying the frame base pointer, the globals base
 /// pointer, and the `note_global_bound` helper reference — the context every op-emitter needs. Keeps
 /// [`emit_op`] free of builder plumbing. Register/global access uses *trusted* memory flags (aligned
@@ -1159,6 +1317,18 @@ struct Codegen<'a, 'b> {
     /// loop headers — so a promoted loop-carried value never touches memory inside the loop.
     /// Registers the plan never promotes still get a (never-used) variable so indexing is direct.
     vars: Vec<cranelift_frontend::Variable>,
+    /// T1 typed promotion: one **raw** SSA variable per VM register, holding the *unboxed* value
+    /// (sign-extended i64 for `Int`, 0/1 for `Bool`) wherever the kind analysis claims that kind
+    /// ([`Codegen::kinds`]). The invariant: at every pc where `kind_in ∈ {Int, Bool}` for a
+    /// promoted register, its raw variable is current — every def form that can produce those
+    /// kinds (`box_int_and_store`, the comparison arms, `LoadConst`, `Move`, the entry inits)
+    /// also defines the raw form. Where the kind is `Imm`/`Float` the raw variable is stale and
+    /// never read. Spills always go through the boxed form ([`Codegen::vars`], kept current by
+    /// the same dual defs).
+    raw_vars: Vec<cranelift_frontend::Variable>,
+    /// T1: the per-pc kind map ([`kind_in_map`]), `kinds[pc * nreg + r]`. Consulted through
+    /// [`Codegen::kind_claim`], which gates on promotion/residency.
+    kinds: Vec<Kind>,
     /// P-JSSA: registers holding one statically-known immediate constant (LICM's hoisted
     /// constants). Reads inline the constant (feeding Cranelift's constant folding — an operand
     /// tag check against a known constant folds away); no variable, no entry load, no block
@@ -1302,29 +1472,60 @@ impl Codegen<'_, '_> {
         }
     }
 
-    /// Soundness guard at an **OSR loop-header entry**: verify at runtime that every register the
-    /// bare-store analysis claims immediate at `pc` actually holds a non-pointer. The forward
-    /// model describes tier-0's fall-through state, but an OSR entry begins mid-frame with
+    /// Soundness guard at a **mid-frame entry** (OSR loop header or seam resume): verify at
+    /// runtime that every register the analyses make a claim about at `pc` actually satisfies it.
+    /// The forward models describe tier-0's fall-through state, but a mid-frame entry begins with
     /// whatever tier 0 actually left in the slots — and tier 0 heap-boxes an overflowing
-    /// arithmetic result where the model claims an immediate. A false claim would skip a needed
-    /// retain/release (a leak, or a double-release). Every mid-frame entry — a seam resume after
-    /// an interpreted callee as well as an OSR loop header — verifies its claims here. The cost
+    /// arithmetic result where the models claim an immediate (or an `Int`). A false claim would
+    /// skip a needed retain/release (a leak, or a double-release) or misread a pointer as a raw
+    /// int. Each claimed register gets the check its claim needs — `is_small_int` for a
+    /// `Kind::Int` claim, the bool/float word tests for `Bool`/`Float`, the plain `is_pointer`
+    /// test for an untyped immediate claim; the typed tests subsume the pointer test. The cost
     /// lands only on interpreter transitions: a native→native direct call never re-enters through
     /// the seam (its callee provably ran fully native, so the caller's claims still hold), and an
     /// OSR entry fires once per hot loop, never per iteration. A violation bails back to the
     /// interpreter at `pc`. Known-constant registers need no guard: their single dominating
     /// `LoadConst` def wrote the slot.
-    fn guard_immediate_claims(&mut self, pc: usize) {
+    fn guard_entry_claims(&mut self, pc: usize) {
+        let l = Value::NANBOX;
         let mut any: Option<ClValue> = None;
         for r in 0..self.nreg as u16 {
-            if !self.heap_in[pc * self.nreg + r as usize] && self.const_bits[r as usize].is_none() {
-                let v = self.load_reg(r);
-                let p = self.is_pointer(v);
-                any = Some(match any {
-                    None => p,
-                    Some(acc) => self.b.ins().bor(acc, p),
-                });
+            if self.heap_in[pc * self.nreg + r as usize] || self.const_bits[r as usize].is_some() {
+                continue;
             }
+            let v = self.load_reg(r);
+            let viol = match self.kind_claim(pc, r) {
+                Kind::Int => {
+                    // Violated unless the small-int tag matches.
+                    let mask = self
+                        .b
+                        .ins()
+                        .iconst(types::I64, (l.sign_bit | l.qnan | l.int_tag) as i64);
+                    let want = self.b.ins().iconst(types::I64, (l.qnan | l.int_tag) as i64);
+                    let masked = self.b.ins().band(v, mask);
+                    self.b.ins().icmp(IntCC::NotEqual, masked, want)
+                }
+                Kind::Bool => {
+                    // Violated unless the word is exactly `true` or `false`.
+                    let tb = self.b.ins().iconst(types::I64, l.true_bits as i64);
+                    let fb = self.b.ins().iconst(types::I64, l.false_bits as i64);
+                    let is_t = self.b.ins().icmp(IntCC::Equal, v, tb);
+                    let is_f = self.b.ins().icmp(IntCC::Equal, v, fb);
+                    let is_bool = self.b.ins().bor(is_t, is_f);
+                    self.b.ins().bxor_imm(is_bool, 1)
+                }
+                Kind::Float => {
+                    // Violated if the word is qnan-tagged (every non-f64 value is).
+                    let qnan = self.b.ins().iconst(types::I64, l.qnan as i64);
+                    let masked = self.b.ins().band(v, qnan);
+                    self.b.ins().icmp(IntCC::Equal, masked, qnan)
+                }
+                Kind::Imm | Kind::Bot => self.is_pointer(v),
+            };
+            any = Some(match any {
+                None => viol,
+                Some(acc) => self.b.ins().bor(acc, viol),
+            });
         }
         if let Some(any) = any {
             let ok = self.b.create_block();
@@ -1334,6 +1535,80 @@ impl Codegen<'_, '_> {
             let here = self.pc_const(pc);
             self.b.ins().return_(&[here]);
             self.b.switch_to_block(ok);
+        }
+    }
+
+    /// The statically-claimed kind of register `r` at `pc` (T1): the exact kind of a
+    /// known-constant register, the kind map's claim where the register is promoted and
+    /// SSA-resident (the only place raw variables are maintained), else `Imm`. `Bot` (an
+    /// analysis-unreached cell) degrades to `Imm`.
+    fn kind_claim(&self, pc: usize, r: Reg) -> Kind {
+        if let Some(bits) = self.const_bits[r as usize] {
+            return classify_immediate_bits(bits);
+        }
+        if self.is_var(r) && self.plan.ssa_ok_at(pc, r) {
+            match self.kinds[pc * self.nreg + r as usize] {
+                Kind::Bot => Kind::Imm,
+                k => k,
+            }
+        } else {
+            Kind::Imm
+        }
+    }
+
+    /// Read register `r`'s **raw** (unboxed i64) value — only valid where
+    /// [`Codegen::kind_claim`] is `Int`: the inlined unboxed constant for a known-constant
+    /// register, else the raw variable.
+    fn read_raw_int(&mut self, r: Reg) -> ClValue {
+        if let Some(bits) = self.const_bits[r as usize] {
+            let raw = ((bits & Value::NANBOX.ptr_mask) as i64) << 16 >> 16;
+            return self.b.ins().iconst(types::I64, raw);
+        }
+        self.b.use_var(self.raw_vars[r as usize])
+    }
+
+    /// Read register `r`'s raw bool (0/1 in an i64) — only valid where the claim is `Bool`.
+    fn read_raw_bool(&mut self, r: Reg) -> ClValue {
+        if let Some(bits) = self.const_bits[r as usize] {
+            let raw = (bits == Value::NANBOX.true_bits) as i64;
+            return self.b.ins().iconst(types::I64, raw);
+        }
+        self.b.use_var(self.raw_vars[r as usize])
+    }
+
+    /// Define register `r`'s raw variable (a no-op for an unpromoted register). Callers do this
+    /// at every def whose result kind can be `Int`/`Bool` — see [`Codegen::raw_vars`].
+    fn def_raw(&mut self, r: Reg, raw: ClValue) {
+        if self.is_var(r) {
+            self.b.def_var(self.raw_vars[r as usize], raw);
+        }
+    }
+
+    /// T1: define every promoted register's raw variable at a native entry point — the real
+    /// unboxed value where the (just-guarded) claim is `Int`/`Bool`, a dummy zero elsewhere (the
+    /// frontend needs a def on every path; a dummy is never read, because a raw read requires a
+    /// typed claim and a typed claim requires typed defs on every incoming path). Runs after
+    /// [`Codegen::load_ssa_vars`], so the boxed variables hold the slot values.
+    fn init_raw_vars(&mut self, pc: usize) {
+        let l = Value::NANBOX;
+        for r in 0..self.nreg as u16 {
+            if !self.is_var(r) {
+                continue;
+            }
+            let raw = match self.kind_claim(pc, r) {
+                Kind::Int => {
+                    let v = self.b.use_var(self.vars[r as usize]);
+                    self.unbox_int(v)
+                }
+                Kind::Bool => {
+                    let v = self.b.use_var(self.vars[r as usize]);
+                    let tb = self.b.ins().iconst(types::I64, l.true_bits as i64);
+                    let is_t = self.b.ins().icmp(IntCC::Equal, v, tb);
+                    self.b.ins().uextend(types::I64, is_t)
+                }
+                _ => self.b.ins().iconst(types::I64, 0),
+            };
+            self.b.def_var(self.raw_vars[r as usize], raw);
         }
     }
 
@@ -1502,8 +1777,22 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
     let next = |cg: &mut Codegen| cg.b.ins().jump(op_blocks[pc + 1], &[]);
     match op {
         Op::LoadConst { dst, k } => {
-            let bits = const_immediate_bits(&consts[*k as usize]).expect("eligibility checked");
+            let c = &consts[*k as usize];
+            let bits = const_immediate_bits(c).expect("eligibility checked");
             let v = cg.b.ins().iconst(types::I64, bits as i64);
+            // T1: a typed constant also defines the raw form (the kind transfer gives the
+            // destination this constant's kind).
+            match c {
+                Const::Int(i) => {
+                    let raw = cg.b.ins().iconst(types::I64, *i);
+                    cg.def_raw(*dst, raw);
+                }
+                Const::Bool(bl) => {
+                    let raw = cg.b.ins().iconst(types::I64, *bl as i64);
+                    cg.def_raw(*dst, raw);
+                }
+                _ => {}
+            }
             cg.store_reg(*dst, v);
             next(cg);
         }
@@ -1516,6 +1805,18 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             let v = cg.read_reg(*src);
             if !cg.transfer[pc] && cg.may_be_heap(*src) {
                 cg.retain_if_heap(v);
+            }
+            // T1: the destination inherits the source's kind, so its raw form moves too.
+            match cg.kind_claim(pc, *src) {
+                Kind::Int => {
+                    let raw = cg.read_raw_int(*src);
+                    cg.def_raw(*dst, raw);
+                }
+                Kind::Bool => {
+                    let raw = cg.read_raw_bool(*src);
+                    cg.def_raw(*dst, raw);
+                }
+                _ => {}
             }
             cg.store_reg(*dst, v);
             next(cg);
@@ -1541,6 +1842,18 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             cg.b.ins().jump(op_blocks[*target as usize], &[]);
         }
         Op::JumpIfTrue { reg, target } => {
+            // T1: a `Bool`-claimed scrutinee branches on its raw 0/1 form — no re-comparison.
+            if cg.kind_claim(pc, *reg) == Kind::Bool {
+                let raw = cg.read_raw_bool(*reg);
+                cg.b.ins().brif(
+                    raw,
+                    op_blocks[*target as usize],
+                    &[],
+                    op_blocks[pc + 1],
+                    &[],
+                );
+                return;
+            }
             // Taken iff the value is exactly `true`; a non-bool is simply not taken (the interpreter's
             // `as_bool() == Some(true)`), so no guard/bail is needed.
             let v = cg.read_reg(*reg);
@@ -1557,6 +1870,17 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             );
         }
         Op::JumpIfFalse { reg, target } => {
+            if cg.kind_claim(pc, *reg) == Kind::Bool {
+                let raw = cg.read_raw_bool(*reg);
+                cg.b.ins().brif(
+                    raw,
+                    op_blocks[pc + 1],
+                    &[],
+                    op_blocks[*target as usize],
+                    &[],
+                );
+                return;
+            }
             let v = cg.read_reg(*reg);
             let fb =
                 cg.b.ins()
@@ -1571,6 +1895,19 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             );
         }
         Op::CondBranch { reg, target, .. } => {
+            // T1: a `Bool`-claimed condition needs no E0007 bail chain — the claim (entry-guarded
+            // / comparison-defined) proves the word is a bool, so branch on the raw bit.
+            if cg.kind_claim(pc, *reg) == Kind::Bool {
+                let raw = cg.read_raw_bool(*reg);
+                cg.b.ins().brif(
+                    raw,
+                    op_blocks[pc + 1],
+                    &[],
+                    op_blocks[*target as usize],
+                    &[],
+                );
+                return;
+            }
             // false → jump target; true → fall through; anything else → bail so the interpreter
             // raises E0007 ("`if` condition must be a bool").
             let v = cg.read_reg(*reg);
@@ -1829,10 +2166,13 @@ fn emit_take_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
 }
 
-/// Emit a numeric `Binary`, dispatching on the operands' runtime types (the bytecode is untyped):
-/// both small ints → the integer fast path (J1); both f64 floats → the float fast path (J2);
-/// anything else (mixed int/float, f32, objects, …) → bail to the interpreter, which handles the
-/// widening/coercion and any type error.
+/// Emit a numeric `Binary`. T1 typed promotion first consults the static kind claims
+/// ([`Codegen::kind_claim`]): both operands claimed `Int` → the raw integer body directly, no
+/// tag checks, no unboxing (the operands come from the raw variables); both claimed `Float` →
+/// the float body directly. Otherwise fall back to the runtime dispatch (the bytecode is
+/// untyped): both small ints → the integer fast path (J1); both f64 floats → the float fast path
+/// (J2); anything else (mixed int/float, f32, objects, …) → bail to the interpreter, which
+/// handles the widening/coercion and any type error.
 fn emit_binary(
     cg: &mut Codegen,
     op: BinaryOp,
@@ -1842,6 +2182,21 @@ fn emit_binary(
     pc: usize,
     op_blocks: &[Block],
 ) {
+    let ka = cg.kind_claim(pc, a);
+    let kb = cg.kind_claim(pc, b);
+    if ka == Kind::Int && kb == Kind::Int {
+        let x = cg.read_raw_int(a);
+        let y = cg.read_raw_int(b);
+        emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
+        return;
+    }
+    if ka == Kind::Float && kb == Kind::Float {
+        let va = cg.read_reg(a);
+        let vb = cg.read_reg(b);
+        emit_float_binary(cg, op, dst, va, vb, pc, op_blocks);
+        return;
+    }
+
     let va = cg.read_reg(a);
     let vb = cg.read_reg(b);
 
@@ -1855,7 +2210,9 @@ fn emit_binary(
 
     // Integer fast path.
     cg.b.switch_to_block(int_block);
-    emit_int_binary(cg, op, dst, va, vb, pc, op_blocks);
+    let x = cg.unbox_int(va);
+    let y = cg.unbox_int(vb);
+    emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
 
     // Float fast path (or bail): both operands must be f64 floats.
     cg.b.switch_to_block(float_check);
@@ -1867,21 +2224,19 @@ fn emit_binary(
     emit_float_binary(cg, op, dst, va, vb, pc, op_blocks);
 }
 
-/// The integer body of a `Binary`, entered with both operands proven small ints (J1). Computes in
-/// i64 with the interpreter's wrapping/trapping semantics and stores the boxed result — bailing
-/// before any write on a zero divisor, a signed overflow, or an out-of-immediate-range result.
-fn emit_int_binary(
+/// The integer body of a `Binary`, entered with both operands as **raw** (unboxed, sign-extended)
+/// i64s — either unboxed by the runtime dispatch or read straight from the raw variables (T1).
+/// Computes in i64 with the interpreter's wrapping/trapping semantics and stores the boxed result
+/// — bailing before any write on a zero divisor or an out-of-immediate-range result.
+fn emit_int_binary_raw(
     cg: &mut Codegen,
     op: BinaryOp,
     dst: Reg,
-    va: ClValue,
-    vb: ClValue,
+    x: ClValue,
+    y: ClValue,
     pc: usize,
     op_blocks: &[Block],
 ) {
-    let x = cg.unbox_int(va);
-    let y = cg.unbox_int(vb);
-
     match op {
         BinaryOp::Add => {
             let r = cg.b.ins().iadd(x, y);
@@ -1919,7 +2274,11 @@ fn emit_int_binary(
                 _ => IntCC::SignedGreaterThanOrEqual,
             };
             let cmp = cg.b.ins().icmp(cc, x, y);
-            // Select the exact `true`/`false` NaN-box bits from the i1 comparison result.
+            // Select the exact `true`/`false` NaN-box bits from the i1 comparison result, and
+            // keep the raw (0/1) form current for a `Bool`-claimed destination (T1) — a claimed
+            // `CondBranch` then branches on the raw bit with no re-comparison.
+            let raw = cg.b.ins().uextend(types::I64, cmp);
+            cg.def_raw(dst, raw);
             let l = Value::NANBOX;
             let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
             let fb = cg.b.ins().iconst(types::I64, l.false_bits as i64);
@@ -1933,7 +2292,9 @@ fn emit_int_binary(
 
 /// Box an i64 arithmetic result back to a small-int word and store it, or bail if it overflows the
 /// 48-bit immediate range (the interpreter would heap-box it). The fit test: sign-extending the low
-/// 48 bits must reproduce the value.
+/// 48 bits must reproduce the value. Also keeps the raw form current (T1): a stored result *is*
+/// the raw i64 (it just passed the fit check), so an `Int`-claimed downstream read skips the
+/// unboxing entirely.
 fn box_int_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_blocks: &[Block]) {
     let l = Value::NANBOX;
     let pm = cg.b.ins().iconst(types::I64, l.ptr_mask as i64);
@@ -1945,6 +2306,7 @@ fn box_int_and_store(cg: &mut Codegen, dst: Reg, r: ClValue, pc: usize, op_block
     // Guard: result fits the 48-bit immediate range, else bail (a big int must heap-box).
     let store = cg.b.create_block();
     guard(cg, fits, store, pc);
+    cg.def_raw(dst, r);
     let tag = cg.b.ins().iconst(types::I64, (l.qnan | l.int_tag) as i64);
     let boxed = cg.b.ins().bor(lo, tag);
     cg.store_reg(dst, boxed);
@@ -2000,6 +2362,10 @@ fn emit_float_binary(
                 _ => FloatCC::GreaterThanOrEqual,
             };
             let cmp = cg.b.ins().fcmp(cc, x, y);
+            // Keep the raw bool form current for a `Bool`-claimed destination (T1) — the kind
+            // transfer marks every comparison result `Bool` regardless of which path produced it.
+            let raw = cg.b.ins().uextend(types::I64, cmp);
+            cg.def_raw(dst, raw);
             let l = Value::NANBOX;
             let tb = cg.b.ins().iconst(types::I64, l.true_bits as i64);
             let fb = cg.b.ins().iconst(types::I64, l.false_bits as i64);
@@ -2165,6 +2531,114 @@ mod tests {
     fn heap_in_all_false_when_not_heap_aware() {
         let c = chunk(vec![Op::Halt], vec![], 1, 2);
         assert!(heap_in_map(&c, false).iter().all(|b| !*b));
+    }
+
+    /// The kind fixpoint (T1): a `LoadConst` int def is `Int` and survives a loop's back edge (the
+    /// header join of the pre-loop path and the in-loop redef is `Int ∨ Int = Int`); a parameter
+    /// is `Imm` (unknown caller value); a comparison result is `Bool`; arithmetic on
+    /// statically-`Int` operands is `Int`.
+    #[test]
+    fn kind_map_tracks_ints_and_bools_through_a_loop() {
+        let sp = Span::new(0, 0);
+        // Shape of a counting loop: 0: r1 = 0   1: r2 = r1 < r0   2: cond r2 → 5
+        //                           3: r1 = r1 + r1   4: jump 1   5: halt
+        let c = chunk(
+            vec![
+                Op::LoadConst { dst: 1, k: 0 },
+                Op::Binary {
+                    op: BinaryOp::Lt,
+                    dst: 2,
+                    a: 1,
+                    b: 0,
+                    span: sp,
+                },
+                Op::CondBranch {
+                    reg: 2,
+                    target: 5,
+                    span: sp,
+                },
+                Op::Binary {
+                    op: BinaryOp::Add,
+                    dst: 1,
+                    a: 1,
+                    b: 1,
+                    span: sp,
+                },
+                Op::Jump { target: 1 },
+                Op::Halt,
+            ],
+            vec![Const::Int(0)],
+            1, // r0 is a parameter
+            3,
+        );
+        let k = kind_in_map(&c);
+        let nreg = 3;
+        let at = |pc: usize, r: usize| k[pc * nreg + r];
+        assert_eq!(at(1, 0), Kind::Imm, "a parameter's kind is unknown");
+        assert_eq!(at(1, 1), Kind::Int, "the counter is Int at the header join");
+        assert_eq!(at(2, 2), Kind::Bool, "a comparison result is Bool");
+        assert_eq!(at(4, 1), Kind::Int, "Int + Int stays Int around the loop");
+    }
+
+    /// A typed kind claim never outlives the immediate claim it rides on: wherever the kind map
+    /// says `Int`/`Bool`/`Float`, the bare-store map must say not-heap — both transfers mark the
+    /// same may-heap defs. (The loop chunk above exercises params, consts, arith, and joins.)
+    #[test]
+    fn typed_kind_implies_immediate_claim() {
+        let sp = Span::new(0, 0);
+        let c = chunk(
+            vec![
+                Op::LoadConst { dst: 1, k: 0 },
+                Op::Binary {
+                    op: BinaryOp::Lt,
+                    dst: 2,
+                    a: 1,
+                    b: 0,
+                    span: sp,
+                },
+                Op::Binary {
+                    op: BinaryOp::Add,
+                    dst: 1,
+                    a: 1,
+                    b: 0,
+                    span: sp,
+                },
+                Op::Move { dst: 2, src: 1 },
+                Op::Jump { target: 1 },
+                Op::Halt,
+            ],
+            vec![Const::Int(0)],
+            1,
+            3,
+        );
+        let kinds = kind_in_map(&c);
+        let heap = heap_in_map(&c, true);
+        for (i, k) in kinds.iter().enumerate() {
+            if matches!(k, Kind::Int | Kind::Bool | Kind::Float) {
+                assert!(
+                    !heap[i],
+                    "typed claim at flat index {i} must imply the immediate claim"
+                );
+            }
+        }
+    }
+
+    /// An unmodeled op fails the kind map closed to all-`Imm` — the generic (tag-checked) code.
+    #[test]
+    fn kind_map_all_imm_when_an_op_is_unmodeled() {
+        let c = chunk(
+            vec![
+                Op::MakeTuple {
+                    dst: 0,
+                    items: Box::new([]),
+                },
+                Op::Halt,
+            ],
+            vec![],
+            0,
+            1,
+        );
+        assert!(kind_in_map(&c).iter().all(|k| *k == Kind::Imm));
     }
 
     /// An unmodeled op (here `MakeTuple`) opts the whole prototype out — the analysis fails closed to
