@@ -368,6 +368,10 @@ pub enum Builtin {
     /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
     /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
     Signal,
+    /// `computed(fn)` — create a lazy, memoized derivation (reactivity S3); the tree-walker twin of the
+    /// VM's `Builtin::Computed`. Returns a `Computed<T>` whose `.get()` recomputes only when a
+    /// dependency it read has changed.
+    Computed,
     /// `effect(fn)` — register a side effect (reactivity S2); the tree-walker twin of the VM's
     /// `Builtin::Effect`. Runs `fn` immediately, tracks the signals it reads, and reruns on change.
     Effect,
@@ -391,6 +395,7 @@ impl Builtin {
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
             Builtin::Signal => "signal",
+            Builtin::Computed => "computed",
             Builtin::Effect => "effect",
         }
     }
@@ -413,6 +418,7 @@ impl Builtin {
         Builtin::Race,
         Builtin::MapBounded,
         Builtin::Signal,
+        Builtin::Computed,
         Builtin::Effect,
     ];
 }
@@ -2193,40 +2199,41 @@ impl Interpreter {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
         }
-        // Reactive handle methods (reactivity S1/S2): `signal.get()`/`.set(v)`/`.update(fn)` and
-        // `effect.dispose()` — the tree-walker twin of the VM's dispatch. Validity was checked
-        // statically. A signal read never recomputes (only a `computed` does, arriving in S3), so the
-        // `run` callback in `get`/`update` is unreachable.
-        if let Value::Reactive(_kind, node) = &receiver {
+        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/`.update(fn)`,
+        // `computed.get()`, and `effect.dispose()` — the tree-walker twin of the VM's dispatch. Each
+        // method is guarded by the node's `kind` (a `signal` is not disposable, a `computed` is
+        // read-only, an `effect` is not readable); an invalid pair falls through to the generic
+        // no-method runtime error below, exactly as any other unknown method on a built-in type.
+        // `get` on a `computed` recomputes a dirty body via `read_reactive`; on a `signal` it is a
+        // plain read (the callback never fires).
+        if let Value::Reactive(kind, node) = &receiver {
+            use noeta_reactive::NodeKind;
+            let kind = *kind;
             let node = *node;
-            match name {
-                "get" => {
+            match (kind, name) {
+                (NodeKind::Signal | NodeKind::Computed, "get") => {
                     self.expect_std_arity(name, &args, 0, span)?;
-                    return Ok(self.reactive.read(node, &mut |_v: Value| {
-                        unreachable!("a signal read never recomputes")
-                    }));
+                    return self.read_reactive(node, span);
                 }
-                "set" => {
+                (NodeKind::Signal, "set") => {
                     self.expect_std_arity(name, &args, 1, span)?;
                     let value = args.into_iter().next().unwrap();
                     self.reactive.set(node, value);
                     self.drive_flush(span)?;
                     return Ok(Value::Unit);
                 }
-                "update" => {
+                (NodeKind::Signal, "update") => {
                     self.expect_std_arity(name, &args, 1, span)?;
                     // Read-modify-write: read the current value, call the updater with it, store the
                     // result, then flush.
                     let f = args.into_iter().next().unwrap();
-                    let current = self.reactive.read(node, &mut |_v: Value| {
-                        unreachable!("a signal read never recomputes")
-                    });
+                    let current = self.read_reactive(node, span)?;
                     let updated = self.call(f, vec![current], span)?;
                     self.reactive.set(node, updated);
                     self.drive_flush(span)?;
                     return Ok(Value::Unit);
                 }
-                "dispose" => {
+                (NodeKind::Effect, "dispose") => {
                     self.expect_std_arity(name, &args, 0, span)?;
                     self.reactive.dispose(node);
                     return Ok(Value::Unit);
@@ -3256,6 +3263,33 @@ impl Interpreter {
         }
     }
 
+    /// Read a reactive node, driving a `computed`'s recompute through [`call`](Self::call) if it is
+    /// dirty (reactivity S3) — the tree-walker twin of the VM's `Vm::read_reactive`. A `signal` read
+    /// never enters the callback (nothing to run); a dirty `computed` runs its body (and, transitively,
+    /// any dirty computeds it reads), memoizing as it goes. The graph is cloned out as an `Rc` so its
+    /// `&self` `read` can borrow it while the callback borrows `self` for `call`. A body that aborts is
+    /// captured deterministically — the first abort stops further recomputes and propagates.
+    fn read_reactive(&mut self, node: noeta_reactive::NodeId, span: Span) -> Eval<Value> {
+        let graph = std::rc::Rc::clone(&self.reactive);
+        let mut abort: Option<Unwind> = None;
+        let value = graph.read(node, &mut |body: Value| -> Value {
+            if abort.is_some() {
+                return Value::Unit;
+            }
+            match self.call(body, Vec::new(), span) {
+                Ok(value) => value,
+                Err(unwind) => {
+                    abort = Some(unwind);
+                    Value::Unit
+                }
+            }
+        });
+        match abort {
+            Some(unwind) => Err(unwind),
+            None => Ok(value),
+        }
+    }
+
     /// Run the reactive graph's pending effects to a fixpoint (reactivity S2) — the tree-walker twin of
     /// the VM's `Vm::drive_flush`. Invokes each effect body through [`call`](Self::call). The graph is
     /// cloned out as an `Rc` so its `&self` `flush` can borrow it while the run callback borrows `self`
@@ -3730,6 +3764,14 @@ impl Interpreter {
                 let value = args.into_iter().next().unwrap();
                 let id = self.reactive.signal(value);
                 Ok(Value::Reactive(noeta_reactive::NodeKind::Signal, id))
+            }
+            Builtin::Computed => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                // `computed(fn)` — register a lazy derivation, storing the body closure. It is created
+                // dirty and computes on first `.get()`; no flush now (nothing eager runs).
+                let body = args.into_iter().next().unwrap();
+                let id = self.reactive.computed(body);
+                Ok(Value::Reactive(noeta_reactive::NodeKind::Computed, id))
             }
             Builtin::Effect => {
                 self.expect_arity(builtin, &args, 1, span)?;

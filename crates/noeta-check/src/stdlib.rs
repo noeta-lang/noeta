@@ -32,8 +32,13 @@ pub(super) const RECEIVER: &str = "Receiver";
 
 /// Reserved built-in type name for a reactive cell (reactivity S1). `signal(v: T)` yields a
 /// `Signal<T>` carrying its value type as its single argument; `.get()` reads `T`, `.set(v: T)`
-/// updates it, `.update(fn(T) -> T)` reads-modifies-writes it. (`computed` joins in S3.)
+/// updates it, `.update(fn(T) -> T)` reads-modifies-writes it.
 pub(super) const SIGNAL: &str = "Signal";
+
+/// Reserved built-in type name for a lazy memoized derivation (reactivity S3). `computed(fn() -> T)`
+/// yields a `Computed<T>` carrying the closure's return type as its single argument; `.get()` reads
+/// `T` (recomputing on read only when a dependency changed). Read-only — no `.set`/`.update`.
+pub(super) const COMPUTED: &str = "Computed";
 
 /// Reserved built-in type name for a reactive side effect (reactivity S2). `effect(fn)` yields an
 /// `Effect` (no type argument — it produces no value); `.dispose()` unsubscribes it.
@@ -122,6 +127,9 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Named(n, args) if n == SIGNAL => {
             signal_method(name, args.first().unwrap_or(&Type::Dyn))
         }
+        Type::Named(n, args) if n == COMPUTED => {
+            computed_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
         Type::Named(n, _) if n == EFFECT => effect_method(name),
         _ => None,
     }
@@ -133,6 +141,15 @@ fn signal_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
         "get" => elem.clone(),
         "set" | "update" => Type::Unit,
+        _ => return None,
+    })
+}
+
+/// A `Computed<T>` derivation (reactivity S3): `get()` reads the current value `T`, recomputing lazily
+/// if a dependency changed. Read-only — there is deliberately no `set`/`update`.
+fn computed_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "get" => elem.clone(),
         _ => return None,
     })
 }
@@ -359,6 +376,11 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
                 _ => return None,
             })
         }
+        // `Computed<T>` (reactivity S3): `get()` takes nothing. Read-only.
+        Type::Named(n, _) if n == COMPUTED => Some(match name {
+            "get" => vec![],
+            _ => return None,
+        }),
         Type::Named(n, _) if n == EFFECT => Some(match name {
             "dispose" => vec![],
             _ => return None,
@@ -516,6 +538,15 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         "signal" => Type::Named(
             SIGNAL.to_string(),
             vec![args.first().cloned().unwrap_or(Type::Unknown)],
+        ),
+        // `computed(fn() -> T) -> Computed<T>` (reactivity S3) — the closure's return type rides as the
+        // single type arg so `.get()` recovers `T`.
+        "computed" => Type::Named(
+            COMPUTED.to_string(),
+            vec![match args.first() {
+                Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                _ => Type::Unknown,
+            }],
         ),
         // `effect(fn() -> void) -> Effect` (reactivity S2) — runs `fn` now and reruns it when a signal
         // it read changes.

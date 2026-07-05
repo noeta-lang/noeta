@@ -1,0 +1,20 @@
+// Reactivity S3 — the glitch-freedom property, the reason `computed` is lazy-pull. A diamond: `base`
+// feeds two computeds `plus` and `times`, and an `effect` reads both. Setting `base` once must run the
+// effect exactly once, seeing a *consistent* pair (both derived from the same `base`) — never a
+// half-updated mix. Each computed echoes its name when it recomputes; the effect echoes the sum. On the
+// single `base.set(3)` the output shows each computed recomputing once and the effect running once with
+// the consistent sum — not twice (once per path) and never an intermediate glitch value.
+// expect: stdout "plus"
+// expect: stdout "times"
+// expect: stdout "sum=32"
+// expect: stdout "plus"
+// expect: stdout "times"
+// expect: stdout "sum=43"
+// expect: exit 0
+base = signal(2)
+plus = computed(fn() { echo "plus"; return base.get() + 10 })
+times = computed(fn() { echo "times"; return base.get() * 10 })
+effect(fn() {
+    echo "sum=${plus.get() + times.get()}"
+})
+base.set(3)

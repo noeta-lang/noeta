@@ -3217,21 +3217,22 @@ impl<'m> Vm<'m> {
                             pc += 1;
                             continue;
                         }
-                        // Reactive handle methods (reactivity S1/S2): `signal.get()`/`.set(v)`/
-                        // `.update(fn)` and `effect.dispose()`. Validity was checked statically. A
-                        // signal read never recomputes (only a `computed` does, arriving in S3), so the
-                        // `run` callback in `get`/`update` is unreachable.
-                        if let Some((_kind, node)) = v.reactive_parts() {
-                            match method {
-                                "get" => {
-                                    let result = self.reactive.read(node, &mut |_v: GcVal| {
-                                        unreachable!("a signal read never recomputes")
-                                    });
-                                    set_reg(regs, fbase, *dst, result.into_value());
+                        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/
+                        // `.update(fn)`, `computed.get()`, and `effect.dispose()`. Each method is guarded
+                        // by the node's `kind` (a `signal` is not disposable, a `computed` is read-only,
+                        // an `effect` is not readable); an invalid pair falls through to the generic
+                        // no-method runtime error below, exactly as any other unknown method on a
+                        // built-in type. `get` on a `computed` recomputes a dirty body via
+                        // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
+                        if let Some((kind, node)) = v.reactive_parts() {
+                            match (kind, method) {
+                                (NodeKind::Signal | NodeKind::Computed, "get") => {
+                                    let result = self.read_reactive(node, *span)?;
+                                    set_reg(regs, fbase, *dst, result);
                                     pc += 1;
                                     continue;
                                 }
-                                "set" => {
+                                (NodeKind::Signal, "set") => {
                                     let value = regs[fbase + args[0] as usize];
                                     // The graph retains its own reference to the new content and
                                     // releases the old; the arg register's reference is released by
@@ -3242,17 +3243,12 @@ impl<'m> Vm<'m> {
                                     pc += 1;
                                     continue;
                                 }
-                                "update" => {
+                                (NodeKind::Signal, "update") => {
                                     // Read-modify-write: read the current value (owned), call the
                                     // updater with it (which consumes that reference), store the
                                     // result, then flush.
                                     let f = regs[fbase + args[0] as usize];
-                                    let current = self
-                                        .reactive
-                                        .read(node, &mut |_v: GcVal| {
-                                            unreachable!("a signal read never recomputes")
-                                        })
-                                        .into_value();
+                                    let current = self.read_reactive(node, *span)?;
                                     let updated = self.call_value(f, vec![current], *span)?;
                                     self.reactive.set(node, GcVal::owned(updated));
                                     self.drive_flush(*span)?;
@@ -3260,7 +3256,7 @@ impl<'m> Vm<'m> {
                                     pc += 1;
                                     continue;
                                 }
-                                "dispose" => {
+                                (NodeKind::Effect, "dispose") => {
                                     // Unsubscribe and free the node; its stored body/content drop.
                                     self.reactive.dispose(node);
                                     set_reg(regs, fbase, *dst, Value::unit());
@@ -5081,6 +5077,40 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Read a reactive node, driving a `computed`'s recompute through [`call_value`](Self::call_value)
+    /// if it is dirty (reactivity S3). A `signal` read never enters the callback; a dirty `computed`
+    /// runs its body (and, transitively, any dirty computeds it reads), memoizing as it goes. The graph
+    /// is cloned out as an `Rc` first so its `&self` `read` can borrow it while the callback borrows
+    /// `self` for `call_value` (different objects, no aliasing). The returned [`GcVal`] owns one
+    /// reference (a signal's cloned content or a computed's fresh/memoized value); the caller transfers
+    /// it into a register via [`into_value`](GcVal::into_value). A body that aborts is captured
+    /// deterministically — the first abort stops further recomputes and propagates.
+    fn read_reactive(&mut self, node: noeta_reactive::NodeId, span: Span) -> Result<Value, Abort> {
+        let graph = Rc::clone(&self.reactive);
+        let mut aborted = false;
+        let result = graph.read(node, &mut |body: GcVal| -> GcVal {
+            if aborted {
+                return GcVal::owned(Value::unit());
+            }
+            // `body` owns the reference the graph cloned for this recompute; `call_value` only borrows
+            // the callee, so peek with `.get()` and let `body` drop (releasing it) at closure end.
+            match self.call_value(body.get(), Vec::new(), span) {
+                Ok(value) => GcVal::owned(value),
+                Err(Abort) => {
+                    aborted = true;
+                    GcVal::owned(Value::unit())
+                }
+            }
+        });
+        if aborted {
+            // `result` owns the placeholder unit reference from the aborted run; drop releases it.
+            drop(result);
+            Err(Abort)
+        } else {
+            Ok(result.into_value())
+        }
+    }
+
     /// Run the reactive graph's pending effects to a fixpoint (reactivity S2), invoking each effect
     /// body through [`call_value`](Self::call_value). Called after any `signal.set`/`.update` and on
     /// `effect(...)` creation. The graph is cloned out as an `Rc` first so its `&self` `flush` can
@@ -5820,6 +5850,13 @@ impl<'m> Vm<'m> {
                 // (retained) reference; the register's reference is released by the caller as usual.
                 let id = self.reactive.signal(GcVal::retained(args[0]));
                 Ok(Value::make_reactive(NodeKind::Signal, id))
+            }
+            Builtin::Computed => {
+                self.check_arity(builtin, args, 1, span)?;
+                // `computed(fn)` — register a lazy derivation, retaining the body closure. Created dirty;
+                // it computes on first `.get()`, so nothing runs now (no flush).
+                let id = self.reactive.computed(GcVal::retained(args[0]));
+                Ok(Value::make_reactive(NodeKind::Computed, id))
             }
             Builtin::Effect => {
                 self.check_arity(builtin, args, 1, span)?;

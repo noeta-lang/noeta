@@ -129,9 +129,26 @@ need a small native-type registration is an S1 detail.
   resubscription**, deterministic fan-out order). Leak oracle 0 both backends (effect bodies are
   refcount-exact through the call boundary; dispose/clear free them). Conformance 449, differential
   438/0-skipped, jit-differential 438, workspace green, clippy/fmt clean.
-- **S3 — `computed`.** Lazy memoization, transitive dependency (computed reading computed), glitch-free
-  diamonds through the topological flush. Differential asserts identical recompute counts/order via an
-  observable `effect` witnessing a `computed`.
+- **S3 — `computed`. DONE.** `computed(fn)` (a `Builtin`) — a lazy, memoized derivation with `.get()`
+  (read-only). This is where `.get()` runs a *real* body for the first time: the new **`read_reactive`**
+  on each backend clones the `Rc<ReactiveGraph>` out and drives `graph.read` with a `run` callback that
+  invokes a dirty computed's body through the backend's call seam (`call`/`call_value`) — the read twin
+  of S2's `drive_flush`, with the same VM refcount discipline (peek the graph-cloned `GcVal` via
+  `.get()`) and deterministic abort capture (the first recompute to abort stops the rest, transitively).
+  The graph core (S0) already had `computed` fully — laziness, memoization, transitive computed-reading-
+  computed, and glitch-free diamonds are all its property tests — so S3 is pure wiring: no scheduling
+  logic moved into the backends. A `computed` is created dirty and computes on first read (no flush at
+  creation, unlike `effect`); reads memoize and clear dirty; a `set` upstream dirties it (lazily,
+  transitively) so the next read pulls fresh exactly once. **Kind-guarded dispatch:** the reactive
+  method block on both backends now matches `(kind, method)` — `get` on signal/computed, `set`/`update`
+  on signal, `dispose` on effect — so `computed.set()` (or any invalid pair) falls through to the same
+  **E0005 "no method … on computed"** any built-in type gives, identically on both backends, instead of
+  reaching the core's signal-only `set`. Checker: reserved `Computed<T>` type + `computed_method`(get→T)
+  + `prelude_return` (`computed(fn() -> T)` carries the closure's return type as its arg so `.get()`
+  recovers `T`) + `method_params`. 5 conformance cases (lazy+memo witnessed by a "computing" echo,
+  transitive pull order, glitch-free diamond feeding an effect, an effect witnessing a computed, and the
+  read-only negative). Conformance 454, differential 443/0-skipped, jit-differential 443, leak 0 both
+  backends, workspace green, clippy/fmt clean.
 - **S4 — disposal/ownership + GC interaction.** Scope ownership, cycle-collector interaction (the
   signal↔subscriber graph is cycle-shaped by design), miri clean. Confirm the leak oracle stays 0 across
   create/dispose churn.
