@@ -247,6 +247,16 @@ pub enum Rvalue {
         name_span: Span,
         span: Span,
     },
+    /// An unbound method handle: `Type.method` used as a value (the checker resolved the receiver to
+    /// a type and the member to a method/associated fn). Produces a callable value that dispatches by
+    /// name — on its first argument (instance) or as an associated call `ty.method(args)`
+    /// (`associated`). The receiver type name is a static string, so no receiver atom is lowered.
+    MethodHandle {
+        ty: String,
+        method: String,
+        associated: bool,
+        span: Span,
+    },
     /// In-place field assignment: `receiver.name = value` (Phase 5.2). Evaluates to the updated
     /// object. Both backends set the field **in place when the object is uniquely owned** (the
     /// reuse pass's `reuse` token, gated on the runtime refcount `== 1`) and **copy-first when

@@ -1,0 +1,23 @@
+// An unbound method handle `Type.method` (prelude-redesign MH) is a first-class callable that takes
+// the receiver as its first argument, so a method can be passed as a value — bound to a name, or
+// handed to `map`. Dispatched through the ordinary method call on both backends, so they agree.
+// expect: stdout "[3, 2]"
+// expect: stdout "1"
+// expect: stdout "6"
+// expect: exit 0
+class Stack {
+    items: list
+    fn new(items: list): Stack { return Stack { items: items } }
+    fn size(): int { return items.len() }
+    fn scaled(factor: int): int { return items.len() * factor }
+}
+
+stacks = [Stack.new([1, 2, 3]), Stack.new([4, 5])]
+// A method handle handed to `map` — each element becomes the receiver.
+echo stacks.map(Stack.size)
+// Bound to a name, then called with an explicit receiver.
+f = Stack.size
+echo f(Stack.new([9]))
+// A handle to a method with parameters: the receiver is first, then the method's own arguments.
+g = Stack.scaled
+echo g(Stack.new([1, 2]), 3)

@@ -128,6 +128,9 @@ pub struct Checked {
     /// lowering wraps the op's result in `Rvalue::MaskWidth` to wrap the erased i64 into the width. A
     /// pure function of the program, like the other site maps — the masking is invisible to `RunResult`.
     pub width_sites: HashMap<Span, (bool, u8)>,
+    /// Unbound method-handle sites (`Type.method` in value position) → the resolved
+    /// `(ty, method, associated)`. Lowering emits an [`Rvalue::MethodHandle`] at these spans.
+    pub handle_sites: HashMap<Span, (String, String, bool)>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -156,6 +159,7 @@ pub fn check_all(program: &Program) -> Checked {
         index_field_sites: checker.sites.index_field_sites,
         for_stream_sites: checker.sites.for_stream_sites,
         width_sites: checker.sites.width_sites,
+        handle_sites: checker.sites.handle_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -458,6 +462,10 @@ struct SiteMaps {
     /// `IntN` → the result's `(signed, bits)`. Lowering reads this (via [`Checked::width_sites`]) to
     /// wrap the op's result in `Rvalue::MaskWidth`. Empty for programs with no fixed-width arithmetic.
     width_sites: HashMap<Span, (bool, u8)>,
+    /// Unbound method-handle sites: a `Type.method` member expression in value position → the
+    /// resolved `(ty, method, associated)`. Lowering reads this (via [`Checked::handle_sites`]) to
+    /// emit an [`Rvalue::MethodHandle`] instead of a field load. A pure function of the program.
+    handle_sites: HashMap<Span, (String, String, bool)>,
 }
 
 #[derive(Default)]
@@ -4463,6 +4471,27 @@ impl Checker {
             && self.is_enum_variant(tn, name)
         {
             return self.enum_construction_type(tn, name, &[], member_span);
+        }
+        // `Type.method` in value position (not the callee of a call) is an unbound **method handle**:
+        // a callable taking the receiver as its first argument (prelude-redesign MH). Guarded to a
+        // bare type name not shadowed by a local, naming a method of a user type. Typed
+        // `Fn(ReceiverType, ...method_params) -> ret`; the resolution is recorded so lowering emits an
+        // `Rvalue::MethodHandle`. (Built-in-type receivers — `list.len` — land in a later slice.)
+        if let Expr::Ident { name: tn, .. } = receiver
+            && lookup(env, tn).is_none()
+            && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string()))
+        {
+            let mut params = Vec::with_capacity(sig.params.len() + 1);
+            params.push(Type::Named(tn.clone(), Vec::new()));
+            params.extend(sig.params.iter().cloned());
+            let ret = sig.ret.clone();
+            self.sites
+                .handle_sites
+                .insert(member_span, (tn.clone(), name.to_string(), false));
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
         }
         let recv = self.synth(receiver, env);
         if let Type::Named(n, recv_args) = &recv

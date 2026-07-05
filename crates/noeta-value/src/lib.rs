@@ -1318,6 +1318,31 @@ impl Value {
         }
     }
 
+    /// An unbound method handle value (refcount 1) — `Type.method` as a value.
+    pub fn method_handle(ty: &str, method: &str, associated: bool) -> Value {
+        heap::alloc(Payload::MethodHandle {
+            ty: ty.to_string(),
+            method: method.to_string(),
+            associated,
+        })
+    }
+
+    /// The `(ty, method, associated)` triple, if this is an unbound method handle value.
+    pub fn method_handle_parts(self) -> Option<(String, String, bool)> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::MethodHandle {
+                    ty,
+                    method,
+                    associated,
+                } => Some((ty.clone(), method.clone(), *associated)),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// A heap map (refcount 1), keyed by owned strings, presenting in sorted-key order. As with
     /// [`Value::list`], the map takes ownership of one reference to each value. The caller passes a
     /// `BTreeMap` (a convenient sorted builder); it is stored internally as a `HashMap` for O(1)
@@ -2033,9 +2058,10 @@ impl Value {
                 Payload::Bytes(b) => format!("<{} bytes>", b.len()),
                 Payload::Int(i) => i.to_string(),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
-                Payload::Closure { .. } | Payload::NativeFn(_) | Payload::ModuleFn { .. } => {
-                    "<fn>".to_string()
-                }
+                Payload::Closure { .. }
+                | Payload::NativeFn(_)
+                | Payload::ModuleFn { .. }
+                | Payload::MethodHandle { .. } => "<fn>".to_string(),
                 // A cell is internal capture storage and never reaches a display site (the
                 // compiler derefs it first); render transparently as its contents if it ever does.
                 Payload::Cell(inner) => inner.display(),
@@ -2188,9 +2214,10 @@ impl Value {
                         .map(|(name, v)| (name.clone(), v.to_native_deep()))
                         .collect(),
                 ),
-                Payload::Closure { .. } | Payload::NativeFn(_) | Payload::ModuleFn { .. } => {
-                    NativeValue::Str("<fn>".to_string())
-                }
+                Payload::Closure { .. }
+                | Payload::NativeFn(_)
+                | Payload::ModuleFn { .. }
+                | Payload::MethodHandle { .. } => NativeValue::Str("<fn>".to_string()),
                 Payload::Cell(inner) => inner.to_native_deep(),
                 Payload::Enum { shape, .. } => {
                     NativeValue::Str(shape.variant.as_deref().unwrap_or(&shape.name).to_string())
@@ -2250,6 +2277,7 @@ impl Value {
             if self.as_closure().is_some()
                 || self.as_native_fn().is_some()
                 || self.module_fn_parts().is_some()
+                || self.method_handle_parts().is_some()
             {
                 "function"
             } else if self.is_list() {

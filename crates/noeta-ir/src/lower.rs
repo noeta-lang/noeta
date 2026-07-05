@@ -91,6 +91,9 @@ pub struct LoweringSites<'a> {
     /// Collection-construction sites → the resolved element [`noeta_ast::reflect::TypeRepr`] baked onto
     /// [`Rvalue::List`] so `type_of` recovers it after a `dyn` launder (R1 reflection).
     pub construction_sites: &'a HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// Unbound method-handle sites (`Type.method` in value position) → the resolved
+    /// `(ty, method, associated)`, emitted as an [`Rvalue::MethodHandle`] instead of a field load.
+    pub handle_sites: &'a HashMap<Span, (String, String, bool)>,
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
@@ -105,6 +108,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     let stream = HashSet::new();
     let width = HashMap::new();
     let construction = HashMap::new();
+    let handles = HashMap::new();
     lower_with_sites(
         program,
         LoweringSites {
@@ -114,6 +118,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
             for_stream_sites: &stream,
             width_sites: &width,
             construction_sites: &construction,
+            handle_sites: &handles,
         },
     )
 }
@@ -999,6 +1004,21 @@ impl Lowerer<'_> {
                 // `List`) lowers to one [`Rvalue::IndexField`] over the list and index atoms, so a
                 // packed element's field is read without materializing the element (P-PACK 2.5+). Any
                 // other member access lowers to the ordinary field load.
+                // `Type.method` in value position (the checker resolved a type receiver + a method) →
+                // an unbound method handle, not a field load. The receiver is a static type name, so
+                // no receiver atom is lowered.
+                if let Some((ty, method, associated)) = self.sites.handle_sites.get(span) {
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::MethodHandle {
+                            ty: ty.clone(),
+                            method: method.clone(),
+                            associated: *associated,
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
                 if self.sites.index_field_sites.contains(span)
                     && let Expr::Index {
                         receiver: list,

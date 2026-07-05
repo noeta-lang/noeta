@@ -993,7 +993,10 @@ fn const_immediate_bits(c: &Const) -> Option<u64> {
         }
         Const::Float(f) => Some(Value::float(*f).bits()),
         Const::F32(f) => Some(Value::f32(*f).bits()),
-        Const::Str(_) | Const::NativeModule(_) | Const::ModuleFn { .. } => None,
+        Const::Str(_)
+        | Const::NativeModule(_)
+        | Const::ModuleFn { .. }
+        | Const::MethodHandle { .. } => None,
     }
 }
 

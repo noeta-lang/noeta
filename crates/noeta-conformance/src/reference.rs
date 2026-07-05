@@ -40,6 +40,7 @@ pub fn reference_run(
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
     construction_sites: HashMap<Span, TypeRepr>,
+    handle_sites: HashMap<Span, (String, String, bool)>,
     relevance: &noeta_check::DestructorRelevance,
 ) -> RunResult {
     // Lower with the checker's site maps: packed-list literals stream into a flat buffer (P-PACK 2.5)
@@ -54,6 +55,7 @@ pub fn reference_run(
             for_stream_sites: &for_stream_sites,
             width_sites: &width_sites,
             construction_sites: &construction_sites,
+            handle_sites: &handle_sites,
         },
     )
     .expect(

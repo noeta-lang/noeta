@@ -434,6 +434,10 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.module_fn_parts(), right.module_fn_parts()) {
         return a == b;
     }
+    // Method handles compare by their `(ty, method, associated)` triple.
+    if let (Some(a), Some(b)) = (left.method_handle_parts(), right.method_handle_parts()) {
+        return a == b;
+    }
     false
 }
 

@@ -101,6 +101,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         let mut for_stream_sites = std::collections::HashSet::new();
         let mut width_sites = std::collections::HashMap::new();
         let mut construction_sites = std::collections::HashMap::new();
+        let mut handle_sites = std::collections::HashMap::new();
         let mut destructor_relevance = noeta_check::DestructorRelevance::default();
         if stage == Stage::Eval && diagnostics.is_empty() {
             let checked = noeta_check::check_all(&parsed.program);
@@ -112,6 +113,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
             for_stream_sites = checked.for_stream_sites;
             width_sites = checked.width_sites;
             construction_sites = checked.construction_sites;
+            handle_sites = checked.handle_sites;
             destructor_relevance = checked.destructor_relevance;
         }
 
@@ -128,6 +130,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
                 for_stream_sites,
                 width_sites,
                 construction_sites,
+                handle_sites,
                 &destructor_relevance,
             );
             stdout = result.stdout;
@@ -303,6 +306,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
         checked.for_stream_sites,
         checked.width_sites,
         checked.construction_sites,
+        checked.handle_sites,
         &checked.destructor_relevance,
     );
     Outcome {

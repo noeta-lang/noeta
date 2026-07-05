@@ -317,6 +317,15 @@ pub(crate) enum Payload {
     /// the same `call_native_module` path as a `<module>.<func>` member call, so the two backends
     /// agree by construction.
     ModuleFn { module: String, func: String },
+    /// An unbound method handle (`Type.method` as a value). When called it dispatches by name — as
+    /// an instance method on its first argument (`associated == false`), or as an associated call
+    /// `ty.method(args)` (`associated == true`). A leaf (owned `String`s + a bool). Both backends
+    /// dispatch through the shared method machinery, so they agree by construction.
+    MethodHandle {
+        ty: String,
+        method: String,
+        associated: bool,
+    },
     /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
     /// pending write buffer. The whole state machine lives in `noeta_stdlib::FileHandle` so it is
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
@@ -687,6 +696,7 @@ pub(crate) fn free(value: Value) {
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::ModuleFn { .. }
+        | Payload::MethodHandle { .. }
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
@@ -869,6 +879,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
         | Payload::ModuleFn { .. }
+        | Payload::MethodHandle { .. }
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)

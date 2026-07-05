@@ -92,6 +92,7 @@ impl Backend for TreeWalkBackend {
                 for_stream_sites: &checked.for_stream_sites,
                 width_sites: &checked.width_sites,
                 construction_sites: &checked.construction_sites,
+                handle_sites: &checked.handle_sites,
             },
         )
         .expect("Core-IR lowering is total over the parsed language");
@@ -3306,6 +3307,32 @@ impl Interpreter {
             Value::ModuleFn(module, func) => {
                 self.call_native_module(&module, &func, &args, span)
             }
+            // An unbound method handle (`Type.method` as a value). An associated handle dispatches
+            // on the named type (`ty.method(args)`); an instance handle takes its first argument as
+            // the receiver (`recv.method(rest)`). Both route through the ordinary (total) method call.
+            Value::MethodHandle(ty, method, associated) => {
+                if associated {
+                    match self.scope.lookup(&ty) {
+                        Some(type_value) => self.call_method(type_value, &method, args, span),
+                        None => Err(self.runtime_error(
+                            DiagnosticCode::UnknownName,
+                            span,
+                            format!("cannot find type `{ty}` for method handle `{ty}.{method}`"),
+                        )),
+                    }
+                } else {
+                    let mut args = args;
+                    if args.is_empty() {
+                        return Err(self.runtime_error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("method handle `{ty}.{method}` needs a receiver argument"),
+                        ));
+                    }
+                    let recv = args.remove(0);
+                    self.call_method(recv, &method, args, span)
+                }
+            }
             Value::Function(closure) => self.call_closure(&closure, args, span),
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
@@ -4548,7 +4575,7 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Map(dyn_(), dyn_())),
-        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) => {
+        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) | Value::MethodHandle(..) => {
             TypeRepr::Fn(Vec::new(), dyn_())
         }
         // A generic enum instance carrying a reflected type tag (R2b.2) reports its precise type;
@@ -4744,9 +4771,10 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),
         // A function type is erased to a head-constructor "is callable" test (params/return dropped),
         // matching the VM's `NarrowTarget::Fn` (type_name `"function"`).
-        TypeRef::Fn { .. } => {
-            matches!(value, Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..))
-        }
+        TypeRef::Fn { .. } => matches!(
+            value,
+            Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) | Value::MethodHandle(..)
+        ),
         TypeRef::Named { name, args, .. } => {
             let head_ok = match name.as_str() {
                 "int" => matches!(value, Value::Int(_)),
@@ -5033,7 +5061,7 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
             )
         }
         Value::Enum(e) => NativeValue::Str(e.variant.clone()),
-        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) => {
+        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) | Value::MethodHandle(..) => {
             NativeValue::Str("<fn>".to_string())
         }
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),

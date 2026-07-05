@@ -35,6 +35,7 @@ fn lowered_ir(src: &str) -> String {
             for_stream_sites: &checked.for_stream_sites,
             width_sites: &checked.width_sites,
             construction_sites: &checked.construction_sites,
+            handle_sites: &checked.handle_sites,
         },
     )
     .expect("lowering is total over the parsed language");

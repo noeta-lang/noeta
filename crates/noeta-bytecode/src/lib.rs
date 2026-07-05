@@ -149,6 +149,13 @@ pub enum Const {
     /// pair, loaded then stored into the bare-name global. Called (or passed as a value) through the
     /// same `call_native_module` path as a `<module>.<func>` member call.
     ModuleFn { module: String, func: String },
+    /// An unbound method handle (`Type.method` as a value): the `(ty, method, associated)` triple.
+    /// Called by dispatching on its first argument (instance) or as an associated call (associated).
+    MethodHandle {
+        ty: String,
+        method: String,
+        associated: bool,
+    },
 }
 
 /// One segment of a fused string interpolation ([`Op::BuildString`], P-VMT-STR). A `Literal` is a
@@ -1291,6 +1298,11 @@ fn const_repr(c: &Const) -> String {
         Const::Str(s) => format!("{s:?}"),
         Const::NativeModule(name) => format!("module {name}"),
         Const::ModuleFn { module, func } => format!("fn {module}.{func}"),
+        Const::MethodHandle {
+            ty,
+            method,
+            associated,
+        } => format!("handle {ty}.{method}{}", if *associated { " (assoc)" } else { "" }),
     }
 }
 

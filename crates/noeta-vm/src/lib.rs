@@ -5227,20 +5227,118 @@ impl<'m> Vm<'m> {
                         }
                         result
                     }
-                    None => {
-                        let type_name = callee.type_name();
-                        for a in args {
-                            release(a);
+                    // An unbound method handle (`Type.method`) applied to its arguments — the first is
+                    // the receiver (prelude-redesign MH). Runs the resolved method on a fresh frame
+                    // stack, consuming the owned arguments into the callee window.
+                    None => match callee.method_handle_parts() {
+                        Some((ty, method, associated)) => {
+                            self.run_method_handle(&ty, &method, associated, args, span)
                         }
-                        Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            span,
-                            format!("{type_name} is not callable"),
-                        ))
-                    }
+                        None => {
+                            let type_name = callee.type_name();
+                            for a in args {
+                                release(a);
+                            }
+                            Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!("{type_name} is not callable"),
+                            ))
+                        }
+                    },
                 },
             },
         }
+    }
+
+    /// Run an unbound method handle (`Type.method`) applied to `args` on a fresh frame stack,
+    /// consuming the owned arguments into the callee window (prelude-redesign MH). For an **instance**
+    /// handle the first argument is the receiver (register 0 = `self`), the rest are the method's
+    /// parameters — identical to a closure call whose prototype is resolved from the method table
+    /// rather than a first-class closure. Associated handles are not yet produced (MH.1 is
+    /// instance-only); they return a clean error rather than mis-dispatching.
+    fn run_method_handle(
+        &mut self,
+        ty: &str,
+        method: &str,
+        associated: bool,
+        args: Vec<Value>,
+        span: Span,
+    ) -> Result<Value, Abort> {
+        if associated {
+            for a in args {
+                release(a);
+            }
+            return Err(self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                format!("associated method handle `{ty}.{method}` is not callable"),
+            ));
+        }
+        // The receiver's runtime type names the method table entry, so a subtype dispatches to its
+        // own method; fall back to the handle's declared type if the receiver has no shape.
+        let type_name = match args.first() {
+            Some(recv) => recv
+                .shape()
+                .map(|s| s.name.clone())
+                .unwrap_or_else(|| ty.to_string()),
+            None => {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("method handle `{ty}.{method}` needs a receiver argument"),
+                ));
+            }
+        };
+        let Some(&proto) = self.methods.get(&(type_name.clone(), method.to_string())) else {
+            for a in args {
+                release(a);
+            }
+            return Err(self.error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("type `{type_name}` has no method `{method}`"),
+            ));
+        };
+        let chunk = &self.module.protos[proto as usize];
+        let num_params = chunk.num_params as usize; // includes register 0 = self (the receiver)
+        let num_registers = chunk.num_registers as usize;
+        let required = num_params - chunk.defaults.len();
+        if args.len() < required || args.len() > num_params {
+            let supplied = args.len();
+            for a in args {
+                release(a);
+            }
+            return Err(self.error(
+                DiagnosticCode::TypeMismatch,
+                span,
+                arity_message("method", required, num_params, supplied),
+            ));
+        }
+        let filled = args.len();
+        let defaults = chunk.defaults.clone();
+        let mut regs = vec![Value::unit(); num_registers];
+        for (i, v) in args.into_iter().enumerate() {
+            regs[i] = v;
+        }
+        // A method never captures upvalues; fill any omitted trailing defaults from module scope.
+        for (reg, dproto) in &defaults {
+            if *reg as usize >= filled {
+                let value = self.run_thunk(*dproto, &[])?;
+                regs[*reg as usize] = value;
+            }
+        }
+        self.run(
+            vec![Frame {
+                proto,
+                base: 0,
+                pc: 0,
+                ret_dst: 0,
+                ret_transform: RetTransform::None,
+                upvalues: Vec::new(),
+            }],
+            regs,
+        )
     }
 
     /// Read a reactive node, driving a `computed`'s recompute through [`call_value`](Self::call_value)
@@ -5446,11 +5544,30 @@ impl<'m> Vm<'m> {
                         set_reg(regs, caller_base, dst, result);
                         Ok(false)
                     }
-                    None => Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("{} is not callable", callee_val.type_name()),
-                    )),
+                    // An unbound method handle (`Type.method`) stored and called directly. Run it
+                    // synchronously (its method body re-enters the VM) and land the result — the
+                    // arguments are retained since `run_method_handle` consumes owned references.
+                    None => match callee_val.method_handle_parts() {
+                        Some((ty, method, associated)) => {
+                            let arg_vals: Vec<Value> = arg_regs
+                                .iter()
+                                .map(|&r| {
+                                    let v = regs[caller_base + r as usize];
+                                    retain(v);
+                                    v
+                                })
+                                .collect();
+                            let result =
+                                self.run_method_handle(&ty, &method, associated, arg_vals, span)?;
+                            set_reg(regs, caller_base, dst, result);
+                            Ok(false)
+                        }
+                        None => Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("{} is not callable", callee_val.type_name()),
+                        )),
+                    },
                 },
             },
         }

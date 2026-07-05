@@ -123,6 +123,7 @@ pub fn compile(program: &Program) -> Result<Module, Unsupported> {
         checked.for_stream_sites,
         checked.width_sites,
         checked.construction_sites,
+        checked.handle_sites,
         &checked.destructor_relevance,
         false,
     )
@@ -155,6 +156,7 @@ pub fn compile_with_sites(
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
     construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    handle_sites: HashMap<Span, (String, String, bool)>,
     relevance: &noeta_check::DestructorRelevance,
     real_isolates: bool,
 ) -> Result<Module, Unsupported> {
@@ -168,6 +170,7 @@ pub fn compile_with_sites(
         for_stream_sites,
         width_sites,
         construction_sites,
+        handle_sites,
         Some(passes_relevance(relevance)),
         relevance.reachable_types.iter().cloned().collect(),
         real_isolates,
@@ -187,6 +190,7 @@ fn compile_inner(
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
     construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    handle_sites: HashMap<Span, (String, String, bool)>,
     relevance: Option<noeta_ir_passes::Relevance>,
     // Per-type destruct-reachability (Phase 4.3), exported straight to the `Module` for the VM's
     // container-before-contained field-walk gate; not consumed by the compiler itself.
@@ -213,6 +217,7 @@ fn compile_inner(
             for_stream_sites: &for_stream_sites,
             width_sites: &width_sites,
             construction_sites: &construction_sites,
+            handle_sites: &handle_sites,
         },
         real_isolates,
     )
@@ -2329,6 +2334,22 @@ impl<'m> FnCompiler<'m> {
                 span,
                 ..
             } => self.lower_field(receiver, name, dst, *span),
+            // An unbound method handle (`Type.method` as a value) is a static constant: load the
+            // `(ty, method, associated)` triple. The VM materializes a `Payload::MethodHandle`.
+            Rvalue::MethodHandle {
+                ty,
+                method,
+                associated,
+                ..
+            } => {
+                let k = self.add_const(Const::MethodHandle {
+                    ty: ty.clone(),
+                    method: method.clone(),
+                    associated: *associated,
+                });
+                self.code.push(Op::LoadConst { dst, k });
+                Ok(())
+            }
             Rvalue::SetField {
                 receiver,
                 name,

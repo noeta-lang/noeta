@@ -1118,6 +1118,14 @@ impl Interpreter {
                 }
                 result
             }
+            // An unbound method handle (`Type.method` as a value) — a static callable value; the
+            // receiver type name is a string, so nothing is evaluated.
+            noeta_ir::Rvalue::MethodHandle {
+                ty,
+                method,
+                associated,
+                ..
+            } => Ok(Value::MethodHandle(ty.clone(), method.clone(), *associated)),
             noeta_ir::Rvalue::IndexField {
                 receiver,
                 index,

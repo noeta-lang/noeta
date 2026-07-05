@@ -520,6 +520,8 @@ fn for_each_rvalue_atom(rvalue: &Rvalue, f: &mut impl FnMut(&Atom)) {
             args.iter().for_each(&mut *f);
         }
         Rvalue::Field { receiver, .. } => f(receiver),
+        // A method handle carries only static strings (no operand atoms) — nothing to visit.
+        Rvalue::MethodHandle { .. } => {}
         Rvalue::SetField {
             receiver, value, ..
         } => {
