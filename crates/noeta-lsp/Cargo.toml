@@ -12,6 +12,10 @@ noeta-ast = { workspace = true }
 noeta-lexer = { workspace = true }
 noeta-diagnostics = { workspace = true }
 noeta-db = { workspace = true }
+# Member completion on a bare `.` re-lexes/parses/checks a lightly-munged buffer off the salsa graph
+# (the dangling `.` otherwise drops the statement, so the receiver never gets a type).
+noeta-parser = { workspace = true }
+noeta-check = { workspace = true }
 # For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.
 salsa = { workspace = true }
 # tokio: the workspace pin gives us rt/io-util/time; the server also needs the stdio driver
@@ -19,10 +23,6 @@ salsa = { workspace = true }
 # (`macros`). Feature-unified with the rest of the workspace's tokio usage.
 tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
 tower-lsp-server = { workspace = true }
-
-[dev-dependencies]
-# The resolver's unit tests build a `Program` straight from source.
-noeta-parser = { workspace = true }
 
 [lints]
 workspace = true

@@ -305,11 +305,13 @@ impl DocumentStore {
     }
 
     /// The completion candidates at `position` in `uri`. When the cursor is on a member access
-    /// `receiver.member` (the parser produced the access), the receiver's type is resolved from the
-    /// workspace type index and the completions are that type's fields, variants, and methods
-    /// (**member completion**, C2) — resolved against the merged program, so an imported type's
-    /// members resolve too. Otherwise the completions are the language keywords, the top-level
-    /// declarations, and the value bindings in scope at the cursor (**identifier completion**, C1).
+    /// `receiver.member`, the receiver's type is resolved and the completions are that type's fields,
+    /// variants, and methods (**member completion**, C2) — nothing else, since an identifier after a
+    /// `.` would be noise. A *partial* member (`c.ge`) is read straight from the workspace type index;
+    /// a *bare* dot (`c.`, the `.`-trigger case) does not parse, so a lightly-munged buffer is
+    /// re-checked off the salsa graph to recover the receiver type (C2.1). Otherwise the completions
+    /// are the language keywords, the top-level declarations, and the value bindings in scope at the
+    /// cursor (**identifier completion**, C1).
     ///
     /// A best-effort read of the mid-edit document: it relies on the recovering parser and the
     /// client's prefix filtering. `None` if the document is not open.
@@ -322,7 +324,8 @@ impl DocumentStore {
         let cache = self.workspaces.get(uri)?;
         let db = &self.db;
         let entry = cache.entry();
-        let index = LineIndex::new(entry.text(db));
+        let entry_text = entry.text(db);
+        let index = LineIndex::new(entry_text);
         let offset = index.offset(position, encoding);
         let cursor = SourceId::FIRST;
 
@@ -335,9 +338,8 @@ impl DocumentStore {
             Err(_) => &entry_ast.0.program,
         };
 
-        // Member completion: if the parser produced a `receiver.member` access under the cursor and
-        // the receiver's type is a known nominal, offer that type's members — nothing else (an
-        // identifier suggestion after a `.` would be noise).
+        // Member completion, partial form: the parser produced a `receiver.member` access under the
+        // cursor. Resolve the receiver's type from the workspace type index and list its members.
         let def_use = resolve::DefUse::build(program);
         if let Some((receiver_span, _member)) = def_use.member_at(offset, cursor) {
             let members = noeta_db::linked_checked_ide(db, cache.workspace)
@@ -347,6 +349,14 @@ impl DocumentStore {
                 .map(|type_name| completion::members_of(program, type_name))
                 .unwrap_or_default();
             return Some(members);
+        }
+
+        // Member completion, bare-dot form (`c.` with no member name yet — the `.`-trigger case). The
+        // dangling dot makes the statement fail to parse, so the receiver never gets a type from the
+        // cached check. Re-check a copy of the buffer with a synthetic member name inserted, off the
+        // salsa graph, to recover it. Single-file: the receiver's type must be declared in this file.
+        if is_bare_dot(entry_text, offset) {
+            return Some(bare_dot_members(entry_text, offset, program).unwrap_or_default());
         }
 
         Some(completion::complete(program, offset, cursor))
@@ -506,6 +516,40 @@ fn nominal_name(repr: &TypeRepr) -> Option<&str> {
     }
 }
 
+/// Whether byte `offset` sits immediately after a lone `.` — the bare member-access position a `.`
+/// trigger fires in (`c.|`). Excludes a preceding `..` (range/spread) so `a..|b` is not mistaken for
+/// a member access.
+fn is_bare_dot(text: &str, offset: u32) -> bool {
+    let o = offset as usize;
+    let bytes = text.as_bytes();
+    o >= 1 && o <= bytes.len() && bytes[o - 1] == b'.' && (o < 2 || bytes[o - 2] != b'.')
+}
+
+/// Member candidates for a bare dot (`receiver.|`): the statement does not parse with a dangling dot,
+/// so a synthetic member name is spliced in at `offset`, and the copy is re-lexed/parsed/checked off
+/// the salsa graph to recover the receiver's type. The members themselves are listed from `program`
+/// (the live merged program). Single-file: the receiver type must be declared in the edited file, so
+/// its type resolves in the standalone check. `None` if there is no member access or the receiver's
+/// type is not a known nominal.
+fn bare_dot_members(
+    text: &str,
+    offset: u32,
+    program: &noeta_ast::Program,
+) -> Option<Vec<completion::Candidate>> {
+    let o = offset as usize;
+    // Splice a synthetic identifier after the dot so `c.` becomes `c.a` — now a real member access
+    // whose receiver (unshifted, before the insertion) gets a type.
+    let munged = format!("{}a{}", &text[..o], &text[o..]);
+    let source = noeta_span::Source::new(SourceId::FIRST, "<completion>", &munged);
+    let lexed = noeta_lexer::lex(&source);
+    let parsed = noeta_parser::parse(&source, &lexed.tokens);
+    let checked = noeta_check::check_all_with_types(&parsed.program);
+    let def_use = resolve::DefUse::build(&parsed.program);
+    let (receiver_span, _member) = def_use.member_at(offset, SourceId::FIRST)?;
+    let type_name = nominal_name(checked.expr_types.get(&receiver_span)?)?;
+    Some(completion::members_of(program, type_name))
+}
+
 /// Pick the position encoding: prefer UTF-8 when the client advertises support for it (LSP 3.17),
 /// so the server can use the compiler's native byte offsets directly; otherwise fall back to the
 /// protocol default, UTF-16.
@@ -602,9 +646,12 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
-                // Identifier completion (C1): invoked explicitly or as the user types a name. No
-                // trigger characters yet — member completion after `.` is a later sub-slice.
-                completion_provider: Some(CompletionOptions::default()),
+                // Completion: invoked explicitly, as the user types a name, or on `.` — the trigger
+                // that fires member completion at a bare receiver dot (`c.`).
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".to_string()]),
+                    ..Default::default()
+                }),
                 ..Default::default()
             },
             ..Default::default()
@@ -1160,6 +1207,73 @@ mod tests {
                 .iter()
                 .any(|i| i.kind == Some(CompletionItemKind::KEYWORD)),
             "keywords must not appear in member completion; got {items:?}"
+        );
+    }
+
+    #[test]
+    fn completions_after_a_bare_dot_offer_the_receiver_type_members() {
+        let mut store = DocumentStore::default();
+        // Trailing bare dot `c.` — does not parse into a statement; the munged re-check recovers
+        // Counter as the receiver type.
+        store.open(
+            "file:///b.noe",
+            "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.".to_string(),
+        );
+        let text = &store.buffers["file:///b.noe"];
+        let last = text.lines().count() as u32 - 1;
+        let col = text.lines().next_back().unwrap().chars().count() as u32; // just after the dot
+        let items = store
+            .completions(
+                "file:///b.noe",
+                Position {
+                    line: last,
+                    character: col,
+                },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions")
+            .iter()
+            .map(to_completion_item)
+            .collect::<Vec<_>>();
+        assert!(
+            items
+                .iter()
+                .any(|i| i.label == "get" && i.kind == Some(CompletionItemKind::METHOD)),
+            "bare-dot member completion offers `get`; got {items:?}"
+        );
+        assert!(items.iter().any(|i| i.label == "n"));
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.kind == Some(CompletionItemKind::KEYWORD)),
+            "no keywords after a bare dot; got {items:?}"
+        );
+    }
+
+    #[test]
+    fn range_operator_is_not_mistaken_for_a_bare_dot() {
+        // `0..` ends in a dot, but the preceding `.` marks a range — identifier completion, not
+        // member completion (so keywords are present).
+        let mut store = DocumentStore::default();
+        store.open("file:///r.noe", "xs = [1, 2]\nfor i in 0..".to_string());
+        let text = &store.buffers["file:///r.noe"];
+        let last = text.lines().count() as u32 - 1;
+        let col = text.lines().next_back().unwrap().chars().count() as u32;
+        let items = store
+            .completions(
+                "file:///r.noe",
+                Position {
+                    line: last,
+                    character: col,
+                },
+                Encoding::Utf8,
+            )
+            .expect("offers completions");
+        assert!(
+            items
+                .iter()
+                .any(|c| matches!(c.kind, completion::CandidateKind::Keyword)),
+            "a range `..` must fall through to identifier completion"
         );
     }
 
