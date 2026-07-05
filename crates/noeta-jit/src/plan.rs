@@ -519,12 +519,11 @@ mod tests {
     }
 
     /// `ssa_ok` is the complement of the bare-store map: a call-free non-OSR prototype promotes
-    /// everywhere (params included — the pc-0 entry guard proved them immediate); a `heap_aware`
-    /// prototype's parameter is not promotable while it may hold a heap value, but a natively
-    /// stored arithmetic result is.
+    /// everywhere; a `heap_aware` prototype promotes wherever the value is claimed immediate —
+    /// parameters included (T1b: the claim is entry-verified) — but not a call's may-heap result.
     #[test]
     fn ssa_ok_tracks_provable_immediacy() {
-        // 0: r1 = r0 < r0   1: r2 = r0 + r0   2: halt
+        // 0: r1 = r0 < r0   1: r2 = r0 + r0   2: r1 = call r2()   3: halt
         let code = vec![
             Op::Binary {
                 op: BinaryOp::Lt,
@@ -540,6 +539,12 @@ mod tests {
                 b: 0,
                 span: sp(),
             },
+            Op::Call {
+                dst: 1,
+                callee: 2,
+                args: Box::new([]),
+                span: sp(),
+            },
             Op::Halt,
         ];
         let free = RegPlan::compute(&chunk(code.clone(), vec![], 1, 3), false);
@@ -549,12 +554,16 @@ mod tests {
         );
         let aware = RegPlan::compute(&chunk(code, vec![], 1, 3), true);
         assert!(
-            !aware.ssa_ok_at(0, 0),
-            "a heap-aware prototype's parameter may be heap — not promotable"
+            aware.ssa_ok_at(0, 0),
+            "a parameter's immediate claim is entry-verified — promotable"
         );
         assert!(
             aware.ssa_ok_at(2, 2),
             "a natively stored arithmetic result is an immediate — promotable"
+        );
+        assert!(
+            !aware.ssa_ok_at(3, 1),
+            "a call's may-heap result is not promotable"
         );
     }
 }

@@ -1003,16 +1003,15 @@ fn analysis_succ(op: &Op, pc: usize, n: usize, out: &mut Vec<usize>) {
 /// - A `heap_aware` prototype with any unmodeled op → all-true (release everywhere, the prior behavior).
 ///
 /// **Soundness.** The analysis is a monotone forward may-hold-heap dataflow over the tier-0 CFG
-/// (join = union), seeded with the parameters possibly-heap at entry (`pc 0`). A `false` cell is a
-/// *guarantee* the register holds an immediate there, so skipping the release is a no-op — the
-/// interpreter's `set_reg` would release an immediate, which is itself a no-op. Every modeled op's
-/// [`RegEffect`] only clears a bit (`Drop`/`StoreGlobal` leave `unit`), copies one (`Move`), or sets
-/// one to an over-approximation of its result's heap-ness; an unmodeled op fails the whole map closed.
-/// A `heap_aware` prototype is either call-free (its native code runs to a single bail per activation,
-/// so a loop-header/`pc 0` entry is the only place the interpreter can have left a live register — and
-/// the fixpoint's in-set over-approximates exactly that) or call-bearing (it contains `Op::Call`, which
-/// is unmodeled → all-true), so the analysis is never trusted across a native re-entry it does not
-/// account for.
+/// (join = union), seeded all-immediate at entry (`pc 0`): locals are `unit`-initialized and the
+/// parameters' immediate claim is **runtime-verified** — the pc-0 entry guard bails on a heap
+/// argument before the body runs, and every mid-frame entry re-verifies the claims
+/// ([`Codegen::guard_entry_claims`]), the same contract that covers the natively-stored-result
+/// claims. A `false` cell is thus a *guarantee* the register holds an immediate wherever native
+/// code executes, so skipping the release is a no-op — the interpreter's `set_reg` would release
+/// an immediate, which is itself a no-op. Every modeled op's [`RegEffect`] only clears a bit
+/// (`Drop`/`StoreGlobal` leave `unit`), copies one (`Move`), or sets one to an over-approximation
+/// of its result's heap-ness; an unmodeled op fails the whole map closed.
 pub(crate) fn heap_in_map(chunk: &noeta_bytecode::Chunk, heap_aware: bool) -> Vec<bool> {
     let n = chunk.code.len();
     let nreg = chunk.num_registers as usize;
@@ -1069,22 +1068,24 @@ fn heap_at_fixpoint(chunk: &noeta_bytecode::Chunk, n: usize, nreg: usize) -> Opt
         .map(|op| reg_effect(op, &chunk.consts))
         .collect::<Option<_>>()?;
 
-    // in[pc * nreg + r]: may register `r` hold a heap value at the start of op `pc`. Seed: the
-    // parameters (registers `0..num_params`) may be heap at entry (`pc 0`); every other slot is
-    // `unit`-initialized (an immediate).
+    // in[pc * nreg + r]: may register `r` hold a heap value at the start of op `pc`. Seed:
+    // all-immediate — locals are `unit`-initialized, and the parameters are **claimed**
+    // immediate too (T1b): the pc-0 entry guard has always bailed on a heap argument before the
+    // body runs, and every mid-frame entry verifies the claim (below), so a parameter register
+    // is promotable — and typed-readable — like any other, until an op redefines it as may-heap.
     let mut inset = vec![false; n * nreg];
-    inset[..chunk.num_params as usize].fill(true);
     // NOTE (soundness, P-JSSA): this forward model describes tier-0's *fall-through* state, but a
     // mid-frame native entry (a seam resume after an interpreted callee, or an OSR loop header)
     // begins with whatever tier 0 actually left in the slots — and tier 0 can put a heap value
-    // where this model claims an immediate (an overflowing arithmetic result heap-boxes to a big
-    // int; native bails *before* such a store, so the discrepancy arises exactly when tier 0 ran
-    // the segment). A false immediate claim would skip a needed retain/release — a leak, or a
-    // double-release. Rather than dropping the claims (which would forfeit post-call bare stores
-    // and the loop promotion), every mid-frame entry **verifies** them at runtime and bails on a
-    // violation — see `Codegen::guard_immediate_claims`. Native→native direct calls never pass
-    // through a mid-frame entry (the callee provably ran fully native), so the hot path pays
-    // nothing.
+    // where this model claims an immediate (a heap argument reaches the body when tier 0 runs the
+    // frame; an overflowing arithmetic result heap-boxes to a big int, where native bails
+    // *before* such a store — so the discrepancy arises exactly when tier 0 ran the segment). A
+    // false immediate claim would skip a needed retain/release — a leak, or a double-release.
+    // Rather than dropping the claims (which would forfeit post-call bare stores and the loop
+    // promotion), every native entry **verifies** them at runtime and bails on a violation — the
+    // pc-0 parameter guard for a fresh frame, `Codegen::guard_entry_claims` for every mid-frame
+    // entry. Native→native direct calls never pass through a mid-frame entry (the callee provably
+    // ran fully native), so the hot path pays nothing.
 
     let mut succ = Vec::new();
     let mut changed = true;
@@ -2196,6 +2197,41 @@ fn emit_binary(
         emit_float_binary(cg, op, dst, va, vb, pc, op_blocks);
         return;
     }
+    // Asymmetric typed paths (T1b): exactly one side statically `Int` (resp. `Float`), the other
+    // an unknown immediate — guard only the unknown side, then the typed body. The canonical
+    // case is a loop bounded by a parameter (`i < n`): `i` is claimed `Int`, `n` is a promoted
+    // `Imm` whose boxed variable is loop-invariant, so its one guard hoists out of the loop.
+    // (A statically-known mismatch — `Int` × `Float`, `Int` × `Bool` — keeps the generic
+    // dispatch, which bails to the interpreter exactly as before.)
+    if (ka == Kind::Int && kb == Kind::Imm) || (ka == Kind::Imm && kb == Kind::Int) {
+        let (x, y) = if ka == Kind::Int {
+            let x = cg.read_raw_int(a);
+            let vb = cg.read_reg(b);
+            let ok = cg.is_small_int(vb);
+            let cont = cg.b.create_block();
+            guard(cg, ok, cont, pc);
+            (x, cg.unbox_int(vb))
+        } else {
+            let va = cg.read_reg(a);
+            let ok = cg.is_small_int(va);
+            let cont = cg.b.create_block();
+            guard(cg, ok, cont, pc);
+            let y = cg.read_raw_int(b);
+            (cg.unbox_int(va), y)
+        };
+        emit_int_binary_raw(cg, op, dst, x, y, pc, op_blocks);
+        return;
+    }
+    if (ka == Kind::Float && kb == Kind::Imm) || (ka == Kind::Imm && kb == Kind::Float) {
+        let va = cg.read_reg(a);
+        let vb = cg.read_reg(b);
+        let unknown = if ka == Kind::Float { vb } else { va };
+        let ok = cg.is_float(unknown);
+        let cont = cg.b.create_block();
+        guard(cg, ok, cont, pc);
+        emit_float_binary(cg, op, dst, va, vb, pc, op_blocks);
+        return;
+    }
 
     let va = cg.read_reg(a);
     let vb = cg.read_reg(b);
@@ -2485,12 +2521,13 @@ mod tests {
         );
     }
 
-    /// The may-hold-heap analysis: parameters are heap at entry; a comparison result is an
-    /// immediate, and so is a completed arithmetic result — native `Binary` bails to the
-    /// interpreter *before* storing when the result would overflow the 48-bit immediate range,
-    /// so a result that was stored natively is always immediate.
+    /// The may-hold-heap analysis: parameters are **claimed** immediate at entry (T1b — the pc-0
+    /// guard bails on a heap argument, and every mid-frame entry verifies the claim), a
+    /// comparison result is an immediate, and so is a completed arithmetic result — native
+    /// `Binary` bails to the interpreter *before* storing when the result would overflow the
+    /// 48-bit immediate range. A call's destination, by contrast, stays may-heap.
     #[test]
-    fn heap_in_marks_params_but_not_binary_results() {
+    fn heap_in_marks_call_results_but_not_params_or_binary_results() {
         let sp = Span::new(0, 0);
         let c = chunk(
             vec![
@@ -2508,6 +2545,12 @@ mod tests {
                     b: 0,
                     span: sp,
                 },
+                Op::Call {
+                    dst: 1,
+                    callee: 2,
+                    args: Box::new([]),
+                    span: sp,
+                },
                 Op::Halt,
             ],
             vec![],
@@ -2517,13 +2560,17 @@ mod tests {
         let map = heap_in_map(&c, true);
         let nreg = 3;
         let at = |pc: usize, r: usize| map[pc * nreg + r];
-        assert!(at(0, 0), "a parameter may be heap at entry");
+        assert!(
+            !at(0, 0),
+            "a parameter is claimed immediate at entry (guard-verified)"
+        );
         assert!(!at(0, 1), "a fresh temp is an immediate at entry");
         assert!(!at(1, 1), "a comparison result is an immediate");
         assert!(
             !at(2, 2),
             "a natively-stored arithmetic result is an immediate (overflow bails before the store)"
         );
+        assert!(at(3, 1), "a call result stays may-heap");
     }
 
     /// A non-`heap_aware` prototype already stores bare everywhere — the map is all-false.
