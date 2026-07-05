@@ -39,6 +39,7 @@ pub fn reference_run(
     ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
+    f32_literal_sites: HashSet<Span>,
     construction_sites: HashMap<Span, TypeRepr>,
     relevance: &noeta_check::DestructorRelevance,
 ) -> RunResult {
@@ -54,6 +55,7 @@ pub fn reference_run(
             for_stream_sites: &for_stream_sites,
             width_sites: &width_sites,
             construction_sites: &construction_sites,
+            f32_literal_sites: &f32_literal_sites,
         },
     )
     .expect(

@@ -510,6 +510,9 @@ impl Pretty for Expr {
             Expr::F32 { value, span: s } => {
                 out.push_str(&format!("(f32 {value} {})", span(*s)));
             }
+            Expr::F64 { value, span: s } => {
+                out.push_str(&format!("(f64 {value} {})", span(*s)));
+            }
             Expr::IntN {
                 magnitude,
                 signed,

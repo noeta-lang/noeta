@@ -1,0 +1,7 @@
+// P-NUM-SYM: a bare integer literal adapts into a fixed-width *parameter*, but only when it fits the
+// width's range — the same range check as a binding (`x: u8 = 300`). An out-of-range literal
+// argument is E0044, at the argument's own span.
+// expect: error E0044 at 7:11
+// expect: exit 1
+fn take(a: u8): u8 { return a }
+echo take(300)

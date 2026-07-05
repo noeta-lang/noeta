@@ -1,0 +1,19 @@
+// P-NUM-SYM: `f32` and `f64` are strict fixed-width floats — arithmetic requires both operands to be
+// the same type, exactly like the fixed-width integers. Mixing a fixed float with `int`, with
+// `float`, or with the other fixed float is `E0044` (convert explicitly). Only `int` and `float`
+// widen. Each line below is an independent mismatch.
+// expect: error E0044 at 10:6
+// expect: error E0044 at 13:6
+// expect: error E0044 at 16:6
+// expect: error E0044 at 19:6
+// expect: exit 1
+echo 1.5f32 + 2
+mut a: f64 = 1.5
+mut b = 2.0
+echo a + b
+mut c: f64 = 1.0
+mut d = 3
+echo c + d
+mut e: f64 = 1.0
+mut f = 2.0f32
+echo e + f

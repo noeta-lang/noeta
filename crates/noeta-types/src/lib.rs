@@ -79,9 +79,15 @@ pub enum Type {
     Int,
     Float,
     /// A 32-bit float (P-PACK Phase 3) — a distinct primitive from the 64-bit `Float`, with its own
-    /// observable precision. Written with the `f32` literal suffix (`1.0f32`); arithmetic widens it
-    /// within the numeric lattice `int < f32 < float`, but assignment is strict (like `int`/`float`).
+    /// observable precision. Written with the `f32` literal suffix (`1.0f32`). A **strict
+    /// fixed-width** float (P-NUM-SYM): it does not participate in the widening lattice — `f32 + int`
+    /// / `f32 + float` require an explicit conversion (E0044), exactly like the fixed-width integers.
     F32,
+    /// A 64-bit float **as a strict fixed-width type** (P-NUM-SYM) — the float twin of `i64`.
+    /// Bit-identical to [`Type::Float`] at runtime (both are IEEE `f64`, stored the same way); the
+    /// *only* difference is coercion: `f64` does not widen (`f64 + int`/`f64 + float` → E0044), where
+    /// `float` is the ergonomic widening default. Reflection/`type_of` sees the shared runtime float.
+    F64,
     /// A **fixed-width integer** (Tier W): one of `i8 i16 i32 i64 u8 u16 u32 u64`, decoded as
     /// `{signed, bits}`. Distinct from `int` (i64) and from each other — there is **no** implicit
     /// widening/subtyping (movement between widths and to/from `int` is via explicit conversions),
@@ -164,28 +170,32 @@ impl Type {
     /// Whether this is one of the two numeric types arithmetic (`+ - * / %`) accepts. (The
     /// checker separately lets an interior hole / `dyn` operand through via
     /// [`Self::defers_to_runtime`], so this is the strict concrete test only.)
+    /// Whether this is a **widening (lattice) numeric** — the ergonomic defaults `int` and `float`
+    /// that coerce/widen freely. The strict fixed-width numerics (`IntN`, `f32`, `f64`) are
+    /// deliberately excluded (P-NUM-SYM): they need an explicit conversion, not implicit widening.
+    /// Use [`Self::is_arith_numeric`] for "can do arithmetic at all".
     pub fn is_numeric(&self) -> bool {
-        matches!(self, Type::Int | Type::Float | Type::F32)
+        matches!(self, Type::Int | Type::Float)
     }
 
     /// Whether this satisfies the arithmetic operator traits (`Add`/`Sub`/`Mul`/`Div`) as a built-in.
-    /// This is [`Self::is_numeric`] **plus** the fixed-width integers `IntN` (Tier W arithmetic
-    /// masks/width-carries), which `is_numeric` deliberately excludes — do not conflate the two.
+    /// This is [`Self::is_numeric`] **plus** every fixed-width numeric — the integers `IntN` and the
+    /// floats `f32`/`f64` — which widen-differently but still do arithmetic (each strictly within its
+    /// own type). Do not conflate the two: `is_numeric` is the widening set, this is the arithmetic set.
     pub fn is_arith_numeric(&self) -> bool {
         matches!(
             self,
-            Type::Int | Type::Float | Type::F32 | Type::IntN { .. }
+            Type::Int | Type::Float | Type::F32 | Type::F64 | Type::IntN { .. }
         )
     }
 
-    /// This numeric type's rank in the widening lattice `int (0) < f32 (1) < float (2)`. Arithmetic
-    /// over two numerics yields the higher-ranked type (`f32 + int → f32`, `f32 + float → float`),
-    /// the production-language widening rule. `None` for a non-numeric type.
+    /// This numeric type's rank in the widening lattice `int (0) < float (1)`. Arithmetic over two
+    /// **lattice** numerics yields the higher-ranked type (`int + float → float`). The strict
+    /// fixed-width numerics (`IntN`, `f32`, `f64`) have no rank — they do not widen (P-NUM-SYM).
     pub fn numeric_rank(&self) -> Option<u8> {
         match self {
             Type::Int => Some(0),
-            Type::F32 => Some(1),
-            Type::Float => Some(2),
+            Type::Float => Some(1),
             _ => None,
         }
     }
@@ -315,6 +325,7 @@ impl Type {
                 "int"
                     | "float"
                     | "f32"
+                    | "f64"
                     | "bool"
                     | "string"
                     | "bytes"
@@ -397,6 +408,7 @@ impl Type {
                     "int" => Type::Int,
                     "float" => Type::Float,
                     "f32" => Type::F32,
+                    "f64" => Type::F64,
                     fixed if parse_int_width(fixed).is_some() => {
                         let (signed, bits) = parse_int_width(fixed).unwrap();
                         Type::IntN { signed, bits }
@@ -437,6 +449,7 @@ impl std::fmt::Display for Type {
             Type::Int => f.write_str("int"),
             Type::Float => f.write_str("float"),
             Type::F32 => f.write_str("f32"),
+            Type::F64 => f.write_str("f64"),
             Type::IntN { signed, bits } => {
                 write!(f, "{}{bits}", if *signed { 'i' } else { 'u' })
             }
