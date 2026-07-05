@@ -1,0 +1,24 @@
+// Reactivity S4 — a `set` performed *inside* a running effect coalesces into the ongoing flush rather
+// than starting a nested one. A `copier` effect reads `src` and writes `mirror`; a `watch` effect reads
+// `mirror`. The distinguishing evidence is ordering: because the copier's `mirror.set` only *enqueues*
+// the watcher (the flush picks it up after the copier finishes), "copier-after" prints BEFORE the
+// watcher's line — not between the copier's two prints, which is where a nested flush would have run it.
+// Both backends share the one flush loop, so this order is byte-identical under the differential.
+// expect: stdout "copier-before src=0"
+// expect: stdout "copier-after"
+// expect: stdout "watch mirror=0"
+// expect: stdout "copier-before src=5"
+// expect: stdout "copier-after"
+// expect: stdout "watch mirror=5"
+// expect: exit 0
+src = signal(0)
+mirror = signal(0)
+effect(fn() {
+    echo "copier-before src=${src.get()}";
+    mirror.set(src.get());
+    echo "copier-after"
+})
+effect(fn() {
+    echo "watch mirror=${mirror.get()}"
+})
+src.set(5)

@@ -3236,9 +3236,13 @@ impl<'m> Vm<'m> {
                                     let value = regs[fbase + args[0] as usize];
                                     // The graph retains its own reference to the new content and
                                     // releases the old; the arg register's reference is released by
-                                    // its normal end-of-life. Then flush so subscribed effects rerun.
+                                    // its normal end-of-life. Then flush so subscribed effects rerun —
+                                    // but coalesce: a set inside a running effect body only enqueues,
+                                    // the ongoing flush picks it up (no nested flush). (reactivity S4)
                                     self.reactive.set(node, GcVal::retained(value));
-                                    self.drive_flush(*span)?;
+                                    if !self.reactive.is_flushing() {
+                                        self.drive_flush(*span)?;
+                                    }
                                     set_reg(regs, fbase, *dst, Value::unit());
                                     pc += 1;
                                     continue;
@@ -3246,12 +3250,14 @@ impl<'m> Vm<'m> {
                                 (NodeKind::Signal, "update") => {
                                     // Read-modify-write: read the current value (owned), call the
                                     // updater with it (which consumes that reference), store the
-                                    // result, then flush.
+                                    // result, then flush (coalescing inside a running flush, like set).
                                     let f = regs[fbase + args[0] as usize];
                                     let current = self.read_reactive(node, *span)?;
                                     let updated = self.call_value(f, vec![current], *span)?;
                                     self.reactive.set(node, GcVal::owned(updated));
-                                    self.drive_flush(*span)?;
+                                    if !self.reactive.is_flushing() {
+                                        self.drive_flush(*span)?;
+                                    }
                                     set_reg(regs, fbase, *dst, Value::unit());
                                     pc += 1;
                                     continue;
@@ -5121,22 +5127,40 @@ impl<'m> Vm<'m> {
     fn drive_flush(&mut self, span: Span) -> Result<(), Abort> {
         let graph = Rc::clone(&self.reactive);
         let mut aborted = false;
-        graph.flush(&mut |body: GcVal| -> GcVal {
-            if aborted {
-                return GcVal::owned(Value::unit());
-            }
-            // `body` owns the reference the graph cloned for this run. `call_value` only *borrows* the
-            // callee (it does not release it), so peek with `.get()` and let `body` drop — releasing
-            // that reference — when this closure returns. The stored body keeps its own reference.
-            match self.call_value(body.get(), Vec::new(), span) {
-                Ok(result) => GcVal::owned(result),
-                Err(Abort) => {
-                    aborted = true;
-                    GcVal::owned(Value::unit())
+        let overflowed = graph
+            .flush(&mut |body: GcVal| -> GcVal {
+                if aborted {
+                    return GcVal::owned(Value::unit());
                 }
-            }
-        });
-        if aborted { Err(Abort) } else { Ok(()) }
+                // `body` owns the reference the graph cloned for this run. `call_value` only *borrows*
+                // the callee (it does not release it), so peek with `.get()` and let `body` drop —
+                // releasing that reference — when this closure returns. The stored body keeps its own.
+                match self.call_value(body.get(), Vec::new(), span) {
+                    Ok(result) => GcVal::owned(result),
+                    Err(Abort) => {
+                        aborted = true;
+                        GcVal::owned(Value::unit())
+                    }
+                }
+            })
+            .is_err();
+        // A body-driven abort (panic / `?`) takes priority — propagate it as itself. Otherwise, a
+        // non-converging flush (a self-reinforcing effect) becomes the reactive-cycle runtime error.
+        if aborted {
+            return Err(Abort);
+        }
+        if overflowed {
+            return Err(self.error(
+                DiagnosticCode::ReactiveCycle,
+                span,
+                format!(
+                    "reactive update did not converge after {} steps — an effect keeps changing a \
+                     signal it depends on",
+                    noeta_reactive::MAX_FLUSH_STEPS
+                ),
+            ));
+        }
+        Ok(())
     }
 
     /// Run a defaulted parameter's zero-argument thunk prototype to its value, on a fresh frame
@@ -5861,9 +5885,13 @@ impl<'m> Vm<'m> {
             Builtin::Effect => {
                 self.check_arity(builtin, args, 1, span)?;
                 // `effect(fn)` — register the effect (created queued), retaining the body closure, then
-                // flush to run it once now (subscribing it to the signals it reads).
+                // flush to run it once now (subscribing it to the signals it reads). If we are already
+                // inside a flush (an effect created within another effect's body), the ongoing flush
+                // drains it — do not nest. (reactivity S4)
                 let id = self.reactive.effect(GcVal::retained(args[0]));
-                self.drive_flush(span)?;
+                if !self.reactive.is_flushing() {
+                    self.drive_flush(span)?;
+                }
                 Ok(Value::make_reactive(NodeKind::Effect, id))
             }
         }

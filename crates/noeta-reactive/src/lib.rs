@@ -44,6 +44,24 @@
 use std::cell::RefCell;
 use std::fmt;
 
+/// The most effect executions a single [`flush`](ReactiveGraph::flush) will perform before declaring
+/// the update non-convergent and returning [`FlushOverflow`]. A well-behaved reactive graph settles in
+/// a number of steps bounded by its propagation depth — far below this. The bound only trips on a
+/// *self-reinforcing cycle*: an `effect` that changes a signal it depends on (directly or through
+/// others) re-queues itself every round, so the flush would never terminate. Bounding it turns a hang
+/// (or, with the backends' nested-flush suppression, a runaway loop) into a deterministic runtime
+/// error — the same number on both backends, so the abort is differential-identical. Deliberately
+/// generous: any real update is orders of magnitude under it, so a trip is a genuine bug, not a tuning
+/// artifact.
+pub const MAX_FLUSH_STEPS: u32 = 10_000;
+
+/// Returned by [`flush`](ReactiveGraph::flush)/[`run_pending`](ReactiveGraph::run_pending) when the
+/// update did not converge within [`MAX_FLUSH_STEPS`]. A zero-size marker — the backend maps it to its
+/// reactive-cycle runtime diagnostic. Distinct from an effect body *aborting* (a panic / `?`), which
+/// the backend captures through its own call seam and propagates as itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FlushOverflow;
+
 /// Index into the graph's node table — the id a `signal`/`computed`/`effect` value carries.
 ///
 /// A plain table index (like `noeta_value::ChannelId`), pinned to `u32`. Freed slots are reused, so an
@@ -141,6 +159,13 @@ struct Inner<V> {
     /// Effects dirtied since the last flush, awaiting a run. Drained (and sorted for determinism) per
     /// flush round.
     queue: Vec<NodeId>,
+    /// True while a [`flush`](ReactiveGraph::flush) loop is running. A `set` performed *inside* a
+    /// running effect body must not start a *nested* flush — it enqueues, and the ongoing flush picks
+    /// it up next round (the coalescing model). The backends consult [`is_flushing`] to decide whether
+    /// their `signal.set`/`.update` should drive a flush or just enqueue.
+    ///
+    /// [`is_flushing`]: ReactiveGraph::is_flushing
+    flushing: bool,
 }
 
 impl<V> Inner<V> {
@@ -259,6 +284,7 @@ impl<V: Clone> ReactiveGraph<V> {
                 free: Vec::new(),
                 computing: Vec::new(),
                 queue: Vec::new(),
+                flushing: false,
             }),
         }
     }
@@ -403,15 +429,31 @@ impl<V: Clone> ReactiveGraph<V> {
 
     /// Run all queued effects to a fixpoint. Each round drains the queue in ascending [`NodeId`] order
     /// (the determinism guarantee), runs each effect's body via `run`, and repeats if running them
-    /// queued more (an effect that `set`s a signal). An effect body's reentrant reads resubscribe it,
-    /// so an effect that stops reading a signal stops rerunning.
-    pub fn flush(&self, run: &mut dyn FnMut(V) -> V) {
+    /// queued more (an effect that `set`s a signal — its set enqueues into *this* flush rather than
+    /// starting a nested one, because [`is_flushing`](Self::is_flushing) is true). An effect body's
+    /// reentrant reads resubscribe it, so an effect that stops reading a signal stops rerunning.
+    ///
+    /// Bounded at [`MAX_FLUSH_STEPS`] effect runs: a self-reinforcing cycle (an effect that changes a
+    /// signal it depends on) would never settle, so the flush returns [`FlushOverflow`] instead of
+    /// looping forever. The [`flushing`](Inner::flushing) flag is set for the whole loop and cleared on
+    /// every exit (empty queue, overflow, or a body-driven abort that unwinds through `run`).
+    pub fn flush(&self, run: &mut dyn FnMut(V) -> V) -> Result<(), FlushOverflow> {
+        self.inner.borrow_mut().flushing = true;
+        let result = self.flush_loop(run);
+        self.inner.borrow_mut().flushing = false;
+        result
+    }
+
+    /// The flush fixpoint itself — see [`flush`](Self::flush). Split out so the `flushing` flag is
+    /// cleared on *every* return path without repeating the reset at each one.
+    fn flush_loop(&self, run: &mut dyn FnMut(V) -> V) -> Result<(), FlushOverflow> {
+        let mut steps: u32 = 0;
         loop {
             // Drain this round's queue under a transient borrow, sorted for a deterministic order.
             let mut round: Vec<NodeId> = {
                 let mut inner = self.inner.borrow_mut();
                 if inner.queue.is_empty() {
-                    return;
+                    return Ok(());
                 }
                 std::mem::take(&mut inner.queue)
             };
@@ -433,14 +475,27 @@ impl<V: Clone> ReactiveGraph<V> {
                     let mut inner = self.inner.borrow_mut();
                     inner.end_compute(effect, None);
                 }
+                steps += 1;
+                if steps > MAX_FLUSH_STEPS {
+                    return Err(FlushOverflow);
+                }
             }
         }
     }
 
     /// Alias for [`flush`](Self::flush), named for the create-then-run path: a fresh `effect` is queued
     /// on creation, and `run_pending` runs it (and any others) the first time.
-    pub fn run_pending(&self, run: &mut dyn FnMut(V) -> V) {
-        self.flush(run);
+    pub fn run_pending(&self, run: &mut dyn FnMut(V) -> V) -> Result<(), FlushOverflow> {
+        self.flush(run)
+    }
+
+    /// Whether a [`flush`](Self::flush) is currently running. The backends consult this on
+    /// `signal.set`/`.update`: at top level (`false`) a set drives a flush; *inside* a running effect
+    /// body (`true`) it only enqueues, coalescing into the ongoing flush rather than recursing into a
+    /// nested one. Keeping this single source of truth in the shared core is what makes the coalescing
+    /// behavior — and therefore the abort/step bound — identical on both backends.
+    pub fn is_flushing(&self) -> bool {
+        self.inner.borrow().flushing
     }
 
     /// Dispose `node`: unsubscribe it from all its sources, drop its stored value/body, and free its
@@ -582,7 +637,14 @@ mod tests {
         fn flush(self: &Rc<Self>) {
             let me = self.clone();
             let mut run = move |v| me.run(v);
-            self.graph.flush(&mut run);
+            self.graph.flush(&mut run).expect("flush converged");
+        }
+
+        /// Flush without asserting convergence — returns the raw result so a test can assert overflow.
+        fn try_flush(self: &Rc<Self>) -> Result<(), FlushOverflow> {
+            let me = self.clone();
+            let mut run = move |v| me.run(v);
+            self.graph.flush(&mut run)
         }
     }
 
@@ -967,6 +1029,66 @@ mod tests {
         assert!(
             downstream_runs.get() > baseline,
             "the mirror watcher must be driven by the copier's set within the flush"
+        );
+    }
+
+    #[test]
+    fn is_flushing_true_during_flush_false_outside() {
+        // The coalescing flag the backends consult: outside any flush it is false; while an effect
+        // body is running (so a set inside it should enqueue, not nest) it is true; and it is cleared
+        // once the flush completes.
+        let seen: Rc<Cell<bool>> = Rc::new(Cell::new(false));
+        let se = seen.clone();
+
+        let b = Builder::new();
+        let s = b.graph.signal(TestVal::Data(0));
+        let b = b.body("probe", move |h| {
+            let _ = get(h, s);
+            se.set(h.graph.is_flushing());
+            TestVal::Data(0)
+        });
+        let _e = b.graph.effect(TestVal::Body("probe"));
+        let h = b.finish();
+
+        assert!(!h.graph.is_flushing(), "not flushing before any flush");
+        h.flush();
+        assert!(
+            seen.get(),
+            "is_flushing() is true while an effect body runs"
+        );
+        assert!(
+            !h.graph.is_flushing(),
+            "flushing flag cleared after the flush"
+        );
+    }
+
+    #[test]
+    fn runaway_self_writing_effect_overflows_not_hangs() {
+        // An effect that reads a signal and then writes it re-queues itself every round — with no
+        // value-equality suppression it never settles. The flush must return FlushOverflow after a
+        // bounded number of steps (not loop forever), and clear its flushing flag on the way out.
+        let s_cell: Rc<Cell<Option<NodeId>>> = Rc::new(Cell::new(None));
+        let sc = s_cell.clone();
+
+        let builder = Builder::new();
+        let s = builder.graph.signal(TestVal::Data(0));
+        s_cell.set(Some(s));
+        let builder = builder.body("spin", move |h| {
+            let v = get(h, sc.get().unwrap());
+            h.graph.set(sc.get().unwrap(), TestVal::Data(v + 1));
+            TestVal::Data(0)
+        });
+        let _e = builder.graph.effect(TestVal::Body("spin"));
+        let h = builder.finish();
+
+        assert_eq!(
+            h.try_flush(),
+            Err(FlushOverflow),
+            "a self-reinforcing effect must be bounded, not hang"
+        );
+        assert!(
+            !h.graph.is_flushing(),
+            "the flushing flag is cleared after overflow"
         );
     }
 }

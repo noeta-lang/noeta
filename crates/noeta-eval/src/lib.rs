@@ -2219,18 +2219,24 @@ impl Interpreter {
                     self.expect_std_arity(name, &args, 1, span)?;
                     let value = args.into_iter().next().unwrap();
                     self.reactive.set(node, value);
-                    self.drive_flush(span)?;
+                    // Coalesce: a set inside a running effect body only enqueues — the ongoing flush
+                    // picks it up. Only a top-level set drives a fresh flush. (reactivity S4)
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
                     return Ok(Value::Unit);
                 }
                 (NodeKind::Signal, "update") => {
                     self.expect_std_arity(name, &args, 1, span)?;
                     // Read-modify-write: read the current value, call the updater with it, store the
-                    // result, then flush.
+                    // result, then flush (coalescing inside a running flush, like `set`).
                     let f = args.into_iter().next().unwrap();
                     let current = self.read_reactive(node, span)?;
                     let updated = self.call(f, vec![current], span)?;
                     self.reactive.set(node, updated);
-                    self.drive_flush(span)?;
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
                     return Ok(Value::Unit);
                 }
                 (NodeKind::Effect, "dispose") => {
@@ -3298,22 +3304,37 @@ impl Interpreter {
     fn drive_flush(&mut self, span: Span) -> Eval<()> {
         let graph = std::rc::Rc::clone(&self.reactive);
         let mut abort: Option<Unwind> = None;
-        graph.flush(&mut |body: Value| -> Value {
-            if abort.is_some() {
-                return Value::Unit;
-            }
-            match self.call(body, Vec::new(), span) {
-                Ok(value) => value,
-                Err(unwind) => {
-                    abort = Some(unwind);
-                    Value::Unit
+        let overflowed = graph
+            .flush(&mut |body: Value| -> Value {
+                if abort.is_some() {
+                    return Value::Unit;
                 }
-            }
-        });
-        match abort {
-            Some(unwind) => Err(unwind),
-            None => Ok(()),
+                match self.call(body, Vec::new(), span) {
+                    Ok(value) => value,
+                    Err(unwind) => {
+                        abort = Some(unwind);
+                        Value::Unit
+                    }
+                }
+            })
+            .is_err();
+        // A body-driven abort (panic / `?`) takes priority — surface it as itself. Otherwise, a
+        // non-converging flush (a self-reinforcing effect) becomes the reactive-cycle runtime error.
+        if let Some(unwind) = abort {
+            return Err(unwind);
         }
+        if overflowed {
+            return Err(self.runtime_error(
+                DiagnosticCode::ReactiveCycle,
+                span,
+                format!(
+                    "reactive update did not converge after {} steps — an effect keeps changing a \
+                     signal it depends on",
+                    noeta_reactive::MAX_FLUSH_STEPS
+                ),
+            ));
+        }
+        Ok(())
     }
 
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
@@ -3776,10 +3797,14 @@ impl Interpreter {
             Builtin::Effect => {
                 self.expect_arity(builtin, &args, 1, span)?;
                 // `effect(fn)` — register the effect (created queued), storing the body closure, then
-                // flush to run it once now (subscribing it to the signals it reads).
+                // flush to run it once now (subscribing it to the signals it reads). If we are already
+                // inside a flush (an effect created within another effect's body), the ongoing flush
+                // drains it — do not nest. (reactivity S4)
                 let body = args.into_iter().next().unwrap();
                 let id = self.reactive.effect(body);
-                self.drive_flush(span)?;
+                if !self.reactive.is_flushing() {
+                    self.drive_flush(span)?;
+                }
                 Ok(Value::Reactive(noeta_reactive::NodeKind::Effect, id))
             }
         }
