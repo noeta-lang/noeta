@@ -225,6 +225,36 @@ impl DefUse {
     }
 }
 
+/// The value **bindings visible at `offset`** in file `source` — the locals, parameters, and
+/// `for`/`match`/closure bindings whose lexical scope encloses the cursor, plus the module-level
+/// bindings declared before it — each as `(name, definition span)`. Powers in-scope identifier
+/// completion. Runs the same scoping walk as [`DefUse::build`]: it snapshots the scope stack at the
+/// deepest AST node that contains the cursor, so a name is offered exactly where it is in scope
+/// (shadowing included). Top-level functions and type declarations are *not* here — the caller lists
+/// those directly, with their precise kinds. Empty when the cursor is not inside any statement.
+pub fn visible_at(program: &Program, offset: u32, source: SourceId) -> Vec<(String, Span)> {
+    let mut resolver = Resolver {
+        cursor: Some((offset, source)),
+        ..Resolver::default()
+    };
+    // Seed top-level functions (mutual recursion) exactly as `DefUse::build` does, so a snapshot
+    // taken inside a function body sees the same scope shape; the functions themselves live outside
+    // the scope stack and so are excluded from the snapshot.
+    for stmt in &program.stmts {
+        if let Stmt::Fn(decl) = stmt {
+            resolver
+                .functions
+                .entry(decl.name.clone())
+                .or_insert(decl.name_span);
+        }
+    }
+    resolver.scopes.push(HashMap::new()); // the module scope
+    for stmt in &program.stmts {
+        resolver.walk_stmt(stmt);
+    }
+    resolver.snapshot.unwrap_or_default()
+}
+
 /// The mutable state of one [`DefUse::build`] walk: the top-level function table, the lexical scope
 /// stack of value bindings (innermost last), and the accumulating use→def references.
 #[derive(Default)]
@@ -233,11 +263,38 @@ struct Resolver {
     scopes: Vec<HashMap<String, Span>>,
     refs: Vec<(Span, Span)>,
     member_refs: Vec<MemberRef>,
+    /// When set (completion), the `(offset, source)` whose in-scope bindings to capture; the walk
+    /// snapshots the scope stack at the deepest node containing it. `None` for the def/use walk,
+    /// which pays no snapshot cost.
+    cursor: Option<(u32, SourceId)>,
+    /// The visible bindings captured at `cursor` (innermost scopes last), once the walk reaches a
+    /// node that contains it. See [`visible_at`].
+    snapshot: Option<Vec<(String, Span)>>,
 }
 
 impl Resolver {
     fn push_scope(&mut self) {
         self.scopes.push(HashMap::new());
+    }
+
+    /// If `span` is in the cursor's file and contains it, snapshot the bindings currently in scope.
+    /// Called at the entry of every statement and expression; because the walk is depth-first and a
+    /// node is entered before its children, the deepest containing node writes last and wins — and
+    /// its scope stack holds exactly the bindings visible there (enclosing scopes plus earlier
+    /// siblings, but not the node's own not-yet-processed bindings).
+    fn maybe_snapshot(&mut self, span: Span) {
+        if let Some((offset, source)) = self.cursor
+            && span.source == source
+            && span.start <= offset
+            && offset <= span.end
+        {
+            self.snapshot = Some(
+                self.scopes
+                    .iter()
+                    .flat_map(|scope| scope.iter().map(|(name, def)| (name.clone(), *def)))
+                    .collect(),
+            );
+        }
     }
 
     fn pop_scope(&mut self) {
@@ -311,6 +368,7 @@ impl Resolver {
     }
 
     fn walk_stmt(&mut self, stmt: &Stmt) {
+        self.maybe_snapshot(stmt.span());
         match stmt {
             Stmt::Echo { value, .. } => self.walk_expr(value),
             Stmt::Binding {
@@ -407,6 +465,7 @@ impl Resolver {
     }
 
     fn walk_expr(&mut self, expr: &Expr) {
+        self.maybe_snapshot(expr.span());
         match expr {
             Expr::Ident { name, span } => self.use_ident(name, *span),
             Expr::Unary { operand, .. } => self.walk_expr(operand),

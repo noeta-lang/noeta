@@ -19,9 +19,11 @@
 //! name table backs type references (see [`resolve`]). Hover and go-to-definition run over the merged
 //! workspace program (slice **W2**), so an imported name resolves and go-to-definition can land in a
 //! *different file*. Slice **L4** adds **document symbols**: the entry document's declarations become
-//! the hierarchical outline the editor renders (see [`symbols`]). Positions are converted
-//! encoding-aware (see [`offsets`]).
+//! the hierarchical outline the editor renders (see [`symbols`]). Slice **L5** adds **completion**:
+//! the cursor offers the language keywords, the top-level declarations, and the value bindings in
+//! scope there (see [`completion`]). Positions are converted encoding-aware (see [`offsets`]).
 
+mod completion;
 mod hover;
 mod offsets;
 mod resolve;
@@ -300,6 +302,24 @@ impl DocumentStore {
         self.locate(cache, def_span, encoding)
     }
 
+    /// The completion candidates at `position` in `uri`: the language keywords, the top-level
+    /// declarations, and the value bindings in scope at the cursor (see [`completion`]). A
+    /// single-file, best-effort read of the entry document's AST — the document is mid-edit, so it
+    /// relies on the recovering parser and the client's prefix filtering. `None` if not open.
+    fn completions(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<Vec<completion::Candidate>> {
+        let cache = self.workspaces.get(uri)?;
+        let entry = cache.entry();
+        let index = LineIndex::new(entry.text(&self.db));
+        let offset = index.offset(position, encoding);
+        let program = &noeta_db::ast(&self.db, entry).0.program;
+        Some(completion::complete(program, offset, SourceId::FIRST))
+    }
+
     /// The document outline for `uri`: the hierarchical symbol tree (top-level functions and type
     /// declarations, with fields/variants and methods nested) mapped to LSP `DocumentSymbol`s. A
     /// single-file feature — it reads the entry document's own AST, not the merged workspace — so an
@@ -373,6 +393,26 @@ fn to_lsp_diagnostic(
         source: Some("noeta".to_string()),
         message,
         related_information,
+        ..Default::default()
+    }
+}
+
+/// Map a completion [`Candidate`](completion::Candidate) to its LSP `CompletionItem`: the label, an
+/// icon kind, and any detail. The label is also the inserted and filter text (client default).
+fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
+    use completion::CandidateKind;
+    let kind = match candidate.kind {
+        CandidateKind::Keyword => CompletionItemKind::KEYWORD,
+        CandidateKind::Function => CompletionItemKind::FUNCTION,
+        CandidateKind::Struct => CompletionItemKind::STRUCT,
+        CandidateKind::Class => CompletionItemKind::CLASS,
+        CandidateKind::Enum => CompletionItemKind::ENUM,
+        CandidateKind::Variable => CompletionItemKind::VARIABLE,
+    };
+    CompletionItem {
+        label: candidate.label.clone(),
+        kind: Some(kind),
+        detail: candidate.detail.clone(),
         ..Default::default()
     }
 }
@@ -527,6 +567,9 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // Identifier completion (C1): invoked explicitly or as the user types a name. No
+                // trigger characters yet — member completion after `.` is a later sub-slice.
+                completion_provider: Some(CompletionOptions::default()),
                 ..Default::default()
             },
             ..Default::default()
@@ -591,6 +634,19 @@ impl LanguageServer for Backend {
             store.document_symbols(uri.as_str(), encoding)
         };
         Ok(symbols.map(DocumentSymbolResponse::Nested))
+    }
+
+    async fn completion(&self, params: CompletionParams) -> Result<Option<CompletionResponse>> {
+        let position_params = params.text_document_position;
+        let uri = position_params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let candidates = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.completions(uri.as_str(), position_params.position, encoding)
+        };
+        Ok(candidates.map(|candidates| {
+            CompletionResponse::Array(candidates.iter().map(to_completion_item).collect())
+        }))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -990,6 +1046,58 @@ mod tests {
         assert_eq!(syms[1].name, "main");
         assert_eq!(syms[1].kind, SymbolKind::FUNCTION);
         assert!(syms[1].children.is_none()); // a leaf carries no `children`, not an empty list
+    }
+
+    #[test]
+    fn completions_offer_keywords_decls_and_scoped_locals() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///c.noe",
+            "fn helper(): int { return 1 }\nfn main() {\n  total = 1\n  return total\n}"
+                .to_string(),
+        );
+        // Cursor on the `return total` line — helper (top-level fn), total (local), and keywords
+        // should all be offered; `main`'s scope does not leak elsewhere.
+        let text = &store.buffers["file:///c.noe"];
+        let line = text
+            .lines()
+            .position(|l| l.contains("return total"))
+            .unwrap() as u32;
+        let items = store
+            .completions(
+                "file:///c.noe",
+                Position { line, character: 2 },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions")
+            .iter()
+            .map(to_completion_item)
+            .collect::<Vec<_>>();
+        let has = |label: &str, kind: CompletionItemKind| {
+            items
+                .iter()
+                .any(|i| i.label == label && i.kind == Some(kind))
+        };
+        assert!(has("helper", CompletionItemKind::FUNCTION));
+        assert!(has("total", CompletionItemKind::VARIABLE));
+        assert!(has("return", CompletionItemKind::KEYWORD));
+    }
+
+    #[test]
+    fn completions_for_unknown_document_is_none() {
+        let store = DocumentStore::default();
+        assert!(
+            store
+                .completions(
+                    "file:///nope.noe",
+                    Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    Encoding::Utf8,
+                )
+                .is_none()
+        );
     }
 
     #[test]
