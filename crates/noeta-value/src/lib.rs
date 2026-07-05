@@ -1342,7 +1342,12 @@ impl Value {
     /// `BTreeMap` (a convenient sorted builder); it is stored internally as a `HashMap` for O(1)
     /// access, and every order-observing accessor re-sorts, so nothing observable changes.
     pub fn map(entries: BTreeMap<String, Value>) -> Value {
-        heap::alloc(Payload::Map(entries.into_iter().collect()))
+        heap::alloc(Payload::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (CompactString::from(k), v))
+                .collect(),
+        ))
     }
 
     /// A heap object (refcount 1): a struct/class/opaque instance laying out `slots` in the
@@ -1442,6 +1447,20 @@ impl Value {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Str(s) => Some(s.as_str().to_owned()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A [`CompactString`] clone of the string value, if this is a heap string. Unlike
+    /// [`Self::as_string`], inline content (≤ 24 bytes) clones without touching the allocator —
+    /// use for map keys, which are stored in this representation.
+    pub fn as_compact_string(self) -> Option<CompactString> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::Str(s) => Some(s.clone()),
                 _ => None,
             })
         } else {
@@ -1719,16 +1738,16 @@ impl Value {
     /// and a single-use value (the caller must not read it again) — used to hand a freshly-built
     /// map key straight to the `HashMap` instead of cloning it. The now-empty `Payload::Str` is a
     /// valid, cheap-to-free object, so the caller's later `Drop`/overwrite of the register is sound.
-    pub fn take_string_in_place(self) -> String {
+    pub fn take_string_in_place(self) -> CompactString {
         debug_assert!(
             self.is_string() && heap::refcount(self) == 1,
             "take_string_in_place requires a uniquely-owned string"
         );
         heap::with_payload_mut(self, |p| {
             if let Payload::Str(buf) = p {
-                std::mem::take(buf).into_string()
+                std::mem::take(buf)
             } else {
-                String::new()
+                CompactString::default()
             }
         })
     }
@@ -1812,7 +1831,7 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
                     // Sorted-key order (the map is a HashMap internally).
-                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     Some(kv.into_iter().map(|(_, v)| *v).collect())
                 }
@@ -1829,7 +1848,8 @@ impl Value {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
-                    let mut keys: Vec<String> = entries.keys().cloned().collect();
+                    let mut keys: Vec<String> =
+                        entries.keys().map(|k| k.as_str().to_owned()).collect();
                     keys.sort_unstable();
                     Some(keys)
                 }
@@ -1846,7 +1866,7 @@ impl Value {
     /// buffer is sound only when no other owner can observe it. The map takes ownership of `value`
     /// (the caller transfers a reference); the returned displaced value's reference is handed back to
     /// the caller to release. Returns `None` (a no-op) if this is not a map.
-    pub fn map_insert(self, key: String, value: Value) -> Option<Value> {
+    pub fn map_insert(self, key: CompactString, value: Value) -> Option<Value> {
         debug_assert!(
             !self.is_map() || heap::refcount(self) == 1,
             "map_insert requires a uniquely-owned map (the COW invariant)"
@@ -1893,9 +1913,12 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 // Collect the internal HashMap into a sorted BTreeMap (the return type callers rely
                 // on for deterministic, sorted iteration).
-                Payload::Map(entries) => {
-                    Some(entries.iter().map(|(k, v)| (k.clone(), *v)).collect())
-                }
+                Payload::Map(entries) => Some(
+                    entries
+                        .iter()
+                        .map(|(k, v)| (k.as_str().to_owned(), *v))
+                        .collect(),
+                ),
                 _ => None,
             })
         } else {
@@ -2076,7 +2099,7 @@ impl Value {
                     format!("{{{}}}", parts.join(", "))
                 }
                 Payload::Map(entries) => {
-                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     let parts: Vec<String> = kv
                         .iter()
@@ -2190,11 +2213,11 @@ impl Value {
                 }
                 Payload::Map(entries) => {
                     // NativeValue::Map is an ordered Vec; present in sorted-key order.
-                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     NativeValue::Map(
                         kv.into_iter()
-                            .map(|(k, v)| (k.clone(), v.to_native_deep()))
+                            .map(|(k, v)| (k.as_str().to_owned(), v.to_native_deep()))
                             .collect(),
                     )
                 }
