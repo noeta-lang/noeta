@@ -19,7 +19,9 @@
 //! name table backs type references (see [`resolve`]). Hover and go-to-definition run over the merged
 //! workspace program (slice **W2**), so an imported name resolves and go-to-definition can land in a
 //! *different file*. Slice **L4** adds **document symbols**: the entry document's declarations become
-//! the hierarchical outline the editor renders (see [`symbols`]). Slice **L5** adds **completion**:
+//! the hierarchical outline the editor renders (see [`symbols`]). **Find-references** lists every use
+//! of the value symbol under the cursor (across modules), reusing the def/use index. Slice **L5** adds
+//! **completion**:
 //! on a member access `receiver.member` the cursor offers the receiver type's fields, variants, and
 //! methods; otherwise it offers the language keywords, the top-level declarations, and the value
 //! bindings in scope there (see [`completion`]). Positions are converted encoding-aware (see
@@ -302,6 +304,56 @@ impl DocumentStore {
         let name = &entry_text[token.span.range()];
         let def_span = resolve::Definitions::collect(program).resolve(name)?;
         self.locate(cache, def_span, encoding)
+    }
+
+    /// All references to the value symbol (local, parameter, or function) at `position` — every use,
+    /// plus the declaration when `include_declaration` is set — as `(URI, range)` pairs. Runs the
+    /// scope-aware def/use index over the merged workspace program, so references to a function are
+    /// found **across modules**. The cursor may be on a use or on the declaration itself.
+    ///
+    /// Scoped to value symbols (what the def/use index resolves); type and member references are a
+    /// follow-up. `None` if the document is not open or the cursor is on no such symbol.
+    fn references(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+        include_declaration: bool,
+    ) -> Option<Vec<(String, Range)>> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let offset = LineIndex::new(entry.text(db)).offset(position, encoding);
+        let cursor = SourceId::FIRST;
+
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+
+        let def_use = resolve::DefUse::build(program);
+        let def = def_use.symbol_at(offset, cursor)?;
+        let mut spans = def_use.references_to(def);
+        if include_declaration {
+            spans.push(def);
+        }
+
+        let mut locations: Vec<(String, Range)> = spans
+            .into_iter()
+            .filter_map(|span| self.locate(cache, span, encoding))
+            .collect();
+        // Stable order and no duplicates (e.g. a declaration that also matched a use span).
+        locations.sort_by(|a, b| {
+            (&a.0, a.1.start.line, a.1.start.character).cmp(&(
+                &b.0,
+                b.1.start.line,
+                b.1.start.character,
+            ))
+        });
+        locations.dedup();
+        Some(locations)
     }
 
     /// The completion candidates at `position` in `uri`. When the cursor is on a member access
@@ -645,6 +697,7 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                references_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // Completion: invoked explicitly, as the user types a name, or on `.` — the trigger
                 // that fires member completion at a bare receiver dot (`c.`).
@@ -702,6 +755,32 @@ impl LanguageServer for Backend {
                 .parse::<Uri>()
                 .ok()
                 .map(|uri| GotoDefinitionResponse::Scalar(Location { uri, range }))
+        }))
+    }
+
+    async fn references(&self, params: ReferenceParams) -> Result<Option<Vec<Location>>> {
+        let position_params = params.text_document_position;
+        let uri = position_params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let found = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.references(
+                uri.as_str(),
+                position_params.position,
+                encoding,
+                params.context.include_declaration,
+            )
+        };
+        Ok(found.map(|locations| {
+            locations
+                .into_iter()
+                .filter_map(|(target_uri, range)| {
+                    target_uri
+                        .parse::<Uri>()
+                        .ok()
+                        .map(|uri| Location { uri, range })
+                })
+                .collect()
         }))
     }
 
@@ -1163,6 +1242,108 @@ mod tests {
         assert!(has("helper", CompletionItemKind::FUNCTION));
         assert!(has("total", CompletionItemKind::VARIABLE));
         assert!(has("return", CompletionItemKind::KEYWORD));
+    }
+
+    #[test]
+    fn references_finds_all_uses_of_a_local() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///r.noe",
+            "total = 1\necho total\necho total".to_string(),
+        );
+        // Cursor on the binding `total` (line 0) — without the declaration, two uses.
+        let uses = store
+            .references(
+                "file:///r.noe",
+                Position {
+                    line: 0,
+                    character: 2,
+                },
+                Encoding::Utf8,
+                false,
+            )
+            .expect("resolves the symbol");
+        assert_eq!(uses.len(), 2, "two uses of total; got {uses:?}");
+        assert!(
+            uses.iter()
+                .all(|(_, r)| r.start.line == 1 || r.start.line == 2)
+        );
+
+        // With the declaration included, three locations.
+        let with_decl = store
+            .references(
+                "file:///r.noe",
+                Position {
+                    line: 1,
+                    character: 5,
+                },
+                Encoding::Utf8,
+                true,
+            )
+            .expect("resolves the symbol from a use too");
+        assert_eq!(
+            with_decl.len(),
+            3,
+            "two uses + the declaration; got {with_decl:?}"
+        );
+    }
+
+    #[test]
+    fn references_span_modules_for_a_function() {
+        let dir = temp_workspace(
+            "refs_xmod",
+            &[(
+                "util.noe",
+                "namespace App.Util;\npub fn helper(): int { return 1 }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let util_uri = path_to_uri(&dir.join("util.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Util.helper;\na = helper()\nb = helper()".to_string(),
+        );
+        // Cursor on a call to the imported `helper` — references include the two call sites here plus
+        // the declaration in the sibling.
+        let refs = store
+            .references(
+                &entry_uri,
+                Position {
+                    line: 1,
+                    character: 4,
+                },
+                Encoding::Utf8,
+                true,
+            )
+            .expect("resolves the imported function");
+        assert!(
+            refs.iter().any(|(u, _)| *u == util_uri),
+            "the declaration in util.noe is a reference; got {refs:?}"
+        );
+        assert!(
+            refs.iter().filter(|(u, _)| *u == entry_uri).count() >= 2,
+            "both call sites in main.noe; got {refs:?}"
+        );
+    }
+
+    #[test]
+    fn references_on_nothing_is_none() {
+        let mut store = DocumentStore::default();
+        store.open("file:///r.noe", "echo 1".to_string());
+        assert!(
+            store
+                .references(
+                    "file:///r.noe",
+                    Position {
+                        line: 0,
+                        character: 5,
+                    },
+                    Encoding::Utf8,
+                    true,
+                )
+                .is_none()
+        );
     }
 
     #[test]

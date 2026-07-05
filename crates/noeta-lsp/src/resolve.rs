@@ -210,6 +210,33 @@ impl DefUse {
             .map(|(_, def)| *def)
     }
 
+    /// The definition span the cursor identifies for find-references — whether it sits on a *use*
+    /// (its resolved definition) or on the *definition* name itself (that binding). `None` if the
+    /// cursor is on neither. The returned span uniquely keys the symbol; [`references_to`](Self::
+    /// references_to) then collects every use of it.
+    pub fn symbol_at(&self, offset: u32, source: SourceId) -> Option<Span> {
+        // On a use → its definition.
+        if let Some(def) = self.definition_at(offset, source) {
+            return Some(def);
+        }
+        // On the declaration name itself → that definition (it is the `def` of its own uses).
+        self.refs
+            .iter()
+            .map(|(_, def)| *def)
+            .find(|def| def.source == source && def.start <= offset && offset <= def.end)
+    }
+
+    /// Every *use* span that resolves to definition `def` — the references to the symbol. The
+    /// declaration itself is not included (the caller adds it when `includeDeclaration` is set).
+    /// Spans may span multiple files (a cross-module symbol).
+    pub fn references_to(&self, def: Span) -> Vec<Span> {
+        self.refs
+            .iter()
+            .filter(|(_, d)| *d == def)
+            .map(|(use_span, _)| *use_span)
+            .collect()
+    }
+
     /// The `(receiver span, member name)` of the member access in file `source` whose member-name
     /// span contains `offset`, if the cursor is on a `.member`. The caller resolves the receiver's
     /// type (via the checker's `expr_types`) and looks the member up in a [`MemberTable`].
