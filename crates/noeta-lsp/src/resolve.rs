@@ -1,18 +1,22 @@
-//! Top-level definition resolution for go-to-definition.
+//! Definition resolution for go-to-definition, in two layers:
 //!
-//! Scope for slice **L3**: the two unambiguous, high-value cases — jumping from a **function call**
-//! or a **type reference** to the top-level `fn` / `struct` / `class` / `enum` that declares it.
-//! These live in a single global namespace with no shadowing among themselves, so a name resolves to
-//! its declaration without scope tracking. The reference under the cursor is found from the token
-//! stream (see [`crate`]); this module owns the definition table and the name lookup.
+//! - [`DefUse`] — a **scope-aware value index** (L3.2): a use of a local, parameter, `for`/`match`/
+//!   closure binding, or top-level function resolves to the precise binding in scope at the cursor,
+//!   respecting shadowing. Built by one AST walk that mirrors the language's scoping.
+//! - [`Definitions`] — a **top-level name table** (L3): the fallback for what the value index does
+//!   not cover — type references and constructors — resolved by the identifier text under the cursor
+//!   against the top-level `fn` / `struct` / `class` / `enum` declarations.
 //!
-//! Deliberately *not* here yet (a documented follow-on): locals and parameters (need a scope-aware
-//! walk), methods and fields (need the receiver's type), and cross-module definitions (need the
-//! linked workspace). Until then a reference to a local simply yields no jump — never a wrong one.
+//! Go-to-definition tries the value index first, then the name table (see [`crate`]).
+//!
+//! Deliberately *not* here yet (a documented follow-on): methods and fields (need the receiver's
+//! type) and cross-module definitions (need the linked workspace). The bodies of methods inside a
+//! `struct`/`class`/`enum` are likewise not yet walked for value references. A reference none of
+//! this covers simply yields no jump — never a wrong one.
 
 use std::collections::HashMap;
 
-use noeta_ast::{Program, Stmt};
+use noeta_ast::{ClosureBody, Expr, ForPattern, Param, Pattern, Program, Stmt, StrPart};
 use noeta_span::Span;
 
 /// The top-level definitions a document offers for go-to-definition, keyed by name → the span of the
@@ -70,6 +74,370 @@ impl Definitions {
     }
 }
 
+/// A scope-aware **value** def/use index: every identifier *use* (a variable, parameter, or
+/// function reference) mapped to the span of the *definition* it resolves to. Built by one AST walk
+/// that mirrors the language's scoping — parameters, block-local bindings, `for`/`match`/closure
+/// bindings, and the bare-assignment locality rule (`x = v` reassigns an enclosing binding if one
+/// exists, else declares a fresh local). Go-to-definition consults this first; anything it does not
+/// cover (type names, constructors) falls back to the top-level [`Definitions`] table.
+///
+/// Not yet walked (a documented follow-on): the bodies of methods inside `struct`/`class`/`enum`
+/// declarations (coupled to the receiver-type work) and `@tier` blocks. A reference there simply
+/// isn't in the index and falls through to the name-table fallback.
+#[derive(Debug, Default)]
+pub struct DefUse {
+    /// `(use span, definition span)` for each value identifier that resolves to a binding.
+    refs: Vec<(Span, Span)>,
+}
+
+impl DefUse {
+    /// Build the value def/use index for `program`.
+    pub fn build(program: &Program) -> DefUse {
+        let mut resolver = Resolver::default();
+        // Top-level functions resolve regardless of textual order (mutual recursion), so seed them
+        // before walking any body.
+        for stmt in &program.stmts {
+            if let Stmt::Fn(decl) = stmt {
+                resolver
+                    .functions
+                    .entry(decl.name.clone())
+                    .or_insert(decl.name_span);
+            }
+        }
+        resolver.scopes.push(HashMap::new()); // the module scope, for top-level bindings
+        for stmt in &program.stmts {
+            resolver.walk_stmt(stmt);
+        }
+        DefUse {
+            refs: resolver.refs,
+        }
+    }
+
+    /// The definition span for the value reference whose use-span contains `offset`, if any. The
+    /// tightest containing use wins (value-ident uses do not nest, but the guard is cheap).
+    pub fn definition_at(&self, offset: u32) -> Option<Span> {
+        self.refs
+            .iter()
+            .filter(|(use_span, _)| {
+                use_span.end > use_span.start && use_span.start <= offset && offset <= use_span.end
+            })
+            .min_by_key(|(use_span, _)| use_span.end - use_span.start)
+            .map(|(_, def)| *def)
+    }
+}
+
+/// The mutable state of one [`DefUse::build`] walk: the top-level function table, the lexical scope
+/// stack of value bindings (innermost last), and the accumulating use→def references.
+#[derive(Default)]
+struct Resolver {
+    functions: HashMap<String, Span>,
+    scopes: Vec<HashMap<String, Span>>,
+    refs: Vec<(Span, Span)>,
+}
+
+impl Resolver {
+    fn push_scope(&mut self) {
+        self.scopes.push(HashMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn bind(&mut self, name: &str, span: Span) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name.to_string(), span);
+        }
+    }
+
+    fn in_scope(&self, name: &str) -> bool {
+        self.scopes.iter().any(|scope| scope.contains_key(name))
+    }
+
+    /// Resolve a value name to its definition span: the nearest enclosing binding, else a top-level
+    /// function.
+    fn resolve(&self, name: &str) -> Option<Span> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).copied())
+            .or_else(|| self.functions.get(name).copied())
+    }
+
+    /// Record a use of `name` at `span` if it resolves to a definition.
+    fn use_ident(&mut self, name: &str, span: Span) {
+        if let Some(def) = self.resolve(name) {
+            self.refs.push((span, def));
+        }
+    }
+
+    /// Introduce a bound name: a fresh local for a `mut` declaration or a name not already in scope;
+    /// otherwise a bare reassignment, whose target is a *use* of the existing binding.
+    fn declare_or_reassign(&mut self, mut_decl: bool, name: &str, span: Span) {
+        if mut_decl || !self.in_scope(name) {
+            self.bind(name, span);
+        } else {
+            self.use_ident(name, span);
+        }
+    }
+
+    fn walk_block_scoped(&mut self, stmts: &[Stmt]) {
+        self.push_scope();
+        for stmt in stmts {
+            self.walk_stmt(stmt);
+        }
+        self.pop_scope();
+    }
+
+    /// Walk a function/closure: parameter defaults resolve in the *definition* scope (not against the
+    /// parameters), so they are walked before the parameter scope is pushed.
+    fn walk_callable(&mut self, params: &[Param], body_stmts: &[Stmt], body_expr: Option<&Expr>) {
+        for param in params {
+            if let Some(default) = &param.default {
+                self.walk_expr(default);
+            }
+        }
+        self.push_scope();
+        for param in params {
+            self.bind(&param.name, param.name_span);
+        }
+        for stmt in body_stmts {
+            self.walk_stmt(stmt);
+        }
+        if let Some(expr) = body_expr {
+            self.walk_expr(expr);
+        }
+        self.pop_scope();
+    }
+
+    fn walk_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Echo { value, .. } => self.walk_expr(value),
+            Stmt::Binding {
+                mut_decl,
+                name,
+                name_span,
+                value,
+                ..
+            } => {
+                self.walk_expr(value);
+                self.declare_or_reassign(*mut_decl, name, *name_span);
+            }
+            Stmt::Destructure {
+                mut_decl,
+                targets,
+                value,
+                ..
+            } => {
+                self.walk_expr(value);
+                for (name, span) in targets {
+                    self.declare_or_reassign(*mut_decl, name, *span);
+                }
+            }
+            Stmt::Fn(decl) => {
+                // The fn name is visible to siblings and to itself (recursion).
+                self.bind(&decl.name, decl.name_span);
+                self.walk_callable(&decl.params, &decl.body, None);
+            }
+            Stmt::Return { value, .. } => {
+                if let Some(value) = value {
+                    self.walk_expr(value);
+                }
+            }
+            Stmt::Yield { value, .. } => self.walk_expr(value),
+            Stmt::Expr { expr, .. } => self.walk_expr(expr),
+            Stmt::Concurrent { body, .. } => self.walk_block_scoped(body),
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } => {
+                self.walk_expr(cond);
+                self.walk_block_scoped(then_body);
+                if let Some(else_body) = else_body {
+                    self.walk_block_scoped(else_body);
+                }
+            }
+            Stmt::For {
+                pattern,
+                iterable,
+                body,
+                ..
+            } => {
+                self.walk_expr(iterable);
+                self.push_scope();
+                match pattern {
+                    ForPattern::Single { name, name_span } => self.bind(name, *name_span),
+                    ForPattern::Tuple { names, .. } => {
+                        for (name, span) in names {
+                            self.bind(name, *span);
+                        }
+                    }
+                }
+                for stmt in body {
+                    self.walk_stmt(stmt);
+                }
+                self.pop_scope();
+            }
+            Stmt::While { cond, body, .. } => {
+                self.walk_expr(cond);
+                self.walk_block_scoped(body);
+            }
+            // Declarations whose bodies need the receiver/type machinery, control-flow leaves, and
+            // module/tier statements are not indexed for value references yet (see the type docs).
+            Stmt::Enum(_)
+            | Stmt::Struct(_)
+            | Stmt::Class(_)
+            | Stmt::Impl(_)
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. }
+            | Stmt::TierBlock { .. } => {}
+        }
+    }
+
+    fn walk_expr(&mut self, expr: &Expr) {
+        match expr {
+            Expr::Ident { name, span } => self.use_ident(name, *span),
+            Expr::Unary { operand, .. } => self.walk_expr(operand),
+            Expr::Binary { lhs, rhs, .. } => {
+                self.walk_expr(lhs);
+                self.walk_expr(rhs);
+            }
+            Expr::Call { callee, args, .. } => {
+                self.walk_expr(callee);
+                self.walk_exprs(args);
+            }
+            Expr::Closure { params, body, .. } => match body {
+                ClosureBody::Expr(expr) => self.walk_callable(params, &[], Some(expr)),
+                ClosureBody::Block(stmts) => self.walk_callable(params, stmts, None),
+            },
+            Expr::Pipeline { left, right, .. } => {
+                self.walk_expr(left);
+                self.walk_expr(right);
+            }
+            Expr::List { items, .. } | Expr::Tuple { items, .. } => self.walk_exprs(items),
+            Expr::TupleIndex { receiver, .. } => self.walk_expr(receiver),
+            Expr::Range { start, end, .. } => {
+                self.walk_expr(start);
+                self.walk_expr(end);
+            }
+            Expr::Map { entries, .. } => {
+                for (key, value) in entries {
+                    self.walk_expr(key);
+                    self.walk_expr(value);
+                }
+            }
+            // `receiver.name` — the receiver is a value; the member name is a field/method, resolved
+            // by the receiver's type (a later slice), not a value binding.
+            Expr::Member { receiver, .. } => self.walk_expr(receiver),
+            Expr::Index {
+                receiver, index, ..
+            } => {
+                self.walk_expr(receiver);
+                self.walk_expr(index);
+            }
+            Expr::Interp { parts, .. } => {
+                for part in parts {
+                    if let StrPart::Hole(expr) = part {
+                        self.walk_expr(expr);
+                    }
+                }
+            }
+            Expr::Match {
+                scrutinee, arms, ..
+            } => {
+                self.walk_expr(scrutinee);
+                for arm in arms {
+                    self.push_scope();
+                    bind_pattern(&arm.pattern, &mut |name, span| self.bind(name, span));
+                    self.walk_expr(&arm.body);
+                    self.pop_scope();
+                }
+            }
+            Expr::Object(lit) => {
+                if let Some(spread) = &lit.spread {
+                    self.walk_expr(spread);
+                }
+                for init in &lit.fields {
+                    self.walk_expr(&init.value);
+                }
+            }
+            Expr::Try { expr, .. }
+            | Expr::Await { expr, .. }
+            | Expr::TypeTest { expr, .. }
+            | Expr::As { expr, .. } => self.walk_expr(expr),
+            Expr::Spawn { future, .. } => self.walk_expr(future),
+            Expr::TypeOf { value, .. } => self.walk_expr(value),
+            Expr::FromBytes { blob, .. } => self.walk_expr(blob),
+            Expr::Channel { capacity, .. } => self.walk_expr(capacity),
+            Expr::TypedModuleCall { recv, args, .. } => {
+                self.walk_expr(recv);
+                self.walk_exprs(args);
+            }
+            Expr::Invoke {
+                recv, name, args, ..
+            } => {
+                self.walk_expr(recv);
+                self.walk_expr(name);
+                self.walk_expr(args);
+            }
+            Expr::Coalesce {
+                value, fallback, ..
+            } => {
+                self.walk_expr(value);
+                self.walk_expr(fallback);
+            }
+            Expr::FieldSet {
+                receiver, value, ..
+            } => {
+                self.walk_expr(receiver);
+                self.walk_expr(value);
+            }
+            // Literals and operand-free reflection queries reference no value binding.
+            Expr::Str { .. }
+            | Expr::Int { .. }
+            | Expr::Float { .. }
+            | Expr::F32 { .. }
+            | Expr::IntN { .. }
+            | Expr::Bool { .. }
+            | Expr::AttributesOf { .. }
+            | Expr::RolesOf { .. } => {}
+        }
+    }
+
+    fn walk_exprs(&mut self, exprs: &[Expr]) {
+        for expr in exprs {
+            self.walk_expr(expr);
+        }
+    }
+}
+
+/// Invoke `bind` for each name a match pattern introduces (recursing into variant and tuple
+/// sub-patterns). Literal, wildcard, and `is T` patterns bind nothing.
+fn bind_pattern(pattern: &Pattern, bind: &mut impl FnMut(&str, Span)) {
+    match pattern {
+        Pattern::Binding { name, span } => bind(name, *span),
+        Pattern::Variant { bindings, .. } => {
+            for sub in bindings {
+                bind_pattern(sub, bind);
+            }
+        }
+        Pattern::Tuple { elements, .. } => {
+            for sub in elements {
+                bind_pattern(sub, bind);
+            }
+        }
+        Pattern::Wildcard { .. }
+        | Pattern::Int { .. }
+        | Pattern::Str { .. }
+        | Pattern::Bool { .. }
+        | Pattern::IsType { .. } => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -77,11 +445,21 @@ mod tests {
     use noeta_parser::parse;
     use noeta_span::{Source, SourceId};
 
-    fn defs_of(src: &str) -> Definitions {
+    fn program_of(src: &str) -> noeta_ast::Program {
         let source = Source::new(SourceId::FIRST, "t.noe", src);
         let lexed = lex(&source);
-        let parsed = parse(&source, &lexed.tokens);
-        Definitions::collect(&parsed.program)
+        parse(&source, &lexed.tokens).program
+    }
+
+    fn defs_of(src: &str) -> Definitions {
+        Definitions::collect(&program_of(src))
+    }
+
+    /// The definition byte-offset the value index resolves for the cursor at `use_offset`.
+    fn def_start_at(src: &str, use_offset: u32) -> Option<u32> {
+        DefUse::build(&program_of(src))
+            .definition_at(use_offset)
+            .map(|span| span.start)
     }
 
     #[test]
@@ -101,5 +479,47 @@ mod tests {
         let span = defs.resolve("greet").unwrap();
         assert_eq!(span.start, 3);
         assert_eq!(span.end, 8); // "greet"
+    }
+
+    #[test]
+    fn value_index_resolves_a_local_binding() {
+        let src = "total = 1 + 2\necho total";
+        let use_at = src.rfind("total").unwrap() as u32; // the `total` in `echo total`
+        let def_at = src.find("total").unwrap() as u32; // the binding
+        assert_eq!(def_start_at(src, use_at + 2), Some(def_at));
+    }
+
+    #[test]
+    fn value_index_resolves_a_parameter() {
+        let src = "fn f(count: int): int { return count }";
+        let use_at = src.rfind("count").unwrap() as u32; // `return count`
+        let def_at = src.find("count").unwrap() as u32; // the parameter
+        assert_eq!(def_start_at(src, use_at + 2), Some(def_at));
+    }
+
+    #[test]
+    fn value_index_resolves_a_for_loop_variable() {
+        let src = "for item in [1, 2] {\n  echo item\n}";
+        let use_at = src.rfind("item").unwrap() as u32;
+        let def_at = src.find("item").unwrap() as u32;
+        assert_eq!(def_start_at(src, use_at + 1), Some(def_at));
+    }
+
+    #[test]
+    fn value_index_respects_shadowing() {
+        // The inner closure parameter `x` shadows the outer binding `x`; a use in the body resolves
+        // to the parameter, not the outer binding.
+        let src = "x = 1\nf = fn(x: int) => x + 1";
+        let param_at = src.find("fn(x").unwrap() as u32 + 3; // the parameter `x`
+        let use_at = src.rfind('x').unwrap() as u32; // `x + 1`
+        assert_eq!(def_start_at(src, use_at), Some(param_at));
+    }
+
+    #[test]
+    fn value_index_ignores_an_unbound_name() {
+        // `greet` is a top-level fn (handled by the name-table fallback, not the value index).
+        let src = "fn greet(): int { return 1 }\nx = 1";
+        // A cursor on a nonexistent name resolves to nothing in the value index.
+        assert_eq!(def_start_at(src, 0), None);
     }
 }

@@ -15,9 +15,10 @@
 //! adds **hover types**: the cursor position becomes a byte offset, the tightest enclosing span in
 //! the checker's `expr_types` index gives the inferred type, and it is rendered back to surface
 //! syntax (see [`hover`]). Both features read the one `checked_ide` query, so a document version is
-//! checked once. Slice **L3** adds **go-to-definition**: the identifier token under the cursor is
-//! resolved against the document's top-level definitions (see [`resolve`]). Positions are converted
-//! encoding-aware (see [`offsets`]).
+//! checked once. Slice **L3** adds **go-to-definition**: the reference under the cursor resolves to
+//! its declaration — a scope-aware value index handles locals, parameters, and functions
+//! (shadowing-correct), falling back to a top-level name table for type references (see [`resolve`]).
+//! Positions are converted encoding-aware (see [`offsets`]).
 
 mod hover;
 mod offsets;
@@ -137,17 +138,27 @@ impl DocumentStore {
         Some((repr.clone(), index.range(*span, encoding)))
     }
 
-    /// Resolve the definition of the identifier at `position` for go-to-definition: its declaration
-    /// span as an LSP range, or `None` if the cursor is not on an identifier or the name has no
-    /// top-level definition. The identifier under the cursor comes from the token stream (so a match
-    /// inside a string/comment can't fire); the name is resolved against the top-level definitions.
+    /// Resolve the definition of the reference at `position` for go-to-definition, as an LSP range,
+    /// or `None` if nothing there resolves. Tries the scope-aware value index first (locals,
+    /// parameters, functions — shadowing-correct), then falls back to the identifier token under the
+    /// cursor resolved by name against the top-level definitions (type references, constructors).
     fn definition(&self, uri: &str, position: Position, encoding: Encoding) -> Option<Range> {
         let &program = self.open.get(uri)?;
         let db = &self.db;
         let text = program.text(db);
         let index = LineIndex::new(text);
         let offset = index.offset(position, encoding);
+        let ast = noeta_db::ast(db, program);
 
+        // 1. Scope-aware value resolution — a local, parameter, or function reference resolves to
+        //    the precise binding in scope at the cursor (shadowing-correct).
+        if let Some(def) = resolve::DefUse::build(&ast.0.program).definition_at(offset) {
+            return Some(index.range(def, encoding));
+        }
+
+        // 2. Fallback: the identifier token under the cursor resolved by name against the top-level
+        //    definitions. Covers type references and constructors (which the value index skips) and
+        //    is drawn from the token stream so a match inside a string/comment cannot fire.
         let token = noeta_db::tokens(db, program)
             .0
             .tokens
@@ -158,9 +169,7 @@ impl DocumentStore {
                     && offset <= token.span.end
             })?;
         let name = &text[token.span.range()];
-
-        let defs = resolve::Definitions::collect(&noeta_db::ast(db, program).0.program);
-        let def_span = defs.resolve(name)?;
+        let def_span = resolve::Definitions::collect(&ast.0.program).resolve(name)?;
         Some(index.range(def_span, encoding))
     }
 }
@@ -525,6 +534,25 @@ mod tests {
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.character, 3);
         assert_eq!(range.end.character, 8);
+    }
+
+    #[test]
+    fn goto_definition_jumps_from_a_use_to_a_local_binding() {
+        let mut store = DocumentStore::default();
+        store.open("file:///d.noe", "total = 1 + 2\necho total".to_string());
+        // Cursor on `total` in `echo total` (line 1) → jumps to the binding on line 0, column 0.
+        let range = store
+            .definition(
+                "file:///d.noe",
+                Position {
+                    line: 1,
+                    character: 7,
+                },
+                Encoding::Utf8,
+            )
+            .expect("use resolves to the local binding");
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 0);
     }
 
     #[test]
