@@ -74,6 +74,7 @@ deliberately separate, last slice (S5) that can be dropped if its measured value
 |---|---|---|---|
 | **S0** | ✅ **DONE.** **Region liveness + value-location maps** (`noeta-jit/src/plan.rs`). Per-pc backward liveness over sound all-op successors (`succ_all` covers the `Match*`/`Coalesce` edges the arithmetic-whitelist `analysis_succ` never sees; unmodeled op = reads-all, fail-closed **per op**) + `ssa_ok` = the complement of the J7 bare-store map. 6 contract-locking tests. | Analysis only; fails closed to `InSlot`. |
 | **S1+S2** | ✅ **DONE (one slice — see "What landed" below).** Promotion via **`cranelift-frontend` `Variable`s** (`declare_var`/`def_var`/`use_var`), which build the block parameters at merges automatically — straight-line *and* cross-block (loop headers included) in one mechanism, which is why the two planned slices collapsed into one. Plus **known-constant register inlining** (`plan::const_reg_bits`) and `opt_level=speed`. fnloop **1.36×**, toploop **1.18×**, float loop **1.23×**; `--jit-differential` 0-div/0-leak first run. | Spill-map correctness at bail edges — oracle-gated. |
+| **T1** | ✅ **DONE (two commits — see "T1 — what landed" below).** **Typed/unboxed promotion**: a forward kind dataflow (`{Bot, Int, Bool, Float, Imm}`) + a second **raw** variable per register; typed ops skip the NaN-box tag checks and unboxing entirely; `Bool`-claimed branches use the raw bit. T1b claims **parameters immediate** (entry-verified) and adds **asymmetric** typed binaries (`i < n` with a parameter bound). Int loop 10M **67→29 ms (2.31×** over S1+S2's output**)** — the milestone's loop target (~30 ms) is **hit**. | Kind claims ride the ff9efed verified-entry contract; typed⇒immediate invariant test-locked. |
 | **S3** | **Skip the register-window zero-init** (P-CALL deferred lever #2). With definite-assignment from S0, a frame whose registers are all written-before-read (or covered by entry spills) doesn't need `reserve_window`'s zero-fill; `do_return`'s release loop instead walks a recorded live-set (or the frame spills unit to dead slots at deopt only). Removes a per-call `memset`-shaped cost. | Frame-teardown contract; leak oracle is the judge. |
 | **S4** | **SSA calling convention for native→native direct calls.** A direct call passes args as SSA values (Cranelift call args) and receives the return value in a register; the callee's frame is materialized (slots + `Frame` push) **only on its deopt path**. The caller's frame-setup work (zero-init + retain-immediates + push/pop) disappears on the all-native path — the actual `fib` lever P-CALL identified. Fallback: any non-direct-able call keeps today's `jit_prepare_call` protocol. | The deopt path must reconstruct a frame mid-call ("frame reconstruction") — the subtlest slice; do after S1–S3 are proven. |
 | **S5** | **(Optional, measure-first) heap values in SSA.** Ownership-aware promotion of may-heap registers (spill = store + the release tier-0 would have done at the overwrite). Only if a workload demonstrates the win after S1–S4; J6's lesson says don't assume. | Refcount bookkeeping — highest risk, lowest proven value. Drop by default. |
@@ -148,6 +149,59 @@ fail-closed like liveness. Expected: the remaining ~2–3× on fnloop-class loop
 The globals loop's ceiling after T1 is the globals array itself (every iteration re-loads/stores
 `i`/`total` slots with unbound/heap guards) — its lever is register-allocating top-level locals
 (the deferred deeper-F1, a compiler track, out of P-JSSA's scope).
+
+## T1 — what landed (typed promotion, and the OSR-entry design correction)
+
+**T1a (typed/unboxed promotion).** A forward kind dataflow (`kind_in_map`, lattice
+`Bot < {Int, Bool, Float} < Imm`, join = equality-or-`Imm`) over the same tier-0 CFG and the same
+modeled-op whitelist as the bare-store analysis, plus a second **raw** SSA variable per register
+holding the unboxed value (sign-extended i64 for `Int`, 0/1 for `Bool`; `Float` needs no raw form
+— a NaN-boxed float's word *is* its bit pattern, so its win is only skipping the dispatch).
+Both-`Int` binaries go straight to the integer body on the raw forms — no tag checks, no unbox,
+no box/unbox chain through the loop-header block params (the floor S1+S2 identified);
+both-`Float` skips the type dispatch; comparisons keep a raw 0/1 form so a `Bool`-claimed
+`CondBranch`/`JumpIf*` branches on the raw bit (no re-comparison, no E0007 bail chain — in the
+final disasm the loop-governing compare is literally one `cmp $bound, %reg; jl`). Every def form
+that can produce `Int`/`Bool` also defines the raw variable (dual def — the boxed form is
+re-boxed once per def, ~2 ALU ops off the critical path, and stays current for spills).
+
+**The design correction discovered en route: entries must *verify* kind claims, not force them
+to `Imm`.** The draft design forced all-`Imm` at native entry pcs — but both hot loop shapes
+enter via **OSR headers**, so the forcing would land exactly on the loop header and erase every
+kind claim where it matters (the whole slice would have been a no-op). Instead the kind claims
+ride the same contract ff9efed built for the immediate claims: `guard_entry_claims` (the renamed
+`guard_immediate_claims`) checks each claimed register by its kind — `is_small_int` for `Int`,
+the bool/float word tests for `Bool`/`Float`, plain `is_pointer` for untyped `Imm` (the typed
+tests subsume the pointer test, so the guard costs the same) — and the entry inits then define
+the raw variables (real unbox where claimed, dummy zero elsewhere; a raw read requires a typed
+claim, which requires typed defs on every path). Invariant locked by test: a typed kind implies
+the immediate claim (`kind ∈ {Int,Bool,Float}` ⇒ `!heap_in` — both transfers mark the same
+may-heap defs).
+
+**T1b (parameters + asymmetric).** The bare-store seed now claims **parameters immediate**: the
+pc-0 entry guard has always bailed on a heap argument before the body runs, and mid-frame entries
+verify — so the claim is runtime-checked at *every* native entry, the identical contract as the
+natively-stored-result claims. Parameters are then promotable (boxed variable, loaded once per
+entry instead of per use). On top: **asymmetric typed binaries** — one operand statically `Int`
+(resp. `Float`), the other an unknown immediate — guard only the unknown side, then the raw body.
+The canonical shape is a parameter-bounded loop (`i < n`): `i` reads raw, and `n`'s boxed
+variable is loop-invariant so its `is_small_int` guard LICM-hoists out of the loop.
+
+**Measured (pinned, round-robin-interleaved min-of-9, end-to-end `noeta run`; "base" =
+S1+S2+fixes, i.e. this branch pre-T1):** fn-local int loop 10M (const bound) 67→29 ms
+(**2.31×**; ~2.4× vs main's ~70 ms — **the milestone's loop 10M ≤ ~30 ms target is hit**;
+PHP-JIT 17.2, LuaJIT 13.9 on the same suite), parameter-bounded variant 73→34 ms (**2.15×**,
+of which 1.21× is T1b), fib ~1.02× (its lever is S4's calling convention, unchanged),
+floatloop/toploop/strcat/assoc/wordcount/struct-field/forrange all neutral (float loops are
+FP-latency-bound — the tag checks lived in the fadd/fmul dependency chain's shadow). Gates:
+`--jit-differential` 433/0-divergence/0-leak/0-anomaly (893/894 native), differential
+433/0-skipped, conformance 444, leak+anomaly residency 0 both backends, workspace green,
+clippy+fmt clean.
+
+**Remaining per-iteration work in the typed loop:** the 48-bit fit check per arith def (bail on
+overflow — semantics, stays), the dual-def re-box (~2 ALU ops/def, off the critical path), and
+`%`'s magic-number division. The next levers are S3 (skip the register-window zero-init) and S4
+(SSA calling convention — the fib lever), per the table.
 
 ## Design notes (constraints discovered by J0–J7 that S1+ must honour)
 
