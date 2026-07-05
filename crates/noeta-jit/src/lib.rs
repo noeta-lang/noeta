@@ -1097,10 +1097,8 @@ fn reachable_pcs_from(chunk: &noeta_bytecode::Chunk, entries: Vec<usize>) -> Vec
                 stack.push(*target as usize);
                 stack.push(pc + 1);
             }
-            // A native `Call`/`CallGlobal` exits the compiled function (returns `CALLED`, or resumes
-            // native after a direct call); `Return` ends the frame. None has an in-frame native
-            // successor.
-            Op::Call { .. } | Op::CallGlobal { .. } | Op::Return { .. } => {}
+            Op::Call { .. } | Op::CallGlobal { .. } => stack.push(pc + 1),
+            Op::Return { .. } => {}
             _ => stack.push(pc + 1), // fast straight-line op
         }
     }
