@@ -1,4 +1,7 @@
+# This extension is not bundled — `src/extension.js` loads `vscode-languageclient` from
+# `node_modules` at runtime, so production dependencies must ship in the .vsix. Package with
+# `npm install --omit=dev` first (so only runtime deps are present), then `vsce package`.
 .vscodeignore
 **/*.vsix
-node_modules/**
 .vscode-test/**
+package-lock.json

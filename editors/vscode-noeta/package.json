@@ -1,8 +1,8 @@
 {
   "name": "noeta",
   "displayName": "Noeta",
-  "description": "Syntax highlighting and editor configuration for the Noeta programming language (.noe).",
-  "version": "0.1.0",
+  "description": "Language support for the Noeta programming language (.noe): syntax highlighting plus the noeta lsp language server (diagnostics, hover, go-to-definition, outline, completion).",
+  "version": "0.2.0",
   "publisher": "noeta",
   "license": "MIT",
   "repository": {
@@ -10,7 +10,7 @@
     "url": "https://github.com/noeta-lang/noeta"
   },
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
   "categories": [
     "Programming Languages"
@@ -18,6 +18,10 @@
   "keywords": [
     "noeta",
     "noe"
+  ],
+  "main": "./src/extension.js",
+  "activationEvents": [
+    "onLanguage:noeta"
   ],
   "contributes": {
     "languages": [
@@ -39,6 +43,39 @@
         "scopeName": "source.noeta",
         "path": "./syntaxes/noeta.tmLanguage.json"
       }
-    ]
+    ],
+    "commands": [
+      {
+        "command": "noeta.restartServer",
+        "title": "Noeta: Restart Language Server"
+      }
+    ],
+    "configuration": {
+      "title": "Noeta",
+      "properties": {
+        "noeta.server.path": {
+          "type": "string",
+          "default": "noeta",
+          "markdownDescription": "Path to the `noeta` executable. The extension launches it as `noeta lsp`. Defaults to `noeta` on your `PATH`; set an absolute path to use a local build (e.g. `target/release/noeta`)."
+        },
+        "noeta.trace.server": {
+          "type": "string",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Trace the JSON-RPC traffic between VS Code and the Noeta language server, in the server's output channel."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^18.19.0",
+    "@types/vscode": "^1.82.0"
   }
 }
