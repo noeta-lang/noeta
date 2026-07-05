@@ -23,7 +23,8 @@
 //! of the symbol under the cursor — a value (local/parameter/function) or a member (field/variant/
 //! method, matched by the receiver's type), across modules; **rename** turns those into a
 //! `WorkspaceEdit` (with `prepareRename` validation). **Signature help** shows the called function's
-//! signature and active
+//! or method's signature; **semantic tokens** overlay the client's grammar with compiler-classified
+//! identifiers (see [`semtokens`]). Signature help shows the active
 //! argument while typing a call (see [`signature`]). Slice **L5** adds **completion**:
 //! on a member access `receiver.member` the cursor offers the receiver type's fields, variants, and
 //! methods; in a type-annotation position it offers the type names; otherwise it offers the language
@@ -34,6 +35,7 @@ mod completion;
 mod hover;
 mod offsets;
 mod resolve;
+mod semtokens;
 mod signature;
 mod symbols;
 
@@ -586,6 +588,40 @@ impl DocumentStore {
         Some(completion::complete(program, offset, cursor))
     }
 
+    /// The semantic tokens for `uri`: the compiler-classified identifiers (function/variable/type/
+    /// property), delta-encoded per the LSP wire format against the [`semtokens::LEGEND`]. A
+    /// single-file overlay over the entry document's own AST — the client keeps its static grammar for
+    /// everything else. `None` if the document is not open.
+    fn semantic_tokens(&self, uri: &str, encoding: Encoding) -> Option<Vec<SemanticToken>> {
+        let cache = self.workspaces.get(uri)?;
+        let entry = cache.entry();
+        let index = LineIndex::new(entry.text(&self.db));
+        let program = &noeta_db::ast(&self.db, entry).0.program;
+
+        let mut data = Vec::new();
+        let (mut prev_line, mut prev_char) = (0u32, 0u32);
+        for (span, kind) in semtokens::highlights(program) {
+            let range = index.range(span, encoding);
+            // Identifiers do not span lines, so the token length is the width on the start line.
+            let length = range.end.character - range.start.character;
+            let delta_line = range.start.line - prev_line;
+            let delta_start = if delta_line == 0 {
+                range.start.character - prev_char
+            } else {
+                range.start.character
+            };
+            data.push(SemanticToken {
+                delta_line,
+                delta_start,
+                length,
+                token_type: kind as u32,
+                token_modifiers_bitset: 0,
+            });
+            (prev_line, prev_char) = (range.start.line, range.start.character);
+        }
+        Some(data)
+    }
+
     /// The document outline for `uri`: the hierarchical symbol tree (top-level functions and type
     /// declarations, with fields/variants and methods nested) mapped to LSP `DocumentSymbol`s. A
     /// single-file feature — it reads the entry document's own AST, not the merged workspace — so an
@@ -969,6 +1005,24 @@ impl LanguageServer for Backend {
                     work_done_progress_options: WorkDoneProgressOptions::default(),
                 })),
                 document_symbol_provider: Some(OneOf::Left(true)),
+                // Compiler-accurate identifier highlighting, overlaid on the client's static grammar.
+                semantic_tokens_provider: Some(
+                    SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        SemanticTokensOptions {
+                            work_done_progress_options: WorkDoneProgressOptions::default(),
+                            legend: SemanticTokensLegend {
+                                // One source of truth with the classifier's `SemKind` indices.
+                                token_types: semtokens::LEGEND
+                                    .iter()
+                                    .map(|name| SemanticTokenType::new(name))
+                                    .collect(),
+                                token_modifiers: Vec::new(),
+                            },
+                            range: None,
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                        },
+                    ),
+                ),
                 // Completion: invoked explicitly, as the user types a name, or on `.` — the trigger
                 // that fires member completion at a bare receiver dot (`c.`).
                 completion_provider: Some(CompletionOptions {
@@ -1127,6 +1181,24 @@ impl LanguageServer for Backend {
             store.prepare_rename(uri.as_str(), params.position, encoding)
         };
         Ok(range.map(PrepareRenameResponse::Range))
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> Result<Option<SemanticTokensResult>> {
+        let uri = params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let data = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.semantic_tokens(uri.as_str(), encoding)
+        };
+        Ok(data.map(|data| {
+            SemanticTokensResult::Tokens(SemanticTokens {
+                result_id: None,
+                data,
+            })
+        }))
     }
 
     async fn document_symbol(

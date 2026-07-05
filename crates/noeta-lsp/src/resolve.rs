@@ -75,6 +75,16 @@ impl Definitions {
             .or_else(|| self.values.get(name))
             .copied()
     }
+
+    /// The declared-name spans of the top-level functions — for classifying them in semantic tokens.
+    pub fn value_spans(&self) -> impl Iterator<Item = Span> + '_ {
+        self.values.values().copied()
+    }
+
+    /// The declared-name spans of the top-level types (`struct`/`class`/`enum`).
+    pub fn type_spans(&self) -> impl Iterator<Item = Span> + '_ {
+        self.types.values().copied()
+    }
 }
 
 /// The members (fields, enum variants, and methods) each top-level type declares, keyed by
@@ -176,6 +186,10 @@ pub struct DefUse {
     refs: Vec<(Span, Span)>,
     /// Every `receiver.member` access, for member go-to-definition.
     member_refs: Vec<MemberRef>,
+    /// The declared-name span of every binding introduced (functions, parameters, locals, loop/match/
+    /// closure variables) — including ones never referenced. For semantic-token classification of
+    /// declarations, which the use→def `refs` alone would miss.
+    bindings: Vec<Span>,
 }
 
 impl DefUse {
@@ -199,6 +213,7 @@ impl DefUse {
         DefUse {
             refs: resolver.refs,
             member_refs: resolver.member_refs,
+            bindings: resolver.bindings,
         }
     }
 
@@ -245,6 +260,19 @@ impl DefUse {
             .filter(|(_, d)| *d == def)
             .map(|(use_span, _)| *use_span)
             .collect()
+    }
+
+    /// Every recorded `(use span, definition span)` — for semantic-token classification: a use whose
+    /// definition is a top-level function is a function reference, otherwise a variable/parameter.
+    pub fn all_refs(&self) -> impl Iterator<Item = (Span, Span)> + '_ {
+        self.refs.iter().copied()
+    }
+
+    /// The declared-name span of every binding (used or not) — for classifying declarations in
+    /// semantic tokens; the caller decides function vs variable by whether the span is a top-level
+    /// function.
+    pub fn binding_spans(&self) -> impl Iterator<Item = Span> + '_ {
+        self.bindings.iter().copied()
     }
 
     /// Every recorded member access as `(member name, member-name span, receiver span)` — for member
@@ -313,6 +341,8 @@ struct Resolver {
     scopes: Vec<HashMap<String, Span>>,
     refs: Vec<(Span, Span)>,
     member_refs: Vec<MemberRef>,
+    /// Every declared-name span passed to [`bind`](Self::bind), for [`DefUse::binding_spans`].
+    bindings: Vec<Span>,
     /// When set (completion), the `(offset, source)` whose in-scope bindings to capture. `None` for
     /// the def/use walk, which pays no snapshot cost.
     cursor: Option<(u32, SourceId)>,
@@ -404,6 +434,7 @@ impl Resolver {
     }
 
     fn bind(&mut self, name: &str, span: Span) {
+        self.bindings.push(span);
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), span);
         }
