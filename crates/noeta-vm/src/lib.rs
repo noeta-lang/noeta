@@ -3117,432 +3117,30 @@ impl<'m> Vm<'m> {
                                 continue 'reload;
                             }
                         }
-                        // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
-                        // impl returns). One argument, on any non-object receiver.
-                        if method == "compare" {
-                            if args.len() != 1 {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!(
-                                        "method `compare` takes 1 argument but {} were supplied",
-                                        args.len()
-                                    ),
-                                ));
+                        // Everything below the object/enum dispatch is a built-in method on a
+                        // non-object receiver — value-in/value-out, factored into
+                        // `call_builtin_method` (prelude-redesign MH.2) so an unbound method handle
+                        // (`list.len` as a value) dispatches through the SAME branches by
+                        // construction. Arguments are borrowed from the registers (which keep
+                        // ownership); the result is freshly owned. Up to 4 args stage through a
+                        // stack buffer — no method-call path allocates that did not before the
+                        // extraction (A/B-benched: a per-call 1-element `Vec` cost ~20ns on
+                        // `signal.set`-class branches that previously read registers directly).
+                        let mut arg_buf = [Value::unit(); 4];
+                        let arg_vec: Vec<Value>;
+                        let arg_values: &[Value] = if args.len() <= 4 {
+                            for (i, r) in args.iter().enumerate() {
+                                arg_buf[i] = regs[fbase + *r as usize];
                             }
-                            let other = regs[fbase + args[0] as usize];
-                            match compare_primitive(v, other) {
-                                Some(ordering) => {
-                                    let value =
-                                        make_ordering(noeta_ast::ordering_variant(ordering));
-                                    set_reg(regs, fbase, *dst, value);
-                                    pc += 1;
-                                }
-                                None => {
-                                    return Err(self.error(
-                                        DiagnosticCode::TypeMismatch,
-                                        *span,
-                                        format!(
-                                            "cannot compare {} and {}",
-                                            v.type_name(),
-                                            other.type_name()
-                                        ),
-                                    ));
-                                }
-                            }
-                            continue;
-                        }
-                        // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
-                        // the shared `noeta-stdlib` surface so the tree-walker and the VM cannot drift.
-                        // `Unknown` falls through to the collection methods below. `as_string` clones
-                        // out of the heap, so the projected args own their strings for the call.
-                        if let Some(recv_str) = v.as_string() {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let arg_strings: Vec<Option<String>> =
-                                arg_values.iter().map(|a| a.as_string()).collect();
-                            let projected: Vec<noeta_stdlib::Arg> = arg_values
-                                .iter()
-                                .zip(&arg_strings)
-                                .map(|(a, s)| {
-                                    if let Some(s) = s {
-                                        noeta_stdlib::Arg::Str(s)
-                                    } else if let Some(i) = a.as_int() {
-                                        noeta_stdlib::Arg::Int(i)
-                                    } else if let Some(f) = a.as_float() {
-                                        noeta_stdlib::Arg::Float(f)
-                                    } else if let Some(b) = a.as_bool() {
-                                        noeta_stdlib::Arg::Bool(b)
-                                    } else {
-                                        noeta_stdlib::Arg::Other
-                                    }
-                                })
-                                .collect();
-                            match noeta_stdlib::string_method(&recv_str, method, &projected) {
-                                noeta_stdlib::Dispatch::Done(output) => {
-                                    let value = stdlib_output_to_value(output);
-                                    set_reg(regs, fbase, *dst, value);
-                                    pc += 1;
-                                    continue;
-                                }
-                                noeta_stdlib::Dispatch::Err(error) => {
-                                    return Err(self.error(
-                                        stdlib_error_code(error.kind),
-                                        *span,
-                                        error.message,
-                                    ));
-                                }
-                                noeta_stdlib::Dispatch::Unknown => {}
-                            }
-                        }
-                        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
-                        // intrinsics, delegating to the shared `int_method` so the backends agree. The
-                        // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
-                        if let Some(recv_int) = v.as_int()
-                            && let Some(int_method) = noeta_stdlib::IntMethod::from_name(method)
-                        {
-                            let arg = match args.first() {
-                                Some(r) => {
-                                    let a = regs[fbase + *r as usize];
-                                    match a.as_int() {
-                                        Some(n) => n,
-                                        None => {
-                                            return Err(self.error(
-                                            DiagnosticCode::TypeMismatch,
-                                            *span,
-                                            format!(
-                                                "`int.{method}` expects an integer argument, found {}",
-                                                a.type_name()
-                                            ),
-                                        ));
-                                        }
-                                    }
-                                }
-                                None => 0,
-                            };
-                            let value =
-                                Value::int(noeta_stdlib::int_method(recv_int, int_method, arg));
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
-                        // `float↔f32`. The `IntMethod` branch above handled `int→int` and continued; an
-                        // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
-                        // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
-                        if let Some(src) = v
-                            .as_f32()
-                            .map(noeta_stdlib::NumScalar::F32)
-                            .or_else(|| v.as_float().map(noeta_stdlib::NumScalar::F64))
-                            .or_else(|| v.as_int().map(noeta_stdlib::NumScalar::Int))
-                            && let Some(dest) = noeta_stdlib::NumConvert::from_name(method)
-                        {
-                            let value = match noeta_stdlib::num_convert(src, dest) {
-                                noeta_stdlib::NumScalar::Int(i) => Value::int(i),
-                                noeta_stdlib::NumScalar::F64(f) => Value::float(f),
-                                noeta_stdlib::NumScalar::F32(f) => Value::f32(f),
-                            };
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
-                        // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
-                        // method this backend lacks.
-                        if v.list_len().is_some()
-                            && let Some(list_method) = noeta_stdlib::ListMethod::from_name(method)
-                        {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_list_method(v, list_method, method, &arg_values, *span)?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Ring 1 set methods (contains/union/intersection).
-                        if v.is_set()
-                            && let Some(set_method) = noeta_stdlib::SetMethod::from_name(method)
-                        {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_set_method(v, set_method, method, &arg_values, *span)?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // File-handle methods (read_line/read/write/close) — the shared
-                        // `FileHandleMethod` enum keeps the two backends in lockstep.
-                        if v.is_file_handle()
-                            && let Some(handle_method) =
-                                noeta_stdlib::FileHandleMethod::from_name(method)
-                        {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value = self.call_file_handle_method(
-                                v,
-                                handle_method,
-                                method,
-                                &arg_values,
-                                *span,
-                            )?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
-                        // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
-                        // polled); `close` is synchronous. Endpoint validity was checked statically.
-                        if let Some(id) = v.sender_id() {
-                            match method {
-                                "send" => {
-                                    let msg = regs[fbase + args[0] as usize];
-                                    // The future retains its own reference to the message; the arg
-                                    // register's reference is released by its normal end-of-life.
-                                    let future = Value::make_channel_send(id, msg);
-                                    set_reg(regs, fbase, *dst, future);
-                                    pc += 1;
-                                    continue;
-                                }
-                                "close" => {
-                                    match &mut self.channels[id.index()] {
-                                        Channel::Local { closed, .. } => *closed = true,
-                                        Channel::Shared(core) => core.close(),
-                                    }
-                                    self.channel_progress += 1;
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
-                        if let Some(id) = v.receiver_id()
-                            && method == "recv"
-                        {
-                            let future = Value::make_channel_recv(id);
-                            set_reg(regs, fbase, *dst, future);
-                            pc += 1;
-                            continue;
-                        }
-                        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/
-                        // `.update(fn)`, `computed.get()`, and `effect.dispose()`. Each method is guarded
-                        // by the node's `kind` (a `signal` is not disposable, a `computed` is read-only,
-                        // an `effect` is not readable); an invalid pair falls through to the generic
-                        // no-method runtime error below, exactly as any other unknown method on a
-                        // built-in type. `get` on a `computed` recomputes a dirty body via
-                        // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
-                        if let Some((kind, node)) = v.reactive_parts() {
-                            match (kind, method) {
-                                (NodeKind::Signal | NodeKind::Computed, "get") => {
-                                    let result = self.read_reactive(node, *span)?;
-                                    set_reg(regs, fbase, *dst, result);
-                                    pc += 1;
-                                    continue;
-                                }
-                                (NodeKind::Signal, "set") => {
-                                    let value = regs[fbase + args[0] as usize];
-                                    // The graph retains its own reference to the new content and
-                                    // releases the old; the arg register's reference is released by
-                                    // its normal end-of-life. Then flush so subscribed effects rerun —
-                                    // but coalesce: a set inside a running effect body only enqueues,
-                                    // the ongoing flush picks it up (no nested flush). (reactivity S4)
-                                    self.reactive.set(node, GcVal::retained(value));
-                                    if !self.reactive.is_flushing() {
-                                        self.drive_flush(*span)?;
-                                    }
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                (NodeKind::Signal, "update") => {
-                                    // Read-modify-write: read the current value (owned), call the
-                                    // updater with it (which consumes that reference), store the
-                                    // result, then flush (coalescing inside a running flush, like set).
-                                    let f = regs[fbase + args[0] as usize];
-                                    let current = self.read_reactive(node, *span)?;
-                                    let updated = self.call_value(f, vec![current], *span)?;
-                                    self.reactive.set(node, GcVal::owned(updated));
-                                    if !self.reactive.is_flushing() {
-                                        self.drive_flush(*span)?;
-                                    }
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                (NodeKind::Effect, "dispose") => {
-                                    // Unsubscribe and free the node; its stored body/content drop.
-                                    self.reactive.dispose(node);
-                                    set_reg(regs, fbase, *dst, Value::unit());
-                                    pc += 1;
-                                    continue;
-                                }
-                                _ => {}
-                            }
-                        }
-                        // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
-                        // handle above.
-                        if v.is_iter()
-                            && let Some(iter_method) = noeta_stdlib::IterMethod::from_name(method)
-                        {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_iter_method(v, iter_method, method, &arg_values, *span)?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Ring 1 map methods (keys/values/has).
-                        if v.is_map()
-                            && let Some(map_method) = noeta_stdlib::MapMethod::from_name(method)
-                        {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_map_method(v, map_method, method, &arg_values, *span)?;
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
-                        // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
-                        if method == "to_bytes" && v.is_list() {
-                            if !args.is_empty() {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    "method `to_bytes` takes no arguments".to_string(),
-                                ));
-                            }
-                            let value = match v.packed_bytes() {
-                                Some(buf) => Value::bytes(buf),
-                                None => {
-                                    return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    "`to_bytes` expects a packed list (a `List` of `@packed` structs)"
-                                        .to_string(),
-                                ));
-                                }
-                            };
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
-                        // its backing (the iterator retains one reference); a set/map first becomes a list
-                        // of its elements / values (the iteration order `for` uses).
-                        if method == "iter" && (v.is_list() || v.is_set() || v.is_map()) {
-                            if !args.is_empty() {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    "method `iter` takes no arguments".to_string(),
-                                ));
-                            }
-                            let value = if v.is_list() {
-                                Value::iter(v)
-                            } else {
-                                let items = if v.is_set() {
-                                    v.set_items()
-                                } else {
-                                    v.map_values()
-                                }
-                                .expect("set/map receiver");
-                                for item in &items {
-                                    item.inc_ref();
-                                }
-                                let list = Value::list(items);
-                                let iter = Value::iter(list);
-                                // `Value::iter` retained the list; drop this local reference so the
-                                // iterator is its sole owner.
-                                list.release();
-                                iter
-                            };
-                            set_reg(regs, fbase, *dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Eager collection methods reusing the prelude builtin impls (prelude-redesign
-                        // P1): `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list, routed through
-                        // `call_builtin` with the receiver as the first argument so the method and
-                        // (legacy) free-function forms share one impl. A user object's own method wins
-                        // (dispatched earlier); a list receiver is never an object.
-                        if v.list_len().is_some()
-                            && let Some(builtin) = match method {
-                                "map" if args.len() == 1 => Some(Builtin::Map),
-                                "filter" if args.len() == 1 => Some(Builtin::Filter),
-                                "sum" if args.is_empty() => Some(Builtin::Sum),
-                                _ => None,
-                            }
-                        {
-                            let mut arg_vals = Vec::with_capacity(args.len() + 1);
-                            arg_vals.push(v);
-                            arg_vals.extend(args.iter().map(|r| regs[fbase + *r as usize]));
-                            let (dst, span) = (*dst, *span);
-                            let value = self.call_builtin(builtin, &arg_vals, span)?;
-                            set_reg(regs, fbase, dst, value);
-                            pc += 1;
-                            continue;
-                        }
-                        // Built-in zero-argument methods on lists/maps/strings. `count()` is the length
-                        // of a collection; `len()` is the same under its new preferred name
-                        // (prelude-redesign P1 — `count` stays only on lazy iterators). Both accepted
-                        // during the migration.
-                        let result = if !args.is_empty() {
-                            None
-                        } else if method == "count" || method == "len" {
-                            v.list_len()
-                                .or_else(|| v.set_len())
-                                .or_else(|| v.map_len())
-                                .or_else(|| v.as_string().map(|s| s.chars().count()))
-                                .or_else(|| v.bytes_len())
-                                .map(|n| Value::int(n as i64))
-                        } else if method == "enumerate" && v.is_list() {
-                            // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
-                            // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
-                            // temporary boxed list first (then released).
-                            let boxed = v.realize_list();
-                            let items = boxed.list_items().expect("list receiver");
-                            let pairs = items
-                                .iter()
-                                .enumerate()
-                                .map(|(i, &element)| {
-                                    retain(element);
-                                    Value::tuple(vec![Value::int(i as i64), element])
-                                })
-                                .collect();
-                            boxed.release();
-                            Some(Value::list(pairs))
+                            &arg_buf[..args.len()]
                         } else {
-                            None
+                            arg_vec = args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            &arg_vec
                         };
-                        match result {
-                            Some(value) => {
-                                set_reg(regs, fbase, *dst, value);
-                                pc += 1;
-                            }
-                            None if !args.is_empty()
-                                && (method == "count"
-                                    || method == "len"
-                                    || method == "enumerate") =>
-                            {
-                                return Err(self.error(
-                                    DiagnosticCode::TypeMismatch,
-                                    *span,
-                                    format!("method `{method}` takes no arguments"),
-                                ));
-                            }
-                            None => {
-                                return Err(self.error(
-                                    DiagnosticCode::UnknownName,
-                                    *span,
-                                    format!("no method `{method}` on {}", v.type_name()),
-                                ));
-                            }
-                        }
+                        let (dst, span) = (*dst, *span);
+                        let value = self.call_builtin_method(v, method, arg_values, span)?;
+                        set_reg(regs, fbase, dst, value);
+                        pc += 1;
                     }
                     Op::Index {
                         dst,
@@ -5248,6 +4846,354 @@ impl<'m> Vm<'m> {
                     },
                 },
             },
+        }
+    }
+
+    /// Dispatch a **built-in** method on a non-object receiver — every method-call path that is
+    /// value-in/value-out: `compare`, string/int/numeric-conversion methods, the Ring 1
+    /// list/set/map/iterator/file-handle methods, channel endpoints, reactive handles, `to_bytes`,
+    /// `iter()`, the eager `map`/`filter`/`sum`, and `count`/`len`/`enumerate` — ending in the
+    /// canonical takes-no-arguments / no-method errors. Factored out of the `Op::CallMethod` arm
+    /// (prelude-redesign MH.2) so the opcode and an unbound method handle (`list.len` passed as a
+    /// value) dispatch through the SAME branches by construction. The op-field-dependent fast paths
+    /// (`reuse` in-place updates) and the frame-pushing object/enum dispatches stay in the opcode —
+    /// receivers here never resolve through the user method table.
+    ///
+    /// The receiver and arguments are **borrowed** (the caller keeps its references, exactly as the
+    /// opcode's registers did); the result is a freshly-owned value. Branch ORDER is semantic
+    /// (string before int, `IntMethod` before `NumConvert`, …) — do not reorder.
+    ///
+    /// `#[inline]` so the `Op::CallMethod` arm — the hot call site — folds this back into the
+    /// dispatch loop exactly as the pre-extraction inline branches were (A/B-benched: the bare
+    /// out-of-line call cost ~+15-25ns per built-in method call); the cold handle path may call it
+    /// out-of-line.
+    #[inline]
+    fn call_builtin_method(
+        &mut self,
+        v: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        // `x.compare(y)` — the `Ordering` of two primitives (the value a `Comparable`
+        // impl returns). One argument, on any non-object receiver.
+        if method == "compare" {
+            if args.len() != 1 {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!(
+                        "method `compare` takes 1 argument but {} were supplied",
+                        args.len()
+                    ),
+                ));
+            }
+            let other = args[0];
+            return match compare_primitive(v, other) {
+                Some(ordering) => Ok(make_ordering(noeta_ast::ordering_variant(ordering))),
+                None => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("cannot compare {} and {}", v.type_name(), other.type_name()),
+                )),
+            };
+        }
+        // Ring 1 string methods (`upper`/`split`/`replace`/...) — dispatched through
+        // the shared `noeta-stdlib` surface so the tree-walker and the VM cannot drift.
+        // `Unknown` falls through to the collection methods below. `as_string` clones
+        // out of the heap, so the projected args own their strings for the call.
+        if let Some(recv_str) = v.as_string() {
+            let arg_strings: Vec<Option<String>> = args.iter().map(|a| a.as_string()).collect();
+            let projected: Vec<noeta_stdlib::Arg> = args
+                .iter()
+                .zip(&arg_strings)
+                .map(|(a, s)| {
+                    if let Some(s) = s {
+                        noeta_stdlib::Arg::Str(s)
+                    } else if let Some(i) = a.as_int() {
+                        noeta_stdlib::Arg::Int(i)
+                    } else if let Some(f) = a.as_float() {
+                        noeta_stdlib::Arg::Float(f)
+                    } else if let Some(b) = a.as_bool() {
+                        noeta_stdlib::Arg::Bool(b)
+                    } else {
+                        noeta_stdlib::Arg::Other
+                    }
+                })
+                .collect();
+            match noeta_stdlib::string_method(&recv_str, method, &projected) {
+                noeta_stdlib::Dispatch::Done(output) => {
+                    return Ok(stdlib_output_to_value(output));
+                }
+                noeta_stdlib::Dispatch::Err(error) => {
+                    return Err(self.error(stdlib_error_code(error.kind), span, error.message));
+                }
+                noeta_stdlib::Dispatch::Unknown => {}
+            }
+        }
+        // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
+        // intrinsics, delegating to the shared `int_method` so the backends agree. The
+        // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
+        if let Some(recv_int) = v.as_int()
+            && let Some(int_method) = noeta_stdlib::IntMethod::from_name(method)
+        {
+            let arg = match args.first() {
+                Some(a) => match a.as_int() {
+                    Some(n) => n,
+                    None => {
+                        return Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!(
+                                "`int.{method}` expects an integer argument, found {}",
+                                a.type_name()
+                            ),
+                        ));
+                    }
+                },
+                None => 0,
+            };
+            return Ok(Value::int(noeta_stdlib::int_method(recv_int, int_method, arg)));
+        }
+        // Cross-domain numeric conversions (S0): `int→float/f32`, `float/f32→int`,
+        // `float↔f32`. The `IntMethod` branch above handled `int→int` and returned; an
+        // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
+        // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
+        if let Some(src) = v
+            .as_f32()
+            .map(noeta_stdlib::NumScalar::F32)
+            .or_else(|| v.as_float().map(noeta_stdlib::NumScalar::F64))
+            .or_else(|| v.as_int().map(noeta_stdlib::NumScalar::Int))
+            && let Some(dest) = noeta_stdlib::NumConvert::from_name(method)
+        {
+            return Ok(match noeta_stdlib::num_convert(src, dest) {
+                noeta_stdlib::NumScalar::Int(i) => Value::int(i),
+                noeta_stdlib::NumScalar::F64(f) => Value::float(f),
+                noeta_stdlib::NumScalar::F32(f) => Value::f32(f),
+            });
+        }
+        // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
+        // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
+        // method this backend lacks.
+        if v.list_len().is_some()
+            && let Some(list_method) = noeta_stdlib::ListMethod::from_name(method)
+        {
+            return self.call_list_method(v, list_method, method, args, span);
+        }
+        // Ring 1 set methods (contains/union/intersection).
+        if v.is_set()
+            && let Some(set_method) = noeta_stdlib::SetMethod::from_name(method)
+        {
+            return self.call_set_method(v, set_method, method, args, span);
+        }
+        // File-handle methods (read_line/read/write/close) — the shared
+        // `FileHandleMethod` enum keeps the two backends in lockstep.
+        if v.is_file_handle()
+            && let Some(handle_method) = noeta_stdlib::FileHandleMethod::from_name(method)
+        {
+            return self.call_file_handle_method(v, handle_method, method, args, span);
+        }
+        // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
+        // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
+        // polled); `close` is synchronous. Endpoint validity was checked statically.
+        if let Some(id) = v.sender_id() {
+            match method {
+                "send" => {
+                    // The future retains its own reference to the message; the caller's
+                    // reference is released by its normal end-of-life.
+                    return Ok(Value::make_channel_send(id, args[0]));
+                }
+                "close" => {
+                    match &mut self.channels[id.index()] {
+                        Channel::Local { closed, .. } => *closed = true,
+                        Channel::Shared(core) => core.close(),
+                    }
+                    self.channel_progress += 1;
+                    return Ok(Value::unit());
+                }
+                _ => {}
+            }
+        }
+        if let Some(id) = v.receiver_id()
+            && method == "recv"
+        {
+            return Ok(Value::make_channel_recv(id));
+        }
+        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/
+        // `.update(fn)`, `computed.get()`, and `effect.dispose()`. Each method is guarded
+        // by the node's `kind` (a `signal` is not disposable, a `computed` is read-only,
+        // an `effect` is not readable); an invalid pair falls through to the generic
+        // no-method runtime error below, exactly as any other unknown method on a
+        // built-in type. `get` on a `computed` recomputes a dirty body via
+        // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
+        if let Some((kind, node)) = v.reactive_parts() {
+            match (kind, method) {
+                (NodeKind::Signal | NodeKind::Computed, "get") => {
+                    return self.read_reactive(node, span);
+                }
+                (NodeKind::Signal, "set") => {
+                    // The graph retains its own reference to the new content and
+                    // releases the old; the caller's reference is released by its normal
+                    // end-of-life. Then flush so subscribed effects rerun — but coalesce:
+                    // a set inside a running effect body only enqueues, the ongoing flush
+                    // picks it up (no nested flush). (reactivity S4)
+                    self.reactive.set(node, GcVal::retained(args[0]));
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
+                    return Ok(Value::unit());
+                }
+                (NodeKind::Signal, "update") => {
+                    // Read-modify-write: read the current value (owned), call the
+                    // updater with it (which consumes that reference), store the
+                    // result, then flush (coalescing inside a running flush, like set).
+                    let f = args[0];
+                    let current = self.read_reactive(node, span)?;
+                    let updated = self.call_value(f, vec![current], span)?;
+                    self.reactive.set(node, GcVal::owned(updated));
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
+                    return Ok(Value::unit());
+                }
+                (NodeKind::Effect, "dispose") => {
+                    // Unsubscribe and free the node; its stored body/content drop.
+                    self.reactive.dispose(node);
+                    return Ok(Value::unit());
+                }
+                _ => {}
+            }
+        }
+        // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
+        // handle above.
+        if v.is_iter()
+            && let Some(iter_method) = noeta_stdlib::IterMethod::from_name(method)
+        {
+            return self.call_iter_method(v, iter_method, method, args, span);
+        }
+        // Ring 1 map methods (keys/values/has).
+        if v.is_map()
+            && let Some(map_method) = noeta_stdlib::MapMethod::from_name(method)
+        {
+            return self.call_map_method(v, map_method, method, args, span);
+        }
+        // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
+        // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
+        if method == "to_bytes" && v.is_list() {
+            if !args.is_empty() {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "method `to_bytes` takes no arguments".to_string(),
+                ));
+            }
+            return match v.packed_bytes() {
+                Some(buf) => Ok(Value::bytes(buf)),
+                None => Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "`to_bytes` expects a packed list (a `List` of `@packed` structs)".to_string(),
+                )),
+            };
+        }
+        // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
+        // its backing (the iterator retains one reference); a set/map first becomes a list
+        // of its elements / values (the iteration order `for` uses).
+        if method == "iter" && (v.is_list() || v.is_set() || v.is_map()) {
+            if !args.is_empty() {
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    "method `iter` takes no arguments".to_string(),
+                ));
+            }
+            let value = if v.is_list() {
+                Value::iter(v)
+            } else {
+                let items = if v.is_set() {
+                    v.set_items()
+                } else {
+                    v.map_values()
+                }
+                .expect("set/map receiver");
+                for item in &items {
+                    item.inc_ref();
+                }
+                let list = Value::list(items);
+                let iter = Value::iter(list);
+                // `Value::iter` retained the list; drop this local reference so the
+                // iterator is its sole owner.
+                list.release();
+                iter
+            };
+            return Ok(value);
+        }
+        // Eager collection methods reusing the prelude builtin impls (prelude-redesign
+        // P1): `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list, routed through
+        // `call_builtin` with the receiver as the first argument so the method and
+        // (legacy) free-function forms share one impl. A user object's own method wins
+        // (dispatched earlier); a list receiver is never an object.
+        if v.list_len().is_some()
+            && let Some(builtin) = match method {
+                "map" if args.len() == 1 => Some(Builtin::Map),
+                "filter" if args.len() == 1 => Some(Builtin::Filter),
+                "sum" if args.is_empty() => Some(Builtin::Sum),
+                _ => None,
+            }
+        {
+            let mut arg_vals = Vec::with_capacity(args.len() + 1);
+            arg_vals.push(v);
+            arg_vals.extend_from_slice(args);
+            return self.call_builtin(builtin, &arg_vals, span);
+        }
+        // Built-in zero-argument methods on lists/maps/strings. `count()` is the length
+        // of a collection; `len()` is the same under its new preferred name
+        // (prelude-redesign P1 — `count` stays only on lazy iterators). Both accepted
+        // during the migration.
+        let result = if !args.is_empty() {
+            None
+        } else if method == "count" || method == "len" {
+            v.list_len()
+                .or_else(|| v.set_len())
+                .or_else(|| v.map_len())
+                .or_else(|| v.as_string().map(|s| s.chars().count()))
+                .or_else(|| v.bytes_len())
+                .map(|n| Value::int(n as i64))
+        } else if method == "enumerate" && v.is_list() {
+            // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
+            // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
+            // temporary boxed list first (then released).
+            let boxed = v.realize_list();
+            let items = boxed.list_items().expect("list receiver");
+            let pairs = items
+                .iter()
+                .enumerate()
+                .map(|(i, &element)| {
+                    retain(element);
+                    Value::tuple(vec![Value::int(i as i64), element])
+                })
+                .collect();
+            boxed.release();
+            Some(Value::list(pairs))
+        } else {
+            None
+        };
+        match result {
+            Some(value) => Ok(value),
+            None if !args.is_empty()
+                && (method == "count" || method == "len" || method == "enumerate") =>
+            {
+                Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    format!("method `{method}` takes no arguments"),
+                ))
+            }
+            None => Err(self.error(
+                DiagnosticCode::UnknownName,
+                span,
+                format!("no method `{method}` on {}", v.type_name()),
+            )),
         }
     }
 
