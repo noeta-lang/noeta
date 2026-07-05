@@ -38,7 +38,7 @@ use std::sync::Arc;
 use noeta_ast::{BinaryOp, Program};
 use noeta_backend::{Backend, RunResult};
 use noeta_bytecode::{
-    BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, ReuseCheck, StrPart,
+    BoolSide, Builtin, CaptureFrom, Const, Module, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
 };
 use noeta_compiler::{Unsupported, compile};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
@@ -2878,10 +2878,9 @@ impl<'m> Vm<'m> {
                         }
                         // Builtins borrow their arguments (the registers keep ownership); the
                         // result is a fresh owned value.
-                        let arg_vals: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                        let arg_vals = ArgBuf::collect(args, regs, fbase);
                         let (dst, builtin, span) = (*dst, *builtin, *span);
-                        let v = self.call_builtin(builtin, &arg_vals, span)?;
+                        let v = self.call_builtin(builtin, arg_vals.as_slice(), span)?;
                         set_reg(regs, fbase, dst, v);
                         pc += 1;
                     }
@@ -2911,8 +2910,7 @@ impl<'m> Vm<'m> {
                                 noeta_stdlib::MapMethod::Set | noeta_stdlib::MapMethod::Remove
                             )
                         {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
                             // Consume the receiver: take its single reference out of the register without
                             // releasing (a direct overwrite, like `ConcatInPlace`), so the refcount below
                             // still counts the accumulator's reference and a `dst == recv` store is safe.
@@ -2921,7 +2919,7 @@ impl<'m> Vm<'m> {
                                 v,
                                 map_method,
                                 method,
-                                &arg_values,
+                                arg_values.as_slice(),
                                 *consume_key,
                                 *span,
                             )?;
@@ -2932,10 +2930,9 @@ impl<'m> Vm<'m> {
                         // In-place list self-update (`xs[i] = v` ⟶ `xs = xs.set(i, v)`): a uniquely-owned
                         // list overwrites slot `i` in place (O(1)) instead of copying the whole list.
                         if *reuse && v.is_list() && method == "set" {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
                             regs[fbase + *recv as usize] = Value::unit();
-                            let result = self.list_set_in_place(v, &arg_values, *span)?;
+                            let result = self.list_set_in_place(v, arg_values.as_slice(), *span)?;
                             set_reg(regs, fbase, *dst, result);
                             pc += 1;
                             continue;
@@ -2951,14 +2948,13 @@ impl<'m> Vm<'m> {
                                 noeta_stdlib::SetMethod::Add | noeta_stdlib::SetMethod::Remove
                             )
                         {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
                             regs[fbase + *recv as usize] = Value::unit();
                             let result = self.set_update_in_place(
                                 v,
                                 set_method,
                                 method,
-                                &arg_values,
+                                arg_values.as_slice(),
                                 *span,
                             )?;
                             set_reg(regs, fbase, *dst, result);
@@ -2968,10 +2964,13 @@ impl<'m> Vm<'m> {
                         // `json.parse(...)` — a Ring 2 native module function call, dispatched before
                         // the object/collection paths.
                         if let Some(module_name) = v.native_module_name() {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_native_module(&module_name, method, &arg_values, *span)?;
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let value = self.call_native_module(
+                                &module_name,
+                                method,
+                                arg_values.as_slice(),
+                                *span,
+                            )?;
                             set_reg(regs, fbase, *dst, value);
                             pc += 1;
                             continue;
@@ -3157,11 +3156,14 @@ impl<'m> Vm<'m> {
                         // `Unknown` falls through to the collection methods below. `as_string` clones
                         // out of the heap, so the projected args own their strings for the call.
                         if let Some(recv_str) = v.as_string() {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let arg_strings: Vec<Option<String>> =
-                                arg_values.iter().map(|a| a.as_string()).collect();
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let arg_strings: Vec<Option<String>> = arg_values
+                                .as_slice()
+                                .iter()
+                                .map(|a| a.as_string())
+                                .collect();
                             let projected: Vec<noeta_stdlib::Arg> = arg_values
+                                .as_slice()
                                 .iter()
                                 .zip(&arg_strings)
                                 .map(|(a, s)| {
@@ -3252,10 +3254,14 @@ impl<'m> Vm<'m> {
                         if v.list_len().is_some()
                             && let Some(list_method) = noeta_stdlib::ListMethod::from_name(method)
                         {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_list_method(v, list_method, method, &arg_values, *span)?;
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let value = self.call_list_method(
+                                v,
+                                list_method,
+                                method,
+                                arg_values.as_slice(),
+                                *span,
+                            )?;
                             set_reg(regs, fbase, *dst, value);
                             pc += 1;
                             continue;
@@ -3264,10 +3270,14 @@ impl<'m> Vm<'m> {
                         if v.is_set()
                             && let Some(set_method) = noeta_stdlib::SetMethod::from_name(method)
                         {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_set_method(v, set_method, method, &arg_values, *span)?;
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let value = self.call_set_method(
+                                v,
+                                set_method,
+                                method,
+                                arg_values.as_slice(),
+                                *span,
+                            )?;
                             set_reg(regs, fbase, *dst, value);
                             pc += 1;
                             continue;
@@ -3278,13 +3288,12 @@ impl<'m> Vm<'m> {
                             && let Some(handle_method) =
                                 noeta_stdlib::FileHandleMethod::from_name(method)
                         {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
                             let value = self.call_file_handle_method(
                                 v,
                                 handle_method,
                                 method,
-                                &arg_values,
+                                arg_values.as_slice(),
                                 *span,
                             )?;
                             set_reg(regs, fbase, *dst, value);
@@ -3386,10 +3395,14 @@ impl<'m> Vm<'m> {
                         if v.is_iter()
                             && let Some(iter_method) = noeta_stdlib::IterMethod::from_name(method)
                         {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_iter_method(v, iter_method, method, &arg_values, *span)?;
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let value = self.call_iter_method(
+                                v,
+                                iter_method,
+                                method,
+                                arg_values.as_slice(),
+                                *span,
+                            )?;
                             set_reg(regs, fbase, *dst, value);
                             pc += 1;
                             continue;
@@ -3398,10 +3411,14 @@ impl<'m> Vm<'m> {
                         if v.is_map()
                             && let Some(map_method) = noeta_stdlib::MapMethod::from_name(method)
                         {
-                            let arg_values: Vec<Value> =
-                                args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                            let value =
-                                self.call_map_method(v, map_method, method, &arg_values, *span)?;
+                            let arg_values = ArgBuf::collect(args, regs, fbase);
+                            let value = self.call_map_method(
+                                v,
+                                map_method,
+                                method,
+                                arg_values.as_slice(),
+                                *span,
+                            )?;
                             set_reg(regs, fbase, *dst, value);
                             pc += 1;
                             continue;
@@ -4369,9 +4386,8 @@ impl<'m> Vm<'m> {
                         // argument ships a channel; otherwise falls back to a cooperative task (so a
                         // non-parallel VM — `@test`/`bench` — and channel-shipping isolates never regress).
                         let callee_val = regs[fbase + *callee as usize];
-                        let arg_vals: Vec<Value> =
-                            args.iter().map(|r| regs[fbase + *r as usize]).collect();
-                        let handle = self.spawn_isolate(callee_val, &arg_vals, *span)?;
+                        let arg_vals = ArgBuf::collect(args, regs, fbase);
+                        let handle = self.spawn_isolate(callee_val, arg_vals.as_slice(), *span)?;
                         set_reg(regs, fbase, *dst, handle);
                         pc += 1;
                     }
@@ -6061,6 +6077,45 @@ impl<'m> Vm<'m> {
                     args.len()
                 ),
             ))
+        }
+    }
+}
+
+/// A stack-allocated argument buffer for built-in dispatch (string/list/map/set/iter methods,
+/// prelude builtins, native modules). Those paths borrow their arguments as a `&[Value]`, and
+/// collecting the argument registers into a heap `Vec` paid an allocation + free on **every**
+/// such call — measurable on map/string loops, where the call ceremony, not the collection
+/// operation itself, dominates. Arities are tiny (the stdlib tops out at three), so up to
+/// [`ArgBuf::INLINE`] arguments live on the dispatch stack frame; a wider call (none exists in
+/// the stdlib today) falls back to the heap rather than imposing a hidden arity cap.
+enum ArgBuf {
+    Inline([Value; ArgBuf::INLINE], usize),
+    Heap(Vec<Value>),
+}
+
+impl ArgBuf {
+    const INLINE: usize = 8;
+
+    /// Copy the argument registers out of the frame window. The registers keep ownership
+    /// (arguments are borrowed by every consumer), exactly as the `Vec` collect did.
+    #[inline]
+    fn collect(args: &[Reg], regs: &[Value], base: usize) -> Self {
+        if args.len() <= Self::INLINE {
+            let mut buf = [Value::unit(); Self::INLINE];
+            for (slot, r) in buf.iter_mut().zip(args) {
+                *slot = regs[base + *r as usize];
+            }
+            ArgBuf::Inline(buf, args.len())
+        } else {
+            ArgBuf::Heap(args.iter().map(|r| regs[base + *r as usize]).collect())
+        }
+    }
+
+    #[inline]
+    fn as_slice(&self) -> &[Value] {
+        match self {
+            ArgBuf::Inline(buf, n) => &buf[..*n],
+            ArgBuf::Heap(v) => v,
         }
     }
 }
