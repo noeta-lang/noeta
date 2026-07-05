@@ -1,0 +1,79 @@
+// sample.noe — every construct the TextMate grammar colorizes.
+// Open in VS Code with the Noeta extension installed and confirm each
+// category highlights. This file also parses and runs cleanly.
+
+/* A block comment.
+   /* nested */
+   still inside. */
+
+use std.{math, json}
+
+// A value struct with a per-field default and a metadata attribute.
+struct Point {
+    x: int = 0
+    y: int = 0
+
+    fn origin(): Point { return Point {} }
+    fn manhattan(): int { return abs(self.x) + abs(self.y) }
+}
+
+// A reference class with a mutable field, backed by fixed-width integers.
+class Counter {
+    mut n: u64 = 0u64
+
+    fn bump(by: int): void {
+        self.n = self.n + by.to_u64()
+    }
+}
+
+// An enum with associated data.
+enum Shape {
+    Circle(float);
+    Rect(int, int);
+
+    fn area(): float {
+        return match self {
+            Shape.Circle(r) => 3.14159 * r * r,
+            Shape.Rect(w, h) => (w * h).to_float(),
+        };
+    }
+}
+
+// Numbers of every form.
+mut dec = 1_000
+mut hex = 0xDEAD_BEEFu32
+mut oct = 0o755
+mut bin = 0b1010_1010u8
+mut flt = 6.022e23
+mut single = 2.5f32
+
+// Strings, including ${...} interpolation and an escaped \${literal}.
+mut name = "Ada"
+mut greeting = "hello, ${name}! (${1 + 1} exclamations)"
+mut literal = 'single-quoted with a \${not-a-hole}'
+
+// Control flow, ranges, the pipeline, and coalescing.
+fn classify(xs: List<int>): int {
+    mut total = 0
+    for i in 0..xs.count() {
+        parity = if xs[i] % 2 == 0 then "even" else "odd"
+        if parity == "even" {
+            total = total + xs[i]
+        }
+    }
+    return total
+}
+
+mut nums = [1, 2, 3, 4, 5]
+mut evens = nums |> filter(fn(x) => x % 2 == 0) |> sum()
+mut root = math.sqrt(2.0)
+mut boxed: dyn = 41
+mut fallback = boxed.as<int>() ?? 0
+
+// A test tier block: only compiled under `noeta test`.
+@test fn point_defaults(): void {
+    p = Point {}
+    assert(p.x == 0, "default x")
+}
+
+echo "grand total is ${classify(nums)}, evens ${evens}, fallback ${fallback}"

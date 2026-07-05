@@ -1,0 +1,44 @@
+{
+  "name": "noeta",
+  "displayName": "Noeta",
+  "description": "Syntax highlighting and editor configuration for the Noeta programming language (.noe).",
+  "version": "0.1.0",
+  "publisher": "noeta",
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noeta-lang/noeta"
+  },
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "keywords": [
+    "noeta",
+    "noe"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "noeta",
+        "aliases": [
+          "Noeta",
+          "noeta"
+        ],
+        "extensions": [
+          ".noe"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "noeta",
+        "scopeName": "source.noeta",
+        "path": "./syntaxes/noeta.tmLanguage.json"
+      }
+    ]
+  }
+}
