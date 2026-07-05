@@ -102,12 +102,45 @@ impl DocumentStore {
         self.refresh_all();
     }
 
-    /// Apply a full-document change: replace the buffer and refresh workspaces. Returns the entry
-    /// input of the changed document's workspace (for callers/tests that re-query it).
+    /// Apply a full-document change: replace the buffer and push the new text into the salsa inputs.
+    /// Returns the entry input of the changed document's workspace (for callers/tests that re-query
+    /// it).
+    ///
+    /// The hot path (every keystroke). A buffer edit cannot change the file *set* or any sibling's
+    /// on-disk content, so — unlike open/close — there is nothing to re-discover: the new text is
+    /// pushed straight into the changed document's input wherever it appears (its own workspace and
+    /// any importer's), with **no directory scan and no disk reads**. Only a change to a document with
+    /// no workspace yet (an editor that skipped `didOpen`) falls back to a full build.
     fn change(&mut self, uri: &str, text: String) -> SourceProgram {
         self.buffers.insert(uri.to_string(), text);
-        self.refresh_all();
+        if self.workspaces.contains_key(uri) {
+            self.propagate(uri);
+        } else {
+            self.refresh_all();
+        }
         self.workspaces[uri].entry()
+    }
+
+    /// Push the changed document's current buffer text into every salsa input that represents it —
+    /// its own workspace entry and the sibling slot of any other open document that imports it —
+    /// without re-reading the directory or any file. Salsa backdates the untouched inputs, so only
+    /// queries that actually depend on the edited text recompute.
+    fn propagate(&mut self, changed_uri: &str) {
+        let Some(text) = self.buffers.get(changed_uri).cloned() else {
+            return;
+        };
+        // Collect the input handles first (`SourceProgram` is `Copy`), then set their text — the two
+        // steps borrow `self.workspaces` and `self.db` respectively.
+        let targets: Vec<SourceProgram> = self
+            .workspaces
+            .values()
+            .flat_map(|cache| cache.source_uris.iter().zip(&cache.programs))
+            .filter(|(source_uri, _)| source_uri.as_str() == changed_uri)
+            .map(|(_, program)| *program)
+            .collect();
+        for program in targets {
+            program.set_text(&mut self.db).to(text.clone());
+        }
     }
 
     /// Drop a closed document (its buffer and workspace), then refresh the rest.
@@ -1107,6 +1140,82 @@ mod tests {
         assert!(
             diags.is_empty(),
             "imported name should resolve; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn change_reuses_the_workspace_without_rebuilding() {
+        let dir = temp_workspace(
+            "incremental",
+            &[(
+                "models.noe",
+                "namespace App.Models;\npub struct User { id: int }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Models.User;\nu = User { id: 1 }".to_string(),
+        );
+        // Capture the input handles, then edit — the fast path must set text in place, not rebuild.
+        let before = store.workspaces[&entry_uri].programs.clone();
+
+        store.change(
+            &entry_uri,
+            "use App.Models.User;\nu = User { id: 2 }".to_string(),
+        );
+
+        let after = &store.workspaces[&entry_uri].programs;
+        assert_eq!(
+            &before, after,
+            "change must reuse the same salsa inputs (no rebuild/rescan)"
+        );
+        assert_eq!(
+            store.workspaces[&entry_uri]
+                .entry()
+                .text(&store.db)
+                .lines()
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn editing_an_open_sibling_propagates_to_its_importer() {
+        let dir = temp_workspace(
+            "propagate",
+            &[(
+                "models.noe",
+                "namespace App.Models;\npub struct User { id: int }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let models_uri = path_to_uri(&dir.join("models.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Models.User;\nu = User { id: 1 }".to_string(),
+        );
+        store.open(
+            &models_uri,
+            "namespace App.Models;\npub struct User { id: int }\n".to_string(),
+        );
+        assert!(
+            store.diagnostics(&entry_uri).unwrap().0.is_empty(),
+            "imports resolve initially"
+        );
+
+        // Edit the open sibling to remove `User` — the importer must see the broken import via the
+        // in-place propagation (no rebuild of its workspace).
+        store.change(
+            &models_uri,
+            "namespace App.Models;\npub struct Account { id: int }\n".to_string(),
+        );
+        let diags = store.diagnostics(&entry_uri).unwrap().0;
+        assert!(
+            !diags.is_empty(),
+            "the importer should now report the missing `User`; got {diags:?}"
         );
     }
 
