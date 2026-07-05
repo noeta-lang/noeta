@@ -1,8 +1,7 @@
 # P-JSSA — SSA register promotion in the JIT (mem2reg)
 
-**Status: MILESTONE COMPLETE — S0–S4.2 landed (loop 10M 29 ms, target hit; fib(32) 87 ms vs
-the ~60 ms stretch target — the residual is call/ret + push/pop fundamentals, next lever
-priced under "honest ceiling"; S5 dropped by default).** The follow-on milestone to J0–J7: hold live VM registers in Cranelift
+**Status: MILESTONE COMPLETE — S0–S5 all landed (loop 10M 29 ms, target hit; fib(32) 40 ms,
+past the ~60 ms stretch target — between PHP-JIT's 25 and 2× of it).** The follow-on milestone to J0–J7: hold live VM registers in Cranelift
 **SSA values** inside compiled code instead of round-tripping every operand through the
 in-memory register stack.
 
@@ -79,7 +78,7 @@ deliberately separate, last slice (S5) that can be dropped if its measured value
 | **T1** | ✅ **DONE (two commits — see "T1 — what landed" below).** **Typed/unboxed promotion**: a forward kind dataflow (`{Bot, Int, Bool, Float, Imm}`) + a second **raw** variable per register; typed ops skip the NaN-box tag checks and unboxing entirely; `Bool`-claimed branches use the raw bit. T1b claims **parameters immediate** (entry-verified) and adds **asymmetric** typed binaries (`i < n` with a parameter bound). Int loop 10M **67→29 ms (2.31×** over S1+S2's output**)** — the milestone's loop target (~30 ms) is **hit**. | Kind claims ride the ff9efed verified-entry contract; typed⇒immediate invariant test-locked. |
 | **S3** | ✅ **SUBSUMED by S4.1** (the plan's own parenthetical — "the frame spills unit to dead slots at deopt only" — is what landed). A tier-0-side zero-init skip dead-ends on teardown: the release loop and the abort-unwind read every slot, and a statically-safe release set is tiny once tier-0 overflow-boxing is accounted for. The fast convention skips the fill *and* fixes teardown in one contract. | — |
 | **S4** | ✅ **DONE as S4.0 + S4.1 (see "S4 — what landed" below).** S4.0: one-roundtrip `prepare_call` (two-word return kills the `callee_base` helper) + **masked window teardown** (`jit_return` releases only the may-heap row at the return pc — native-path-sound). S4.1: the **fast call convention** — a second, frameless-window body per eligible prototype (args as machine args, uninitialized window + `normalize_frame` at every native exit, fully native return protocol from the baked `FrameLayout`). fib(32) **169→127 ms (1.33×**; 1.35× vs main**)**; everything else neutral. Remaining distance to the ~60 ms target = the `prepare` helper itself (op decode + closure checks + `Frame` push per call) → S4.2. | Frame-teardown contract — the anomaly + leak oracles are the judge; green first run. |
-| **S5** | **(Optional, measure-first) heap values in SSA.** Ownership-aware promotion of may-heap registers (spill = store + the release tier-0 would have done at the overwrite). Only if a workload demonstrates the win after S1–S4; J6's lesson says don't assume. | Refcount bookkeeping — highest risk, lowest proven value. Drop by default. |
+| **S5** | ✅ **DONE (user-ordered; see "S5 — what landed" below).** **Universal residency**: every register of a modeled prototype lives in SSA — heap values included. Defs release the old value *from the variable* and write no slot; a new **slot-hazard** dataflow drives the sync spill set (`live ∪ hazard`). Direct win modest as predicted (fib ~7%, toploop ~4%, rest neutral) — but its red oracle run exposed the **call-fall-through reachability bug** (`0e8bd0b`) that had every fast body bailing to the interpreter after its first call: fixing that took fib **87→43 ms**, and S5 to **40 ms** (~4.3× vs main — the ~60 ms target passed). | Ownership-in-SSA — the anomaly oracle is the judge; green after the reachability fix. |
 
 Each slice lands only with: `--jit-differential` 0-divergence / 0-leak at full corpus coverage,
 standard differential + leak oracle untouched (sandbox is tier-0 by construction), criterion
@@ -276,6 +275,39 @@ cold deopt-propagation path — each caller inserts its own frame at its capture
 which the honest-ceiling section prices as method-JIT-class work and is NOT part of this
 milestone. Int loop 10M **29 ms** (target ~30 ✓; PHP-JIT 17.2). Milestone closed; S5 dropped by
 default per the table.
+
+## S5 — what landed (universal residency), and the bug it flushed out
+
+**Mechanism (`b6f1a1a`).** Residency stops being gated by provable immediacy: in a modeled
+prototype every register — call results, loaded globals, moved heap values — lives in its SSA
+variable, and the per-pc `ssa_ok` map is gone (`RegPlan` keeps liveness plus one `modeled` bit).
+A def releases the overwritten value **from the variable** (no load-old) and writes no slot;
+`heap_in` now decides release-on-overwrite and sync obligations. The new obligation is the
+**slot-hazard** invariant: a slot can hold a *released* pointer (after an overwrite/`Drop`/
+move-out) or miss the reference its variable owns — either would corrupt teardown/unwind, so a
+forward hazard dataflow (raised where a def's old or new value may be heap; cleared at call
+syncs) extends every sync's spill set to `live ∪ hazard`. Fast bodies additionally spill
+may-heap residents before unit-filling; returns release from the variables (fast) or pre-sync
+exactly the masked slots (normal). `fast_ok` reduced to modeled ∧ ≤64 registers — reads-before-
+write became safe by construction (reads go through variables initialized to `unit`, tier-0's
+fresh-local semantics), so *more* prototypes get fast bodies.
+
+**The bug S5 flushed out (`0e8bd0b`, applies to S4.1/S4.2 as shipped):** `reachable_pcs` treated
+a `Call` as having no in-frame native successor — masked in normal bodies because `call_pc + 1`
+is a resume *entry*, but a fast body's entry set is `{0}`, so **everything after a fast body's
+first call compiled to a bail filler**. Every fast activation ran one call natively, then bounced
+to the interpreter for the rest of the frame — correct (the result reached the slot, the resume
+pc was exact) but silently forfeiting most of the convention. Pre-S5 no oracle could see it;
+with the result living only in a variable, the un-synced filler stranded it and the
+jit-differential went red on `functions/recursion.noe` immediately. One line
+(`Call → push(pc+1)`): fib **87→43 ms**.
+
+**Measured (pinned, round-robin min-of-N):** fib(32) 43→**40 ms** from S5 proper (~4.3× vs
+main's ~170; target ≤~60 passed; PHP-JIT 25 / LuaJIT 15.8), toploop50 278→267 ms (the
+`LoadGlobal`/`StoreGlobal` slot round-trips), everything else neutral — the modest direct win
+the plan predicted ("J6's lesson says don't assume"), plus a simpler residency model and the
+reachability find. Gates: jit-differential 433/0-div/0-leak/0-anomaly, conformance 444,
+differential 433/0, leak+anomaly residency 0, workspace green, clippy+fmt clean.
 
 ## Design notes (constraints discovered by J0–J7 that S1+ must honour)
 
