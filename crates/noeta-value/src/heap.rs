@@ -56,6 +56,34 @@ pub fn live_count() -> usize {
     LIVE.with(|c| c.get())
 }
 
+thread_local! {
+    /// Accumulated **refcount anomalies** noted by the backup trace collector (`noeta-gc`'s
+    /// `collect_trace`) since the last [`reset_refcount_anomalies`]. The collector reclaims
+    /// unreachable garbage — legitimate reference cycles and refcount-bug orphans alike — so plain
+    /// end-of-run residency ([`live_count`]) can never see a skipped release/retain. This counter
+    /// is the oracle's window into that blind spot: garbage is unreachable from the live graph, so
+    /// its members can only be referenced from *within* the garbage set — in a refcount-correct
+    /// program every member's count equals its in-edges from other members. A mismatch is a
+    /// phantom (leaked) or missing (double-free-hazard) reference.
+    static REFCOUNT_ANOMALIES: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Add `n` refcount anomalies (the trace collector calls this per collection).
+pub fn note_refcount_anomalies(n: usize) {
+    REFCOUNT_ANOMALIES.with(|c| c.set(c.get() + n));
+}
+
+/// Reset the anomaly accumulator (the leak oracles call this before a measured run).
+pub fn reset_refcount_anomalies() {
+    REFCOUNT_ANOMALIES.with(|c| c.set(0));
+}
+
+/// The refcount anomalies accumulated since the last reset. Zero for a refcount-correct program;
+/// the leak oracles assert it alongside residency.
+pub fn refcount_anomalies() -> usize {
+    REFCOUNT_ANOMALIES.with(|c| c.get())
+}
+
 /// The peak live-object count since the last [`reset_peak`] — the peak-residency metric.
 pub fn live_peak() -> usize {
     PEAK.with(|c| c.get())

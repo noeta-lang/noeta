@@ -26,7 +26,8 @@ mod ops;
 
 pub use heap::{
     CollectorMode, Color, SharedRegion, collector_mode, live_count, live_objects, live_peak,
-    reset_peak, set_collector_mode, take_candidates,
+    note_refcount_anomalies, refcount_anomalies, reset_peak, reset_refcount_anomalies,
+    set_collector_mode, take_candidates,
 };
 pub use ids::{ChannelId, ScopeId, TaskId};
 pub use ops::{

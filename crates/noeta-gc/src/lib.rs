@@ -83,11 +83,52 @@ pub fn collect_trace(roots: &[Value]) -> Garbage {
             v.gc_set_color(Color::Black);
         }
     }
+    noeta_value::note_refcount_anomalies(count_refcount_anomalies(&fresh));
     Garbage {
         fresh,
         already_destructed: Vec::new(),
         release_external: true,
     }
+}
+
+/// Count the **refcount anomalies** in a trace collection's garbage set. Garbage is unreachable
+/// from the live graph (a live object referencing it would have marked it), so its members can
+/// only be referenced from *within* the set: in a refcount-correct program each member's count is
+/// exactly its in-edges from other members — a dead cycle balances, and so do the acyclic values
+/// it drags down. A mismatch is a refcount bug the reclaim below would otherwise silently absorb:
+/// `count > in-edges` means a release was skipped (the object leaked until this collection),
+/// `count < in-edges` means a retain was skipped (a double-release hazard). The leak oracles
+/// assert the accumulated count ([`noeta_value::refcount_anomalies`]) is zero; a clean program's
+/// garbage set is empty, so the check is free outside genuine cycle collections.
+fn count_refcount_anomalies(garbage: &[Value]) -> usize {
+    if garbage.is_empty() {
+        return 0;
+    }
+    let members: HashSet<u64> = garbage.iter().map(|v| v.bits()).collect();
+    let mut in_edges: std::collections::HashMap<u64, u32> =
+        std::collections::HashMap::with_capacity(garbage.len());
+    for &obj in garbage {
+        for child in obj.gc_children() {
+            if child.is_pointer() && members.contains(&child.bits()) {
+                *in_edges.entry(child.bits()).or_insert(0) += 1;
+            }
+        }
+    }
+    garbage
+        .iter()
+        .filter(|obj| {
+            let bad = obj.refcount() != in_edges.get(&obj.bits()).copied().unwrap_or(0);
+            if bad && std::env::var_os("NOETA_ANOMALY_DEBUG").is_some() {
+                eprintln!(
+                    "anomaly: {} rc={} in_edges={}",
+                    obj.type_name(),
+                    obj.refcount(),
+                    in_edges.get(&obj.bits()).copied().unwrap_or(0)
+                );
+            }
+            bad
+        })
+        .count()
 }
 
 /// **Trial-deletion collection** (Bacon–Rajan synchronous, Phase 6.4): reclaim the unreachable

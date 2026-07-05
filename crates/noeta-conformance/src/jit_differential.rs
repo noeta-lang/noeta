@@ -176,8 +176,13 @@ fn run_and_compare(name: &str, module: &noeta_bytecode::Module, report: &mut Jit
     // Forced-JIT run, measuring heap residency around it (refcount parity under native code): the
     // integer fast path leaves every register an immediate, so residency must match the interpreter.
     let before = noeta_value::live_count() as i64;
+    noeta_value::reset_refcount_anomalies();
     let (jit, stats) = VmBackend::new().run_module_jit_with_stats(module);
     let residual = noeta_value::live_count() as i64 - before;
+    // A refcount anomaly (skipped release/retain) is invisible to end-of-run residency — the
+    // teardown's final backup sweep reclaims orphans and cycles alike — so the teardown measures
+    // it separately (see `noeta_gc::count_refcount_anomalies`) and the oracle asserts it here.
+    let anomalies = noeta_value::refcount_anomalies() as i64;
 
     report.native_protos += stats.native;
     report.compiled_protos += stats.compiled;
@@ -195,6 +200,13 @@ fn run_and_compare(name: &str, module: &noeta_bytecode::Module, report: &mut Jit
             name: name.to_string(),
             backend: "jit",
             residual,
+        });
+    }
+    if anomalies != 0 {
+        report.leaks.push(Leak {
+            name: name.to_string(),
+            backend: "jit (refcount)",
+            residual: anomalies,
         });
     }
 }

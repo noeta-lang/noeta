@@ -1468,6 +1468,18 @@ fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult 
     if let Ok(v) = vm.run(vec![top], regs) {
         release(v);
     }
+    // An abort (e.g. a detected deadlock, E0010) can leave open `concurrent` scopes whose tasks
+    // were never joined — each scope still owns its tasks' futures (and any parked results).
+    // Release them exactly as `ScopeEnd` would, so an aborted program's teardown stays
+    // refcount-exact (the anomaly oracle checks) and destructors on captured locals still run.
+    for scope in std::mem::take(&mut vm.scopes) {
+        for task in scope {
+            vm.release_value(task.future);
+            if let Some(result) = task.result {
+                vm.release_value(result);
+            }
+        }
+    }
     // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
     // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
     // different points: the **trace** marks from the live globals *before* teardown (the frame stack
@@ -4058,8 +4070,13 @@ impl<'m> Vm<'m> {
                         // the future's step-closure cells) runs now rather than being lost.
                         let future =
                             std::mem::replace(&mut regs[fbase + *src as usize], Value::unit());
-                        let value = self.drive_future(future, *span)?;
+                        // Release before propagating an abort: the register was already emptied, so
+                        // the frame teardown can no longer see the future — skipping this on the
+                        // error path (e.g. a detected async deadlock) orphans it (the refcount
+                        // anomaly the strengthened leak oracle catches). `drive_future` borrows.
+                        let value = self.drive_future(future, *span);
                         self.release_value(future);
+                        let value = value?;
                         set_reg(regs, fbase, *dst, value);
                         pc += 1;
                     }
@@ -4452,12 +4469,20 @@ impl<'m> Vm<'m> {
                         // Reduce an erased fixed-width integer (an `int` value) into its declared width
                         // (Tier W). Total — the shared helper runs identically in the tree-walker. A
                         // non-int (only if the checker's IntN guarantee broke) passes through unchanged.
+                        //
+                        // Ownership: a masked result is a *fresh* value from `Value::int` — already
+                        // owning its one reference if it heap-boxes (a `u64` past the immediate range),
+                        // so it must NOT be retained again (the refcount-anomaly oracle catches the
+                        // over-count as a leak). Only the pass-through borrows from the src register
+                        // and needs the retain for its new owner.
                         let v = regs[fbase + *src as usize];
                         let masked = match v.as_int() {
                             Some(n) => Value::int(noeta_stdlib::mask_to_width(n, *signed, *bits)),
-                            None => v,
+                            None => {
+                                retain(v);
+                                v
+                            }
                         };
-                        retain(masked);
                         set_reg(regs, fbase, *dst, masked);
                         pc += 1;
                     }

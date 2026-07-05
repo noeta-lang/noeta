@@ -156,15 +156,24 @@ fn measure_single(name: &str, text: &str, report: &mut LeakReport) {
     record(report, name, "eval", noeta_eval::live_count() - before);
     report.eval_measured += 1;
 
-    // VM: measure the live heap-object delta, but only when the program compiles.
+    // VM: measure the live heap-object delta, but only when the program compiles. Also assert the
+    // teardown's refcount-anomaly count (a skipped release/retain the final backup sweep would
+    // otherwise silently absorb — see `noeta_gc::count_refcount_anomalies`).
     if let Ok(module) = &noeta_db::bytecode(&db, src).0 {
         let before = noeta_value::live_count() as i64;
+        noeta_value::reset_refcount_anomalies();
         let _ = VmBackend::new().run_module(module);
         record(
             report,
             name,
             "vm",
             noeta_value::live_count() as i64 - before,
+        );
+        record(
+            report,
+            name,
+            "vm (refcount)",
+            noeta_value::refcount_anomalies() as i64,
         );
         report.vm_measured += 1;
     }
@@ -207,12 +216,19 @@ fn measure_workspace(name: &str, raw: &noeta_loader::RawWorkspace, report: &mut 
 
     if let Ok(module) = &noeta_db::linked_bytecode(&db, ws).0 {
         let before = noeta_value::live_count() as i64;
+        noeta_value::reset_refcount_anomalies();
         let _ = VmBackend::new().run_module(module);
         record(
             report,
             name,
             "vm",
             noeta_value::live_count() as i64 - before,
+        );
+        record(
+            report,
+            name,
+            "vm (refcount)",
+            noeta_value::refcount_anomalies() as i64,
         );
         report.vm_measured += 1;
     }
