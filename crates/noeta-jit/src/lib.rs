@@ -601,6 +601,10 @@ impl Jit {
             }
             for (rp, init) in resume_inits {
                 cg.b.switch_to_block(init);
+                // Every mid-frame entry (seam resume or OSR header) verifies the analysis's
+                // immediate claims against tier-0's actual slots before any native code trusts
+                // them — see `guard_immediate_claims`.
+                cg.guard_immediate_claims(rp);
                 cg.load_ssa_vars();
                 cg.b.ins().jump(op_blocks[rp], &[]);
             }
@@ -1063,6 +1067,17 @@ fn heap_at_fixpoint(chunk: &noeta_bytecode::Chunk, n: usize, nreg: usize) -> Opt
     // `unit`-initialized (an immediate).
     let mut inset = vec![false; n * nreg];
     inset[..chunk.num_params as usize].fill(true);
+    // NOTE (soundness, P-JSSA): this forward model describes tier-0's *fall-through* state, but a
+    // mid-frame native entry (a seam resume after an interpreted callee, or an OSR loop header)
+    // begins with whatever tier 0 actually left in the slots — and tier 0 can put a heap value
+    // where this model claims an immediate (an overflowing arithmetic result heap-boxes to a big
+    // int; native bails *before* such a store, so the discrepancy arises exactly when tier 0 ran
+    // the segment). A false immediate claim would skip a needed retain/release — a leak, or a
+    // double-release. Rather than dropping the claims (which would forfeit post-call bare stores
+    // and the loop promotion), every mid-frame entry **verifies** them at runtime and bails on a
+    // violation — see `Codegen::guard_immediate_claims`. Native→native direct calls never pass
+    // through a mid-frame entry (the callee provably ran fully native), so the hot path pays
+    // nothing.
 
     let mut succ = Vec::new();
     let mut changed = true;
@@ -1284,6 +1299,41 @@ impl Codegen<'_, '_> {
                     .ins()
                     .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
             }
+        }
+    }
+
+    /// Soundness guard at an **OSR loop-header entry**: verify at runtime that every register the
+    /// bare-store analysis claims immediate at `pc` actually holds a non-pointer. The forward
+    /// model describes tier-0's fall-through state, but an OSR entry begins mid-frame with
+    /// whatever tier 0 actually left in the slots — and tier 0 heap-boxes an overflowing
+    /// arithmetic result where the model claims an immediate. A false claim would skip a needed
+    /// retain/release (a leak, or a double-release). Every mid-frame entry — a seam resume after
+    /// an interpreted callee as well as an OSR loop header — verifies its claims here. The cost
+    /// lands only on interpreter transitions: a native→native direct call never re-enters through
+    /// the seam (its callee provably ran fully native, so the caller's claims still hold), and an
+    /// OSR entry fires once per hot loop, never per iteration. A violation bails back to the
+    /// interpreter at `pc`. Known-constant registers need no guard: their single dominating
+    /// `LoadConst` def wrote the slot.
+    fn guard_immediate_claims(&mut self, pc: usize) {
+        let mut any: Option<ClValue> = None;
+        for r in 0..self.nreg as u16 {
+            if !self.heap_in[pc * self.nreg + r as usize] && self.const_bits[r as usize].is_none() {
+                let v = self.load_reg(r);
+                let p = self.is_pointer(v);
+                any = Some(match any {
+                    None => p,
+                    Some(acc) => self.b.ins().bor(acc, p),
+                });
+            }
+        }
+        if let Some(any) = any {
+            let ok = self.b.create_block();
+            let bail = self.b.create_block();
+            self.b.ins().brif(any, bail, &[], ok, &[]);
+            self.b.switch_to_block(bail);
+            let here = self.pc_const(pc);
+            self.b.ins().return_(&[here]);
+            self.b.switch_to_block(ok);
         }
     }
 

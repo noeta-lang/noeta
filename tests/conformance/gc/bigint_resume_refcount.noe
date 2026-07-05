@@ -1,0 +1,20 @@
+// Tier 0 heap-boxes the overflowing multiply into b's register (the native multiply bails on the
+// 48-bit fit check and the interpreter re-runs it). After the call returns, resume-native
+// re-enters this frame with the bare-store analysis claiming b's register immediate — the rebind
+// then skips the Drop's release and bare-stores over the slot, stranding the big int until the
+// teardown sweep (a refcount anomaly).
+// expect: stdout "7"
+// expect: exit 0
+fn noop(n: int): int {
+    return n
+}
+
+fn big(): int {
+    a = 100000000
+    mut b: dyn = a * a
+    c = noop(7)
+    b = c
+    return c
+}
+
+echo big()
