@@ -119,6 +119,18 @@ failed closed (leaf-op/field code) gets **no** variables — byte-identical code
 neutral (1.00–1.01×). Gates: `--jit-differential` 432/0-divergence/0-leak (890/891 native),
 standard differential 432/0, conformance 443, leak 0, workspace green, clippy+fmt clean.
 
+**Soundness fallout (fixed in follow-up commits `960f05f`+`ff9efed`):** designing the typed slice
+surfaced a **latent J7-era bug on main**: the analysis's arithmetic-results-are-immediate claim is
+native-path-true but tier-0-false (tier 0 heap-boxes a 48-bit overflow into the claimed register),
+and a mid-frame entry (seam resume / OSR header) begins with tier-0's slots — a false claim skipped
+a needed retain/release (silent mid-run leak + latent double-release). Invisible to the old leak
+oracle because teardown's empty-roots backup sweep absorbs orphans; the new **refcount-anomaly
+oracle** (garbage members' counts must equal their in-edges from the garbage set) made it red, and
+also immediately caught three unrelated interpreter refcount bugs (`MaskWidth` over-retain, abort
+leaving `concurrent` scopes unreleased, `Op::RunFuture` abort path). Fix: mid-frame entry init
+blocks **verify** the claims (one `is_pointer` test per claimed register, cold path only — direct
+native→native calls never pass through a mid-frame entry, so fib stays 1.01×).
+
 **The finding that reshapes the next slice: with loads/stores gone, the NaN-box chain is the
 floor.** The promoted loop still pays, per op: two `is_small_int` tag checks, two unbox
 shift-pairs, the 48-bit overflow fit-check, and a re-box — because a `Variable` holds the *boxed*
