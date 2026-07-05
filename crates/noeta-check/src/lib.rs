@@ -99,6 +99,9 @@ pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     /// The full-fidelity `type_of` site map (see [`resolve_type_of_sites`]).
     pub type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// Every expression's inferred static type, keyed by span — the hover index. Empty unless the
+    /// checker ran via [`check_all_with_types`] (the IDE path); the compile path leaves it empty.
+    pub expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// Runtime type-argument reflection (`plans/reflection/runtime-type-args.md`, slice A): the
     /// resolved `TypeRepr` at each collection/object **construction** site (list/map/set/object/enum
     /// literal), so a value can be tagged with the type it was built as and `type_of`/`is` recover its
@@ -138,7 +141,22 @@ pub struct Checked {
 /// the single-pass entry point the hot paths (the CLI, the conformance/differential harnesses,
 /// the `noeta-db` `bytecode` query) use so the checker runs exactly once per program.
 pub fn check_all(program: &Program) -> Checked {
-    let mut checker = Checker::default();
+    check_all_impl(program, false)
+}
+
+/// Like [`check_all`], but additionally records every expression's inferred type into
+/// [`Checked::expr_types`] — the span→type index the IDE hover feature reads. Only the IDE path
+/// (`noeta-db`'s `checked_ide` query) calls this; the compile path uses [`check_all`] and never
+/// builds the index. Diagnostics are identical either way — recording types is a pure side-channel.
+pub fn check_all_with_types(program: &Program) -> Checked {
+    check_all_impl(program, true)
+}
+
+fn check_all_impl(program: &Program, record_expr_types: bool) -> Checked {
+    let mut checker = Checker {
+        record_expr_types,
+        ..Checker::default()
+    };
     checker.register_prelude();
     checker.collect(program);
     // Compute destruct-reachability + parameter relevance before checking bodies (local-binding
@@ -149,6 +167,7 @@ pub fn check_all(program: &Program) -> Checked {
     Checked {
         diagnostics: checker.diags,
         type_of_sites: checker.sites.type_of_sites,
+        expr_types: checker.sites.expr_types,
         construction_sites: checker.sites.construction_sites,
         packed_list_sites: checker.sites.packed_list_sites,
         ext_call_sites: checker.sites.ext_call_sites,
@@ -426,6 +445,12 @@ struct SiteMaps {
     /// the runtime head-constructor path. Both backends harvest this map via [`resolve_type_of_sites`]
     /// on the same program, so they emit identical `Type` values by construction.
     type_of_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// Every synthesized expression's inferred static type, keyed by the expression's span — the
+    /// span→type index the IDE hover feature reads. Populated **only** when
+    /// [`Checker::record_expr_types`] is set (the `check_all_with_types` / IDE path); the hot
+    /// compile path leaves it empty and pays nothing. Concretely-typed sites only, like the other
+    /// maps: a `dyn`/union/un-inferred result is omitted (hover simply shows nothing there).
+    expr_types: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     construction_sites: HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// List-construction sites whose element type is a `@packed` struct (P-PACK Phase 2), keyed by the
     /// constructing expression's span → the element's flat [`PackedLayout`]. Both backends consult this
@@ -488,6 +513,10 @@ struct Checker {
     /// may read/write/construct its module's private fields (the Rust `#[cfg(test)]` model). `false`
     /// for ordinary fns and methods. Set from [`FnDecl::is_dev_tier`] in [`Checker::check_fn`].
     in_dev_tier: bool,
+    /// When set, [`Checker::synth`] records every expression's inferred type into
+    /// [`SiteMaps::expr_types`] for the IDE hover path. Off by default so the compile path is
+    /// unaffected; enabled by [`check_all_with_types`].
+    record_expr_types: bool,
     /// Declared type → its kind (`Enum`/`Struct`/`Class`). Drives the abstract kind-type
     /// membership rule (`Named(n) <: Enum` iff `n` is an enum) — the registry-dependent piece the
     /// pure lattice cannot decide, consulted by [`Checker::assignable`].
@@ -2683,7 +2712,21 @@ impl Checker {
 
     // ----- synthesis -----
 
+    /// Synthesize an expression's type. Thin wrapper over [`Self::synth_inner`] that, on the IDE
+    /// path ([`Self::record_expr_types`]), records the result into the `expr_types` index for hover.
+    /// Every expression — and every subexpression, since the checker recurses through here — flows
+    /// through this one choke point, so the index covers the whole tree with a single insertion site.
     fn synth(&mut self, expr: &Expr, env: &mut Env) -> Type {
+        let ty = self.synth_inner(expr, env);
+        if self.record_expr_types
+            && let Some(repr) = type_to_repr_top(&ty, &self.type_kinds)
+        {
+            self.sites.expr_types.insert(expr.span(), repr);
+        }
+        ty
+    }
+
+    fn synth_inner(&mut self, expr: &Expr, env: &mut Env) -> Type {
         match expr {
             Expr::Str { .. } => Type::String,
             Expr::Int { .. } => Type::Int,

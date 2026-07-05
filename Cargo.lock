@@ -1312,6 +1312,7 @@ dependencies = [
 name = "noeta-lsp"
 version = "0.0.0"
 dependencies = [
+ "noeta-ast",
  "noeta-db",
  "noeta-diagnostics",
  "noeta-span",

@@ -70,6 +70,37 @@ impl<'a> LineIndex<'a> {
             end: self.position(span.end, encoding),
         }
     }
+
+    /// Convert a 0-based LSP [`Position`] back into a byte offset under `encoding` — the inverse of
+    /// [`position`](Self::position), used to locate a hover/definition request in the source. A line
+    /// past the end of the text maps to the end; a `character` past the end of its line clamps to the
+    /// line's end (the newline, or EOF for the last line).
+    pub fn offset(&self, position: Position, encoding: Encoding) -> u32 {
+        let Some(&line_start) = self.line_starts.get(position.line as usize) else {
+            return self.text.len() as u32;
+        };
+        let line_start = line_start as usize;
+        // End of this line's content: just before the next line's start (dropping the `\n`), or EOF.
+        let line_end = self
+            .line_starts
+            .get(position.line as usize + 1)
+            .map(|&next| next as usize - 1)
+            .unwrap_or(self.text.len());
+        let line = &self.text[line_start..line_end];
+
+        let target = position.character as usize;
+        let mut units = 0usize;
+        for (byte, ch) in line.char_indices() {
+            if units >= target {
+                return (line_start + byte) as u32;
+            }
+            units += match encoding {
+                Encoding::Utf8 => ch.len_utf8(),
+                Encoding::Utf16 => ch.len_utf16(),
+            };
+        }
+        (line_start + line.len()) as u32
+    }
 }
 
 #[cfg(test)]
@@ -131,5 +162,60 @@ mod tests {
         let r = LineIndex::new(text).range(Span::new(4, 5), Encoding::Utf8);
         assert_eq!((r.start.line, r.start.character), (0, 4));
         assert_eq!((r.end.line, r.end.character), (0, 5));
+    }
+
+    fn off(text: &str, line: u32, character: u32, enc: Encoding) -> u32 {
+        LineIndex::new(text).offset(Position { line, character }, enc)
+    }
+
+    #[test]
+    fn offset_inverts_position_ascii() {
+        let text = "abc\ndef";
+        assert_eq!(off(text, 0, 0, Encoding::Utf8), 0);
+        assert_eq!(off(text, 0, 2, Encoding::Utf8), 2);
+        assert_eq!(off(text, 1, 0, Encoding::Utf8), 4);
+        assert_eq!(off(text, 1, 2, Encoding::Utf8), 6);
+    }
+
+    #[test]
+    fn offset_inverts_position_multibyte() {
+        // "x\ncafé!" — line 1 is "café!" (é is 2 UTF-8 bytes / 1 UTF-16 unit).
+        let text = "x\ncafé!";
+        // UTF-16 character 5 is the end of the line; byte offset is line_start(2) + 6 bytes = 8.
+        assert_eq!(off(text, 1, 5, Encoding::Utf16), text.len() as u32);
+        // UTF-8 character 3 is just before 'é' (c,a,f); byte offset 2 + 3 = 5.
+        assert_eq!(off(text, 1, 3, Encoding::Utf8), 5);
+    }
+
+    #[test]
+    fn offset_roundtrips_with_position() {
+        let text = "let 𝄞 = café";
+        let index = LineIndex::new(text);
+        for enc in [Encoding::Utf8, Encoding::Utf16] {
+            for boundary in text
+                .char_indices()
+                .map(|(i, _)| i as u32)
+                .chain([text.len() as u32])
+            {
+                let pos = index.position(boundary, enc);
+                assert_eq!(
+                    index.offset(pos, enc),
+                    boundary,
+                    "enc {enc:?} at {boundary}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn offset_past_end_of_line_clamps_to_line_end() {
+        let text = "ab\ncd";
+        assert_eq!(off(text, 0, 99, Encoding::Utf8), 2); // end of "ab", before '\n'
+    }
+
+    #[test]
+    fn offset_past_last_line_clamps_to_eof() {
+        let text = "ab";
+        assert_eq!(off(text, 5, 0, Encoding::Utf8), 2);
     }
 }

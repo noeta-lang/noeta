@@ -7,18 +7,23 @@
 //! queries that the edit invalidated. That incremental spine is what makes the server responsive;
 //! it is inherited wholesale from M1, not built here.
 //!
-//! Slice **L0** stood up the skeleton and document lifecycle. Slice **L1** adds the headline
-//! feature: **live diagnostics**. On open/change the server runs the compiler's `tokens` → `ast` →
-//! `checked` queries (each salsa-memoized, so an edit recomputes only what it touched), takes the
-//! earliest failing stage's diagnostics — mirroring the compiler's own lex→parse→check gating —
-//! maps each to an LSP `Diagnostic` (severity, `E0xxx` code, range, related labels), and publishes
-//! them. Positions are converted encoding-aware (see [`offsets`]).
+//! Slice **L0** stood up the skeleton and document lifecycle. Slice **L1** added **live
+//! diagnostics**: on open/change the server runs `tokens` → `ast` → `checked_ide` (each
+//! salsa-memoized, so an edit recomputes only what it touched), takes the earliest failing stage's
+//! diagnostics — mirroring the compiler's own lex→parse→check gating — maps each to an LSP
+//! `Diagnostic` (severity, `E0xxx` code, range, related labels), and publishes them. Slice **L2**
+//! adds **hover types**: the cursor position becomes a byte offset, the tightest enclosing span in
+//! the checker's `expr_types` index gives the inferred type, and it is rendered back to surface
+//! syntax (see [`hover`]). Both features read the one `checked_ide` query, so a document version is
+//! checked once. Positions are converted encoding-aware (see [`offsets`]).
 
+mod hover;
 mod offsets;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
+use noeta_ast::reflect::TypeRepr;
 use noeta_db::{LangDatabase, SourceProgram};
 use offsets::{Encoding, LineIndex};
 use salsa::Setter;
@@ -97,10 +102,35 @@ impl DocumentStore {
             if !parsed.0.diagnostics.is_empty() {
                 parsed.0.diagnostics.clone()
             } else {
-                noeta_db::checked(db, program).diagnostics.clone()
+                // `checked_ide` (not `checked`) so hover reads the same memoized run — one checker
+                // pass per document version serves both diagnostics and the type index.
+                noeta_db::checked_ide(db, program).diagnostics.clone()
             }
         };
         Some((diags, program.text(db).clone()))
+    }
+
+    /// The type at `position` for hover: the **smallest** `expr_types` span that contains the cursor
+    /// (the most specific expression under it), rendered plus its LSP range. `None` if the document
+    /// is unknown or no typed expression covers the position. The whole lookup runs under one salsa
+    /// borrow — the type index is never cloned.
+    fn hover_type(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(TypeRepr, Range)> {
+        let &program = self.open.get(uri)?;
+        let db = &self.db;
+        let index = LineIndex::new(program.text(db));
+        let offset = index.offset(position, encoding);
+        let (span, repr) = noeta_db::checked_ide(db, program)
+            .expr_types
+            .iter()
+            // Non-empty spans that cover the cursor; pick the tightest (innermost) one.
+            .filter(|(span, _)| span.end > span.start && span.start <= offset && offset <= span.end)
+            .min_by_key(|(span, _)| span.end - span.start)?;
+        Some((repr.clone(), index.range(*span, encoding)))
     }
 }
 
@@ -225,6 +255,7 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -239,6 +270,23 @@ impl LanguageServer for Backend {
 
     async fn shutdown(&self) -> Result<()> {
         Ok(())
+    }
+
+    async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {
+        let position_params = params.text_document_position_params;
+        let uri = position_params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let found = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.hover_type(uri.as_str(), position_params.position, encoding)
+        };
+        Ok(found.map(|(repr, range)| Hover {
+            contents: HoverContents::Markup(MarkupContent {
+                kind: MarkupKind::Markdown,
+                value: format!("```noeta\n{}\n```", hover::render_type(&repr)),
+            }),
+            range: Some(range),
+        }))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -370,6 +418,43 @@ mod tests {
     fn diagnostics_for_unknown_document_is_none() {
         let store = DocumentStore::default();
         assert!(store.diagnostics("file:///nope.noe").is_none());
+    }
+
+    #[test]
+    fn hover_reports_expression_types() {
+        let mut store = DocumentStore::default();
+        store.open("file:///h.noe", "nums = [1, 2, 3]".to_string());
+        let at = |c| {
+            store
+                .hover_type(
+                    "file:///h.noe",
+                    Position {
+                        line: 0,
+                        character: c,
+                    },
+                    Encoding::Utf8,
+                )
+                .map(|(repr, _range)| hover::render_type(&repr))
+        };
+        assert_eq!(at(7).as_deref(), Some("List<int>")); // the `[1, 2, 3]` literal
+        assert_eq!(at(8).as_deref(), Some("int")); // the `1` element
+    }
+
+    #[test]
+    fn hover_off_any_expression_is_none() {
+        let mut store = DocumentStore::default();
+        store.open("file:///h.noe", "nums = [1, 2, 3]".to_string());
+        // Column 5 is the ` = ` gap — the binding's LHS name and the operator are not expressions,
+        // so no `expr_types` span covers the cursor.
+        let hit = store.hover_type(
+            "file:///h.noe",
+            Position {
+                line: 0,
+                character: 5,
+            },
+            Encoding::Utf8,
+        );
+        assert!(hit.is_none());
     }
 
     #[test]

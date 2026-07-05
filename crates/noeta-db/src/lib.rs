@@ -100,6 +100,10 @@ pub struct Ast(pub Parsed);
 pub struct Checked {
     pub diagnostics: Vec<Diagnostic>,
     pub type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
+    /// Every expression's inferred type, keyed by span — the IDE hover index. Empty except in the
+    /// result of the [`checked_ide`] query (the LSP path); the compile-path [`checked`] query leaves
+    /// it empty so `noeta run`/differential pay nothing for it.
+    pub expr_types: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     /// The `List<packed>` construction-site layout map (P-PACK 2.1), carried here for the same
     /// reason as `type_of_sites`: the eval reference reads it to lay flat lists out identically to
     /// the VM, computed once per check.
@@ -199,10 +203,27 @@ pub fn ast(db: &dyn salsa::Database, src: SourceProgram) -> Ast {
 #[salsa::tracked(returns(ref))]
 pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
     let parsed = ast(db, src);
-    let out = noeta_check::check_all(&parsed.0.program);
+    from_check_output(noeta_check::check_all(&parsed.0.program))
+}
+
+/// The IDE-flavored type-check: like [`checked`], but the result's [`Checked::expr_types`] is
+/// populated (the span→type hover index), because it runs the checker via
+/// [`noeta_check::check_all_with_types`]. The LSP reads diagnostics *and* hover types from this one
+/// query — a single checker run per document version — while the compile path stays on [`checked`]
+/// and never builds the index. Diagnostics are identical between the two.
+#[salsa::tracked(returns(ref))]
+pub fn checked_ide(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
+    let parsed = ast(db, src);
+    from_check_output(noeta_check::check_all_with_types(&parsed.0.program))
+}
+
+/// Project a `noeta_check` result into this crate's memoized [`Checked`]. Shared by [`checked`] and
+/// [`checked_ide`] so the two stay field-for-field in sync.
+fn from_check_output(out: noeta_check::Checked) -> Checked {
     Checked {
         diagnostics: out.diagnostics,
         type_of_sites: out.type_of_sites,
+        expr_types: out.expr_types,
         packed_list_sites: out.packed_list_sites,
         ext_call_sites: out.ext_call_sites,
         map_packed_sites: out.map_packed_sites,
@@ -331,24 +352,11 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
 #[salsa::tracked(returns(ref))]
 pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     match &linked(db, ws).0 {
-        Ok(program) => {
-            let out = noeta_check::check_all(program);
-            Checked {
-                diagnostics: out.diagnostics,
-                type_of_sites: out.type_of_sites,
-                packed_list_sites: out.packed_list_sites,
-                ext_call_sites: out.ext_call_sites,
-                map_packed_sites: out.map_packed_sites,
-                index_field_sites: out.index_field_sites,
-                for_stream_sites: out.for_stream_sites,
-                width_sites: out.width_sites,
-                construction_sites: out.construction_sites,
-                destructor_relevance: out.destructor_relevance,
-            }
-        }
+        Ok(program) => from_check_output(noeta_check::check_all(program)),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
             type_of_sites: std::collections::HashMap::new(),
+            expr_types: std::collections::HashMap::new(),
             packed_list_sites: std::collections::HashMap::new(),
             ext_call_sites: std::collections::HashMap::new(),
             map_packed_sites: std::collections::HashMap::new(),
