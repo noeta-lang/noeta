@@ -414,6 +414,33 @@ impl DocumentStore {
         Some(by_uri)
     }
 
+    /// The range of the renameable value symbol under the cursor — for `prepareRename`, so the editor
+    /// can validate before showing its input box and pre-select the old name. Returns the span of the
+    /// identifier occurrence at the cursor when it resolves to a local, parameter, or function; `None`
+    /// when the cursor is not on such a symbol (the editor then refuses the rename).
+    fn prepare_rename(&self, uri: &str, position: Position, encoding: Encoding) -> Option<Range> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let entry_text = entry.text(db);
+        let index = LineIndex::new(entry_text);
+        let offset = index.offset(position, encoding);
+
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        // Only offer a rename where the def/use index resolves a value symbol.
+        resolve::DefUse::build(program).symbol_at(offset, SourceId::FIRST)?;
+        // Return the range of the identifier occurrence the cursor is actually on.
+        let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|token| {
+            token.kind == TokenKind::Ident && token.span.start <= offset && offset <= token.span.end
+        })?;
+        Some(index.range(token.span, encoding))
+    }
+
     /// Signature help for the call the cursor at `position` is inside: the called function's
     /// signature and the active argument. Token-based (so a half-typed call with an unbalanced paren
     /// still resolves); the callee is looked up among the merged program's top-level functions, so an
@@ -832,7 +859,12 @@ impl LanguageServer for Backend {
                 }),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
-                rename_provider: Some(OneOf::Left(true)),
+                // `prepareProvider` lets the editor validate the cursor is on a renameable symbol
+                // and pre-select the old name before showing its rename box.
+                rename_provider: Some(OneOf::Right(RenameOptions {
+                    prepare_provider: Some(true),
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                })),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // Completion: invoked explicitly, as the user types a name, or on `.` — the trigger
                 // that fires member completion at a bare receiver dot (`c.`).
@@ -979,6 +1011,19 @@ impl LanguageServer for Backend {
                 active_parameter: Some(active),
             }
         }))
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> Result<Option<PrepareRenameResponse>> {
+        let uri = params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let range = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.prepare_rename(uri.as_str(), params.position, encoding)
+        };
+        Ok(range.map(PrepareRenameResponse::Range))
     }
 
     async fn document_symbol(
@@ -1658,6 +1703,38 @@ mod tests {
             "declaration file edited; got {by_uri:?}"
         );
         assert!(by_uri.contains_key(&entry_uri), "call-site file edited");
+    }
+
+    #[test]
+    fn prepare_rename_returns_the_symbol_range() {
+        let mut store = DocumentStore::default();
+        store.open("file:///r.noe", "total = 1\necho total".to_string());
+        // On a use of `total` (line 1) → the range of that occurrence.
+        let range = store
+            .prepare_rename(
+                "file:///r.noe",
+                Position {
+                    line: 1,
+                    character: 7,
+                },
+                Encoding::Utf8,
+            )
+            .expect("renameable");
+        assert_eq!(range.start.line, 1);
+        assert_eq!(range.end.character - range.start.character, 5); // `total`
+        // Not on a symbol → None.
+        assert!(
+            store
+                .prepare_rename(
+                    "file:///r.noe",
+                    Position {
+                        line: 0,
+                        character: 6,
+                    },
+                    Encoding::Utf8,
+                )
+                .is_none()
+        );
     }
 
     #[test]
