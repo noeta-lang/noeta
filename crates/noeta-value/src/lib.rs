@@ -42,6 +42,11 @@ use noeta_bytecode::Builtin;
 use noeta_object::{PackedKind, PackedSchema, Shape};
 use noeta_stdlib::FileHandle;
 
+// The P-SSO string (24-byte, ≤24-byte content inline) inside `Payload::Str`. Re-exported so the
+// one hot producer outside this crate — the VM's `BuildString` — can assemble its output in the
+// payload's own representation and hand it over without a conversion.
+pub use compact_str::CompactString;
+
 use heap::{IterShape, IterState, Payload};
 
 /// Why an iterator pull ([`Value::iter_next_apply`]) aborted (Track I.1c). The closure adapters
@@ -228,15 +233,17 @@ impl Value {
         }
     }
 
-    /// A heap string (refcount 1).
+    /// A heap string (refcount 1). Content ≤ 24 bytes lives inline in the payload (P-SSO) —
+    /// the value is then a single allocation.
     pub fn string(s: &str) -> Value {
-        heap::alloc(Payload::Str(s.to_string()))
+        heap::alloc(Payload::Str(CompactString::new(s)))
     }
 
-    /// A heap string (refcount 1) that **takes ownership** of an already-built `String` — no copy,
+    /// A heap string (refcount 1) that **takes ownership** of an already-built buffer — no copy,
     /// unlike [`Value::string`] which copies a borrowed `&str`. Use when the caller already owns the
-    /// buffer (e.g. `BuildString`'s interpolation output).
-    pub fn from_string(s: String) -> Value {
+    /// buffer (e.g. `BuildString`'s interpolation output, assembled as a [`CompactString`] so a
+    /// short result never touches the allocator).
+    pub fn from_string(s: CompactString) -> Value {
         heap::alloc(Payload::Str(s))
     }
 
@@ -1434,7 +1441,7 @@ impl Value {
     pub fn as_string(self) -> Option<String> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => Some(s.clone()),
+                Payload::Str(s) => Some(s.as_str().to_owned()),
                 _ => None,
             })
         } else {
@@ -1449,7 +1456,7 @@ impl Value {
     pub fn with_str<R>(self, f: impl FnOnce(&str) -> R) -> Option<R> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => Some(f(s)),
+                Payload::Str(s) => Some(f(s.as_str())),
                 _ => None,
             })
         } else {
@@ -1719,7 +1726,7 @@ impl Value {
         );
         heap::with_payload_mut(self, |p| {
             if let Payload::Str(buf) = p {
-                std::mem::take(buf)
+                std::mem::take(buf).into_string()
             } else {
                 String::new()
             }
@@ -1993,7 +2000,7 @@ impl Value {
     /// `String` that `push_str(&self.display())` would allocate. Fast paths cover the values that
     /// dominate string interpolation — a heap string (append its bytes, no clone), a small int, and a
     /// bool — and everything else falls back to `display()`, so the rendering is byte-identical.
-    pub fn display_into(self, out: &mut String) {
+    pub fn display_into(self, out: &mut CompactString) {
         if let Some(b) = self.as_bool() {
             out.push_str(if b { "true" } else { "false" });
         } else if self.is_small_int() {
@@ -2040,7 +2047,7 @@ impl Value {
             noeta_stdlib::format_f32(self.as_f32().unwrap())
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => s.clone(),
+                Payload::Str(s) => s.as_str().to_owned(),
                 // A byte buffer renders as a length summary (`<N bytes>`) — opaque and identical on
                 // both backends; its content round-trips through `from_bytes`, not display.
                 Payload::Bytes(b) => format!("<{} bytes>", b.len()),
@@ -2171,7 +2178,7 @@ impl Value {
             NativeValue::Scalar(Scalar::F32(self.as_f32().unwrap()))
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => NativeValue::Str(s.clone()),
+                Payload::Str(s) => NativeValue::Str(s.as_str().to_owned()),
                 // A byte buffer has no JSON representation (it is the *binary* alternative): a length
                 // summary string, so `json.stringify` never panics.
                 Payload::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),

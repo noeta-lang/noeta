@@ -23,6 +23,8 @@ noeta-stdlib = { workspace = true }
 noeta-reactive = { workspace = true }
 # Hot-path integer formatting for interpolation holes (`display_into`); bypasses `fmt::Formatter`.
 itoa = { workspace = true }
+# The SSO string inside `Payload::Str` (P-SSO); re-exported for the `BuildString` seam.
+compact_str = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

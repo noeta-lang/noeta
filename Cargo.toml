@@ -68,6 +68,10 @@ bytemuck = "1"
 # Direct integer→decimal formatting for hot display paths (string interpolation holes): the
 # `write!`/`fmt::Formatter` machinery costs ~2× the digits themselves on short ints.
 itoa = "1"
+# 24-byte small-string-optimized string for `Payload::Str` and map keys (P-SSO): ≤24-byte
+# content lives inline in the payload — a short-lived string costs one allocation (the Obj),
+# not two. Heap spill keeps capacity, so in-place append stays amortized O(n).
+compact_str = "0.9"
 
 [workspace.lints.rust]
 # Quarantine unsafe: forbidden workspace-wide in M0. The first crates that may

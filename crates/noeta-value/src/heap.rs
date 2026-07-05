@@ -258,7 +258,7 @@ type RegistrySet = HashSet<u64, std::hash::BuildHasherDefault<FxHasher>>;
 /// are its field values in the shape's declared order; an `Enum`'s slots are its variant's
 /// positional data. Freeing either releases its slots first (see [`free`]).
 pub(crate) enum Payload {
-    Str(String),
+    Str(compact_str::CompactString),
     /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — a GC leaf like `Str`; owns no child
     /// references, freeing it just drops the `Vec<u8>`.
     Bytes(Vec<u8>),

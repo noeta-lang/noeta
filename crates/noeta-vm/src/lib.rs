@@ -5055,7 +5055,7 @@ impl<'m> Vm<'m> {
                                 StrPart::Hole(_) => 0,
                             })
                             .sum();
-                        let mut out = String::with_capacity(cap);
+                        let mut out = noeta_value::CompactString::with_capacity(cap);
                         for part in parts.iter() {
                             match part {
                                 StrPart::Literal(k) => {
