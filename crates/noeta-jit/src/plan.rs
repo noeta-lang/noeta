@@ -1,27 +1,22 @@
-//! P-JSSA S0 — the register plan: per-pc **liveness** and per-pc **SSA-residency permission**
-//! (`plans/jit/ssa.md`). This module is pure analysis; codegen consumes it starting at S1.
+//! P-JSSA S0/S5 — the register plan: per-pc **liveness** and the prototype-wide **residency
+//! permission** (`plans/jit/ssa.md`). This module is pure analysis; codegen consumes it.
 //!
-//! Two flattened `[pc * nreg + r]` maps over the tier-0 CFG:
-//!
-//! - **`live_in`** — may register `r`'s value be read (as an operand, a branch scrutinee, a
-//!   `Return`/`Echo` source, or a `Drop` release) along some tier-0 path from the *start* of op
-//!   `pc`, before being overwritten? This is the spill set: when native code bails (or calls a
-//!   runtime helper) at `pc`, the SSA-resident registers it must materialize into their slots are
-//!   exactly the dirty ∩ live-in ones — a dead register's slot is never read, so its staleness is
-//!   unobservable.
-//! - **`ssa_ok`** — may register `r` be **SSA-resident** at `pc`? Exactly the complement of the
-//!   bare-store map ([`crate::heap_in_map`]): a register is promotable only where its value is
-//!   provably an immediate. This is the v1 refcount dodge (ssa.md): an immediate carries no
-//!   ownership, so eliding its intermediate slot stores changes no refcount, and any
-//!   heap→immediate transition happens at a pc where `ssa_ok` is false — i.e. through a real,
-//!   releasing store — so a slot left stale by SSA residency always holds an immediate and frame
-//!   teardown's release loop stays a no-op over it.
+//! - **`live_in`** (flattened `[pc * nreg + r]`, over the tier-0 CFG) — may register `r`'s value
+//!   be read (as an operand, a branch scrutinee, a `Return`/`Echo` source, or a `Drop` release)
+//!   along some tier-0 path from the *start* of op `pc`, before being overwritten? This is the
+//!   core of the spill set: when native code bails (or calls a runtime helper) at `pc`, the
+//!   SSA-resident registers it must materialize into their slots are the live-in ones plus the
+//!   heap-desynced ones ([`crate::slot_hazard_map`], S5) — a dead, non-hazardous register's slot
+//!   is never read and holds nothing that teardown could misrelease.
+//! - **`modeled`** (S5) — residency is universal: in a modeled prototype **every** register
+//!   (heap values included) lives in its SSA variable; `heap_in_map` decides release-on-overwrite
+//!   and sync obligations instead of gating residency. An unmodeled prototype promotes nothing.
 //!
 //! **Fail-closed posture.** Liveness fails closed **per op**: an op the model doesn't cover is
 //! treated as reading every register and defining none, so everything is live across it (native
 //! codegen treats those ops as spill-everything sync points anyway — runtime helpers read and
-//! write the frame's slots). `ssa_ok` inherits `heap_in_map`'s whole-prototype fail-closed: any
-//! op the heap analysis can't model makes every cell false (nothing promotes).
+//! write the frame's slots). Residency fails closed **per prototype**: any op the register-effect
+//! model can't cover makes the whole prototype unmodeled (nothing promotes).
 //!
 //! **Successor soundness.** Unlike [`crate::analysis_succ`] (which only ever sees the
 //! arithmetic-loop whitelist), liveness runs over *every* op, so [`succ_all`] must know every
@@ -32,40 +27,34 @@
 
 use noeta_bytecode::{Chunk, Op, Reg};
 
-/// The S0 register plan for a prototype. See the module docs for the two maps' contracts.
+/// The S0/S5 register plan for a prototype. See the module docs for the maps' contracts.
 pub(crate) struct RegPlan {
     live_in: Vec<bool>,
-    ssa_ok: Vec<bool>,
-    /// Per register: is `ssa_ok` true at *some* pc? A register that is never promotable gets no
-    /// SSA variable at all, so a prototype whose heap analysis failed closed (`ssa_ok` all-false)
-    /// generates byte-identical code to the pre-P-JSSA backend.
-    promotable: Vec<bool>,
+    /// P-JSSA S5: residency is **universal** in a modeled prototype — every register (heap
+    /// values included) lives in its SSA variable, and `heap_in` decides release-on-overwrite
+    /// and sync obligations instead of gating residency. An unmodeled prototype promotes
+    /// nothing (no variable is ever defined or used) — byte-identical to the slot backend.
+    modeled: bool,
     nreg: usize,
 }
 
 impl RegPlan {
-    /// Build the plan from an already-computed bare-store map (avoids re-running the heap
-    /// fixpoint the caller needed anyway). `heap_in` is [`crate::heap_in_map`]'s output for this
-    /// chunk.
-    pub(crate) fn with_heap_in(chunk: &Chunk, heap_in: &[bool]) -> RegPlan {
-        let nreg = chunk.num_registers as usize;
-        let mut promotable = vec![false; nreg];
-        for (i, &h) in heap_in.iter().enumerate() {
-            if !h {
-                promotable[i % nreg.max(1)] = true;
-            }
-        }
+    /// Build the plan. `modeled` says whether every op's register effect is known to the heap
+    /// analysis (or the prototype is call-free/non-OSR, where the all-immediate invariant holds
+    /// without modeling) — the S5 residency permission.
+    pub(crate) fn with_heap_in(chunk: &Chunk, _heap_in: &[bool], modeled: bool) -> RegPlan {
         RegPlan {
             live_in: live_in_map(chunk),
-            ssa_ok: heap_in.iter().map(|&h| !h).collect(),
-            promotable,
-            nreg,
+            modeled,
+            nreg: chunk.num_registers as usize,
         }
     }
 
     #[cfg(test)]
     pub(crate) fn compute(chunk: &Chunk, heap_aware: bool) -> RegPlan {
-        RegPlan::with_heap_in(chunk, &crate::heap_in_map(chunk, heap_aware))
+        let heap_in = crate::heap_in_map(chunk, heap_aware);
+        let modeled = crate::proto_modeled(chunk, heap_aware);
+        RegPlan::with_heap_in(chunk, &heap_in, modeled)
     }
 
     /// May `r`'s value be read along some tier-0 path from the start of op `pc`?
@@ -73,14 +62,9 @@ impl RegPlan {
         self.live_in[pc * self.nreg + r as usize]
     }
 
-    /// May `r` be SSA-resident at `pc` (provably immediate there)?
-    pub(crate) fn ssa_ok_at(&self, pc: usize, r: Reg) -> bool {
-        self.ssa_ok[pc * self.nreg + r as usize]
-    }
-
-    /// Is `r` promotable anywhere (carries an SSA variable at all)?
-    pub(crate) fn promotable(&self, r: Reg) -> bool {
-        self.promotable[r as usize]
+    /// Is `r` promotable (carries an SSA variable)? S5: all registers of a modeled prototype.
+    pub(crate) fn promotable(&self, _r: Reg) -> bool {
+        self.modeled
     }
 }
 
@@ -518,23 +502,15 @@ mod tests {
         assert!(!p.live_at(2, 0), "dead below the Drop");
     }
 
-    /// `ssa_ok` is the complement of the bare-store map: a call-free non-OSR prototype promotes
-    /// everywhere; a `heap_aware` prototype promotes wherever the value is claimed immediate —
-    /// parameters included (T1b: the claim is entry-verified) — but not a call's may-heap result.
+    /// S5 residency: a modeled prototype promotes **every** register (heap values included — a
+    /// call's result too); an unmodeled one (an op the heap analysis can't track) promotes
+    /// nothing.
     #[test]
-    fn ssa_ok_tracks_provable_immediacy() {
-        // 0: r1 = r0 < r0   1: r2 = r0 + r0   2: r1 = call r2()   3: halt
+    fn residency_is_universal_iff_modeled() {
         let code = vec![
             Op::Binary {
                 op: BinaryOp::Lt,
                 dst: 1,
-                a: 0,
-                b: 0,
-                span: sp(),
-            },
-            Op::Binary {
-                op: BinaryOp::Add,
-                dst: 2,
                 a: 0,
                 b: 0,
                 span: sp(),
@@ -547,23 +523,29 @@ mod tests {
             },
             Op::Halt,
         ];
-        let free = RegPlan::compute(&chunk(code.clone(), vec![], 1, 3), false);
-        assert!(
-            free.ssa_ok_at(0, 0) && free.ssa_ok_at(2, 2),
-            "a non-heap-aware prototype promotes everywhere"
-        );
         let aware = RegPlan::compute(&chunk(code, vec![], 1, 3), true);
         assert!(
-            aware.ssa_ok_at(0, 0),
-            "a parameter's immediate claim is entry-verified — promotable"
+            aware.promotable(0) && aware.promotable(1) && aware.promotable(2),
+            "a modeled prototype promotes everything — call results included (S5)"
+        );
+        let unmodeled = RegPlan::compute(
+            &chunk(
+                vec![
+                    Op::MakeTuple {
+                        dst: 0,
+                        items: Box::new([]),
+                    },
+                    Op::Halt,
+                ],
+                vec![],
+                0,
+                1,
+            ),
+            true,
         );
         assert!(
-            aware.ssa_ok_at(2, 2),
-            "a natively stored arithmetic result is an immediate — promotable"
-        );
-        assert!(
-            !aware.ssa_ok_at(3, 1),
-            "a call's may-heap result is not promotable"
+            !unmodeled.promotable(0),
+            "an unmodeled prototype promotes nothing"
         );
     }
 }

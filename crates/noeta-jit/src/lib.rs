@@ -449,7 +449,7 @@ impl Jit {
             // S4.1: also compile the fast-convention body where the prototype supports the
             // frameless-window contract; direct calls to it then skip the window fill, the
             // argument copy, and the helper-side return protocol.
-            if fast_eligible(chunk) {
+            if fast_ok(chunk) {
                 let ff = self.emit_int_body(module, proto, true)?;
                 self.fast_compiled[proto] = Some(ff as usize);
             }
@@ -665,16 +665,24 @@ impl Jit {
             let nreg = chunk.num_registers as usize;
             let heap_in = heap_in_map(chunk, heap_aware);
             let transfer = transfer_pairs(chunk);
-            // P-JSSA: the register plan (per-pc liveness + SSA-residency permission) and one SSA
-            // variable per VM register. A prototype whose heap analysis failed closed promotes
-            // nothing (no variable is ever defined or used) — its code is unchanged.
-            let reg_plan = plan::RegPlan::with_heap_in(chunk, &heap_in);
+            // P-JSSA: the register plan (per-pc liveness + S5 universal residency) and one SSA
+            // variable per VM register. An unmodeled prototype promotes nothing (no variable is
+            // ever defined or used) — its code is unchanged.
+            let modeled = proto_modeled(chunk, heap_aware);
+            let reg_plan = plan::RegPlan::with_heap_in(chunk, &heap_in, modeled);
             let const_bits = plan::const_reg_bits(chunk);
             let kinds = kind_in_map(chunk);
+            // S5: with heap values SSA-resident, track where a slot may be heap-desynced from
+            // its variable; the sync spill set is live ∪ hazard.
+            let slot_hazard = if modeled && heap_aware {
+                slot_hazard_map(chunk, &heap_in)
+            } else {
+                vec![false; n * nreg]
+            };
             // Fast bodies need the must-slot-written map to normalize their (uninitialized)
             // window at every native exit; `fast_eligible` verified the contract holds.
             let must_written = if fast {
-                must_slot_written_map(chunk, &heap_in, &reg_plan, &const_bits)
+                must_slot_written_map(chunk, &const_bits)
             } else {
                 Vec::new()
             };
@@ -705,6 +713,7 @@ impl Jit {
                 proto: proto as u32,
                 fast,
                 must_written,
+                slot_hazard,
                 vec_len_off,
                 layout,
                 site_addrs,
@@ -1097,6 +1106,9 @@ fn reachable_pcs_from(chunk: &noeta_bytecode::Chunk, entries: Vec<usize>) -> Vec
                 stack.push(*target as usize);
                 stack.push(pc + 1);
             }
+            // A native `Call`/`CallGlobal` continues at `pc + 1` on the direct/fast path
+            // (J3/S4.1) — this edge is what lets a fast body run its post-call ops natively
+            // instead of compiling them to bail fillers. `Return` ends the frame.
             Op::Call { .. } | Op::CallGlobal { .. } => stack.push(pc + 1),
             Op::Return { .. } => {}
             _ => stack.push(pc + 1), // fast straight-line op
@@ -1256,6 +1268,83 @@ pub(crate) fn heap_in_map(chunk: &noeta_bytecode::Chunk, heap_aware: bool) -> Ve
         Some(inset) => inset,
         None => vec![true; n * nreg],
     }
+}
+
+/// Whether the register-effect model covers this prototype (P-JSSA S5's residency permission):
+/// either every op is modeled by [`reg_effect`], or the prototype is call-free/non-OSR
+/// (`!heap_aware`), where the pc-0 entry guard's all-immediate invariant holds without any
+/// modeling — every register write is then refcount-free by construction, and unmodeled ops are
+/// plain bail points whose sync uses the (always-modeled) liveness.
+pub(crate) fn proto_modeled(chunk: &noeta_bytecode::Chunk, heap_aware: bool) -> bool {
+    !heap_aware
+        || chunk
+            .code
+            .iter()
+            .all(|op| reg_effect(op, &chunk.consts).is_some())
+}
+
+/// The forward **slot-hazard** fixpoint (P-JSSA S5): `map[pc * nreg + r]` = may register `r`'s
+/// window slot be **out of sync with its variable in a heap-relevant way** at the start of `pc`?
+/// With heap values SSA-resident, a def releases the old value *from the variable* and writes no
+/// slot — so a slot can hold a released (dangling) pointer, or fail to hold the heap reference
+/// the register owns. Either way the slot must be re-synced before anything that reads or
+/// releases it (teardown, unwind, the interpreter). The spill set at every sync point is
+/// therefore `live ∪ hazard`.
+///
+/// Transfer: a def/clear of `r` raises the hazard if the *old* value may be heap
+/// (`heap_in[pc][r]` — its release/move leaves released bits in the slot) or the *new* value may
+/// be heap (`heap_in[pc+1][r]` — the variable now owns a reference the slot doesn't hold). A
+/// call clears everything (the pre-call sync spilled `live ∪ hazard`, and immediates are
+/// stale-safe) and then raises its own destination (the fast path writes the result to the
+/// variable only). Entries seed in-sync (variables are loaded from the slots). Join = OR.
+pub(crate) fn slot_hazard_map(chunk: &noeta_bytecode::Chunk, heap_in: &[bool]) -> Vec<bool> {
+    let n = chunk.code.len();
+    let nreg = chunk.num_registers as usize;
+    let all_immediate = heap_in.iter().all(|&h| !h);
+    if all_immediate {
+        return vec![false; n * nreg]; // stale slots are stale-immediates — always safe
+    }
+    let heap_at = |pc: usize, r: usize| -> bool {
+        let i = pc * nreg + r;
+        i < heap_in.len() && heap_in[i]
+    };
+    let mut hazard = vec![false; n * nreg];
+    let mut succ = Vec::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for pc in 0..n {
+            let mut out: Vec<bool> = hazard[pc * nreg..pc * nreg + nreg].to_vec();
+            match reg_effect(&chunk.code[pc], &chunk.consts) {
+                Some(RegEffect::Def { dst, .. }) | Some(RegEffect::Copy { dst, .. }) => {
+                    let d = dst as usize;
+                    if matches!(chunk.code[pc], Op::Call { .. } | Op::CallGlobal { .. }) {
+                        out.fill(false); // the pre-call sync spilled live ∪ hazard
+                        out[d] = true; // the result lands in the variable only (fast path)
+                    } else {
+                        out[d] = out[d] || heap_at(pc, d) || heap_at(pc + 1, d);
+                    }
+                }
+                Some(RegEffect::Clear(r)) => {
+                    let d = r as usize;
+                    out[d] = out[d] || heap_at(pc, d);
+                }
+                Some(RegEffect::Inert) => {}
+                None => return vec![true; n * nreg], // unmodeled → no residency anyway
+            }
+            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            for &su in &succ {
+                let base = su * nreg;
+                for (r, &o) in out.iter().enumerate() {
+                    if o && !hazard[base + r] {
+                        hazard[base + r] = true;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    hazard
 }
 
 /// The ownership-transfer peephole map for a prototype (see [`Codegen::transfer`]): pc `i` is marked
@@ -1504,30 +1593,19 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
 /// The forward **must-slot-written** fixpoint (P-JSSA S4.1): `map[pc * nreg + r]` = has register
 /// `r`'s window *slot* been written on **every** path from a fresh pc-0 entry to the start of op
 /// `pc`? Under the fast call convention the callee's window is reserved without initialization,
-/// so a slot is release-safe/readable only where this map proves a real store happened. "Writes
-/// the slot" mirrors the emitter exactly: a def site stores through unless it is a pure
-/// SSA `def_var` — promoted register, provably-immediate old and new occupant
-/// (cf. [`Codegen::store_reg`]). Meet = AND over [`analysis_succ`] predecessors; pc 0 starts
-/// all-unwritten (parameters travel as machine arguments — their slots are *not* written).
-/// Requires every op modeled by [`reg_effect`] (the caller checks eligibility first).
+/// so `normalize_frame` may keep a slot's contents only where this map proves a real store
+/// happened. With S5's universal residency the only defs that write slots are the
+/// known-constant registers' `LoadConst`s (everything else is a pure variable def); sync spills
+/// also write slots, but path-dependently, so they are not counted. Meet = AND over
+/// [`analysis_succ`] predecessors; pc 0 starts all-unwritten. Requires every op modeled by
+/// [`reg_effect`] (the caller checks [`fast_ok`] first).
 pub(crate) fn must_slot_written_map(
     chunk: &noeta_bytecode::Chunk,
-    heap_in: &[bool],
-    plan: &plan::RegPlan,
     const_bits: &[Option<u64>],
 ) -> Vec<bool> {
     let n = chunk.code.len();
     let nreg = chunk.num_registers as usize;
-    let is_var = |r: usize| {
-        plan.promotable(r as Reg) && const_bits.get(r).map(|c| c.is_none()).unwrap_or(true)
-    };
-    // A def at `pc` writes the slot unless the emitter's pure-def condition holds.
-    let slot_write = |pc: usize, r: usize| -> bool {
-        let ok_now = !heap_in[pc * nreg + r];
-        let i = (pc + 1) * nreg + r;
-        let ok_next = i < heap_in.len() && !heap_in[i];
-        !(is_var(r) && ok_now && ok_next)
-    };
+    let slot_write = |r: usize| -> bool { const_bits.get(r).is_some_and(|c| c.is_some()) };
     // Must-analysis: cells start "written" (⊤) except the entry row, and intersect over
     // predecessors; iterate to the greatest fixpoint. `written[pc]` describes the start of `pc`.
     let mut written = vec![true; n * nreg];
@@ -1542,11 +1620,11 @@ pub(crate) fn must_slot_written_map(
             match reg_effect(&chunk.code[pc], &chunk.consts) {
                 Some(RegEffect::Def { dst, .. }) | Some(RegEffect::Copy { dst, .. }) => {
                     let d = dst as usize;
-                    out[d] = out[d] || slot_write(pc, d);
+                    out[d] = out[d] || slot_write(d);
                 }
                 Some(RegEffect::Clear(r)) => {
                     let d = r as usize;
-                    out[d] = out[d] || slot_write(pc, d);
+                    out[d] = out[d] || slot_write(d);
                 }
                 Some(RegEffect::Inert) => {}
                 None => unreachable!("fast_ok requires a fully modeled prototype"),
@@ -1566,80 +1644,24 @@ pub(crate) fn must_slot_written_map(
     written
 }
 
-/// Compile-time gate for the fast body (P-JSSA S4.1): recompute the analyses the way
-/// [`Jit::emit_int_body`] will and check [`fast_ok`]. Only called once per compiled prototype.
-fn fast_eligible(chunk: &noeta_bytecode::Chunk) -> bool {
-    let heap_aware = has_osr_entry(chunk)
-        || chunk
-            .code
-            .iter()
-            .any(|op| matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) || is_leaf_heap_op(op));
-    let heap_in = heap_in_map(chunk, heap_aware);
-    let reg_plan = plan::RegPlan::with_heap_in(chunk, &heap_in);
-    let const_bits = plan::const_reg_bits(chunk);
-    if chunk
-        .code
-        .iter()
-        .any(|op| reg_effect(op, &chunk.consts).is_none())
-    {
-        return false;
-    }
-    let must_written = must_slot_written_map(chunk, &heap_in, &reg_plan, &const_bits);
-    fast_ok(chunk, &heap_in, &reg_plan, &must_written)
-}
-
-/// Whether a prototype is eligible for the **fast call convention** (P-JSSA S4.1): entered with
-/// its window reserved **uninitialized** and its arguments as machine arguments, so every native
-/// exit must be able to hand the interpreter a fully valid window (`Codegen::normalize_frame`).
-/// Requires:
+/// Whether a prototype is eligible for the **fast call convention** (P-JSSA S4.1/S5): entered
+/// with its window reserved **uninitialized** and its arguments as machine arguments, so every
+/// native exit must make the window fully tier-0-valid (`Codegen::normalize_frame`). With S5's
+/// universal residency the requirements reduce to:
 ///
-/// - every op modeled by the bare-store analysis (an unmodeled op has unknown slot effects);
-/// - ≤ 64 registers (the teardown mask, and bounded normalize code);
-/// - no non-parameter register read before written from pc 0 (its slot is garbage);
-/// - wherever a register is live but not SSA-resident, its slot must be must-written (normalize
-///   keeps real slot values and unit-fills the rest — a live non-resident register whose
-///   written-ness is path-dependent cannot be normalized statically);
-/// - at every `Return`, a may-heap register must be must-written (the native masked teardown
-///   releases exactly those slots — releasing a path-dependently-written slot would free garbage
-///   or leak the written path's value).
-pub(crate) fn fast_ok(
-    chunk: &noeta_bytecode::Chunk,
-    heap_in: &[bool],
-    plan: &plan::RegPlan,
-    must_written: &[bool],
-) -> bool {
-    let n = chunk.code.len();
-    let nreg = chunk.num_registers as usize;
-    if nreg > 64
-        || chunk
+/// - every op modeled by the register-effect whitelist (unknown slot effects are unnormalizable);
+/// - ≤ 64 registers (the teardown mask, and bounded normalize code).
+///
+/// Reads-before-write need no clause: reads go through the variables, which the fast entry
+/// initializes to `unit` — exactly tier-0's fresh-local semantics. Slot validity needs no
+/// per-return clause: the fast return releases from the variables, and `normalize_frame` spills
+/// `live ∪ hazard` and unit-fills everything not must-written.
+pub(crate) fn fast_ok(chunk: &noeta_bytecode::Chunk) -> bool {
+    chunk.num_registers <= 64
+        && chunk
             .code
             .iter()
-            .any(|op| reg_effect(op, &chunk.consts).is_none())
-    {
-        return false;
-    }
-    for r in chunk.num_params as usize..nreg {
-        if plan.live_at(0, r as Reg) {
-            return false;
-        }
-    }
-    for pc in 0..n {
-        for r in 0..nreg {
-            let live = plan.live_at(pc, r as Reg);
-            let resident = plan.ssa_ok_at(pc, r as Reg);
-            if live && !resident && !must_written[pc * nreg + r] {
-                return false;
-            }
-        }
-        if let Op::Return { .. } = chunk.code[pc] {
-            for r in 0..nreg {
-                if heap_in[pc * nreg + r] && !must_written[pc * nreg + r] {
-                    return false;
-                }
-            }
-        }
-    }
-    true
+            .all(|op| reg_effect(op, &chunk.consts).is_some())
 }
 
 /// A thin wrapper over the Cranelift builder carrying the frame base pointer, the globals base
@@ -1686,9 +1708,10 @@ struct Codegen<'a, 'b> {
     /// P-JSSA: the register plan — per-pc liveness (the bail spill set) and per-pc SSA-residency
     /// permission (`ssa_ok`, the complement of [`Codegen::heap_in`]). See [`plan::RegPlan`].
     plan: plan::RegPlan,
-    /// P-JSSA: one Cranelift SSA variable per VM register. Where the plan proves a register
-    /// immediate ([`plan::RegPlan::ssa_ok_at`]), its variable holds the truth and the slot may be
-    /// stale (stale-immediate by the plan's invariant); elsewhere the slot holds the truth. The
+    /// P-JSSA: one Cranelift SSA variable per VM register. In a modeled prototype the variable
+    /// holds the truth for **every** register — heap values included (S5) — and the slot may be
+    /// stale (stale-immediate, or heap-desynced per [`slot_hazard_map`]); in an unmodeled
+    /// prototype the slot holds the truth. The
     /// frontend's variable machinery turns defs/uses into block parameters at merges — including
     /// loop headers — so a promoted loop-carried value never touches memory inside the loop.
     /// Registers the plan never promotes still get a (never-used) variable so indexing is direct.
@@ -1721,6 +1744,9 @@ struct Codegen<'a, 'b> {
     /// Fast bodies only: the must-slot-written map ([`must_slot_written_map`]) driving
     /// `normalize_frame`'s keep/unit-fill decision. Empty for normal bodies.
     must_written: Vec<bool>,
+    /// S5: the per-pc slot-hazard map ([`slot_hazard_map`]) — where a slot may be heap-desynced
+    /// from its variable, so every sync point must spill it (live or not).
+    slot_hazard: Vec<bool>,
     /// Byte offset of a `Vec`'s length word within its three-word header ([`FrameLayout`]),
     /// baked so the fast return can pop the frame and truncate the register stack natively.
     vec_len_off: i32,
@@ -1768,27 +1794,18 @@ impl Codegen<'_, '_> {
         self.plan.promotable(r) && self.const_bits[r as usize].is_none()
     }
 
-    /// Read register `r`'s current value: the inlined constant for a known-constant register, the
-    /// SSA variable where the plan says it is resident (provably immediate at the current op),
-    /// else the slot.
+    /// Read register `r`'s current value: the inlined constant for a known-constant register,
+    /// the SSA variable for a promoted one (S5: residency is universal in a modeled prototype —
+    /// heap values included), else the slot (unmodeled prototypes only).
     fn read_reg(&mut self, r: Reg) -> ClValue {
         if let Some(bits) = self.const_bits[r as usize] {
             return self.b.ins().iconst(types::I64, bits as i64);
         }
-        if self.is_var(r) && self.plan.ssa_ok_at(self.cur_pc, r) {
+        if self.is_var(r) {
             self.b.use_var(self.vars[r as usize])
         } else {
             self.load_reg(r)
         }
-    }
-
-    /// Whether `r` is SSA-resident (provably immediate) at the *next* pc — i.e. whether the value
-    /// being defined by the current (fall-through) op may live purely in the variable. `false` at
-    /// the last pc (no next op; every chunk ends in `Halt`, which defines nothing, so this is
-    /// unreachable in practice).
-    fn ssa_ok_next(&self, r: Reg) -> bool {
-        let i = (self.cur_pc + 1) * self.nreg + r as usize;
-        i < self.heap_in.len() && !self.heap_in[i]
     }
 
     /// Whether register `r` may hold a heap pointer at the current op (`cur_pc`) — the bare-store
@@ -1798,70 +1815,62 @@ impl Codegen<'_, '_> {
         self.heap_in[self.cur_pc * self.nreg + r as usize]
     }
 
-    /// Store `v` into register `r`. Reproduces the interpreter's `set_reg`, which drops one reference to
-    /// the overwritten value — but only *where that value may be a heap pointer* ([`Codegen::may_be_heap`]
-    /// of `r`). Where the old occupant is provably an immediate (a fresh/`Drop`-ped slot, a bool, an
-    /// immediate arithmetic result) the store is bare — no load-old, no `is_pointer` branch. A call-free
-    /// prototype's map is all-false (every store bare, the immediate invariant), a `heap_aware` one the
-    /// analysis cannot model is all-true (every store releases, as before). The caller is responsible
-    /// for retaining `v` when it is a moved heap value (`LoadGlobal`/`Move`).
+    /// Store `v` into register `r`. Reproduces the interpreter's `set_reg`, which drops one
+    /// reference to the overwritten value — but only *where that value may be a heap pointer*
+    /// ([`Codegen::may_be_heap`] of `r`). The caller is responsible for retaining `v` when it is
+    /// a moved heap value (`LoadGlobal`/`Move`).
     ///
-    /// P-JSSA on top of that: where the old occupant **and** the new value are both provably
-    /// immediate, the write is a pure `def_var` — no memory traffic at all; the slot goes stale
-    /// (stale-*immediate*, so a bail spill or frame-teardown release over it stays a no-op). At a
-    /// heap→immediate transition the slot is written through (the released heap pointer must not
-    /// linger in the slot) and residency begins; an immediate→heap def stays a plain slot store.
+    /// P-JSSA S5: for a promoted register the def is a pure `def_var` — the old value is
+    /// released **from the variable** (no load-old) and the slot is not written at all. The slot
+    /// may then be heap-desynced (holding a released pointer, or missing the reference the
+    /// variable now owns); the [`slot_hazard_map`] tracks exactly that, and every sync point
+    /// spills `live ∪ hazard` before anything can read or release the slot. Only an unmodeled
+    /// prototype's (unpromoted) registers take the classic slot path.
     fn store_reg(&mut self, r: Reg, v: ClValue) {
-        let promotable = self.is_var(r);
-        let ok_now = !self.may_be_heap(r);
-        let ok_next = self.ssa_ok_next(r);
-        if promotable && ok_now && ok_next {
+        if self.is_var(r) {
+            if self.may_be_heap(r) {
+                let old = self.b.use_var(self.vars[r as usize]);
+                self.release_if_heap(old);
+            }
             self.b.def_var(self.vars[r as usize], v);
             return;
         }
-        if ok_now {
-            self.b
-                .ins()
-                .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
-        } else {
+        if self.may_be_heap(r) {
             let old = self.load_reg(r);
             self.b
                 .ins()
                 .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
             self.release_if_heap(old);
-        }
-        if promotable && ok_next {
-            self.b.def_var(self.vars[r as usize], v);
+        } else {
+            self.b
+                .ins()
+                .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
         }
     }
 
     /// A store to register `r` with no release of the old value (the caller has already taken
-    /// ownership of the old value, e.g. `Drop`, or is initializing). Same SSA-residency rule as
+    /// ownership of the old value, e.g. `Drop`, or is initializing). Same S5 residency rule as
     /// [`Codegen::store_reg`], minus the release.
     fn store_reg_raw(&mut self, r: Reg, v: ClValue) {
-        let promotable = self.is_var(r);
-        let ok_now = !self.may_be_heap(r);
-        let ok_next = self.ssa_ok_next(r);
-        if promotable && ok_now && ok_next {
+        if self.is_var(r) {
             self.b.def_var(self.vars[r as usize], v);
             return;
         }
         self.b
             .ins()
             .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
-        if promotable && ok_next {
-            self.b.def_var(self.vars[r as usize], v);
-        }
     }
 
-    /// P-JSSA: materialize the SSA-resident registers into their slots for a **bail** at `pc` —
-    /// every promotable register that is both resident (`ssa_ok`) and live at `pc`. After this the
-    /// interpreter finds every slot it may read holding exactly what tier 0 would have there; a
-    /// dead register's slot may stay stale-immediate (never read, and its teardown release is a
-    /// no-op). Emitted on cold paths only (bail blocks, pre-helper syncs).
+    /// P-JSSA: materialize the SSA-resident registers into their slots for a **bail** or helper
+    /// sync at `pc`: every promoted register that is **live** (the interpreter may read it) or
+    /// **slot-hazardous** (S5 — the slot may hold a released pointer, or miss the heap reference
+    /// the variable owns; teardown/unwind releases every slot, so it must be re-synced). A dead,
+    /// non-hazardous register's slot stays stale-immediate or in-sync — safe either way.
     fn spill_ssa(&mut self, pc: usize) {
         for r in 0..self.nreg as u16 {
-            if self.is_var(r) && self.plan.ssa_ok_at(pc, r) && self.plan.live_at(pc, r) {
+            if self.is_var(r)
+                && (self.plan.live_at(pc, r) || self.slot_hazard[pc * self.nreg + r as usize])
+            {
                 let v = self.b.use_var(self.vars[r as usize]);
                 self.b
                     .ins()
@@ -1937,14 +1946,14 @@ impl Codegen<'_, '_> {
     }
 
     /// The statically-claimed kind of register `r` at `pc` (T1): the exact kind of a
-    /// known-constant register, the kind map's claim where the register is promoted and
-    /// SSA-resident (the only place raw variables are maintained), else `Imm`. `Bot` (an
-    /// analysis-unreached cell) degrades to `Imm`.
+    /// known-constant register, the kind map's claim for a promoted one (a typed claim implies
+    /// the immediate claim — the map is `Imm` wherever the value may be heap), else `Imm`.
+    /// `Bot` (an analysis-unreached cell) degrades to `Imm`.
     fn kind_claim(&self, pc: usize, r: Reg) -> Kind {
         if let Some(bits) = self.const_bits[r as usize] {
             return classify_immediate_bits(bits);
         }
-        if self.is_var(r) && self.plan.ssa_ok_at(pc, r) {
+        if self.is_var(r) {
             match self.kinds[pc * self.nreg + r as usize] {
                 Kind::Bot => Kind::Imm,
                 k => k,
@@ -2023,24 +2032,28 @@ impl Codegen<'_, '_> {
     }
 
     /// P-JSSA S4.1: make a fast body's (initially uninitialized) window fully tier-0-valid at
-    /// `pc`, slot by slot: an SSA-resident live register spills its variable (the truth); a
-    /// must-written slot already holds a real value (kept — unit-filling it would clobber a
-    /// possibly-heap reference); everything else gets `unit` (exactly what tier 0 would have —
-    /// a never-written local — or a dead value whose slot may not hold garbage bits, because
-    /// frame teardown's release loop and the unwind path read every slot). `fast_eligible`
-    /// guarantees no live non-resident register is only path-dependently written.
+    /// `pc`, slot by slot. A promoted register spills its variable when it is **live** (the
+    /// interpreter may read it), **slot-hazardous** (S5 — the slot misses a release or a
+    /// reference), or **may-heap** (S5 — the variable may own a heap reference that must reach
+    /// the slot for teardown to release; unit-filling it would leak). A must-written slot (a
+    /// known constant's) already holds its real value — kept. Everything else gets `unit`:
+    /// exactly tier-0's never-written local, or a dead immediate whose slot may not keep garbage
+    /// bits (teardown's release loop and the unwind path read every slot).
     fn normalize_frame(&mut self, pc: usize) {
         let unit = self
             .b
             .ins()
             .iconst(types::I64, Value::NANBOX.unit_bits as i64);
         for r in 0..self.nreg as u16 {
-            if self.is_var(r) && self.plan.ssa_ok_at(pc, r) && self.plan.live_at(pc, r) {
+            let i = pc * self.nreg + r as usize;
+            if self.is_var(r)
+                && (self.plan.live_at(pc, r) || self.slot_hazard[i] || self.heap_in[i])
+            {
                 let v = self.b.use_var(self.vars[r as usize]);
                 self.b
                     .ins()
                     .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
-            } else if !self.must_written[pc * self.nreg + r as usize] {
+            } else if !self.must_written[i] {
                 self.b
                     .ins()
                     .store(MemFlagsData::trusted(), unit, self.frame_ptr, reg_offset(r));
@@ -2718,9 +2731,10 @@ fn emit_return(cg: &mut Codegen, src: Reg, pc: usize) {
     if cg.fast {
         return emit_return_fast(cg, src, pc);
     }
-    // No spill: the frame dies here. The return value travels as the helper's argument; any slot
-    // left stale by SSA residency holds an immediate (the plan's invariant), and the masked
-    // teardown never touches it.
+    // The frame dies here; only the may-heap slots need to be current — the helper's masked
+    // teardown releases exactly those (S4.0), and with S5 their truth lives in the variables, so
+    // spill the masked set first (an unmasked slot is a stale immediate or dangling bits the
+    // teardown never touches). The return value travels as the helper's argument.
     let raw = cg.read_reg(src);
     let mask: u64 = if cg.nreg <= 64 {
         let row = &cg.heap_in[pc * cg.nreg..pc * cg.nreg + cg.nreg];
@@ -2730,6 +2744,19 @@ fn emit_return(cg: &mut Codegen, src: Reg, pc: usize) {
     } else {
         u64::MAX
     };
+    if mask != u64::MAX {
+        for r in 0..cg.nreg as u16 {
+            if mask & (1 << r) != 0 && cg.is_var(r) {
+                let v = cg.b.use_var(cg.vars[r as usize]);
+                cg.b.ins()
+                    .store(MemFlagsData::trusted(), v, cg.frame_ptr, reg_offset(r));
+            }
+        }
+    } else {
+        // Release-all fallback (>64 registers): every slot the helper will release must be
+        // current.
+        cg.spill_ssa(pc);
+    }
     let vm = cg.vm;
     let frames = cg.frames;
     let regs_vec = cg.regs_vec;
@@ -2753,9 +2780,15 @@ fn emit_return_fast(cg: &mut Codegen, src: Reg, pc: usize) {
     if cg.may_be_heap(src) {
         cg.retain_if_heap(raw);
     }
+    // S5: the may-heap registers' truth lives in their variables (the slots may be desynced or
+    // never written) — release from the variables directly, no loads.
     for r in 0..cg.nreg as u16 {
         if cg.heap_in[pc * cg.nreg + r as usize] {
-            let v = cg.load_reg(r);
+            let v = if cg.is_var(r) {
+                cg.b.use_var(cg.vars[r as usize])
+            } else {
+                cg.load_reg(r)
+            };
             cg.release_if_heap(v);
         }
     }
