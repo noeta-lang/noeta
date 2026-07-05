@@ -18,11 +18,14 @@
 //! (shadowing-correct); member accesses `x.member` resolve via the receiver's type; and a top-level
 //! name table backs type references (see [`resolve`]). Hover and go-to-definition run over the merged
 //! workspace program (slice **W2**), so an imported name resolves and go-to-definition can land in a
-//! *different file*. Positions are converted encoding-aware (see [`offsets`]).
+//! *different file*. Slice **L4** adds **document symbols**: the entry document's declarations become
+//! the hierarchical outline the editor renders (see [`symbols`]). Positions are converted
+//! encoding-aware (see [`offsets`]).
 
 mod hover;
 mod offsets;
 mod resolve;
+mod symbols;
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -297,6 +300,24 @@ impl DocumentStore {
         self.locate(cache, def_span, encoding)
     }
 
+    /// The document outline for `uri`: the hierarchical symbol tree (top-level functions and type
+    /// declarations, with fields/variants and methods nested) mapped to LSP `DocumentSymbol`s. A
+    /// single-file feature — it reads the entry document's own AST, not the merged workspace — so an
+    /// unparseable document yields whatever the recovering parser produced. `None` if the document is
+    /// not open.
+    fn document_symbols(&self, uri: &str, encoding: Encoding) -> Option<Vec<DocumentSymbol>> {
+        let cache = self.workspaces.get(uri)?;
+        let entry = cache.entry();
+        let index = LineIndex::new(entry.text(&self.db));
+        let program = &noeta_db::ast(&self.db, entry).0.program;
+        Some(
+            symbols::outline(program)
+                .iter()
+                .map(|node| to_document_symbol(&index, node, encoding))
+                .collect(),
+        )
+    }
+
     /// Map a definition `span` (whose [`SourceId`] names the file it belongs to) to the `(URI,
     /// range)` the editor jumps to, resolving the range against that file's own text.
     fn locate(
@@ -353,6 +374,32 @@ fn to_lsp_diagnostic(
         message,
         related_information,
         ..Default::default()
+    }
+}
+
+/// Map an outline [`SymbolNode`](symbols::SymbolNode) to its LSP `DocumentSymbol`, resolving the
+/// declaration span to `range` and the name span to `selection_range`, and recursing into children.
+fn to_document_symbol(
+    index: &LineIndex,
+    node: &symbols::SymbolNode,
+    encoding: Encoding,
+) -> DocumentSymbol {
+    #[allow(deprecated)]
+    // `deprecated` is a required struct field, not a value we set meaningfully.
+    DocumentSymbol {
+        name: node.name.clone(),
+        detail: node.detail.clone(),
+        kind: node.kind,
+        tags: None,
+        deprecated: None,
+        range: index.range(node.full_span, encoding),
+        selection_range: index.range(node.name_span, encoding),
+        children: (!node.children.is_empty()).then(|| {
+            node.children
+                .iter()
+                .map(|child| to_document_symbol(index, child, encoding))
+                .collect()
+        }),
     }
 }
 
@@ -479,6 +526,7 @@ impl LanguageServer for Backend {
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
+                document_symbol_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -530,6 +578,19 @@ impl LanguageServer for Backend {
                 .ok()
                 .map(|uri| GotoDefinitionResponse::Scalar(Location { uri, range }))
         }))
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> Result<Option<DocumentSymbolResponse>> {
+        let uri = params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let symbols = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.document_symbols(uri.as_str(), encoding)
+        };
+        Ok(symbols.map(DocumentSymbolResponse::Nested))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -891,6 +952,52 @@ mod tests {
                     },
                     Encoding::Utf8,
                 )
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn document_symbols_builds_the_outline_with_ranges() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///o.noe",
+            "struct Point {\n  x: int\n  fn norm(): int { return self.x }\n}\nfn main() {}"
+                .to_string(),
+        );
+        let syms = store
+            .document_symbols("file:///o.noe", Encoding::Utf8)
+            .expect("open document has an outline");
+        assert_eq!(syms.len(), 2);
+
+        let point = &syms[0];
+        assert_eq!(point.name, "Point");
+        assert_eq!(point.kind, SymbolKind::STRUCT);
+        // The selection range is the name on line 0 (`struct Point` → `Point` at column 7).
+        assert_eq!(point.selection_range.start.line, 0);
+        assert_eq!(point.selection_range.start.character, 7);
+        // Nested field then method.
+        let kids = point.children.as_ref().expect("struct has members");
+        assert_eq!(kids.len(), 2);
+        assert_eq!(
+            (kids[0].name.as_str(), kids[0].kind),
+            ("x", SymbolKind::FIELD)
+        );
+        assert_eq!(
+            (kids[1].name.as_str(), kids[1].kind),
+            ("norm", SymbolKind::METHOD)
+        );
+
+        assert_eq!(syms[1].name, "main");
+        assert_eq!(syms[1].kind, SymbolKind::FUNCTION);
+        assert!(syms[1].children.is_none()); // a leaf carries no `children`, not an empty list
+    }
+
+    #[test]
+    fn document_symbols_for_unknown_document_is_none() {
+        let store = DocumentStore::default();
+        assert!(
+            store
+                .document_symbols("file:///nope.noe", Encoding::Utf8)
                 .is_none()
         );
     }
