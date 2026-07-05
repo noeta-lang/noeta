@@ -21,6 +21,8 @@ noeta-stdlib = { workspace = true }
 # VM's reactive graph) tagged with its `NodeKind`. noeta-reactive is a value-generic leaf crate with
 # no internal deps, so this adds no dependency cycle.
 noeta-reactive = { workspace = true }
+# Hot-path integer formatting for interpolation holes (`display_into`); bypasses `fmt::Formatter`.
+itoa = { workspace = true }
 
 [dev-dependencies]
 proptest = { workspace = true }

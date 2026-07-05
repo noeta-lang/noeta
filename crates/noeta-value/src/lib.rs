@@ -1961,11 +1961,12 @@ impl Value {
     /// dominate string interpolation — a heap string (append its bytes, no clone), a small int, and a
     /// bool — and everything else falls back to `display()`, so the rendering is byte-identical.
     pub fn display_into(self, out: &mut String) {
-        use std::fmt::Write;
         if let Some(b) = self.as_bool() {
             out.push_str(if b { "true" } else { "false" });
         } else if self.is_small_int() {
-            let _ = write!(out, "{}", self.as_int().unwrap());
+            // `itoa`, not `write!`: the `fmt::Formatter` round-trip costs about as much as the
+            // digits themselves on the short ints interpolation overwhelmingly renders.
+            out.push_str(itoa::Buffer::new().format(self.as_int().unwrap()));
         } else if self.is_pointer() {
             let handled = heap::with_payload(self, |p| match p {
                 Payload::Str(s) => {
@@ -1973,7 +1974,7 @@ impl Value {
                     true
                 }
                 Payload::Int(i) => {
-                    let _ = write!(out, "{i}");
+                    out.push_str(itoa::Buffer::new().format(*i));
                     true
                 }
                 _ => false,

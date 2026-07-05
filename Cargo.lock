@@ -1210,6 +1210,7 @@ dependencies = [
 name = "noeta-value"
 version = "0.0.0"
 dependencies = [
+ "itoa",
  "noeta-ast",
  "noeta-bytecode",
  "noeta-diagnostics",
