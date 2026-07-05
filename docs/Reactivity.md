@@ -100,7 +100,7 @@ A `set`/`update` performed **inside** a running effect does not start a nested u
 
 An effect that changes a signal it depends on would rerun forever. Rather than hang, the scheduler bounds each flush and raises **`E0045` ReactiveCycle** once it exceeds the step limit:
 
-```noeta
+```noeta error
 n = signal(0)
 effect(fn() { n.set(n.get() + 1) })   // reads n and writes n — never settles
 // → E0045: reactive update did not converge
