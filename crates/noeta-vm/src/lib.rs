@@ -430,10 +430,6 @@ struct Vm<'m> {
     /// parks it here for the dispatch loop to yield as the run's result.
     #[cfg(feature = "jit")]
     jit_ret: Value,
-    /// The callee window base a `jit_prepare_call` reserved for a native direct call (J3): the
-    /// compiled caller reads it back (via `jit_callee_base`) to `call_indirect` the callee.
-    #[cfg(feature = "jit")]
-    jit_callee_base: usize,
 }
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
@@ -647,6 +643,14 @@ extern "C" fn jit_call(
 /// to the caller's destination, pop this frame). Returns `OUTCOME_RETURNED` when it transferred to a
 /// caller, or `OUTCOME_HALTED` (parking the value on `vm.jit_ret`) when the bottom frame returned.
 ///
+/// `release_mask` is the P-JSSA S4.0 fast teardown: bit `r` set means window slot `r` may hold a
+/// heap value at this return site (the bare-store analysis row at the `Return`'s pc), so only
+/// those slots need a release; `u64::MAX` means "release every slot" (an unanalyzed prototype, or
+/// one with more than 64 registers). The mask is native-path-sound: this helper is reached only
+/// by natively-executed `Op::Return`s, and native execution maintains the analysis's claims
+/// (entries verify them, native defs preserve them) — a clear bit is a guarantee the slot holds
+/// an immediate, whose release is a no-op.
+///
 /// # Safety
 /// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
 #[cfg(feature = "jit")]
@@ -656,11 +660,12 @@ extern "C" fn jit_return(
     frames: *mut core::ffi::c_void,
     regs_vec: *mut core::ffi::c_void,
     raw: u64,
+    release_mask: u64,
 ) -> i64 {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
     let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
-    match vm.do_return(frames, regs, Value::from_bits(raw)) {
+    match vm.do_return_masked(frames, regs, Value::from_bits(raw), release_mask) {
         Some(v) => {
             vm.jit_ret = v;
             noeta_jit::OUTCOME_HALTED
@@ -669,12 +674,24 @@ extern "C" fn jit_return(
     }
 }
 
+/// The two-word result of [`jit_prepare_call`], returned by value (rax:rdx under SysV; the JIT
+/// declares the import with two `i64` returns, which lowers to the same registers — one helper
+/// roundtrip instead of the former `prepare_call` + `callee_base` pair, P-JSSA S4.0).
+#[cfg(feature = "jit")]
+#[repr(C)]
+struct PreparedCall {
+    /// The callee's compiled entry pointer, or `0` (fall back to `jit_call`).
+    fnptr: i64,
+    /// The callee's reserved window base (meaningful only when `fnptr != 0`).
+    base: usize,
+}
+
 /// Runtime helper for a native direct call (J3 native→native): decide whether the `Op::Call` at
 /// `pc` can be called directly and, if so, set up the callee frame on the shared stacks and return
-/// the callee's compiled entry pointer (as an `i64`); otherwise return `0` (the caller falls back to
-/// `jit_call`). Direct-able means: a closure callee, plain arity (no defaults), no upvalues, an
-/// already-compiled callee, and stack capacity for the callee window without a reallocation (so the
-/// caller's register pointer stays valid across the indirect call).
+/// the callee's compiled entry pointer plus its window base; otherwise a zero `fnptr` (the caller
+/// falls back to `jit_call`). Direct-able means: a closure callee, plain arity (no defaults), no
+/// upvalues, an already-compiled callee, and stack capacity for the callee window without a
+/// reallocation (so the caller's register pointer stays valid across the indirect call).
 ///
 /// # Safety
 /// `vm`/`frames`/`regs_vec` must be the live pointers the tier-1 ABI passed.
@@ -687,13 +704,14 @@ extern "C" fn jit_prepare_call(
     base: usize,
     proto: i32,
     pc: i32,
-) -> i64 {
+) -> PreparedCall {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
     let regs = unsafe { &mut *(regs_vec as *mut Vec<Value>) };
     let module = vm.module;
     // Direct-call setup for `Op::Call` or `Op::CallGlobal`; the callee comes from a register or its
     // global slot. An unbound `CallGlobal` slot falls back to `jit_call`, which raises the E0005.
+    const FALLBACK: PreparedCall = PreparedCall { fnptr: 0, base: 0 };
     let (dst, callee_val, args) = match &module.protos[proto as usize].code[pc as usize] {
         Op::Call {
             dst, callee, args, ..
@@ -703,28 +721,28 @@ extern "C" fn jit_prepare_call(
         } => {
             let cv = vm.globals[global.0 as usize];
             if cv.is_unbound() {
-                return 0;
+                return FALLBACK;
             }
             (*dst, cv, args)
         }
-        _ => return 0,
+        _ => return FALLBACK,
     };
     let Some(callee_proto) = callee_val.as_closure() else {
-        return 0; // a first-class builtin / non-callable → fall back
+        return FALLBACK; // a first-class builtin / non-callable → fall back
     };
     let cc = &module.protos[callee_proto as usize];
     // Plain arity (no default-filling) and no upvalues — else the general setup path handles it.
     if args.len() != cc.num_params as usize || callee_val.closure_upvalue_count() != 0 {
-        return 0;
+        return FALLBACK;
     }
     let num_regs = cc.num_registers as usize;
     // The callee must already be compiled, and its window must fit without reallocating the register
     // stack (which would dangle the caller's pointer).
     let Some(f) = vm.jit.as_ref().and_then(|j| j.get(callee_proto as usize)) else {
-        return 0;
+        return FALLBACK;
     };
     if regs.len() + num_regs > regs.capacity() {
-        return 0;
+        return FALLBACK;
     }
     // Set up the callee frame (like `setup_closure_call`'s closure arm, minus defaults/upvalues).
     let new_base = reserve_window(regs, num_regs);
@@ -743,19 +761,10 @@ extern "C" fn jit_prepare_call(
         ret_transform: RetTransform::None,
         upvalues: Vec::new(),
     });
-    vm.jit_callee_base = new_base;
-    f as usize as i64
-}
-
-/// Runtime helper: read back the callee base a preceding `jit_prepare_call` reserved (J3).
-///
-/// # Safety
-/// `vm` must be the live `*mut Vm` the tier-1 ABI passed.
-#[cfg(feature = "jit")]
-#[allow(unsafe_code)]
-extern "C" fn jit_callee_base(vm: *mut core::ffi::c_void) -> usize {
-    let vm = unsafe { &*(vm as *const Vm) };
-    vm.jit_callee_base
+    PreparedCall {
+        fnptr: f as usize as i64,
+        base: new_base,
+    }
 }
 
 /// Runtime helper: interpret a direct callee's outcome for its native caller (J3). `RETURNED` → the
@@ -1268,8 +1277,6 @@ impl<'m> Vm<'m> {
             jit_declined: Vec::new(),
             #[cfg(feature = "jit")]
             jit_ret: Value::unit(),
-            #[cfg(feature = "jit")]
-            jit_callee_base: 0,
         }
     }
 
@@ -1297,7 +1304,6 @@ impl<'m> Vm<'m> {
                 noeta_jit::PREPARE_CALL_HELPER,
                 jit_prepare_call as *const u8,
             ),
-            (noeta_jit::CALLEE_BASE_HELPER, jit_callee_base as *const u8),
             (noeta_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
             (noeta_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
         ];
@@ -5108,11 +5114,34 @@ impl<'m> Vm<'m> {
         regs: &mut Vec<Value>,
         raw: Value,
     ) -> Option<Value> {
+        self.do_return_masked(frames, regs, raw, u64::MAX)
+    }
+
+    /// [`Vm::do_return`] with a window-release mask (P-JSSA S4.0, see [`jit_return`]):
+    /// `u64::MAX` releases every slot (the interpreter's path — it has no per-site analysis);
+    /// any other value releases only the set bits, a guarantee from the JIT that the clear
+    /// slots hold immediates at this (natively-executed) return site.
+    fn do_return_masked(
+        &mut self,
+        frames: &mut Vec<Frame>,
+        regs: &mut Vec<Value>,
+        raw: Value,
+        release_mask: u64,
+    ) -> Option<Value> {
         retain(raw); // keep alive across this frame's teardown
         let finished = frames.pop().unwrap();
-        let n = self.module.protos[finished.proto as usize].num_registers as usize;
-        for i in 0..n {
-            release(regs[finished.base + i]);
+        if release_mask == u64::MAX {
+            let n = self.module.protos[finished.proto as usize].num_registers as usize;
+            for i in 0..n {
+                release(regs[finished.base + i]);
+            }
+        } else {
+            let mut m = release_mask;
+            while m != 0 {
+                let i = m.trailing_zeros() as usize;
+                m &= m - 1;
+                release(regs[finished.base + i]);
+            }
         }
         for u in &finished.upvalues {
             release(*u);

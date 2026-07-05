@@ -170,11 +170,11 @@ pub const CALL_HELPER: &str = "noeta_jit_call";
 pub const RETURN_HELPER: &str = "noeta_jit_return";
 /// Direct-call helpers (J3 native→native calls). `prepare_call` checks whether the `Op::Call` at a pc
 /// can be a direct native call (compiled callee, plain arity, no upvalues, stack capacity) and, if so,
-/// sets up the callee frame and returns the callee's compiled entry pointer (else `0`, a fallback to
-/// `call`); `callee_base` reads the reserved callee base it stashed; `after_call` inspects the
-/// callee's outcome and tells the caller to continue in place ([`OUTCOME_CONTINUE`]) or propagate.
+/// sets up the callee frame and returns two words — the callee's compiled entry pointer (else `0`, a
+/// fallback to `call`) and its reserved window base (P-JSSA S4.0: one roundtrip, not two);
+/// `after_call` inspects the callee's outcome and tells the caller to continue in place
+/// ([`OUTCOME_CONTINUE`]) or propagate.
 pub const PREPARE_CALL_HELPER: &str = "noeta_jit_prepare_call";
-pub const CALLEE_BASE_HELPER: &str = "noeta_jit_callee_base";
 pub const AFTER_CALL_HELPER: &str = "noeta_jit_after_call";
 /// The leaf-heap-op helper (J4): runs a single non-dispatching heap/collection op (the interpreter's
 /// exact arm, refcounts included) and returns [`OUTCOME_CONTINUE`] (done — the caller advances) or a
@@ -202,7 +202,6 @@ pub struct Jit {
     call_id: FuncId,
     return_id: FuncId,
     prepare_call_id: FuncId,
-    callee_base_id: FuncId,
     after_call_id: FuncId,
     leaf_op_id: FuncId,
     ctx: cranelift_codegen::Context,
@@ -288,26 +287,28 @@ impl Jit {
         let call_id = module
             .declare_function(CALL_HELPER, Linkage::Import, &call_sig)
             .map_err(|e| e.to_string())?;
-        // `return(vm, frames, regs_vec: ptr, raw: i64) -> i64`.
+        // `return(vm, frames, regs_vec: ptr, raw: i64, release_mask: i64) -> i64`. The mask is the
+        // S4.0 fast teardown: which window slots may hold heap values at this return site.
         let mut return_sig = module.make_signature();
         return_sig.params.push(AbiParam::new(ptr_ty));
         return_sig.params.push(AbiParam::new(ptr_ty));
         return_sig.params.push(AbiParam::new(ptr_ty));
         return_sig.params.push(AbiParam::new(types::I64));
+        return_sig.params.push(AbiParam::new(types::I64));
         return_sig.returns.push(AbiParam::new(types::I64));
         let return_id = module
             .declare_function(RETURN_HELPER, Linkage::Import, &return_sig)
             .map_err(|e| e.to_string())?;
-        // Direct-call helpers. `prepare_call` shares `call`'s signature (returns a fn ptr or 0);
-        // `callee_base(vm) -> usize`; `after_call(vm, frames, outcome: i64) -> i64`.
+        // Direct-call helpers. `prepare_call` takes `call`'s params but returns two words —
+        // (fnptr-or-0, callee window base), the VM's `#[repr(C)] PreparedCall` (rax:rdx under
+        // SysV, exactly what a two-i64-return Cranelift import reads back);
+        // `after_call(vm, frames, outcome: i64) -> i64`.
+        let mut prepare_sig = module.make_signature();
+        prepare_sig.params.clone_from(&call_sig.params);
+        prepare_sig.returns.push(AbiParam::new(types::I64));
+        prepare_sig.returns.push(AbiParam::new(types::I64));
         let prepare_call_id = module
-            .declare_function(PREPARE_CALL_HELPER, Linkage::Import, &call_sig)
-            .map_err(|e| e.to_string())?;
-        let mut callee_base_sig = module.make_signature();
-        callee_base_sig.params.push(AbiParam::new(ptr_ty));
-        callee_base_sig.returns.push(AbiParam::new(ptr_ty));
-        let callee_base_id = module
-            .declare_function(CALLEE_BASE_HELPER, Linkage::Import, &callee_base_sig)
+            .declare_function(PREPARE_CALL_HELPER, Linkage::Import, &prepare_sig)
             .map_err(|e| e.to_string())?;
         let mut after_call_sig = module.make_signature();
         after_call_sig.params.push(AbiParam::new(ptr_ty)); // vm
@@ -341,7 +342,6 @@ impl Jit {
             call_id,
             return_id,
             prepare_call_id,
-            callee_base_id,
             after_call_id,
             leaf_op_id,
             ctx,
@@ -500,9 +500,6 @@ impl Jit {
             let prepare_call_ref = self
                 .module
                 .declare_func_in_func(self.prepare_call_id, b.func);
-            let callee_base_ref = self
-                .module
-                .declare_func_in_func(self.callee_base_id, b.func);
             let after_call_ref = self.module.declare_func_in_func(self.after_call_id, b.func);
             let leaf_op_ref = self.module.declare_func_in_func(self.leaf_op_id, b.func);
             // The signature of a compiled prototype, imported so a direct call can `call_indirect`
@@ -564,7 +561,6 @@ impl Jit {
                 call_ref,
                 return_ref,
                 prepare_call_ref,
-                callee_base_ref,
                 after_call_ref,
                 leaf_op_ref,
                 callee_sig,
@@ -1345,7 +1341,6 @@ struct Codegen<'a, 'b> {
     call_ref: FuncRef,
     return_ref: FuncRef,
     prepare_call_ref: FuncRef,
-    callee_base_ref: FuncRef,
     after_call_ref: FuncRef,
     leaf_op_ref: FuncRef,
     callee_sig: cranelift_codegen::ir::SigRef,
@@ -1932,7 +1927,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
         Op::Call { .. } | Op::CallGlobal { .. } => emit_call(cg, pc, op_blocks),
-        Op::Return { src } => emit_return(cg, *src),
+        Op::Return { src } => emit_return(cg, *src, pc),
         op if is_leaf_heap_op(op) => emit_leaf_op(cg, pc, op_blocks),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
@@ -1958,13 +1953,15 @@ fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     let proto = cg.b.ins().iconst(types::I32, cg.proto as i64);
     let pcv = cg.b.ins().iconst(types::I32, pc as i64);
 
-    // Try a direct native→native call: `prepare_call` returns the callee's compiled entry pointer if
-    // the call is direct-able (compiled callee, plain arity, no upvalues, stack capacity), else 0.
+    // Try a direct native→native call: `prepare_call` returns the callee's compiled entry pointer
+    // and its reserved window base in one roundtrip (S4.0), or a zero pointer if the call is not
+    // direct-able (uncompiled callee, defaults/upvalues, no stack capacity).
     let prep = cg.prepare_call_ref;
     let pinst =
         cg.b.ins()
             .call(prep, &[vm, frames, regs_vec, base, proto, pcv]);
     let fnptr = cg.b.inst_results(pinst)[0];
+    let callee_base = cg.b.inst_results(pinst)[1];
     let zero = cg.b.ins().iconst(types::I64, 0);
     let is_zero = cg.b.ins().icmp(IntCC::Equal, fnptr, zero);
     let fallback = cg.b.create_block();
@@ -1981,12 +1978,10 @@ fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     cg.b.ins().return_(&[outcome]);
 
     // Direct: call the callee's compiled entry on the shared stack. `prepare_call` already reserved
-    // the callee window and pushed its frame; `regs`/`globals`/`frames`/`regs_vec` pass through, the
-    // callee base comes from `callee_base`, and `entry_pc = 0` (a fresh frame). No reallocation can
-    // happen (capacity was checked), so `cg.regs` stays valid across the indirect call.
+    // the callee window (whose base it returned) and pushed its frame; `regs`/`globals`/`frames`/
+    // `regs_vec` pass through and `entry_pc = 0` (a fresh frame). No reallocation can happen
+    // (capacity was checked), so `cg.regs` stays valid across the indirect call.
     cg.b.switch_to_block(direct);
-    let cbinst = cg.b.ins().call(cg.callee_base_ref, &[vm]);
-    let callee_base = cg.b.inst_results(cbinst)[0];
     let regs = cg.regs;
     let globals = cg.globals;
     let entry0 = cg.b.ins().iconst(types::I64, 0);
@@ -2058,16 +2053,32 @@ fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
 /// shared return protocol (transfer to the caller's destination, pop this frame) on the interpreter's
 /// stacks, and propagate its outcome (`RETURNED`, or `HALTED` for the bottom frame). Value-returning
 /// so a native direct caller gets its callee's result back without a bail.
-fn emit_return(cg: &mut Codegen, src: Reg) {
+///
+/// S4.0 fast teardown: the helper also gets a **release mask** — the bare-store analysis's
+/// may-heap row at this return pc (for ≤64 registers; `u64::MAX` = release-all beyond that) — so
+/// the window teardown releases only the slots that can actually hold a heap value. Sound because
+/// this code path executes only natively, where the analysis's claims are maintained (entries
+/// verify them, native defs preserve them); a clear bit's release would be a no-op on the
+/// immediate the slot holds.
+fn emit_return(cg: &mut Codegen, src: Reg, pc: usize) {
     // No spill: the frame dies here. The return value travels as the helper's argument; any slot
-    // left stale by SSA residency holds an immediate (the plan's invariant), so the frame
-    // teardown's release loop over the window stays a no-op on it.
+    // left stale by SSA residency holds an immediate (the plan's invariant), and the masked
+    // teardown never touches it.
     let raw = cg.read_reg(src);
+    let mask: u64 = if cg.nreg <= 64 {
+        let row = &cg.heap_in[pc * cg.nreg..pc * cg.nreg + cg.nreg];
+        row.iter()
+            .enumerate()
+            .fold(0u64, |m, (r, &h)| if h { m | (1 << r) } else { m })
+    } else {
+        u64::MAX
+    };
     let vm = cg.vm;
     let frames = cg.frames;
     let regs_vec = cg.regs_vec;
     let f = cg.return_ref;
-    let inst = cg.b.ins().call(f, &[vm, frames, regs_vec, raw]);
+    let maskv = cg.b.ins().iconst(types::I64, mask as i64);
+    let inst = cg.b.ins().call(f, &[vm, frames, regs_vec, raw, maskv]);
     let outcome = cg.b.inst_results(inst)[0];
     cg.b.ins().return_(&[outcome]);
 }
