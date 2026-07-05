@@ -1,6 +1,26 @@
 # P-SSO — one-allocation strings (small-string optimization)
 
-**Status: in progress.** Branch `perf-map-scaffolding` (continues the tier-1 scaffolding slices).
+**Status: DONE (S1 `77af8b3`, S2 `500a8b7`; S3 dropped — subsumed, see below).** Branch
+`perf-map-scaffolding` (continues the tier-1 scaffolding slices).
+
+## Outcome (measured)
+
+- **wordcount 200k: 35.1 → 27.4 ms vs main (−22%)** — the whole scaffolding+SSO stack; S2's
+  allocation-free key clone/move is the biggest single contributor after the tier-1 dispatch work.
+- criterion (in-process, the reliable instrument on this thermally-flappy machine):
+  `vm_map_accumulate` / `vm_map_rmw` / `vm_map_get_or` all **20–40% faster** than S1.
+- assoc ≈ wash end-to-end (−2%): its unique-key top-level insert loop shows a persistent ~11%
+  wall-clock cost in isolation (`dec_insert`) that the fn-local criterion twin contradicts
+  (+25% win) — layout-sensitive, watch it, don't chase it.
+- strcat unchanged (within its ±7% noise band across runs); `ConcatInPlace` keeps amortized
+  O(n) through the SSO heap spill.
+- **S1 alone measured ≈ 0 vs its parent** — the honest surprise: under mimalloc a hot small
+  alloc+free pair is nearly free, so halving allocation *count* bought nothing; the win came
+  from S2 making key **clones** (wordcount's non-consumed key) and **moves** allocation-free
+  and locality-friendly (inline 24-byte keys, no pointer chase on probe compare).
+- **S3 dropped**: with SSO keys, an insert landing on an occupied slot drops its inline key for
+  free, so the RMW write path no longer materializes a heap key at all — single-probe raw-entry
+  machinery would buy only the second hash of an 8-byte key (~ns). Not worth the API.
 
 ## Why
 
