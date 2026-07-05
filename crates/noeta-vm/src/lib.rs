@@ -430,6 +430,19 @@ struct Vm<'m> {
     /// parks it here for the dispatch loop to yield as the run's result.
     #[cfg(feature = "jit")]
     jit_ret: Value,
+    /// Closures pinned by the JIT's per-call-site inline caches (P-JSSA S4.2): `jit_prepare_call`
+    /// retains a closure when it caches it, so bits-equality at the site stays a proof of
+    /// identity (no free/reuse while cached). Only 0-upvalue closures are cacheable — they hold
+    /// nothing, so delaying their free to teardown is observably inert. Released (and the caches
+    /// with them) before the teardown collectors run, keeping residency and the anomaly
+    /// accounting exact. Bounded by call-site count: a site that sees a second distinct callee
+    /// is poisoned, never re-pinned.
+    #[cfg(feature = "jit")]
+    jit_cache_pins: Vec<Value>,
+    /// The empty-`Frame` template the JIT's native frame push copies (stable address for the
+    /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
+    #[cfg(feature = "jit")]
+    jit_frame_template: Option<Box<Frame>>,
 }
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
@@ -704,6 +717,7 @@ extern "C" fn jit_prepare_call(
     base: usize,
     proto: i32,
     pc: i32,
+    site: *mut noeta_jit::CallSiteCache,
 ) -> PreparedCall {
     let vm = unsafe { &mut *(vm as *mut Vm) };
     let frames = unsafe { &mut *(frames as *mut Vec<Frame>) };
@@ -749,6 +763,24 @@ extern "C" fn jit_prepare_call(
     // it) and skip the argument copy/retain (the arguments travel as machine arguments, borrowed
     // from the caller's still-live registers). Bit 0 of the returned pointer tags the convention.
     if let Some(ff) = jit.get_fast(callee_proto as usize) {
+        // S4.2: fill this call site's inline cache so the next call with the same callee pushes
+        // the frame natively, without this helper. The cached closure is **pinned** (retained +
+        // held on `jit_cache_pins` until teardown) so its bits can never be reused by another
+        // object while cached; a site that sees a second distinct callee is poisoned instead
+        // (megamorphic — the pin stays until teardown, bounding pins by site count).
+        if !site.is_null() {
+            let slot = unsafe { &mut *site };
+            if slot[0] == noeta_jit::SITE_EMPTY {
+                retain(callee_val);
+                vm.jit_cache_pins.push(callee_val);
+                slot[1] = ff as u64;
+                slot[2] = num_regs as u64;
+                slot[3] = callee_proto as u64;
+                slot[0] = callee_val.bits();
+            } else if slot[0] != callee_val.bits() {
+                slot[0] = noeta_jit::SITE_POISON;
+            }
+        }
         let new_base = regs.len();
         // SAFETY: capacity was checked above, and `reserve_window` keeps the register stack's
         // entire capacity initialized (its growth path fills to capacity), so every element in
@@ -1309,6 +1341,10 @@ impl<'m> Vm<'m> {
             jit_declined: Vec::new(),
             #[cfg(feature = "jit")]
             jit_ret: Value::unit(),
+            #[cfg(feature = "jit")]
+            jit_cache_pins: Vec::new(),
+            #[cfg(feature = "jit")]
+            jit_frame_template: None,
         }
     }
 
@@ -1339,7 +1375,18 @@ impl<'m> Vm<'m> {
             (noeta_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
             (noeta_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
         ];
-        match noeta_jit::Jit::new(helpers, frame_layout()) {
+        let template = self.jit_frame_template.get_or_insert_with(|| {
+            Box::new(Frame {
+                proto: 0,
+                base: 0,
+                pc: 0,
+                ret_dst: 0,
+                ret_transform: RetTransform::None,
+                upvalues: Vec::new(),
+            })
+        });
+        let template_ptr = template.as_ref() as *const Frame as *const u8;
+        match noeta_jit::Jit::new(helpers, frame_layout(), template_ptr) {
             Ok(mut jit) => {
                 if self.force_jit {
                     for p in 0..self.module.protos.len() {
@@ -1518,6 +1565,13 @@ fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult 
             }
         }
     }
+    // Release the JIT inline caches' closure pins (S4.2) before any collector accounting: a
+    // pinned closure the program itself dropped must read as garbage now, not as an anomaly.
+    // Native code can no longer run (the run above is over), so the caches are dead.
+    #[cfg(feature = "jit")]
+    for v in std::mem::take(&mut vm.jit_cache_pins) {
+        release(v);
+    }
     // Reap reference cycles the program may have tied through `mut` fields / cells / closures that
     // refcounting alone cannot reclaim (e.g. a self-recursive nested `fn`). The two collectors run at
     // different points: the **trace** marks from the live globals *before* teardown (the frame stack
@@ -1638,8 +1692,13 @@ fn run_isolate_worker(
             .map(|d| d.message.clone())
             .unwrap_or_else(|| "isolate aborted".to_string())),
     };
-    // Tear the worker down so its thread-local heap returns to zero residency: destroy globals in
-    // reverse declaration order, then drain any channel buffers.
+    // Tear the worker down so its thread-local heap returns to zero residency: release the JIT
+    // inline caches' closure pins (S4.2), destroy globals in reverse declaration order, then
+    // drain any channel buffers.
+    #[cfg(feature = "jit")]
+    for v in std::mem::take(&mut wvm.jit_cache_pins) {
+        release(v);
+    }
     for slot in wvm.global_order.clone().into_iter().rev() {
         let value = std::mem::replace(&mut wvm.globals[slot as usize], Value::unbound());
         if !value.is_unbound() {

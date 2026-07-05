@@ -181,6 +181,33 @@ pub const AFTER_CALL_HELPER: &str = "noeta_jit_after_call";
 /// resume pc (it can't handle this instance — a dispatch or an error — so the interpreter runs it).
 pub const LEAF_OP_HELPER: &str = "noeta_jit_run_leaf_op";
 
+/// A per-call-site **inline cache** slot (P-JSSA S4.2), allocated by the JIT (one per
+/// `Call`/`CallGlobal` pc, stable address baked into the code) and filled by the VM's
+/// `jit_prepare_call` when it resolves a fast-convention callee. Layout:
+/// `[key, untagged fast entry, callee num_registers, callee proto]`.
+///
+/// `key` is the callee closure's exact NaN-box bits. The VM **pins** (retains + roots until
+/// teardown) every closure it caches, so bits-equality on a later call proves it is the same
+/// live object — the same prototype — with no ABA hazard (only 0-upvalue closures are cacheable,
+/// and those hold nothing, so delaying their free to teardown is observably inert). A site that
+/// ever sees a *second* distinct callee is poisoned (never cached again), bounding pins by site
+/// count. The two sentinels are bit patterns no live value can have.
+pub type CallSiteCache = [u64; 4];
+
+/// [`CallSiteCache`] key sentinel: never filled. The unbound-global marker can appear in a
+/// global *slot* but never as a call operand (`prepare_call` rejects it first).
+pub const SITE_EMPTY: u64 = {
+    let l = Value::NANBOX;
+    l.unbound_bits
+};
+
+/// [`CallSiteCache`] key sentinel: poisoned (a second distinct callee was seen). The pattern is
+/// a NaN-boxed heap pointer with address 0 — the heap never allocates at null.
+pub const SITE_POISON: u64 = {
+    let l = Value::NANBOX;
+    l.sign_bit | l.qnan
+};
+
 /// The method JIT: a Cranelift [`JITModule`] plus a per-prototype cache of finalized entry points.
 ///
 /// The cache is indexed by prototype index (into [`noeta_bytecode::Module::protos`]) — the same key
@@ -200,6 +227,16 @@ pub struct Jit {
     /// The VM's frame/`Vec`-header layout, baked into the fast bodies' native frame pop
     /// (see [`FrameLayout`]).
     layout: FrameLayout,
+    /// A prototype "empty" `Frame` owned by the VM (`Jit::new`'s `frame_template`): `proto`/
+    /// `base`/`ret_dst` zeroed, `pc = 0`, `ret_transform = None`, `upvalues` empty. The S4.2
+    /// native frame push copies its `frame_size` bytes and patches the three per-call fields —
+    /// no enum-discriminant or `Vec`-internals knowledge in the JIT.
+    frame_template: *const u8,
+    /// The inline-cache slots (S4.2), one per emitted call site. Each is individually boxed —
+    /// not inline in the `Vec` — because the generated code bakes the slot's address: a `Vec`
+    /// reallocation would move inline slots and dangle every baked pointer.
+    #[allow(clippy::vec_box)]
+    site_slots: Vec<Box<CallSiteCache>>,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
     /// Imported runtime helpers, declared once (see the `*_HELPER` name constants).
@@ -237,7 +274,14 @@ impl Jit {
     ///
     /// Returns `Err` with a human-readable message if the host ISA is unavailable or Cranelift
     /// rejects the flags — the VM treats that as "JIT unavailable, stay tier 0".
-    pub fn new(helpers: &[(&str, *const u8)], layout: FrameLayout) -> Result<Jit, String> {
+    pub fn new(
+        helpers: &[(&str, *const u8)],
+        layout: FrameLayout,
+        frame_template: *const u8,
+    ) -> Result<Jit, String> {
+        if !layout.frame_size.is_multiple_of(8) {
+            return Err("Frame size must be word-aligned for the native frame push".to_string());
+        }
         let mut flags = settings::builder();
         flags
             .set("use_colocated_libcalls", "false")
@@ -314,6 +358,7 @@ impl Jit {
         // `after_call(vm, frames, outcome: i64) -> i64`.
         let mut prepare_sig = module.make_signature();
         prepare_sig.params.clone_from(&call_sig.params);
+        prepare_sig.params.push(AbiParam::new(ptr_ty)); // site cache slot (S4.2), or null
         prepare_sig.returns.push(AbiParam::new(types::I64));
         prepare_sig.returns.push(AbiParam::new(types::I64));
         let prepare_call_id = module
@@ -344,6 +389,8 @@ impl Jit {
             compiled: Vec::new(),
             fast_compiled: Vec::new(),
             layout,
+            frame_template,
+            site_slots: Vec::new(),
             native_count: 0,
             observe_id,
             note_bound_id,
@@ -522,6 +569,18 @@ impl Jit {
         };
 
         self.module.clear_context(&mut self.ctx);
+        // S4.2 inline caches: one slot per call site in this body, allocated up front so their
+        // (stable, boxed) addresses can be baked into the code below.
+        let mut site_addrs: Vec<u64> = vec![0; n];
+        for (pc, op) in chunk.code.iter().enumerate() {
+            if matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) {
+                let slot: Box<CallSiteCache> = Box::new([SITE_EMPTY, 0, 0, 0]);
+                site_addrs[pc] = slot.as_ref() as *const CallSiteCache as u64;
+                self.site_slots.push(slot);
+            }
+        }
+        let frame_template_addr = self.frame_template as u64;
+        let layout = self.layout;
         // Precompute the ABI signature (also imported for the direct-call `call_indirect`) before the
         // builder borrows `self.ctx.func`, so it doesn't also need to borrow `self`.
         let abi_sig = self.abi_signature();
@@ -647,6 +706,9 @@ impl Jit {
                 fast,
                 must_written,
                 vec_len_off,
+                layout,
+                site_addrs,
+                frame_template_addr,
                 note_bound_ref,
                 retain_ref,
                 release_ref,
@@ -1664,6 +1726,14 @@ struct Codegen<'a, 'b> {
     /// Byte offset of a `Vec`'s length word within its three-word header ([`FrameLayout`]),
     /// baked so the fast return can pop the frame and truncate the register stack natively.
     vec_len_off: i32,
+    /// The full frame/`Vec` layout (S4.2): the native frame push needs the data-pointer and
+    /// capacity words and the `Frame` field offsets, not just the length word.
+    layout: FrameLayout,
+    /// Per-pc inline-cache slot addresses (S4.2), nonzero exactly at `Call`/`CallGlobal` pcs.
+    site_addrs: Vec<u64>,
+    /// The empty-`Frame` template's address (S4.2) — the native push copies it, then patches
+    /// `proto`/`base`/`ret_dst`.
+    frame_template_addr: u64,
     note_bound_ref: FuncRef,
     retain_ref: FuncRef,
     release_ref: FuncRef,
@@ -2310,9 +2380,12 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::LoadGlobal { dst, global, .. } => emit_load_global(cg, *dst, global.0, pc, op_blocks),
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
-        Op::Call { dst, args, .. } | Op::CallGlobal { dst, args, .. } => {
-            emit_call(cg, *dst, args, pc, op_blocks)
-        }
+        Op::Call {
+            dst, callee, args, ..
+        } => emit_call(cg, *dst, args, CalleeSrc::Reg(*callee), pc, op_blocks),
+        Op::CallGlobal {
+            dst, global, args, ..
+        } => emit_call(cg, *dst, args, CalleeSrc::Global(global.0), pc, op_blocks),
         Op::Return { src } => emit_return(cg, *src, pc),
         op if is_leaf_heap_op(op) => emit_leaf_op(cg, pc, op_blocks),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
@@ -2328,7 +2401,21 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
 /// frame/register stacks (pushing the callee frame). Whatever it returns — `CALLED` (frame pushed),
 /// a resume pc (a synchronous first-class-builtin call completed), or `ABORTED` — becomes this
 /// compiled function's outcome, so the interpreter runs the callee and resumes the caller in tier 0.
-fn emit_call(cg: &mut Codegen, dst: Reg, args: &[Reg], pc: usize, op_blocks: &[Block]) {
+/// The source of a call's callee value: a register (`Op::Call`) or a global slot
+/// (`Op::CallGlobal`) — the S4.2 inline cache loads it natively for the hit check.
+enum CalleeSrc {
+    Reg(Reg),
+    Global(u32),
+}
+
+fn emit_call(
+    cg: &mut Codegen,
+    dst: Reg,
+    args: &[Reg],
+    callee_src: CalleeSrc,
+    pc: usize,
+    op_blocks: &[Block],
+) {
     // P-JSSA sync point: the call helpers read the argument registers (and, on a bail or an
     // abort-unwind, any slot) from the window, so make it fully valid first (mode-aware).
     cg.sync_frame(pc);
@@ -2336,6 +2423,130 @@ fn emit_call(cg: &mut Codegen, dst: Reg, args: &[Reg], pc: usize, op_blocks: &[B
     let frames = cg.frames;
     let regs_vec = cg.regs_vec;
     let base = cg.base;
+    let l = cg.layout;
+    let ptr_off = (l.vec_ptr_word * 8) as i32;
+    let cap_off = (l.vec_cap_word * 8) as i32;
+    let len_off = cg.vec_len_off;
+
+    // The shared fast-call block (S4.1/S4.2), parameterized on (untagged fast entry, callee
+    // window base) so both the inline-cache hit and the helper's tagged result enter it.
+    let fast_blk = cg.b.create_block();
+    cg.b.append_block_param(fast_blk, types::I64);
+    cg.b.append_block_param(fast_blk, types::I64);
+    let slow_blk = cg.b.create_block();
+
+    // ---- S4.2 inline-cache hit path: no helper at all. The cached key is the pinned callee
+    // closure's exact bits; a hit proves the same live closure — same prototype, same fast
+    // entry. The frame push is emitted natively: capacity-check both stacks (miss → the slow
+    // helper, which can grow them), extend the register stack's length over the (uninitialized —
+    // S4.1's contract) callee window, copy the empty-`Frame` template, patch
+    // `proto`/`base`/`ret_dst`, bump the frame count, and record the caller's resume pc.
+    let site_addr = cg.site_addrs[pc];
+    let site = cg.b.ins().iconst(types::I64, site_addr as i64);
+    let callee_v = match callee_src {
+        CalleeSrc::Reg(r) => cg.read_reg(r),
+        CalleeSrc::Global(g) => cg.load_global(g),
+    };
+    let key =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), site, 0);
+    let is_hit = cg.b.ins().icmp(IntCC::Equal, callee_v, key);
+    let hit_blk = cg.b.create_block();
+    cg.b.ins().brif(is_hit, hit_blk, &[], slow_blk, &[]);
+
+    cg.b.switch_to_block(hit_blk);
+    let regs_len =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), regs_vec, len_off);
+    let regs_cap =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), regs_vec, cap_off);
+    let nregs =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), site, 16);
+    let need = cg.b.ins().iadd(regs_len, nregs);
+    let fits =
+        cg.b.ins()
+            .icmp(IntCC::UnsignedLessThanOrEqual, need, regs_cap);
+    let frames_len =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), frames, len_off);
+    let frames_cap =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), frames, cap_off);
+    let froom =
+        cg.b.ins()
+            .icmp(IntCC::UnsignedLessThan, frames_len, frames_cap);
+    let room = cg.b.ins().band(fits, froom);
+    let push_blk = cg.b.create_block();
+    cg.b.ins().brif(room, push_blk, &[], slow_blk, &[]);
+
+    cg.b.switch_to_block(push_blk);
+    // regs.set_len(len + nregs) — the callee window, uninitialized by contract.
+    cg.b.ins()
+        .store(MemFlagsData::trusted(), need, regs_vec, len_off);
+    let fdata =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), frames, ptr_off);
+    let foff = cg.b.ins().imul_imm(frames_len, l.frame_size as i64);
+    let faddr = cg.b.ins().iadd(fdata, foff);
+    // frames.push(template) — write the empty frame's (emission-time-constant) words, then
+    // patch the per-call fields. The template is fully built before compilation, so its words
+    // are baked as immediates: no loads on the hot path.
+    // SAFETY: `frame_template_addr` is the VM-owned template `Frame`'s address (alive for the
+    // `Vm`'s — and thus this `Jit`'s — lifetime), word-aligned and a multiple-of-8 size
+    // (`Jit::new` checked).
+    let template_words: Vec<u64> = unsafe {
+        std::slice::from_raw_parts(cg.frame_template_addr as *const u64, l.frame_size / 8).to_vec()
+    };
+    for (w, &word) in template_words.iter().enumerate() {
+        let c = cg.b.ins().iconst(types::I64, word as i64);
+        cg.b.ins()
+            .store(MemFlagsData::trusted(), c, faddr, (w * 8) as i32);
+    }
+    let proto32 =
+        cg.b.ins()
+            .load(types::I32, MemFlagsData::trusted(), site, 24);
+    cg.b.ins().store(
+        MemFlagsData::trusted(),
+        proto32,
+        faddr,
+        l.proto_offset as i32,
+    );
+    cg.b.ins().store(
+        MemFlagsData::trusted(),
+        regs_len,
+        faddr,
+        l.base_offset as i32,
+    );
+    let dst16 = cg.b.ins().iconst(types::I16, dst as i64);
+    cg.b.ins().store(
+        MemFlagsData::trusted(),
+        dst16,
+        faddr,
+        l.ret_dst_offset as i32,
+    );
+    let new_flen = cg.b.ins().iadd_imm(frames_len, 1);
+    cg.b.ins()
+        .store(MemFlagsData::trusted(), new_flen, frames, len_off);
+    // The caller (the current top frame, just below the pushed one) resumes at pc + 1 if the
+    // callee deopts — same eager update the helper performs.
+    let caller_faddr = cg.b.ins().iadd_imm(faddr, -(l.frame_size as i64));
+    let resume = cg.b.ins().iconst(types::I64, pc as i64 + 1);
+    cg.b.ins().store(
+        MemFlagsData::trusted(),
+        resume,
+        caller_faddr,
+        l.pc_offset as i32,
+    );
+    let cached_fp =
+        cg.b.ins()
+            .load(types::I64, MemFlagsData::trusted(), site, 8);
+    cg.b.ins()
+        .jump(fast_blk, &[cached_fp.into(), regs_len.into()]);
+
+    // ---- Slow path: the prepare helper (which also fills or poisons the site cache). ----
+    cg.b.switch_to_block(slow_blk);
     let proto = cg.b.ins().iconst(types::I32, cg.proto as i64);
     let pcv = cg.b.ins().iconst(types::I32, pc as i64);
 
@@ -2347,13 +2558,17 @@ fn emit_call(cg: &mut Codegen, dst: Reg, args: &[Reg], pc: usize, op_blocks: &[B
     let prep = cg.prepare_call_ref;
     let pinst =
         cg.b.ins()
-            .call(prep, &[vm, frames, regs_vec, base, proto, pcv]);
+            .call(prep, &[vm, frames, regs_vec, base, proto, pcv, site]);
     let fnptr = cg.b.inst_results(pinst)[0];
     let callee_base = cg.b.inst_results(pinst)[1];
     let fast_bit = cg.b.ins().band_imm(fnptr, 1);
-    let fast_blk = cg.b.create_block();
+    let tagged_blk = cg.b.create_block();
     let untagged = cg.b.create_block();
-    cg.b.ins().brif(fast_bit, fast_blk, &[], untagged, &[]);
+    cg.b.ins().brif(fast_bit, tagged_blk, &[], untagged, &[]);
+    cg.b.switch_to_block(tagged_blk);
+    let fp_untagged = cg.b.ins().band_imm(fnptr, -2);
+    cg.b.ins()
+        .jump(fast_blk, &[fp_untagged.into(), callee_base.into()]);
 
     cg.b.switch_to_block(untagged);
     let zero = cg.b.ins().iconst(types::I64, 0);
@@ -2420,14 +2635,17 @@ fn emit_call(cg: &mut Codegen, dst: Reg, args: &[Reg], pc: usize, op_blocks: &[B
     cg.ret_bail(after);
 
     // Fast-convention direct call (S4.1): pass the argument *values* as machine arguments — no
-    // window fill, no argument copy/retain happened in `prepare_call` — and receive the result as
-    // the second return word. `OUTCOME_RETURNED` → write the result into `dst` ourselves (the
-    // ownership transfer `do_return` would have done) and continue; anything else takes the same
-    // cold `after_call` protocol as the classic direct path (the callee frame exists — it
-    // normalized its window before exiting).
+    // window fill, no argument copy/retain happened — and receive the result as the second
+    // return word. `OUTCOME_RETURNED` → write the result into `dst` ourselves (the ownership
+    // transfer `do_return` would have done) and continue; anything else takes the same cold
+    // `after_call` protocol as the classic direct path (the callee frame exists — it normalized
+    // its window before exiting). Entered from the inline-cache hit (S4.2) or the helper's
+    // tagged result, via the block params (untagged entry, callee base).
     cg.b.switch_to_block(fast_blk);
-    let fp = cg.b.ins().band_imm(fnptr, -2); // clear the tag bit
-    let mut fast_args: Vec<ClValue> = vec![vm, cg.regs, callee_base, cg.globals, frames, regs_vec];
+    let fp = cg.b.block_params(fast_blk)[0];
+    let f_callee_base = cg.b.block_params(fast_blk)[1];
+    let mut fast_args: Vec<ClValue> =
+        vec![vm, cg.regs, f_callee_base, cg.globals, frames, regs_vec];
     for &a in args {
         let v = cg.read_reg(a);
         fast_args.push(v);
