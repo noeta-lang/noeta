@@ -1,7 +1,8 @@
 # P-JSSA — SSA register promotion in the JIT (mem2reg)
 
-**Status: S0–S4 LANDED (loop target hit; fib at 127 ms vs the ~60 ms target — S4.2 designed,
-S5 drop-by-default).** The follow-on milestone to J0–J7: hold live VM registers in Cranelift
+**Status: MILESTONE COMPLETE — S0–S4.2 landed (loop 10M 29 ms, target hit; fib(32) 87 ms vs
+the ~60 ms stretch target — the residual is call/ret + push/pop fundamentals, next lever
+priced under "honest ceiling"; S5 dropped by default).** The follow-on milestone to J0–J7: hold live VM registers in Cranelift
 **SSA values** inside compiled code instead of round-tripping every operand through the
 in-memory register stack.
 
@@ -247,16 +248,34 @@ normalized window, resumed later through the *normal* body's guarded entries.
 fib 143→127 ms; jit-differential (with the refcount-anomaly oracle) green first run; everything
 else neutral.
 
-**S4.2 (next, designed, not started): kill the `prepare` helper on the hot path.** What remains
-per call is `prepare_call` itself — op decode, closure/arity checks, `get_fast` lookup, `Frame`
-push, caller-pc update — plus the callee's entry guard. The design: per-call-site **inline
-caches** in a JIT-owned side table (baked pointer): cached `(callee closure bits → tagged fast
-ptr, callee base delta)`, verified natively by comparing the callee value's bits, with the frame
-push emitted natively from `FrameLayout` (capacity-checked, cold-helper on miss/growth), and the
-caller-pc update moved to the cold path (nobody reads it on the all-native path). Estimated to
-take fib into the ~70–90 ms range; beyond that is frameless *frames* (LIFO mid-stack `Frame`
-materialization on deopt — the caller inserts its own frame at its captured stack depth on the
-cold propagation path), which the honest-ceiling section already prices as method-JIT-class work.
+**S4.2 (`f97551d`) — per-call-site inline caches + native frame push: fib 127→87 ms.** Each
+`Call`/`CallGlobal` site gets a cache slot (individually boxed — the code bakes its address):
+`[pinned callee bits, untagged fast entry, callee nregs, callee proto]`. A hit does the whole
+call setup natively — load the callee (register or global slot), compare against the cached
+bits, capacity-check both stacks, `set_len` the register stack over the uninitialized callee
+window, write the empty-`Frame` image (the VM-owned template's words baked as immediates at
+emission — zero loads) patched with proto/base/ret_dst, bump the frame count, record the
+caller's resume pc, and call the cached fast entry. **Zero helper calls on the hot path.**
+Miss/full-stack falls to `prepare_call`, which fills the cache.
+
+**Identity safety (the part that makes a bits-keyed cache sound):** closures are heap values, so
+bits equality alone is ABA-vulnerable. The fill **pins** the closure — retain + hold on
+`vm.jit_cache_pins` until teardown — so its address can never be reused while cached. Only
+0-upvalue closures are cacheable and they hold nothing, so the delayed free is observably inert
+(no destructor, no captured values); the pins are released before the teardown collectors run
+(residency + anomaly accounting stay exact, worker isolates included); a site that sees a second
+distinct callee is **poisoned** (never re-cached), bounding pins by site count; and there is no
+mid-run trace collection, so the pins need no root registration.
+
+**Final standings (pinned, this branch vs main):** fib(32) 172→**87 ms (1.98×;** 189 pre-
+milestone, so ~2.2× for P-JSSA overall**)** — target was ~60 ms; PHP-JIT 25 / LuaJIT 15.8. What
+remains per call (~15 ns): the call/ret pair itself, the entry guard, ~20 straight-line hit-path
+ops, the native return, and fib's inherently mispredicting recursion. The next structural lever
+is frameless *frames* (skip the push/pop entirely; LIFO mid-stack `Frame` materialization on the
+cold deopt-propagation path — each caller inserts its own frame at its captured stack depth),
+which the honest-ceiling section prices as method-JIT-class work and is NOT part of this
+milestone. Int loop 10M **29 ms** (target ~30 ✓; PHP-JIT 17.2). Milestone closed; S5 dropped by
+default per the table.
 
 ## Design notes (constraints discovered by J0–J7 that S1+ must honour)
 
