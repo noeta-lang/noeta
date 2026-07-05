@@ -736,14 +736,46 @@ extern "C" fn jit_prepare_call(
         return FALLBACK;
     }
     let num_regs = cc.num_registers as usize;
-    // The callee must already be compiled, and its window must fit without reallocating the register
-    // stack (which would dangle the caller's pointer).
-    let Some(f) = vm.jit.as_ref().and_then(|j| j.get(callee_proto as usize)) else {
-        return FALLBACK;
-    };
+    // The callee's window must fit without reallocating the register stack (which would dangle
+    // the caller's pointer).
     if regs.len() + num_regs > regs.capacity() {
         return FALLBACK;
     }
+    let Some(jit) = vm.jit.as_ref() else {
+        return FALLBACK;
+    };
+    // Fast convention (P-JSSA S4.1): the callee has a frameless-window body — reserve the window
+    // WITHOUT initializing it (the fast body normalizes it before the interpreter can ever see
+    // it) and skip the argument copy/retain (the arguments travel as machine arguments, borrowed
+    // from the caller's still-live registers). Bit 0 of the returned pointer tags the convention.
+    if let Some(ff) = jit.get_fast(callee_proto as usize) {
+        let new_base = regs.len();
+        // SAFETY: capacity was checked above, and `reserve_window` keeps the register stack's
+        // entire capacity initialized (its growth path fills to capacity), so every element in
+        // `..new_base + num_regs` has been written at some point — `set_len`'s contract.
+        #[allow(clippy::uninit_vec)]
+        unsafe {
+            regs.set_len(new_base + num_regs);
+        }
+        let caller_top = frames.len() - 1;
+        frames[caller_top].pc = pc as usize + 1;
+        frames.push(Frame {
+            proto: callee_proto,
+            base: new_base,
+            pc: 0,
+            ret_dst: dst,
+            ret_transform: RetTransform::None,
+            upvalues: Vec::new(),
+        });
+        return PreparedCall {
+            fnptr: ff as i64 | 1,
+            base: new_base,
+        };
+    }
+    // The classic direct path needs the callee's normal body compiled.
+    let Some(f) = jit.get(callee_proto as usize) else {
+        return FALLBACK;
+    };
     // Set up the callee frame (like `setup_closure_call`'s closure arm, minus defaults/upvalues).
     let new_base = reserve_window(regs, num_regs);
     for (i, &arg_reg) in args.iter().enumerate() {
@@ -1307,7 +1339,7 @@ impl<'m> Vm<'m> {
             (noeta_jit::AFTER_CALL_HELPER, jit_after_call as *const u8),
             (noeta_jit::LEAF_OP_HELPER, jit_run_leaf_op as *const u8),
         ];
-        match noeta_jit::Jit::new(helpers) {
+        match noeta_jit::Jit::new(helpers, frame_layout()) {
             Ok(mut jit) => {
                 if self.force_jit {
                     for p in 0..self.module.protos.len() {
@@ -5749,6 +5781,16 @@ fn set_reg(regs: &mut [Value], base: usize, dst: u16, value: Value) {
 /// always by `(base, index)`.
 fn reserve_window(regs: &mut Vec<Value>, n: usize) -> usize {
     let base = regs.len();
+    if base + n > regs.capacity() {
+        // Growing: initialize the whole new capacity (fill to capacity, then shrink back), so
+        // the JIT's fast call convention may later extend `len` over it with `set_len` — every
+        // element within capacity has then been written at least once (`set_len`'s contract).
+        // Runs only on the rare growth, not per call.
+        regs.reserve(base + n - regs.len());
+        let cap = regs.capacity();
+        regs.resize(cap, Value::unit());
+        regs.truncate(base);
+    }
     regs.resize(base + n, Value::unit());
     base
 }

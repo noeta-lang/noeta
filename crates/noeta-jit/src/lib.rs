@@ -191,6 +191,15 @@ pub struct Jit {
     module: JITModule,
     /// Finalized entry points, keyed by prototype index. `None` = not (yet) compiled → tier 0.
     compiled: Vec<Option<CompiledFn>>,
+    /// Fast-convention entry points (P-JSSA S4.1), keyed by prototype index: the type-erased
+    /// pointer to the prototype's second, frameless-window body — signature
+    /// `(vm, regs, base, globals, frames, regs_vec, arg0..argN) -> (outcome, value)`, one `i64`
+    /// argument per parameter. `None` = the prototype has no fast body (ineligible or not yet
+    /// compiled); calls then use the classic direct path.
+    fast_compiled: Vec<Option<usize>>,
+    /// The VM's frame/`Vec`-header layout, baked into the fast bodies' native frame pop
+    /// (see [`FrameLayout`]).
+    layout: FrameLayout,
     /// How many prototypes were compiled to *real* native code (vs a bail stub) — the coverage stat.
     native_count: usize,
     /// Imported runtime helpers, declared once (see the `*_HELPER` name constants).
@@ -228,7 +237,7 @@ impl Jit {
     ///
     /// Returns `Err` with a human-readable message if the host ISA is unavailable or Cranelift
     /// rejects the flags — the VM treats that as "JIT unavailable, stay tier 0".
-    pub fn new(helpers: &[(&str, *const u8)]) -> Result<Jit, String> {
+    pub fn new(helpers: &[(&str, *const u8)], layout: FrameLayout) -> Result<Jit, String> {
         let mut flags = settings::builder();
         flags
             .set("use_colocated_libcalls", "false")
@@ -333,6 +342,8 @@ impl Jit {
         Ok(Jit {
             module,
             compiled: Vec::new(),
+            fast_compiled: Vec::new(),
+            layout,
             native_count: 0,
             observe_id,
             note_bound_id,
@@ -354,6 +365,13 @@ impl Jit {
         self.compiled.get(proto).copied().flatten()
     }
 
+    /// The fast-convention entry point for prototype `proto` (P-JSSA S4.1), or `None` if the
+    /// prototype has no fast body. Type-erased: the pointer's signature depends on the
+    /// prototype's arity, and only compiled callers (which know the arity statically) invoke it.
+    pub fn get_fast(&self, proto: usize) -> Option<usize> {
+        self.fast_compiled.get(proto).copied().flatten()
+    }
+
     /// How many prototypes have any compiled entry (native or bail stub).
     pub fn compiled_count(&self) -> usize {
         self.compiled.iter().filter(|c| c.is_some()).count()
@@ -370,16 +388,24 @@ impl Jit {
     /// Idempotent: a second call for an already-compiled prototype returns the cached entry point.
     pub fn compile(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, String> {
         if proto >= self.compiled.len() {
-            self.compiled
-                .resize(module.protos.len().max(proto + 1), None);
+            let n = module.protos.len().max(proto + 1);
+            self.compiled.resize(n, None);
+            self.fast_compiled.resize(n, None);
         }
         if let Some(f) = self.compiled[proto] {
             return Ok(f);
         }
         let chunk = &module.protos[proto];
         let f = if is_eligible(chunk) {
-            let f = self.emit_int_body(module, proto)?;
+            let f = self.emit_int_body(module, proto, false)?;
             self.native_count += 1;
+            // S4.1: also compile the fast-convention body where the prototype supports the
+            // frameless-window contract; direct calls to it then skip the window fill, the
+            // argument copy, and the helper-side return protocol.
+            if fast_eligible(chunk) {
+                let ff = self.emit_int_body(module, proto, true)?;
+                self.fast_compiled[proto] = Some(ff as usize);
+            }
             f
         } else {
             self.emit_bail_stub(proto)?
@@ -401,6 +427,25 @@ impl Jit {
         sig.params.push(AbiParam::new(ptr_ty)); // regs_vec (opaque *mut Vec<Value>)
         sig.params.push(AbiParam::new(ptr_ty)); // entry_pc (usize — where to resume native execution)
         sig.returns.push(AbiParam::new(types::I64)); // outcome (resume pc / CALLED / ABORTED)
+        sig
+    }
+
+    /// The fast-convention signature for an `arity`-parameter prototype (P-JSSA S4.1):
+    /// `(vm, regs, base, globals, frames, regs_vec, arg0..argN) -> (outcome, value)`. No
+    /// `entry_pc` — a fast body is entered only fresh at pc 0; the arguments travel as machine
+    /// arguments instead of window slots, and a completed `Return`'s value comes back as the
+    /// second return word (`outcome == OUTCOME_RETURNED`).
+    fn fast_abi_signature(&self, arity: usize) -> cranelift_codegen::ir::Signature {
+        let ptr_ty = self.module.target_config().pointer_type();
+        let mut sig = self.module.make_signature();
+        for _ in 0..6 {
+            sig.params.push(AbiParam::new(ptr_ty));
+        }
+        for _ in 0..arity {
+            sig.params.push(AbiParam::new(types::I64));
+        }
+        sig.returns.push(AbiParam::new(types::I64)); // outcome
+        sig.returns.push(AbiParam::new(types::I64)); // returned value (RETURNED only)
         sig
     }
 
@@ -460,16 +505,32 @@ impl Jit {
     /// Emit the native integer body for a J1-eligible prototype (see the module docs). One Cranelift
     /// block per bytecode `pc`; register state lives in memory (the `regs` array), so blocks carry no
     /// SSA params — only the frame base pointer, computed once in the entry block, crosses into them.
-    fn emit_int_body(&mut self, module: &Module, proto: usize) -> Result<CompiledFn, String> {
+    fn emit_int_body(
+        &mut self,
+        module: &Module,
+        proto: usize,
+        fast: bool,
+    ) -> Result<CompiledFn, String> {
         let chunk = &module.protos[proto];
         let n = chunk.code.len();
-        let reachable = reachable_pcs(chunk);
+        // A fast body is entered only fresh at pc 0 (no seam resume, no OSR — the interpreter
+        // re-enters a deopted fast frame through the normal body).
+        let reachable = if fast {
+            reachable_pcs_from(chunk, vec![0])
+        } else {
+            reachable_pcs(chunk)
+        };
 
         self.module.clear_context(&mut self.ctx);
         // Precompute the ABI signature (also imported for the direct-call `call_indirect`) before the
         // builder borrows `self.ctx.func`, so it doesn't also need to borrow `self`.
         let abi_sig = self.abi_signature();
-        self.ctx.func.signature = abi_sig.clone();
+        self.ctx.func.signature = if fast {
+            self.fast_abi_signature(chunk.num_params as usize)
+        } else {
+            abi_sig.clone()
+        };
+        let vec_len_off = (self.layout.vec_len_word * 8) as i32;
         {
             let mut b = FunctionBuilder::new(&mut self.ctx.func, &mut self.fb_ctx);
 
@@ -485,7 +546,19 @@ impl Jit {
             let globals = b.block_params(entry)[3];
             let frames = b.block_params(entry)[4];
             let regs_vec = b.block_params(entry)[5];
-            let entry_pc = b.block_params(entry)[6];
+            // Normal body: param 6 is `entry_pc`. Fast body: params 6.. are the call arguments.
+            let entry_pc = if fast {
+                None
+            } else {
+                Some(b.block_params(entry)[6])
+            };
+            let arg_vals: Vec<ClValue> = if fast {
+                (0..chunk.num_params as usize)
+                    .map(|i| b.block_params(entry)[6 + i])
+                    .collect()
+            } else {
+                Vec::new()
+            };
             // frame_ptr = regs + base * 8 (Value is 8 bytes). All register access is off this.
             let base_bytes = b.ins().imul_imm(base, 8);
             let frame_ptr = b.ins().iadd(regs, base_bytes);
@@ -503,8 +576,18 @@ impl Jit {
             let after_call_ref = self.module.declare_func_in_func(self.after_call_id, b.func);
             let leaf_op_ref = self.module.declare_func_in_func(self.leaf_op_id, b.func);
             // The signature of a compiled prototype, imported so a direct call can `call_indirect`
-            // another compiled prototype's entry point.
+            // another compiled prototype's entry point — plus one fast-convention signature per
+            // distinct call arity in this chunk (S4.1).
             let callee_sig = b.import_signature(abi_sig.clone());
+            let mut fast_sigs = std::collections::HashMap::new();
+            for op in chunk.code.iter() {
+                if let Op::Call { args, .. } | Op::CallGlobal { args, .. } = op {
+                    let arity = args.len();
+                    if let std::collections::hash_map::Entry::Vacant(e) = fast_sigs.entry(arity) {
+                        e.insert(b.import_signature(fast_sig_for(&abi_sig, arity)));
+                    }
+                }
+            }
 
             // A prototype that makes a call carries heap values (the callee closure, and results) in
             // registers, so its register writes must be refcount-correct (release the overwritten
@@ -529,6 +612,13 @@ impl Jit {
             let reg_plan = plan::RegPlan::with_heap_in(chunk, &heap_in);
             let const_bits = plan::const_reg_bits(chunk);
             let kinds = kind_in_map(chunk);
+            // Fast bodies need the must-slot-written map to normalize their (uninitialized)
+            // window at every native exit; `fast_eligible` verified the contract holds.
+            let must_written = if fast {
+                must_slot_written_map(chunk, &heap_in, &reg_plan, &const_bits)
+            } else {
+                Vec::new()
+            };
             let vars: Vec<cranelift_frontend::Variable> =
                 (0..nreg).map(|_| b.declare_var(types::I64)).collect();
             let raw_vars: Vec<cranelift_frontend::Variable> =
@@ -554,6 +644,9 @@ impl Jit {
                 kinds,
                 const_bits,
                 proto: proto as u32,
+                fast,
+                must_written,
+                vec_len_off,
                 note_bound_ref,
                 retain_ref,
                 release_ref,
@@ -564,89 +657,152 @@ impl Jit {
                 after_call_ref,
                 leaf_op_ref,
                 callee_sig,
+                fast_sigs,
             };
 
-            // Entry-pc dispatch (J3 resume-native): jump to the block for `entry_pc`. `0` is a fresh
-            // frame (run the parameter guard first); a post-call resume pc jumps straight to its block;
-            // any other value has no native entry, so bail (the interpreter runs that frame). The valid
-            // resume pcs are exactly `call_pc + 1` for each `Call` (the interpreter re-enters a frame
-            // only at pc 0 or just after a call returns).
-            let resume_targets: Vec<usize> =
-                entry_pcs(chunk).into_iter().filter(|&p| p != 0).collect();
-            let guarded = cg.b.create_block();
-            let bad_entry = cg.b.create_block();
-            // Chain: entry_pc == 0 → guarded; == resume_pc_k → init_k → op_blocks[k]; else →
-            // bad_entry. Every native entry point passes through an init block that loads the SSA
-            // variables from the register slots (P-JSSA) — at an entry the interpreter's slots
-            // are the truth — so every variable is defined on every path before any use.
-            let is_zero = cg.b.ins().icmp_imm(IntCC::Equal, entry_pc, 0);
-            let mut next = cg.b.create_block();
-            let mut resume_inits: Vec<(usize, Block)> = Vec::new();
-            cg.b.ins().brif(is_zero, guarded, &[], next, &[]);
-            for (i, &rp) in resume_targets.iter().enumerate() {
-                cg.b.switch_to_block(next);
-                let is_rp = cg.b.ins().icmp_imm(IntCC::Equal, entry_pc, rp as i64);
-                let after = if i + 1 < resume_targets.len() {
-                    cg.b.create_block()
-                } else {
-                    bad_entry
-                };
-                let init = cg.b.create_block();
-                resume_inits.push((rp, init));
-                cg.b.ins().brif(is_rp, init, &[], after, &[]);
-                next = after;
-            }
-            if resume_targets.is_empty() {
-                cg.b.switch_to_block(next);
-                cg.b.ins().jump(bad_entry, &[]);
-            }
-            for (rp, init) in resume_inits {
-                cg.b.switch_to_block(init);
-                // Every mid-frame entry (seam resume or OSR header) verifies the analyses'
-                // immediate/kind claims against tier-0's actual slots before any native code
-                // trusts them — see `guard_entry_claims`.
-                cg.guard_entry_claims(rp);
-                cg.load_ssa_vars();
-                cg.init_raw_vars(rp);
-                cg.b.ins().jump(op_blocks[rp], &[]);
-            }
-            // `bad_entry`: an unexpected resume pc — hand the frame back to the interpreter there.
-            // (`entry_pc` is pointer-width, i.e. i64 on the 64-bit target, matching the return.)
-            cg.b.switch_to_block(bad_entry);
-            cg.b.ins().return_(&[entry_pc]);
+            if let Some(entry_pc) = entry_pc {
+                // Entry-pc dispatch (J3 resume-native): jump to the block for `entry_pc`. `0` is a
+                // fresh frame (run the parameter guard first); a post-call resume pc jumps straight
+                // to its block; any other value has no native entry, so bail (the interpreter runs
+                // that frame). The valid resume pcs are exactly `call_pc + 1` for each `Call` (the
+                // interpreter re-enters a frame only at pc 0 or just after a call returns).
+                let resume_targets: Vec<usize> =
+                    entry_pcs(chunk).into_iter().filter(|&p| p != 0).collect();
+                let guarded = cg.b.create_block();
+                let bad_entry = cg.b.create_block();
+                // Chain: entry_pc == 0 → guarded; == resume_pc_k → init_k → op_blocks[k]; else →
+                // bad_entry. Every native entry point passes through an init block that loads the
+                // SSA variables from the register slots (P-JSSA) — at an entry the interpreter's
+                // slots are the truth — so every variable is defined on every path before any use.
+                let is_zero = cg.b.ins().icmp_imm(IntCC::Equal, entry_pc, 0);
+                let mut next = cg.b.create_block();
+                let mut resume_inits: Vec<(usize, Block)> = Vec::new();
+                cg.b.ins().brif(is_zero, guarded, &[], next, &[]);
+                for (i, &rp) in resume_targets.iter().enumerate() {
+                    cg.b.switch_to_block(next);
+                    let is_rp = cg.b.ins().icmp_imm(IntCC::Equal, entry_pc, rp as i64);
+                    let after = if i + 1 < resume_targets.len() {
+                        cg.b.create_block()
+                    } else {
+                        bad_entry
+                    };
+                    let init = cg.b.create_block();
+                    resume_inits.push((rp, init));
+                    cg.b.ins().brif(is_rp, init, &[], after, &[]);
+                    next = after;
+                }
+                if resume_targets.is_empty() {
+                    cg.b.switch_to_block(next);
+                    cg.b.ins().jump(bad_entry, &[]);
+                }
+                for (rp, init) in resume_inits {
+                    cg.b.switch_to_block(init);
+                    // Every mid-frame entry (seam resume or OSR header) verifies the analyses'
+                    // immediate/kind claims against tier-0's actual slots before any native code
+                    // trusts them — see `guard_entry_claims`.
+                    cg.guard_entry_claims(rp);
+                    cg.load_ssa_vars();
+                    cg.init_raw_vars(rp);
+                    cg.b.ins().jump(op_blocks[rp], &[]);
+                }
+                // `bad_entry`: an unexpected resume pc — hand the frame back to the interpreter
+                // there. (`entry_pc` is pointer-width, i.e. i64 on the 64-bit target.)
+                cg.b.switch_to_block(bad_entry);
+                cg.b.ins().return_(&[entry_pc]);
 
-            // `guarded` (fresh frame, entry_pc == 0): parameter guard, then the pc-0 init block
-            // (SSA variables loaded from the guard-proven slots), then op block 0. If any argument
-            // is a heap pointer, bail to pc 0 — keeping heap arguments out of the body (the body's
-            // heap values then arise only from `LoadGlobal`/calls, which the heap-aware path
-            // refcounts).
-            cg.b.switch_to_block(guarded);
-            let init0 = cg.b.create_block();
-            let mut any_ptr: Option<ClValue> = None;
-            for p in 0..chunk.num_params {
-                let v = cg.load_reg(p);
-                let is_ptr = cg.is_pointer(v);
-                any_ptr = Some(match any_ptr {
-                    None => is_ptr,
-                    Some(acc) => cg.b.ins().bor(acc, is_ptr),
-                });
-            }
-            match any_ptr {
-                Some(any) => {
-                    let bail0 = cg.b.create_block();
-                    cg.b.ins().brif(any, bail0, &[], init0, &[]);
-                    cg.b.switch_to_block(bail0);
-                    let zero = cg.b.ins().iconst(types::I64, 0);
-                    cg.b.ins().return_(&[zero]);
+                // `guarded` (fresh frame, entry_pc == 0): parameter guard, then the pc-0 init
+                // block (SSA variables loaded from the guard-proven slots), then op block 0. If
+                // any argument is a heap pointer, bail to pc 0 — keeping heap arguments out of
+                // the body (the body's heap values then arise only from `LoadGlobal`/calls,
+                // which the heap-aware path refcounts).
+                cg.b.switch_to_block(guarded);
+                let init0 = cg.b.create_block();
+                let mut any_ptr: Option<ClValue> = None;
+                for p in 0..chunk.num_params {
+                    let v = cg.load_reg(p);
+                    let is_ptr = cg.is_pointer(v);
+                    any_ptr = Some(match any_ptr {
+                        None => is_ptr,
+                        Some(acc) => cg.b.ins().bor(acc, is_ptr),
+                    });
                 }
-                None => {
-                    cg.b.ins().jump(init0, &[]);
+                match any_ptr {
+                    Some(any) => {
+                        let bail0 = cg.b.create_block();
+                        cg.b.ins().brif(any, bail0, &[], init0, &[]);
+                        cg.b.switch_to_block(bail0);
+                        let zero = cg.b.ins().iconst(types::I64, 0);
+                        cg.b.ins().return_(&[zero]);
+                    }
+                    None => {
+                        cg.b.ins().jump(init0, &[]);
+                    }
                 }
+                cg.b.switch_to_block(init0);
+                cg.load_ssa_vars();
+                cg.init_raw_vars(0);
+                cg.b.ins().jump(op_blocks[0], &[]);
+            } else {
+                // Fast-convention entry (P-JSSA S4.1): the window is reserved but UNINITIALIZED
+                // and the arguments arrive as machine arguments. Guard the argument *values* (no
+                // slot loads); on a heap argument, materialize the window for the interpreter —
+                // store each argument to its parameter slot with the retain the classic setup
+                // would have done, unit-fill every other slot, and hand back pc 0. On the good
+                // path the parameters' SSA variables are defined straight from the argument
+                // values and the parameter slots are never written (they stay garbage; every
+                // native exit runs `normalize_frame` before the interpreter can see them).
+                let init0 = cg.b.create_block();
+                let mut any_ptr: Option<ClValue> = None;
+                for &a in &arg_vals {
+                    let is_ptr = cg.is_pointer(a);
+                    any_ptr = Some(match any_ptr {
+                        None => is_ptr,
+                        Some(acc) => cg.b.ins().bor(acc, is_ptr),
+                    });
+                }
+                match any_ptr {
+                    Some(any) => {
+                        let bail0 = cg.b.create_block();
+                        cg.b.ins().brif(any, bail0, &[], init0, &[]);
+                        cg.b.switch_to_block(bail0);
+                        let unit =
+                            cg.b.ins()
+                                .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+                        for (pi, &a) in arg_vals.iter().enumerate() {
+                            cg.b.ins().store(
+                                MemFlagsData::trusted(),
+                                a,
+                                cg.frame_ptr,
+                                reg_offset(pi as Reg),
+                            );
+                            cg.retain_if_heap(a);
+                        }
+                        for r in chunk.num_params..nreg as u16 {
+                            cg.b.ins().store(
+                                MemFlagsData::trusted(),
+                                unit,
+                                cg.frame_ptr,
+                                reg_offset(r),
+                            );
+                        }
+                        let zero = cg.b.ins().iconst(types::I64, 0);
+                        cg.b.ins().return_(&[zero, zero]);
+                    }
+                    None => {
+                        cg.b.ins().jump(init0, &[]);
+                    }
+                }
+                cg.b.switch_to_block(init0);
+                let unit =
+                    cg.b.ins()
+                        .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+                for r in 0..nreg {
+                    let v = arg_vals.get(r).copied().unwrap_or(unit);
+                    cg.b.def_var(cg.vars[r], v);
+                }
+                cg.init_raw_vars(0);
+                cg.b.ins().jump(op_blocks[0], &[]);
             }
-            cg.b.switch_to_block(init0);
-            cg.load_ssa_vars();
-            cg.init_raw_vars(0);
-            cg.b.ins().jump(op_blocks[0], &[]);
 
             // One block per op. Unreachable pcs (dead code) get a trivial bail so they never touch
             // `frame_ptr` (which only dominates reachable blocks).
@@ -654,7 +810,7 @@ impl Jit {
                 cg.b.switch_to_block(op_blocks[pc]);
                 if !reachable[pc] {
                     let here = cg.b.ins().iconst(types::I64, pc as i64);
-                    cg.b.ins().return_(&[here]);
+                    cg.ret_bail(here);
                     continue;
                 }
                 emit_op(&mut cg, &chunk.consts, op, pc, &op_blocks);
@@ -663,8 +819,25 @@ impl Jit {
             b.seal_all_blocks();
             b.finalize();
         }
-        self.finalize(&format!("noeta_jit_proto{proto}"))
+        let tag = if fast { "fast" } else { "proto" };
+        self.finalize(&format!("noeta_jit_{tag}{proto}"))
     }
+}
+
+/// Build the fast-convention signature for `arity` from the normal ABI signature's pointer
+/// params (P-JSSA S4.1): the six fixed pointers, then `arity` NaN-boxed `i64` arguments, and the
+/// two-word (outcome, value) return. Must agree with [`Jit::fast_abi_signature`].
+fn fast_sig_for(
+    abi_sig: &cranelift_codegen::ir::Signature,
+    arity: usize,
+) -> cranelift_codegen::ir::Signature {
+    let mut sig = abi_sig.clone();
+    sig.params.truncate(6); // drop entry_pc
+    for _ in 0..arity {
+        sig.params.push(AbiParam::new(types::I64));
+    }
+    sig.returns.push(AbiParam::new(types::I64)); // second word: the returned value
+    sig
 }
 
 /// Whether a prototype is worth compiling: it has at least one op the JIT emits natively. Ops it
@@ -835,9 +1008,14 @@ pub fn worth_compiling(chunk: &noeta_bytecode::Chunk) -> bool {
 /// fall-through past a bail) with a trivial bail instead of code that would reference the entry-only
 /// frame/globals pointers from a non-dominated block.
 fn reachable_pcs(chunk: &noeta_bytecode::Chunk) -> Vec<bool> {
+    reachable_pcs_from(chunk, entry_pcs(chunk))
+}
+
+/// [`reachable_pcs`] seeded from an explicit entry set (the fast body's is just `{0}`).
+fn reachable_pcs_from(chunk: &noeta_bytecode::Chunk, entries: Vec<usize>) -> Vec<bool> {
     let n = chunk.code.len();
     let mut seen = vec![false; n];
-    let mut stack = entry_pcs(chunk);
+    let mut stack = entries;
     while let Some(pc) = stack.pop() {
         if pc >= n || seen[pc] {
             continue;
@@ -1263,6 +1441,147 @@ pub(crate) fn kind_in_map(chunk: &noeta_bytecode::Chunk) -> Vec<Kind> {
     inset
 }
 
+/// The forward **must-slot-written** fixpoint (P-JSSA S4.1): `map[pc * nreg + r]` = has register
+/// `r`'s window *slot* been written on **every** path from a fresh pc-0 entry to the start of op
+/// `pc`? Under the fast call convention the callee's window is reserved without initialization,
+/// so a slot is release-safe/readable only where this map proves a real store happened. "Writes
+/// the slot" mirrors the emitter exactly: a def site stores through unless it is a pure
+/// SSA `def_var` — promoted register, provably-immediate old and new occupant
+/// (cf. [`Codegen::store_reg`]). Meet = AND over [`analysis_succ`] predecessors; pc 0 starts
+/// all-unwritten (parameters travel as machine arguments — their slots are *not* written).
+/// Requires every op modeled by [`reg_effect`] (the caller checks eligibility first).
+pub(crate) fn must_slot_written_map(
+    chunk: &noeta_bytecode::Chunk,
+    heap_in: &[bool],
+    plan: &plan::RegPlan,
+    const_bits: &[Option<u64>],
+) -> Vec<bool> {
+    let n = chunk.code.len();
+    let nreg = chunk.num_registers as usize;
+    let is_var = |r: usize| {
+        plan.promotable(r as Reg) && const_bits.get(r).map(|c| c.is_none()).unwrap_or(true)
+    };
+    // A def at `pc` writes the slot unless the emitter's pure-def condition holds.
+    let slot_write = |pc: usize, r: usize| -> bool {
+        let ok_now = !heap_in[pc * nreg + r];
+        let i = (pc + 1) * nreg + r;
+        let ok_next = i < heap_in.len() && !heap_in[i];
+        !(is_var(r) && ok_now && ok_next)
+    };
+    // Must-analysis: cells start "written" (⊤) except the entry row, and intersect over
+    // predecessors; iterate to the greatest fixpoint. `written[pc]` describes the start of `pc`.
+    let mut written = vec![true; n * nreg];
+    let row0 = nreg.min(written.len());
+    written[..row0].fill(false);
+    let mut succ = Vec::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for pc in 0..n {
+            let mut out: Vec<bool> = written[pc * nreg..pc * nreg + nreg].to_vec();
+            match reg_effect(&chunk.code[pc], &chunk.consts) {
+                Some(RegEffect::Def { dst, .. }) | Some(RegEffect::Copy { dst, .. }) => {
+                    let d = dst as usize;
+                    out[d] = out[d] || slot_write(pc, d);
+                }
+                Some(RegEffect::Clear(r)) => {
+                    let d = r as usize;
+                    out[d] = out[d] || slot_write(pc, d);
+                }
+                Some(RegEffect::Inert) => {}
+                None => unreachable!("fast_ok requires a fully modeled prototype"),
+            }
+            analysis_succ(&chunk.code[pc], pc, n, &mut succ);
+            for &su in &succ {
+                let base = su * nreg;
+                for (r, &o) in out.iter().enumerate() {
+                    if !o && written[base + r] {
+                        written[base + r] = false;
+                        changed = true;
+                    }
+                }
+            }
+        }
+    }
+    written
+}
+
+/// Compile-time gate for the fast body (P-JSSA S4.1): recompute the analyses the way
+/// [`Jit::emit_int_body`] will and check [`fast_ok`]. Only called once per compiled prototype.
+fn fast_eligible(chunk: &noeta_bytecode::Chunk) -> bool {
+    let heap_aware = has_osr_entry(chunk)
+        || chunk
+            .code
+            .iter()
+            .any(|op| matches!(op, Op::Call { .. } | Op::CallGlobal { .. }) || is_leaf_heap_op(op));
+    let heap_in = heap_in_map(chunk, heap_aware);
+    let reg_plan = plan::RegPlan::with_heap_in(chunk, &heap_in);
+    let const_bits = plan::const_reg_bits(chunk);
+    if chunk
+        .code
+        .iter()
+        .any(|op| reg_effect(op, &chunk.consts).is_none())
+    {
+        return false;
+    }
+    let must_written = must_slot_written_map(chunk, &heap_in, &reg_plan, &const_bits);
+    fast_ok(chunk, &heap_in, &reg_plan, &must_written)
+}
+
+/// Whether a prototype is eligible for the **fast call convention** (P-JSSA S4.1): entered with
+/// its window reserved **uninitialized** and its arguments as machine arguments, so every native
+/// exit must be able to hand the interpreter a fully valid window (`Codegen::normalize_frame`).
+/// Requires:
+///
+/// - every op modeled by the bare-store analysis (an unmodeled op has unknown slot effects);
+/// - ≤ 64 registers (the teardown mask, and bounded normalize code);
+/// - no non-parameter register read before written from pc 0 (its slot is garbage);
+/// - wherever a register is live but not SSA-resident, its slot must be must-written (normalize
+///   keeps real slot values and unit-fills the rest — a live non-resident register whose
+///   written-ness is path-dependent cannot be normalized statically);
+/// - at every `Return`, a may-heap register must be must-written (the native masked teardown
+///   releases exactly those slots — releasing a path-dependently-written slot would free garbage
+///   or leak the written path's value).
+pub(crate) fn fast_ok(
+    chunk: &noeta_bytecode::Chunk,
+    heap_in: &[bool],
+    plan: &plan::RegPlan,
+    must_written: &[bool],
+) -> bool {
+    let n = chunk.code.len();
+    let nreg = chunk.num_registers as usize;
+    if nreg > 64
+        || chunk
+            .code
+            .iter()
+            .any(|op| reg_effect(op, &chunk.consts).is_none())
+    {
+        return false;
+    }
+    for r in chunk.num_params as usize..nreg {
+        if plan.live_at(0, r as Reg) {
+            return false;
+        }
+    }
+    for pc in 0..n {
+        for r in 0..nreg {
+            let live = plan.live_at(pc, r as Reg);
+            let resident = plan.ssa_ok_at(pc, r as Reg);
+            if live && !resident && !must_written[pc * nreg + r] {
+                return false;
+            }
+        }
+        if let Op::Return { .. } = chunk.code[pc] {
+            for r in 0..nreg {
+                if heap_in[pc * nreg + r] && !must_written[pc * nreg + r] {
+                    return false;
+                }
+            }
+        }
+    }
+    true
+}
+
 /// A thin wrapper over the Cranelift builder carrying the frame base pointer, the globals base
 /// pointer, and the `note_global_bound` helper reference — the context every op-emitter needs. Keeps
 /// [`emit_op`] free of builder plumbing. Register/global access uses *trusted* memory flags (aligned
@@ -1334,6 +1653,17 @@ struct Codegen<'a, 'b> {
     const_bits: Vec<Option<u64>>,
     /// This prototype's index, passed to the call helper so it can read the `Op::Call` back.
     proto: u32,
+    /// P-JSSA S4.1: is this the **fast-convention** body? Entered only fresh at pc 0 with its
+    /// window uninitialized and its arguments as machine arguments; every native exit runs
+    /// [`Codegen::normalize_frame`] instead of a plain spill, returns two words
+    /// (outcome, value), and `Op::Return` tears the frame down natively.
+    fast: bool,
+    /// Fast bodies only: the must-slot-written map ([`must_slot_written_map`]) driving
+    /// `normalize_frame`'s keep/unit-fill decision. Empty for normal bodies.
+    must_written: Vec<bool>,
+    /// Byte offset of a `Vec`'s length word within its three-word header ([`FrameLayout`]),
+    /// baked so the fast return can pop the frame and truncate the register stack natively.
+    vec_len_off: i32,
     note_bound_ref: FuncRef,
     retain_ref: FuncRef,
     release_ref: FuncRef,
@@ -1344,6 +1674,10 @@ struct Codegen<'a, 'b> {
     after_call_ref: FuncRef,
     leaf_op_ref: FuncRef,
     callee_sig: cranelift_codegen::ir::SigRef,
+    /// Imported fast-convention signatures, one per distinct call arity in this chunk (P-JSSA
+    /// S4.1) — a compiled caller `call_indirect`s a fast body through the signature its own
+    /// static argument count determines.
+    fast_sigs: std::collections::HashMap<usize, cranelift_codegen::ir::SigRef>,
 }
 
 impl Codegen<'_, '_> {
@@ -1608,6 +1942,56 @@ impl Codegen<'_, '_> {
         }
     }
 
+    /// Mode-aware pre-exit sync: a normal body materializes the SSA-resident live set
+    /// ([`Codegen::spill_ssa`] — the rest of its window is already tier-0-valid); a fast body
+    /// must make the *whole* window valid ([`Codegen::normalize_frame`] — its window started as
+    /// garbage). Called before every bail, every frame-visible helper, and every call.
+    fn sync_frame(&mut self, pc: usize) {
+        if self.fast {
+            self.normalize_frame(pc);
+        } else {
+            self.spill_ssa(pc);
+        }
+    }
+
+    /// P-JSSA S4.1: make a fast body's (initially uninitialized) window fully tier-0-valid at
+    /// `pc`, slot by slot: an SSA-resident live register spills its variable (the truth); a
+    /// must-written slot already holds a real value (kept — unit-filling it would clobber a
+    /// possibly-heap reference); everything else gets `unit` (exactly what tier 0 would have —
+    /// a never-written local — or a dead value whose slot may not hold garbage bits, because
+    /// frame teardown's release loop and the unwind path read every slot). `fast_eligible`
+    /// guarantees no live non-resident register is only path-dependently written.
+    fn normalize_frame(&mut self, pc: usize) {
+        let unit = self
+            .b
+            .ins()
+            .iconst(types::I64, Value::NANBOX.unit_bits as i64);
+        for r in 0..self.nreg as u16 {
+            if self.is_var(r) && self.plan.ssa_ok_at(pc, r) && self.plan.live_at(pc, r) {
+                let v = self.b.use_var(self.vars[r as usize]);
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), v, self.frame_ptr, reg_offset(r));
+            } else if !self.must_written[pc * self.nreg + r as usize] {
+                self.b
+                    .ins()
+                    .store(MemFlagsData::trusted(), unit, self.frame_ptr, reg_offset(r));
+            }
+        }
+    }
+
+    /// Mode-aware bail return: a normal body returns one word (the resume pc / outcome); a fast
+    /// body's signature returns two (outcome, value) — the value is meaningful only for
+    /// `OUTCOME_RETURNED`, so bails pad with zero.
+    fn ret_bail(&mut self, outcome: ClValue) {
+        if self.fast {
+            let zero = self.b.ins().iconst(types::I64, 0);
+            self.b.ins().return_(&[outcome, zero]);
+        } else {
+            self.b.ins().return_(&[outcome]);
+        }
+    }
+
     /// P-JSSA: (re)load every promotable register's variable from its slot. Used at every native
     /// entry point (fresh pc-0 entry, resume-after-call, OSR header) — where the interpreter's
     /// slots are the truth — and after a runtime helper that may have written a slot (a call's
@@ -1765,9 +2149,9 @@ fn global_offset(g: u32) -> i32 {
 fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[Block]) {
     cg.cur_pc = pc;
     if !is_fast_op(op, consts) {
-        cg.spill_ssa(pc);
+        cg.sync_frame(pc);
         let here = cg.pc_const(pc);
-        cg.b.ins().return_(&[here]);
+        cg.ret_bail(here);
         return;
     }
     let next = |cg: &mut Codegen| cg.b.ins().jump(op_blocks[pc + 1], &[]);
@@ -1919,20 +2303,22 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
             let bail = cg.b.create_block();
             cg.b.ins().brif(is_true, op_blocks[pc + 1], &[], bail, &[]);
             cg.b.switch_to_block(bail);
-            cg.spill_ssa(pc);
+            cg.sync_frame(pc);
             let here = cg.pc_const(pc);
-            cg.b.ins().return_(&[here]);
+            cg.ret_bail(here);
         }
         Op::LoadGlobal { dst, global, .. } => emit_load_global(cg, *dst, global.0, pc, op_blocks),
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
-        Op::Call { dst, .. } | Op::CallGlobal { dst, .. } => emit_call(cg, *dst, pc, op_blocks),
+        Op::Call { dst, args, .. } | Op::CallGlobal { dst, args, .. } => {
+            emit_call(cg, *dst, args, pc, op_blocks)
+        }
         Op::Return { src } => emit_return(cg, *src, pc),
         op if is_leaf_heap_op(op) => emit_leaf_op(cg, pc, op_blocks),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
         _ => {
             let here = cg.pc_const(pc);
-            cg.b.ins().return_(&[here]);
+            cg.ret_bail(here);
         }
     }
 }
@@ -1942,10 +2328,10 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
 /// frame/register stacks (pushing the callee frame). Whatever it returns — `CALLED` (frame pushed),
 /// a resume pc (a synchronous first-class-builtin call completed), or `ABORTED` — becomes this
 /// compiled function's outcome, so the interpreter runs the callee and resumes the caller in tier 0.
-fn emit_call(cg: &mut Codegen, dst: Reg, pc: usize, op_blocks: &[Block]) {
-    // P-JSSA sync point: the call helpers read the argument registers (and, on a bail, any live
-    // register) from the slots, so materialize the SSA-resident live set first.
-    cg.spill_ssa(pc);
+fn emit_call(cg: &mut Codegen, dst: Reg, args: &[Reg], pc: usize, op_blocks: &[Block]) {
+    // P-JSSA sync point: the call helpers read the argument registers (and, on a bail or an
+    // abort-unwind, any slot) from the window, so make it fully valid first (mode-aware).
+    cg.sync_frame(pc);
     let vm = cg.vm;
     let frames = cg.frames;
     let regs_vec = cg.regs_vec;
@@ -1955,13 +2341,21 @@ fn emit_call(cg: &mut Codegen, dst: Reg, pc: usize, op_blocks: &[Block]) {
 
     // Try a direct native→native call: `prepare_call` returns the callee's compiled entry pointer
     // and its reserved window base in one roundtrip (S4.0), or a zero pointer if the call is not
-    // direct-able (uncompiled callee, defaults/upvalues, no stack capacity).
+    // direct-able (uncompiled callee, defaults/upvalues, no stack capacity). A pointer with bit 0
+    // set is a **fast-convention** entry (S4.1): its window was reserved uninitialized and the
+    // arguments travel as machine arguments.
     let prep = cg.prepare_call_ref;
     let pinst =
         cg.b.ins()
             .call(prep, &[vm, frames, regs_vec, base, proto, pcv]);
     let fnptr = cg.b.inst_results(pinst)[0];
     let callee_base = cg.b.inst_results(pinst)[1];
+    let fast_bit = cg.b.ins().band_imm(fnptr, 1);
+    let fast_blk = cg.b.create_block();
+    let untagged = cg.b.create_block();
+    cg.b.ins().brif(fast_bit, fast_blk, &[], untagged, &[]);
+
+    cg.b.switch_to_block(untagged);
     let zero = cg.b.ins().iconst(types::I64, 0);
     let is_zero = cg.b.ins().icmp(IntCC::Equal, fnptr, zero);
     let fallback = cg.b.create_block();
@@ -1975,7 +2369,7 @@ fn emit_call(cg: &mut Codegen, dst: Reg, pc: usize, op_blocks: &[Block]) {
         cg.b.ins()
             .call(call, &[vm, frames, regs_vec, base, proto, pcv]);
     let outcome = cg.b.inst_results(inst)[0];
-    cg.b.ins().return_(&[outcome]);
+    cg.ret_bail(outcome);
 
     // Direct: call the callee's compiled entry on the shared stack. `prepare_call` already reserved
     // the callee window (whose base it returned) and pushed its frame; `regs`/`globals`/`frames`/
@@ -2023,7 +2417,45 @@ fn emit_call(cg: &mut Codegen, dst: Reg, pc: usize, op_blocks: &[Block]) {
     }
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
     cg.b.switch_to_block(return_blk);
-    cg.b.ins().return_(&[after]);
+    cg.ret_bail(after);
+
+    // Fast-convention direct call (S4.1): pass the argument *values* as machine arguments — no
+    // window fill, no argument copy/retain happened in `prepare_call` — and receive the result as
+    // the second return word. `OUTCOME_RETURNED` → write the result into `dst` ourselves (the
+    // ownership transfer `do_return` would have done) and continue; anything else takes the same
+    // cold `after_call` protocol as the classic direct path (the callee frame exists — it
+    // normalized its window before exiting).
+    cg.b.switch_to_block(fast_blk);
+    let fp = cg.b.ins().band_imm(fnptr, -2); // clear the tag bit
+    let mut fast_args: Vec<ClValue> = vec![vm, cg.regs, callee_base, cg.globals, frames, regs_vec];
+    for &a in args {
+        let v = cg.read_reg(a);
+        fast_args.push(v);
+    }
+    let fsig = cg.fast_sigs[&args.len()];
+    let finst = cg.b.ins().call_indirect(fsig, fp, &fast_args);
+    let f_outcome = cg.b.inst_results(finst)[0];
+    let f_value = cg.b.inst_results(finst)[1];
+    let f_returned = cg.b.ins().iconst(types::I64, OUTCOME_RETURNED);
+    let f_is_ret = cg.b.ins().icmp(IntCC::Equal, f_outcome, f_returned);
+    let f_hot = cg.b.create_block();
+    let f_cold = cg.b.create_block();
+    cg.b.ins().brif(f_is_ret, f_hot, &[], f_cold, &[]);
+    cg.b.switch_to_block(f_hot);
+    // The value arrives with the reference the callee's teardown retained for it; `store_reg`
+    // releases the overwritten destination and takes ownership — exactly `do_return`'s transfer.
+    cg.store_reg(dst, f_value);
+    cg.b.ins().jump(op_blocks[pc + 1], &[]);
+    cg.b.switch_to_block(f_cold);
+    let f_ainst = cg.b.ins().call(cg.after_call_ref, &[vm, frames, f_outcome]);
+    let f_after = cg.b.inst_results(f_ainst)[0];
+    let f_cont = cg.b.ins().iconst(types::I64, OUTCOME_CONTINUE);
+    let f_is_cont = cg.b.ins().icmp(IntCC::Equal, f_after, f_cont);
+    let f_ret_blk = cg.b.create_block();
+    cg.b.ins()
+        .brif(f_is_cont, continue_blk, &[], f_ret_blk, &[]);
+    cg.b.switch_to_block(f_ret_blk);
+    cg.ret_bail(f_after);
 }
 
 /// A native leaf heap/collection op (P-JIT J4): run it through the `run_leaf_op` helper, which does
@@ -2032,7 +2464,7 @@ fn emit_call(cg: &mut Codegen, dst: Reg, pc: usize, op_blocks: &[Block]) {
 fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     // P-JSSA sync point: the leaf helper reads its operands from (and writes its destination to)
     // the slots.
-    cg.spill_ssa(pc);
+    cg.sync_frame(pc);
     let vm = cg.vm;
     let regs_vec = cg.regs_vec;
     let base = cg.base;
@@ -2052,7 +2484,7 @@ fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     cg.load_ssa_vars();
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
     cg.b.switch_to_block(return_blk);
-    cg.b.ins().return_(&[outcome]);
+    cg.ret_bail(outcome);
 }
 
 /// A native `Op::Return` (P-JIT J3): hand the return value to the `jit_return` helper, which runs the
@@ -2067,6 +2499,9 @@ fn emit_leaf_op(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
 /// verify them, native defs preserve them); a clear bit's release would be a no-op on the
 /// immediate the slot holds.
 fn emit_return(cg: &mut Codegen, src: Reg, pc: usize) {
+    if cg.fast {
+        return emit_return_fast(cg, src, pc);
+    }
     // No spill: the frame dies here. The return value travels as the helper's argument; any slot
     // left stale by SSA residency holds an immediate (the plan's invariant), and the masked
     // teardown never touches it.
@@ -2089,6 +2524,43 @@ fn emit_return(cg: &mut Codegen, src: Reg, pc: usize) {
     cg.b.ins().return_(&[outcome]);
 }
 
+/// A fast body's `Op::Return` (P-JSSA S4.1): the whole return protocol, natively — no helper.
+/// The value goes back as the second return word; the frame it leaves behind was pushed by
+/// `jit_prepare_call`'s fast path (empty upvalues, `RetTransform::None`, never the bottom frame),
+/// so the teardown is: retain the value if it may be heap (it must survive the window release),
+/// release exactly the may-heap slots (each is must-written — `fast_ok` — so it holds a real
+/// value; everything else is an immediate or was never written), pop the frame by decrementing
+/// the frame `Vec`'s length (nothing to drop: empty `Vec` + POD fields), and truncate the
+/// register stack to this frame's base by storing it as the register `Vec`'s length.
+fn emit_return_fast(cg: &mut Codegen, src: Reg, pc: usize) {
+    let raw = cg.read_reg(src);
+    if cg.may_be_heap(src) {
+        cg.retain_if_heap(raw);
+    }
+    for r in 0..cg.nreg as u16 {
+        if cg.heap_in[pc * cg.nreg + r as usize] {
+            let v = cg.load_reg(r);
+            cg.release_if_heap(v);
+        }
+    }
+    // frames.len -= 1 (pop this frame).
+    let flen = cg.b.ins().load(
+        types::I64,
+        MemFlagsData::trusted(),
+        cg.frames,
+        cg.vec_len_off,
+    );
+    let flen1 = cg.b.ins().iadd_imm(flen, -1);
+    cg.b.ins()
+        .store(MemFlagsData::trusted(), flen1, cg.frames, cg.vec_len_off);
+    // regs.len = base (truncate this frame's window off the register stack).
+    let base = cg.base;
+    cg.b.ins()
+        .store(MemFlagsData::trusted(), base, cg.regs_vec, cg.vec_len_off);
+    let outcome = cg.b.ins().iconst(types::I64, OUTCOME_RETURNED);
+    cg.b.ins().return_(&[outcome, raw]);
+}
+
 /// `dst = globals[g]` (P-JIT globals). Bails if the slot is unbound (E0005). A call-free prototype
 /// also bails on a heap global (it would need a `retain`, breaking the immediate invariant); a
 /// `heap_aware` prototype instead retains the heap value (matching the interpreter's `LoadGlobal`
@@ -2106,9 +2578,9 @@ fn emit_load_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
     let bail = cg.b.create_block();
     cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);
     cg.b.switch_to_block(bail);
-    cg.spill_ssa(pc);
+    cg.sync_frame(pc);
     let here = cg.pc_const(pc);
-    cg.b.ins().return_(&[here]);
+    cg.ret_bail(here);
     cg.b.switch_to_block(cont);
     if cg.heap_aware {
         cg.retain_if_heap(v);
@@ -2133,9 +2605,9 @@ fn emit_store_global(cg: &mut Codegen, g: u32, src: Reg, pc: usize, op_blocks: &
     let bail = cg.b.create_block();
     cg.b.ins().brif(heap, bail, &[], cont, &[]);
     cg.b.switch_to_block(bail);
-    cg.spill_ssa(pc);
+    cg.sync_frame(pc);
     let here = cg.pc_const(pc);
-    cg.b.ins().return_(&[here]);
+    cg.ret_bail(here);
 
     // Not a heap old value: safe to mutate. Take the source out (moved into the global — no release,
     // its reference transfers) and write the slot; a first bind also records it in `global_order`.
@@ -2172,9 +2644,9 @@ fn emit_take_global(cg: &mut Codegen, dst: Reg, g: u32, pc: usize, op_blocks: &[
     let bail = cg.b.create_block();
     cg.b.ins().brif(bail_cond, bail, &[], cont, &[]);
     cg.b.switch_to_block(bail);
-    cg.spill_ssa(pc);
+    cg.sync_frame(pc);
     let here = cg.pc_const(pc);
-    cg.b.ins().return_(&[here]);
+    cg.ret_bail(here);
     cg.b.switch_to_block(cont);
     let unit =
         cg.b.ins()
@@ -2454,9 +2926,9 @@ fn guard(cg: &mut Codegen, cond: ClValue, cont: Block, pc: usize) {
     let bail = cg.b.create_block();
     cg.b.ins().brif(cond, cont, &[], bail, &[]);
     cg.b.switch_to_block(bail);
-    cg.spill_ssa(pc);
+    cg.sync_frame(pc);
     let here = cg.pc_const(pc);
-    cg.b.ins().return_(&[here]);
+    cg.ret_bail(here);
     cg.b.switch_to_block(cont);
 }
 
