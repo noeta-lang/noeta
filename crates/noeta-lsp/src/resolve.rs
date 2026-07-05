@@ -249,10 +249,14 @@ pub fn visible_at(program: &Program, offset: u32, source: SourceId) -> Vec<(Stri
         }
     }
     resolver.scopes.push(HashMap::new()); // the module scope
-    for stmt in &program.stmts {
-        resolver.walk_stmt(stmt);
-    }
-    resolver.snapshot.unwrap_or_default()
+    // The module region spans the whole file (offsets 0..∞ in the cursor's source), so a cursor on a
+    // blank top-level line still captures the module-level bindings declared before it.
+    let module_region = Span::new_in(source, 0, u32::MAX);
+    resolver.walk_seq(module_region, &program.stmts, None);
+    resolver
+        .snapshot
+        .map(|(bindings, _)| bindings)
+        .unwrap_or_default()
 }
 
 /// The mutable state of one [`DefUse::build`] walk: the top-level function table, the lexical scope
@@ -263,13 +267,14 @@ struct Resolver {
     scopes: Vec<HashMap<String, Span>>,
     refs: Vec<(Span, Span)>,
     member_refs: Vec<MemberRef>,
-    /// When set (completion), the `(offset, source)` whose in-scope bindings to capture; the walk
-    /// snapshots the scope stack at the deepest node containing it. `None` for the def/use walk,
-    /// which pays no snapshot cost.
+    /// When set (completion), the `(offset, source)` whose in-scope bindings to capture. `None` for
+    /// the def/use walk, which pays no snapshot cost.
     cursor: Option<(u32, SourceId)>,
-    /// The visible bindings captured at `cursor` (innermost scopes last), once the walk reaches a
-    /// node that contains it. See [`visible_at`].
-    snapshot: Option<Vec<(String, Span)>>,
+    /// The visible bindings captured for `cursor`, paired with the *width* of the span they were
+    /// captured at. The tightest (smallest-width) containing span wins: a node the cursor sits on
+    /// beats the enclosing scope's region, which is only used when the cursor is in whitespace with
+    /// no node under it. See [`visible_at`].
+    snapshot: Option<(Vec<(String, Span)>, u32)>,
 }
 
 impl Resolver {
@@ -277,23 +282,74 @@ impl Resolver {
         self.scopes.push(HashMap::new());
     }
 
-    /// If `span` is in the cursor's file and contains it, snapshot the bindings currently in scope.
-    /// Called at the entry of every statement and expression; because the walk is depth-first and a
-    /// node is entered before its children, the deepest containing node writes last and wins — and
-    /// its scope stack holds exactly the bindings visible there (enclosing scopes plus earlier
-    /// siblings, but not the node's own not-yet-processed bindings).
-    fn maybe_snapshot(&mut self, span: Span) {
-        if let Some((offset, source)) = self.cursor
-            && span.source == source
-            && span.start <= offset
-            && offset <= span.end
+    /// Whether the cursor is in `region`'s file and within it.
+    fn cursor_within(&self, region: Span) -> bool {
+        matches!(self.cursor, Some((offset, source)) if source == region.source && region.start <= offset && offset <= region.end)
+    }
+
+    /// Snapshot the bindings currently in scope, tagged with `width`. Keeps the capture from the
+    /// *tightest* span seen so far (`width <= previous`): a node the cursor sits on (small width)
+    /// overrides an enclosing scope-region capture (large width). The scope stack at the call site
+    /// holds exactly the bindings visible there — enclosing scopes plus earlier siblings, not any
+    /// not-yet-processed binding.
+    fn capture(&mut self, width: u32) {
+        if self
+            .snapshot
+            .as_ref()
+            .is_none_or(|(_, prev)| width <= *prev)
         {
-            self.snapshot = Some(
-                self.scopes
-                    .iter()
-                    .flat_map(|scope| scope.iter().map(|(name, def)| (name.clone(), *def)))
-                    .collect(),
-            );
+            let bindings = self
+                .scopes
+                .iter()
+                .flat_map(|scope| scope.iter().map(|(name, def)| (name.clone(), *def)))
+                .collect();
+            self.snapshot = Some((bindings, width));
+        }
+    }
+
+    /// If the cursor sits on `span` (a node), capture the bindings visible there. Called at the entry
+    /// of every statement and expression, so a cursor on any token gets the precise in-scope set.
+    fn maybe_snapshot(&mut self, span: Span) {
+        if self.cursor_within(span) {
+            self.capture(span.len());
+        }
+    }
+
+    /// Walk a scope's body (statements plus an optional tail expression), also capturing bindings when
+    /// the cursor falls in *whitespace* with no node under it: at the first item starting after the
+    /// cursor (a gap between statements) or, failing that, past the last item but still inside
+    /// `region` (trailing whitespace). These captures use `region`'s width, so the on-node captures
+    /// inside `walk_stmt`/`walk_expr` still win wherever the cursor is actually on a node.
+    fn walk_seq(&mut self, region: Span, stmts: &[Stmt], tail: Option<&Expr>) {
+        let mut captured = false;
+        let mut last_end = region.start;
+        for stmt in stmts {
+            self.gap_capture(region, stmt.span().start, &mut captured);
+            self.walk_stmt(stmt);
+            last_end = last_end.max(stmt.span().end);
+        }
+        if let Some(expr) = tail {
+            self.gap_capture(region, expr.span().start, &mut captured);
+            self.walk_expr(expr);
+            last_end = last_end.max(expr.span().end);
+        }
+        // Cursor past every item but still inside the region → all of the body's bindings are visible.
+        if !captured
+            && self.cursor_within(region)
+            && matches!(self.cursor, Some((offset, _)) if offset >= last_end)
+        {
+            self.capture(region.len());
+        }
+    }
+
+    /// Capture (once) if the cursor sits in the gap before an item starting at `next_start`.
+    fn gap_capture(&mut self, region: Span, next_start: u32, captured: &mut bool) {
+        if !*captured
+            && self.cursor_within(region)
+            && matches!(self.cursor, Some((offset, _)) if offset < next_start)
+        {
+            self.capture(region.len());
+            *captured = true;
         }
     }
 
@@ -340,15 +396,25 @@ impl Resolver {
 
     fn walk_block_scoped(&mut self, stmts: &[Stmt]) {
         self.push_scope();
-        for stmt in stmts {
-            self.walk_stmt(stmt);
+        // The block's region is the span of its statements (used only for whitespace completion); an
+        // empty block has nothing to walk or capture.
+        if let Some(region) = seq_region(stmts) {
+            self.walk_seq(region, stmts, None);
         }
         self.pop_scope();
     }
 
     /// Walk a function/closure: parameter defaults resolve in the *definition* scope (not against the
-    /// parameters), so they are walked before the parameter scope is pushed.
-    fn walk_callable(&mut self, params: &[Param], body_stmts: &[Stmt], body_expr: Option<&Expr>) {
+    /// parameters), so they are walked before the parameter scope is pushed. `region` is the whole
+    /// callable's span — broad enough that completion in an empty or whitespace-only body still offers
+    /// the parameters.
+    fn walk_callable(
+        &mut self,
+        region: Span,
+        params: &[Param],
+        body_stmts: &[Stmt],
+        body_expr: Option<&Expr>,
+    ) {
         for param in params {
             if let Some(default) = &param.default {
                 self.walk_expr(default);
@@ -358,12 +424,7 @@ impl Resolver {
         for param in params {
             self.bind(&param.name, param.name_span);
         }
-        for stmt in body_stmts {
-            self.walk_stmt(stmt);
-        }
-        if let Some(expr) = body_expr {
-            self.walk_expr(expr);
-        }
+        self.walk_seq(region, body_stmts, body_expr);
         self.pop_scope();
     }
 
@@ -395,7 +456,7 @@ impl Resolver {
             Stmt::Fn(decl) => {
                 // The fn name is visible to siblings and to itself (recursion).
                 self.bind(&decl.name, decl.name_span);
-                self.walk_callable(&decl.params, &decl.body, None);
+                self.walk_callable(decl.span, &decl.params, &decl.body, None);
             }
             Stmt::Return { value, .. } => {
                 if let Some(value) = value {
@@ -421,7 +482,7 @@ impl Resolver {
                 pattern,
                 iterable,
                 body,
-                ..
+                span,
             } => {
                 self.walk_expr(iterable);
                 self.push_scope();
@@ -433,9 +494,9 @@ impl Resolver {
                         }
                     }
                 }
-                for stmt in body {
-                    self.walk_stmt(stmt);
-                }
+                // The loop's own span is the region, so completion in the body (including whitespace)
+                // sees the loop variable alongside the body's locals.
+                self.walk_seq(*span, body, None);
                 self.pop_scope();
             }
             Stmt::While { cond, body, .. } => {
@@ -460,7 +521,7 @@ impl Resolver {
 
     fn walk_methods(&mut self, methods: &[FnDecl]) {
         for method in methods {
-            self.walk_callable(&method.params, &method.body, None);
+            self.walk_callable(method.span, &method.params, &method.body, None);
         }
     }
 
@@ -477,9 +538,11 @@ impl Resolver {
                 self.walk_expr(callee);
                 self.walk_exprs(args);
             }
-            Expr::Closure { params, body, .. } => match body {
-                ClosureBody::Expr(expr) => self.walk_callable(params, &[], Some(expr)),
-                ClosureBody::Block(stmts) => self.walk_callable(params, stmts, None),
+            Expr::Closure {
+                params, body, span, ..
+            } => match body {
+                ClosureBody::Expr(inner) => self.walk_callable(*span, params, &[], Some(inner)),
+                ClosureBody::Block(stmts) => self.walk_callable(*span, params, stmts, None),
             },
             Expr::Pipeline { left, right, .. } => {
                 self.walk_expr(left);
@@ -593,6 +656,12 @@ impl Resolver {
             self.walk_expr(expr);
         }
     }
+}
+
+/// The span covering a statement sequence (its first statement's start to its last's end), or `None`
+/// for an empty sequence. Used as the completion region of a block body.
+fn seq_region(stmts: &[Stmt]) -> Option<Span> {
+    Some(stmts.first()?.span().merge(stmts.last()?.span()))
 }
 
 /// Invoke `bind` for each name a match pattern introduces (recursing into variant and tuple

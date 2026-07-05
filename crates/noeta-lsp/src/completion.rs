@@ -262,6 +262,59 @@ mod tests {
     }
 
     #[test]
+    fn whitespace_gap_in_a_body_offers_params_and_prior_locals() {
+        // A blank line inside the function body — no AST node covers the cursor (C1.1).
+        let src = "fn f(count: int): int {\n  total = count\n  \n  return total\n}";
+        let offset = src.find("\n  \n").unwrap() as u32 + 2; // on the blank line's whitespace
+        let cands = complete_at(src, offset);
+        let vars = labels_of(&cands, CandidateKind::Variable);
+        assert!(
+            vars.contains(&"count"),
+            "param visible in whitespace; got {vars:?}"
+        );
+        assert!(
+            vars.contains(&"total"),
+            "prior local visible in whitespace; got {vars:?}"
+        );
+    }
+
+    #[test]
+    fn whitespace_gap_does_not_offer_a_later_local() {
+        // In the gap *before* `later` is declared, it is not yet in scope.
+        let src = "fn f() {\n  early = 1\n  \n  later = 2\n}";
+        let offset = src.find("\n  \n").unwrap() as u32 + 2;
+        let cands = complete_at(src, offset);
+        let vars = labels_of(&cands, CandidateKind::Variable);
+        assert!(vars.contains(&"early"));
+        assert!(
+            !vars.contains(&"later"),
+            "a later local must not leak backward; got {vars:?}"
+        );
+    }
+
+    #[test]
+    fn trailing_whitespace_in_a_body_offers_all_locals() {
+        // After the last statement but before the closing brace — every body local is visible.
+        let src = "fn f() {\n  a = 1\n  b = 2\n  \n}";
+        let offset = src.rfind("\n  \n").unwrap() as u32 + 2;
+        let cands = complete_at(src, offset);
+        let vars = labels_of(&cands, CandidateKind::Variable);
+        assert!(vars.contains(&"a") && vars.contains(&"b"), "got {vars:?}");
+    }
+
+    #[test]
+    fn whitespace_in_one_body_does_not_leak_another() {
+        let src = "fn a() {\n  inner = 1\n}\nfn b() {\n  \n}";
+        let offset = src.rfind("\n  \n").unwrap() as u32 + 2; // blank line inside b's body
+        let cands = complete_at(src, offset);
+        let vars = labels_of(&cands, CandidateKind::Variable);
+        assert!(
+            !vars.contains(&"inner"),
+            "a's local leaked into b's whitespace; got {vars:?}"
+        );
+    }
+
+    #[test]
     fn out_of_scope_locals_are_not_offered() {
         // `inner` is local to `a`; completing in `b` must not see it.
         let src = "fn a() {\n  inner = 1\n}\nfn b() {\n  return 0\n}";
