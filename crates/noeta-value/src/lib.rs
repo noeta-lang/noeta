@@ -42,6 +42,11 @@ use noeta_bytecode::Builtin;
 use noeta_object::{PackedKind, PackedSchema, Shape};
 use noeta_stdlib::FileHandle;
 
+// The P-SSO string (24-byte, ≤24-byte content inline) inside `Payload::Str`. Re-exported so the
+// one hot producer outside this crate — the VM's `BuildString` — can assemble its output in the
+// payload's own representation and hand it over without a conversion.
+pub use compact_str::CompactString;
+
 use heap::{IterShape, IterState, Payload};
 
 /// Why an iterator pull ([`Value::iter_next_apply`]) aborted (Track I.1c). The closure adapters
@@ -55,6 +60,39 @@ pub enum IterAbort<E> {
     Closure(E),
     /// A `filter` predicate returned a value of this type instead of a `bool`.
     FilterNotBool(&'static str),
+}
+
+/// The kind of a heap value's payload — the public, `Copy` face of the internal `Payload`
+/// discriminant, one variant per payload. See [`Value::heap_kind`]: classify a receiver once,
+/// then dispatch on integer compares instead of re-dereferencing the heap per candidate type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapKind {
+    Str,
+    Bytes,
+    Int,
+    Closure,
+    Cell,
+    List,
+    Tuple,
+    Set,
+    Map,
+    PackedList,
+    Object,
+    Enum,
+    NativeModule,
+    NativeFn,
+    FileHandle,
+    Iter,
+    Future,
+    Timer,
+    Handle,
+    AsyncIo,
+    Sender,
+    Receiver,
+    ChannelSend,
+    ChannelRecv,
+    IsolateFuture,
+    Reactive,
 }
 
 /// The NaN-box bit layout (see [`Value::NANBOX`]), the ABI contract between this crate's value
@@ -195,15 +233,17 @@ impl Value {
         }
     }
 
-    /// A heap string (refcount 1).
+    /// A heap string (refcount 1). Content ≤ 24 bytes lives inline in the payload (P-SSO) —
+    /// the value is then a single allocation.
     pub fn string(s: &str) -> Value {
-        heap::alloc(Payload::Str(s.to_string()))
+        heap::alloc(Payload::Str(CompactString::new(s)))
     }
 
-    /// A heap string (refcount 1) that **takes ownership** of an already-built `String` — no copy,
+    /// A heap string (refcount 1) that **takes ownership** of an already-built buffer — no copy,
     /// unlike [`Value::string`] which copies a borrowed `&str`. Use when the caller already owns the
-    /// buffer (e.g. `BuildString`'s interpolation output).
-    pub fn from_string(s: String) -> Value {
+    /// buffer (e.g. `BuildString`'s interpolation output, assembled as a [`CompactString`] so a
+    /// short result never touches the allocator).
+    pub fn from_string(s: CompactString) -> Value {
         heap::alloc(Payload::Str(s))
     }
 
@@ -1302,7 +1342,12 @@ impl Value {
     /// `BTreeMap` (a convenient sorted builder); it is stored internally as a `HashMap` for O(1)
     /// access, and every order-observing accessor re-sorts, so nothing observable changes.
     pub fn map(entries: BTreeMap<String, Value>) -> Value {
-        heap::alloc(Payload::Map(entries.into_iter().collect()))
+        heap::alloc(Payload::Map(
+            entries
+                .into_iter()
+                .map(|(k, v)| (CompactString::from(k), v))
+                .collect(),
+        ))
     }
 
     /// A heap object (refcount 1): a struct/class/opaque instance laying out `slots` in the
@@ -1401,6 +1446,20 @@ impl Value {
     pub fn as_string(self) -> Option<String> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
+                Payload::Str(s) => Some(s.as_str().to_owned()),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// A [`CompactString`] clone of the string value, if this is a heap string. Unlike
+    /// [`Self::as_string`], inline content (≤ 24 bytes) clones without touching the allocator —
+    /// use for map keys, which are stored in this representation.
+    pub fn as_compact_string(self) -> Option<CompactString> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
                 Payload::Str(s) => Some(s.clone()),
                 _ => None,
             })
@@ -1416,7 +1475,7 @@ impl Value {
     pub fn with_str<R>(self, f: impl FnOnce(&str) -> R) -> Option<R> {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => Some(f(s)),
+                Payload::Str(s) => Some(f(s.as_str())),
                 _ => None,
             })
         } else {
@@ -1679,7 +1738,7 @@ impl Value {
     /// and a single-use value (the caller must not read it again) — used to hand a freshly-built
     /// map key straight to the `HashMap` instead of cloning it. The now-empty `Payload::Str` is a
     /// valid, cheap-to-free object, so the caller's later `Drop`/overwrite of the register is sound.
-    pub fn take_string_in_place(self) -> String {
+    pub fn take_string_in_place(self) -> CompactString {
         debug_assert!(
             self.is_string() && heap::refcount(self) == 1,
             "take_string_in_place requires a uniquely-owned string"
@@ -1688,7 +1747,7 @@ impl Value {
             if let Payload::Str(buf) = p {
                 std::mem::take(buf)
             } else {
-                String::new()
+                CompactString::default()
             }
         })
     }
@@ -1772,7 +1831,7 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
                     // Sorted-key order (the map is a HashMap internally).
-                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     Some(kv.into_iter().map(|(_, v)| *v).collect())
                 }
@@ -1789,7 +1848,8 @@ impl Value {
         if self.is_pointer() {
             heap::with_payload(self, |p| match p {
                 Payload::Map(entries) => {
-                    let mut keys: Vec<String> = entries.keys().cloned().collect();
+                    let mut keys: Vec<String> =
+                        entries.keys().map(|k| k.as_str().to_owned()).collect();
                     keys.sort_unstable();
                     Some(keys)
                 }
@@ -1806,7 +1866,7 @@ impl Value {
     /// buffer is sound only when no other owner can observe it. The map takes ownership of `value`
     /// (the caller transfers a reference); the returned displaced value's reference is handed back to
     /// the caller to release. Returns `None` (a no-op) if this is not a map.
-    pub fn map_insert(self, key: String, value: Value) -> Option<Value> {
+    pub fn map_insert(self, key: CompactString, value: Value) -> Option<Value> {
         debug_assert!(
             !self.is_map() || heap::refcount(self) == 1,
             "map_insert requires a uniquely-owned map (the COW invariant)"
@@ -1853,9 +1913,12 @@ impl Value {
             heap::with_payload(self, |p| match p {
                 // Collect the internal HashMap into a sorted BTreeMap (the return type callers rely
                 // on for deterministic, sorted iteration).
-                Payload::Map(entries) => {
-                    Some(entries.iter().map(|(k, v)| (k.clone(), *v)).collect())
-                }
+                Payload::Map(entries) => Some(
+                    entries
+                        .iter()
+                        .map(|(k, v)| (k.as_str().to_owned(), *v))
+                        .collect(),
+                ),
                 _ => None,
             })
         } else {
@@ -1960,12 +2023,13 @@ impl Value {
     /// `String` that `push_str(&self.display())` would allocate. Fast paths cover the values that
     /// dominate string interpolation — a heap string (append its bytes, no clone), a small int, and a
     /// bool — and everything else falls back to `display()`, so the rendering is byte-identical.
-    pub fn display_into(self, out: &mut String) {
-        use std::fmt::Write;
+    pub fn display_into(self, out: &mut CompactString) {
         if let Some(b) = self.as_bool() {
             out.push_str(if b { "true" } else { "false" });
         } else if self.is_small_int() {
-            let _ = write!(out, "{}", self.as_int().unwrap());
+            // `itoa`, not `write!`: the `fmt::Formatter` round-trip costs about as much as the
+            // digits themselves on the short ints interpolation overwhelmingly renders.
+            out.push_str(itoa::Buffer::new().format(self.as_int().unwrap()));
         } else if self.is_pointer() {
             let handled = heap::with_payload(self, |p| match p {
                 Payload::Str(s) => {
@@ -1973,7 +2037,7 @@ impl Value {
                     true
                 }
                 Payload::Int(i) => {
-                    let _ = write!(out, "{i}");
+                    out.push_str(itoa::Buffer::new().format(*i));
                     true
                 }
                 _ => false,
@@ -2006,7 +2070,7 @@ impl Value {
             noeta_stdlib::format_f32(self.as_f32().unwrap())
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => s.clone(),
+                Payload::Str(s) => s.as_str().to_owned(),
                 // A byte buffer renders as a length summary (`<N bytes>`) — opaque and identical on
                 // both backends; its content round-trips through `from_bytes`, not display.
                 Payload::Bytes(b) => format!("<{} bytes>", b.len()),
@@ -2035,7 +2099,7 @@ impl Value {
                     format!("{{{}}}", parts.join(", "))
                 }
                 Payload::Map(entries) => {
-                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     let parts: Vec<String> = kv
                         .iter()
@@ -2137,7 +2201,7 @@ impl Value {
             NativeValue::Scalar(Scalar::F32(self.as_f32().unwrap()))
         } else if self.is_pointer() {
             heap::with_payload(self, |p| match p {
-                Payload::Str(s) => NativeValue::Str(s.clone()),
+                Payload::Str(s) => NativeValue::Str(s.as_str().to_owned()),
                 // A byte buffer has no JSON representation (it is the *binary* alternative): a length
                 // summary string, so `json.stringify` never panics.
                 Payload::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),
@@ -2149,11 +2213,11 @@ impl Value {
                 }
                 Payload::Map(entries) => {
                     // NativeValue::Map is an ordered Vec; present in sorted-key order.
-                    let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+                    let mut kv: Vec<(&CompactString, &Value)> = entries.iter().collect();
                     kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
                     NativeValue::Map(
                         kv.into_iter()
-                            .map(|(k, v)| (k.clone(), v.to_native_deep()))
+                            .map(|(k, v)| (k.as_str().to_owned(), v.to_native_deep()))
                             .collect(),
                     )
                 }
@@ -2208,6 +2272,47 @@ impl Value {
             Some(s) => format!("{s:?}"),
             None => self.display(),
         }
+    }
+
+    /// The kind of this value's heap payload (`None` for immediates) — a cheap `Copy`
+    /// discriminant for one-dereference dispatch. A dispatch ladder that probes candidate
+    /// receiver types in sequence (`is_map()`, `is_list()`, `as_string()`, …) pays a heap
+    /// dereference per probe; classifying once and comparing kinds turns every subsequent
+    /// rung into an integer compare. Note the mapping is variant-exact: `is_list()` is
+    /// `List | PackedList`, so a caller replacing it must test both kinds.
+    #[inline]
+    pub fn heap_kind(self) -> Option<HeapKind> {
+        if !self.is_pointer() {
+            return None;
+        }
+        Some(heap::with_payload(self, |p| match p {
+            Payload::Str(_) => HeapKind::Str,
+            Payload::Bytes(_) => HeapKind::Bytes,
+            Payload::Int(_) => HeapKind::Int,
+            Payload::Closure { .. } => HeapKind::Closure,
+            Payload::Cell(_) => HeapKind::Cell,
+            Payload::List(_) => HeapKind::List,
+            Payload::Tuple(_) => HeapKind::Tuple,
+            Payload::Set(_) => HeapKind::Set,
+            Payload::Map(_) => HeapKind::Map,
+            Payload::PackedList { .. } => HeapKind::PackedList,
+            Payload::Object { .. } => HeapKind::Object,
+            Payload::Enum { .. } => HeapKind::Enum,
+            Payload::NativeModule(_) => HeapKind::NativeModule,
+            Payload::NativeFn(_) => HeapKind::NativeFn,
+            Payload::FileHandle(_) => HeapKind::FileHandle,
+            Payload::Iter(_) => HeapKind::Iter,
+            Payload::Future(_) => HeapKind::Future,
+            Payload::Timer { .. } => HeapKind::Timer,
+            Payload::Handle { .. } => HeapKind::Handle,
+            Payload::AsyncIo { .. } => HeapKind::AsyncIo,
+            Payload::Sender(_) => HeapKind::Sender,
+            Payload::Receiver(_) => HeapKind::Receiver,
+            Payload::ChannelSend { .. } => HeapKind::ChannelSend,
+            Payload::ChannelRecv { .. } => HeapKind::ChannelRecv,
+            Payload::IsolateFuture { .. } => HeapKind::IsolateFuture,
+            Payload::Reactive { .. } => HeapKind::Reactive,
+        }))
     }
 
     /// The user-facing type name, for diagnostics (mirrors M0's `Value::type_name`).
