@@ -20,8 +20,8 @@
 //! workspace program (slice **W2**), so an imported name resolves and go-to-definition can land in a
 //! *different file*. Slice **L4** adds **document symbols**: the entry document's declarations become
 //! the hierarchical outline the editor renders (see [`symbols`]). **Find-references** lists every use
-//! of the value symbol under the cursor (across modules), reusing the def/use index. Slice **L5** adds
-//! **completion**:
+//! of the value symbol under the cursor (across modules), reusing the def/use index; **rename** turns
+//! those into a `WorkspaceEdit`. Slice **L5** adds **completion**:
 //! on a member access `receiver.member` the cursor offers the receiver type's fields, variants, and
 //! methods; in a type-annotation position it offers the type names; otherwise it offers the language
 //! keywords, the top-level declarations, and the value bindings in scope there (see [`completion`]).
@@ -356,6 +356,29 @@ impl DocumentStore {
         Some(locations)
     }
 
+    /// The edits that rename the value symbol at `position` to `new_name` — every use and the
+    /// declaration — grouped by URI. Reuses [`references`](Self::references) (declaration included), so
+    /// a rename of a function propagates **across modules**. `None` if the cursor is on no renameable
+    /// symbol or `new_name` is not a valid identifier (an invalid rename must not silently corrupt the
+    /// source).
+    fn rename_edits(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+        new_name: &str,
+    ) -> Option<HashMap<String, Vec<Range>>> {
+        if !is_identifier(new_name) {
+            return None;
+        }
+        let locations = self.references(uri, position, encoding, true)?;
+        let mut by_uri: HashMap<String, Vec<Range>> = HashMap::new();
+        for (target_uri, range) in locations {
+            by_uri.entry(target_uri).or_default().push(range);
+        }
+        Some(by_uri)
+    }
+
     /// The completion candidates at `position` in `uri`. When the cursor is on a member access
     /// `receiver.member`, the receiver's type is resolved and the completions are that type's fields,
     /// variants, and methods (**member completion**, C2) — nothing else, since an identifier after a
@@ -574,6 +597,15 @@ fn nominal_name(repr: &TypeRepr) -> Option<&str> {
     }
 }
 
+/// Whether `name` is a syntactically valid identifier — a non-empty run starting with a letter or
+/// `_`, then letters, digits, or `_`. Guards rename from writing a new name that would not lex as an
+/// identifier (an operator, a number, whitespace), which would corrupt the source.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    matches!(chars.next(), Some(c) if c.is_alphabetic() || c == '_')
+        && chars.all(|c| c.is_alphanumeric() || c == '_')
+}
+
 /// Whether byte `offset` sits immediately after a lone `.` — the bare member-access position a `.`
 /// trigger fires in (`c.|`). Excludes a preceding `..` (range/spread) so `a..|b` is not mistaken for
 /// a member access.
@@ -733,6 +765,7 @@ impl LanguageServer for Backend {
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
+                rename_provider: Some(OneOf::Left(true)),
                 document_symbol_provider: Some(OneOf::Left(true)),
                 // Completion: invoked explicitly, as the user types a name, or on `.` — the trigger
                 // that fires member completion at a bare receiver dot (`c.`).
@@ -816,6 +849,37 @@ impl LanguageServer for Backend {
                         .map(|uri| Location { uri, range })
                 })
                 .collect()
+        }))
+    }
+
+    async fn rename(&self, params: RenameParams) -> Result<Option<WorkspaceEdit>> {
+        let position_params = params.text_document_position;
+        let uri = position_params.text_document.uri;
+        let new_name = params.new_name;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let edits = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.rename_edits(uri.as_str(), position_params.position, encoding, &new_name)
+        };
+        Ok(edits.map(|by_uri| {
+            let changes = by_uri
+                .into_iter()
+                .filter_map(|(target_uri, ranges)| {
+                    let uri = target_uri.parse::<Uri>().ok()?;
+                    let text_edits = ranges
+                        .into_iter()
+                        .map(|range| TextEdit {
+                            range,
+                            new_text: new_name.clone(),
+                        })
+                        .collect();
+                    Some((uri, text_edits))
+                })
+                .collect();
+            WorkspaceEdit {
+                changes: Some(changes),
+                ..Default::default()
+            }
         }))
     }
 
@@ -1360,6 +1424,88 @@ mod tests {
             refs.iter().filter(|(u, _)| *u == entry_uri).count() >= 2,
             "both call sites in main.noe; got {refs:?}"
         );
+    }
+
+    #[test]
+    fn rename_edits_cover_every_occurrence() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///r.noe",
+            "total = 1\necho total\necho total".to_string(),
+        );
+        // Rename `total` from a use — the declaration and both uses get an edit.
+        let by_uri = store
+            .rename_edits(
+                "file:///r.noe",
+                Position {
+                    line: 1,
+                    character: 5,
+                },
+                Encoding::Utf8,
+                "sum",
+            )
+            .expect("renameable symbol");
+        let ranges = &by_uri["file:///r.noe"];
+        assert_eq!(ranges.len(), 3, "declaration + two uses; got {ranges:?}");
+        // Every edit spans exactly the old name (5 chars, `total`).
+        assert!(
+            ranges
+                .iter()
+                .all(|r| r.end.character - r.start.character == 5)
+        );
+    }
+
+    #[test]
+    fn rename_spans_modules() {
+        let dir = temp_workspace(
+            "rename_xmod",
+            &[(
+                "util.noe",
+                "namespace App.Util;\npub fn helper(): int { return 1 }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let util_uri = path_to_uri(&dir.join("util.noe"));
+        let mut store = DocumentStore::default();
+        store.open(&entry_uri, "use App.Util.helper;\na = helper()".to_string());
+        let by_uri = store
+            .rename_edits(
+                &entry_uri,
+                Position {
+                    line: 1,
+                    character: 4,
+                },
+                Encoding::Utf8,
+                "run",
+            )
+            .expect("renameable imported function");
+        assert!(
+            by_uri.contains_key(&util_uri),
+            "declaration file edited; got {by_uri:?}"
+        );
+        assert!(by_uri.contains_key(&entry_uri), "call-site file edited");
+    }
+
+    #[test]
+    fn rename_to_an_invalid_identifier_is_rejected() {
+        let mut store = DocumentStore::default();
+        store.open("file:///r.noe", "total = 1\necho total".to_string());
+        for bad in ["1sum", "a b", "x+y", ""] {
+            assert!(
+                store
+                    .rename_edits(
+                        "file:///r.noe",
+                        Position {
+                            line: 0,
+                            character: 2,
+                        },
+                        Encoding::Utf8,
+                        bad,
+                    )
+                    .is_none(),
+                "invalid name {bad:?} must be rejected"
+            );
+        }
     }
 
     #[test]
