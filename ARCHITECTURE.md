@@ -65,14 +65,15 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 | `noeta-eval` | AST/IR → `RunResult` (the M0 tree-walker, **frozen as the differential oracle**). `Rc`-based value model. |
 | `noeta-compiler` | IR → `Chunk`/`Module` bytecode; register allocation (graph colouring). |
 | `noeta-bytecode` | Opcode set, `Chunk`/`Module`, constant pool (pure data). |
-| `noeta-vm` | `Module` → `RunResult` (the register VM, `VmBackend`) over NaN-boxed values + inline caches. |
+| `noeta-vm` | `Module` → `RunResult` (the Tier-0 register VM, `VmBackend`) over NaN-boxed values + inline caches; owns the tier-promotion counters and the JIT runtime helpers. |
+| `noeta-jit` | The Tier-1 method JIT (Cranelift, behind the `jit` cargo feature): compiles hot prototypes to native code holding VM registers in SSA (typed/unboxed where provable), with a bail-to-interpreter deopt contract and per-call-site inline caches. The sandbox/differential path never uses it. |
 | `noeta-builtins` | The prelude constructors (`Ok`/`Err`/`some`/`none`, `echo`, collection builtins). |
 
 ### VM value model
 | Crate | Role |
 |---|---|
 | `noeta-object` | Shapes (hidden classes): the flat-slot layout descriptor for structs/classes/enums. Pure data below `noeta-value`. |
-| `noeta-value` | The NaN-boxed `Value` + heap payloads (strings, closures, collections, shaped objects, cells, file handles). **The one crate whose source uses `unsafe`** (NaN-boxing), miri-gated. |
+| `noeta-value` | The NaN-boxed `Value` + heap payloads (strings, closures, collections, shaped objects, cells, file handles). The NaN-boxing `unsafe` lives here, miri-gated (see the `unsafe` quarantine below). |
 | `noeta-gc` | Refcount + `__destruct` policy + Bacon–Rajan cycle collector over `noeta-value`. |
 
 ### Shared runtime & host
@@ -93,12 +94,13 @@ Dependency edges form a strict DAG (no back-edges): `noeta-span` is depended on 
 ## Key implementation decisions
 
 - **Two backends, one differential oracle.** The frozen tree-walker (`noeta-eval`) and the bytecode VM (`noeta-vm`) are run through `trait Backend` against the same programs, and their `RunResult`s (observable output, not internal representation) are asserted identical. Comparing output — not value layout — is exactly what lets the two backends use completely different value models (the tree-walker's `Rc`-based enum vs. the VM's NaN-boxed words). This oracle is the spine of the test strategy.
+- **Tiered execution, oracle-gated.** The VM is Tier 0; a Cranelift method JIT (`noeta-jit`, `jit` feature) is Tier 1, compiling hot prototypes with registers held in SSA and a bail-before-mutate deopt contract onto the interpreter's own register stack. Tier 1 has its own differential gate (`--jit-differential`: forced-JIT vs interpreter, byte-identical output, zero leaks, zero refcount anomalies) so native code can never silently disagree with the interpreter. See [The Virtual Machine → Tier 1](docs/The-Virtual-Machine.md).
 - **Shared semantics live once, in `noeta-stdlib`.** Anything both backends must agree on (stdlib method bodies, host IO, float formatting, the neutral marshalling seam) is factored into `noeta-stdlib` and dispatched through exhaustive enums (`ListMethod`/`MapMethod`/…) rather than per-backend string matching, so the compiler catches a missing case. (Routing/dispatch that is still mirrored between the backends is a known debt tracked in `plans/`.)
 - **Errors as data, centralized.** Every diagnostic is a typed variant with a stable code in `noeta-diagnostics`, rendered in exactly one place. No ad-hoc error strings in the stages.
 - **Precise reference counting via an ANF IR.** Memory management is compiled, not traced: `noeta-ir` lowers to ANF and `noeta-ir-passes` inserts drops at last-use and rewrites unique-owner mutations into in-place reuse. A cycle collector backstops reference cycles. See the [Memory Management](docs/Memory-Management.md) wiki page.
 - **Surface sugar stays in the AST.** Constructs like `?T`, `|>`, `~`, `?`, `??` are distinct AST nodes (not desugared in the parser) so later passes can produce precise diagnostics.
 - **Incremental by construction (salsa).** The compiler is a `salsa` query graph (`noeta-db`); the sharp crate seams are what keep the queries mechanical.
-- **`unsafe` is quarantined.** The workspace forbids `unsafe` via a `[workspace.lints]` table (`unsafe_code = "forbid"`); a short list of crates opt out with justification — the NaN-boxing in `noeta-value`, the cycle collector's touch points in `noeta-gc`, a trivially-sound salsa `Update` impl in `noeta-db`, a SIMD reinterpret in `noeta-stdlib`, and the test-only `noeta-alloc-probe`. The VM and compiler themselves are `unsafe`-free. All `unsafe` is miri-checked.
+- **`unsafe` is quarantined.** The workspace forbids `unsafe` via a `[workspace.lints]` table (`unsafe_code = "forbid"`); a short list of crates opt out with justification — the NaN-boxing in `noeta-value`, the cycle collector's touch points in `noeta-gc`, a trivially-sound salsa `Update` impl in `noeta-db`, a SIMD reinterpret in `noeta-stdlib`, the test-only `noeta-alloc-probe`, and the Tier-1 seam: `noeta-jit` (finalizing a code pointer, reading the baked frame template) and `noeta-vm`'s `jit`-feature helpers (`deny` + per-function `#[allow]`: reconstituting the VM from the native ABI's pointers, and the fast call convention's `set_len` window reserve). The compiler and every default-feature interpreter path stay `unsafe`-free. `unsafe` that can execute under miri is miri-checked; JIT-generated native code cannot be, so its contracts are gated by the `--jit-differential` oracle (byte-identity + zero leaks + zero refcount anomalies) instead.
 
 ## Testing architecture
 

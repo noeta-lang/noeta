@@ -39,11 +39,12 @@ Each stage is its own crate with explicit input/output types and no hidden share
 | `noeta-backend` | The `Backend` trait + `RunResult` — the seam both runtimes implement. |
 | `noeta-eval` | AST → `RunResult` (M0 tree-walker, retained as the **differential oracle**). |
 | `noeta-object` | Shapes (hidden classes): `Shape`/`ShapeKind`, the flat-slot layout descriptor for records/classes/enums. Pure data; sits *below* `noeta-value` (which holds `Rc<Shape>`). |
-| `noeta-value` | The M1 NaN-boxed `Value` + operator semantics; heap strings, closures, lists/maps, shaped objects/enums, the M2.5 `Payload::FileHandle` (a GC-leaf wrapper around the shared `noeta_stdlib::FileHandle`, so it depends on `noeta-stdlib`), and the F1 `Payload::Cell` + closure upvalue cells (closures are now GC *nodes* — a closure→cell cycle is reclaimed by the collector). **The one crate with `unsafe`** (miri-gated). |
+| `noeta-value` | The M1 NaN-boxed `Value` + operator semantics; heap strings, closures, lists/maps, shaped objects/enums, the M2.5 `Payload::FileHandle` (a GC-leaf wrapper around the shared `noeta_stdlib::FileHandle`, so it depends on `noeta-stdlib`), and the F1 `Payload::Cell` + closure upvalue cells (closures are now GC *nodes* — a closure→cell cycle is reclaimed by the collector). The NaN-boxing `unsafe` lives here (miri-gated; the other `unsafe` opt-outs are listed in `ARCHITECTURE.md`). |
 | `noeta-gc` | Refcount/`__destruct` GC policy + Bacon–Rajan cycle collector over `noeta-value` (now exercises closure/cell cycles). |
 | `noeta-bytecode` | The register IR: `Op` (incl. F1 `MakeCell`/`CellGet`/`CellSet`/`UpvalueGet`/`UpvalueSet` and `MakeClosure` captures), `Chunk` (a function prototype), `Module` (the proto table + shape/method tables), disassembler (pure data). |
 | `noeta-compiler` | AST → `Module` (returns `Unsupported` outside the VM's current subset). Closure conversion (celled locals + upvalue layout) lives in `freevars.rs`. |
-| `noeta-vm` | `Module` → `RunResult` (M1 frame-based register VM, `VmBackend`). Add VM behavior here. |
+| `noeta-vm` | `Module` → `RunResult` (M1 frame-based register VM, `VmBackend`; Tier 0). Add VM behavior here. Owns the Tier-1 promotion counters and the JIT's runtime helpers (`jit` feature). |
+| `noeta-jit` | The Tier-1 Cranelift method JIT (`jit` cargo feature): hot prototypes → native code, registers in SSA, bail-to-interpreter deopt. Gated by its own `--jit-differential` oracle (byte-identity + zero leaks + zero refcount anomalies); the sandbox/differential baseline never runs it. |
 | `noeta-builtins` | The prelude. |
 | `noeta-conformance` | The test harness (`// expect:` runner, JSON, `--stage`/`--file`, `--differential`). |
 | `noeta-cli` | The `noeta` binary (`run`/`repl`/`test`). |
