@@ -1,22 +1,25 @@
-//! Definition resolution for go-to-definition, in two layers:
+//! Definition resolution for go-to-definition, in three layers:
 //!
 //! - [`DefUse`] — a **scope-aware value index** (L3.2): a use of a local, parameter, `for`/`match`/
 //!   closure binding, or top-level function resolves to the precise binding in scope at the cursor,
 //!   respecting shadowing. Built by one AST walk that mirrors the language's scoping.
+//! - [`MemberTable`] — a **per-type member table** (L3.3): a member access `x.foo` resolves to the
+//!   field, enum variant, or method `foo` on `x`'s type. The [`DefUse`] walk records each
+//!   `receiver.member` access; the caller supplies the receiver's type (from the checker) and looks
+//!   the member up here.
 //! - [`Definitions`] — a **top-level name table** (L3): the fallback for what the value index does
 //!   not cover — type references and constructors — resolved by the identifier text under the cursor
 //!   against the top-level `fn` / `struct` / `class` / `enum` declarations.
 //!
-//! Go-to-definition tries the value index first, then the name table (see [`crate`]).
+//! Go-to-definition tries the value index first, then the member table, then the name table (see
+//! [`crate`]).
 //!
-//! Deliberately *not* here yet (a documented follow-on): methods and fields (need the receiver's
-//! type) and cross-module definitions (need the linked workspace). The bodies of methods inside a
-//! `struct`/`class`/`enum` are likewise not yet walked for value references. A reference none of
-//! this covers simply yields no jump — never a wrong one.
+//! Deliberately *not* here yet (a documented follow-on): cross-module definitions (need the linked
+//! workspace). A reference none of this covers simply yields no jump — never a wrong one.
 
 use std::collections::HashMap;
 
-use noeta_ast::{ClosureBody, Expr, ForPattern, Param, Pattern, Program, Stmt, StrPart};
+use noeta_ast::{ClosureBody, Expr, FnDecl, ForPattern, Param, Pattern, Program, Stmt, StrPart};
 use noeta_span::Span;
 
 /// The top-level definitions a document offers for go-to-definition, keyed by name → the span of the
@@ -74,20 +77,95 @@ impl Definitions {
     }
 }
 
+/// The members (fields, enum variants, and methods) each top-level type declares, keyed by
+/// `(type name, member name)` → the span of the member's declared name. Powers go-to-definition on a
+/// member access `x.foo` once the receiver `x`'s type is known (from the checker's `expr_types`).
+/// Methods flattened out of in-body `impl` blocks are already present in each decl's `methods`, so
+/// no separate `impl` walk is needed.
+#[derive(Debug, Default)]
+pub struct MemberTable {
+    by_type_member: HashMap<(String, String), Span>,
+}
+
+impl MemberTable {
+    pub fn collect(program: &Program) -> MemberTable {
+        let mut table = MemberTable::default();
+        for stmt in &program.stmts {
+            match stmt {
+                Stmt::Struct(decl) => {
+                    table.add_fields(
+                        &decl.name,
+                        decl.fields.iter().map(|f| (&f.name, f.name_span)),
+                    );
+                    table.add_methods(&decl.name, &decl.methods);
+                }
+                Stmt::Class(decl) => {
+                    table.add_fields(
+                        &decl.name,
+                        decl.fields.iter().map(|f| (&f.name, f.name_span)),
+                    );
+                    table.add_methods(&decl.name, &decl.methods);
+                }
+                Stmt::Enum(decl) => {
+                    table.add_fields(
+                        &decl.name,
+                        decl.variants.iter().map(|v| (&v.name, v.name_span)),
+                    );
+                    table.add_methods(&decl.name, &decl.methods);
+                }
+                _ => {}
+            }
+        }
+        table
+    }
+
+    fn add_fields<'a>(&mut self, ty: &str, members: impl Iterator<Item = (&'a String, Span)>) {
+        for (name, span) in members {
+            self.by_type_member
+                .entry((ty.to_string(), name.clone()))
+                .or_insert(span);
+        }
+    }
+
+    fn add_methods(&mut self, ty: &str, methods: &[FnDecl]) {
+        for method in methods {
+            self.by_type_member
+                .entry((ty.to_string(), method.name.clone()))
+                .or_insert(method.name_span);
+        }
+    }
+
+    /// The declaration span of `member` on type `ty`, if any.
+    pub fn lookup(&self, ty: &str, member: &str) -> Option<Span> {
+        self.by_type_member
+            .get(&(ty.to_string(), member.to_string()))
+            .copied()
+    }
+}
+
+/// A member access `receiver.name` recorded during the def/use walk: the span of the member *name*
+/// (the go-to-definition target when the cursor is on it) and the span of the *receiver* expression
+/// (whose type resolves which declaration the member belongs to).
+#[derive(Debug)]
+struct MemberRef {
+    name: String,
+    name_span: Span,
+    receiver_span: Span,
+}
+
 /// A scope-aware **value** def/use index: every identifier *use* (a variable, parameter, or
 /// function reference) mapped to the span of the *definition* it resolves to. Built by one AST walk
 /// that mirrors the language's scoping — parameters, block-local bindings, `for`/`match`/closure
 /// bindings, and the bare-assignment locality rule (`x = v` reassigns an enclosing binding if one
-/// exists, else declares a fresh local). Go-to-definition consults this first; anything it does not
-/// cover (type names, constructors) falls back to the top-level [`Definitions`] table.
-///
-/// Not yet walked (a documented follow-on): the bodies of methods inside `struct`/`class`/`enum`
-/// declarations (coupled to the receiver-type work) and `@tier` blocks. A reference there simply
-/// isn't in the index and falls through to the name-table fallback.
+/// exists, else declares a fresh local). It also records every `receiver.member` access for the
+/// [`MemberTable`] step. Method bodies inside `struct`/`class`/`enum` declarations are walked (so
+/// their parameters and locals resolve); `@tier` blocks are not.
 #[derive(Debug, Default)]
 pub struct DefUse {
     /// `(use span, definition span)` for each value identifier that resolves to a binding.
     refs: Vec<(Span, Span)>,
+    /// Every `receiver.member` access, for member go-to-definition.
+    member_refs: Vec<MemberRef>,
 }
 
 impl DefUse {
@@ -110,6 +188,7 @@ impl DefUse {
         }
         DefUse {
             refs: resolver.refs,
+            member_refs: resolver.member_refs,
         }
     }
 
@@ -124,6 +203,16 @@ impl DefUse {
             .min_by_key(|(use_span, _)| use_span.end - use_span.start)
             .map(|(_, def)| *def)
     }
+
+    /// The `(receiver span, member name)` of the member access whose member-name span contains
+    /// `offset`, if the cursor is on a `.member`. The caller resolves the receiver's type (via the
+    /// checker's `expr_types`) and looks the member up in a [`MemberTable`].
+    pub fn member_at(&self, offset: u32) -> Option<(Span, &str)> {
+        self.member_refs
+            .iter()
+            .find(|m| m.name_span.start <= offset && offset <= m.name_span.end)
+            .map(|m| (m.receiver_span, m.name.as_str()))
+    }
 }
 
 /// The mutable state of one [`DefUse::build`] walk: the top-level function table, the lexical scope
@@ -133,6 +222,7 @@ struct Resolver {
     functions: HashMap<String, Span>,
     scopes: Vec<HashMap<String, Span>>,
     refs: Vec<(Span, Span)>,
+    member_refs: Vec<MemberRef>,
 }
 
 impl Resolver {
@@ -284,17 +374,25 @@ impl Resolver {
                 self.walk_expr(cond);
                 self.walk_block_scoped(body);
             }
-            // Declarations whose bodies need the receiver/type machinery, control-flow leaves, and
-            // module/tier statements are not indexed for value references yet (see the type docs).
-            Stmt::Enum(_)
-            | Stmt::Struct(_)
-            | Stmt::Class(_)
-            | Stmt::Impl(_)
+            // A type's methods each open their own scope (parameters + body locals); walk them so
+            // resolution works inside method bodies. Fields are not bound as bare names — a bare
+            // field reference in a method simply falls through rather than mis-resolving.
+            Stmt::Struct(decl) => self.walk_methods(&decl.methods),
+            Stmt::Class(decl) => self.walk_methods(&decl.methods),
+            Stmt::Enum(decl) => self.walk_methods(&decl.methods),
+            // Control-flow leaves and module/tier statements bind and reference nothing.
+            Stmt::Impl(_)
             | Stmt::Namespace { .. }
             | Stmt::Use { .. }
             | Stmt::Break { .. }
             | Stmt::Continue { .. }
             | Stmt::TierBlock { .. } => {}
+        }
+    }
+
+    fn walk_methods(&mut self, methods: &[FnDecl]) {
+        for method in methods {
+            self.walk_callable(&method.params, &method.body, None);
         }
     }
 
@@ -330,9 +428,22 @@ impl Resolver {
                     self.walk_expr(value);
                 }
             }
-            // `receiver.name` — the receiver is a value; the member name is a field/method, resolved
-            // by the receiver's type (a later slice), not a value binding.
-            Expr::Member { receiver, .. } => self.walk_expr(receiver),
+            // `receiver.name` — the member name is a field/method, resolved by the receiver's type
+            // (recorded here, resolved by the caller against a `MemberTable`); the receiver is a
+            // value expression walked normally.
+            Expr::Member {
+                receiver,
+                name,
+                name_span,
+                ..
+            } => {
+                self.member_refs.push(MemberRef {
+                    name: name.clone(),
+                    name_span: *name_span,
+                    receiver_span: receiver.span(),
+                });
+                self.walk_expr(receiver);
+            }
             Expr::Index {
                 receiver, index, ..
             } => {

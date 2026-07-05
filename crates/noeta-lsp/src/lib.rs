@@ -17,8 +17,9 @@
 //! syntax (see [`hover`]). Both features read the one `checked_ide` query, so a document version is
 //! checked once. Slice **L3** adds **go-to-definition**: the reference under the cursor resolves to
 //! its declaration — a scope-aware value index handles locals, parameters, and functions
-//! (shadowing-correct), falling back to a top-level name table for type references (see [`resolve`]).
-//! Positions are converted encoding-aware (see [`offsets`]).
+//! (shadowing-correct); member accesses `x.member` resolve via the receiver's type; and a top-level
+//! name table backs type references (see [`resolve`]). Positions are converted encoding-aware (see
+//! [`offsets`]).
 
 mod hover;
 mod offsets;
@@ -139,9 +140,10 @@ impl DocumentStore {
     }
 
     /// Resolve the definition of the reference at `position` for go-to-definition, as an LSP range,
-    /// or `None` if nothing there resolves. Tries the scope-aware value index first (locals,
-    /// parameters, functions — shadowing-correct), then falls back to the identifier token under the
-    /// cursor resolved by name against the top-level definitions (type references, constructors).
+    /// or `None` if nothing there resolves. Three layers, in order: the scope-aware value index
+    /// (locals, parameters, functions — shadowing-correct); a member access `x.member` resolved via
+    /// the receiver's type and the type's member table; and the identifier token under the cursor
+    /// resolved by name against the top-level definitions (type references, constructors).
     fn definition(&self, uri: &str, position: Position, encoding: Encoding) -> Option<Range> {
         let &program = self.open.get(uri)?;
         let db = &self.db;
@@ -150,13 +152,28 @@ impl DocumentStore {
         let offset = index.offset(position, encoding);
         let ast = noeta_db::ast(db, program);
 
+        let def_use = resolve::DefUse::build(&ast.0.program);
+
         // 1. Scope-aware value resolution — a local, parameter, or function reference resolves to
         //    the precise binding in scope at the cursor (shadowing-correct).
-        if let Some(def) = resolve::DefUse::build(&ast.0.program).definition_at(offset) {
+        if let Some(def) = def_use.definition_at(offset) {
             return Some(index.range(def, encoding));
         }
 
-        // 2. Fallback: the identifier token under the cursor resolved by name against the top-level
+        // 2. Member access `receiver.member`: resolve the receiver's type from the checker's type
+        //    index, then look the member up among that type's declared fields/variants/methods.
+        if let Some((receiver_span, member)) = def_use.member_at(offset)
+            && let Some(receiver_ty) = noeta_db::checked_ide(db, program)
+                .expr_types
+                .get(&receiver_span)
+            && let Some(type_name) = nominal_name(receiver_ty)
+            && let Some(def) =
+                resolve::MemberTable::collect(&ast.0.program).lookup(type_name, member)
+        {
+            return Some(index.range(def, encoding));
+        }
+
+        // 3. Fallback: the identifier token under the cursor resolved by name against the top-level
         //    definitions. Covers type references and constructors (which the value index skips) and
         //    is drawn from the token stream so a match inside a string/comment cannot fire.
         let token = noeta_db::tokens(db, program)
@@ -214,6 +231,19 @@ fn to_lsp_diagnostic(
         message,
         related_information,
         ..Default::default()
+    }
+}
+
+/// The declared type name a reflected [`TypeRepr`] refers to, for member resolution — the nominal
+/// variants (`struct` / `class` / `enum` / unknown-kind named). Scalars, containers, functions, and
+/// unions have no user declaration to jump into, so they yield `None`.
+fn nominal_name(repr: &TypeRepr) -> Option<&str> {
+    match repr {
+        TypeRepr::Struct(name, _)
+        | TypeRepr::Class(name, _)
+        | TypeRepr::Enum(name, _)
+        | TypeRepr::Named(name, _) => Some(name),
+        _ => None,
     }
 }
 
@@ -553,6 +583,52 @@ mod tests {
             .expect("use resolves to the local binding");
         assert_eq!(range.start.line, 0);
         assert_eq!(range.start.character, 0);
+    }
+
+    #[test]
+    fn goto_definition_resolves_a_field_access() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///m.noe",
+            "struct Point { x: int }\no = Point { x: 1 }\nd = o.x".to_string(),
+        );
+        // Cursor on `.x` in `o.x` (line 2, `d = o.x` → the `x` is column 6).
+        let range = store
+            .definition(
+                "file:///m.noe",
+                Position {
+                    line: 2,
+                    character: 6,
+                },
+                Encoding::Utf8,
+            )
+            .expect("field access resolves to the field declaration");
+        // The field `x` is declared on line 0 at column 15 (`struct Point { x: int }`).
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 15);
+    }
+
+    #[test]
+    fn goto_definition_resolves_a_method_call() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///m.noe",
+            "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.get()".to_string(),
+        );
+        // Cursor on `.get` in `c.get()` (last line, `v = c.get()` → `get` starts at column 6).
+        let range = store
+            .definition(
+                "file:///m.noe",
+                Position {
+                    line: 4,
+                    character: 6,
+                },
+                Encoding::Utf8,
+            )
+            .expect("method call resolves to the method declaration");
+        // `fn get` is declared on line 1 (`  fn get(...)` → `get` at column 5).
+        assert_eq!(range.start.line, 1);
+        assert_eq!(range.start.character, 5);
     }
 
     #[test]
