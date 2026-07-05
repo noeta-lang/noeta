@@ -1,17 +1,16 @@
 //! The Noeta language server (`noeta lsp`).
 //!
-//! A thin JSON-RPC adapter over the compiler's salsa query graph (`noeta-db`). The server owns
-//! exactly two pieces of state: one [`LangDatabase`] and a map from each open document's URI to its
-//! salsa [`SourceProgram`] input. Every language feature is then a *read* of a memoized query —
-//! editing a document calls the salsa-generated `set_text` setter, and salsa recomputes only the
-//! queries that the edit invalidated. That incremental spine is what makes the server responsive;
-//! it is inherited wholesale from M1, not built here.
+//! A thin JSON-RPC adapter over the compiler's salsa query graph (`noeta-db`). The server owns a
+//! [`LangDatabase`], the open editor buffers, and one [`Workspace`] per open document — its entry
+//! plus the sibling `.noe` modules in its directory (with open buffers overlaying disk). Every
+//! language feature is then a *read* of a memoized query; editing a document calls the salsa
+//! `set_text` setter, and salsa recomputes only the queries that edit invalidated. That incremental
+//! spine is what makes the server responsive; it is inherited wholesale from M1, not built here.
 //!
 //! Slice **L0** stood up the skeleton and document lifecycle. Slice **L1** added **live
-//! diagnostics**: on open/change the server runs `tokens` → `ast` → `checked_ide` (each
-//! salsa-memoized, so an edit recomputes only what it touched), takes the earliest failing stage's
-//! diagnostics — mirroring the compiler's own lex→parse→check gating — maps each to an LSP
-//! `Diagnostic` (severity, `E0xxx` code, range, related labels), and publishes them. Slice **L2**
+//! diagnostics**, now computed over the whole-workspace `linked_checked` query (slice **W1**) so a
+//! name imported from a sibling module resolves — each maps to an LSP `Diagnostic` (severity,
+//! `E0xxx` code, range, related labels), filtered to the entry file's own spans and published. Slice **L2**
 //! adds **hover types**: the cursor position becomes a byte offset, the tightest enclosing span in
 //! the checker's `expr_types` index gives the inferred type, and it is rendered back to surface
 //! syntax (see [`hover`]). Both features read the one `checked_ide` query, so a document version is
@@ -26,94 +25,188 @@ mod offsets;
 mod resolve;
 
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use noeta_ast::reflect::TypeRepr;
-use noeta_db::{LangDatabase, SourceProgram};
+use noeta_db::{LangDatabase, SourceProgram, Workspace};
 use noeta_lexer::TokenKind;
+use noeta_span::SourceId;
 use offsets::{Encoding, LineIndex};
 use salsa::Setter;
 use tower_lsp_server::jsonrpc::Result;
 use tower_lsp_server::ls_types::*;
 use tower_lsp_server::{Client, LanguageServer, LspService, Server};
 
-/// The server's document state: the salsa database plus the live set of open documents, each
-/// mapped to its salsa input. Kept behind a [`Mutex`] on the [`Backend`]; the LSP request handlers
-/// lock it, do their (synchronous, fast) salsa work, and release it before awaiting any client I/O.
+/// One open document's workspace: the salsa [`Workspace`] input (its entry plus the sibling `.noe`
+/// modules discovered in the entry's directory) and, per [`SourceId`], the module's URI and salsa
+/// input. The entry is always [`SourceId::FIRST`] (index 0). Rebuilt when the file *set* changes;
+/// otherwise member texts are updated in place so `linked` recomputes incrementally.
+#[derive(Debug)]
+struct WorkspaceCache {
+    workspace: Workspace,
+    /// Per `SourceId`: the source's URI (index 0 = the entry). Maps a merged-program span back to
+    /// the file it belongs to, for cross-file diagnostics and navigation.
+    source_uris: Vec<String>,
+    /// Per `SourceId`: the salsa input, for in-place text updates.
+    programs: Vec<SourceProgram>,
+}
+
+impl WorkspaceCache {
+    /// The entry source's salsa input ([`SourceId::FIRST`]) — what the single-file hover and
+    /// within-file navigation queries read.
+    fn entry(&self) -> SourceProgram {
+        self.programs[0]
+    }
+}
+
+/// The server's document state: the salsa database, the open editor buffers, and one cached
+/// [`WorkspaceCache`] per open document (treated as its own workspace entry). Kept behind a
+/// [`Mutex`] on the [`Backend`]; the request handlers lock it, do their (synchronous, fast) salsa
+/// work, and release it before awaiting any client I/O.
 ///
-/// Split out from [`Backend`] so it can be unit-tested without a live [`Client`]: the document
-/// bookkeeping is pure and does not touch the transport.
+/// Split out from [`Backend`] so it can be unit-tested without a live [`Client`].
 #[derive(Default)]
 struct DocumentStore {
     db: LangDatabase,
-    /// Keyed by the document URI's string form (`Uri` is not a convenient map key across
-    /// lsp-types versions; its text is stable and unique per open document).
-    open: HashMap<String, SourceProgram>,
+    /// Open documents: URI → current buffer text (the authoritative content, possibly unsaved).
+    buffers: HashMap<String, String>,
+    /// One workspace per open document, keyed by the document's URI (its entry).
+    workspaces: HashMap<String, WorkspaceCache>,
 }
 
 impl std::fmt::Debug for DocumentStore {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("DocumentStore")
-            .field("open", &self.open.keys().collect::<Vec<_>>())
+            .field("open", &self.buffers.keys().collect::<Vec<_>>())
             .finish_non_exhaustive()
     }
 }
 
 impl DocumentStore {
-    /// Register a freshly opened document. Creates a new [`SourceProgram`] input (id
-    /// [`SourceId::FIRST`](noeta_span::SourceId::FIRST) — each open document is checked as its own
-    /// single-file entry program until cross-file features arrive) and stores it under `uri`.
-    /// Re-opening a URI replaces its input.
+    /// Register or replace an open document's buffer, then refresh every open document's workspace
+    /// (an edit to one file can change what its importers see).
     fn open(&mut self, uri: &str, text: String) {
-        let program = SourceProgram::new(&self.db, 0, uri.to_string(), text);
-        self.open.insert(uri.to_string(), program);
+        self.buffers.insert(uri.to_string(), text);
+        self.refresh_all();
     }
 
-    /// Apply a full-document change. Mutates the existing input's text in place — the salsa setter
-    /// invalidates exactly the queries that read it — or, if the document is somehow unknown (no
-    /// prior `didOpen`), registers it. Returns the input so callers can immediately re-query it.
+    /// Apply a full-document change: replace the buffer and refresh workspaces. Returns the entry
+    /// input of the changed document's workspace (for callers/tests that re-query it).
     fn change(&mut self, uri: &str, text: String) -> SourceProgram {
-        match self.open.get(uri) {
-            Some(&program) => {
-                program.set_text(&mut self.db).to(text);
-                program
-            }
-            None => {
-                self.open(uri, text);
-                self.open[uri]
-            }
+        self.buffers.insert(uri.to_string(), text);
+        self.refresh_all();
+        self.workspaces[uri].entry()
+    }
+
+    /// Drop a closed document (its buffer and workspace), then refresh the rest.
+    fn close(&mut self, uri: &str) {
+        self.buffers.remove(uri);
+        self.workspaces.remove(uri);
+        self.refresh_all();
+    }
+
+    /// The URIs of the open documents.
+    fn open_uris(&self) -> Vec<String> {
+        self.buffers.keys().cloned().collect()
+    }
+
+    /// Rebuild or update the workspace of every open document. Each open document is the entry of
+    /// its own workspace; its modules are the sibling `.noe` files in the entry's directory, with
+    /// open files taking their (unsaved) buffer content over disk.
+    fn refresh_all(&mut self) {
+        for uri in self.open_uris() {
+            self.refresh_workspace(&uri);
         }
     }
 
-    /// Drop a closed document and its input handle.
-    fn close(&mut self, uri: &str) {
-        self.open.remove(uri);
+    /// (Re)build the workspace for entry `uri`. Discovers the entry's sibling `.noe` files, overlays
+    /// open buffers, and either updates the cached inputs' text in place (file set unchanged) or
+    /// builds a fresh workspace (file set changed).
+    fn refresh_workspace(&mut self, uri: &str) {
+        let sources = self.discover_sources(uri);
+        let uris: Vec<String> = sources.iter().map(|(u, _)| u.clone()).collect();
+
+        // File set unchanged → update each member's text in place (salsa backdates unchanged ones).
+        let reuse = self
+            .workspaces
+            .get(uri)
+            .filter(|cache| cache.source_uris == uris)
+            .map(|cache| cache.programs.clone());
+        if let Some(programs) = reuse {
+            for (program, (_, text)) in programs.iter().zip(&sources) {
+                program.set_text(&mut self.db).to(text.clone());
+            }
+            return;
+        }
+
+        // File set changed (or first build) → fresh inputs and a fresh workspace.
+        let programs: Vec<SourceProgram> = sources
+            .iter()
+            .enumerate()
+            .map(|(id, (u, text))| SourceProgram::new(&self.db, id as u32, u.clone(), text.clone()))
+            .collect();
+        let workspace = Workspace::new(&self.db, programs[0], programs[1..].to_vec());
+        self.workspaces.insert(
+            uri.to_string(),
+            WorkspaceCache {
+                workspace,
+                source_uris: uris,
+                programs,
+            },
+        );
     }
 
-    /// Collect the diagnostics for `uri` together with its current text (needed for position
-    /// mapping). `None` if the document is not open.
-    ///
-    /// Follows the compiler's own **lex → parse → check gating**: the earliest stage that reports
-    /// anything wins, because each later stage runs on the earlier stage's (broken) output and its
-    /// diagnostics would be noise. All three queries are salsa-memoized, so an edit re-runs only the
-    /// stages it actually invalidated.
-    fn diagnostics(&self, uri: &str) -> Option<(Vec<noeta_diagnostics::Diagnostic>, String)> {
-        let &program = self.open.get(uri)?;
-        let db = &self.db;
-        let lexed = noeta_db::tokens(db, program);
-        let diags = if !lexed.0.diagnostics.is_empty() {
-            lexed.0.diagnostics.clone()
-        } else {
-            let parsed = noeta_db::ast(db, program);
-            if !parsed.0.diagnostics.is_empty() {
-                parsed.0.diagnostics.clone()
-            } else {
-                // `checked_ide` (not `checked`) so hover reads the same memoized run — one checker
-                // pass per document version serves both diagnostics and the type index.
-                noeta_db::checked_ide(db, program).diagnostics.clone()
+    /// The ordered `(uri, text)` sources of entry `uri`'s workspace: the entry first, then its
+    /// sibling `.noe` files sorted by path (matching the loader's `SourceId` convention). A sibling
+    /// that is open uses its editor buffer; otherwise its on-disk content. A non-`file:` entry (or
+    /// one with no directory) is a lone workspace.
+    fn discover_sources(&self, uri: &str) -> Vec<(String, String)> {
+        let entry_text = self.buffers.get(uri).cloned().unwrap_or_default();
+        let mut sources = vec![(uri.to_string(), entry_text)];
+
+        if let Some(entry_path) = uri_to_path(uri)
+            && let Some(dir) = entry_path.parent()
+            && let Ok(read_dir) = std::fs::read_dir(dir)
+        {
+            let mut siblings: Vec<PathBuf> = read_dir
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.is_file() && p.extension().is_some_and(|ext| ext == "noe"))
+                .filter(|p| *p != entry_path)
+                .collect();
+            siblings.sort();
+            for path in siblings {
+                let sib_uri = path_to_uri(&path);
+                let text = self
+                    .buffers
+                    .get(&sib_uri)
+                    .cloned()
+                    .or_else(|| std::fs::read_to_string(&path).ok())
+                    .unwrap_or_default();
+                sources.push((sib_uri, text));
             }
-        };
-        Some((diags, program.text(db).clone()))
+        }
+        sources
+    }
+
+    /// The `uri`'s own diagnostics (cross-module resolution, but only the entry file's own
+    /// diagnostics — each open module reports its own through its own workspace) together with the
+    /// entry text for position mapping. `None` if the document is not open.
+    ///
+    /// Runs over the whole-workspace [`linked_checked`](noeta_db::linked_checked) query, so a name
+    /// imported from a sibling module resolves and no longer reports a false "unknown name". A load
+    /// or parse failure carries its diagnostics through the same query.
+    fn diagnostics(&self, uri: &str) -> Option<(Vec<noeta_diagnostics::Diagnostic>, String)> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let diags = noeta_db::linked_checked(db, cache.workspace)
+            .diagnostics
+            .iter()
+            .filter(|d| d.span.source == SourceId::FIRST)
+            .cloned()
+            .collect();
+        Some((diags, cache.entry().text(db).clone()))
     }
 
     /// The type at `position` for hover: the **smallest** `expr_types` span that contains the cursor
@@ -126,7 +219,7 @@ impl DocumentStore {
         position: Position,
         encoding: Encoding,
     ) -> Option<(TypeRepr, Range)> {
-        let &program = self.open.get(uri)?;
+        let program = self.workspaces.get(uri)?.entry();
         let db = &self.db;
         let index = LineIndex::new(program.text(db));
         let offset = index.offset(position, encoding);
@@ -145,7 +238,7 @@ impl DocumentStore {
     /// the receiver's type and the type's member table; and the identifier token under the cursor
     /// resolved by name against the top-level definitions (type references, constructors).
     fn definition(&self, uri: &str, position: Position, encoding: Encoding) -> Option<Range> {
-        let &program = self.open.get(uri)?;
+        let program = self.workspaces.get(uri)?.entry();
         let db = &self.db;
         let text = program.text(db);
         let index = LineIndex::new(text);
@@ -234,6 +327,21 @@ fn to_lsp_diagnostic(
     }
 }
 
+/// Convert a `file:` document URI to a filesystem path. Returns `None` for any other scheme (e.g.
+/// `untitled:`), which the caller treats as a lone, directory-less document. A minimal decoder: the
+/// path component after `file://`, with `%`-escapes not yet decoded (paths with escaped bytes are
+/// rare and degrade to a lone workspace, never a wrong file).
+fn uri_to_path(uri: &str) -> Option<PathBuf> {
+    let rest = uri.strip_prefix("file://")?;
+    // `file:///abs` → `/abs`; a leading host (`file://host/p`) is not expected for local files.
+    Some(PathBuf::from(rest))
+}
+
+/// The `file:` URI for a filesystem path — the inverse of [`uri_to_path`] for the paths it produces.
+fn path_to_uri(path: &Path) -> String {
+    format!("file://{}", path.display())
+}
+
 /// The declared type name a reflected [`TypeRepr`] refers to, for member resolution — the nominal
 /// variants (`struct` / `class` / `enum` / unknown-kind named). Scalars, containers, functions, and
 /// unions have no user declaration to jump into, so they yield `None`.
@@ -301,6 +409,21 @@ impl Backend {
             .map(|diag| to_lsp_diagnostic(&index, &uri, diag, encoding))
             .collect();
         self.client.publish_diagnostics(uri, lsp_diags, None).await;
+    }
+
+    /// Republish diagnostics for every open document. Editing one file can change what a sibling
+    /// that imports it sees, so a change re-publishes the whole open set (bounded by the number of
+    /// open documents).
+    async fn publish_all(&self) {
+        let uris = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.open_uris()
+        };
+        for uri in uris {
+            if let Ok(uri) = uri.parse::<Uri>() {
+                self.publish(uri).await;
+            }
+        }
     }
 }
 
@@ -376,12 +499,13 @@ impl LanguageServer for Backend {
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
         let doc = params.text_document;
-        let uri = doc.uri;
         {
             let mut store = self.store.lock().expect("document store poisoned");
-            store.open(uri.as_str(), doc.text);
+            store.open(doc.uri.as_str(), doc.text);
         }
-        self.publish(uri).await;
+        // Republish every open document: the newly opened file may be a module another open file
+        // imports, so its arrival can resolve names that were previously unknown.
+        self.publish_all().await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -394,7 +518,7 @@ impl LanguageServer for Backend {
             let mut store = self.store.lock().expect("document store poisoned");
             store.change(uri.as_str(), change.text);
         }
-        self.publish(uri).await;
+        self.publish_all().await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
@@ -403,8 +527,10 @@ impl LanguageServer for Backend {
             let mut store = self.store.lock().expect("document store poisoned");
             store.close(uri.as_str());
         }
-        // Clear any diagnostics the client is still showing for the now-closed document.
+        // Clear any diagnostics the client is still showing for the now-closed document, then
+        // refresh the rest (they may now be missing a module they imported).
         self.client.publish_diagnostics(uri, Vec::new(), None).await;
+        self.publish_all().await;
     }
 }
 
@@ -434,8 +560,8 @@ mod tests {
     fn open_registers_a_document() {
         let mut store = DocumentStore::default();
         store.open("file:///a.noe", "let x = 1".to_string());
-        assert_eq!(store.open.len(), 1);
-        let program = store.open["file:///a.noe"];
+        assert_eq!(store.buffers.len(), 1);
+        let program = store.workspaces["file:///a.noe"].entry();
         assert_eq!(program.text(&store.db), "let x = 1");
     }
 
@@ -443,15 +569,15 @@ mod tests {
     fn change_mutates_the_same_input_in_place() {
         let mut store = DocumentStore::default();
         store.open("file:///a.noe", "old".to_string());
-        let before = store.open["file:///a.noe"];
+        let before = store.workspaces["file:///a.noe"].entry();
 
         let after = store.change("file:///a.noe", "new".to_string());
 
-        // Same salsa input handle (edited in place, not replaced) with the updated text — this is
-        // what lets salsa recompute only the affected downstream queries.
+        // Same salsa input handle (edited in place, not replaced — the file set is unchanged) with
+        // the updated text; this is what lets salsa recompute only the affected downstream queries.
         assert_eq!(before, after);
         assert_eq!(after.text(&store.db), "new");
-        assert_eq!(store.open.len(), 1);
+        assert_eq!(store.buffers.len(), 1);
     }
 
     #[test]
@@ -459,7 +585,7 @@ mod tests {
         let mut store = DocumentStore::default();
         let program = store.change("file:///ghost.noe", "hi".to_string());
         assert_eq!(program.text(&store.db), "hi");
-        assert_eq!(store.open.len(), 1);
+        assert_eq!(store.buffers.len(), 1);
     }
 
     #[test]
@@ -467,7 +593,57 @@ mod tests {
         let mut store = DocumentStore::default();
         store.open("file:///a.noe", "x".to_string());
         store.close("file:///a.noe");
-        assert!(store.open.is_empty());
+        assert!(store.buffers.is_empty());
+        assert!(store.workspaces.is_empty());
+    }
+
+    /// Create a fresh temp directory with the given `(filename, content)` files on disk, for the
+    /// multi-file workspace tests (sibling discovery reads the real directory).
+    fn temp_workspace(name: &str, files: &[(&str, &str)]) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("noeta_lsp_{name}"));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for (filename, content) in files {
+            std::fs::write(dir.join(filename), content).unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn workspace_resolves_a_name_imported_from_a_sibling() {
+        let dir = temp_workspace(
+            "import_ok",
+            &[(
+                "models.noe",
+                "namespace App.Models;\npub struct User { id: int }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = DocumentStore::default();
+        // Without the workspace, `User` would be an unknown name; with the sibling linked in, it
+        // resolves and there are no diagnostics.
+        store.open(
+            &entry_uri,
+            "use App.Models.User;\nu = User { id: 1 }\necho u.id".to_string(),
+        );
+        let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
+        assert!(
+            diags.is_empty(),
+            "imported name should resolve; got {diags:?}"
+        );
+    }
+
+    #[test]
+    fn workspace_still_reports_the_entrys_own_error() {
+        let dir = temp_workspace("import_err", &[]);
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let mut store = DocumentStore::default();
+        store.open(&entry_uri, "count: int = \"lots\"".to_string());
+        let (diags, _text) = store.diagnostics(&entry_uri).unwrap();
+        assert!(
+            diags.iter().any(|d| d.code.code() == "E0007"),
+            "the entry's own type error must still report; got {diags:?}"
+        );
     }
 
     #[test]
