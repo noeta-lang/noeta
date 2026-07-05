@@ -57,6 +57,39 @@ pub enum IterAbort<E> {
     FilterNotBool(&'static str),
 }
 
+/// The kind of a heap value's payload — the public, `Copy` face of the internal `Payload`
+/// discriminant, one variant per payload. See [`Value::heap_kind`]: classify a receiver once,
+/// then dispatch on integer compares instead of re-dereferencing the heap per candidate type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeapKind {
+    Str,
+    Bytes,
+    Int,
+    Closure,
+    Cell,
+    List,
+    Tuple,
+    Set,
+    Map,
+    PackedList,
+    Object,
+    Enum,
+    NativeModule,
+    NativeFn,
+    FileHandle,
+    Iter,
+    Future,
+    Timer,
+    Handle,
+    AsyncIo,
+    Sender,
+    Receiver,
+    ChannelSend,
+    ChannelRecv,
+    IsolateFuture,
+    Reactive,
+}
+
 /// The NaN-box bit layout (see [`Value::NANBOX`]), the ABI contract between this crate's value
 /// encoding and the JIT's native codegen. Every field is a raw bit pattern (or bound) the JIT feeds
 /// straight into Cranelift constants.
@@ -2209,6 +2242,47 @@ impl Value {
             Some(s) => format!("{s:?}"),
             None => self.display(),
         }
+    }
+
+    /// The kind of this value's heap payload (`None` for immediates) — a cheap `Copy`
+    /// discriminant for one-dereference dispatch. A dispatch ladder that probes candidate
+    /// receiver types in sequence (`is_map()`, `is_list()`, `as_string()`, …) pays a heap
+    /// dereference per probe; classifying once and comparing kinds turns every subsequent
+    /// rung into an integer compare. Note the mapping is variant-exact: `is_list()` is
+    /// `List | PackedList`, so a caller replacing it must test both kinds.
+    #[inline]
+    pub fn heap_kind(self) -> Option<HeapKind> {
+        if !self.is_pointer() {
+            return None;
+        }
+        Some(heap::with_payload(self, |p| match p {
+            Payload::Str(_) => HeapKind::Str,
+            Payload::Bytes(_) => HeapKind::Bytes,
+            Payload::Int(_) => HeapKind::Int,
+            Payload::Closure { .. } => HeapKind::Closure,
+            Payload::Cell(_) => HeapKind::Cell,
+            Payload::List(_) => HeapKind::List,
+            Payload::Tuple(_) => HeapKind::Tuple,
+            Payload::Set(_) => HeapKind::Set,
+            Payload::Map(_) => HeapKind::Map,
+            Payload::PackedList { .. } => HeapKind::PackedList,
+            Payload::Object { .. } => HeapKind::Object,
+            Payload::Enum { .. } => HeapKind::Enum,
+            Payload::NativeModule(_) => HeapKind::NativeModule,
+            Payload::NativeFn(_) => HeapKind::NativeFn,
+            Payload::FileHandle(_) => HeapKind::FileHandle,
+            Payload::Iter(_) => HeapKind::Iter,
+            Payload::Future(_) => HeapKind::Future,
+            Payload::Timer { .. } => HeapKind::Timer,
+            Payload::Handle { .. } => HeapKind::Handle,
+            Payload::AsyncIo { .. } => HeapKind::AsyncIo,
+            Payload::Sender(_) => HeapKind::Sender,
+            Payload::Receiver(_) => HeapKind::Receiver,
+            Payload::ChannelSend { .. } => HeapKind::ChannelSend,
+            Payload::ChannelRecv { .. } => HeapKind::ChannelRecv,
+            Payload::IsolateFuture { .. } => HeapKind::IsolateFuture,
+            Payload::Reactive { .. } => HeapKind::Reactive,
+        }))
     }
 
     /// The user-facing type name, for diagnostics (mirrors M0's `Value::type_name`).

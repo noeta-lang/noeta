@@ -47,7 +47,7 @@ use noeta_object::{Shape, ShapeKind};
 use noeta_reactive::{NodeKind, ReactiveGraph};
 use noeta_span::Span;
 use noeta_value::{
-    ChannelId, ScopeId, TaskId, Value, apply_binary, apply_binary_wide, apply_unary,
+    ChannelId, HeapKind, ScopeId, TaskId, Value, apply_binary, apply_binary_wide, apply_unary,
     compare_primitive, structural_compare,
 };
 
@@ -2897,13 +2897,18 @@ impl<'m> Vm<'m> {
                         // Resolve the interned method name once; every path below wants the `&str`.
                         let method = module.name(*method);
                         let v = regs[fbase + *recv as usize];
+                        // Classify the receiver once (one heap dereference). Every rung below
+                        // tests `hk` with an integer compare instead of re-probing the heap
+                        // per candidate type — a deep rung (map/iter methods) used to pay a
+                        // dereference for every rung above it.
+                        let hk = v.heap_kind();
                         // In-place map self-update (Phase 5.1c): a reuse-marked `m = m.set(k,v)` /
                         // `m = m.remove(k)` whose runtime receiver is actually a map consumes the receiver
                         // register and mutates the sole-owned backing buffer in place (an alias copies). A
                         // non-map receiver — a user method that happens to be named `set` — falls through to
                         // the ordinary dispatch below with the receiver intact.
                         if *reuse
-                            && v.is_map()
+                            && hk == Some(HeapKind::Map)
                             && let Some(map_method) = noeta_stdlib::MapMethod::from_name(method)
                             && matches!(
                                 map_method,
@@ -2929,7 +2934,10 @@ impl<'m> Vm<'m> {
                         }
                         // In-place list self-update (`xs[i] = v` ⟶ `xs = xs.set(i, v)`): a uniquely-owned
                         // list overwrites slot `i` in place (O(1)) instead of copying the whole list.
-                        if *reuse && v.is_list() && method == "set" {
+                        if *reuse
+                            && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+                            && method == "set"
+                        {
                             let arg_values = ArgBuf::collect(args, regs, fbase);
                             regs[fbase + *recv as usize] = Value::unit();
                             let result = self.list_set_in_place(v, arg_values.as_slice(), *span)?;
@@ -2941,7 +2949,7 @@ impl<'m> Vm<'m> {
                         // canonically-ordered set binary-search-inserts/removes one element in its existing
                         // buffer instead of cloning + re-sorting the whole set.
                         if *reuse
-                            && v.is_set()
+                            && hk == Some(HeapKind::Set)
                             && let Some(set_method) = noeta_stdlib::SetMethod::from_name(method)
                             && matches!(
                                 set_method,
@@ -2963,7 +2971,9 @@ impl<'m> Vm<'m> {
                         }
                         // `json.parse(...)` — a Ring 2 native module function call, dispatched before
                         // the object/collection paths.
-                        if let Some(module_name) = v.native_module_name() {
+                        if hk == Some(HeapKind::NativeModule)
+                            && let Some(module_name) = v.native_module_name()
+                        {
                             let arg_values = ArgBuf::collect(args, regs, fbase);
                             let value = self.call_native_module(
                                 &module_name,
@@ -2977,7 +2987,7 @@ impl<'m> Vm<'m> {
                         }
                         // An object dispatches to a user method through the type's method table;
                         // anything else falls to the built-in `count`/`enumerate` methods.
-                        if v.is_object() {
+                        if hk == Some(HeapKind::Object) {
                             // `o.to_json()` on a type that `@derive(Serialize<Json>)` (so has no hand-written
                             // `to_json`) synthesizes a structural JSON string — a pure value
                             // computation, so it is produced inline rather than via a call frame. Only a
@@ -3073,7 +3083,7 @@ impl<'m> Vm<'m> {
                         // slice 3) through the same `(type, method)` table as an object. Enums carry no
                         // inline-cache shape pointer, so this is a direct table lookup. An unknown method
                         // falls through to the built-in paths below.
-                        if v.is_enum() {
+                        if hk == Some(HeapKind::Enum) {
                             let type_name = v.shape().unwrap().name.clone();
                             if let Some(&proto) = self.methods.get(&(type_name, method.to_string()))
                             {
@@ -3155,7 +3165,9 @@ impl<'m> Vm<'m> {
                         // the shared `noeta-stdlib` surface so the tree-walker and the VM cannot drift.
                         // `Unknown` falls through to the collection methods below. `as_string` clones
                         // out of the heap, so the projected args own their strings for the call.
-                        if let Some(recv_str) = v.as_string() {
+                        if hk == Some(HeapKind::Str)
+                            && let Some(recv_str) = v.as_string()
+                        {
                             let arg_values = ArgBuf::collect(args, regs, fbase);
                             let arg_strings: Vec<Option<String>> = arg_values
                                 .as_slice()
@@ -3200,7 +3212,8 @@ impl<'m> Vm<'m> {
                         // Bit-manipulation methods on `int` (P-BITS Tier B4) — the popcount-class
                         // intrinsics, delegating to the shared `int_method` so the backends agree. The
                         // checker already arity/type-checked the call; `rotate_*` take one `int` amount.
-                        if let Some(recv_int) = v.as_int()
+                        if matches!(hk, None | Some(HeapKind::Int))
+                            && let Some(recv_int) = v.as_int()
                             && let Some(int_method) = noeta_stdlib::IntMethod::from_name(method)
                         {
                             let arg = match args.first() {
@@ -3232,11 +3245,12 @@ impl<'m> Vm<'m> {
                         // `float↔f32`. The `IntMethod` branch above handled `int→int` and continued; an
                         // integer receiver reaches here only for a float destination (`to_float`/`to_f32`),
                         // a `float`/`f32` receiver for any. Shared `num_convert` keeps the backends in step.
-                        if let Some(src) = v
-                            .as_f32()
-                            .map(noeta_stdlib::NumScalar::F32)
-                            .or_else(|| v.as_float().map(noeta_stdlib::NumScalar::F64))
-                            .or_else(|| v.as_int().map(noeta_stdlib::NumScalar::Int))
+                        if matches!(hk, None | Some(HeapKind::Int))
+                            && let Some(src) = v
+                                .as_f32()
+                                .map(noeta_stdlib::NumScalar::F32)
+                                .or_else(|| v.as_float().map(noeta_stdlib::NumScalar::F64))
+                                .or_else(|| v.as_int().map(noeta_stdlib::NumScalar::Int))
                             && let Some(dest) = noeta_stdlib::NumConvert::from_name(method)
                         {
                             let value = match noeta_stdlib::num_convert(src, dest) {
@@ -3251,7 +3265,7 @@ impl<'m> Vm<'m> {
                         // Ring 1 list methods (reverse/contains/join) — the shared `ListMethod` enum
                         // makes the helper's `match` exhaustive, so the tree-walker cannot offer a
                         // method this backend lacks.
-                        if v.list_len().is_some()
+                        if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
                             && let Some(list_method) = noeta_stdlib::ListMethod::from_name(method)
                         {
                             let arg_values = ArgBuf::collect(args, regs, fbase);
@@ -3267,7 +3281,7 @@ impl<'m> Vm<'m> {
                             continue;
                         }
                         // Ring 1 set methods (contains/union/intersection).
-                        if v.is_set()
+                        if hk == Some(HeapKind::Set)
                             && let Some(set_method) = noeta_stdlib::SetMethod::from_name(method)
                         {
                             let arg_values = ArgBuf::collect(args, regs, fbase);
@@ -3284,7 +3298,7 @@ impl<'m> Vm<'m> {
                         }
                         // File-handle methods (read_line/read/write/close) — the shared
                         // `FileHandleMethod` enum keeps the two backends in lockstep.
-                        if v.is_file_handle()
+                        if hk == Some(HeapKind::FileHandle)
                             && let Some(handle_method) =
                                 noeta_stdlib::FileHandleMethod::from_name(method)
                         {
@@ -3303,7 +3317,9 @@ impl<'m> Vm<'m> {
                         // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
                         // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
                         // polled); `close` is synchronous. Endpoint validity was checked statically.
-                        if let Some(id) = v.sender_id() {
+                        if hk == Some(HeapKind::Sender)
+                            && let Some(id) = v.sender_id()
+                        {
                             match method {
                                 "send" => {
                                     let msg = regs[fbase + args[0] as usize];
@@ -3327,7 +3343,8 @@ impl<'m> Vm<'m> {
                                 _ => {}
                             }
                         }
-                        if let Some(id) = v.receiver_id()
+                        if hk == Some(HeapKind::Receiver)
+                            && let Some(id) = v.receiver_id()
                             && method == "recv"
                         {
                             let future = Value::make_channel_recv(id);
@@ -3342,7 +3359,9 @@ impl<'m> Vm<'m> {
                         // no-method runtime error below, exactly as any other unknown method on a
                         // built-in type. `get` on a `computed` recomputes a dirty body via
                         // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
-                        if let Some((kind, node)) = v.reactive_parts() {
+                        if hk == Some(HeapKind::Reactive)
+                            && let Some((kind, node)) = v.reactive_parts()
+                        {
                             match (kind, method) {
                                 (NodeKind::Signal | NodeKind::Computed, "get") => {
                                     let result = self.read_reactive(node, *span)?;
@@ -3392,7 +3411,7 @@ impl<'m> Vm<'m> {
                         }
                         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
                         // handle above.
-                        if v.is_iter()
+                        if hk == Some(HeapKind::Iter)
                             && let Some(iter_method) = noeta_stdlib::IterMethod::from_name(method)
                         {
                             let arg_values = ArgBuf::collect(args, regs, fbase);
@@ -3408,7 +3427,7 @@ impl<'m> Vm<'m> {
                             continue;
                         }
                         // Ring 1 map methods (keys/values/has).
-                        if v.is_map()
+                        if hk == Some(HeapKind::Map)
                             && let Some(map_method) = noeta_stdlib::MapMethod::from_name(method)
                         {
                             let arg_values = ArgBuf::collect(args, regs, fbase);
@@ -3425,7 +3444,9 @@ impl<'m> Vm<'m> {
                         }
                         // `list.to_bytes()` — serialize a `List<@packed>` to its flat buffer (P-PACK 4.4);
                         // a boxed list has no canonical form, so it's a type error (surfaced, not silent).
-                        if method == "to_bytes" && v.is_list() {
+                        if method == "to_bytes"
+                            && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+                        {
                             if !args.is_empty() {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
@@ -3451,7 +3472,17 @@ impl<'m> Vm<'m> {
                         // `iter()` on a built-in collection (Track I.1a) → a lazy iterator. A list shares
                         // its backing (the iterator retains one reference); a set/map first becomes a list
                         // of its elements / values (the iteration order `for` uses).
-                        if method == "iter" && (v.is_list() || v.is_set() || v.is_map()) {
+                        if method == "iter"
+                            && matches!(
+                                hk,
+                                Some(
+                                    HeapKind::List
+                                        | HeapKind::PackedList
+                                        | HeapKind::Set
+                                        | HeapKind::Map
+                                )
+                            )
+                        {
                             if !args.is_empty() {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,
@@ -3459,10 +3490,11 @@ impl<'m> Vm<'m> {
                                     "method `iter` takes no arguments".to_string(),
                                 ));
                             }
-                            let value = if v.is_list() {
+                            let value = if matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+                            {
                                 Value::iter(v)
                             } else {
-                                let items = if v.is_set() {
+                                let items = if hk == Some(HeapKind::Set) {
                                     v.set_items()
                                 } else {
                                     v.map_values()
@@ -3492,7 +3524,9 @@ impl<'m> Vm<'m> {
                                 .or_else(|| v.as_string().map(|s| s.chars().count()))
                                 .or_else(|| v.bytes_len())
                                 .map(|n| Value::int(n as i64))
-                        } else if method == "enumerate" && v.is_list() {
+                        } else if method == "enumerate"
+                            && matches!(hk, Some(HeapKind::List | HeapKind::PackedList))
+                        {
                             // A list of `(index, value)` **tuples** (object-model slice 4b), matching the
                             // tree-walker's `Value::Tuple` pairs. A packed list is materialized to a
                             // temporary boxed list first (then released).
