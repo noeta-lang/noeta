@@ -15,16 +15,20 @@
 //! adds **hover types**: the cursor position becomes a byte offset, the tightest enclosing span in
 //! the checker's `expr_types` index gives the inferred type, and it is rendered back to surface
 //! syntax (see [`hover`]). Both features read the one `checked_ide` query, so a document version is
-//! checked once. Positions are converted encoding-aware (see [`offsets`]).
+//! checked once. Slice **L3** adds **go-to-definition**: the identifier token under the cursor is
+//! resolved against the document's top-level definitions (see [`resolve`]). Positions are converted
+//! encoding-aware (see [`offsets`]).
 
 mod hover;
 mod offsets;
+mod resolve;
 
 use std::collections::HashMap;
 use std::sync::Mutex;
 
 use noeta_ast::reflect::TypeRepr;
 use noeta_db::{LangDatabase, SourceProgram};
+use noeta_lexer::TokenKind;
 use offsets::{Encoding, LineIndex};
 use salsa::Setter;
 use tower_lsp_server::jsonrpc::Result;
@@ -56,7 +60,7 @@ impl std::fmt::Debug for DocumentStore {
 impl DocumentStore {
     /// Register a freshly opened document. Creates a new [`SourceProgram`] input (id
     /// [`SourceId::FIRST`](noeta_span::SourceId::FIRST) — each open document is checked as its own
-    /// single-file entry program until cross-file features arrive in L3) and stores it under `uri`.
+    /// single-file entry program until cross-file features arrive) and stores it under `uri`.
     /// Re-opening a URI replaces its input.
     fn open(&mut self, uri: &str, text: String) {
         let program = SourceProgram::new(&self.db, 0, uri.to_string(), text);
@@ -131,6 +135,33 @@ impl DocumentStore {
             .filter(|(span, _)| span.end > span.start && span.start <= offset && offset <= span.end)
             .min_by_key(|(span, _)| span.end - span.start)?;
         Some((repr.clone(), index.range(*span, encoding)))
+    }
+
+    /// Resolve the definition of the identifier at `position` for go-to-definition: its declaration
+    /// span as an LSP range, or `None` if the cursor is not on an identifier or the name has no
+    /// top-level definition. The identifier under the cursor comes from the token stream (so a match
+    /// inside a string/comment can't fire); the name is resolved against the top-level definitions.
+    fn definition(&self, uri: &str, position: Position, encoding: Encoding) -> Option<Range> {
+        let &program = self.open.get(uri)?;
+        let db = &self.db;
+        let text = program.text(db);
+        let index = LineIndex::new(text);
+        let offset = index.offset(position, encoding);
+
+        let token = noeta_db::tokens(db, program)
+            .0
+            .tokens
+            .iter()
+            .find(|token| {
+                token.kind == TokenKind::Ident
+                    && token.span.start <= offset
+                    && offset <= token.span.end
+            })?;
+        let name = &text[token.span.range()];
+
+        let defs = resolve::Definitions::collect(&noeta_db::ast(db, program).0.program);
+        let def_span = defs.resolve(name)?;
+        Some(index.range(def_span, encoding))
     }
 }
 
@@ -256,6 +287,7 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                definition_provider: Some(OneOf::Left(true)),
                 ..Default::default()
             },
             ..Default::default()
@@ -287,6 +319,20 @@ impl LanguageServer for Backend {
             }),
             range: Some(range),
         }))
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> Result<Option<GotoDefinitionResponse>> {
+        let position_params = params.text_document_position_params;
+        let uri = position_params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let range = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.definition(uri.as_str(), position_params.position, encoding)
+        };
+        Ok(range.map(|range| GotoDefinitionResponse::Scalar(Location { uri, range })))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -455,6 +501,49 @@ mod tests {
             Encoding::Utf8,
         );
         assert!(hit.is_none());
+    }
+
+    #[test]
+    fn goto_definition_jumps_from_a_call_to_the_fn() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///d.noe",
+            "fn greet(): int { return 1 }\ntotal = greet()".to_string(),
+        );
+        // Cursor on `greet` inside the call on line 1 (byte 37 = "…total = gr|eet()").
+        let range = store
+            .definition(
+                "file:///d.noe",
+                Position {
+                    line: 1,
+                    character: 10,
+                },
+                Encoding::Utf8,
+            )
+            .expect("call resolves to the fn");
+        // Jumps to the declared name on line 0 at column 3 (`fn greet` — name starts after "fn ").
+        assert_eq!(range.start.line, 0);
+        assert_eq!(range.start.character, 3);
+        assert_eq!(range.end.character, 8);
+    }
+
+    #[test]
+    fn goto_definition_off_a_known_name_is_none() {
+        let mut store = DocumentStore::default();
+        store.open("file:///d.noe", "total = 1 + 2".to_string());
+        // `total` is a local binding, not a top-level definition — no jump (never a wrong one).
+        assert!(
+            store
+                .definition(
+                    "file:///d.noe",
+                    Position {
+                        line: 0,
+                        character: 2,
+                    },
+                    Encoding::Utf8,
+                )
+                .is_none()
+        );
     }
 
     #[test]

@@ -1315,6 +1315,8 @@ dependencies = [
  "noeta-ast",
  "noeta-db",
  "noeta-diagnostics",
+ "noeta-lexer",
+ "noeta-parser",
  "noeta-span",
  "salsa",
  "tokio",
