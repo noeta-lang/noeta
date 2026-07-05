@@ -46,6 +46,8 @@ noeta-stdlib = { path = "crates/noeta-stdlib" }
 noeta-runtime = { path = "crates/noeta-runtime" }
 # M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
 noeta-reactive = { path = "crates/noeta-reactive" }
+# M2 editor tooling: the `noeta lsp` language server over the noeta-db salsa query graph
+noeta-lsp = { path = "crates/noeta-lsp" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"
@@ -54,6 +56,9 @@ tokio = { version = "1", features = ["rt", "fs", "io-util", "time"] }
 chumsky = { version = "1.0.0-alpha.8", features = ["pratt"] }
 ariadne = "0.6"
 clap = { version = "4", features = ["derive"] }
+# Language-server framework (editor-tooling milestone): the maintained community fork of
+# tower-lsp — async LanguageServer trait + JSON-RPC transport, composes with our tokio.
+tower-lsp-server = "0.23"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 insta = "1"

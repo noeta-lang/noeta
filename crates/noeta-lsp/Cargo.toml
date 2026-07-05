@@ -1,0 +1,21 @@
+[package]
+name = "noeta-lsp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+noeta-span = { workspace = true }
+noeta-db = { workspace = true }
+# For the `Setter` trait — the salsa-generated `set_text` on `SourceProgram` needs it in scope.
+salsa = { workspace = true }
+# tokio: the workspace pin gives us rt/io-util/time; the server also needs the stdio driver
+# (`io-std`) for the JSON-RPC transport, a worker pool (`rt-multi-thread`), and `#[tokio::main]`
+# (`macros`). Feature-unified with the rest of the workspace's tokio usage.
+tokio = { workspace = true, features = ["io-std", "rt-multi-thread", "macros"] }
+tower-lsp-server = { workspace = true }
+
+[lints]
+workspace = true
