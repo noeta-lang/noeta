@@ -20,7 +20,7 @@
 use std::collections::HashMap;
 
 use noeta_ast::{ClosureBody, Expr, FnDecl, ForPattern, Param, Pattern, Program, Stmt, StrPart};
-use noeta_span::Span;
+use noeta_span::{SourceId, Span};
 
 /// The top-level definitions a document offers for go-to-definition, keyed by name → the span of the
 /// **declared name** (what the editor jumps to). Two namespaces because a value reference (a call)
@@ -192,25 +192,35 @@ impl DefUse {
         }
     }
 
-    /// The definition span for the value reference whose use-span contains `offset`, if any. The
-    /// tightest containing use wins (value-ident uses do not nest, but the guard is cheap).
-    pub fn definition_at(&self, offset: u32) -> Option<Span> {
+    /// The definition span for the value reference in file `source` whose use-span contains
+    /// `offset`, if any. The `source` filter matters over a merged multi-file program, where the
+    /// same byte offset exists in every file; the cursor is in one specific file. The tightest
+    /// containing use wins (value-ident uses do not nest, but the guard is cheap). The returned
+    /// definition span may belong to a *different* file (a cross-module reference).
+    pub fn definition_at(&self, offset: u32, source: SourceId) -> Option<Span> {
         self.refs
             .iter()
             .filter(|(use_span, _)| {
-                use_span.end > use_span.start && use_span.start <= offset && offset <= use_span.end
+                use_span.source == source
+                    && use_span.end > use_span.start
+                    && use_span.start <= offset
+                    && offset <= use_span.end
             })
             .min_by_key(|(use_span, _)| use_span.end - use_span.start)
             .map(|(_, def)| *def)
     }
 
-    /// The `(receiver span, member name)` of the member access whose member-name span contains
-    /// `offset`, if the cursor is on a `.member`. The caller resolves the receiver's type (via the
-    /// checker's `expr_types`) and looks the member up in a [`MemberTable`].
-    pub fn member_at(&self, offset: u32) -> Option<(Span, &str)> {
+    /// The `(receiver span, member name)` of the member access in file `source` whose member-name
+    /// span contains `offset`, if the cursor is on a `.member`. The caller resolves the receiver's
+    /// type (via the checker's `expr_types`) and looks the member up in a [`MemberTable`].
+    pub fn member_at(&self, offset: u32, source: SourceId) -> Option<(Span, &str)> {
         self.member_refs
             .iter()
-            .find(|m| m.name_span.start <= offset && offset <= m.name_span.end)
+            .find(|m| {
+                m.name_span.source == source
+                    && m.name_span.start <= offset
+                    && offset <= m.name_span.end
+            })
             .map(|m| (m.receiver_span, m.name.as_str()))
     }
 }
@@ -569,7 +579,7 @@ mod tests {
     /// The definition byte-offset the value index resolves for the cursor at `use_offset`.
     fn def_start_at(src: &str, use_offset: u32) -> Option<u32> {
         DefUse::build(&program_of(src))
-            .definition_at(use_offset)
+            .definition_at(use_offset, SourceId::FIRST)
             .map(|span| span.start)
     }
 

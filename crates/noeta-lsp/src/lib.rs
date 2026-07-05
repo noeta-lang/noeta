@@ -12,13 +12,13 @@
 //! name imported from a sibling module resolves — each maps to an LSP `Diagnostic` (severity,
 //! `E0xxx` code, range, related labels), filtered to the entry file's own spans and published. Slice **L2**
 //! adds **hover types**: the cursor position becomes a byte offset, the tightest enclosing span in
-//! the checker's `expr_types` index gives the inferred type, and it is rendered back to surface
-//! syntax (see [`hover`]). Both features read the one `checked_ide` query, so a document version is
-//! checked once. Slice **L3** adds **go-to-definition**: the reference under the cursor resolves to
-//! its declaration — a scope-aware value index handles locals, parameters, and functions
+//! the workspace `expr_types` index gives the inferred type, rendered back to surface syntax (see
+//! [`hover`]). Slice **L3** adds **go-to-definition**: the reference under the cursor resolves to its
+//! declaration — a scope-aware value index handles locals, parameters, and functions
 //! (shadowing-correct); member accesses `x.member` resolve via the receiver's type; and a top-level
-//! name table backs type references (see [`resolve`]). Positions are converted encoding-aware (see
-//! [`offsets`]).
+//! name table backs type references (see [`resolve`]). Hover and go-to-definition run over the merged
+//! workspace program (slice **W2**), so an imported name resolves and go-to-definition can land in a
+//! *different file*. Positions are converted encoding-aware (see [`offsets`]).
 
 mod hover;
 mod offsets;
@@ -31,7 +31,7 @@ use std::sync::Mutex;
 use noeta_ast::reflect::TypeRepr;
 use noeta_db::{LangDatabase, SourceProgram, Workspace};
 use noeta_lexer::TokenKind;
-use noeta_span::SourceId;
+use noeta_span::{SourceId, Span};
 use offsets::{Encoding, LineIndex};
 use salsa::Setter;
 use tower_lsp_server::jsonrpc::Result;
@@ -209,78 +209,107 @@ impl DocumentStore {
         Some((diags, cache.entry().text(db).clone()))
     }
 
-    /// The type at `position` for hover: the **smallest** `expr_types` span that contains the cursor
-    /// (the most specific expression under it), rendered plus its LSP range. `None` if the document
-    /// is unknown or no typed expression covers the position. The whole lookup runs under one salsa
-    /// borrow — the type index is never cloned.
+    /// The type at `position` for hover: the **smallest** `expr_types` span in the entry file that
+    /// contains the cursor (the most specific expression under it), rendered plus its LSP range.
+    /// Runs over the whole-workspace type index so an expression's type is known even when it depends
+    /// on an imported declaration; the `source` filter keeps the lookup to the entry file the cursor
+    /// is in. `None` if the document is unknown or no typed expression covers the position.
     fn hover_type(
         &self,
         uri: &str,
         position: Position,
         encoding: Encoding,
     ) -> Option<(TypeRepr, Range)> {
-        let program = self.workspaces.get(uri)?.entry();
+        let cache = self.workspaces.get(uri)?;
         let db = &self.db;
-        let index = LineIndex::new(program.text(db));
+        let index = LineIndex::new(cache.entry().text(db));
         let offset = index.offset(position, encoding);
-        let (span, repr) = noeta_db::checked_ide(db, program)
+        let (span, repr) = noeta_db::linked_checked_ide(db, cache.workspace)
             .expr_types
             .iter()
-            // Non-empty spans that cover the cursor; pick the tightest (innermost) one.
-            .filter(|(span, _)| span.end > span.start && span.start <= offset && offset <= span.end)
+            // Non-empty spans in the entry file that cover the cursor; pick the tightest.
+            .filter(|(span, _)| {
+                span.source == SourceId::FIRST
+                    && span.end > span.start
+                    && span.start <= offset
+                    && offset <= span.end
+            })
             .min_by_key(|(span, _)| span.end - span.start)?;
         Some((repr.clone(), index.range(*span, encoding)))
     }
 
-    /// Resolve the definition of the reference at `position` for go-to-definition, as an LSP range,
-    /// or `None` if nothing there resolves. Three layers, in order: the scope-aware value index
-    /// (locals, parameters, functions — shadowing-correct); a member access `x.member` resolved via
-    /// the receiver's type and the type's member table; and the identifier token under the cursor
-    /// resolved by name against the top-level definitions (type references, constructors).
-    fn definition(&self, uri: &str, position: Position, encoding: Encoding) -> Option<Range> {
-        let program = self.workspaces.get(uri)?.entry();
+    /// Resolve the definition of the reference at `position` for go-to-definition, as a `(URI,
+    /// range)` — the target may be a **different file** (a cross-module reference). Runs over the
+    /// merged workspace program, so an imported name resolves to its declaration in the sibling that
+    /// declares it. Three layers, in order: the scope-aware value index (locals, parameters,
+    /// functions — shadowing-correct); a member access `x.member` resolved via the receiver's type
+    /// and the type's member table; and the identifier token under the cursor resolved by name
+    /// against the top-level definitions (type references, constructors).
+    fn definition(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let cache = self.workspaces.get(uri)?;
         let db = &self.db;
-        let text = program.text(db);
-        let index = LineIndex::new(text);
-        let offset = index.offset(position, encoding);
-        let ast = noeta_db::ast(db, program);
+        let entry = cache.entry();
+        let entry_text = entry.text(db);
+        let entry_index = LineIndex::new(entry_text);
+        let offset = entry_index.offset(position, encoding);
+        let cursor = SourceId::FIRST;
 
-        let def_use = resolve::DefUse::build(&ast.0.program);
+        // The merged program when the link succeeded, else the entry's own AST (so within-file
+        // navigation still works while a sibling is broken).
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let def_use = resolve::DefUse::build(program);
 
         // 1. Scope-aware value resolution — a local, parameter, or function reference resolves to
         //    the precise binding in scope at the cursor (shadowing-correct).
-        if let Some(def) = def_use.definition_at(offset) {
-            return Some(index.range(def, encoding));
+        if let Some(def) = def_use.definition_at(offset, cursor) {
+            return self.locate(cache, def, encoding);
         }
 
-        // 2. Member access `receiver.member`: resolve the receiver's type from the checker's type
+        // 2. Member access `receiver.member`: resolve the receiver's type from the workspace type
         //    index, then look the member up among that type's declared fields/variants/methods.
-        if let Some((receiver_span, member)) = def_use.member_at(offset)
-            && let Some(receiver_ty) = noeta_db::checked_ide(db, program)
+        if let Some((receiver_span, member)) = def_use.member_at(offset, cursor)
+            && let Some(receiver_ty) = noeta_db::linked_checked_ide(db, cache.workspace)
                 .expr_types
                 .get(&receiver_span)
             && let Some(type_name) = nominal_name(receiver_ty)
-            && let Some(def) =
-                resolve::MemberTable::collect(&ast.0.program).lookup(type_name, member)
+            && let Some(def) = resolve::MemberTable::collect(program).lookup(type_name, member)
         {
-            return Some(index.range(def, encoding));
+            return self.locate(cache, def, encoding);
         }
 
-        // 3. Fallback: the identifier token under the cursor resolved by name against the top-level
-        //    definitions. Covers type references and constructors (which the value index skips) and
-        //    is drawn from the token stream so a match inside a string/comment cannot fire.
-        let token = noeta_db::tokens(db, program)
-            .0
-            .tokens
-            .iter()
-            .find(|token| {
-                token.kind == TokenKind::Ident
-                    && token.span.start <= offset
-                    && offset <= token.span.end
-            })?;
-        let name = &text[token.span.range()];
-        let def_span = resolve::Definitions::collect(&ast.0.program).resolve(name)?;
-        Some(index.range(def_span, encoding))
+        // 3. Fallback: the identifier token under the cursor (from the entry's tokens) resolved by
+        //    name against the top-level definitions. Covers type references and constructors.
+        let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|token| {
+            token.kind == TokenKind::Ident && token.span.start <= offset && offset <= token.span.end
+        })?;
+        let name = &entry_text[token.span.range()];
+        let def_span = resolve::Definitions::collect(program).resolve(name)?;
+        self.locate(cache, def_span, encoding)
+    }
+
+    /// Map a definition `span` (whose [`SourceId`] names the file it belongs to) to the `(URI,
+    /// range)` the editor jumps to, resolving the range against that file's own text.
+    fn locate(
+        &self,
+        cache: &WorkspaceCache,
+        span: Span,
+        encoding: Encoding,
+    ) -> Option<(String, Range)> {
+        let idx = span.source.0 as usize;
+        let uri = cache.source_uris.get(idx)?.clone();
+        let program = *cache.programs.get(idx)?;
+        let index = LineIndex::new(program.text(&self.db));
+        Some((uri, index.range(span, encoding)))
     }
 }
 
@@ -490,11 +519,17 @@ impl LanguageServer for Backend {
         let position_params = params.text_document_position_params;
         let uri = position_params.text_document.uri;
         let encoding = *self.encoding.lock().expect("encoding lock poisoned");
-        let range = {
+        let target = {
             let store = self.store.lock().expect("document store poisoned");
             store.definition(uri.as_str(), position_params.position, encoding)
         };
-        Ok(range.map(|range| GotoDefinitionResponse::Scalar(Location { uri, range })))
+        // The target may be a different file; parse its URI back for the `Location`.
+        Ok(target.and_then(|(target_uri, range)| {
+            target_uri
+                .parse::<Uri>()
+                .ok()
+                .map(|uri| GotoDefinitionResponse::Scalar(Location { uri, range }))
+        }))
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) {
@@ -726,7 +761,7 @@ mod tests {
             "fn greet(): int { return 1 }\ntotal = greet()".to_string(),
         );
         // Cursor on `greet` inside the call on line 1 (byte 37 = "…total = gr|eet()").
-        let range = store
+        let (_uri, range) = store
             .definition(
                 "file:///d.noe",
                 Position {
@@ -747,7 +782,7 @@ mod tests {
         let mut store = DocumentStore::default();
         store.open("file:///d.noe", "total = 1 + 2\necho total".to_string());
         // Cursor on `total` in `echo total` (line 1) → jumps to the binding on line 0, column 0.
-        let range = store
+        let (_uri, range) = store
             .definition(
                 "file:///d.noe",
                 Position {
@@ -769,7 +804,7 @@ mod tests {
             "struct Point { x: int }\no = Point { x: 1 }\nd = o.x".to_string(),
         );
         // Cursor on `.x` in `o.x` (line 2, `d = o.x` → the `x` is column 6).
-        let range = store
+        let (_uri, range) = store
             .definition(
                 "file:///m.noe",
                 Position {
@@ -792,7 +827,7 @@ mod tests {
             "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.get()".to_string(),
         );
         // Cursor on `.get` in `c.get()` (last line, `v = c.get()` → `get` starts at column 6).
-        let range = store
+        let (_uri, range) = store
             .definition(
                 "file:///m.noe",
                 Position {
@@ -805,6 +840,40 @@ mod tests {
         // `fn get` is declared on line 1 (`  fn get(...)` → `get` at column 5).
         assert_eq!(range.start.line, 1);
         assert_eq!(range.start.character, 5);
+    }
+
+    #[test]
+    fn goto_definition_jumps_across_modules() {
+        let dir = temp_workspace(
+            "goto_xmod",
+            &[(
+                "models.noe",
+                "namespace App.Models;\npub struct User { id: int }\n",
+            )],
+        );
+        let entry_uri = path_to_uri(&dir.join("main.noe"));
+        let models_uri = path_to_uri(&dir.join("models.noe"));
+        let mut store = DocumentStore::default();
+        store.open(
+            &entry_uri,
+            "use App.Models.User;\nu = User { id: 1 }".to_string(),
+        );
+        // Cursor on `User` in the constructor (line 1, column 4) jumps to the sibling that declares
+        // it — a different file.
+        let (target_uri, range) = store
+            .definition(
+                &entry_uri,
+                Position {
+                    line: 1,
+                    character: 4,
+                },
+                Encoding::Utf8,
+            )
+            .expect("imported type resolves across modules");
+        assert_eq!(target_uri, models_uri);
+        // `pub struct User` is on line 1 of models.noe (line 0 is the `namespace`).
+        assert_eq!(range.start.line, 1);
+        assert_eq!(range.start.character, 11); // after "pub struct "
     }
 
     #[test]

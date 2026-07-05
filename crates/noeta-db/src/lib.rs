@@ -369,6 +369,30 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     }
 }
 
+/// The IDE-flavored whole-workspace check: like [`linked_checked`], but the result's
+/// [`Checked::expr_types`] is populated (via [`noeta_check::check_all_with_types`]) — the merged,
+/// multi-file span→type index the LSP reads for cross-module hover and member navigation. The
+/// compile path stays on [`linked_checked`] and never builds the index.
+#[salsa::tracked(returns(ref))]
+pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
+    match &linked(db, ws).0 {
+        Ok(program) => from_check_output(noeta_check::check_all_with_types(program)),
+        Err(diags) => Checked {
+            diagnostics: diags.clone(),
+            type_of_sites: std::collections::HashMap::new(),
+            expr_types: std::collections::HashMap::new(),
+            packed_list_sites: std::collections::HashMap::new(),
+            ext_call_sites: std::collections::HashMap::new(),
+            map_packed_sites: std::collections::HashMap::new(),
+            index_field_sites: std::collections::HashSet::new(),
+            for_stream_sites: std::collections::HashSet::new(),
+            width_sites: std::collections::HashMap::new(),
+            construction_sites: std::collections::HashMap::new(),
+            destructor_relevance: noeta_check::DestructorRelevance::default(),
+        },
+    }
+}
+
 /// Compile the linked program to a [`Module`] — the workspace analogue of [`bytecode`]. Callers
 /// gate on [`linked`] being `Ok` (and [`linked_checked`] being empty) before reaching a real
 /// `Module`; when the link failed there is nothing to compile, so an empty program stands in (a
