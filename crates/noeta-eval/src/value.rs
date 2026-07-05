@@ -74,6 +74,11 @@ pub enum Value {
     /// A Ring 2 native module (e.g. `json`), bound by `use std.{...}` and identified by its surface
     /// name; `module.func(args)` dispatches to native code via the extension registry.
     NativeModule(String),
+    /// A selectively-imported native-module function (`use std.math.sqrt` → bare `sqrt`), holding
+    /// the `(module, func)` pair. Called (or passed as a value) through the same
+    /// `call_native_module` dispatch as a `module.func(...)` member call — the VM twin is
+    /// `Payload::ModuleFn`, so the two backends agree by construction.
+    ModuleFn(String, String),
     /// An `fs.open` file handle (M2.5): a mutable cursor. `Rc<RefCell<…>>` gives the shared,
     /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
     /// same shared type both backends advance, so behavior is identical by construction.
@@ -710,6 +715,9 @@ impl Value {
                 format!("{{{}}}", parts.join(", "))
             }
             Value::Function(_) => "<fn>".to_string(),
+            // A selectively-imported module function renders as a function (matching the VM's
+            // `Payload::ModuleFn` → `<fn>`), not with the module's `<module …>` form.
+            Value::ModuleFn(..) => "<fn>".to_string(),
             Value::Builtin(b) => format!("<builtin {}>", b.name()),
             Value::EnumType(def) => format!("<enum {}>", def.name()),
             Value::Enum(value) => value.display(),
@@ -755,7 +763,7 @@ impl Value {
             Value::Tuple(_) => "tuple",
             Value::Set(..) => "set",
             Value::Map(..) => "map",
-            Value::Function(_) | Value::Builtin(_) => "function",
+            Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) => "function",
             Value::EnumType(_) => "enum type",
             Value::Enum(_) => "enum",
             Value::Type(_) => "type",
@@ -796,6 +804,7 @@ impl fmt::Debug for Value {
             Value::Set(items, _) => write!(f, "Set({items:?})"),
             Value::Map(entries, _) => write!(f, "Map({entries:?})"),
             Value::Function(_) => write!(f, "Function(<fn>)"),
+            Value::ModuleFn(module, func) => write!(f, "ModuleFn({module}.{func})"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
             Value::EnumType(def) => write!(f, "EnumType({})", def.name()),
             Value::Enum(value) => write!(f, "Enum({})", value.display()),
@@ -837,6 +846,8 @@ impl PartialEq for Value {
             (Value::Enum(a), Value::Enum(b)) => a == b,
             (Value::Object(a), Value::Object(b)) => a == b,
             (Value::NativeModule(a), Value::NativeModule(b)) => a == b,
+            // A selectively-imported module function compares by its `(module, func)` pair.
+            (Value::ModuleFn(am, af), Value::ModuleFn(bm, bf)) => am == bm && af == bf,
             // File handles compare by their full shared state, matching the VM by construction.
             (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
             // Functions and types are not structurally comparable.

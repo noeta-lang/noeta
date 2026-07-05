@@ -430,6 +430,10 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.as_native_fn(), right.as_native_fn()) {
         return a == b;
     }
+    // Selectively-imported native-module functions compare by their `(module, func)` pair.
+    if let (Some(a), Some(b)) = (left.module_fn_parts(), right.module_fn_parts()) {
+        return a == b;
+    }
     false
 }
 

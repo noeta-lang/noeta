@@ -145,6 +145,10 @@ pub enum Const {
     /// A Ring 2 native module, by surface name (`use std.{json}` lowers to loading this then
     /// storing it into the named global).
     NativeModule(String),
+    /// A selectively-imported native-module function (`use std.math.sqrt`): the `(module, func)`
+    /// pair, loaded then stored into the bare-name global. Called (or passed as a value) through the
+    /// same `call_native_module` path as a `<module>.<func>` member call.
+    ModuleFn { module: String, func: String },
 }
 
 /// One segment of a fused string interpolation ([`Op::BuildString`], P-VMT-STR). A `Literal` is a
@@ -1286,6 +1290,7 @@ fn const_repr(c: &Const) -> String {
         Const::F32(f) => format!("{f:?}f32"),
         Const::Str(s) => format!("{s:?}"),
         Const::NativeModule(name) => format!("module {name}"),
+        Const::ModuleFn { module, func } => format!("fn {module}.{func}"),
     }
 }
 

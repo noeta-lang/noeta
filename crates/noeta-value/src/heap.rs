@@ -312,6 +312,11 @@ pub(crate) enum Payload {
     /// A first-class prelude builtin (`len`/`map`/`filter`/`sum`) used as a value. A leaf (the
     /// `Builtin` id is plain data); `noeta-vm` dispatches it at an indirect call site.
     NativeFn(Builtin),
+    /// A selectively-imported native-module function (`use std.math.sqrt` → bare `sqrt`) used as a
+    /// value or called directly. A leaf (two owned `String`s, no child values); dispatched through
+    /// the same `call_native_module` path as a `<module>.<func>` member call, so the two backends
+    /// agree by construction.
+    ModuleFn { module: String, func: String },
     /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
     /// pending write buffer. The whole state machine lives in `noeta_stdlib::FileHandle` so it is
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
@@ -681,6 +686,7 @@ pub(crate) fn free(value: Value) {
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::ModuleFn { .. }
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)
@@ -862,6 +868,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Int(_)
         | Payload::NativeModule(_)
         | Payload::NativeFn(_)
+        | Payload::ModuleFn { .. }
         | Payload::PackedList { .. }
         | Payload::Timer(_)
         | Payload::Handle(..)

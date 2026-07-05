@@ -5190,17 +5190,28 @@ impl<'m> Vm<'m> {
                     }
                     result
                 }
-                None => {
-                    let type_name = callee.type_name();
-                    for a in args {
-                        release(a);
+                // A selectively-imported native-module function (`use std.math.sqrt`) called by its
+                // bare name — dispatched through the same `call_native_module` as `math.sqrt(...)`.
+                None => match callee.module_fn_parts() {
+                    Some((module, func)) => {
+                        let result = self.call_native_module(&module, &func, &args, span);
+                        for a in &args {
+                            release(*a);
+                        }
+                        result
                     }
-                    Err(self.error(
-                        DiagnosticCode::TypeMismatch,
-                        span,
-                        format!("{type_name} is not callable"),
-                    ))
-                }
+                    None => {
+                        let type_name = callee.type_name();
+                        for a in args {
+                            release(a);
+                        }
+                        Err(self.error(
+                            DiagnosticCode::TypeMismatch,
+                            span,
+                            format!("{type_name} is not callable"),
+                        ))
+                    }
+                },
             },
         }
     }
@@ -5397,11 +5408,23 @@ impl<'m> Vm<'m> {
                     set_reg(regs, caller_base, dst, result);
                     Ok(false)
                 }
-                None => Err(self.error(
-                    DiagnosticCode::TypeMismatch,
-                    span,
-                    format!("{} is not callable", callee_val.type_name()),
-                )),
+                // A selectively-imported native-module function called by its bare name.
+                None => match callee_val.module_fn_parts() {
+                    Some((module, func)) => {
+                        let arg_vals: Vec<Value> = arg_regs
+                            .iter()
+                            .map(|&r| regs[caller_base + r as usize])
+                            .collect();
+                        let result = self.call_native_module(&module, &func, &arg_vals, span)?;
+                        set_reg(regs, caller_base, dst, result);
+                        Ok(false)
+                    }
+                    None => Err(self.error(
+                        DiagnosticCode::TypeMismatch,
+                        span,
+                        format!("{} is not callable", callee_val.type_name()),
+                    )),
+                },
             },
         }
     }

@@ -507,6 +507,10 @@ struct Checker {
     /// Names bound to a Ring 2 stdlib module by a `use std.{…}` import (`json`, `fs`, …). A call
     /// `m.f(args)` on such a name resolves through [`stdlib::module_return`].
     modules: HashSet<String>,
+    /// Names brought into scope bare by a selective member import (`use std.math.sqrt` → `sqrt`),
+    /// each mapped to its `(module, func)`. A bare call `sqrt(args)` types through
+    /// [`stdlib::module_return`] exactly like the qualified `math.sqrt(args)`.
+    imported_fns: HashMap<String, (String, String)>,
     /// Every name a type annotation may legally resolve to: declared records/classes/enums plus
     /// names brought in by a `use` (whether merged in by the linker or left as an opaque stub).
     /// Built-in names and in-scope generic parameters are *not* stored here — they are checked
@@ -1177,9 +1181,30 @@ impl Checker {
                 // opaque stub) is a legal referent for an annotation — registered as a known type.
                 Stmt::Use { path, names, .. } => {
                     let is_std = path.len() == 1 && path[0] == "std";
+                    // A selective member import `use std.<mod>.<fn>` — a two-segment `std` path whose
+                    // second segment is a known module. Each name binds as a bare function alias.
+                    let selective = (path.len() == 2 && path[0] == "std")
+                        .then(|| path[1].clone())
+                        .filter(|m| stdlib::is_std_module(m));
                     for name in names {
                         if is_std && stdlib::is_std_module(&name.name) {
                             self.modules.insert(name.name.clone());
+                        } else if let Some(module) = &selective {
+                            if noeta_stdlib::registry::is_module_function(module, &name.name) {
+                                self.imported_fns.insert(
+                                    name.name.clone(),
+                                    (module.clone(), name.name.clone()),
+                                );
+                            } else {
+                                self.error(
+                                    DiagnosticCode::UnknownName,
+                                    name.span,
+                                    format!(
+                                        "module `{module}` has no function `{}`",
+                                        name.name
+                                    ),
+                                );
+                            }
                         } else {
                             self.types.insert(name.name.clone());
                         }
@@ -2711,6 +2736,13 @@ impl Checker {
                         ret: Box::new(sig.ret.clone()),
                     })
                 })
+                // A selectively-imported module function referenced as a value (`let f = sqrt`).
+                .or_else(|| {
+                    self.imported_fns.contains_key(name).then(|| Type::Fn {
+                        params: Vec::new(),
+                        ret: Box::new(Type::Dyn),
+                    })
+                })
                 .unwrap_or(Type::Unknown),
             Expr::Unary { op, operand, span } => {
                 // A negated fixed-width literal (`-128i8`, `-1i32`): check against the *signed*
@@ -3730,6 +3762,18 @@ impl Checker {
                     let ret = sig.ret.clone();
                     self.check_args(&params, required, args, span, name);
                     return ret;
+                }
+                // A selectively-imported module function (`use std.math.sqrt`) called bare — typed
+                // exactly like the qualified `math.sqrt(args)` (same params/return tables). A local
+                // binding of the same name shadows it (checked first, in the arms above via `env`).
+                if let Some((module, func)) = self.imported_fns.get(name).cloned()
+                    && lookup(env, name).is_none()
+                {
+                    if let Some(params) = stdlib::module_params(&module, &func) {
+                        let n = params.len();
+                        self.check_args(&params, n, args, span, &func);
+                    }
+                    return stdlib::module_return(&module, &func, args).unwrap_or(Type::Unknown);
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
                 // arguments are not arity-checked here.

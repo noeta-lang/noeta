@@ -246,6 +246,20 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
         .find(|f| f.name == func)
 }
 
+/// Whether `<module>.<func>` names a callable std-module function — the single predicate the
+/// checker and both backends share to decide what a selective member import (`use std.<mod>.<fn>`)
+/// binds, so all three agree by construction. Covers every registered function plus the handful of
+/// non-registry ones that still dispatch through a per-backend fallback (the `vec` bulk `*_all`
+/// kernels and `fs.list`, both pending `vec`/`fs` refinements — see `noeta-check::stdlib`).
+pub fn is_module_function(module: &str, func: &str) -> bool {
+    find_function(module, func).is_some()
+        || matches!(
+            (module, func),
+            ("vec", "add_all" | "sub_all" | "scale_all" | "dot_all" | "length_all")
+                | ("fs", "list")
+        )
+}
+
 /// Dispatch a registered module function. Returns the canonical "no such function" error if the
 /// module is unknown (the backends only ever dispatch a name they bound, so that is unreachable
 /// in practice).

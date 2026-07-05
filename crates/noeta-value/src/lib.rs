@@ -1297,6 +1297,27 @@ impl Value {
         }
     }
 
+    /// A selectively-imported native-module function value (refcount 1), e.g. `sqrt` from
+    /// `use std.math.sqrt` — the `(module, func)` pair to hand to `call_native_module`.
+    pub fn module_fn(module: &str, func: &str) -> Value {
+        heap::alloc(Payload::ModuleFn {
+            module: module.to_string(),
+            func: func.to_string(),
+        })
+    }
+
+    /// The `(module, func)` pair, if this is a selectively-imported native-module function value.
+    pub fn module_fn_parts(self) -> Option<(String, String)> {
+        if self.is_pointer() {
+            heap::with_payload(self, |p| match p {
+                Payload::ModuleFn { module, func } => Some((module.clone(), func.clone())),
+                _ => None,
+            })
+        } else {
+            None
+        }
+    }
+
     /// A heap map (refcount 1), keyed by owned strings, presenting in sorted-key order. As with
     /// [`Value::list`], the map takes ownership of one reference to each value. The caller passes a
     /// `BTreeMap` (a convenient sorted builder); it is stored internally as a `HashMap` for O(1)
@@ -2012,7 +2033,9 @@ impl Value {
                 Payload::Bytes(b) => format!("<{} bytes>", b.len()),
                 Payload::Int(i) => i.to_string(),
                 // Mirrors the M0 tree-walker's `Value::Function(_) => "<fn>"` (and `Builtin`).
-                Payload::Closure { .. } | Payload::NativeFn(_) => "<fn>".to_string(),
+                Payload::Closure { .. } | Payload::NativeFn(_) | Payload::ModuleFn { .. } => {
+                    "<fn>".to_string()
+                }
                 // A cell is internal capture storage and never reaches a display site (the
                 // compiler derefs it first); render transparently as its contents if it ever does.
                 Payload::Cell(inner) => inner.display(),
@@ -2165,7 +2188,7 @@ impl Value {
                         .map(|(name, v)| (name.clone(), v.to_native_deep()))
                         .collect(),
                 ),
-                Payload::Closure { .. } | Payload::NativeFn(_) => {
+                Payload::Closure { .. } | Payload::NativeFn(_) | Payload::ModuleFn { .. } => {
                     NativeValue::Str("<fn>".to_string())
                 }
                 Payload::Cell(inner) => inner.to_native_deep(),
@@ -2224,7 +2247,10 @@ impl Value {
             // Boxed ints were already caught by `as_int` above, so a pointer here is a
             // closure, list, map, or string. M0 names both user functions and builtins
             // "function".
-            if self.as_closure().is_some() || self.as_native_fn().is_some() {
+            if self.as_closure().is_some()
+                || self.as_native_fn().is_some()
+                || self.module_fn_parts().is_some()
+            {
                 "function"
             } else if self.is_list() {
                 "list"

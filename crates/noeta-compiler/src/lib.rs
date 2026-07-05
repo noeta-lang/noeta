@@ -90,6 +90,21 @@ fn is_native_module(path: &[String], name: &str) -> bool {
     path == ["std"] && noeta_stdlib::registry::find_module(name).is_some()
 }
 
+/// For a selective member import `use std.<mod>.<name>` — `path == ["std", <mod>]` where `<mod>` is a
+/// native module — the module name. Each imported `<name>` then binds as a bare global holding a
+/// [`Const::ModuleFn`], called (or passed) through the same `call_native_module` path as
+/// `<mod>.<name>(...)`. `None` for a plain module import (`use std.{math}`) or a non-std path.
+fn selective_import_module(path: &[String]) -> Option<&str> {
+    if path.len() == 2
+        && path[0] == "std"
+        && noeta_stdlib::registry::find_module(&path[1]).is_some()
+    {
+        Some(&path[1])
+    } else {
+        None
+    }
+}
+
 /// Compile a whole program to a [`Module`], or report the first unsupported construct.
 ///
 /// Three passes: (1) register every top-level type so forward references resolve and shapes
@@ -410,8 +425,11 @@ impl ModuleCompiler {
                     self.module_fns.insert(decl.name.clone());
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
+                    // A plain module import (`use std.{math}`) binds the module name; a selective
+                    // member import (`use std.math.sqrt`) binds each member as a bare global.
+                    let selective = selective_import_module(path).is_some();
                     for imported in names {
-                        if is_native_module(path, &imported.name) {
+                        if is_native_module(path, &imported.name) || selective {
                             self.module_globals.insert(imported.name.clone(), false);
                         }
                     }
@@ -548,10 +566,12 @@ impl ModuleCompiler {
                         .insert(decl.name.clone(), TypeInfo::Enum { variants, fns });
                 }
                 noeta_ast::Stmt::Use { path, names, .. } => {
+                    // A `use std.{json}` native module — or a selective member import
+                    // (`use std.math.sqrt`) — resolves as a global value bound at the `use` site,
+                    // not an opaque type, so neither is registered here.
+                    let selective = selective_import_module(path).is_some();
                     for imported in names {
-                        // A `use std.{json}` native module resolves as a global value (bound at
-                        // the `use` site), not an opaque type, so it is not registered here.
-                        if is_native_module(path, &imported.name) {
+                        if is_native_module(path, &imported.name) || selective {
                             continue;
                         }
                         self.types.insert(imported.name.clone(), TypeInfo::Opaque);
@@ -1351,10 +1371,25 @@ impl<'m> FnCompiler<'m> {
             Decl::Fn { name, func, .. } => self.declare_fn(name, func),
             Decl::Class(_) | Decl::Enum(_) | Decl::Struct(_) => Ok(()),
             Decl::Use { path, names, .. } => {
+                let selective = selective_import_module(path);
                 for imported in names {
                     if is_native_module(path, &imported.name) {
                         let value = self.alloc_reg();
                         let k = self.add_const(Const::NativeModule(imported.name.clone()));
+                        self.code.push(Op::LoadConst { dst: value, k });
+                        let global = self.module.intern_global(&imported.name);
+                        self.code.push(Op::StoreGlobal { global, src: value });
+                    } else if let Some(module) = selective
+                        && noeta_stdlib::registry::is_module_function(module, &imported.name)
+                    {
+                        // `use std.math.sqrt` — bind `sqrt` to a `(math, sqrt)` module-function value.
+                        // An unknown member is left unbound (the checker reports it); a bare call then
+                        // raises E0005 like any missing name.
+                        let value = self.alloc_reg();
+                        let k = self.add_const(Const::ModuleFn {
+                            module: module.to_string(),
+                            func: imported.name.clone(),
+                        });
                         self.code.push(Op::LoadConst { dst: value, k });
                         let global = self.module.intern_global(&imported.name);
                         self.code.push(Op::StoreGlobal { global, src: value });

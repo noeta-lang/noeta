@@ -1533,12 +1533,20 @@ impl Interpreter {
     /// M0 each imported name resolves to an *opaque stub type* so references and all-fields
     /// literals (`User { name: ... }`) work even though the type's real shape is unknown.
     fn declare_use(&mut self, path: &[String], names: &[noeta_ast::UseName]) {
-        // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; other
-        // imports (and unrecognized `std` names) fall back to the opaque-stub binding.
+        // `use std.{json, ...}` binds each recognized name to its Ring 2 native module; a selective
+        // member import (`use std.math.sqrt`) binds each member to a `(module, func)` module-function
+        // value; other imports (and unrecognized `std` names) fall back to the opaque-stub binding.
         let is_std = path == ["std"];
+        let selective_module = (path.len() == 2 && path[0] == "std")
+            .then(|| path[1].as_str())
+            .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
         for imported in names {
             let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some() {
                 Value::NativeModule(imported.name.clone())
+            } else if let Some(module) = selective_module
+                && noeta_stdlib::registry::is_module_function(module, &imported.name)
+            {
+                Value::ModuleFn(module.to_string(), imported.name.clone())
             } else {
                 Value::Type(Rc::new(TypeDef {
                     name: imported.name.clone(),
@@ -3265,6 +3273,11 @@ impl Interpreter {
     fn call(&mut self, callee: Value, args: Vec<Value>, span: Span) -> Eval<Value> {
         match callee {
             Value::Builtin(builtin) => self.call_builtin(builtin, args, span),
+            // A selectively-imported module function (`use std.math.sqrt`) called by its bare name —
+            // dispatched exactly like the `math.sqrt(...)` member call.
+            Value::ModuleFn(module, func) => {
+                self.call_native_module(&module, &func, &args, span)
+            }
             Value::Function(closure) => self.call_closure(&closure, args, span),
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
@@ -4507,7 +4520,9 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Map(dyn_(), dyn_())),
-        Value::Function(_) | Value::Builtin(_) => TypeRepr::Fn(Vec::new(), dyn_()),
+        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) => {
+            TypeRepr::Fn(Vec::new(), dyn_())
+        }
         // A generic enum instance carrying a reflected type tag (R2b.2) reports its precise type;
         // otherwise the head-only classification (`Option`/`Result` by name, else the enum name with
         // empty args). Mirrors `vm_type_repr`'s node-tag consultation.
@@ -4701,7 +4716,9 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         TypeRef::Tuple { .. } => matches!(value, Value::Tuple(_)),
         // A function type is erased to a head-constructor "is callable" test (params/return dropped),
         // matching the VM's `NarrowTarget::Fn` (type_name `"function"`).
-        TypeRef::Fn { .. } => matches!(value, Value::Function(_) | Value::Builtin(_)),
+        TypeRef::Fn { .. } => {
+            matches!(value, Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..))
+        }
         TypeRef::Named { name, args, .. } => {
             let head_ok = match name.as_str() {
                 "int" => matches!(value, Value::Int(_)),
@@ -4988,7 +5005,9 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
             )
         }
         Value::Enum(e) => NativeValue::Str(e.variant.clone()),
-        Value::Function(_) | Value::Builtin(_) => NativeValue::Str("<fn>".to_string()),
+        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) => {
+            NativeValue::Str("<fn>".to_string())
+        }
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
