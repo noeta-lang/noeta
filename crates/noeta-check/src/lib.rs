@@ -242,6 +242,9 @@ fn type_to_repr(
         Type::Int => TypeRepr::Int,
         Type::Float => TypeRepr::Float,
         Type::F32 => TypeRepr::F32,
+        // `f64` is bit-identical to `float` at runtime (P-NUM-SYM), so reflection reports `Float` —
+        // consistent with the shared value, just as the fixed-width integers report `Int`.
+        Type::F64 => TypeRepr::Float,
         // Fixed-width integers are **erased to `int`** at runtime (Tier W), so runtime reflection
         // (`type_of`) cannot recover the width — it reports `Int`, consistent with the erased value.
         Type::IntN { .. } => TypeRepr::Int,
@@ -2628,6 +2631,12 @@ impl Checker {
                 }
                 expected.clone()
             }
+            // A bare float literal coerces into an **`f64`** context — `mut x: f64 = 1.5`,
+            // `f(1.5)` where the parameter is `f64` (P-NUM-SYM). This is representation-free: `f64`
+            // is bit-identical to `float`, so the literal still lowers to a 64-bit float value; only
+            // its static type is pinned to the strict `f64`. (`f32` is a *distinct* 32-bit
+            // representation, so it keeps requiring its `1.5f32` suffix — no adaptation here.)
+            Expr::Float { .. } if matches!(expected, Type::F64) => Type::F64,
             // Default: synthesize the actual type, then require it to be a subtype of the
             // expectation.
             _ => {
@@ -3506,6 +3515,11 @@ impl Checker {
                 if matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }) {
                     return self.synth_intn_arith(op, &lt, &rt, span);
                 }
+                // Strict fixed-width floats (P-NUM-SYM): `f32`/`f64` arithmetic is same-type-only,
+                // exactly like `IntN` — no implicit widening with `int`/`float` or between each other.
+                if matches!(lt, Type::F32 | Type::F64) || matches!(rt, Type::F32 | Type::F64) {
+                    return self.synth_fixed_float_arith(op, &lt, &rt, span);
+                }
                 // Arithmetic is trait-backed: `+`→`Add`, … (`%` has no trait — numerics only). An
                 // operand must satisfy that trait — a built-in numeric, a user type that `impl`s it,
                 // or a type parameter bounded by it; a `dyn`/hole defers. Otherwise it is rejected,
@@ -3536,6 +3550,10 @@ impl Checker {
                 // `Comparable` path (which the width-carrying `WideInt` op then implements).
                 if matches!(lt, Type::IntN { .. }) || matches!(rt, Type::IntN { .. }) {
                     self.synth_intn_compare(op, &lt, &rt, span);
+                    return Type::Bool;
+                }
+                if matches!(lt, Type::F32 | Type::F64) || matches!(rt, Type::F32 | Type::F64) {
+                    self.synth_fixed_float_compare(op, &lt, &rt, span);
                     return Type::Bool;
                 }
                 if !self.operand_satisfies_operator(&lt, BuiltinTrait::Comparable)
@@ -5144,6 +5162,7 @@ fn type_relevant(ty: &Type, reachable: &HashSet<String>) -> bool {
         | Type::Int
         | Type::Float
         | Type::F32
+        | Type::F64
         | Type::IntN { .. }
         | Type::Bool
         | Type::String

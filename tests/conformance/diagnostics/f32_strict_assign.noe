@@ -1,6 +1,6 @@
-// P-PACK Phase 3: assignment between numeric types is strict (like `int`/`float` today — `let x:
-// float = 1` is rejected). A `float` literal does not silently narrow to `f32`, nor does `f32` widen
-// to `float` in assignment (only arithmetic widens). Construct an `f32` with the `f32` suffix instead.
+// P-PACK Phase 3 + P-NUM-SYM: assignment between numeric types is strict. A `float` literal does not
+// silently narrow to `f32`, nor does `f32` widen to `float`. `f32` is a strict fixed-width type, so
+// neither assignment nor arithmetic widens it. Construct an `f32` with the `f32` suffix instead.
 // expect: error E0007 at 7:14
 // expect: error E0007 at 8:16
 // expect: exit 1

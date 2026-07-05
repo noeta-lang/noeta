@@ -1,0 +1,35 @@
+// P-NUM-SYM: `f64` is the strict fixed-width 64-bit float — the float twin of `i64`. It is
+// bit-identical to `float` at runtime (both IEEE f64), so it displays and computes identically; the
+// only difference is coercion. A bare float literal adapts into an `f64` context (`mut x: f64 =
+// 1.5`), and `to_f64()` produces one; arithmetic and comparison are strict (same-type-only), so
+// mixing with `int`/`float`/`f32` is `E0044`. The differential pins eval against the VM.
+// expect: stdout "3.5"
+// expect: stdout "3.0"
+// expect: stdout "-0.5"
+// expect: stdout "0.75"
+// expect: stdout "0.30000000000000004"
+// expect: stdout "true"
+// expect: stdout "false"
+// expect: stdout "6.0"
+// expect: stdout "-2.0"
+// expect: exit 0
+mut x: f64 = 1.5
+mut y: f64 = 2.0
+echo x + y
+echo x * y
+echo x - y
+echo x / y
+// f64 shares float's full 64-bit precision (unlike f32's rounded 0.3).
+mut a: f64 = 0.1
+mut b: f64 = 0.2
+echo a + b
+echo x < y
+echo x == y
+// Interop with `int`/`float` is strict — convert explicitly.
+echo x.to_float() + 4.5
+mut s: f64 = 0.0
+mut half: f64 = 0.5
+for i in 0..4 {
+  s = s - half
+}
+echo s
