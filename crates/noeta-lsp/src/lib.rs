@@ -20,8 +20,10 @@
 //! workspace program (slice **W2**), so an imported name resolves and go-to-definition can land in a
 //! *different file*. Slice **L4** adds **document symbols**: the entry document's declarations become
 //! the hierarchical outline the editor renders (see [`symbols`]). Slice **L5** adds **completion**:
-//! the cursor offers the language keywords, the top-level declarations, and the value bindings in
-//! scope there (see [`completion`]). Positions are converted encoding-aware (see [`offsets`]).
+//! on a member access `receiver.member` the cursor offers the receiver type's fields, variants, and
+//! methods; otherwise it offers the language keywords, the top-level declarations, and the value
+//! bindings in scope there (see [`completion`]). Positions are converted encoding-aware (see
+//! [`offsets`]).
 
 mod completion;
 mod hover;
@@ -302,10 +304,15 @@ impl DocumentStore {
         self.locate(cache, def_span, encoding)
     }
 
-    /// The completion candidates at `position` in `uri`: the language keywords, the top-level
-    /// declarations, and the value bindings in scope at the cursor (see [`completion`]). A
-    /// single-file, best-effort read of the entry document's AST — the document is mid-edit, so it
-    /// relies on the recovering parser and the client's prefix filtering. `None` if not open.
+    /// The completion candidates at `position` in `uri`. When the cursor is on a member access
+    /// `receiver.member` (the parser produced the access), the receiver's type is resolved from the
+    /// workspace type index and the completions are that type's fields, variants, and methods
+    /// (**member completion**, C2) — resolved against the merged program, so an imported type's
+    /// members resolve too. Otherwise the completions are the language keywords, the top-level
+    /// declarations, and the value bindings in scope at the cursor (**identifier completion**, C1).
+    ///
+    /// A best-effort read of the mid-edit document: it relies on the recovering parser and the
+    /// client's prefix filtering. `None` if the document is not open.
     fn completions(
         &self,
         uri: &str,
@@ -313,11 +320,36 @@ impl DocumentStore {
         encoding: Encoding,
     ) -> Option<Vec<completion::Candidate>> {
         let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
         let entry = cache.entry();
-        let index = LineIndex::new(entry.text(&self.db));
+        let index = LineIndex::new(entry.text(db));
         let offset = index.offset(position, encoding);
-        let program = &noeta_db::ast(&self.db, entry).0.program;
-        Some(completion::complete(program, offset, SourceId::FIRST))
+        let cursor = SourceId::FIRST;
+
+        // Prefer the merged workspace program (so an imported type's members resolve); fall back to
+        // the entry's own AST while a sibling is unparseable.
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+
+        // Member completion: if the parser produced a `receiver.member` access under the cursor and
+        // the receiver's type is a known nominal, offer that type's members — nothing else (an
+        // identifier suggestion after a `.` would be noise).
+        let def_use = resolve::DefUse::build(program);
+        if let Some((receiver_span, _member)) = def_use.member_at(offset, cursor) {
+            let members = noeta_db::linked_checked_ide(db, cache.workspace)
+                .expr_types
+                .get(&receiver_span)
+                .and_then(nominal_name)
+                .map(|type_name| completion::members_of(program, type_name))
+                .unwrap_or_default();
+            return Some(members);
+        }
+
+        Some(completion::complete(program, offset, cursor))
     }
 
     /// The document outline for `uri`: the hierarchical symbol tree (top-level functions and type
@@ -408,6 +440,9 @@ fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
         CandidateKind::Class => CompletionItemKind::CLASS,
         CandidateKind::Enum => CompletionItemKind::ENUM,
         CandidateKind::Variable => CompletionItemKind::VARIABLE,
+        CandidateKind::Field => CompletionItemKind::FIELD,
+        CandidateKind::Method => CompletionItemKind::METHOD,
+        CandidateKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
     };
     CompletionItem {
         label: candidate.label.clone(),
@@ -1081,6 +1116,51 @@ mod tests {
         assert!(has("helper", CompletionItemKind::FUNCTION));
         assert!(has("total", CompletionItemKind::VARIABLE));
         assert!(has("return", CompletionItemKind::KEYWORD));
+    }
+
+    #[test]
+    fn completions_after_a_dot_offer_the_receiver_type_members() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///m.noe",
+            "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.ge".to_string(),
+        );
+        // Cursor at the end of the partial member `c.ge` (last line) — offer Counter's members only.
+        let text = &store.buffers["file:///m.noe"];
+        let last = text.lines().count() as u32 - 1;
+        let col = text.lines().next_back().unwrap().chars().count() as u32;
+        let items = store
+            .completions(
+                "file:///m.noe",
+                Position {
+                    line: last,
+                    character: col,
+                },
+                Encoding::Utf8,
+            )
+            .expect("open document offers completions")
+            .iter()
+            .map(to_completion_item)
+            .collect::<Vec<_>>();
+        // Members present with member kinds…
+        assert!(
+            items
+                .iter()
+                .any(|i| i.label == "get" && i.kind == Some(CompletionItemKind::METHOD)),
+            "method `get` offered; got {items:?}"
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i.label == "n" && i.kind == Some(CompletionItemKind::FIELD))
+        );
+        // …and nothing else (no keywords/locals leaking in after the dot).
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.kind == Some(CompletionItemKind::KEYWORD)),
+            "keywords must not appear in member completion; got {items:?}"
+        );
     }
 
     #[test]

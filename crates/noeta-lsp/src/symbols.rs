@@ -141,8 +141,8 @@ fn impl_symbol(decl: &ImplDecl) -> SymbolNode {
 }
 
 /// The payload detail of an enum variant: its associated field types as `(A, B)`, or `None` for a
-/// fieldless variant.
-fn variant_detail(variant: &VariantDecl) -> Option<String> {
+/// fieldless variant. Shared with member completion.
+pub(crate) fn variant_detail(variant: &VariantDecl) -> Option<String> {
     if variant.fields.is_empty() {
         return None;
     }
@@ -156,8 +156,8 @@ fn variant_detail(variant: &VariantDecl) -> Option<String> {
 }
 
 /// A function/method signature detail: `(name: T, …) -> R`, omitting the arrow when there is no
-/// declared return type.
-fn fn_signature(decl: &FnDecl) -> String {
+/// declared return type. Shared with member completion.
+pub(crate) fn fn_signature(decl: &FnDecl) -> String {
     let params = decl
         .params
         .iter()
@@ -179,8 +179,8 @@ fn param_detail(param: &Param) -> String {
 }
 
 /// Render a surface [`TypeRef`] back to compact source syntax for symbol detail (`List<int>`, `?T`,
-/// `A | B`, `(A, B)`, `(A) -> R`).
-fn render_type_ref(ty: &TypeRef) -> String {
+/// `A | B`, `(A, B)`, `(A) -> R`). Shared with member completion.
+pub(crate) fn render_type_ref(ty: &TypeRef) -> String {
     match ty {
         TypeRef::Named { name, args, .. } => {
             if args.is_empty() {

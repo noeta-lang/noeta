@@ -1,15 +1,18 @@
-//! Completion candidates for `textDocument/completion` (slice **L5**, sub-slice **C1**).
+//! Completion candidates for `textDocument/completion` (slice **L5**).
 //!
-//! The always-available identifier completions at a cursor: the language keywords, the top-level
-//! declarations (functions and types), and the value bindings in scope (locals, parameters,
-//! `for`/`match`/closure bindings, and earlier module-level bindings). Member/method completion
-//! after `.` is a later sub-slice.
+//! Two forms, chosen by the caller from the cursor context:
 //!
-//! A single-file, best-effort read of the parsed AST — the document is mid-edit, so this leans on
-//! the recovering parser and the client's own prefix filtering rather than requiring a clean parse.
-//! [`complete`] returns backend-neutral [`Candidate`]s (label + kind + optional detail); the server
-//! maps each to an LSP `CompletionItem`. In-scope bindings come from [`resolve::visible_at`], so the
-//! same scoping walk backs completion and go-to-definition.
+//! - [`complete`] — **identifier completion** (C1): the language keywords, the top-level
+//!   declarations (functions and types), and the value bindings in scope at the cursor (locals,
+//!   parameters, `for`/`match`/closure bindings, and earlier module-level bindings). In-scope
+//!   bindings come from [`resolve::visible_at`], so the same scoping walk backs completion and
+//!   go-to-definition.
+//! - [`members_of`] — **member completion** (C2): the fields, enum variants, and methods of a named
+//!   type, offered on a `receiver.member` access once the caller has resolved the receiver's type.
+//!
+//! A best-effort read of the mid-edit AST — it leans on the recovering parser and the client's own
+//! prefix filtering rather than requiring a clean parse. Both return backend-neutral [`Candidate`]s
+//! (label + kind + optional detail) that the server maps to LSP `CompletionItem`s.
 
 use std::collections::HashSet;
 
@@ -17,6 +20,7 @@ use noeta_ast::{Program, Stmt};
 use noeta_span::SourceId;
 
 use crate::resolve;
+use crate::symbols;
 
 /// What a completion candidate is, for the client's icon and the server's `CompletionItemKind`
 /// mapping.
@@ -29,6 +33,12 @@ pub enum CandidateKind {
     Enum,
     /// A local, parameter, or other in-scope value binding.
     Variable,
+    /// A struct/class field (member completion after `.`).
+    Field,
+    /// A method (member completion after `.`).
+    Method,
+    /// An enum variant (member completion after `.`).
+    EnumMember,
 }
 
 /// One completion candidate: the inserted/filtered text, its kind, and an optional short detail.
@@ -124,6 +134,61 @@ pub fn complete(program: &Program, offset: u32, source: SourceId) -> Vec<Candida
     dedupe_by_label(candidates)
 }
 
+/// The member candidates of the type named `type_name` in `program`: its fields, enum variants, and
+/// methods, each with a signature/type detail — for member completion after `.`, once the receiver's
+/// type is known. Empty if no such type is declared (or it declares no members). The `program`
+/// should be the merged workspace program so a type imported from a sibling resolves.
+pub fn members_of(program: &Program, type_name: &str) -> Vec<Candidate> {
+    let mut members = Vec::new();
+    for stmt in &program.stmts {
+        match stmt {
+            Stmt::Struct(decl) if decl.name == type_name => {
+                for field in &decl.fields {
+                    members.push(Candidate {
+                        label: field.name.clone(),
+                        kind: CandidateKind::Field,
+                        detail: field.ty.as_ref().map(symbols::render_type_ref),
+                    });
+                }
+                push_methods(&mut members, &decl.methods);
+            }
+            Stmt::Class(decl) if decl.name == type_name => {
+                for field in &decl.fields {
+                    members.push(Candidate {
+                        label: field.name.clone(),
+                        kind: CandidateKind::Field,
+                        detail: field.ty.as_ref().map(symbols::render_type_ref),
+                    });
+                }
+                push_methods(&mut members, &decl.methods);
+            }
+            Stmt::Enum(decl) if decl.name == type_name => {
+                for variant in &decl.variants {
+                    members.push(Candidate {
+                        label: variant.name.clone(),
+                        kind: CandidateKind::EnumMember,
+                        detail: symbols::variant_detail(variant),
+                    });
+                }
+                push_methods(&mut members, &decl.methods);
+            }
+            _ => {}
+        }
+    }
+    dedupe_by_label(members)
+}
+
+/// Append each method as a `Method` candidate carrying its signature.
+fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
+    for method in methods {
+        members.push(Candidate {
+            label: method.name.clone(),
+            kind: CandidateKind::Method,
+            detail: Some(symbols::fn_signature(method)),
+        });
+    }
+}
+
 /// Keep the first candidate for each label, preserving order.
 fn dedupe_by_label(candidates: Vec<Candidate>) -> Vec<Candidate> {
     let mut seen = HashSet::new();
@@ -207,6 +272,42 @@ mod tests {
             !vars.contains(&"inner"),
             "leaked a's local into b; got {vars:?}"
         );
+    }
+
+    fn members(src: &str, type_name: &str) -> Vec<Candidate> {
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let lexed = lex(&source);
+        let program = parse(&source, &lexed.tokens).program;
+        members_of(&program, type_name)
+    }
+
+    #[test]
+    fn members_of_a_class_lists_fields_and_methods() {
+        let src = "class Counter { n: int\n  fn get(): int { return self.n }\n}";
+        let ms = members(src, "Counter");
+        let field = ms.iter().find(|c| c.label == "n").unwrap();
+        assert_eq!(field.kind, CandidateKind::Field);
+        assert_eq!(field.detail.as_deref(), Some("int"));
+        let method = ms.iter().find(|c| c.label == "get").unwrap();
+        assert_eq!(method.kind, CandidateKind::Method);
+        assert_eq!(method.detail.as_deref(), Some("() -> int"));
+    }
+
+    #[test]
+    fn members_of_an_enum_lists_variants() {
+        let src = "enum Shape {\n  Dot\n  Circle(radius: int)\n}";
+        let ms = members(src, "Shape");
+        assert_eq!(
+            ms.iter().find(|c| c.label == "Dot").unwrap().kind,
+            CandidateKind::EnumMember
+        );
+        let circle = ms.iter().find(|c| c.label == "Circle").unwrap();
+        assert_eq!(circle.detail.as_deref(), Some("(radius: int)"));
+    }
+
+    #[test]
+    fn members_of_unknown_type_is_empty() {
+        assert!(members("struct Point { x: int }", "Nope").is_empty());
     }
 
     #[test]
