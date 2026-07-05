@@ -16,8 +16,8 @@
 
 use std::collections::HashSet;
 
-use noeta_ast::{Program, Stmt};
-use noeta_span::SourceId;
+use noeta_ast::{FnDecl, Program, Stmt, TypeRef};
+use noeta_span::{SourceId, Span};
 
 use crate::resolve;
 use crate::symbols;
@@ -39,6 +39,8 @@ pub enum CandidateKind {
     Method,
     /// An enum variant (member completion after `.`).
     EnumMember,
+    /// A built-in type name (`int`, `List`, …) offered in a type-annotation position.
+    Type,
 }
 
 /// One completion candidate: the inserted/filtered text, its kind, and an optional short detail.
@@ -186,6 +188,133 @@ fn push_methods(members: &mut Vec<Candidate>, methods: &[noeta_ast::FnDecl]) {
             kind: CandidateKind::Method,
             detail: Some(symbols::fn_signature(method)),
         });
+    }
+}
+
+/// The built-in type names offered in type-annotation position — the primitives, the container
+/// generics, and the fixed-width integers.
+const BUILTIN_TYPES: &[&str] = &[
+    "int", "float", "f32", "bool", "string", "bytes", "unit", "List", "Map", "Set", "Option",
+    "Result", "i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
+];
+
+/// The type names offered in a type-annotation position (C3): the user-declared `struct`/`class`/
+/// `enum` types (with their precise kinds) followed by the built-in types. De-duplicated by label.
+/// `program` should be the merged workspace program so an imported type is offered.
+pub fn type_names(program: &Program) -> Vec<Candidate> {
+    let mut candidates = Vec::new();
+    for stmt in &program.stmts {
+        let (name, kind) = match stmt {
+            Stmt::Struct(decl) => (&decl.name, CandidateKind::Struct),
+            Stmt::Class(decl) => (&decl.name, CandidateKind::Class),
+            Stmt::Enum(decl) => (&decl.name, CandidateKind::Enum),
+            _ => continue,
+        };
+        candidates.push(Candidate {
+            label: name.clone(),
+            kind,
+            detail: None,
+        });
+    }
+    for name in BUILTIN_TYPES {
+        candidates.push(Candidate {
+            label: (*name).to_string(),
+            kind: CandidateKind::Type,
+            detail: None,
+        });
+    }
+    dedupe_by_label(candidates)
+}
+
+/// Whether `offset` falls inside a type-annotation position of `program` — a parameter/field/return/
+/// binding type, an enum backing, or a nested type argument. The caller splices a synthetic type name
+/// in at the cursor and re-parses first, so an *empty* annotation (`x: |`) is detected as the
+/// synthetic name's `TypeRef` covering the cursor, while a map-literal value (`{ "k": | }`) is not (it
+/// parses as a value expression, not a `TypeRef`).
+pub fn is_type_position(program: &Program, offset: u32) -> bool {
+    let mut spans = Vec::new();
+    collect_type_spans(&program.stmts, &mut spans);
+    spans
+        .iter()
+        .any(|span| span.start <= offset && offset <= span.end)
+}
+
+/// Collect the spans of every type annotation reachable through `stmts`, recursing into declaration
+/// bodies (so a binding annotation inside a function is covered) and into nested type arguments.
+fn collect_type_spans(stmts: &[Stmt], out: &mut Vec<Span>) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Binding { ty: Some(ty), .. } => push_type_span(ty, out),
+            Stmt::Fn(decl) => collect_fn_type_spans(decl, out),
+            Stmt::Struct(decl) => {
+                push_field_type_spans(decl.fields.iter().filter_map(|f| f.ty.as_ref()), out);
+                decl.methods
+                    .iter()
+                    .for_each(|m| collect_fn_type_spans(m, out));
+            }
+            Stmt::Class(decl) => {
+                push_field_type_spans(decl.fields.iter().filter_map(|f| f.ty.as_ref()), out);
+                decl.methods
+                    .iter()
+                    .for_each(|m| collect_fn_type_spans(m, out));
+            }
+            Stmt::Enum(decl) => {
+                if let Some(backing) = &decl.backing {
+                    push_type_span(backing, out);
+                }
+                for variant in &decl.variants {
+                    push_field_type_spans(variant.fields.iter().filter_map(|f| f.ty.as_ref()), out);
+                }
+                decl.methods
+                    .iter()
+                    .for_each(|m| collect_fn_type_spans(m, out));
+            }
+            Stmt::If {
+                then_body,
+                else_body,
+                ..
+            } => {
+                collect_type_spans(then_body, out);
+                if let Some(else_body) = else_body {
+                    collect_type_spans(else_body, out);
+                }
+            }
+            Stmt::For { body, .. } | Stmt::While { body, .. } | Stmt::Concurrent { body, .. } => {
+                collect_type_spans(body, out)
+            }
+            _ => {}
+        }
+    }
+}
+
+/// The type spans of a function/method: its parameters, its return type, and — recursing — its body.
+fn collect_fn_type_spans(decl: &FnDecl, out: &mut Vec<Span>) {
+    push_field_type_spans(decl.params.iter().filter_map(|p| p.ty.as_ref()), out);
+    if let Some(ret) = &decl.ret {
+        push_type_span(ret, out);
+    }
+    collect_type_spans(&decl.body, out);
+}
+
+fn push_field_type_spans<'a>(types: impl Iterator<Item = &'a TypeRef>, out: &mut Vec<Span>) {
+    for ty in types {
+        push_type_span(ty, out);
+    }
+}
+
+/// Record a type reference's span and recurse into its nested arguments (so completion inside
+/// `List<|>` or `A | |` is a type position too).
+fn push_type_span(ty: &TypeRef, out: &mut Vec<Span>) {
+    out.push(ty.span());
+    match ty {
+        TypeRef::Named { args, .. } => args.iter().for_each(|a| push_type_span(a, out)),
+        TypeRef::Optional { inner, .. } => push_type_span(inner, out),
+        TypeRef::Union { members, .. } => members.iter().for_each(|m| push_type_span(m, out)),
+        TypeRef::Tuple { elements, .. } => elements.iter().for_each(|e| push_type_span(e, out)),
+        TypeRef::Fn { params, ret, .. } => {
+            params.iter().for_each(|p| push_type_span(p, out));
+            push_type_span(ret, out);
+        }
     }
 }
 
@@ -361,6 +490,51 @@ mod tests {
     #[test]
     fn members_of_unknown_type_is_empty() {
         assert!(members("struct Point { x: int }", "Nope").is_empty());
+    }
+
+    fn program_of(src: &str) -> Program {
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let lexed = lex(&source);
+        parse(&source, &lexed.tokens).program
+    }
+
+    #[test]
+    fn type_names_include_user_types_and_builtins() {
+        let names: Vec<String> =
+            type_names(&program_of("struct Point { x: int }\nenum Color { Red }"))
+                .into_iter()
+                .map(|c| c.label)
+                .collect();
+        assert!(names.contains(&"Point".to_string()));
+        assert!(names.contains(&"Color".to_string()));
+        assert!(names.contains(&"int".to_string()));
+        assert!(names.contains(&"List".to_string()));
+    }
+
+    #[test]
+    fn is_type_position_true_in_annotations() {
+        // A parameter annotation `count: Point`.
+        let src = "fn f(count: Point) {}";
+        let program = program_of(src);
+        let offset = src.find("Point").unwrap() as u32 + 2; // inside the type name
+        assert!(is_type_position(&program, offset));
+    }
+
+    #[test]
+    fn is_type_position_false_in_value_context() {
+        // A map-literal value position — the `Point` here is a value expression, not a type.
+        let src = "m = { \"k\": 1 }\nx = 2";
+        let program = program_of(src);
+        let offset = src.find("x = 2").unwrap() as u32 + 4; // on the `2`
+        assert!(!is_type_position(&program, offset));
+    }
+
+    #[test]
+    fn is_type_position_true_for_nested_type_argument() {
+        let src = "fn f(xs: List<Point>) {}";
+        let program = program_of(src);
+        let offset = src.find("Point").unwrap() as u32 + 1; // inside the `List<Point>` argument
+        assert!(is_type_position(&program, offset));
     }
 
     #[test]

@@ -23,9 +23,9 @@
 //! of the value symbol under the cursor (across modules), reusing the def/use index. Slice **L5** adds
 //! **completion**:
 //! on a member access `receiver.member` the cursor offers the receiver type's fields, variants, and
-//! methods; otherwise it offers the language keywords, the top-level declarations, and the value
-//! bindings in scope there (see [`completion`]). Positions are converted encoding-aware (see
-//! [`offsets`]).
+//! methods; in a type-annotation position it offers the type names; otherwise it offers the language
+//! keywords, the top-level declarations, and the value bindings in scope there (see [`completion`]).
+//! Positions are converted encoding-aware (see [`offsets`]).
 
 mod completion;
 mod hover;
@@ -411,6 +411,11 @@ impl DocumentStore {
             return Some(bare_dot_members(entry_text, offset, program).unwrap_or_default());
         }
 
+        // Type-annotation position (`x: |`, `fn f(): |`, `List<|>`): offer type names only.
+        if let Some(types) = type_position_completion(entry_text, offset, program) {
+            return Some(types);
+        }
+
         Some(completion::complete(program, offset, cursor))
     }
 
@@ -505,6 +510,7 @@ fn to_completion_item(candidate: &completion::Candidate) -> CompletionItem {
         CandidateKind::Field => CompletionItemKind::FIELD,
         CandidateKind::Method => CompletionItemKind::METHOD,
         CandidateKind::EnumMember => CompletionItemKind::ENUM_MEMBER,
+        CandidateKind::Type => CompletionItemKind::INTERFACE,
     };
     CompletionItem {
         label: candidate.label.clone(),
@@ -600,6 +606,35 @@ fn bare_dot_members(
     let (receiver_span, _member) = def_use.member_at(offset, SourceId::FIRST)?;
     let type_name = nominal_name(checked.expr_types.get(&receiver_span)?)?;
     Some(completion::members_of(program, type_name))
+}
+
+/// Type-name candidates when `offset` is in a type-annotation position, else `None`. A synthetic
+/// type name is spliced in at the cursor and the copy re-parsed, so an empty annotation (`x: |`) is
+/// recognised (the synthetic name becomes a `TypeRef` under the cursor) while a value position — a
+/// map-literal value, an initializer — is not (it parses as an expression). The names themselves come
+/// from `program` (the live merged program), so imported types are offered.
+///
+/// Two splice forms are tried: a bare `T` (covers a parameter, field, return, or an annotation whose
+/// binding already has `= value`), and `T = 0` (completes a value-less binding annotation `total: |`,
+/// which does not parse without a right-hand side). Either recognising a type position is enough.
+fn type_position_completion(
+    text: &str,
+    offset: u32,
+    program: &noeta_ast::Program,
+) -> Option<Vec<completion::Candidate>> {
+    // A capitalized synthetic name so it parses as a type reference (`x: T`, `List<T>`).
+    (splices_a_type("T", text, offset) || splices_a_type("T = 0", text, offset))
+        .then(|| completion::type_names(program))
+}
+
+/// Whether splicing `insert` in at `offset` and re-parsing puts a `TypeRef` under the cursor.
+fn splices_a_type(insert: &str, text: &str, offset: u32) -> bool {
+    let o = offset as usize;
+    let munged = format!("{}{insert}{}", &text[..o], &text[o..]);
+    let source = noeta_span::Source::new(SourceId::FIRST, "<completion>", &munged);
+    let lexed = noeta_lexer::lex(&source);
+    let parsed = noeta_parser::parse(&source, &lexed.tokens);
+    completion::is_type_position(&parsed.program, offset)
 }
 
 /// Pick the position encoding: prefer UTF-8 when the client advertises support for it (LSP 3.17),
@@ -1455,6 +1490,76 @@ mod tests {
                 .iter()
                 .any(|c| matches!(c.kind, completion::CandidateKind::Keyword)),
             "a range `..` must fall through to identifier completion"
+        );
+    }
+
+    #[test]
+    fn completions_in_a_type_annotation_offer_type_names_only() {
+        let mut store = DocumentStore::default();
+        // A binding annotation with an empty type after the colon — the `.`-trigger case's cousin.
+        store.open(
+            "file:///t.noe",
+            "struct Point { x: int }\ntotal: ".to_string(),
+        );
+        let text = &store.buffers["file:///t.noe"];
+        let last = text.lines().count() as u32 - 1;
+        let col = text.lines().next_back().unwrap().chars().count() as u32; // after `total: `
+        let items = store
+            .completions(
+                "file:///t.noe",
+                Position {
+                    line: last,
+                    character: col,
+                },
+                Encoding::Utf8,
+            )
+            .expect("offers completions")
+            .iter()
+            .map(to_completion_item)
+            .collect::<Vec<_>>();
+        assert!(
+            items.iter().any(|i| i.label == "Point"),
+            "user type offered in annotation; got {items:?}"
+        );
+        assert!(
+            items.iter().any(|i| i.label == "int" || i.label == "List"),
+            "built-in types offered"
+        );
+        assert!(
+            !items
+                .iter()
+                .any(|i| i.kind == Some(CompletionItemKind::KEYWORD)),
+            "no keywords in a type position; got {items:?}"
+        );
+    }
+
+    #[test]
+    fn completions_in_a_value_position_are_not_type_names() {
+        let mut store = DocumentStore::default();
+        // A binding *initializer* (right of `=`) is a value position — keywords/locals, not types.
+        store.open(
+            "file:///v.noe",
+            "struct Point { x: int }\ntotal = ".to_string(),
+        );
+        let text = &store.buffers["file:///v.noe"];
+        let last = text.lines().count() as u32 - 1;
+        let col = text.lines().next_back().unwrap().chars().count() as u32; // after `total = `
+        let cands = store
+            .completions(
+                "file:///v.noe",
+                Position {
+                    line: last,
+                    character: col,
+                },
+                Encoding::Utf8,
+            )
+            .expect("offers completions");
+        // Identifier completion here includes keywords; a type-position result would not.
+        assert!(
+            cands
+                .iter()
+                .any(|c| matches!(c.kind, completion::CandidateKind::Keyword)),
+            "a value position must fall through to identifier completion; got {cands:?}"
         );
     }
 
