@@ -68,9 +68,16 @@ which range-checks an `IntN` (E0044) and records the `f32` narrowing site. `chec
 argument **expressions** (a new `&[Expr]` parameter, plumbed through `synth_call` /
 `call_user_method` / `check_method_args`) and tries adaptation before the type-based
 `arg_assignable` — so the `int`/`float` value-widening leniency is preserved, and only *literals*
-adapt (a non-literal int *value* into an `i64` param is still E0007). Generic-function calls (which
-resolve args via `arg_assignable` on substituted type-vars, not `check_args`) are the one remaining
-non-adapting corner; a concrete fixed-width param of a generic fn is a rare edge, left for later.
+adapt (a non-literal int *value* into an `i64` param is still E0007).
+
+**Generic calls too (done).** `check_generic_call` has its own argument loop (it must infer the
+type parameters from the argument types first), so it was the one path that bypassed `check_args`
+and thus the adaptation. It now runs the same `try_adapt_literal` against each *substituted*
+parameter type before `arg_assignable` — so a literal adapts into a concrete fixed-width param of a
+generic function/method (`g<T>(a: T, b: u8)` accepts `g(x, 200)`), and also into a type variable
+already bound to a fixed-width type by an earlier argument (`max2<T>(100i8, 9)` binds `T = i8`, so
+the `9` narrows). A genuinely-generic `T` param is untouched (its substituted type is
+`int`/`float`/etc., which `try_adapt_literal` ignores), so inference is unaffected.
 
 ## Gates (per slice)
 

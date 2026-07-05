@@ -3778,7 +3778,15 @@ impl Checker {
                     // argument types, check arguments against the substituted parameters, enforce
                     // the bounds (E0025), and return the substituted result type.
                     if let Some(generic) = sig.generic.clone() {
-                        return self.check_generic_call(name, &generic, required, args, span, &[]);
+                        return self.check_generic_call(
+                            name,
+                            &generic,
+                            required,
+                            args,
+                            arg_exprs,
+                            span,
+                            &[],
+                        );
                     }
                     let params = sig.params.clone();
                     let ret = sig.ret.clone();
@@ -3986,7 +3994,15 @@ impl Checker {
         recv_args: &[Type],
     ) -> Type {
         if let Some(generic) = &sig.generic {
-            return self.check_generic_call(name, generic, sig.required, args, span, recv_args);
+            return self.check_generic_call(
+                name,
+                generic,
+                sig.required,
+                args,
+                arg_exprs,
+                span,
+                recv_args,
+            );
         }
         self.check_args(&sig.params, sig.required, args, arg_exprs, span, name);
         sig.ret.clone()
@@ -4324,12 +4340,14 @@ impl Checker {
     /// arguments are bound to the class's type parameters positionally (`box: Box<int>` → `T=int`),
     /// so the method's result is precise and its bounds enforced against the receiver's instantiation.
     /// Empty for a free function or a static call (the arguments alone instantiate the parameters).
+    #[allow(clippy::too_many_arguments)]
     fn check_generic_call(
         &mut self,
         name: &str,
         generic: &GenericInfo,
         required: usize,
         args: &[Type],
+        arg_exprs: &[Expr],
         span: Span,
         recv_args: &[Type],
     ) -> Type {
@@ -4359,9 +4377,18 @@ impl Checker {
             .zip(recv_args.iter().cloned())
             .filter(|(_, t)| !t.defers_to_runtime())
             .collect();
-        for (raw, arg) in generic.raw_params.iter().zip(args) {
+        for (i, (raw, arg)) in generic.raw_params.iter().zip(args).enumerate() {
             bind_type_params(raw, arg, &tps, &mut subst);
             let expected = apply_subst(raw, &subst);
+            // A bare literal adapts into a fixed-width parameter here too (P-NUM-SYM) — whether the
+            // parameter is a concrete `u8`/`f32`/`f64` or a type variable already bound to one
+            // (`g(200u8, 200)` binds `T = u8`, so the second `200` narrows). Tried before the
+            // type-based `arg_assignable`, exactly as in `check_args`.
+            if let Some(expr) = arg_exprs.get(i)
+                && self.try_adapt_literal(expr, &expected).is_some()
+            {
+                continue;
+            }
             if !self.arg_assignable(arg, &expected) {
                 self.error(
                     DiagnosticCode::TypeMismatch,

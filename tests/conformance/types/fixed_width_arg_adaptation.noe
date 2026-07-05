@@ -1,12 +1,15 @@
 // P-NUM-SYM: a bare numeric literal adapts into a fixed-width *parameter* exactly as into a binding
-// of that type — `f(200)` for a `u8` param, `f(2.5)` for `f32`/`f64` — for functions and methods
-// alike. A literal that overflows the width is E0044 (see diagnostics/fixed_width_arg_overflow). A
+// of that type — `f(200)` for a `u8` param, `f(2.5)` for `f32`/`f64` — for ordinary functions and
+// methods, and for generic ones too (a concrete fixed-width param, or a type variable already bound
+// to one). A literal that overflows the width is E0044 (see diagnostics/fixed_width_arg_overflow); a
 // non-literal *value* still does not adapt (that stays E0007) — only literals do. The differential
 // pins eval against the VM, including the type-directed f32 narrowing.
 // expect: stdout "205"
 // expect: stdout "4.0"
 // expect: stdout "7.0"
 // expect: stdout "42"
+// expect: stdout "200"
+// expect: stdout "100"
 // expect: exit 0
 fn add_byte(a: u8, b: u8): u8 {
     return a + b
@@ -32,3 +35,17 @@ class Counter {
 }
 mut c = Counter { n: 40i64 }
 echo c.bump(2)
+
+// A generic function with a concrete `u8` parameter — the literal adapts even though the function
+// is generic in `T`.
+fn tagged<T>(tag: T, width: u8): u8 {
+    return width
+}
+echo tagged("px", 200)
+
+// A generic function whose type variable is bound to a fixed-width type by an earlier argument
+// (`T = i8` from `100i8`), so the bare literal for the same `T` parameter narrows to `i8`.
+fn max2<T: Comparable>(a: T, b: T): T {
+    return if a < b then b else a
+}
+echo max2(100i8, 9)
