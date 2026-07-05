@@ -2613,52 +2613,65 @@ impl Checker {
                     ret: Box::new(declared.unwrap_or(body_ty)),
                 }
             }
-            // An **untyped** integer literal (optionally negated) coerces into a fixed-width context
-            // when it fits the width's range — `x: u8 = 200`, `y: i8 = -5`. Out of range → E0044.
-            // (A *suffixed* literal like `200u8` is an `Expr::IntN`, not an `Expr::Int`; it
-            // synthesizes its own `IntN` type and is subsumed by the default arm below.)
-            Expr::Int { span, .. }
-            | Expr::Unary {
-                op: UnaryOp::Neg,
-                span,
-                ..
-            } if matches!(expected, Type::IntN { .. }) && int_literal_value(expr).is_some() => {
-                let Type::IntN { signed, bits } = expected else {
-                    unreachable!()
-                };
-                let value = int_literal_value(expr).unwrap();
+            // A bare numeric literal adapts into a fixed-width context — `x: u8 = 200`, `y: i8 = -5`,
+            // `z: f32 = 1.5`, `w: f64 = 1.5` (P-NUM-SYM). Shared with call-argument checking via
+            // `try_adapt_literal`; a non-adapting pair falls through to synthesize-and-check.
+            _ => {
+                if let Some(adapted) = self.try_adapt_literal(expr, expected) {
+                    return adapted;
+                }
+                let actual = self.synth(expr, env);
+                self.subsume(&actual, expected, expr.span());
+                actual
+            }
+        }
+    }
+
+    /// If `expr` is a bare numeric literal that adapts into the fixed-width `expected` type — an
+    /// integer literal (optionally negated) into an in-range [`Type::IntN`], or a float literal into
+    /// [`Type::F32`]/[`Type::F64`] — perform the adaptation and return the adapted type. Range-checks
+    /// an `IntN` (E0044 out of range) and records the `f32` narrowing site so lowering emits a
+    /// `Const::F32`. Returns `None` for any non-adapting pair. Shared by binding checks (`mut x: T =
+    /// …`) and call-argument checks (`f(…)`) so a bare `5`/`1.5` flows into an `i64`/`f32`/`f64`
+    /// identically in both positions. (A *suffixed* literal like `200u8`/`1.5f32` is its own
+    /// `Expr::IntN`/`Expr::F32`, already the fixed-width type — it never reaches here.)
+    fn try_adapt_literal(&mut self, expr: &Expr, expected: &Type) -> Option<Type> {
+        match expected {
+            Type::IntN { signed, bits } => {
+                let is_int_literal = matches!(expr, Expr::Int { .. })
+                    || matches!(
+                        expr,
+                        Expr::Unary {
+                            op: UnaryOp::Neg,
+                            ..
+                        }
+                    );
+                if !is_int_literal {
+                    return None;
+                }
+                let value = int_literal_value(expr)?;
                 let (lo, hi) = Self::int_width_range(*signed, *bits);
                 if value < lo || value > hi {
                     self.error(
                         DiagnosticCode::FixedWidthOutOfRange,
-                        *span,
+                        expr.span(),
                         format!(
                             "literal `{value}` is out of range for `{expected}` (valid range {lo}..={hi})"
                         ),
                     );
                 }
-                expected.clone()
+                Some(expected.clone())
             }
-            // A bare float literal coerces into an **`f64`** context — `mut x: f64 = 1.5`,
-            // `f(1.5)` where the parameter is `f64` (P-NUM-SYM). Representation-free: `f64` is
-            // bit-identical to `float`, so the literal still lowers to a 64-bit float value; only its
-            // static type is pinned to the strict `f64`.
-            Expr::Float { .. } if matches!(expected, Type::F64) => Type::F64,
-            // A bare float literal also coerces into an **`f32`** context — `mut x: f32 = 1.5`. Unlike
-            // `f64`, `f32` is a *distinct 32-bit* representation, so the literal's span is recorded so
-            // lowering narrows it to a `Const::F32` (type-directed). The suffixed `1.5f32` form
-            // (`Expr::F32`) is unaffected — it is already an `f32`.
-            Expr::Float { span, .. } if matches!(expected, Type::F32) => {
-                self.sites.f32_literal_sites.insert(*span);
-                Type::F32
+            // `f64` is bit-identical to `float`, so no narrowing is needed — only the static type.
+            Type::F64 if matches!(expr, Expr::Float { .. }) => Some(Type::F64),
+            // `f32` is a distinct 32-bit representation; record the site so lowering narrows it.
+            Type::F32 if matches!(expr, Expr::Float { .. }) => {
+                if let Expr::Float { span, .. } = expr {
+                    self.sites.f32_literal_sites.insert(*span);
+                }
+                Some(Type::F32)
             }
-            // Default: synthesize the actual type, then require it to be a subtype of the
-            // expectation.
-            _ => {
-                let actual = self.synth(expr, env);
-                self.subsume(&actual, expected, expr.span());
-                actual
-            }
+            _ => None,
         }
     }
 
@@ -2798,7 +2811,7 @@ impl Checker {
                 callee, args, span, ..
             } => {
                 let arg_types: Vec<Type> = args.iter().map(|a| self.synth(a, env)).collect();
-                self.synth_call(callee, &arg_types, *span, env)
+                self.synth_call(callee, &arg_types, args, *span, env)
             }
             Expr::Closure {
                 params,
@@ -3735,10 +3748,10 @@ impl Checker {
             Expr::Call { callee, args, .. } => {
                 let mut arg_types = vec![piped];
                 arg_types.extend(args.iter().map(|a| self.synth(a, env)));
-                self.synth_call(callee, &arg_types, right.span(), env)
+                self.synth_call(callee, &arg_types, &[], right.span(), env)
             }
             Expr::Ident { .. } | Expr::Member { .. } => {
-                self.synth_call(right, &[piped], right.span(), env)
+                self.synth_call(right, &[piped], &[], right.span(), env)
             }
             other => {
                 self.synth(other, env);
@@ -3747,7 +3760,14 @@ impl Checker {
         }
     }
 
-    fn synth_call(&mut self, callee: &Expr, args: &[Type], call_span: Span, env: &mut Env) -> Type {
+    fn synth_call(
+        &mut self,
+        callee: &Expr,
+        args: &[Type],
+        arg_exprs: &[Expr],
+        call_span: Span,
+        env: &mut Env,
+    ) -> Type {
         let span = callee.span();
         match callee {
             // A plain `name(args)` call: a user function, else a prelude free function.
@@ -3762,7 +3782,7 @@ impl Checker {
                     }
                     let params = sig.params.clone();
                     let ret = sig.ret.clone();
-                    self.check_args(&params, required, args, span, name);
+                    self.check_args(&params, required, args, arg_exprs, span, name);
                     return ret;
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
@@ -3787,7 +3807,7 @@ impl Checker {
                     && lookup(env, tn).is_none()
                     && self.enums.contains_key(tn)
                 {
-                    self.check_args(&[Type::String], 1, args, span, name);
+                    self.check_args(&[Type::String], 1, args, arg_exprs, span, name);
                     let ty = Type::Named(tn.clone(), Vec::new());
                     return if name == "from" {
                         ty
@@ -3808,7 +3828,7 @@ impl Checker {
                 {
                     if let Some(params) = stdlib::module_params(m, name) {
                         let n = params.len();
-                        self.check_args(&params, n, args, span, name);
+                        self.check_args(&params, n, args, arg_exprs, span, name);
                     }
                     return stdlib::module_return(m, name, args).unwrap_or(Type::Unknown);
                 }
@@ -3824,7 +3844,7 @@ impl Checker {
                 {
                     // A static call: the type arguments are not known from a bare type name, so the
                     // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
-                    return self.call_user_method(name, &sig, args, span, &[]);
+                    return self.call_user_method(name, &sig, args, arg_exprs, span, &[]);
                 }
                 // `receiver.method(args)` — a built-in method, a user method, or (on a `dyn`/hole
                 // receiver) a runtime-dispatched call that stays deferred.
@@ -3836,9 +3856,9 @@ impl Checker {
                 if let Type::Named(n, recv_args) = &recv
                     && let Some(sig) = self.methods.get(&(n.clone(), name.to_string())).cloned()
                 {
-                    return self.call_user_method(name, &sig, args, span, recv_args);
+                    return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
                 }
-                self.check_method_args(&recv, name, args, span);
+                self.check_method_args(&recv, name, args, arg_exprs, span);
                 // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
                 // the erased i64 (`(1u8).leading_zeros() == 7`), so mark the **call** span (the one
                 // lowering's `Method` carries) — lowering then emits the width-carrying
@@ -3961,29 +3981,37 @@ impl Checker {
         name: &str,
         sig: &FnSig,
         args: &[Type],
+        arg_exprs: &[Expr],
         span: Span,
         recv_args: &[Type],
     ) -> Type {
         if let Some(generic) = &sig.generic {
             return self.check_generic_call(name, generic, sig.required, args, span, recv_args);
         }
-        self.check_args(&sig.params, sig.required, args, span, name);
+        self.check_args(&sig.params, sig.required, args, arg_exprs, span, name);
         sig.ret.clone()
     }
 
     /// Arity- and type-check a method call's arguments against the resolved parameter signature
     /// (a built-in method or a user method); a deferred receiver or an unknown method is not
     /// checked.
-    fn check_method_args(&mut self, recv: &Type, name: &str, args: &[Type], span: Span) {
+    fn check_method_args(
+        &mut self,
+        recv: &Type,
+        name: &str,
+        args: &[Type],
+        arg_exprs: &[Expr],
+        span: Span,
+    ) {
         if let Some(params) = stdlib::method_params(recv, name) {
             let n = params.len();
-            self.check_args(&params, n, args, span, name);
+            self.check_args(&params, n, args, arg_exprs, span, name);
         } else if let Type::Named(n, _) = recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
         {
             let params = sig.params.clone();
             let required = sig.required;
-            self.check_args(&params, required, args, span, name);
+            self.check_args(&params, required, args, arg_exprs, span, name);
         }
     }
 
@@ -3995,6 +4023,7 @@ impl Checker {
         params: &[Type],
         required: usize,
         args: &[Type],
+        arg_exprs: &[Expr],
         span: Span,
         callee: &str,
     ) {
@@ -4017,7 +4046,16 @@ impl Checker {
         // Only the supplied arguments are type-checked; the omitted trailing parameters are
         // filled by their defaults (already checked against their parameter types at the
         // declaration), so `zip` stopping at the shorter side is exactly right.
-        for (param, arg) in params.iter().zip(args) {
+        for (i, (param, arg)) in params.iter().zip(args).enumerate() {
+            // A bare numeric literal argument adapts into a fixed-width parameter (`f(200)` for a
+            // `u8` param, `f(1.5)` for `f32`/`f64`) — exactly as it does at a binding of that type
+            // (P-NUM-SYM). Try that first; a non-literal or non-adapting arg falls to `arg_assignable`
+            // (which keeps the `int`/`float` widening leniency the strict fixed-width types lack).
+            if let Some(expr) = arg_exprs.get(i)
+                && self.try_adapt_literal(expr, param).is_some()
+            {
+                continue;
+            }
             if !self.arg_assignable(arg, param) {
                 self.error(
                     DiagnosticCode::TypeMismatch,

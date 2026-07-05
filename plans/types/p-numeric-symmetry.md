@@ -57,10 +57,20 @@ Both float literal escapes now match the integer tier:
   ordinary literals (double-rounding via `as f32` is a rare theoretical ULP edge, deterministic and
   differential-safe).
 
-Note: **argument-position** literal adaptation (`f(5)` where the param is `i64`, or `f(1.5)` for
-`f32`) is a pre-existing, *uniform* limitation across the whole fixed-width tier — literals adapt at
-bindings, not at call args, for `i64`/`u8`/`f32`/`f64` alike. Not changed here (a separate,
-tier-wide enhancement if wanted).
+### Argument-position adaptation (done)
+
+A bare literal now also adapts into a fixed-width **parameter** — `f(200)` for a `u8` param,
+`f(2.5)` for `f32`/`f64` — for functions and methods, across the whole fixed-width tier
+(`i8`…`u64`, `f32`, `f64`). Previously this was a uniform limitation (literals adapted at bindings
+but not at call args). Mechanism: the binding and argument paths now share one
+`try_adapt_literal(expr, expected) -> Option<Type>` helper (extracted from the binding-check arms),
+which range-checks an `IntN` (E0044) and records the `f32` narrowing site. `check_args` threads the
+argument **expressions** (a new `&[Expr]` parameter, plumbed through `synth_call` /
+`call_user_method` / `check_method_args`) and tries adaptation before the type-based
+`arg_assignable` — so the `int`/`float` value-widening leniency is preserved, and only *literals*
+adapt (a non-literal int *value* into an `i64` param is still E0007). Generic-function calls (which
+resolve args via `arg_assignable` on substituted type-vars, not `check_args`) are the one remaining
+non-adapting corner; a concrete fixed-width param of a generic fn is a rare edge, left for later.
 
 ## Gates (per slice)
 

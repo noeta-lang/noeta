@@ -1,0 +1,34 @@
+// P-NUM-SYM: a bare numeric literal adapts into a fixed-width *parameter* exactly as into a binding
+// of that type — `f(200)` for a `u8` param, `f(2.5)` for `f32`/`f64` — for functions and methods
+// alike. A literal that overflows the width is E0044 (see diagnostics/fixed_width_arg_overflow). A
+// non-literal *value* still does not adapt (that stays E0007) — only literals do. The differential
+// pins eval against the VM, including the type-directed f32 narrowing.
+// expect: stdout "205"
+// expect: stdout "4.0"
+// expect: stdout "7.0"
+// expect: stdout "42"
+// expect: exit 0
+fn add_byte(a: u8, b: u8): u8 {
+    return a + b
+}
+echo add_byte(200, 5)
+
+fn scale32(a: f32): f32 {
+    return a * 2.0f32
+}
+echo scale32(2.0)
+
+fn scale64(a: f64): f64 {
+    return a + 4.5f64
+}
+echo scale64(2.5)
+
+class Counter {
+    pub mut n: i64
+    fn bump(by: i64): i64 {
+        self.n = self.n + by
+        return self.n
+    }
+}
+mut c = Counter { n: 40i64 }
+echo c.bump(2)
