@@ -141,6 +141,16 @@ impl MemberTable {
             .get(&(ty.to_string(), member.to_string()))
             .copied()
     }
+
+    /// The `(type, member)` whose declared-name span in file `source` contains `offset` — i.e. the
+    /// member declaration the cursor is on (a field, variant, or method name in a type body). For
+    /// find-references / rename started from the declaration itself.
+    pub fn declaration_at(&self, offset: u32, source: SourceId) -> Option<(&str, &str)> {
+        self.by_type_member
+            .iter()
+            .find(|(_, span)| span.source == source && span.start <= offset && offset <= span.end)
+            .map(|((ty, member), _)| (ty.as_str(), member.as_str()))
+    }
 }
 
 /// A member access `receiver.name` recorded during the def/use walk: the span of the member *name*
@@ -235,6 +245,15 @@ impl DefUse {
             .filter(|(_, d)| *d == def)
             .map(|(use_span, _)| *use_span)
             .collect()
+    }
+
+    /// Every recorded member access as `(member name, member-name span, receiver span)` — for member
+    /// find-references / rename: the caller keeps those whose `receiver` has the target type and whose
+    /// name matches, and renames each name span.
+    pub fn member_occurrences(&self) -> impl Iterator<Item = (&str, Span, Span)> {
+        self.member_refs
+            .iter()
+            .map(|m| (m.name.as_str(), m.name_span, m.receiver_span))
     }
 
     /// The `(receiver span, member name)` of the member access in file `source` whose member-name

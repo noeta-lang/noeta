@@ -20,8 +20,10 @@
 //! workspace program (slice **W2**), so an imported name resolves and go-to-definition can land in a
 //! *different file*. Slice **L4** adds **document symbols**: the entry document's declarations become
 //! the hierarchical outline the editor renders (see [`symbols`]). **Find-references** lists every use
-//! of the value symbol under the cursor (across modules), reusing the def/use index; **rename** turns
-//! those into a `WorkspaceEdit`. **Signature help** shows the called function's signature and active
+//! of the symbol under the cursor — a value (local/parameter/function) or a member (field/variant/
+//! method, matched by the receiver's type), across modules; **rename** turns those into a
+//! `WorkspaceEdit` (with `prepareRename` validation). **Signature help** shows the called function's
+//! signature and active
 //! argument while typing a call (see [`signature`]). Slice **L5** adds **completion**:
 //! on a member access `receiver.member` the cursor offers the receiver type's fields, variants, and
 //! methods; in a type-annotation position it offers the type names; otherwise it offers the language
@@ -341,13 +343,13 @@ impl DocumentStore {
         self.locate(cache, def_span, encoding)
     }
 
-    /// All references to the value symbol (local, parameter, or function) at `position` — every use,
-    /// plus the declaration when `include_declaration` is set — as `(URI, range)` pairs. Runs the
-    /// scope-aware def/use index over the merged workspace program, so references to a function are
-    /// found **across modules**. The cursor may be on a use or on the declaration itself.
-    ///
-    /// Scoped to value symbols (what the def/use index resolves); type and member references are a
-    /// follow-up. `None` if the document is not open or the cursor is on no such symbol.
+    /// All references to the symbol at `position` — every use, plus the declaration when
+    /// `include_declaration` is set — as `(URI, range)` pairs. Handles a **value** symbol (local,
+    /// parameter, function — via the scope-aware def/use index) or a **member** symbol (field,
+    /// variant, method — matched by the receiver's type so a same-named member on another type is not
+    /// swept in). Runs over the merged workspace program, so references are found **across modules**.
+    /// The cursor may be on a use or on the declaration itself. `None` if the document is not open or
+    /// the cursor is on no resolvable symbol.
     fn references(
         &self,
         uri: &str,
@@ -356,24 +358,8 @@ impl DocumentStore {
         include_declaration: bool,
     ) -> Option<Vec<(String, Range)>> {
         let cache = self.workspaces.get(uri)?;
-        let db = &self.db;
-        let entry = cache.entry();
-        let offset = LineIndex::new(entry.text(db)).offset(position, encoding);
-        let cursor = SourceId::FIRST;
-
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
-        let program = match &linked.0 {
-            Ok(program) => program,
-            Err(_) => &entry_ast.0.program,
-        };
-
-        let def_use = resolve::DefUse::build(program);
-        let def = def_use.symbol_at(offset, cursor)?;
-        let mut spans = def_use.references_to(def);
-        if include_declaration {
-            spans.push(def);
-        }
+        let offset = LineIndex::new(cache.entry().text(&self.db)).offset(position, encoding);
+        let spans = self.symbol_occurrences(cache, offset, include_declaration)?;
 
         let mut locations: Vec<(String, Range)> = spans
             .into_iter()
@@ -391,11 +377,73 @@ impl DocumentStore {
         Some(locations)
     }
 
-    /// The edits that rename the value symbol at `position` to `new_name` — every use and the
-    /// declaration — grouped by URI. Reuses [`references`](Self::references) (declaration included), so
-    /// a rename of a function propagates **across modules**. `None` if the cursor is on no renameable
-    /// symbol or `new_name` is not a valid identifier (an invalid rename must not silently corrupt the
-    /// source).
+    /// Every occurrence span of the symbol at `offset` (uses, and the declaration when
+    /// `include_declaration`), whether it is a value symbol or a member symbol. The returned spans
+    /// carry their own [`SourceId`], so they may span multiple files. `None` if the cursor is on no
+    /// resolvable symbol. The shared core of find-references, rename, and prepare-rename.
+    fn symbol_occurrences(
+        &self,
+        cache: &WorkspaceCache,
+        offset: u32,
+        include_declaration: bool,
+    ) -> Option<Vec<Span>> {
+        let db = &self.db;
+        let cursor = SourceId::FIRST;
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, cache.entry());
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        let def_use = resolve::DefUse::build(program);
+
+        // 1. Value symbol (local, parameter, function).
+        if let Some(def) = def_use.symbol_at(offset, cursor) {
+            let mut spans = def_use.references_to(def);
+            if include_declaration {
+                spans.push(def);
+            }
+            return Some(spans);
+        }
+
+        // 2. Member symbol (field, variant, method), keyed by `(type, member)`. The target is read
+        //    from the `.member` access under the cursor (receiver type from the workspace index) or
+        //    from the member declaration the cursor is on.
+        let members = resolve::MemberTable::collect(program);
+        let ide = noeta_db::linked_checked_ide(db, cache.workspace);
+        let expr_types = &ide.expr_types;
+        let (type_name, member_name) = match def_use.member_at(offset, cursor) {
+            Some((receiver_span, name)) => {
+                let ty = expr_types.get(&receiver_span).and_then(nominal_name)?;
+                (ty.to_string(), name.to_string())
+            }
+            None => {
+                let (ty, member) = members.declaration_at(offset, cursor)?;
+                (ty.to_string(), member.to_string())
+            }
+        };
+
+        // Every `.member` access whose name matches and whose receiver has the target type.
+        let mut spans: Vec<Span> = def_use
+            .member_occurrences()
+            .filter(|(name, _, receiver_span)| {
+                *name == member_name
+                    && expr_types.get(receiver_span).and_then(nominal_name)
+                        == Some(type_name.as_str())
+            })
+            .map(|(_, name_span, _)| name_span)
+            .collect();
+        if include_declaration && let Some(decl) = members.lookup(&type_name, &member_name) {
+            spans.push(decl);
+        }
+        Some(spans)
+    }
+
+    /// The edits that rename the symbol at `position` to `new_name` — every use and the declaration —
+    /// grouped by URI. Reuses [`references`](Self::references) (declaration included), so it renames a
+    /// value or member symbol and propagates **across modules**. `None` if the cursor is on no
+    /// renameable symbol or `new_name` is not a valid identifier (an invalid rename must not silently
+    /// corrupt the source).
     fn rename_edits(
         &self,
         uri: &str,
@@ -414,31 +462,22 @@ impl DocumentStore {
         Some(by_uri)
     }
 
-    /// The range of the renameable value symbol under the cursor — for `prepareRename`, so the editor
-    /// can validate before showing its input box and pre-select the old name. Returns the span of the
-    /// identifier occurrence at the cursor when it resolves to a local, parameter, or function; `None`
-    /// when the cursor is not on such a symbol (the editor then refuses the rename).
+    /// The range of the renameable symbol under the cursor — for `prepareRename`, so the editor can
+    /// validate before showing its input box and pre-select the old name. Returns the occurrence at
+    /// the cursor (in the entry file) when it resolves to a value or member symbol; `None` otherwise
+    /// (the editor then refuses the rename).
     fn prepare_rename(&self, uri: &str, position: Position, encoding: Encoding) -> Option<Range> {
         let cache = self.workspaces.get(uri)?;
-        let db = &self.db;
-        let entry = cache.entry();
-        let entry_text = entry.text(db);
-        let index = LineIndex::new(entry_text);
+        let index = LineIndex::new(cache.entry().text(&self.db));
         let offset = index.offset(position, encoding);
-
-        let linked = noeta_db::linked(db, cache.workspace);
-        let entry_ast = noeta_db::ast(db, entry);
-        let program = match &linked.0 {
-            Ok(program) => program,
-            Err(_) => &entry_ast.0.program,
-        };
-        // Only offer a rename where the def/use index resolves a value symbol.
-        resolve::DefUse::build(program).symbol_at(offset, SourceId::FIRST)?;
-        // Return the range of the identifier occurrence the cursor is actually on.
-        let token = noeta_db::tokens(db, entry).0.tokens.iter().find(|token| {
-            token.kind == TokenKind::Ident && token.span.start <= offset && offset <= token.span.end
-        })?;
-        Some(index.range(token.span, encoding))
+        // The occurrences include the one under the cursor (a use or the declaration); return it.
+        let here = self
+            .symbol_occurrences(cache, offset, true)?
+            .into_iter()
+            .find(|span| {
+                span.source == SourceId::FIRST && span.start <= offset && offset <= span.end
+            })?;
+        Some(index.range(here, encoding))
     }
 
     /// Signature help for the call the cursor at `position` is inside: the called function's
@@ -1802,6 +1841,95 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn references_find_a_field_across_uses_not_a_namesake() {
+        let mut store = DocumentStore::default();
+        // Two types with a same-named field `x`; a reference search on `Point`'s `x` must not sweep in
+        // `Other`'s `x`.
+        store.open(
+            "file:///m.noe",
+            "struct Point { x: int }\nstruct Other { x: int }\np = Point { x: 1 }\no = Other { x: 2 }\na = p.x\nb = o.x\nc = p.x".to_string(),
+        );
+        // Cursor on `.x` in `a = p.x` (line 4, `a = p.x` → `x` at col 6).
+        let refs = store
+            .references(
+                "file:///m.noe",
+                Position {
+                    line: 4,
+                    character: 6,
+                },
+                Encoding::Utf8,
+                true,
+            )
+            .expect("field symbol resolves");
+        // Declaration (line 0) + the two `p.x` accesses (lines 4 and 6) — never `o.x` (line 5).
+        let lines: Vec<u32> = refs.iter().map(|(_, r)| r.start.line).collect();
+        assert!(lines.contains(&0), "field declaration; got {lines:?}");
+        assert!(
+            lines.contains(&4) && lines.contains(&6),
+            "both p.x accesses; got {lines:?}"
+        );
+        assert!(
+            !lines.contains(&5),
+            "o.x is a different type's field; got {lines:?}"
+        );
+    }
+
+    #[test]
+    fn rename_a_method_updates_declaration_and_calls() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///m.noe",
+            "class Counter { n: int\n  fn get(): int { return self.n }\n}\nc = Counter { n: 1 }\nv = c.get()".to_string(),
+        );
+        // Cursor on `.get` in `c.get()` (line 4, col 6).
+        let by_uri = store
+            .rename_edits(
+                "file:///m.noe",
+                Position {
+                    line: 4,
+                    character: 6,
+                },
+                Encoding::Utf8,
+                "value",
+            )
+            .expect("method symbol renameable");
+        let ranges = &by_uri["file:///m.noe"];
+        // The method declaration (line 1) and the call site (line 4).
+        let lines: Vec<u32> = ranges.iter().map(|r| r.start.line).collect();
+        assert!(
+            lines.contains(&1) && lines.contains(&4),
+            "decl + call; got {lines:?}"
+        );
+        assert!(
+            ranges
+                .iter()
+                .all(|r| r.end.character - r.start.character == 3)
+        ); // `get`
+    }
+
+    #[test]
+    fn prepare_rename_accepts_a_field() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///m.noe",
+            "struct Point { x: int }\np = Point { x: 1 }\nd = p.x".to_string(),
+        );
+        // On `.x` in `d = p.x` (line 2, col 6).
+        let range = store
+            .prepare_rename(
+                "file:///m.noe",
+                Position {
+                    line: 2,
+                    character: 6,
+                },
+                Encoding::Utf8,
+            )
+            .expect("field is renameable");
+        assert_eq!(range.start.line, 2);
+        assert_eq!(range.end.character - range.start.character, 1); // `x`
     }
 
     #[test]
