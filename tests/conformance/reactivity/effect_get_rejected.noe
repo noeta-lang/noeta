@@ -1,0 +1,10 @@
+// Reactivity S5 (hardening) — an `effect` has no readable value: it is a side-effecting subscription,
+// not a cell or a derivation. Calling `.get()` on one is rejected with the same "no method" error any
+// built-in gives for a method it lacks (`.dispose()` is the only method an `Effect` handle carries).
+// The kind-guarded dispatch means the `(Effect, "get")` pair never reaches the read path — it falls
+// through to E0005, identically on both backends.
+// expect: error E0005 at 10:1
+// expect: exit 1
+sig = signal(0)
+e = effect(fn() { sig.get() })
+e.get()

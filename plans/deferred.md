@@ -123,6 +123,29 @@ Pass 2 (the runtime reflection read-back) is planned in `plans/attributes/pass-2
 | ~~Redundant checker passes for `type_of` fidelity A (attribute-system P2.3): `lang-compiler::compile` and `lang-eval`'s `run` each call `lang_check::resolve_type_of_sites`, which re-runs the full checker — so a CLI `run` type-checks the program ~3× (the `checked` gate + once per backend).~~ | P2.3 (reflection) | **Done** — `lang_check::check_all(program) → Checked { diagnostics, type_of_sites }` runs the checker once and returns both. Each backend kept a self-deriving default (`compile`, `Backend::run` / `run_with_host` — for the REPL, unit tests, and any caller without a precomputed map) but gained a threaded variant (`compile_with_sites`, `run_with_sites` / `run_with_host_sites`). The orchestrators now check once and thread `type_of_sites`: the CLI `run_linked`, the conformance harness (both the single-file and linked paths), and the `lang-db` `checked` query (widened to carry the map) which `bytecode` and the differential eval path read. Pure perf no-op — conformance 196/0, differential 190 matched / 0 skipped / backends agree. |
 | Columnar kernels via extensions (P-SIMD tier 3): let a third-party package register a native **column-buffer kernel** for its own `@packed(layout: column)` type, keyed `(module/type, operation)` in the registry — so any numeric struct (not just Vec3/quat) gets a fast bulk op. Needs a *"give me field `f`'s contiguous column buffer"* accessor on the native-extension ABI (the neutral `NativeValue` seam can't hand over raw buffers today — the reason `vec.*_all` is a per-backend special case). | P-SIMD column-layout arc (`plans/perf/p-simd-column-layout.md`) | The `lang-native` ABI extraction / package-manager milestone (`plans/native-extensions/README.md`). Until then column layout ships tier-1 generic per-column primitives + the per-backend Vec3/quat kernels only. |
 
+## Reactivity — the transport/consumer layers + the owner tree (deferred with the milestone)
+
+The reactivity milestone (`plans/reactivity/`, S0–S5) shipped the **reactive core** — `signal`/`computed`/
+`effect`, deterministic glitch-free flush, disposal, the E0045 non-convergence guard — fully oracle-covered
+(differential `0 skipped` + leak 0). It deliberately stopped at the core; the layers that consume it wait on
+their own prerequisites. None is a correctness gap in shipped behavior: the core is complete and sound on its
+own; these are additive capabilities.
+
+| Item | Source | Trigger to implement |
+|---|---|---|
+| **WS minimal-diff push / LiveView** (§9.4, §9.5) — stream "which computeds changed this flush" to a client as a minimal DOM/state diff | reactivity milestone (design) | The bundled HTTP/WS server exists. The core already exposes the hook (a flush knows exactly which nodes recomputed); the diff layer consumes it. This is the "unforgettable" half the staging deferred. |
+| **Nested owner tree** (SolidJS-style) — an `effect`/`computed` that creates child reactive nodes during its run *owns* them and disposes them when it reruns or is itself disposed | reactivity S4b | A program that creates reactive nodes *inside* a repeatedly-running body (so children accumulate until scope end). Reachable but advanced, and invisible to the leak oracle (which measures end-of-program residency; `clear()` reclaims everything). Today ownership is flat (implicit isolate-lifetime scope); disposal is effect-only at the surface. |
+| **Reactive persistence** (§9.12) — a DB change invalidates a `signal`, re-running dependent computeds/effects | reactivity milestone (design) | The DB layer (§11.4) plus the open consistency-model questions resolved. R&D. |
+| **HMR** (§9.14) — a code change flows through the graph to the UI | reactivity milestone (design) | The persistent runtime + the bundled server. |
+| **Synced / CRDT `synced_signal`** (§9.15) — a signal whose state is replicated peer-to-peer | reactivity milestone (design) | The p2p stack; opt-in per app. |
+| **Value-equality suppression** (opt-in) — a `set` to an equal value need not re-fire dependents | reactivity S0 (noted in core tests) | A benchmark or program where redundant re-fires cost enough to justify it; must stay opt-in (structural equality is not always cheap, and "a change is a set" is the current, simpler contract). |
+
+## Backend divergences (latent — would fail the differential if a corpus case reached it)
+
+| Item | Source | Trigger / note |
+|---|---|---|
+| **Shadowing a prelude builtin name with a local binding** (`sum = 5`, `map = x`, …) diverges: the **tree-walker** pre-declares prelude names as immutable bindings, so `sum = …` is rejected at runtime with **E0006 ImmutableAssignment**, while the **VM** lets the local shadow the builtin and runs fine. | found during reactivity S5 hardening (a test accidentally named a variable `sum`) | Latent — no corpus case binds a prelude name, so the differential's `0 skipped`/agreement gate still holds. Fix is a **language-design call** (is shadowing a builtin allowed?) independent of any milestone: either make the tree-walker allow a local to shadow a prelude name (match the VM) or make both reject it statically (a new name-collision diagnostic). Not a reactivity concern. |
+
 ## Notes
 
 - ~~**Stale code comments to tidy**~~ — **Done (F3)**: corrected the `lang-eval` operator-dispatch comment (comparisons *do* trait-dispatch via `Comparable`, and `Ordering` is now a namable type) and the `lang-ast` "return type not yet checked in M0" / "is M1.8b" comments (checked since M1.7; the trait wiring shipped).

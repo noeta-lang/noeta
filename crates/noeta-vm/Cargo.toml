@@ -37,6 +37,10 @@ criterion = { workspace = true }
 name = "vm"
 harness = false
 
+[[bench]]
+name = "reactivity"
+harness = false
+
 # This crate re-states the workspace lint table with one change: `unsafe_code` is `deny` (not the
 # workspace's `forbid`) so the single tier-1 JIT dispatch site (P-JIT) — which calls a
 # Cranelift-finalized `extern "C"` function pointer — can opt in with an explicit

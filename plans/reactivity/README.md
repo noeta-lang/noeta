@@ -176,8 +176,24 @@ need a small native-type registration is an S1 detail.
   effects leave no dangling subscription (the later `set` reruns only the live watcher) and that the
   leak oracle stays 0 across the churn. Conformance 457, differential 446/0-skipped, jit-differential
   446, leak 0 both backends, miri clean over the core.
-- **S5 — hardening + docs.** Negative cases, the reactivity wiki page, a bench (large fan-out flush), and
-  the deferred-registry entry for the transport half.
+- **S5 — hardening + docs. DONE.** Three additive conformance cases (`effect_get_rejected` — `.get()`
+  on an `Effect` is `E0005`, the readability guard; `effect_multi_signal` — one effect subscribing to
+  three signals, each `set` reruns it once, the complement of a fan-out; `computed_multi_dep` — a
+  computed deriving from two signals, recomputing only when one changed and memoizing otherwise). The
+  **reactivity wiki page** `docs/Reactivity.md` (in the sidebar + Home, all examples run + differential-
+  agree). A **large fan-out flush bench** `crates/noeta-vm/benches/reactivity.rs` (one signal → N
+  effects, `SETS` sets each flushing all N; baseline ~125µs / 582µs / 3.49ms at fanout 64 / 256 / 1024
+  — roughly linear in flush width). The **deferred-registry** section in `plans/deferred.md` for the
+  transport/consumer layers + the owner tree + opt-in value-equality suppression. Also surfaced (and
+  logged as a latent, non-reactivity divergence in `deferred.md`) a pre-existing tree-walker/VM
+  disagreement on **shadowing a prelude builtin name** — a test that named a variable `sum` tripped it;
+  renamed. Conformance 460, differential 449/0-skipped, jit-differential 449, leak 0 both backends.
+
+**Reactivity milestone (S0–S5) COMPLETE.** The reactive core — `signal`/`computed`/`effect`,
+deterministic glitch-free flush, coalescing, the E0045 non-convergence guard, effect disposal — is
+fully oracle-covered (differential `0 skipped` + leak 0 + miri) and documented. The transport/consumer
+layers (WS diff-push/LiveView, persistence, HMR, CRDT) are tracked in `plans/deferred.md`, to land with
+their prerequisites.
 
 (Slice boundaries firm up after S0 proves the core; S1/S2 likely land together since a signal with no
 consumer isn't observable.)
