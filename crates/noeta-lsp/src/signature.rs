@@ -6,10 +6,12 @@
 //! stream finds the innermost unclosed call paren before the cursor and counts the top-level commas
 //! up to it. The callee name then resolves against the top-level function declarations.
 //!
-//! Scoped to calls of top-level functions; method-call signatures (which need the receiver's type)
-//! are a follow-up. [`signature_at`] returns a backend-neutral [`SignatureData`] the server maps to
-//! an LSP `SignatureHelp`.
+//! Covers calls of top-level functions (`f(`) and method calls (`recv.m(`); the caller resolves the
+//! receiver's type for the latter. [`enclosing_call`] finds the call context from the token stream;
+//! [`from_decl`] renders a resolved function/method declaration into a backend-neutral
+//! [`SignatureData`] the server maps to an LSP `SignatureHelp`.
 
+use noeta_ast::FnDecl;
 use noeta_lexer::{Token, TokenKind};
 use noeta_span::Span;
 
@@ -25,41 +27,30 @@ pub struct SignatureData {
     pub active_param: usize,
 }
 
-/// The signature to show for the call the cursor at `offset` is inside, or `None` if the cursor is
-/// not within a call of a known top-level function. `tokens` and `text` are the entry document's;
-/// `program` supplies the function declarations.
-pub fn signature_at(
-    tokens: &[Token],
-    text: &str,
-    program: &noeta_ast::Program,
-    offset: u32,
-) -> Option<SignatureData> {
-    let call = enclosing_call(tokens, text, offset)?;
-    let decl = program.stmts.iter().find_map(|stmt| match stmt {
-        noeta_ast::Stmt::Fn(decl) if decl.name == call.callee => Some(decl),
-        _ => None,
-    })?;
-
+/// Render a resolved function/method declaration into the signature to show, with `active` clamped to
+/// the last parameter (so a trailing/extra comma still highlights the final one).
+pub fn from_decl(decl: &FnDecl, active: usize) -> SignatureData {
     let parameters: Vec<String> = decl.params.iter().map(symbols::param_detail).collect();
     let label = format!("{}({})", decl.name, parameters.join(", "));
     let label = match &decl.ret {
         Some(ret) => format!("{label} -> {}", symbols::render_type_ref(ret)),
         None => label,
     };
-    // Clamp to the last parameter so a trailing/extra comma still highlights the final one; an empty
-    // parameter list has nothing to highlight.
-    let active_param = call.active.min(decl.params.len().saturating_sub(1));
-    Some(SignatureData {
+    let active_param = active.min(decl.params.len().saturating_sub(1));
+    SignatureData {
         label,
         parameters,
         active_param,
-    })
+    }
 }
 
-/// The call the cursor is inside: the callee name and the 0-based active argument index.
-struct CallContext {
-    callee: String,
-    active: usize,
+/// The call the cursor is inside: the callee name, the 0-based active argument index, and — when the
+/// call is a method call `recv.callee(` — the span of the receiver `recv` (so the caller can resolve
+/// its type and find the method). `receiver` is `None` for a plain function call.
+pub struct CallContext {
+    pub callee: String,
+    pub active: usize,
+    pub receiver: Option<Span>,
 }
 
 /// One bracket frame on the scan stack. A call frame (a `(` opened right after an identifier) counts
@@ -67,25 +58,32 @@ struct CallContext {
 /// (`foo([a, b|])`) is not mistaken for an argument separator of the call.
 struct Frame {
     callee: Option<String>,
+    receiver: Option<Span>,
     active: usize,
 }
 
 /// Scan the tokens before `offset`, tracking bracket nesting, and return the innermost enclosing
-/// *call* frame — the callee named just before an unclosed `(`, with the count of top-level commas
-/// inside it as the active-argument index.
-fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallContext> {
+/// *call* frame — the callee named just before an unclosed `(`, its receiver when the callee is
+/// preceded by `.`, and the count of top-level commas inside it as the active-argument index.
+pub fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallContext> {
     let mut stack: Vec<Frame> = Vec::new();
-    let mut prev_ident: Option<&str> = None;
+    // The three tokens preceding the current one (`window[2]` is the most recent), for reading the
+    // `receiver . callee (` head of a call.
+    let mut window: [Option<(TokenKind, Span)>; 3] = [None; 3];
 
     for token in tokens.iter().take_while(|t| t.span.start < offset) {
         match token.kind {
-            // A `(` right after an identifier opens a call; otherwise it is plain grouping.
-            TokenKind::LParen => stack.push(Frame {
-                callee: prev_ident.map(str::to_string),
-                active: 0,
-            }),
+            TokenKind::LParen => {
+                let (callee, receiver) = call_head(&window, text);
+                stack.push(Frame {
+                    callee,
+                    receiver,
+                    active: 0,
+                });
+            }
             TokenKind::LBracket | TokenKind::LBrace => stack.push(Frame {
                 callee: None,
+                receiver: None,
                 active: 0,
             }),
             TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace => {
@@ -100,7 +98,7 @@ fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallConte
             }
             _ => {}
         }
-        prev_ident = (token.kind == TokenKind::Ident).then(|| slice(text, token.span));
+        window = [window[1], window[2], Some((token.kind, token.span))];
     }
 
     // The innermost enclosing call (nearest call frame from the top of the stack).
@@ -108,8 +106,27 @@ fn enclosing_call(tokens: &[Token], text: &str, offset: u32) -> Option<CallConte
         frame.callee.clone().map(|callee| CallContext {
             callee,
             active: frame.active,
+            receiver: frame.receiver,
         })
     })
+}
+
+/// Read the `receiver . callee` head from the tokens just before a `(`: the callee is the immediately
+/// preceding identifier; the receiver is the identifier before a `.` (a method call). `(None, _)`
+/// when the `(` does not follow an identifier — plain grouping, not a call.
+fn call_head(
+    window: &[Option<(TokenKind, Span)>; 3],
+    text: &str,
+) -> (Option<String>, Option<Span>) {
+    let callee = match window[2] {
+        Some((TokenKind::Ident, span)) => Some(slice(text, span).to_string()),
+        _ => None,
+    };
+    let receiver = match (window[1], window[0]) {
+        (Some((TokenKind::Dot, _)), Some((TokenKind::Ident, span))) => Some(span),
+        _ => None,
+    };
+    (callee, receiver)
 }
 
 fn slice(text: &str, span: Span) -> &str {
@@ -123,11 +140,23 @@ mod tests {
     use noeta_parser::parse;
     use noeta_span::{Source, SourceId};
 
+    /// Resolve as the store does for a top-level function: find the call context, look up the fn.
     fn sig_at(src: &str, offset: u32) -> Option<SignatureData> {
         let source = Source::new(SourceId::FIRST, "t.noe", src);
         let lexed = lex(&source);
         let program = parse(&source, &lexed.tokens).program;
-        signature_at(&lexed.tokens, src, &program, offset)
+        let call = enclosing_call(&lexed.tokens, src, offset)?;
+        let decl = program.stmts.iter().find_map(|stmt| match stmt {
+            noeta_ast::Stmt::Fn(decl) if decl.name == call.callee => Some(decl),
+            _ => None,
+        })?;
+        Some(from_decl(decl, call.active))
+    }
+
+    fn call_at(src: &str, offset: u32) -> Option<CallContext> {
+        let source = Source::new(SourceId::FIRST, "t.noe", src);
+        let lexed = lex(&source);
+        enclosing_call(&lexed.tokens, src, offset)
     }
 
     #[test]
@@ -172,5 +201,21 @@ mod tests {
     fn a_call_to_an_unknown_function_is_none() {
         let src = "y = mystery(";
         assert!(sig_at(src, src.len() as u32).is_none());
+    }
+
+    #[test]
+    fn a_method_call_reports_its_receiver() {
+        // `c.get(` — the callee is `get`, and the receiver `c` is captured for type resolution.
+        let src = "v = c.get(";
+        let call = call_at(src, src.len() as u32).expect("inside a call");
+        assert_eq!(call.callee, "get");
+        let receiver = call.receiver.expect("method call has a receiver");
+        assert_eq!(&src[receiver.range()], "c");
+    }
+
+    #[test]
+    fn a_plain_call_has_no_receiver() {
+        let src = "v = f(";
+        assert!(call_at(src, src.len() as u32).unwrap().receiver.is_none());
     }
 }

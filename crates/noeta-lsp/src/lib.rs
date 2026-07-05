@@ -480,10 +480,12 @@ impl DocumentStore {
         Some(index.range(here, encoding))
     }
 
-    /// Signature help for the call the cursor at `position` is inside: the called function's
-    /// signature and the active argument. Token-based (so a half-typed call with an unbalanced paren
-    /// still resolves); the callee is looked up among the merged program's top-level functions, so an
-    /// imported function's signature is shown. `None` if the cursor is not in a known function call.
+    /// Signature help for the call the cursor at `position` is inside: the called function's or
+    /// method's signature and the active argument. Token-based (so a half-typed call with an
+    /// unbalanced paren still resolves). A plain call `f(` resolves the callee among the merged
+    /// program's top-level functions (imported functions included); a method call `recv.m(` resolves
+    /// the receiver's type — by closing the call in a munged copy and re-checking off the salsa graph
+    /// — and finds `m` among that type's methods. `None` if the cursor is not in a resolvable call.
     fn signature_help(
         &self,
         uri: &str,
@@ -503,7 +505,22 @@ impl DocumentStore {
             Ok(program) => program,
             Err(_) => &entry_ast.0.program,
         };
-        signature::signature_at(tokens, text, program, offset)
+
+        let call = signature::enclosing_call(tokens, text, offset)?;
+        match call.receiver {
+            // Plain function call: the callee is a top-level function.
+            None => {
+                let decl = top_level_fn(program, &call.callee)?;
+                Some(signature::from_decl(decl, call.active))
+            }
+            // Method call `recv.m(`: resolve `recv`'s type (closing the call so it type-checks), then
+            // find `m` among that type's methods.
+            Some(receiver_span) => {
+                let type_name = receiver_type_at(text, offset, receiver_span)?;
+                let decl = type_method(program, &type_name, &call.callee)?;
+                Some(signature::from_decl(decl, call.active))
+            }
+        }
     }
 
     /// The completion candidates at `position` in `uri`. When the cursor is on a member access
@@ -722,6 +739,53 @@ fn nominal_name(repr: &TypeRepr) -> Option<&str> {
         | TypeRepr::Named(name, _) => Some(name),
         _ => None,
     }
+}
+
+/// The top-level function declaration named `name`, for signature help on a plain call.
+fn top_level_fn<'a>(program: &'a noeta_ast::Program, name: &str) -> Option<&'a noeta_ast::FnDecl> {
+    program.stmts.iter().find_map(|stmt| match stmt {
+        noeta_ast::Stmt::Fn(decl) if decl.name == name => Some(decl),
+        _ => None,
+    })
+}
+
+/// The method named `method` on the type named `type_name`, for signature help on a method call.
+fn type_method<'a>(
+    program: &'a noeta_ast::Program,
+    type_name: &str,
+    method: &str,
+) -> Option<&'a noeta_ast::FnDecl> {
+    program.stmts.iter().find_map(|stmt| {
+        let methods = match stmt {
+            noeta_ast::Stmt::Struct(decl) if decl.name == type_name => &decl.methods,
+            noeta_ast::Stmt::Class(decl) if decl.name == type_name => &decl.methods,
+            noeta_ast::Stmt::Enum(decl) if decl.name == type_name => &decl.methods,
+            _ => return None,
+        };
+        methods.iter().find(|m| m.name == method)
+    })
+}
+
+/// The declared type name of the receiver at `receiver_span`, for method signature help. The call the
+/// cursor is inside is unclosed (`recv.m(…|`), so the receiver does not type-check as written; the
+/// call is closed in a copy that is re-checked off the salsa graph. At an argument boundary (right
+/// after `(` or `,`) a synthetic argument is inserted before the `)` so no dangling comma trips the
+/// parser (which would leave the receiver untyped); mid-argument, a bare `)` suffices. The receiver
+/// precedes the insertion, so its span is unchanged. `None` if its type is not a nominal.
+fn receiver_type_at(text: &str, offset: u32, receiver_span: Span) -> Option<String> {
+    let o = offset as usize;
+    let at_arg_boundary = {
+        let before = text[..o].trim_end();
+        before.ends_with('(') || before.ends_with(',')
+    };
+    let closer = if at_arg_boundary { "x)" } else { ")" };
+    let munged = format!("{}{closer}{}", &text[..o], &text[o..]);
+    let source = noeta_span::Source::new(SourceId::FIRST, "<signature>", &munged);
+    let lexed = noeta_lexer::lex(&source);
+    let parsed = noeta_parser::parse(&source, &lexed.tokens);
+    let checked = noeta_check::check_all_with_types(&parsed.program);
+    let type_name = nominal_name(checked.expr_types.get(&receiver_span)?)?;
+    Some(type_name.to_string())
 }
 
 /// Whether `name` is a syntactically valid identifier — a non-empty run starting with a letter or
@@ -1818,6 +1882,30 @@ mod tests {
                 Encoding::Utf8,
             )
             .expect("inside the call");
+        assert_eq!(sig.label, "add(a: int, b: int) -> int");
+        assert_eq!(sig.active_param, 1);
+    }
+
+    #[test]
+    fn signature_help_resolves_a_method_call() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///s.noe",
+            "class Calc { n: int\n  fn add(a: int, b: int): int { return a + b }\n}\nc = Calc { n: 0 }\nv = c.add(1, ".to_string(),
+        );
+        let text = &store.buffers["file:///s.noe"];
+        let last = text.lines().count() as u32 - 1;
+        let col = text.lines().next_back().unwrap().chars().count() as u32; // after `c.add(1, `
+        let sig = store
+            .signature_help(
+                "file:///s.noe",
+                Position {
+                    line: last,
+                    character: col,
+                },
+                Encoding::Utf8,
+            )
+            .expect("inside the method call");
         assert_eq!(sig.label, "add(a: int, b: int) -> int");
         assert_eq!(sig.active_param, 1);
     }
