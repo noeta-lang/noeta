@@ -1,0 +1,40 @@
+{
+  "name": "tree-sitter-noeta",
+  "version": "0.1.0",
+  "description": "Noeta grammar for tree-sitter",
+  "license": "MIT",
+  "keywords": [
+    "parser",
+    "tree-sitter",
+    "noeta"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/noeta-lang/noeta"
+  },
+  "files": [
+    "grammar.js",
+    "tree-sitter.json",
+    "queries/",
+    "src/",
+    "bindings/"
+  ],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.0"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.noeta",
+      "file-types": [
+        "noe"
+      ],
+      "highlights": [
+        "queries/highlights.scm"
+      ]
+    }
+  ]
+}

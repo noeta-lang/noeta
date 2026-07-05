@@ -1,0 +1,30 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "noeta",
+      "camelcase": "Noeta",
+      "scope": "source.noeta",
+      "file-types": ["noe"],
+      "highlights": ["queries/highlights.scm"],
+      "injection-regex": "^noeta$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Noeta grammar for tree-sitter",
+    "authors": [{ "name": "Niklas Rosenqvist" }],
+    "links": {
+      "repository": "https://github.com/noeta-lang/noeta"
+    }
+  },
+  "bindings": {
+    "c": false,
+    "go": false,
+    "node": false,
+    "python": false,
+    "rust": true,
+    "swift": false
+  }
+}

@@ -1,0 +1,100 @@
+==================
+Binding with arithmetic
+==================
+
+mut x = 1 + 2
+
+---
+
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (binary_expression
+      left: (integer_literal)
+      right: (integer_literal))))
+
+==================
+Echo a function call
+==================
+
+echo len(xs)
+
+---
+
+(source_file
+  (echo_statement
+    (call_expression
+      function: (identifier)
+      arguments: (arguments
+        (identifier)))))
+
+==================
+Struct with a typed field
+==================
+
+struct Point {
+    x: int
+}
+
+---
+
+(source_file
+  (struct_declaration
+    name: (identifier)
+    body: (type_body
+      (field_declaration
+        name: (identifier)
+        type: (primitive_type)))))
+
+==================
+Match over an enum
+==================
+
+fn area(): float {
+    return match self {
+        Shape.Circle(r) => 1.0,
+    }
+}
+
+---
+
+(source_file
+  (function_declaration
+    name: (identifier)
+    parameters: (parameters)
+    return_type: (primitive_type)
+    body: (block
+      (return_statement
+        (match_expression
+          value: (self)
+          (match_arm
+            pattern: (enum_pattern
+              type: (identifier)
+              variant: (identifier)
+              (identifier))
+            value: (float_literal)))))))
+
+==================
+Newline terminates; leading operator continues
+==================
+
+mut a = [1, 2, 3]
+    |> sum()
+mut b = 2
+
+---
+
+(source_file
+  (let_statement
+    name: (identifier)
+    value: (binary_expression
+      left: (list_literal
+        (integer_literal)
+        (integer_literal)
+        (integer_literal))
+      right: (call_expression
+        function: (identifier)
+        arguments: (arguments))))
+  (let_statement
+    name: (identifier)
+    value: (integer_literal)))
