@@ -21,7 +21,8 @@
 //! *different file*. Slice **L4** adds **document symbols**: the entry document's declarations become
 //! the hierarchical outline the editor renders (see [`symbols`]). **Find-references** lists every use
 //! of the value symbol under the cursor (across modules), reusing the def/use index; **rename** turns
-//! those into a `WorkspaceEdit`. Slice **L5** adds **completion**:
+//! those into a `WorkspaceEdit`. **Signature help** shows the called function's signature and active
+//! argument while typing a call (see [`signature`]). Slice **L5** adds **completion**:
 //! on a member access `receiver.member` the cursor offers the receiver type's fields, variants, and
 //! methods; in a type-annotation position it offers the type names; otherwise it offers the language
 //! keywords, the top-level declarations, and the value bindings in scope there (see [`completion`]).
@@ -31,6 +32,7 @@ mod completion;
 mod hover;
 mod offsets;
 mod resolve;
+mod signature;
 mod symbols;
 
 use std::collections::HashMap;
@@ -377,6 +379,32 @@ impl DocumentStore {
             by_uri.entry(target_uri).or_default().push(range);
         }
         Some(by_uri)
+    }
+
+    /// Signature help for the call the cursor at `position` is inside: the called function's
+    /// signature and the active argument. Token-based (so a half-typed call with an unbalanced paren
+    /// still resolves); the callee is looked up among the merged program's top-level functions, so an
+    /// imported function's signature is shown. `None` if the cursor is not in a known function call.
+    fn signature_help(
+        &self,
+        uri: &str,
+        position: Position,
+        encoding: Encoding,
+    ) -> Option<signature::SignatureData> {
+        let cache = self.workspaces.get(uri)?;
+        let db = &self.db;
+        let entry = cache.entry();
+        let text = entry.text(db);
+        let offset = LineIndex::new(text).offset(position, encoding);
+        let tokens = &noeta_db::tokens(db, entry).0.tokens;
+
+        let linked = noeta_db::linked(db, cache.workspace);
+        let entry_ast = noeta_db::ast(db, entry);
+        let program = match &linked.0 {
+            Ok(program) => program,
+            Err(_) => &entry_ast.0.program,
+        };
+        signature::signature_at(tokens, text, program, offset)
     }
 
     /// The completion candidates at `position` in `uri`. When the cursor is on a member access
@@ -763,6 +791,12 @@ impl LanguageServer for Backend {
                     TextDocumentSyncKind::FULL,
                 )),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                signature_help_provider: Some(SignatureHelpOptions {
+                    // `(` opens a call, `,` moves to the next argument.
+                    trigger_characters: Some(vec!["(".to_string(), ",".to_string()]),
+                    retrigger_characters: None,
+                    work_done_progress_options: WorkDoneProgressOptions::default(),
+                }),
                 definition_provider: Some(OneOf::Left(true)),
                 references_provider: Some(OneOf::Left(true)),
                 rename_provider: Some(OneOf::Left(true)),
@@ -879,6 +913,37 @@ impl LanguageServer for Backend {
             WorkspaceEdit {
                 changes: Some(changes),
                 ..Default::default()
+            }
+        }))
+    }
+
+    async fn signature_help(&self, params: SignatureHelpParams) -> Result<Option<SignatureHelp>> {
+        let position_params = params.text_document_position_params;
+        let uri = position_params.text_document.uri;
+        let encoding = *self.encoding.lock().expect("encoding lock poisoned");
+        let data = {
+            let store = self.store.lock().expect("document store poisoned");
+            store.signature_help(uri.as_str(), position_params.position, encoding)
+        };
+        Ok(data.map(|data| {
+            let active = data.active_param as u32;
+            let parameters = data
+                .parameters
+                .into_iter()
+                .map(|label| ParameterInformation {
+                    label: ParameterLabel::Simple(label),
+                    documentation: None,
+                })
+                .collect();
+            SignatureHelp {
+                signatures: vec![SignatureInformation {
+                    label: data.label,
+                    documentation: None,
+                    parameters: Some(parameters),
+                    active_parameter: Some(active),
+                }],
+                active_signature: Some(0),
+                active_parameter: Some(active),
             }
         }))
     }
@@ -1506,6 +1571,51 @@ mod tests {
                 "invalid name {bad:?} must be rejected"
             );
         }
+    }
+
+    #[test]
+    fn signature_help_shows_the_active_parameter() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///s.noe",
+            "fn add(a: int, b: int): int { return a + b }\nx = add(1, ".to_string(),
+        );
+        let text = &store.buffers["file:///s.noe"];
+        let last = text.lines().count() as u32 - 1;
+        let col = text.lines().next_back().unwrap().chars().count() as u32; // after `add(1, `
+        let sig = store
+            .signature_help(
+                "file:///s.noe",
+                Position {
+                    line: last,
+                    character: col,
+                },
+                Encoding::Utf8,
+            )
+            .expect("inside the call");
+        assert_eq!(sig.label, "add(a: int, b: int) -> int");
+        assert_eq!(sig.active_param, 1);
+    }
+
+    #[test]
+    fn signature_help_outside_a_call_is_none() {
+        let mut store = DocumentStore::default();
+        store.open(
+            "file:///s.noe",
+            "fn f(a: int): int { return 1 }\ny = 2".to_string(),
+        );
+        assert!(
+            store
+                .signature_help(
+                    "file:///s.noe",
+                    Position {
+                        line: 1,
+                        character: 5,
+                    },
+                    Encoding::Utf8,
+                )
+                .is_none()
+        );
     }
 
     #[test]

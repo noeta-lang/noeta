@@ -171,7 +171,8 @@ pub(crate) fn fn_signature(decl: &FnDecl) -> String {
 }
 
 /// One parameter (or variant field) rendered as `name: T`, or just `name` when it has no annotation.
-fn param_detail(param: &Param) -> String {
+/// Shared with signature help.
+pub(crate) fn param_detail(param: &Param) -> String {
     match &param.ty {
         Some(ty) => format!("{}: {}", param.name, render_type_ref(ty)),
         None => param.name.clone(),
