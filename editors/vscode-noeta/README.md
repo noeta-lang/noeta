@@ -13,8 +13,15 @@ features backed by the compiler itself.
   - **Hover types** — the inferred type of the expression under the cursor.
   - **Go-to-definition** — jump to a local, parameter, function, type, field, or method — including
     across modules.
+  - **Find references & rename** — every use of a value or member symbol (type-aware, so a same-named
+    field on another type is left alone), across modules; rename validates the new name first.
+  - **Signature help** — the called function's or method's signature with the active argument
+    highlighted as you type the call.
+  - **Semantic highlighting** — compiler-accurate colouring that tells a function from a variable from
+    a property, overlaid on the static grammar.
   - **Document outline** — the symbol tree for breadcrumbs and `@`-symbol search.
-  - **Completion** — keywords and in-scope names, and a receiver type's fields/methods after `.`.
+  - **Completion** — keywords, in-scope names, a receiver type's members after `.`, and type names in
+    annotation position.
 - **Syntax highlighting** for the full Noeta surface:
   - keywords — control flow, declarations (`fn`/`struct`/`class`/`enum`/`impl`), concurrency (`async`/`spawn`/`isolate`/`channel`), and the operator words `as`/`is`
   - the three string forms — `"…"`, `'…'`, and backtick templates — with `${…}` interpolation holes highlighted as embedded expressions and `\${` recognized as an escape
@@ -67,9 +74,9 @@ The grammar emits standard TextMate scopes so it inherits sensible colors from a
 
 ## Roadmap
 
-- **`noeta lsp`** — the language server over the compiler's salsa query graph is **wired in** (this
-  release): live diagnostics, hover types, go-to-definition, document outline, and completion. Next:
-  member completion on a bare `.` trigger, find-references, and rename.
+- **`noeta lsp`** — the language server over the compiler's salsa query graph is **wired in**: live
+  diagnostics, hover, go-to-definition, find references, rename, signature help, semantic highlighting,
+  document outline, and completion — most working across modules.
 - A tree-sitter grammar for editors outside the TextMate ecosystem (Neovim, Zed, Helix).
 
 See `docs/Editor-and-AI-Tooling.md` in the repository for the full plan.

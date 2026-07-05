@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+The language server gained, since 0.2.0 (all served automatically by `noeta lsp` — no client change):
+
+- **Find references** and **rename** for value *and* member symbols (type-aware, cross-module), with
+  `prepareRename` validation.
+- **Signature help** for function and method calls, with the active argument highlighted.
+- **Semantic highlighting** — compiler-accurate identifier colouring overlaid on the grammar.
+- Richer **completion**: member completion on a bare `.` trigger, in-scope locals in whitespace, and
+  type names in annotation position.
+- Faster editing: `didChange` no longer re-reads sibling files from disk on every keystroke.
+
 ## 0.2.0
 
 Wires in the `noeta lsp` language server, adding semantic features on top of the static grammar:
