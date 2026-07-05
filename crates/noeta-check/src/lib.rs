@@ -3891,6 +3891,19 @@ impl Checker {
                     };
                     return Type::Named(stdlib::ITERATOR.to_string(), vec![r]);
                 }
+                // `xs.map(f)` on a list → `List<R>`, `R` the closure's return type — the eager list
+                // method form (prelude-redesign P1), refined here for the same reason as iterator
+                // `map`. Matches the free `map(xs, f)` this replaces.
+                if name == "map" && matches!(recv, Type::List(_)) {
+                    let r = match args.first() {
+                        Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                        _ => Type::Dyn,
+                    };
+                    // Record the packed-result note the free `map` gets (keyed by the call span), so a
+                    // packed-struct element still lowers to a flat result.
+                    self.note_map_packed(&r, call_span);
+                    return Type::List(Box::new(r));
+                }
                 let ret = self.method_call_return(&recv, name);
                 // A method call on a concrete primitive with no such built-in method is an error,
                 // mirroring the non-indexable check (`42[0]`). `dyn`/holes defer (their result is

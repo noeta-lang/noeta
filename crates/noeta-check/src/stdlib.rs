@@ -218,7 +218,7 @@ fn iterator_method(name: &str, elem: &Type) -> Option<Type> {
 
 fn bytes_method(name: &str) -> Option<Type> {
     Some(match name {
-        "count" => Type::Int, // the buffer length in bytes
+        "count" | "len" => Type::Int, // the buffer length in bytes
         _ => return None,
     })
 }
@@ -277,7 +277,7 @@ fn string_method(name: &str) -> Option<Type> {
         "upper" | "lower" | "trim" | "replace" | "repeat" => Type::String,
         "contains" | "starts_with" | "ends_with" => Type::Bool,
         "split" => list(Type::String),
-        "count" => Type::Int,
+        "count" | "len" => Type::Int,
         _ => return None,
     })
 }
@@ -289,7 +289,18 @@ fn list_method(name: &str, elem: &Type) -> Option<Type> {
         "join" => Type::String,
         "first" | "last" => opt(elem.clone()),
         "to_set" => set(elem.clone()),
-        "count" => Type::Int,
+        // `count` is the legacy length name; `len` is the preferred one (prelude-redesign P1).
+        "count" | "len" => Type::Int,
+        // Eager collection methods reusing the free-function impls (prelude-redesign P1). `filter(f)`
+        // keeps the element type; `sum()` is numeric by element (`int`/`float`/hole); `map(f)` → a
+        // `List<R>` where `R` is the closure's return, refined at the call site (like iterator `map`).
+        "filter" => list(elem.clone()),
+        "sum" => match elem {
+            Type::Int => Type::Int,
+            Type::Float => Type::Float,
+            _ => Type::Unknown,
+        },
+        "map" => list(Type::Dyn),
         // `to_bytes` serializes a `List<@packed>` to its raw flat buffer (P-PACK 4.4).
         "to_bytes" => Type::Bytes,
         // `enumerate` yields a list of `(index, item)` tuples (object-model slice 4b).
@@ -304,7 +315,7 @@ fn set_method(name: &str, elem: &Type) -> Option<Type> {
     Some(match name {
         "contains" => Type::Bool,
         "union" | "intersection" | "add" | "remove" => set(elem.clone()),
-        "count" => Type::Int,
+        "count" | "len" => Type::Int,
         "iter" => iterable_iter(elem.clone()),
         _ => return None,
     })
@@ -315,7 +326,7 @@ fn map_method(name: &str, val: &Type) -> Option<Type> {
         "keys" => list(Type::String), // runtime map keys are always strings
         "values" => list(val.clone()),
         "has" => Type::Bool,
-        "count" => Type::Int,
+        "count" | "len" => Type::Int,
         // `get_or(key, default)` — the value at `key`, or `default`. Both are `V`.
         "get_or" => val.clone(),
         // `set`/`remove` return a new map of the same type (keys are always strings).
@@ -346,7 +357,7 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
         Type::List(elem) => list_params(name, elem),
         Type::Set(elem) => set_params(name, elem),
         Type::Map(_, val) => map_params(name, val),
-        Type::Bytes if name == "count" => Some(vec![]),
+        Type::Bytes if name == "count" || name == "len" => Some(vec![]),
         Type::Named(n, _) if n == FILE_HANDLE => file_handle_params(name),
         Type::Named(n, args) if n == ITERATOR => {
             iterator_params(name, args.first().unwrap_or(&Type::Dyn))
@@ -424,7 +435,7 @@ fn int_params(name: &str) -> Option<Vec<Type>> {
 
 fn string_params(name: &str) -> Option<Vec<Type>> {
     Some(match name {
-        "upper" | "lower" | "trim" | "count" => vec![],
+        "upper" | "lower" | "trim" | "count" | "len" => vec![],
         "contains" | "starts_with" | "ends_with" | "split" => vec![Type::String],
         "replace" => vec![Type::String, Type::String],
         "repeat" => vec![Type::Int],
@@ -434,21 +445,32 @@ fn string_params(name: &str) -> Option<Vec<Type>> {
 
 fn list_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "reverse" | "sorted" | "count" | "first" | "last" | "to_set" | "enumerate" | "to_bytes"
-        | "iter" => {
+        "reverse" | "sorted" | "count" | "len" | "sum" | "first" | "last" | "to_set"
+        | "enumerate" | "to_bytes" | "iter" => {
             vec![]
         }
         "contains" => vec![elem.clone()],
         "join" => vec![Type::String],
         "slice" => vec![Type::Int, Type::Int],
         "set" => vec![Type::Int, elem.clone()], // `set(index, value)`
+        // `map(f)` / `filter(f)` take one closure over the element type. `filter` demands a `bool`
+        // predicate; `map` accepts any return (its result element type is the closure's return,
+        // refined at the call site). Matching the eager free-function forms they replace.
+        "filter" => vec![Type::Fn {
+            params: vec![elem.clone()],
+            ret: Box::new(Type::Bool),
+        }],
+        "map" => vec![Type::Fn {
+            params: vec![elem.clone()],
+            ret: Box::new(Type::Dyn),
+        }],
         _ => return None,
     })
 }
 
 fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "count" | "iter" => vec![],
+        "count" | "len" | "iter" => vec![],
         "contains" | "add" | "remove" => vec![elem.clone()],
         "union" | "intersection" => vec![set(elem.clone())],
         _ => return None,
@@ -457,7 +479,7 @@ fn set_params(name: &str, elem: &Type) -> Option<Vec<Type>> {
 
 fn map_params(name: &str, val: &Type) -> Option<Vec<Type>> {
     Some(match name {
-        "keys" | "values" | "count" | "iter" => vec![],
+        "keys" | "values" | "count" | "len" | "iter" => vec![],
         "has" | "remove" => vec![Type::String], // runtime map keys are strings
         "set" => vec![Type::String, val.clone()], // `set(key, value)`
         "get_or" => vec![Type::String, val.clone()], // `get_or(key, default)`

@@ -3465,10 +3465,35 @@ impl<'m> Vm<'m> {
                             pc += 1;
                             continue;
                         }
-                        // Built-in zero-argument methods on lists/maps/strings.
+                        // Eager collection methods reusing the prelude builtin impls (prelude-redesign
+                        // P1): `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list, routed through
+                        // `call_builtin` with the receiver as the first argument so the method and
+                        // (legacy) free-function forms share one impl. A user object's own method wins
+                        // (dispatched earlier); a list receiver is never an object.
+                        if v.list_len().is_some()
+                            && let Some(builtin) = match method {
+                                "map" if args.len() == 1 => Some(Builtin::Map),
+                                "filter" if args.len() == 1 => Some(Builtin::Filter),
+                                "sum" if args.is_empty() => Some(Builtin::Sum),
+                                _ => None,
+                            }
+                        {
+                            let mut arg_vals = Vec::with_capacity(args.len() + 1);
+                            arg_vals.push(v);
+                            arg_vals.extend(args.iter().map(|r| regs[fbase + *r as usize]));
+                            let (dst, span) = (*dst, *span);
+                            let value = self.call_builtin(builtin, &arg_vals, span)?;
+                            set_reg(regs, fbase, dst, value);
+                            pc += 1;
+                            continue;
+                        }
+                        // Built-in zero-argument methods on lists/maps/strings. `count()` is the length
+                        // of a collection; `len()` is the same under its new preferred name
+                        // (prelude-redesign P1 — `count` stays only on lazy iterators). Both accepted
+                        // during the migration.
                         let result = if !args.is_empty() {
                             None
-                        } else if method == "count" {
+                        } else if method == "count" || method == "len" {
                             v.list_len()
                                 .or_else(|| v.set_len())
                                 .or_else(|| v.map_len())
@@ -3500,7 +3525,9 @@ impl<'m> Vm<'m> {
                                 pc += 1;
                             }
                             None if !args.is_empty()
-                                && (method == "count" || method == "enumerate") =>
+                                && (method == "count"
+                                    || method == "len"
+                                    || method == "enumerate") =>
                             {
                                 return Err(self.error(
                                     DiagnosticCode::TypeMismatch,

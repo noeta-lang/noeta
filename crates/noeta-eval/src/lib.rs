@@ -2299,13 +2299,40 @@ impl Interpreter {
                 )),
             };
         }
+        // Eager collection methods that reuse the prelude builtin impls (prelude-redesign P1):
+        // `xs.map(f)` / `xs.filter(f)` / `xs.sum()` on a list. Routed through `call_builtin` with the
+        // receiver as the first argument, so the method form and the (legacy) free-function form
+        // `map(xs, f)` share exactly one implementation. A user object's own `map`/`filter`/`sum`
+        // method wins — it is dispatched earlier, before this built-in fallback.
+        if let Value::List(_) = &receiver
+            && let Some(builtin) = match name {
+                "map" if args.len() == 1 => Some(Builtin::Map),
+                "filter" if args.len() == 1 => Some(Builtin::Filter),
+                "sum" if args.is_empty() => Some(Builtin::Sum),
+                _ => None,
+            }
+        {
+            let mut builtin_args = Vec::with_capacity(args.len() + 1);
+            builtin_args.push(receiver);
+            builtin_args.extend(args);
+            return self.call_builtin(builtin, builtin_args, span);
+        }
         let arity_ok = args.is_empty();
+        // `count()` is the length of a collection; `len()` is the same operation under its new,
+        // preferred name (prelude-redesign P1 — `count` stays only on lazy iterators, where it is a
+        // consuming terminal). Both names are accepted here during the migration.
         let result = match (name, &receiver) {
-            ("count", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
-            ("count", Value::Set(items, _)) if arity_ok => Some(Value::Int(items.len() as i64)),
-            ("count", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
-            ("count", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
-            ("count", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
+            ("count" | "len", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("count" | "len", Value::Set(items, _)) if arity_ok => {
+                Some(Value::Int(items.len() as i64))
+            }
+            ("count" | "len", Value::Map(entries, _)) if arity_ok => {
+                Some(Value::Int(entries.len() as i64))
+            }
+            ("count" | "len", Value::Str(s)) if arity_ok => {
+                Some(Value::Int(s.chars().count() as i64))
+            }
+            ("count" | "len", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
             // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
             // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
@@ -2326,12 +2353,13 @@ impl Interpreter {
             // always `UnknownName` regardless of arity. (Without this guard, `xs.map(f)` — `map` is a
             // free function, not a method — reported `TypeMismatch` here while the VM reported
             // `UnknownName`; the guard makes both backends agree.)
-            None if !arity_ok && (name == "count" || name == "enumerate") => Err(self
-                .runtime_error(
+            None if !arity_ok && (name == "count" || name == "len" || name == "enumerate") => {
+                Err(self.runtime_error(
                     DiagnosticCode::TypeMismatch,
                     span,
                     format!("method `{name}` takes no arguments"),
-                )),
+                ))
+            }
             None => Err(self.runtime_error(
                 DiagnosticCode::UnknownName,
                 span,
