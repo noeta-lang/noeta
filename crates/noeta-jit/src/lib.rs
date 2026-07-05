@@ -1926,7 +1926,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
         Op::LoadGlobal { dst, global, .. } => emit_load_global(cg, *dst, global.0, pc, op_blocks),
         Op::StoreGlobal { global, src } => emit_store_global(cg, global.0, *src, pc, op_blocks),
         Op::TakeGlobal { dst, global, .. } => emit_take_global(cg, *dst, global.0, pc, op_blocks),
-        Op::Call { .. } | Op::CallGlobal { .. } => emit_call(cg, pc, op_blocks),
+        Op::Call { dst, .. } | Op::CallGlobal { dst, .. } => emit_call(cg, *dst, pc, op_blocks),
         Op::Return { src } => emit_return(cg, *src, pc),
         op if is_leaf_heap_op(op) => emit_leaf_op(cg, pc, op_blocks),
         // A bail point (`is_fast_op` was checked at the top; unreachable in practice).
@@ -1942,7 +1942,7 @@ fn emit_op(cg: &mut Codegen, consts: &[Const], op: &Op, pc: usize, op_blocks: &[
 /// frame/register stacks (pushing the callee frame). Whatever it returns — `CALLED` (frame pushed),
 /// a resume pc (a synchronous first-class-builtin call completed), or `ABORTED` — becomes this
 /// compiled function's outcome, so the interpreter runs the callee and resumes the caller in tier 0.
-fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
+fn emit_call(cg: &mut Codegen, dst: Reg, pc: usize, op_blocks: &[Block]) {
     // P-JSSA sync point: the call helpers read the argument registers (and, on a bail, any live
     // register) from the slots, so materialize the SSA-resident live set first.
     cg.spill_ssa(pc);
@@ -2012,9 +2012,15 @@ fn emit_call(cg: &mut Codegen, pc: usize, op_blocks: &[Block]) {
     let is_cont = cg.b.ins().icmp(IntCC::Equal, after, cont);
     cg.b.ins().brif(is_cont, continue_blk, &[], return_blk, &[]);
     cg.b.switch_to_block(continue_blk);
-    // The callee's return protocol wrote this call's destination slot — reload the SSA variables
-    // from the (now-current) slots before continuing natively.
-    cg.load_ssa_vars();
+    // S4.1a precise reload: this block is reached only by a clean direct `RETURNED`, whose whole
+    // effect on the caller's window is one write — the destination slot (`do_return`'s transfer).
+    // Every other promoted variable still holds exactly what it held at the pre-call spill, so
+    // only `dst`'s variable needs a reload. (Its raw variable needs nothing: a call result's kind
+    // is `Imm`, and the raw form already has a def on every path from the entry inits.)
+    if cg.is_var(dst) {
+        let v = cg.load_reg(dst);
+        cg.b.def_var(cg.vars[dst as usize], v);
+    }
     cg.b.ins().jump(op_blocks[pc + 1], &[]);
     cg.b.switch_to_block(return_blk);
     cg.b.ins().return_(&[after]);
