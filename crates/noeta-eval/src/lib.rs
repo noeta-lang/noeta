@@ -401,6 +401,23 @@ impl Builtin {
         }
     }
 
+    /// The builtin behind a **virtual-module** function name (`use std.reactive.{signal}` →
+    /// `Builtin::Signal`, prelude-redesign P2) — the names `registry::VIRTUAL_MODULES` exports.
+    /// The bytecode compiler resolves the same names through its own `Builtin::from_name`.
+    fn from_virtual_name(name: &str) -> Option<Builtin> {
+        match name {
+            "signal" => Some(Builtin::Signal),
+            "computed" => Some(Builtin::Computed),
+            "effect" => Some(Builtin::Effect),
+            "sleep" => Some(Builtin::Sleep),
+            "all" => Some(Builtin::All),
+            "race" => Some(Builtin::Race),
+            "map_bounded" => Some(Builtin::MapBounded),
+            "next_id" => Some(Builtin::NextId),
+            _ => None,
+        }
+    }
+
     /// The prelude functions registered in every program's global scope. `none` is a
     /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
@@ -416,9 +433,8 @@ impl Builtin {
         Builtin::All,
         Builtin::Race,
         Builtin::MapBounded,
-        Builtin::Signal,
-        Builtin::Computed,
-        Builtin::Effect,
+        // `Signal`/`Computed`/`Effect` left the prelude (prelude-redesign P2a): they are
+        // `use std.reactive` imports now, bound by `declare_use` as first-class builtin values.
     ];
 }
 
@@ -1538,10 +1554,25 @@ impl Interpreter {
         let is_std = path == ["std"];
         let selective_module = (path.len() == 2 && path[0] == "std")
             .then(|| path[1].as_str())
-            .filter(|m| noeta_stdlib::registry::find_module(m).is_some());
+            .filter(|m| {
+                noeta_stdlib::registry::find_module(m).is_some()
+                    || noeta_stdlib::registry::is_virtual_module(m)
+            });
         for imported in names {
-            let value = if is_std && noeta_stdlib::registry::find_module(&imported.name).is_some() {
+            let value = if is_std
+                && (noeta_stdlib::registry::find_module(&imported.name).is_some()
+                    || noeta_stdlib::registry::is_virtual_module(&imported.name))
+            {
                 Value::NativeModule(imported.name.clone())
+            } else if let Some(module) = selective_module
+                && noeta_stdlib::registry::virtual_module_function(module, &imported.name)
+            {
+                // A virtual-module member (`use std.reactive.{signal}`, P2a): the function IS a
+                // builtin, so bind the first-class builtin value — the old prelude binding, gated.
+                Value::Builtin(
+                    Builtin::from_virtual_name(&imported.name)
+                        .expect("every virtual-module function is a named builtin"),
+                )
             } else if let Some(module) = selective_module
                 && noeta_stdlib::registry::is_module_function(module, &imported.name)
             {
@@ -2671,6 +2702,22 @@ impl Interpreter {
         {
             let id = self.executor.spawn_io(&mut *self.host, req);
             return Ok(Value::AsyncIo(id));
+        }
+        // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
+        // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
+        // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. Mirrors the VM.
+        if noeta_stdlib::registry::is_virtual_module(module) {
+            let Some(builtin) = noeta_stdlib::registry::virtual_module_function(module, func)
+                .then(|| Builtin::from_virtual_name(func))
+                .flatten()
+            else {
+                return Err(self.runtime_error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("module `{module}` has no function `{func}`"),
+                ));
+            };
+            return self.call_builtin(builtin, args.to_vec(), span);
         }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host

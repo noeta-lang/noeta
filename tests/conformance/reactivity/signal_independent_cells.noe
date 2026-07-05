@@ -7,6 +7,7 @@
 // expect: stdout "10"
 // expect: stdout "3"
 // expect: exit 0
+use std.reactive.{signal}
 a = signal(1)
 b = signal(10)
 echo a.get()

@@ -341,6 +341,24 @@ impl<'m> Vm<'m> {
             let id = self.executor.spawn_io(&mut *self.host, req);
             return Ok(Value::make_async_io(id));
         }
+        // A virtual module's functions (`reactive.signal(...)`, prelude-redesign P2) are builtins —
+        // they need the executor/reactive graph the registry seam cannot reach — so a qualified call
+        // intercepts here, ahead of registry dispatch, exactly like `fs.*_async`. The tree-walker
+        // mirrors this in its own `call_native_module`.
+        if noeta_stdlib::registry::is_virtual_module(module) {
+            let Some(builtin) =
+                noeta_stdlib::registry::virtual_module_function(module, func)
+                    .then(|| Builtin::from_name(func))
+                    .flatten()
+            else {
+                return Err(self.error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("module `{module}` has no function `{func}`"),
+                ));
+            };
+            return self.call_builtin(builtin, args, span);
+        }
         // A function registered in the native-extension registry dispatches through the shared
         // seam: project arguments onto `NativeValue`, run the one shared dispatch body (host
         // threaded in), and materialize the `NativeOut` result (the result shape supplied from the

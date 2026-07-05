@@ -1,0 +1,7 @@
+// Using `signal` without `use std.reactive` is an unknown name (E0005) — the reactive constructors
+// left the always-global prelude (prelude-redesign P2a), so the bare name resolves like any other
+// missing identifier, identically on both backends.
+// expect: error E0005 at 6:5
+// expect: exit 1
+s = signal(0)
+echo s.get()

@@ -2,7 +2,8 @@
 // `signal(0)` is a `Signal<int>`; setting it to a string is rejected at check time (E0007), the same
 // argument-type check every typed call gets. This is the payoff of threading the value type through
 // `Signal<T>` rather than erasing it.
-// expect: error E0007 at 8:1
+// expect: error E0007 at 9:1
 // expect: exit 1
+use std.reactive.{signal}
 s = signal(0)
 s.set("not an int")

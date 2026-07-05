@@ -1,0 +1,17 @@
+// `signal`/`computed`/`effect` are `use std.reactive` imports, not prelude names (prelude-redesign
+// P2a). Both forms work: a selective import binds the bare name; a whole-module import gives the
+// qualified call (`reactive.signal(...)` intercepts ahead of registry dispatch — the builtins need
+// the reactive graph, which the registry seam cannot reach). Ungated bare use is E0005 (see
+// diagnostics/reactive_unimported.noe).
+// expect: stdout "10"
+// expect: stdout "3"
+// expect: exit 0
+use std.reactive.{signal, computed}
+use std.{reactive}
+
+count = signal(5)
+doubled = computed(fn() => count.get() * 2)
+echo doubled.get()
+
+qualified = reactive.signal(3)
+echo qualified.get()

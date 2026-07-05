@@ -48,7 +48,7 @@ pub(super) const EFFECT: &str = "Effect";
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
 pub(super) fn is_std_module(name: &str) -> bool {
-    registry::find_module(name).is_some()
+    registry::find_module(name).is_some() || registry::is_virtual_module(name)
 }
 
 /// Map the registry's neutral [`registry::SigType`] onto a checker [`Type`].
@@ -543,24 +543,8 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         // `sleep(ms)` — a leaf timer future (Track A.2). Returns `Future<void>`, so `sleep(ms).await`
         // yields `void`; awaiting it suspends until the executor clock reaches the deadline.
         "sleep" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
-        // `signal(v: T) -> Signal<T>` (reactivity S1) — the value type rides as the single type arg
-        // so `.get()` recovers `T` and `.set()` requires `T`.
-        "signal" => Type::Named(
-            SIGNAL.to_string(),
-            vec![args.first().cloned().unwrap_or(Type::Unknown)],
-        ),
-        // `computed(fn() -> T) -> Computed<T>` (reactivity S3) — the closure's return type rides as the
-        // single type arg so `.get()` recovers `T`.
-        "computed" => Type::Named(
-            COMPUTED.to_string(),
-            vec![match args.first() {
-                Some(Type::Fn { ret, .. }) => (**ret).clone(),
-                _ => Type::Unknown,
-            }],
-        ),
-        // `effect(fn() -> void) -> Effect` (reactivity S2) — runs `fn` now and reruns it when a signal
-        // it read changes.
-        "effect" => Type::Named(EFFECT.to_string(), vec![]),
+        // `signal`/`computed`/`effect` left the prelude (prelude-redesign P2a): they are
+        // `use std.reactive` imports now — typed in `module_return` under the `reactive` module.
         // `all(List<Future<T>>) -> List<T>` — await every future, results in order (Track A.9).
         "all" => list(future_elem(args.first())),
         // `race(List<Future<T>>) -> T` — the first result; the losers are cancelled (Track A.9).
@@ -593,6 +577,27 @@ pub(super) fn index_return(receiver: &Type) -> Option<Type> {
 
 /// The return type of a Ring 2 module call `module.name(args)`, or `None` if unknown.
 pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<Type> {
+    // The virtual `reactive` module (prelude-redesign P2a): its functions are backend builtins, so
+    // their types live here rather than in the registry. `signal(v: T) -> Signal<T>` (the value
+    // type rides as the single type arg so `.get()` recovers `T` and `.set()` requires `T`);
+    // `computed(fn() -> T) -> Computed<T>`; `effect(fn() -> void) -> Effect`.
+    if module == "reactive" {
+        return match name {
+            "signal" => Some(Type::Named(
+                SIGNAL.to_string(),
+                vec![args.first().cloned().unwrap_or(Type::Unknown)],
+            )),
+            "computed" => Some(Type::Named(
+                COMPUTED.to_string(),
+                vec![match args.first() {
+                    Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                    _ => Type::Unknown,
+                }],
+            )),
+            "effect" => Some(Type::Named(EFFECT.to_string(), vec![])),
+            _ => None,
+        };
+    }
     // Migrated modules: the result type comes from the registry's `RetTy`. `SameAsArg(i)` carries the
     // i-th argument's type (`vec.add(v, w): typeof v`); `NumericPreserving` is the `math.abs`/min/max
     // kind-preserving rule; `Concrete` maps directly.

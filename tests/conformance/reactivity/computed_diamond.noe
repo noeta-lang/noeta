@@ -11,6 +11,7 @@
 // expect: stdout "times"
 // expect: stdout "sum=43"
 // expect: exit 0
+use std.reactive.{signal, computed, effect}
 base = signal(2)
 plus = computed(fn() { echo "plus"; return base.get() + 10 })
 times = computed(fn() { echo "times"; return base.get() * 10 })

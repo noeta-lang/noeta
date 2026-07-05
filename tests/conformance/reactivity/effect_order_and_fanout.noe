@@ -7,6 +7,7 @@
 // expect: stdout "first=1"
 // expect: stdout "second=1"
 // expect: exit 0
+use std.reactive.{signal, effect}
 s = signal(0)
 effect(fn() {
     echo "first=${s.get()}"

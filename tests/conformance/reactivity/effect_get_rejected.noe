@@ -3,8 +3,9 @@
 // built-in gives for a method it lacks (`.dispose()` is the only method an `Effect` handle carries).
 // The kind-guarded dispatch means the `(Effect, "get")` pair never reaches the read path — it falls
 // through to E0005, identically on both backends.
-// expect: error E0005 at 10:1
+// expect: error E0005 at 11:1
 // expect: exit 1
+use std.reactive.{signal, effect}
 sig = signal(0)
 e = effect(fn() { sig.get() })
 e.get()

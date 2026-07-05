@@ -11,6 +11,7 @@
 // expect: stdout "computing"
 // expect: stdout "doubled=6"
 // expect: exit 0
+use std.reactive.{signal, computed}
 count = signal(2)
 doubled = computed(fn() { echo "computing"; return count.get() * 2 })
 echo "start"

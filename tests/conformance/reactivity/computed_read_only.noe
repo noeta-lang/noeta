@@ -2,6 +2,7 @@
 // `.set` on one is rejected with the same "no method" error any built-in type gives for a method it
 // does not have (a `computed` derives its value from its dependencies; there is nothing to set). Both
 // backends key on the node kind, so the diagnostic is identical.
-// expect: error E0005 at 7:1
+// expect: error E0005 at 8:1
+use std.reactive.{computed}
 c = computed(fn() => 5)
 c.set(3)

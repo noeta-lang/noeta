@@ -44,7 +44,8 @@ const SETS: usize = 16;
 /// measures, not the body work.
 fn fanout_src(n: usize) -> String {
     format!(
-        "s = signal(0)\n\
+        "use std.reactive.{{signal, effect}}\n\
+         s = signal(0)\n\
          mut c = 0\n\
          while c < {n} {{\n    \
              effect(fn() {{ s.get() }})\n    \

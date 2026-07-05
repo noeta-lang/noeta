@@ -6,6 +6,7 @@
 // expect: stdout "5"
 // expect: stdout "final=99"
 // expect: exit 0
+use std.reactive.{signal, effect}
 count = signal(0)
 e = effect(fn() {
     echo count.get()

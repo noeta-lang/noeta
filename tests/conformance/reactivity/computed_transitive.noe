@@ -11,6 +11,7 @@
 // expect: stdout "lo"
 // expect: stdout "hi=60"
 // expect: exit 0
+use std.reactive.{signal, computed}
 base = signal(1)
 lo = computed(fn() { echo "lo"; return base.get() + 1 })
 hi = computed(fn() { echo "hi"; return lo.get() * 10 })
