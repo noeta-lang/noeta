@@ -48,6 +48,7 @@ The exhaustive reference for syntax, semantics, and the stdlib.
 - [Fixed-Width Integers, Bitwise & Packed Types](Fixed-Width-Integers)
 - [Attributes & Reflection](Attributes-and-Reflection)
 - [Concurrency](Concurrency)
+- [Reactivity](Reactivity)
 - [Standard Library](Standard-Library)
 - [Standard-Library Modules](Standard-Library-Modules)
 

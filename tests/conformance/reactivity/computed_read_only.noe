@@ -1,0 +1,7 @@
+// Reactivity S3 — a `computed` is read-only: it exposes `.get()` but no `.set()`/`.update()`. Calling
+// `.set` on one is rejected with the same "no method" error any built-in type gives for a method it
+// does not have (a `computed` derives its value from its dependencies; there is nothing to set). Both
+// backends key on the node kind, so the diagnostic is identical.
+// expect: error E0005 at 7:1
+c = computed(fn() => 5)
+c.set(3)

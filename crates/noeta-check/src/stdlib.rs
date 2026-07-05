@@ -30,6 +30,20 @@ pub(super) const FUTURE: &str = "Future";
 pub(super) const SENDER: &str = "Sender";
 pub(super) const RECEIVER: &str = "Receiver";
 
+/// Reserved built-in type name for a reactive cell (reactivity S1). `signal(v: T)` yields a
+/// `Signal<T>` carrying its value type as its single argument; `.get()` reads `T`, `.set(v: T)`
+/// updates it, `.update(fn(T) -> T)` reads-modifies-writes it.
+pub(super) const SIGNAL: &str = "Signal";
+
+/// Reserved built-in type name for a lazy memoized derivation (reactivity S3). `computed(fn() -> T)`
+/// yields a `Computed<T>` carrying the closure's return type as its single argument; `.get()` reads
+/// `T` (recomputing on read only when a dependency changed). Read-only — no `.set`/`.update`.
+pub(super) const COMPUTED: &str = "Computed";
+
+/// Reserved built-in type name for a reactive side effect (reactivity S2). `effect(fn)` yields an
+/// `Effect` (no type argument — it produces no value); `.dispose()` unsubscribes it.
+pub(super) const EFFECT: &str = "Effect";
+
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
@@ -110,8 +124,42 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         Type::Named(n, args) if n == RECEIVER => {
             receiver_method(name, args.first().unwrap_or(&Type::Dyn))
         }
+        Type::Named(n, args) if n == SIGNAL => {
+            signal_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
+        Type::Named(n, args) if n == COMPUTED => {
+            computed_method(name, args.first().unwrap_or(&Type::Dyn))
+        }
+        Type::Named(n, _) if n == EFFECT => effect_method(name),
         _ => None,
     }
+}
+
+/// A `Signal<T>` cell (reactivity S1/S2): `get()` reads the current value `T`; `set(v: T)` updates it;
+/// `update(fn(T) -> T)` reads-modifies-writes it. `set`/`update` yield nothing.
+fn signal_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "get" => elem.clone(),
+        "set" | "update" => Type::Unit,
+        _ => return None,
+    })
+}
+
+/// A `Computed<T>` derivation (reactivity S3): `get()` reads the current value `T`, recomputing lazily
+/// if a dependency changed. Read-only — there is deliberately no `set`/`update`.
+fn computed_method(name: &str, elem: &Type) -> Option<Type> {
+    Some(match name {
+        "get" => elem.clone(),
+        _ => return None,
+    })
+}
+
+/// An `Effect` (reactivity S2): `dispose()` unsubscribes the effect so it stops rerunning.
+fn effect_method(name: &str) -> Option<Type> {
+    Some(match name {
+        "dispose" => Type::Unit,
+        _ => return None,
+    })
 }
 
 /// A `Sender<T>` endpoint (isolates I.1): `send(v)` enqueues `v` (async — suspends on a full buffer),
@@ -315,6 +363,30 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
             "recv" => vec![],
             _ => return None,
         }),
+        // `Signal<T>` (reactivity S1): `get()` takes nothing; `set(v: T)` takes the value type, so a
+        // mistyped update is rejected statically.
+        Type::Named(n, args) if n == SIGNAL => {
+            let elem = args.first().cloned().unwrap_or(Type::Dyn);
+            Some(match name {
+                "get" => vec![],
+                "set" => vec![elem.clone()],
+                // `update(fn(T) -> T)` — a closure from the value type to itself.
+                "update" => vec![Type::Fn {
+                    params: vec![elem.clone()],
+                    ret: Box::new(elem),
+                }],
+                _ => return None,
+            })
+        }
+        // `Computed<T>` (reactivity S3): `get()` takes nothing. Read-only.
+        Type::Named(n, _) if n == COMPUTED => Some(match name {
+            "get" => vec![],
+            _ => return None,
+        }),
+        Type::Named(n, _) if n == EFFECT => Some(match name {
+            "dispose" => vec![],
+            _ => return None,
+        }),
         _ => None,
     }
 }
@@ -464,6 +536,24 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         // `sleep(ms)` — a leaf timer future (Track A.2). Returns `Future<void>`, so `sleep(ms).await`
         // yields `void`; awaiting it suspends until the executor clock reaches the deadline.
         "sleep" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
+        // `signal(v: T) -> Signal<T>` (reactivity S1) — the value type rides as the single type arg
+        // so `.get()` recovers `T` and `.set()` requires `T`.
+        "signal" => Type::Named(
+            SIGNAL.to_string(),
+            vec![args.first().cloned().unwrap_or(Type::Unknown)],
+        ),
+        // `computed(fn() -> T) -> Computed<T>` (reactivity S3) — the closure's return type rides as the
+        // single type arg so `.get()` recovers `T`.
+        "computed" => Type::Named(
+            COMPUTED.to_string(),
+            vec![match args.first() {
+                Some(Type::Fn { ret, .. }) => (**ret).clone(),
+                _ => Type::Unknown,
+            }],
+        ),
+        // `effect(fn() -> void) -> Effect` (reactivity S2) — runs `fn` now and reruns it when a signal
+        // it read changes.
+        "effect" => Type::Named(EFFECT.to_string(), vec![]),
         // `all(List<Future<T>>) -> List<T>` — await every future, results in order (Track A.9).
         "all" => list(future_elem(args.first())),
         // `race(List<Future<T>>) -> T` — the first result; the losers are cancelled (Track A.9).

@@ -365,6 +365,16 @@ pub enum Builtin {
     /// `map_bounded(items, n, f)` — apply async `f` to each item, at most `n` concurrently, results
     /// as a `List<B>` in item order (Track A.9).
     MapBounded,
+    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1); the tree-walker twin of the
+    /// VM's `Builtin::Signal`. Returns a `Signal<T>` handle read/updated via the interpreter's graph.
+    Signal,
+    /// `computed(fn)` — create a lazy, memoized derivation (reactivity S3); the tree-walker twin of the
+    /// VM's `Builtin::Computed`. Returns a `Computed<T>` whose `.get()` recomputes only when a
+    /// dependency it read has changed.
+    Computed,
+    /// `effect(fn)` — register a side effect (reactivity S2); the tree-walker twin of the VM's
+    /// `Builtin::Effect`. Runs `fn` immediately, tracks the signals it reads, and reruns on change.
+    Effect,
 }
 
 impl Builtin {
@@ -384,6 +394,9 @@ impl Builtin {
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
+            Builtin::Signal => "signal",
+            Builtin::Computed => "computed",
+            Builtin::Effect => "effect",
         }
     }
 
@@ -404,6 +417,9 @@ impl Builtin {
         Builtin::All,
         Builtin::Race,
         Builtin::MapBounded,
+        Builtin::Signal,
+        Builtin::Computed,
+        Builtin::Effect,
     ];
 }
 
@@ -1092,6 +1108,13 @@ struct Interpreter {
     /// round — a channel op that unblocks a sibling is progress even when no task *completes*.
     channels: Vec<Channel>,
     channel_progress: u64,
+    /// The reactive graph (reactivity S1): the tree-walker twin of the VM's `reactive` field. Every
+    /// `signal(v)`/`computed(fn)`/`effect(fn)` allocates a node here; a `Reactive` handle references
+    /// one by [`NodeId`]. Held behind `Rc` so a flush can borrow the graph and the interpreter
+    /// independently (the graph's methods are `&self`, interior-mutable). The stored values are plain
+    /// `Value`s — `Rc`-shared, so the graph's clones/drops are refcount-correct for free, no wrapper
+    /// needed (unlike the VM's `GcVal`). Cleared at program end so held values drop.
+    reactive: std::rc::Rc<noeta_reactive::ReactiveGraph<Value>>,
     /// The shared reflection artifact (attribute manifest + type registry), built from the program
     /// by the *same* `noeta_ast::reflect::build` the VM uses — so `attributes_of` materializes
     /// identical values in both backends. Populated at the start of `run`.
@@ -1166,6 +1189,7 @@ impl Interpreter {
             scopes: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
+            reactive: std::rc::Rc::new(noeta_reactive::ReactiveGraph::new()),
             reflection: noeta_ast::reflect::ReflectionInfo::default(),
             type_of_sites: std::collections::HashMap::new(),
         }
@@ -2174,6 +2198,54 @@ impl Interpreter {
         {
             self.expect_std_arity(name, &args, 0, span)?;
             return Ok(Value::ChannelRecv(*id));
+        }
+        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/`.update(fn)`,
+        // `computed.get()`, and `effect.dispose()` — the tree-walker twin of the VM's dispatch. Each
+        // method is guarded by the node's `kind` (a `signal` is not disposable, a `computed` is
+        // read-only, an `effect` is not readable); an invalid pair falls through to the generic
+        // no-method runtime error below, exactly as any other unknown method on a built-in type.
+        // `get` on a `computed` recomputes a dirty body via `read_reactive`; on a `signal` it is a
+        // plain read (the callback never fires).
+        if let Value::Reactive(kind, node) = &receiver {
+            use noeta_reactive::NodeKind;
+            let kind = *kind;
+            let node = *node;
+            match (kind, name) {
+                (NodeKind::Signal | NodeKind::Computed, "get") => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    return self.read_reactive(node, span);
+                }
+                (NodeKind::Signal, "set") => {
+                    self.expect_std_arity(name, &args, 1, span)?;
+                    let value = args.into_iter().next().unwrap();
+                    self.reactive.set(node, value);
+                    // Coalesce: a set inside a running effect body only enqueues — the ongoing flush
+                    // picks it up. Only a top-level set drives a fresh flush. (reactivity S4)
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
+                    return Ok(Value::Unit);
+                }
+                (NodeKind::Signal, "update") => {
+                    self.expect_std_arity(name, &args, 1, span)?;
+                    // Read-modify-write: read the current value, call the updater with it, store the
+                    // result, then flush (coalescing inside a running flush, like `set`).
+                    let f = args.into_iter().next().unwrap();
+                    let current = self.read_reactive(node, span)?;
+                    let updated = self.call(f, vec![current], span)?;
+                    self.reactive.set(node, updated);
+                    if !self.reactive.is_flushing() {
+                        self.drive_flush(span)?;
+                    }
+                    return Ok(Value::Unit);
+                }
+                (NodeKind::Effect, "dispose") => {
+                    self.expect_std_arity(name, &args, 0, span)?;
+                    self.reactive.dispose(node);
+                    return Ok(Value::Unit);
+                }
+                _ => {}
+            }
         }
         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file handle above.
         if let Value::Iter(state) = &receiver
@@ -3202,6 +3274,74 @@ impl Interpreter {
         }
     }
 
+    /// Read a reactive node, driving a `computed`'s recompute through [`call`](Self::call) if it is
+    /// dirty (reactivity S3) — the tree-walker twin of the VM's `Vm::read_reactive`. A `signal` read
+    /// never enters the callback (nothing to run); a dirty `computed` runs its body (and, transitively,
+    /// any dirty computeds it reads), memoizing as it goes. The graph is cloned out as an `Rc` so its
+    /// `&self` `read` can borrow it while the callback borrows `self` for `call`. A body that aborts is
+    /// captured deterministically — the first abort stops further recomputes and propagates.
+    fn read_reactive(&mut self, node: noeta_reactive::NodeId, span: Span) -> Eval<Value> {
+        let graph = std::rc::Rc::clone(&self.reactive);
+        let mut abort: Option<Unwind> = None;
+        let value = graph.read(node, &mut |body: Value| -> Value {
+            if abort.is_some() {
+                return Value::Unit;
+            }
+            match self.call(body, Vec::new(), span) {
+                Ok(value) => value,
+                Err(unwind) => {
+                    abort = Some(unwind);
+                    Value::Unit
+                }
+            }
+        });
+        match abort {
+            Some(unwind) => Err(unwind),
+            None => Ok(value),
+        }
+    }
+
+    /// Run the reactive graph's pending effects to a fixpoint (reactivity S2) — the tree-walker twin of
+    /// the VM's `Vm::drive_flush`. Invokes each effect body through [`call`](Self::call). The graph is
+    /// cloned out as an `Rc` so its `&self` `flush` can borrow it while the run callback borrows `self`
+    /// for `call`. The first effect body to abort (by the deterministic flush order) stops further
+    /// bodies and propagates, identically to the VM.
+    fn drive_flush(&mut self, span: Span) -> Eval<()> {
+        let graph = std::rc::Rc::clone(&self.reactive);
+        let mut abort: Option<Unwind> = None;
+        let overflowed = graph
+            .flush(&mut |body: Value| -> Value {
+                if abort.is_some() {
+                    return Value::Unit;
+                }
+                match self.call(body, Vec::new(), span) {
+                    Ok(value) => value,
+                    Err(unwind) => {
+                        abort = Some(unwind);
+                        Value::Unit
+                    }
+                }
+            })
+            .is_err();
+        // A body-driven abort (panic / `?`) takes priority — surface it as itself. Otherwise, a
+        // non-converging flush (a self-reinforcing effect) becomes the reactive-cycle runtime error.
+        if let Some(unwind) = abort {
+            return Err(unwind);
+        }
+        if overflowed {
+            return Err(self.runtime_error(
+                DiagnosticCode::ReactiveCycle,
+                span,
+                format!(
+                    "reactive update did not converge after {} steps — an effect keeps changing a \
+                     signal it depends on",
+                    noeta_reactive::MAX_FLUSH_STEPS
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     fn call_closure(&mut self, closure: &Rc<Closure>, args: Vec<Value>, span: Span) -> Eval<Value> {
         let required = required_count(&closure.defaults);
         if args.len() < required || args.len() > closure.params.len() {
@@ -3642,6 +3782,35 @@ impl Interpreter {
                         ));
                     }
                 }
+            }
+            Builtin::Signal => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                // `signal(v)` — allocate a reactive cell holding `v`. `args` is owned here, so the
+                // value moves straight into the graph (an `Rc` clone keeps it live).
+                let value = args.into_iter().next().unwrap();
+                let id = self.reactive.signal(value);
+                Ok(Value::Reactive(noeta_reactive::NodeKind::Signal, id))
+            }
+            Builtin::Computed => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                // `computed(fn)` — register a lazy derivation, storing the body closure. It is created
+                // dirty and computes on first `.get()`; no flush now (nothing eager runs).
+                let body = args.into_iter().next().unwrap();
+                let id = self.reactive.computed(body);
+                Ok(Value::Reactive(noeta_reactive::NodeKind::Computed, id))
+            }
+            Builtin::Effect => {
+                self.expect_arity(builtin, &args, 1, span)?;
+                // `effect(fn)` — register the effect (created queued), storing the body closure, then
+                // flush to run it once now (subscribing it to the signals it reads). If we are already
+                // inside a flush (an effect created within another effect's body), the ongoing flush
+                // drains it — do not nest. (reactivity S4)
+                let body = args.into_iter().next().unwrap();
+                let id = self.reactive.effect(body);
+                if !self.reactive.is_flushing() {
+                    self.drive_flush(span)?;
+                }
+                Ok(Value::Reactive(noeta_reactive::NodeKind::Effect, id))
             }
         }
     }
@@ -4376,6 +4545,7 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
         | Value::AsyncIo(_)
         | Value::Sender(_)
         | Value::Receiver(_)
+        | Value::Reactive(..)
         | Value::ChannelSend(..)
         | Value::ChannelRecv(_) => TypeRepr::Dyn,
     }
@@ -4831,6 +5001,9 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         | Value::ChannelRecv(_) => NativeValue::Str("<future>".to_string()),
         Value::Sender(_) => NativeValue::Str("<sender>".to_string()),
         Value::Receiver(_) => NativeValue::Str("<receiver>".to_string()),
+        Value::Reactive(kind, _) => {
+            NativeValue::Str(format!("<{}>", kind.type_name().to_ascii_lowercase()))
+        }
         Value::Pending => NativeValue::Str("<pending>".to_string()),
         // An enum/struct *type* value has no JSON analog; its quoted display form, like the VM.
         Value::EnumType(_) | Value::Type(_) => NativeValue::Str(value.display()),

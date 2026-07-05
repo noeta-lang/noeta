@@ -1,0 +1,15 @@
+// Reactivity S2 — an `effect(fn)` runs its body immediately, tracking the signals it reads, and reruns
+// whenever one of them changes. `.set` and `.update` both trigger the rerun (via a flush). Here the
+// effect prints the count on creation (0), after each `.set` (1, 2), and after an `.update` (+10 → 12).
+// expect: stdout "count=0"
+// expect: stdout "count=1"
+// expect: stdout "count=2"
+// expect: stdout "count=12"
+// expect: exit 0
+count = signal(0)
+effect(fn() {
+    echo "count=${count.get()}"
+})
+count.set(1)
+count.set(2)
+count.update(fn(n) => n + 10)

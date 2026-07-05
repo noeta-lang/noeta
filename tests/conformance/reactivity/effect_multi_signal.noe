@@ -1,0 +1,18 @@
+// Reactivity S5 (hardening) — one effect can subscribe to several signals at once (the complement of a
+// fan-out: many sources into one subscriber). This effect reads `a`, `b`, and `c`; it runs once on
+// creation, and a change to *any* of the three reruns it exactly once, seeing the current value of all
+// three. Each set is an independent dependency, so all three edges are live simultaneously.
+// expect: stdout "sum=6"
+// expect: stdout "sum=16"
+// expect: stdout "sum=26"
+// expect: stdout "sum=36"
+// expect: exit 0
+a = signal(1)
+b = signal(2)
+c = signal(3)
+effect(fn() {
+    echo "sum=${a.get() + b.get() + c.get()}"
+})
+a.set(11)
+b.set(12)
+c.set(13)

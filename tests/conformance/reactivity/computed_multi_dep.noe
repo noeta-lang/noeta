@@ -1,0 +1,22 @@
+// Reactivity S5 (hardening) — a `computed` can derive from several signals. `total` reads both `a` and
+// `b`; it recomputes (echoing "compute") only when one of them has actually changed, and returns its
+// memo otherwise. The witness: two reads with no change between them compute once; changing `a` then
+// reading recomputes; changing `b` then reading recomputes; so the derivation tracks every source but
+// still memoizes across unrelated reads.
+// expect: stdout "compute"
+// expect: stdout "total=3"
+// expect: stdout "total=3"
+// expect: stdout "compute"
+// expect: stdout "total=12"
+// expect: stdout "compute"
+// expect: stdout "total=30"
+// expect: exit 0
+a = signal(1)
+b = signal(2)
+total = computed(fn() { echo "compute"; return a.get() + b.get() })
+echo "total=${total.get()}"
+echo "total=${total.get()}"
+a.set(10)
+echo "total=${total.get()}"
+b.set(20)
+echo "total=${total.get()}"

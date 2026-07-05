@@ -1,0 +1,20 @@
+// Reactivity S3 — `computed(fn)` is lazy and memoized. Its body runs on *read*, not on creation, and
+// only when a dependency it read has changed; a read with no intervening change returns the memo
+// without recomputing. The body echoes "computing" each time it actually runs, so the output witnesses
+// exactly when a recompute happens: once on the first `.get()`, skipped on the immediate second
+// `.get()` (memoized), and once more after `count.set(3)` dirties it. This laziness + memoization is
+// the whole point of `computed` over a plain function call.
+// expect: stdout "start"
+// expect: stdout "computing"
+// expect: stdout "doubled=4"
+// expect: stdout "doubled=4"
+// expect: stdout "computing"
+// expect: stdout "doubled=6"
+// expect: exit 0
+count = signal(2)
+doubled = computed(fn() { echo "computing"; return count.get() * 2 })
+echo "start"
+echo "doubled=${doubled.get()}"
+echo "doubled=${doubled.get()}"
+count.set(3)
+echo "doubled=${doubled.get()}"

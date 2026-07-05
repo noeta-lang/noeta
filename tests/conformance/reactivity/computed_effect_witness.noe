@@ -1,0 +1,20 @@
+// Reactivity S3 — an `effect` observing a `computed` is how the value of a derivation becomes visible
+// (and how the differential oracle witnesses recompute order). The effect reads `squared`; on creation
+// it runs once (computing `squared` from `n`). Each `n.set(4)` dirties `squared` and reruns the effect,
+// which pulls `squared` fresh — so the body echoes "sq" exactly once per rerun. The two identical
+// `set(4)`s both rerun (the core does no value-equality suppression), proving a change is a `set`, not
+// a value difference.
+// expect: stdout "sq"
+// expect: stdout "watch=1"
+// expect: stdout "sq"
+// expect: stdout "watch=16"
+// expect: stdout "sq"
+// expect: stdout "watch=16"
+// expect: exit 0
+n = signal(1)
+squared = computed(fn() { echo "sq"; return n.get() * n.get() })
+effect(fn() {
+    echo "watch=${squared.get()}"
+})
+n.set(4)
+n.set(4)

@@ -1,0 +1,17 @@
+// Reactivity S2 — one signal can fan out to several effects, and a change reruns them in a
+// deterministic order (creation order). Two effects both read `s`: each prints on creation (0), then a
+// single `.set(1)` reruns both, `first` before `second`, every time. This determinism is what lets the
+// differential oracle compare effect output byte-for-byte across the two backends.
+// expect: stdout "first=0"
+// expect: stdout "second=0"
+// expect: stdout "first=1"
+// expect: stdout "second=1"
+// expect: exit 0
+s = signal(0)
+effect(fn() {
+    echo "first=${s.get()}"
+})
+effect(fn() {
+    echo "second=${s.get()}"
+})
+s.set(1)

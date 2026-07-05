@@ -1,0 +1,17 @@
+// Reactivity S1 — a `signal(v)` is a mutable reactive cell. `.get()` reads it, `.set(v)` updates it.
+// With no `computed`/`effect` yet, a signal is still observable through get-after-set: the read
+// reflects the last write. The value type rides in `Signal<T>`, so `.get()` recovers it (here `int`
+// then `string`). A self-update `s.set(s.get() + 1)` reads and writes the same cell in one line.
+// expect: stdout "0"
+// expect: stdout "42"
+// expect: stdout "hi"
+// expect: stdout "43"
+// expect: exit 0
+s = signal(0)
+echo s.get()
+s.set(42)
+echo s.get()
+name = signal("hi")
+echo name.get()
+s.set(s.get() + 1)
+echo s.get()

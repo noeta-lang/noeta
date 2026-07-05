@@ -366,6 +366,13 @@ pub(crate) enum Payload {
     /// receiver). Polling it harvests the marshalled result once the worker finishes, else pending. A GC
     /// leaf — the id is a plain integer; the worker's state lives in the backend. VM-real path only.
     IsolateFuture(u32),
+    /// A **reactive handle** (reactivity S1): the `Signal<T>`/`Computed<T>`/`Effect` value the
+    /// `signal`/`computed`/`effect` builtins yield. It carries a [`NodeId`](noeta_reactive::NodeId)
+    /// into the VM's reactive graph, tagged with its [`NodeKind`](noeta_reactive::NodeKind) so the
+    /// value knows what it is without consulting the graph. A GC leaf — the handle owns no heap
+    /// children; the node's stored values (a signal's content, a computed/effect body) are owned by
+    /// the graph and released on dispose / at program end, exactly as channel buffers are.
+    Reactive(noeta_reactive::NodeKind, noeta_reactive::NodeId),
 }
 
 /// The state machine behind a [`Payload::Iter`] (Track I). The base case cursors a list; each adapter
@@ -682,6 +689,7 @@ pub(crate) fn free(value: Value) {
         | Payload::Receiver(_)
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
+        | Payload::Reactive(..)
         | Payload::FileHandle(_) => {}
     }
     drop(boxed);
@@ -862,6 +870,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::Receiver(_)
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
+        | Payload::Reactive(..)
         | Payload::FileHandle(_) => {}
     }
     out

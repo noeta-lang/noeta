@@ -1,0 +1,20 @@
+// Reactivity S3 — a `computed` may read another `computed`: the dependency graph is transitive. `hi`
+// derives from `lo`, which derives from `base`. Reading `hi` pulls `lo` fresh (which pulls `base`),
+// memoizing both; a second read recomputes neither. Setting `base` dirties `lo` and, transitively,
+// `hi`, so the next read recomputes both once. Each body echoes its name when it runs, so the output
+// proves the transitive pull order (outer body first, then the inner it reads) and the memoization.
+// expect: stdout "hi"
+// expect: stdout "lo"
+// expect: stdout "hi=20"
+// expect: stdout "hi=20"
+// expect: stdout "hi"
+// expect: stdout "lo"
+// expect: stdout "hi=60"
+// expect: exit 0
+base = signal(1)
+lo = computed(fn() { echo "lo"; return base.get() + 1 })
+hi = computed(fn() { echo "hi"; return lo.get() * 10 })
+echo "hi=${hi.get()}"
+echo "hi=${hi.get()}"
+base.set(5)
+echo "hi=${hi.get()}"

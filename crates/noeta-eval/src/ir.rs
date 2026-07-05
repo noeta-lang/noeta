@@ -160,6 +160,10 @@ impl Interpreter {
             // A top-level `return`, a `?` short-circuit, or a runtime error stops the program.
             Ok(Flow::Return(_)) | Err(Unwind::Return(_)) | Err(Unwind::Abort) => {}
         }
+        // Release every value held by the reactive graph (reactivity S1) before global teardown, so a
+        // value kept alive only by an undisposed signal drops here — the tree-walker twin of the VM's
+        // `vm.reactive.clear()`, keeping the leak oracle's residency at 0.
+        self.reactive.clear();
         self.destroy_globals();
         // Reap cycles left after teardown so residency reaches 0: closure-capture cycles (Phase 6.3)
         // and reference-`class` field cycles (object-model slice 2c).

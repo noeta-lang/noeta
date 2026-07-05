@@ -44,6 +44,7 @@ use noeta_compiler::{Unsupported, compile};
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_gc::{collect_trace, release, retain};
 use noeta_object::{Shape, ShapeKind};
+use noeta_reactive::{NodeKind, ReactiveGraph};
 use noeta_span::Span;
 use noeta_value::{
     ChannelId, ScopeId, TaskId, Value, apply_binary, apply_binary_wide, apply_unary,
@@ -391,6 +392,14 @@ struct Vm<'m> {
     /// unblocks a sibling as progress even when no task completes. Mirrors the tree-walker's fields.
     channels: Vec<Channel>,
     channel_progress: u64,
+    /// The reactive graph (reactivity S1): every `signal(v)`/`computed(fn)`/`effect(fn)` allocates a
+    /// node here; a `Reactive` handle value references one by [`NodeId`]. Held behind `Rc` so a flush
+    /// (`self.reactive.flush(|body| self.call_value(body, …))`) can borrow the graph and `self`
+    /// independently — the graph's own methods are `&self` (interior-mutable), so this sidesteps the
+    /// borrow conflict without `unsafe`. The graph stores [`GcVal`]s so its internal clones/drops keep
+    /// the VM's manual refcounts exact; it is cleared at program end so held values are released
+    /// (the leak oracle's residency returns to 0).
+    reactive: Rc<ReactiveGraph<GcVal>>,
     /// Real OS-thread isolates (isolates I.4b), CLI-only / out-of-oracle. `parallel_isolates` selects
     /// the real path in the `Op::SpawnIsolate` handler; `isolate_module` is an `Arc` clone of the
     /// compiled module (`Send + Sync`) the entry point holds *alongside* the `&Module` borrow, so a
@@ -1085,6 +1094,64 @@ struct IsolateSlot {
     handle: Option<std::thread::JoinHandle<()>>,
 }
 
+/// An owned reference to a VM [`Value`], with RAII refcounting — the element type the reactive graph
+/// (reactivity S1) stores. The VM's NaN-boxed `Value` is `Copy` and does **not** adjust its refcount
+/// on a bitwise clone, so a generic container that clones/drops `Value` internally would leak or
+/// double-free. Wrapping it makes `Clone` `retain` and `Drop` `release`, so every clone/drop the
+/// `ReactiveGraph` performs (memoizing a value, replacing a signal's content, disposing a node) stays
+/// refcount-exact for free — the leak oracle is the proof. Constructing a `GcVal` either takes over an
+/// already-owned reference ([`GcVal::owned`]) or takes a fresh reference to a borrowed value
+/// ([`GcVal::retained`]); [`GcVal::into_value`] hands the owned reference back out (e.g. into a
+/// register) without releasing it.
+struct GcVal(Value);
+
+impl GcVal {
+    /// Wrap a value we already own one reference to (a freshly built value, a call result). No retain.
+    /// (Used from S2/S3 when a `computed`/`effect` body's call result enters the graph.)
+    #[allow(dead_code)]
+    #[inline]
+    fn owned(v: Value) -> Self {
+        GcVal(v)
+    }
+
+    /// Take a new reference to a value owned elsewhere (e.g. a borrowed builtin argument we want the
+    /// graph to keep). Retains.
+    #[inline]
+    fn retained(v: Value) -> Self {
+        retain(v);
+        GcVal(v)
+    }
+
+    /// Hand the owned reference back out without releasing it (into a register / to `call_value`).
+    #[inline]
+    fn into_value(self) -> Value {
+        let v = self.0;
+        std::mem::forget(self);
+        v
+    }
+
+    /// Peek the underlying value without affecting ownership (e.g. to feed it into the GC root set).
+    #[inline]
+    fn get(&self) -> Value {
+        self.0
+    }
+}
+
+impl Clone for GcVal {
+    #[inline]
+    fn clone(&self) -> Self {
+        retain(self.0);
+        GcVal(self.0)
+    }
+}
+
+impl Drop for GcVal {
+    #[inline]
+    fn drop(&mut self) {
+        release(self.0);
+    }
+}
+
 /// A bounded channel's scheduler-owned state (isolates I.1): a FIFO queue of buffered messages, its
 /// capacity, and whether it has been closed. Endpoints are indices into [`Vm::channels`]; the queue is
 /// never shared heap memory. Mirrors the tree-walker's `Channel`, so the FIFO + block-on-full/empty
@@ -1324,6 +1391,7 @@ impl<'m> Vm<'m> {
             scopes: Vec::new(),
             channels: Vec::new(),
             channel_progress: 0,
+            reactive: Rc::new(ReactiveGraph::new()),
             parallel_isolates: false,
             isolate_module: None,
             isolate_factory: None,
@@ -1579,12 +1647,18 @@ fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult 
     // **trial-deletion** path instead reaps its buffered candidates *after* teardown, once every frame
     // and global release has had a chance to buffer the cycle's roots.
     if mode == noeta_value::CollectorMode::Trace {
-        let roots: Vec<Value> = vm
+        let mut roots: Vec<Value> = vm
             .globals
             .iter()
             .copied()
             .filter(|v| !v.is_unbound())
             .collect();
+        // The reactive graph (reactivity S1) holds a `+1` reference to every signal's content and
+        // every computed/effect body, but a value reachable *only* through the graph is invisible to
+        // this mark-from-roots sweep. Feed those held values in as roots so the collector does not
+        // reclaim a still-referenced value out from under the graph (which `reactive.clear()` below
+        // would then double-free). The reactive analogue of scanning the channel buffers.
+        vm.reactive.for_each_value(|gv| roots.push(gv.get()));
         let garbage = collect_trace(&roots);
         vm.reclaim_cycle_garbage(garbage);
     }
@@ -1598,6 +1672,10 @@ fn run_and_teardown(vm: &mut Vm, mode: noeta_value::CollectorMode) -> RunResult 
             }
         }
     }
+    // Release every value held by the reactive graph (reactivity S1): signals never disposed by the
+    // program still own their content until here. Dropping the nodes fires each `GcVal`'s `Drop`, so
+    // residency returns to zero — the leak oracle's proof that the graph's refcounting is exact.
+    vm.reactive.clear();
     // Destroy the globals at program end in reverse declaration order, running each
     // destructor on its last reference — the deterministic destruction the spec requires.
     for slot in vm.global_order.clone().into_iter().rev() {
@@ -1712,6 +1790,7 @@ fn run_isolate_worker(
             }
         }
     }
+    wvm.reactive.clear();
     message
 }
 
@@ -3246,6 +3325,61 @@ impl<'m> Vm<'m> {
                             set_reg(regs, fbase, *dst, future);
                             pc += 1;
                             continue;
+                        }
+                        // Reactive handle methods (reactivity S1/S2/S3): `signal.get()`/`.set(v)`/
+                        // `.update(fn)`, `computed.get()`, and `effect.dispose()`. Each method is guarded
+                        // by the node's `kind` (a `signal` is not disposable, a `computed` is read-only,
+                        // an `effect` is not readable); an invalid pair falls through to the generic
+                        // no-method runtime error below, exactly as any other unknown method on a
+                        // built-in type. `get` on a `computed` recomputes a dirty body via
+                        // `read_reactive`; on a `signal` it is a plain read (the callback never fires).
+                        if let Some((kind, node)) = v.reactive_parts() {
+                            match (kind, method) {
+                                (NodeKind::Signal | NodeKind::Computed, "get") => {
+                                    let result = self.read_reactive(node, *span)?;
+                                    set_reg(regs, fbase, *dst, result);
+                                    pc += 1;
+                                    continue;
+                                }
+                                (NodeKind::Signal, "set") => {
+                                    let value = regs[fbase + args[0] as usize];
+                                    // The graph retains its own reference to the new content and
+                                    // releases the old; the arg register's reference is released by
+                                    // its normal end-of-life. Then flush so subscribed effects rerun —
+                                    // but coalesce: a set inside a running effect body only enqueues,
+                                    // the ongoing flush picks it up (no nested flush). (reactivity S4)
+                                    self.reactive.set(node, GcVal::retained(value));
+                                    if !self.reactive.is_flushing() {
+                                        self.drive_flush(*span)?;
+                                    }
+                                    set_reg(regs, fbase, *dst, Value::unit());
+                                    pc += 1;
+                                    continue;
+                                }
+                                (NodeKind::Signal, "update") => {
+                                    // Read-modify-write: read the current value (owned), call the
+                                    // updater with it (which consumes that reference), store the
+                                    // result, then flush (coalescing inside a running flush, like set).
+                                    let f = regs[fbase + args[0] as usize];
+                                    let current = self.read_reactive(node, *span)?;
+                                    let updated = self.call_value(f, vec![current], *span)?;
+                                    self.reactive.set(node, GcVal::owned(updated));
+                                    if !self.reactive.is_flushing() {
+                                        self.drive_flush(*span)?;
+                                    }
+                                    set_reg(regs, fbase, *dst, Value::unit());
+                                    pc += 1;
+                                    continue;
+                                }
+                                (NodeKind::Effect, "dispose") => {
+                                    // Unsubscribe and free the node; its stored body/content drop.
+                                    self.reactive.dispose(node);
+                                    set_reg(regs, fbase, *dst, Value::unit());
+                                    pc += 1;
+                                    continue;
+                                }
+                                _ => {}
+                            }
                         }
                         // Iterator methods (next/collect) — the shared `IterMethod` enum, like the file
                         // handle above.
@@ -5071,6 +5205,86 @@ impl<'m> Vm<'m> {
         }
     }
 
+    /// Read a reactive node, driving a `computed`'s recompute through [`call_value`](Self::call_value)
+    /// if it is dirty (reactivity S3). A `signal` read never enters the callback; a dirty `computed`
+    /// runs its body (and, transitively, any dirty computeds it reads), memoizing as it goes. The graph
+    /// is cloned out as an `Rc` first so its `&self` `read` can borrow it while the callback borrows
+    /// `self` for `call_value` (different objects, no aliasing). The returned [`GcVal`] owns one
+    /// reference (a signal's cloned content or a computed's fresh/memoized value); the caller transfers
+    /// it into a register via [`into_value`](GcVal::into_value). A body that aborts is captured
+    /// deterministically — the first abort stops further recomputes and propagates.
+    fn read_reactive(&mut self, node: noeta_reactive::NodeId, span: Span) -> Result<Value, Abort> {
+        let graph = Rc::clone(&self.reactive);
+        let mut aborted = false;
+        let result = graph.read(node, &mut |body: GcVal| -> GcVal {
+            if aborted {
+                return GcVal::owned(Value::unit());
+            }
+            // `body` owns the reference the graph cloned for this recompute; `call_value` only borrows
+            // the callee, so peek with `.get()` and let `body` drop (releasing it) at closure end.
+            match self.call_value(body.get(), Vec::new(), span) {
+                Ok(value) => GcVal::owned(value),
+                Err(Abort) => {
+                    aborted = true;
+                    GcVal::owned(Value::unit())
+                }
+            }
+        });
+        if aborted {
+            // `result` owns the placeholder unit reference from the aborted run; drop releases it.
+            drop(result);
+            Err(Abort)
+        } else {
+            Ok(result.into_value())
+        }
+    }
+
+    /// Run the reactive graph's pending effects to a fixpoint (reactivity S2), invoking each effect
+    /// body through [`call_value`](Self::call_value). Called after any `signal.set`/`.update` and on
+    /// `effect(...)` creation. The graph is cloned out as an `Rc` first so its `&self` `flush` can
+    /// borrow it while the run callback borrows `self` for `call_value` (different objects, no
+    /// aliasing). An effect body that aborts (a panic or `?`) is captured deterministically: the first
+    /// abort by flush order stops further bodies (subsequent runs no-op) and propagates — identically
+    /// on both backends, since the flush order is a pure function of the graph.
+    fn drive_flush(&mut self, span: Span) -> Result<(), Abort> {
+        let graph = Rc::clone(&self.reactive);
+        let mut aborted = false;
+        let overflowed = graph
+            .flush(&mut |body: GcVal| -> GcVal {
+                if aborted {
+                    return GcVal::owned(Value::unit());
+                }
+                // `body` owns the reference the graph cloned for this run. `call_value` only *borrows*
+                // the callee (it does not release it), so peek with `.get()` and let `body` drop —
+                // releasing that reference — when this closure returns. The stored body keeps its own.
+                match self.call_value(body.get(), Vec::new(), span) {
+                    Ok(result) => GcVal::owned(result),
+                    Err(Abort) => {
+                        aborted = true;
+                        GcVal::owned(Value::unit())
+                    }
+                }
+            })
+            .is_err();
+        // A body-driven abort (panic / `?`) takes priority — propagate it as itself. Otherwise, a
+        // non-converging flush (a self-reinforcing effect) becomes the reactive-cycle runtime error.
+        if aborted {
+            return Err(Abort);
+        }
+        if overflowed {
+            return Err(self.error(
+                DiagnosticCode::ReactiveCycle,
+                span,
+                format!(
+                    "reactive update did not converge after {} steps — an effect keeps changing a \
+                     signal it depends on",
+                    noeta_reactive::MAX_FLUSH_STEPS
+                ),
+            ));
+        }
+        Ok(())
+    }
+
     /// Run a defaulted parameter's zero-argument thunk prototype to its value, on a fresh frame
     /// stack (the same re-entry `map`/`filter` callbacks use). `upvalues` are the calling closure's
     /// captured cells — the thunk is compiled with that same upvalue layout, so a default that
@@ -5798,6 +6012,32 @@ impl<'m> Vm<'m> {
                         ));
                     }
                 }
+            }
+            Builtin::Signal => {
+                self.check_arity(builtin, args, 1, span)?;
+                // `signal(v)` — allocate a reactive cell holding `v`. The graph keeps its own
+                // (retained) reference; the register's reference is released by the caller as usual.
+                let id = self.reactive.signal(GcVal::retained(args[0]));
+                Ok(Value::make_reactive(NodeKind::Signal, id))
+            }
+            Builtin::Computed => {
+                self.check_arity(builtin, args, 1, span)?;
+                // `computed(fn)` — register a lazy derivation, retaining the body closure. Created dirty;
+                // it computes on first `.get()`, so nothing runs now (no flush).
+                let id = self.reactive.computed(GcVal::retained(args[0]));
+                Ok(Value::make_reactive(NodeKind::Computed, id))
+            }
+            Builtin::Effect => {
+                self.check_arity(builtin, args, 1, span)?;
+                // `effect(fn)` — register the effect (created queued), retaining the body closure, then
+                // flush to run it once now (subscribing it to the signals it reads). If we are already
+                // inside a flush (an effect created within another effect's body), the ongoing flush
+                // drains it — do not nest. (reactivity S4)
+                let id = self.reactive.effect(GcVal::retained(args[0]));
+                if !self.reactive.is_flushing() {
+                    self.drive_flush(span)?;
+                }
+                Ok(Value::make_reactive(NodeKind::Effect, id))
             }
         }
     }

@@ -180,6 +180,12 @@ pub enum DiagnosticCode {
     /// also an untyped integer literal coerced into a fixed-width context that does not fit it
     /// (`x: u8 = 300`). The value simply does not fit the type's range.
     FixedWidthOutOfRange,
+    /// A reactive update did not converge (reactivity S4): an `effect` keeps changing a signal it
+    /// depends on, so a `signal.set`/`.update` flush would re-run it without end. The scheduler bounds
+    /// each flush at [`noeta_reactive::MAX_FLUSH_STEPS`] effect runs and aborts here rather than
+    /// looping forever. This is a runtime error (the program is well-formed; the *update graph* has a
+    /// self-reinforcing cycle), analogous to a non-terminating loop being surfaced instead of hung on.
+    ReactiveCycle,
 }
 
 impl DiagnosticCode {
@@ -230,6 +236,7 @@ impl DiagnosticCode {
         DiagnosticCode::NotSend,
         DiagnosticCode::NonIntegerBitwise,
         DiagnosticCode::FixedWidthOutOfRange,
+        DiagnosticCode::ReactiveCycle,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -280,6 +287,7 @@ impl DiagnosticCode {
             DiagnosticCode::NotSend => "E0042",
             DiagnosticCode::NonIntegerBitwise => "E0043",
             DiagnosticCode::FixedWidthOutOfRange => "E0044",
+            DiagnosticCode::ReactiveCycle => "E0045",
         }
     }
 

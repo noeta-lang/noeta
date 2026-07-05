@@ -44,6 +44,8 @@ noeta-loader = { path = "crates/noeta-loader" }
 noeta-stdlib = { path = "crates/noeta-stdlib" }
 # M2 runtime (host-coupled IO: real disk async + real env/args)
 noeta-runtime = { path = "crates/noeta-runtime" }
+# M2 reactivity core (signal/computed/effect graph — value-generic, backend-driven)
+noeta-reactive = { path = "crates/noeta-reactive" }
 
 # External crates (pinned once; see docs/resources/03-implementation-plan.md §2)
 logos = "0.16"

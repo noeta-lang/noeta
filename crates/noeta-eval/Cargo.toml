@@ -15,6 +15,7 @@ noeta-ir-passes = { workspace = true }
 noeta-builtins = { workspace = true }
 noeta-backend = { workspace = true }
 noeta-stdlib = { workspace = true }
+noeta-reactive = { workspace = true }
 noeta-check = { workspace = true }
 
 [dev-dependencies]

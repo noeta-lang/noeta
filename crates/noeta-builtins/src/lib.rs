@@ -57,6 +57,11 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "all",
     "race",
     "map_bounded",
+    // Reactivity S1/S2/S3: `signal(v)` creates a reactive cell; `computed(fn)` a lazy memoized
+    // derivation; `effect(fn)` a side effect that reruns when a signal it reads changes.
+    "signal",
+    "computed",
+    "effect",
 ];
 
 #[cfg(test)]

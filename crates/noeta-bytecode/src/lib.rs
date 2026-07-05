@@ -80,6 +80,17 @@ pub enum Builtin {
     /// `map_bounded(items, n, f)` — apply the async `f` to each item, at most `n` in flight at once,
     /// returning the results as a `List<B>` in item order (Track A.9, bounded-parallelism map).
     MapBounded,
+    /// `signal(v)` — create a reactive cell holding `v` (reactivity S1). Returns a `Signal<T>` handle
+    /// whose `.get()`/`.set(v)` read and update it through the VM's reactive graph.
+    Signal,
+    /// `computed(fn)` — create a lazy, memoized derivation (reactivity S3). Returns a `Computed<T>`
+    /// handle whose `.get()` recomputes the body only when a dependency it read has changed, and
+    /// returns the memo otherwise.
+    Computed,
+    /// `effect(fn)` — register a side effect (reactivity S2). Runs `fn` immediately, tracking which
+    /// signals it reads, and reruns it whenever one of them changes. Returns an `Effect` handle with
+    /// `.dispose()`.
+    Effect,
 }
 
 impl Builtin {
@@ -95,6 +106,9 @@ impl Builtin {
             Builtin::All => "all",
             Builtin::Race => "race",
             Builtin::MapBounded => "map_bounded",
+            Builtin::Signal => "signal",
+            Builtin::Computed => "computed",
+            Builtin::Effect => "effect",
         }
     }
 
@@ -110,6 +124,9 @@ impl Builtin {
             "all" => Some(Builtin::All),
             "race" => Some(Builtin::Race),
             "map_bounded" => Some(Builtin::MapBounded),
+            "signal" => Some(Builtin::Signal),
+            "computed" => Some(Builtin::Computed),
+            "effect" => Some(Builtin::Effect),
             _ => None,
         }
     }

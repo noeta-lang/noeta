@@ -1,0 +1,22 @@
+// Reactivity S4 — disposal + GC interaction under churn. A persistent watcher tracks `n`. Alongside it
+// a loop creates and immediately disposes 50 transient effects, each of which subscribes to `n` on its
+// one creation run. Disposal must sever every one of those subscriptions (and free the slot for reuse),
+// so the later `n.set(1)` reruns only the *one* live watcher — not 51 — proving no disposed effect
+// lingers on `n`'s subscriber list. The leak oracle separately asserts residency 0 at exit across all
+// this create/dispose churn, and the differential asserts both backends churn byte-identically.
+// expect: stdout "watch n=0"
+// expect: stdout "watch n=1"
+// expect: stdout "done"
+// expect: exit 0
+n = signal(0)
+effect(fn() {
+    echo "watch n=${n.get()}"
+})
+mut i = 0
+while i < 50 {
+    tmp = effect(fn() { n.get() })
+    tmp.dispose()
+    i = i + 1
+}
+n.set(1)
+echo "done"
