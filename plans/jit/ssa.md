@@ -1,7 +1,8 @@
 # P-JSSA — SSA register promotion in the JIT (mem2reg)
 
-**Status: PLANNED (sign-off pending).** The follow-on milestone to J0–J7: hold live VM registers in
-Cranelift **SSA values** inside compiled code instead of round-tripping every operand through the
+**Status: S0–S4 LANDED (loop target hit; fib at 127 ms vs the ~60 ms target — S4.2 designed,
+S5 drop-by-default).** The follow-on milestone to J0–J7: hold live VM registers in Cranelift
+**SSA values** inside compiled code instead of round-tripping every operand through the
 in-memory register stack.
 
 ## Why this is the next milestone (the measured case)
@@ -75,8 +76,8 @@ deliberately separate, last slice (S5) that can be dropped if its measured value
 | **S0** | ✅ **DONE.** **Region liveness + value-location maps** (`noeta-jit/src/plan.rs`). Per-pc backward liveness over sound all-op successors (`succ_all` covers the `Match*`/`Coalesce` edges the arithmetic-whitelist `analysis_succ` never sees; unmodeled op = reads-all, fail-closed **per op**) + `ssa_ok` = the complement of the J7 bare-store map. 6 contract-locking tests. | Analysis only; fails closed to `InSlot`. |
 | **S1+S2** | ✅ **DONE (one slice — see "What landed" below).** Promotion via **`cranelift-frontend` `Variable`s** (`declare_var`/`def_var`/`use_var`), which build the block parameters at merges automatically — straight-line *and* cross-block (loop headers included) in one mechanism, which is why the two planned slices collapsed into one. Plus **known-constant register inlining** (`plan::const_reg_bits`) and `opt_level=speed`. fnloop **1.36×**, toploop **1.18×**, float loop **1.23×**; `--jit-differential` 0-div/0-leak first run. | Spill-map correctness at bail edges — oracle-gated. |
 | **T1** | ✅ **DONE (two commits — see "T1 — what landed" below).** **Typed/unboxed promotion**: a forward kind dataflow (`{Bot, Int, Bool, Float, Imm}`) + a second **raw** variable per register; typed ops skip the NaN-box tag checks and unboxing entirely; `Bool`-claimed branches use the raw bit. T1b claims **parameters immediate** (entry-verified) and adds **asymmetric** typed binaries (`i < n` with a parameter bound). Int loop 10M **67→29 ms (2.31×** over S1+S2's output**)** — the milestone's loop target (~30 ms) is **hit**. | Kind claims ride the ff9efed verified-entry contract; typed⇒immediate invariant test-locked. |
-| **S3** | **Skip the register-window zero-init** (P-CALL deferred lever #2). With definite-assignment from S0, a frame whose registers are all written-before-read (or covered by entry spills) doesn't need `reserve_window`'s zero-fill; `do_return`'s release loop instead walks a recorded live-set (or the frame spills unit to dead slots at deopt only). Removes a per-call `memset`-shaped cost. | Frame-teardown contract; leak oracle is the judge. |
-| **S4** | **SSA calling convention for native→native direct calls.** A direct call passes args as SSA values (Cranelift call args) and receives the return value in a register; the callee's frame is materialized (slots + `Frame` push) **only on its deopt path**. The caller's frame-setup work (zero-init + retain-immediates + push/pop) disappears on the all-native path — the actual `fib` lever P-CALL identified. Fallback: any non-direct-able call keeps today's `jit_prepare_call` protocol. | The deopt path must reconstruct a frame mid-call ("frame reconstruction") — the subtlest slice; do after S1–S3 are proven. |
+| **S3** | ✅ **SUBSUMED by S4.1** (the plan's own parenthetical — "the frame spills unit to dead slots at deopt only" — is what landed). A tier-0-side zero-init skip dead-ends on teardown: the release loop and the abort-unwind read every slot, and a statically-safe release set is tiny once tier-0 overflow-boxing is accounted for. The fast convention skips the fill *and* fixes teardown in one contract. | — |
+| **S4** | ✅ **DONE as S4.0 + S4.1 (see "S4 — what landed" below).** S4.0: one-roundtrip `prepare_call` (two-word return kills the `callee_base` helper) + **masked window teardown** (`jit_return` releases only the may-heap row at the return pc — native-path-sound). S4.1: the **fast call convention** — a second, frameless-window body per eligible prototype (args as machine args, uninitialized window + `normalize_frame` at every native exit, fully native return protocol from the baked `FrameLayout`). fib(32) **169→127 ms (1.33×**; 1.35× vs main**)**; everything else neutral. Remaining distance to the ~60 ms target = the `prepare` helper itself (op decode + closure checks + `Frame` push per call) → S4.2. | Frame-teardown contract — the anomaly + leak oracles are the judge; green first run. |
 | **S5** | **(Optional, measure-first) heap values in SSA.** Ownership-aware promotion of may-heap registers (spill = store + the release tier-0 would have done at the overwrite). Only if a workload demonstrates the win after S1–S4; J6's lesson says don't assume. | Refcount bookkeeping — highest risk, lowest proven value. Drop by default. |
 
 Each slice lands only with: `--jit-differential` 0-divergence / 0-leak at full corpus coverage,
@@ -202,6 +203,60 @@ clippy+fmt clean.
 overflow — semantics, stays), the dual-def re-box (~2 ALU ops/def, off the critical path), and
 `%`'s magic-number division. The next levers are S3 (skip the register-window zero-init) and S4
 (SSA calling convention — the fib lever), per the table.
+
+## S4 — what landed (the call-convention arc), and the measured cost map
+
+**Cost attribution first** (fib(32) ≈ 5.7M calls; pinned, hack-isolated): window zero-fill ≈ 9 ms,
+argument retain ≈ 2 ms, `prepare_call`'s op decode + closure checks + jit lookup ≈ 6 ms (a
+site-cache hack) — i.e. **no single component dominates**; the ~25 ns/call is death by a thousand
+cuts (two helper roundtrips, callee entry dispatch + slot loads, `jit_return`'s
+retain/pop/release-loop/truncate/transfer, `Frame` push, plus the branchy recursion itself). That
+ruled out any partial fix and motivated the full convention.
+
+**S4.0 (`013636c`).** `jit_prepare_call` returns `(fnptr, callee window base)` as a two-word
+`#[repr(C)]` struct (rax:rdx ↔ a two-i64-return Cranelift import) — the `jit_callee_base` helper
+roundtrip, its `Vm` field, and its import are gone. And `jit_return` now carries a per-return-site
+**release mask** — the bare-store row at the `Return`'s pc (`u64::MAX` = release-all for >64-reg
+or unanalyzed prototypes); `do_return_masked` releases only the set bits. Sound because
+`jit_return` is reached only by natively-executed returns, where the analysis's claims hold
+(entries verify, native defs preserve). fib 169→143 ms (1.18×).
+
+**S4.1 (`96bf539`) — the fast call convention.** Eligible prototypes compile a **second body**:
+entered only fresh at pc 0, arguments as machine arguments (borrowed — parameters are verified
+immediate, so no retain), window reserved **uninitialized** (`set_len`; `reserve_window` keeps
+the stack's capacity initialized so this stays within `Vec`'s documented contract), result
+returned as a second return word. The native return protocol needs no helper at all: retain the
+value if may-heap, release exactly the may-heap (⟹ must-written) slots, pop the frame and
+truncate the register stack by storing the `Vec` lengths directly (offsets from the baked, lock-
+tested `FrameLayout`). `prepare_call` tags a fast entry pointer with bit 0; the caller passes the
+argument *values* and, on `OUTCOME_RETURNED`, performs `do_return`'s ownership transfer itself
+(`store_reg(dst, value)`).
+
+The soundness contract is **the interpreter must never see the garbage window**: every native
+exit (bail, guard, frame-visible helper, any call — a nested callee can abort and unwind past
+this frame) runs `normalize_frame` — spill SSA-resident live registers, keep **must-written**
+slots (new forward must-slot-written analysis, mirroring the emitter's pure-def condition
+exactly), unit-fill the rest — and the entry guard's heap-argument bail materializes the window
+(store + retain the args, unit the rest) before handing back pc 0. `fast_eligible` fails closed:
+modeled ops only, ≤64 registers, no read-before-write from pc 0, and every live-non-resident or
+released-at-return slot must be must-written (a path-dependently-written slot cannot be
+normalized statically). The `Frame` stack stays fully honest — every call still pushes — which is
+what keeps deopt/unwind trivial: a deopted fast frame is just a normal interpreter frame with a
+normalized window, resumed later through the *normal* body's guarded entries.
+
+fib 143→127 ms; jit-differential (with the refcount-anomaly oracle) green first run; everything
+else neutral.
+
+**S4.2 (next, designed, not started): kill the `prepare` helper on the hot path.** What remains
+per call is `prepare_call` itself — op decode, closure/arity checks, `get_fast` lookup, `Frame`
+push, caller-pc update — plus the callee's entry guard. The design: per-call-site **inline
+caches** in a JIT-owned side table (baked pointer): cached `(callee closure bits → tagged fast
+ptr, callee base delta)`, verified natively by comparing the callee value's bits, with the frame
+push emitted natively from `FrameLayout` (capacity-checked, cold-helper on miss/growth), and the
+caller-pc update moved to the cold path (nobody reads it on the all-native path). Estimated to
+take fib into the ~70–90 ms range; beyond that is frameless *frames* (LIFO mid-stack `Frame`
+materialization on deopt — the caller inserts its own frame at its captured stack depth on the
+cold propagation path), which the honest-ceiling section already prices as method-JIT-class work.
 
 ## Design notes (constraints discovered by J0–J7 that S1+ must honour)
 
