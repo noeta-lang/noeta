@@ -1,6 +1,5 @@
 ---
 source: crates/noeta-vm/src/lib.rs
-assertion_line: 7641
 expression: module.disassemble()
 ---
 === main ===
@@ -17,13 +16,16 @@ code:
     3  LoadConst   r4 <- k3
     4  MakeList    r0 <- [r1, r2, r3, r4]  ; reflect #0
     5  MakeClosure r1 <- proto 1 [0 captures]
-    6  CallBuiltin r2 <- filter(r0, r1)
-    7  MakeClosure r0 <- proto 2 [0 captures]
-    8  CallBuiltin r1 <- map(r2, r0)
-    9  CallBuiltin r0 <- sum(r1)
-   10  Stringify   r1 <- display(r0)
-   11  Echo        r1
-   12  Halt
+    6  CallMethod  r2 <- r0.filter(r1)
+    7  Drop        r0 ~destruct
+    8  MakeClosure r0 <- proto 2 [0 captures]
+    9  CallMethod  r1 <- r2.map(r0)
+   10  Drop        r2 ~destruct
+   11  CallMethod  r0 <- r1.sum()
+   12  Drop        r1 ~destruct
+   13  Stringify   r1 <- display(r0)
+   14  Echo        r1
+   15  Halt
 === proto 1 ===
 params: 1, registers: 3
 constants:

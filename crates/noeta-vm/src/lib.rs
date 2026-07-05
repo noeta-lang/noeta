@@ -7387,7 +7387,7 @@ mod tests {
     fn len_dispatches_to_length_trait() {
         // `len(o)` routes to the class's `Length::len`, pushing a receiver-only call frame.
         let r = run(
-            "class Stack {\n  items: list\n  fn new(items: list): Stack { return Stack { items: items }; }\n  impl Length {\n    fn len(): int { return len(items); }\n  }\n}\necho len(Stack.new([1, 2, 3]));\n",
+            "class Stack {\n  items: list\n  fn new(items: list): Stack { return Stack { items: items }; }\n  impl Length {\n    fn len(): int { return items.len(); }\n  }\n}\necho Stack.new([1, 2, 3]).len();\n",
         );
         assert_eq!(r.stdout, "3\n");
         assert_eq!(r.exit_code, 0);
@@ -7570,7 +7570,7 @@ mod tests {
         // The `fn(it) => it.price * it.qty` closure captures nothing enclosing, so it compiles
         // even though it is defined inside a method (true upvalue capture stays unsupported).
         let r = run(
-            "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return items |> map(fn(it) => it.price * it.qty) |> sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
+            "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return items.map(fn(it) => it.price * it.qty).sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
         );
         assert_eq!(r.stdout, "13.0\n");
         assert_eq!(r.exit_code, 0);
@@ -7600,7 +7600,7 @@ mod tests {
     #[test]
     fn len_over_list_map_and_string() {
         let r = run(
-            "echo len([1, 2, 3]);\necho len({\"a\": 1});\necho len(\"héllo\");\necho len([]);\n",
+            "echo [1, 2, 3].len();\necho {\"a\": 1}.len();\necho \"héllo\".len();\necho [].len();\n",
         );
         assert_eq!(r.stdout, "3\n1\n5\n0\n");
     }
@@ -7608,7 +7608,7 @@ mod tests {
     #[test]
     fn filter_map_sum_pipeline() {
         let r = run(
-            "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();\n",
+            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n",
         );
         assert_eq!(r.stdout, "60\n");
         assert_eq!(r.exit_code, 0);
@@ -7616,9 +7616,9 @@ mod tests {
 
     #[test]
     fn sum_promotes_to_float_when_any_element_is_float() {
-        assert_eq!(run("echo sum([1, 2, 3]);\n").stdout, "6\n");
-        assert_eq!(run("echo sum([1, 2.5, 3]);\n").stdout, "6.5\n");
-        assert_eq!(run("echo sum([]);\n").stdout, "0\n");
+        assert_eq!(run("echo [1, 2, 3].sum();\n").stdout, "6\n");
+        assert_eq!(run("echo [1, 2.5, 3].sum();\n").stdout, "6.5\n");
+        assert_eq!(run("echo [].sum();\n").stdout, "0\n");
     }
 
     #[test]
@@ -7661,12 +7661,14 @@ mod tests {
     }
 
     #[test]
-    fn len_of_an_int_is_a_type_error() {
-        let r = run("echo len(42);\n");
+    fn len_of_an_int_is_an_unknown_method() {
+        // `len` is a collection method (P1.2), so on an int it is an unknown method (E0005) — the
+        // same error every other unknown method raises (the old free `len(42)` was a TypeMismatch).
+        let r = run("echo (42).len();\n");
         assert_eq!(r.exit_code, 1);
         assert_eq!(
             r.diagnostics[0].code,
-            noeta_diagnostics::DiagnosticCode::TypeMismatch
+            noeta_diagnostics::DiagnosticCode::UnknownName
         );
     }
 
@@ -7674,7 +7676,7 @@ mod tests {
     fn map_closure_error_propagates_and_frees() {
         // The closure divides by zero on the second element: the error must surface and the
         // partially-built result list must be freed (miri verifies no leak).
-        let r = run("echo [1, 0, 2] |> map(fn(n) => 10 / n);\n");
+        let r = run("echo [1, 0, 2].map(fn(n) => 10 / n);\n");
         assert_eq!(r.exit_code, 1);
         assert_eq!(
             r.diagnostics[0].code,
@@ -7685,7 +7687,7 @@ mod tests {
     #[test]
     fn nested_list_of_lists_round_trips() {
         // Exercises recursive collection freeing through the register/global machinery.
-        let r = run("xs = [[1, 2], [3, 4]];\necho xs;\necho len(xs);\n");
+        let r = run("xs = [[1, 2], [3, 4]];\necho xs;\necho xs.len();\n");
         assert_eq!(r.stdout, "[[1, 2], [3, 4]]\n2\n");
     }
 
@@ -7890,7 +7892,7 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.noe",
-            "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();\n",
+            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

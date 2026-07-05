@@ -1,5 +1,7 @@
-// `len` used as a first-class value still dispatches to a user object's `Length` method when
-// called indirectly (not just at a direct `len(o)` call site).
+// A user-type method handle (`Stack.len`) dispatches to the object's `len` method when called
+// indirectly — the successor of the retired `len`-builtin-as-value, which dispatched through the
+// `Length` trait (prelude-redesign P1.2). The trait itself lives on as a generic bound (see
+// traits/length_protocol.noe).
 // expect: stdout "2"
 // expect: stdout "5"
 // expect: exit 0
@@ -12,11 +14,11 @@ class Stack {
 
     impl Length {
         fn len(): int {
-            return len(items);
+            return items.len();
         }
     }
 }
 
-size = len;
+size = Stack.len;
 echo size(Stack.new([10, 20]));
-echo size([1, 2, 3, 4, 5]);
+echo size(Stack.new([1, 2, 3, 4, 5]));

@@ -22,7 +22,7 @@ Semantics are Unicode-scalar-based; a wrong arity or argument type is E0007.
 | `repeat` | `repeat(n: int) -> string` | `"ab".repeat(3)` → `ababab` |
 | `count` | `count() -> int` | `"héllo".count()` → `5` |
 
-Splitting on `""` yields characters. Also: index `s[i]` returns the i-th character (out of bounds is E0016), `len(s)` counts scalars, `"…${e}…"` interpolates, and `a ~ b` concatenates (display-concatenating non-strings).
+Splitting on `""` yields characters. Also: index `s[i]` returns the i-th character (out of bounds is E0016), `s.len()` counts scalars, `"…${e}…"` interpolates, and `a ~ b` concatenates (display-concatenating non-strings).
 
 ## `List<T>`
 
@@ -47,20 +47,23 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 | `last` | `last() -> ?T` | `[1,2].last()` → `some(2)` |
 | `to_set` | `to_set() -> Set<T>` | `[3,1,2,1].to_set()` → `{1, 2, 3}` |
 | `set` | `set(i: int, v: T) -> List<T>` | `[1,2,3].set(2, 30)` → `[1, 2, 30]` |
+| `len` | `len() -> int` | `[1,2,3].len()` → `3` (preferred; `count` is the legacy alias) |
 | `count` | `count() -> int` | `[1,2,3].count()` → `3` |
 | `enumerate` | `enumerate() -> List<(int, T)>` | `["a","b"].enumerate()` → `[(0, "a"), (1, "b")]` |
 | `iter` | `iter() -> Iterator<T>` | see [Iterators](#iterators) |
 
-**Prelude free functions** over lists compose with the pipe:
+**Eager collection methods** chain directly (each returns a plain value, unlike the lazy
+`iter()` adapters):
 
 ```noeta
-echo len([1, 2, 3])                                 // 3
-echo [1,2,3,4] |> filter(fn(n) => n % 2 == 0)
-              |> map(fn(n) => n * 10)
-              |> sum()                              // 60
+echo [1, 2, 3].len()                                // 3
+echo [1,2,3,4].filter(fn(n) => n % 2 == 0)
+              .map(fn(n) => n * 10)
+              .sum()                                // 60
 ```
 
-- `len(xs)`, `map(xs, f)`, `filter(xs, pred)`, `sum(xs)` (int for `List<int>`, else float).
+- `xs.len()`, `xs.map(f)`, `xs.filter(pred)`, `xs.sum()` (int for `List<int>`, else float). To pass
+  one as a value, take an unbound method handle: `f = list.len`, `xss.map(list.len)`.
 
 ## Map
 

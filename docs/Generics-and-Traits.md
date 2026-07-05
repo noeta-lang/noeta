@@ -51,7 +51,7 @@ Traits are a **fixed built-in set** — naming an unknown one is E0014. Operator
 | `Add` | `add(other): T` | `+` |
 | `TryAdd` | `try_add(other): Result<T, E>` | fallible `+` (via `?`) |
 | `Index` | `get(i): T` | `a[i]` |
-| `Length` | `len(): int` | `len(o)` |
+| `Length` | `len(): int` | `x.len()` on a `<T: Length>` parameter |
 | `Iterable` | `iter(): Iterator<T>` | `for x in o` |
 | `Clone` | — | structural clone |
 

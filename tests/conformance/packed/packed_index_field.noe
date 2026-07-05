@@ -25,7 +25,7 @@ echo ps[2].z
 
 // Demoted-boxed fallback: `map` yields a boxed list that is still statically `List<Vec3>`, so the
 // `qs[i].field` reads fuse — but at runtime the list is boxed, exercising the fused op's fallback.
-qs = map(ps, fn(v) => Vec3 { x: v.x - 1.0, y: v.y, z: v.z })
+qs = ps.map(fn(v) => Vec3 { x: v.x - 1.0, y: v.y, z: v.z })
 echo qs[0].x
 echo qs[1].x
 

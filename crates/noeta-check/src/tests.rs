@@ -1062,9 +1062,13 @@ fn string_and_list_methods_are_typed() {
 
 #[test]
 fn prelude_functions_are_typed() {
-    assert!(codes("fn f(): int { return len([1, 2, 3]); }\n").is_empty()); // len -> int
-    assert_eq!(codes("fn f(): string { return len([1]); }\n"), ["E0007"]);
-    assert!(codes("fn f(): int { return sum([1, 2]); }\n").is_empty()); // sum(List<int>) -> int
+    // `len`/`sum` left the prelude (P1.2) — they are collection methods now, typed as such.
+    assert!(codes("fn f(): int { return [1, 2, 3].len(); }\n").is_empty()); // len -> int
+    assert_eq!(codes("fn f(): string { return [1].len(); }\n"), ["E0007"]);
+    assert!(codes("fn f(): int { return [1, 2].sum(); }\n").is_empty()); // sum(List<int>) -> int
+    // The remaining prelude free functions stay typed.
+    assert!(codes("fn f(): int { return next_id(); }\n").is_empty()); // next_id -> int
+    assert_eq!(codes("fn f(): string { return next_id(); }\n"), ["E0007"]);
 }
 
 #[test]
@@ -1741,18 +1745,18 @@ fn map_to_packed_struct_is_recorded() {
     let n = map_packed_count(
         "@packed struct Vec3 { x: float; y: float; z: float }\n\
          ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
-         echo map(ps, fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z }).count()\n",
+         echo ps.map(fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z }).count()\n",
     );
     assert_eq!(n, 1);
 }
 
 #[test]
 fn map_to_primitive_is_not_recorded() {
-    // `map(ps, fn(v) => v.x)` produces `List<float>` — not a packed struct, so it stays boxed.
+    // `ps.map(fn(v) => v.x)` produces `List<float>` — not a packed struct, so it stays boxed.
     let n = map_packed_count(
         "@packed struct Vec3 { x: float; y: float; z: float }\n\
          ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
-         echo map(ps, fn(v) => v.x).count()\n",
+         echo ps.map(fn(v) => v.x).count()\n",
     );
     assert_eq!(n, 0);
 }
@@ -1762,7 +1766,7 @@ fn map_to_non_packed_struct_is_not_recorded() {
     let n = map_packed_count(
         "struct P { x: int; y: int }\n\
          ps = [P { x: 1, y: 2 }]\n\
-         echo map(ps, fn(v) => P { x: v.x + 1, y: v.y }).count()\n",
+         echo ps.map(fn(v) => P { x: v.x + 1, y: v.y }).count()\n",
     );
     assert_eq!(n, 0);
 }

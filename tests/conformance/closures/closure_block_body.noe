@@ -20,7 +20,7 @@ sumsq = fn(xs) {
 echo sumsq([1, 2, 3])
 
 // Block body as a `map` callback, with a statement `if` and multiple returns.
-echo map([1, 2, 3], fn(n) {
+echo [1, 2, 3].map(fn(n) {
   if n % 2 == 0 {
     return n * 10
   }
@@ -42,4 +42,4 @@ twice = fn(f, x) => f(f(x))
 echo twice(fn(n) { return n + 3 }, 10)
 
 // The inferred block return (int) flows downstream — `sum` accepts it.
-echo sum(map([1, 2, 3], fn(n) { return n * 2 }))
+echo [1, 2, 3].map(fn(n) { return n * 2 }).sum()

@@ -7,7 +7,7 @@
 // expect: exit 0
 add1 = fn(v: int): int => v + 1
 echo add1(5)
-echo map([1, 2, 3], fn(v): int => v * 2)
+echo [1, 2, 3].map(fn(v): int => v * 2)
 // The annotation is optional and composes with inference and captures.
 base = 4
 combine = fn(a: int, b: int): int => a + b + base

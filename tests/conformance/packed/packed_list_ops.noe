@@ -15,8 +15,8 @@
 // expect: exit 0
 @packed struct V { x: int; y: int }
 ps = [V { x: 3, y: 1 }, V { x: 1, y: 2 }, V { x: 2, y: 3 }]
-echo map(ps, fn(v) => v.x)
-echo filter(ps, fn(v) => v.x > 1).count()
+echo ps.map(fn(v) => v.x)
+echo ps.filter(fn(v) => v.x > 1).count()
 echo ps.first()
 echo ps.last()
 echo ps.slice(0, 2)
@@ -27,5 +27,5 @@ for (i, v) in ps.enumerate() {
 echo acc
 echo ps.set(0, V { x: 9, y: 9 })
 echo ps.reverse()
-echo sum(map(ps, fn(v) => v.x))
-echo len(ps)
+echo ps.map(fn(v) => v.x).sum()
+echo ps.len()

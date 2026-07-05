@@ -151,10 +151,15 @@ echo twice(inc, 10)         // 12
 The pipe `|>` threads a value as the first argument of the next call, which reads left-to-right:
 
 ```noeta
+fn double(n: int): int { return n * 2 }
+
+echo 5 |> double |> double          // 20
+
+// Collection work chains directly as methods:
 echo [1, 2, 3, 4]
-    |> filter(fn(n) => n % 2 == 0)
-    |> map(fn(n) => n * 10)
-    |> sum()                        // 60
+    .filter(fn(n) => n % 2 == 0)
+    .map(fn(n) => n * 10)
+    .sum()                          // 60
 ```
 
 → [Functions & Closures](Functions-and-Closures).
@@ -247,7 +252,7 @@ Lists, maps, and sets — all value-semantic (copy-on-write):
 ```noeta
 xs = [1, 2, 3]
 echo xs[0]                     // 1
-echo len(xs)                   // 3
+echo xs.len()                  // 3
 echo xs.reverse()              // [3, 2, 1]
 echo [...xs, 4]                // [1, 2, 3, 4]  (spread)
 
@@ -412,7 +417,7 @@ enum OrderError {
 }
 
 fn total(items: List<Item>): float {
-    return items |> map(fn(it) => it.price * it.qty) |> sum()
+    return items.map(fn(it) => it.price * it.qty).sum()
 }
 
 fn validate(items: List<Item>): Result<void, OrderError> {

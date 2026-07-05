@@ -38,8 +38,8 @@ for p in ps {
 }
 echo total                     // 255 + 1 + 7
 
-echo map(ps, fn(p) => p.r)     // demote-to-boxed producer
-echo filter(ps, fn(p) => p.opaque).count()
+echo ps.map(fn(p) => p.r)     // demote-to-boxed producer
+echo ps.filter(fn(p) => p.opaque).count()
 echo ps.slice(1, 3)            // packed_select over columns
 echo ps.reverse()              // packed_select over columns
 echo ps.set(1, P { r: 9, g: 9, b: 9, opaque: false })

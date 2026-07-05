@@ -405,10 +405,8 @@ impl Builtin {
     /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
         Builtin::NextId,
-        Builtin::Len,
-        Builtin::Map,
-        Builtin::Filter,
-        Builtin::Sum,
+        // `Len`/`Map`/`Filter`/`Sum` left the prelude (prelude-redesign P1.2): the collection
+        // METHOD forms route to the same impls; `list.len`-style handles cover value use.
         Builtin::MakeOk,
         Builtin::MakeErr,
         Builtin::MakeSome,
@@ -5596,14 +5594,15 @@ mod tests {
     #[test]
     fn list_and_map_literals_and_len() {
         assert_eq!(run("echo [1, 2, 3];").stdout, "[1, 2, 3]\n");
-        assert_eq!(run("echo len([1, 2, 3]);").stdout, "3\n");
+        assert_eq!(run("echo [1, 2, 3].len();").stdout, "3\n");
         assert_eq!(run("echo {\"a\": 1, \"b\": 2}.count();").stdout, "2\n");
     }
 
     #[test]
     fn map_filter_sum_pipeline() {
+        // Method-chain form since P1.2 — the free `map`/`filter`/`sum` left the prelude.
         let src =
-            "echo [1, 2, 3, 4] |> filter(fn(n) => n % 2 == 0) |> map(fn(n) => n * 10) |> sum();";
+            "echo [1, 2, 3, 4].filter(fn(n) => n % 2 == 0).map(fn(n) => n * 10).sum();";
         assert_eq!(run(src).stdout, "60\n");
     }
 

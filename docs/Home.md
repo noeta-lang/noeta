@@ -81,7 +81,7 @@ enum OrderError {
 }
 
 fn total(items: List<Item>): float {
-    return items |> map(fn(it) => it.price * it.qty) |> sum();
+    return items.map(fn(it) => it.price * it.qty).sum();
 }
 
 fn validate(items: List<Item>): Result<void, OrderError> {

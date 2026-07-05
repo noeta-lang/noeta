@@ -14,7 +14,7 @@ echo #{3, 1, 2, 1};
 echo #{};
 echo #{1, 2, 3} == [3, 2, 1].to_set();
 echo #{1, 2}.union(#{3, 4});
-echo len(#{7, 7, 9});
+echo #{7, 7, 9}.len();
 for x in #{3, 1, 2} {
     echo x;
 }

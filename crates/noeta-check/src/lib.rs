@@ -3802,17 +3802,10 @@ impl Checker {
                     return stdlib::module_return(&module, &func, args).unwrap_or(Type::Unknown);
                 }
                 // Prelude functions are polymorphic/variadic — their result is typed, but their
-                // arguments are not arity-checked here.
-                let result = stdlib::prelude_return(name, args).unwrap_or(Type::Unknown);
-                // A `map(list, fn)` whose result element type is a packed struct: record the call so
-                // the VM builds a flat result instead of N boxed objects (P-PACK 2.6 category B). Keyed
-                // by the whole-call span — the span the lowered `Rvalue::Call`/`Op::Call` carries.
-                if name == "map"
-                    && let Type::List(elem) = &result
-                {
-                    self.note_map_packed(elem, call_span);
-                }
-                result
+                // arguments are not arity-checked here. (The packed-result note the free `map`
+                // recorded here moved to the list-method `map` arm in `synth_call`'s Member case —
+                // the free form left the prelude, P1.2.)
+                stdlib::prelude_return(name, args).unwrap_or(Type::Unknown)
             }
             Expr::Member { receiver, name, .. } => {
                 // `Enum.try_from(s)` → `?Enum` / `Enum.from(s)` → `Enum` — the built-in string→case

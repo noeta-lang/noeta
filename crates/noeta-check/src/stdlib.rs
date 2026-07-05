@@ -522,24 +522,9 @@ pub(super) fn module_params(module: &str, name: &str) -> Option<Vec<Type>> {
 /// `None` if `name` is not a prelude function.
 pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
     Some(match name {
-        "len" | "next_id" => Type::Int,
-        // Numeric: `int` if the list is concretely `List<int>`, `float` if `List<float>`, else a
-        // numeric hole (the element type is not yet known — gradual, not the `dyn` escape).
-        "sum" => match args.first() {
-            Some(Type::List(e)) if **e == Type::Int => Type::Int,
-            Some(Type::List(e)) if **e == Type::Float => Type::Float,
-            _ => Type::Unknown,
-        },
-        // `map(list, f) -> List<ret(f)>`; the element type is the closure's synthesized return.
-        "map" => match args.get(1) {
-            Some(Type::Fn { ret, .. }) => list((**ret).clone()),
-            _ => list(Type::Unknown),
-        },
-        // `filter(list, _) -> List<T>` (the same list).
-        "filter" => match args.first() {
-            Some(t @ Type::List(_)) => t.clone(),
-            _ => list(Type::Unknown),
-        },
+        // `len`/`map`/`filter`/`sum` left the prelude (prelude-redesign P1.2): they are collection
+        // METHODS now — see `list_method`/`method_params`; `list.len`-style handles cover value use.
+        "next_id" => Type::Int,
         // The polymorphic constructors carry the argument type in the known position; the other
         // type parameter is unconstrained (a hole) at the call site.
         "Ok" => Type::Result(
