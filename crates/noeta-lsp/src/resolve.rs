@@ -721,6 +721,7 @@ impl Resolver {
             | Expr::Int { .. }
             | Expr::Float { .. }
             | Expr::F32 { .. }
+            | Expr::F64 { .. }
             | Expr::IntN { .. }
             | Expr::Bool { .. }
             | Expr::AttributesOf { .. }

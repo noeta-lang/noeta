@@ -169,6 +169,13 @@ pub enum TokenKind {
     #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f32")]
     #[regex(r"[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f32")]
     F32Lit,
+    /// A 64-bit float literal with the explicit `f64` suffix (P-NUM-SYM): `1.0f64`, `2.5e3f64`,
+    /// `5f64`. `f64` is bit-identical to `float`, so this is just a `float` value whose *type* is
+    /// pinned to the strict `f64` — the suffix is the expression-position escape (a bare `1.5`
+    /// adapts to `f64` only where a type is expected). Same maximal-munch treatment as `f32`.
+    #[regex(r"[0-9][0-9_]*\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f64")]
+    #[regex(r"[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?f64")]
+    F64Lit,
     /// A **fixed-width integer literal** (Tier W): an integer literal (decimal or `0x`/`0o`/`0b`
     /// radix, with `_` separators) carrying one of the eight width suffixes `i8 i16 i32 i64 u8 u16
     /// u32 u64` — `255u8`, `0xFFi32`, `0b1010u16`, `1_000u32`. Maximal munch picks this over
@@ -372,6 +379,7 @@ impl TokenKind {
             TokenKind::TemplateStr => "TemplateStr",
             TokenKind::FloatLit => "FloatLit",
             TokenKind::F32Lit => "F32Lit",
+            TokenKind::F64Lit => "F64Lit",
             TokenKind::IntNLit => "IntNLit",
             TokenKind::IntLit => "IntLit",
             TokenKind::Ident => "Ident",
@@ -476,6 +484,7 @@ impl TokenKind {
             TokenKind::TemplateStr => "a template string literal",
             TokenKind::FloatLit => "a float literal",
             TokenKind::F32Lit => "an f32 literal",
+            TokenKind::F64Lit => "an f64 literal",
             TokenKind::IntNLit => "a fixed-width integer literal",
             TokenKind::IntLit => "an integer literal",
             TokenKind::Ident => "an identifier",
@@ -749,6 +758,7 @@ fn is_statement_ending(kind: TokenKind) -> bool {
             | TokenKind::IntLit
             | TokenKind::FloatLit
             | TokenKind::F32Lit
+            | TokenKind::F64Lit
             | TokenKind::IntNLit
             | TokenKind::StringLit
             | TokenKind::RawStr

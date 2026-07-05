@@ -177,6 +177,7 @@ fn compare_backends(name: &str, text: &str, report: &mut DiffReport) {
         ext,
         checked.for_stream_sites.clone(),
         checked.width_sites.clone(),
+        checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
         &checked.destructor_relevance,
     );
@@ -234,6 +235,7 @@ fn compare_backends_workspace(
         ext,
         checked.for_stream_sites.clone(),
         checked.width_sites.clone(),
+        checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
         &checked.destructor_relevance,
     );

@@ -1,10 +1,13 @@
-// P-PACK Phase 3: assignment between numeric types is strict (like `int`/`float` today — `let x:
-// float = 1` is rejected). A `float` literal does not silently narrow to `f32`, nor does `f32` widen
-// to `float` in assignment (only arithmetic widens). Construct an `f32` with the `f32` suffix instead.
-// expect: error E0007 at 7:14
-// expect: error E0007 at 8:16
+// P-NUM-SYM: assignment between numeric *values* is strict. A bare float *literal* adapts into an
+// `f32` context (`mut a: f32 = 1.0` is fine — the narrowing is type-directed), but an `f32` value
+// does not implicitly widen to `float`, and a `float` value does not narrow to `f32` — only literals
+// adapt, not values. Both mismatches below are between values, and both are `E0007`.
+// expect: error E0007 at 9:14
+// expect: error E0007 at 11:16
 // expect: exit 1
-mut a: f32 = 1.0
-mut b: float = 1.0f32
+mut f: float = 3.5
+mut a: f32 = f
+mut g: f32 = 2.5f32
+mut b: float = g
 echo a
 echo b

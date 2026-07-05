@@ -124,6 +124,9 @@ pub struct Checked {
     /// maps: lowering wraps `+ - *`/unary `-` on an `IntN` in `Rvalue::MaskWidth` from it, so both
     /// backends wrap the erased result identically.
     pub width_sites: std::collections::HashMap<Span, (bool, u8)>,
+    /// Bare float-literal spans adapted into an `f32` context (P-NUM-SYM), carried here for the same
+    /// reason as the other site maps: lowering narrows the literal to a `Const::F32` from it.
+    pub f32_literal_sites: std::collections::HashSet<Span>,
     /// Collection-construction-site → element `TypeRepr` map (runtime type-argument reflection, R1),
     /// carried here for the same reason as the other site maps: lowering bakes it onto `Rvalue::List`
     /// so `type_of` recovers a list's element type after a `dyn` launder, identically on both backends.
@@ -230,6 +233,7 @@ fn from_check_output(out: noeta_check::Checked) -> Checked {
         index_field_sites: out.index_field_sites,
         for_stream_sites: out.for_stream_sites,
         width_sites: out.width_sites,
+        f32_literal_sites: out.f32_literal_sites,
         construction_sites: out.construction_sites,
         destructor_relevance: out.destructor_relevance,
     }
@@ -258,6 +262,7 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
         ext,
         checked.for_stream_sites.clone(),
         checked.width_sites.clone(),
+        checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
         &checked.destructor_relevance,
         false,
@@ -352,6 +357,8 @@ pub fn linked(db: &dyn salsa::Database, ws: Workspace) -> LinkedProgram {
 #[salsa::tracked(returns(ref))]
 pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
     match &linked(db, ws).0 {
+        // The shared helper maps every `CheckOutput` field (including main's `f32_literal_sites`)
+        // and leaves `expr_types` empty — the compile path pays nothing for the IDE index.
         Ok(program) => from_check_output(noeta_check::check_all(program)),
         Err(diags) => Checked {
             diagnostics: diags.clone(),
@@ -363,6 +370,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             index_field_sites: std::collections::HashSet::new(),
             for_stream_sites: std::collections::HashSet::new(),
             width_sites: std::collections::HashMap::new(),
+            f32_literal_sites: std::collections::HashSet::new(),
             construction_sites: std::collections::HashMap::new(),
             destructor_relevance: noeta_check::DestructorRelevance::default(),
         },
@@ -387,6 +395,7 @@ pub fn linked_checked_ide(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             index_field_sites: std::collections::HashSet::new(),
             for_stream_sites: std::collections::HashSet::new(),
             width_sites: std::collections::HashMap::new(),
+            f32_literal_sites: std::collections::HashSet::new(),
             construction_sites: std::collections::HashMap::new(),
             destructor_relevance: noeta_check::DestructorRelevance::default(),
         },
@@ -416,6 +425,7 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
                 ext,
                 checked.for_stream_sites.clone(),
                 checked.width_sites.clone(),
+                checked.f32_literal_sites.clone(),
                 checked.construction_sites.clone(),
                 &checked.destructor_relevance,
                 false,
