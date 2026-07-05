@@ -5237,14 +5237,18 @@ impl<'m> Vm<'m> {
             }
         };
         let Some(&proto) = self.methods.get(&(type_name.clone(), method.to_string())) else {
+            // Not a user method — a **built-in** receiver (`list.len`, `string.upper`, MH.2):
+            // dispatch through the same `call_builtin_method` the `Op::CallMethod` opcode uses, so a
+            // handle call and a direct call agree by construction (this mirrors the tree-walker,
+            // whose handle arm reuses its ordinary `call_method`). The helper borrows; the owned
+            // arguments are released after (the result is a fresh value, so this is safe even when
+            // it aliases an argument's content).
+            let recv = args[0];
+            let result = self.call_builtin_method(recv, method, &args[1..], span);
             for a in args {
                 release(a);
             }
-            return Err(self.error(
-                DiagnosticCode::UnknownName,
-                span,
-                format!("type `{type_name}` has no method `{method}`"),
-            ));
+            return result;
         };
         let chunk = &self.module.protos[proto as usize];
         let num_params = chunk.num_params as usize; // includes register 0 = self (the receiver)

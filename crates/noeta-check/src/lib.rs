@@ -378,6 +378,24 @@ fn lookup(env: &Env, name: &str) -> Option<Type> {
         .find_map(|frame| frame.get(name).map(|b| b.ty.clone()))
 }
 
+/// A representative `Type` for a built-in type *name* used as a method-handle receiver
+/// (`list.len`, `string.upper`), with unknown element/value types as `dyn`. `None` for a name that
+/// is not a handle-able built-in type. Built-in types carry only instance methods (no associated
+/// fns), so a handle on one is always an instance handle.
+fn builtin_receiver_type(name: &str) -> Option<Type> {
+    Some(match name {
+        "list" | "List" => Type::List(Box::new(Type::Dyn)),
+        "set" | "Set" => Type::Set(Box::new(Type::Dyn)),
+        "map" | "Map" => Type::Map(Box::new(Type::String), Box::new(Type::Dyn)),
+        "string" => Type::String,
+        "bytes" => Type::Bytes,
+        "int" => Type::Int,
+        "float" => Type::Float,
+        "f32" => Type::F32,
+        _ => return None,
+    })
+}
+
 /// Whether `name`'s nearest in-scope binding was declared `mut` (false if unbound).
 fn lookup_mutable(env: &Env, name: &str) -> bool {
     env.iter()
@@ -4485,6 +4503,25 @@ impl Checker {
             params.push(Type::Named(tn.clone(), Vec::new()));
             params.extend(sig.params.iter().cloned());
             let ret = sig.ret.clone();
+            self.sites
+                .handle_sites
+                .insert(member_span, (tn.clone(), name.to_string(), false));
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
+        }
+        // The same for a **built-in** type receiver (`list.len`, `string.upper`): a bare built-in
+        // type name (not shadowed) whose `name` is one of its built-in methods → an instance handle
+        // `Fn(ReceiverType, ...method_params) -> ret` (prelude-redesign MH.2). Built-in types have no
+        // associated fns, so a built-in handle is always instance.
+        if let Expr::Ident { name: tn, .. } = receiver
+            && lookup(env, tn).is_none()
+            && let Some(recv_ty) = builtin_receiver_type(tn)
+            && let Some(ret) = stdlib::method_return(&recv_ty, name)
+        {
+            let mut params = vec![recv_ty.clone()];
+            params.extend(stdlib::method_params(&recv_ty, name).unwrap_or_default());
             self.sites
                 .handle_sites
                 .insert(member_span, (tn.clone(), name.to_string(), false));

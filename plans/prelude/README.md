@@ -98,6 +98,32 @@ dependencies: enabling feature → move names out → reserve the remainder.
 - **P4 — Docs + deferred.md.** Strike the divergence row in `plans/deferred.md`; update language/
   stdlib docs (prelude list, import syntax); record the arc outcome.
 
+## Closing track — explicit member access + derive associated/instance (added with user)
+
+Discovered mid-arc (during method handles) that inside a method a bare field **read** still resolves
+live off `self` while a bare **write** declares a local — an intended-but-surprising asymmetry from
+the 2026-07 object-model decision. **User's actual intent: BOTH reads and writes explicit** — a bare
+name inside a method is never a field; `self.field` is required for all member access. This closes
+the read/write footgun and, paired with the second slice, makes associated-vs-instance derivable and
+unambiguous (which retires MH's instance-only limitation — enabling associated + bound handles).
+
+- **EX.1 — explicit member reads.** Remove the bare-read live-off-`self` fallback: a bare identifier
+  in a method body resolves to a local or is E0005 (never a field). `self.field` required for reads
+  too (writes already require `self.f = v`). Both backends + checker. Corpus migration: every bare
+  field read in a method (`return len(items)`, `items |> map(...)`, `self.words`-mixed files, …) →
+  `self.field`. Update the object-model README's "bare field read resolves live off self" note.
+- **EX.2 — derive associated/instance + wrong-way is a static error + upgrade handles.** With member
+  access fully explicit, a method that references `self` is an **instance** method; one that never
+  does is **associated**. Derive this at check time (compile-time only — **zero runtime cost**, per
+  user). Then: calling an instance method associated-style (or vice-versa) becomes a **static error**
+  (a new diag) instead of today's runtime "no field `n` on unit"; and `Type.method` handles gain the
+  unambiguous associated/instance distinction — **upgrade MH to support associated + bound handles**,
+  retiring the MH.1 instance-only interim (the `associated` flag becomes real). Migrate
+  `builtin_as_value.noe`'s associated cases if wanted.
+
+This is an object-model change (a completed arc) done here because it is now the fastest path and it
+completes method handles. Differential-green + leak-0 per slice.
+
 ## Follow-on tracks (NOT this arc — captured as backlog)
 
 - **UUID** in `std.id` — needs the deterministic Host seam (like `random`/`time`) since v4=random /
