@@ -70,7 +70,8 @@ mut root = math.sqrt(2.0)
 mut boxed: dyn = 41
 mut fallback = boxed.as<int>() ?? 0
 
-// A test tier block: only compiled under `noeta test`.
+// A test tier fn with a metadata attribute; only compiled under `noeta test`.
+#[Name("point defaults hold")]
 @test fn point_defaults(): void {
     p = Point {}
     assert(p.x == 0, "default x")

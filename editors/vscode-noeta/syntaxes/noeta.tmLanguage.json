@@ -204,8 +204,16 @@
     },
 
     "constants": {
-      "name": "constant.language.boolean.noeta",
-      "match": "\\b(true|false)\\b"
+      "patterns": [
+        {
+          "name": "constant.language.boolean.noeta",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "variable.language.self.noeta",
+          "match": "\\bself\\b"
+        }
+      ]
     },
 
     "keywords": {

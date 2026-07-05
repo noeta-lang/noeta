@@ -18,3 +18,7 @@
 /log.txt
 /scratch.txt
 /data.bin
+
+# VS Code extension build artifacts
+editors/vscode-noeta/*.vsix
+editors/vscode-noeta/node_modules/
