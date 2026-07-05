@@ -149,9 +149,33 @@ need a small native-type registration is an S1 detail.
   transitive pull order, glitch-free diamond feeding an effect, an effect witnessing a computed, and the
   read-only negative). Conformance 454, differential 443/0-skipped, jit-differential 443, leak 0 both
   backends, workspace green, clippy/fmt clean.
-- **S4 — disposal/ownership + GC interaction.** Scope ownership, cycle-collector interaction (the
-  signal↔subscriber graph is cycle-shaped by design), miri clean. Confirm the leak oracle stays 0 across
-  create/dispose churn.
+- **S4 — disposal/ownership + GC interaction. DONE (S4a + S4b).** Two parts.
+
+  **S4a — coalescing + the runaway guard.** Closed the one place the backends diverged from the shared
+  core's model. A `signal.set`/`.update` performed *inside* a running effect body was starting a
+  *nested* flush on each backend — for a self-writing effect that meant unbounded recursion (nested
+  `drive_flush` → stack overflow). Now the core tracks a single `flushing` flag
+  (`ReactiveGraph::is_flushing`) and both backends only `drive_flush` at top level; a set inside a flush
+  just enqueues and the ongoing fixpoint loop picks it up (plan decision #4, matching the core's own
+  `set_inside_effect_coalesces` property test). Effect *creation* coalesces the same way. With
+  recursion gone, a genuinely non-converging update (an effect that keeps changing a signal it depends
+  on) is bounded: `flush` returns `FlushOverflow` after `MAX_FLUSH_STEPS` (10_000) effect runs, which
+  each backend maps to a new runtime diagnostic **E0045 ReactiveCycle** — same step count both
+  backends, so the abort is differential-identical; a body-driven abort (panic / `?`) still takes
+  priority. 2 new core property tests + 2 conformance cases (`effect_set_coalesces`, whose *ordering*
+  distinguishes coalesced from nested; `effect_runaway_cycle` → E0045).
+
+  **S4b — ownership finalized + GC-under-churn proof.** Documented the model (core module docs): a flat
+  implicit scope whose lifetime is the isolate's; **disposal is effect-only** at the surface
+  (`effect(...).dispose()` severs subscriptions + frees the slot) — a `signal`/`computed` is *not*
+  independently disposable (a computed has no side effect to stop; per-signal disposal would only add
+  use-after-dispose risk), both reclaimed by `clear()` at program end. The nested **owner tree**
+  (SolidJS-style child disposal on rerun) is explicitly deferred — reachable but advanced, and
+  invisible to the leak oracle since `clear` reclaims everything at exit. New `dispose_churn` conformance
+  case: 50 rounds of create-effect-then-dispose alongside one persistent watcher, proving disposed
+  effects leave no dangling subscription (the later `set` reruns only the live watcher) and that the
+  leak oracle stays 0 across the churn. Conformance 457, differential 446/0-skipped, jit-differential
+  446, leak 0 both backends, miri clean over the core.
 - **S5 — hardening + docs.** Negative cases, the reactivity wiki page, a bench (large fan-out flush), and
   the deferred-registry entry for the transport half.
 

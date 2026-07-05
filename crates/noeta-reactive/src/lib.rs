@@ -39,6 +39,31 @@
 //! makes value glitch-freedom automatic: because a dirty `computed` is pulled fresh on read, a diamond
 //! (`A → B`, `A → C`, `B & C → D`) recomputes its sink `D` exactly once with consistent inputs.
 //!
+//! # Ownership & disposal (reactivity S4)
+//!
+//! Every node is owned by the program's single implicit reactive scope — its lifetime is the
+//! isolate's. There are no nested reactive scopes yet, so ownership is flat: a node lives until it is
+//! explicitly disposed or the program ends. Two disposal paths:
+//!
+//! - **Explicit, effect-only.** `effect(...)` returns a handle with `.dispose()`, which
+//!   [`dispose`](ReactiveGraph::dispose)s its node — severing every subscription so it stops rerunning
+//!   and freeing its slot. This is the surface's only manual disposal: a `signal`/`computed` is *not*
+//!   independently disposable (there is no `.dispose()` on them). A `computed` is a pure derivation
+//!   with no side effects to stop, and exposing per-signal disposal would invite use-after-dispose for
+//!   no gain; both are reclaimed with the scope. (The core's `dispose` accepts any kind — it is what
+//!   `clear` and, later, a scope teardown build on — but the *language surface* only wires it to
+//!   effects.)
+//! - **Scope end.** At program exit the backend calls [`clear`](ReactiveGraph::clear), dropping every
+//!   node and releasing every held value. For a backend whose value type is externally refcounted
+//!   (the VM's `GcVal`) this is what returns residency to zero — the leak oracle's proof obligation,
+//!   which holds across arbitrary create/dispose churn (see the `dispose_churn` conformance case).
+//!
+//! Deferred (not yet built): a **nested owner tree** (SolidJS-style), where an `effect`/`computed`
+//! that creates child nodes during its run owns them and disposes them when it reruns or is itself
+//! disposed. Without it, a node created *inside* a body that runs repeatedly accumulates until scope
+//! end — reachable but advanced, and invisible to the leak oracle (which measures end-of-program
+//! residency, and `clear` reclaims everything). It lands with the transport/UI layers that need it.
+//!
 //! This crate is `unsafe`-free (an arena of indices, no raw pointers) and has no dependencies.
 
 use std::cell::RefCell;
