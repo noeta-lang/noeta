@@ -651,6 +651,28 @@ impl<'m> Vm<'m> {
         Ok(Value::list(out))
     }
 
+    /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
+    /// [`noeta_stdlib::ExtType`]'s shared dispatch — project the arguments, run the one shared
+    /// body (host threaded in, receiver `&mut`), materialize the result. Mirrors the
+    /// tree-walker's `call_extern_method`, so the two backends agree by construction.
+    pub(crate) fn call_extern_method(
+        &mut self,
+        recv: Value,
+        method: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Result<Value, Abort> {
+        let nargs: Vec<noeta_stdlib::NativeValue> =
+            args.iter().map(|a| marshal_native_arg(*a)).collect();
+        let host = &mut *self.host;
+        let result =
+            recv.with_extern_mut(|e| noeta_stdlib::registry::dispatch_method(e, method, host, &nargs));
+        match result {
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.error(stdlib_error_code(error.kind), span, error.message)),
+        }
+    }
+
     /// Dispatch a file-handle method. Mirrors the tree-walker's `call_file_handle_method`: the
     /// cursor logic lives in the shared `FileHandle`, so the two backends differ only in value glue
     /// (building `some`/`none`, routing the close flush through `self.host`).

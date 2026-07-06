@@ -263,6 +263,12 @@ pub(crate) enum Payload {
     /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — a GC leaf like `Str`; owns no child
     /// references, freeing it just drops the `Vec<u8>`.
     Bytes(Vec<u8>),
+    /// A registered extern-type value (extern-types X1) — the ONE hosting variant every
+    /// registry-contributed type shares. A GC leaf: the contract is acyclic by design (no child
+    /// `Value`s), so freeing just drops the box. The payload is RC-shared like any other, so a
+    /// mutating method (through [`with_extern_mut`]) has reference semantics — the FileHandle
+    /// discipline, generalized.
+    Extern(noeta_stdlib::ExternBox),
     Int(i64),
     /// A function value: a prototype index plus the captured upvalue cells (empty for a
     /// top-level `fn`/closure, which captures only globals). The closure **owns one reference
@@ -715,7 +721,8 @@ pub(crate) fn free(value: Value) {
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
         | Payload::Reactive(..)
-        | Payload::FileHandle(_) => {}
+        | Payload::FileHandle(_)
+        | Payload::Extern(_) => {}
     }
     drop(boxed);
 }
@@ -900,7 +907,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         | Payload::ChannelRecv(_)
         | Payload::IsolateFuture(_)
         | Payload::Reactive(..)
-        | Payload::FileHandle(_) => {}
+        | Payload::FileHandle(_)
+        | Payload::Extern(_) => {}
     }
     out
 }
@@ -949,6 +957,30 @@ pub(crate) fn with_file_handle_mut<R>(value: Value, f: impl FnOnce(&mut FileHand
         panic!("with_file_handle_mut on a non-handle value");
     };
     f(handle)
+}
+
+/// Read an extern-type value under a closure (extern-types X1). The caller must have checked the
+/// value is an `Extern`.
+pub(crate) fn with_extern<R>(value: Value, f: impl FnOnce(&dyn noeta_stdlib::ExternValue) -> R) -> R {
+    let obj = unsafe { &*obj_ptr(value) };
+    let Payload::Extern(e) = &obj.payload else {
+        panic!("with_extern on a non-extern value");
+    };
+    f(&**e)
+}
+
+/// Mutate an extern-type value under a closure — the receiver of a mutating method, generalizing
+/// [`with_file_handle_mut`]. Single-threaded interior mutation of a heap object; the contract is
+/// a GC leaf (no child `Value`s), so no retain/release bookkeeping is needed.
+pub(crate) fn with_extern_mut<R>(
+    value: Value,
+    f: impl FnOnce(&mut dyn noeta_stdlib::ExternValue) -> R,
+) -> R {
+    let obj = unsafe { &mut *obj_ptr(value) };
+    let Payload::Extern(e) = &mut obj.payload else {
+        panic!("with_extern_mut on a non-extern value");
+    };
+    f(&mut **e)
 }
 
 /// Read the value held in a cell, returning a borrowed (not retained) copy. The caller must
@@ -1131,6 +1163,9 @@ impl SharedRegion {
             match &obj.payload {
                 Payload::Str(s) => PromoteJob::Leaf(Payload::Str(s.clone())),
                 Payload::Bytes(b) => PromoteJob::Leaf(Payload::Bytes(b.clone())),
+                // An extern value is `Send` by trait bound and a leaf; `ExternBox::clone`
+                // routes through `ExternValue::clone_box`.
+                Payload::Extern(e) => PromoteJob::Leaf(Payload::Extern(e.clone())),
                 Payload::Int(i) => PromoteJob::Leaf(Payload::Int(*i)),
                 Payload::PackedList { schema, bytes } => PromoteJob::Leaf(Payload::PackedList {
                     schema: Rc::clone(schema),

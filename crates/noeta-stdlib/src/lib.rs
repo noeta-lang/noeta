@@ -22,6 +22,7 @@
 
 pub mod env;
 pub mod executor;
+pub mod extern_value;
 pub mod fs;
 pub mod handle;
 pub mod host;
@@ -35,12 +36,13 @@ pub mod registry;
 pub mod vec3;
 
 pub use executor::{Executor, IoOutcome, IoRequest, SandboxExecutor, run_io_sync};
+pub use extern_value::{ExternBox, ExternValue};
 pub use handle::{FileHandle, FileHandleMethod, FileMode, Flush, ReadSource};
 pub use host::{Clock, Entropy, Env, FileReader, FileSystem, Host, Ids, Rng, SandboxHost};
 pub use iter::IterMethod;
 pub use registry::{
-    ExtFn, ExtModule, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType, StdExtension,
-    TypeRecipe,
+    ExtFn, ExtModule, ExtType, Extension, NativeOut, NativeValue, RetTy, Scalar, SigType,
+    StdExtension, TypeDispatch, TypeRecipe,
 };
 
 /// A backend-agnostic view of an argument value, covering only the primitive shapes the

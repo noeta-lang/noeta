@@ -1502,6 +1502,8 @@ impl Interpreter {
             NativeOut::Str(s) => Ok(Value::Str(s)),
             NativeOut::Bytes(b) => Ok(Value::Bytes(Rc::new(b))),
             NativeOut::Unit => Ok(Value::Unit),
+            // A `TypeRecipe` names only JSON shapes; an extern value can never decode from one.
+            NativeOut::Extern(_) => unreachable!("json recipes never produce extern values"),
             NativeOut::None => Ok(crate::builtin_enum("Option", "none", vec![])),
             NativeOut::Some(inner) => {
                 let value = self.materialize_recipe(*inner, span)?;

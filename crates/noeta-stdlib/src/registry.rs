@@ -65,6 +65,10 @@ pub enum NativeValue {
     Map(Vec<(String, NativeValue)>),
     /// Any value a dispatch function never inspects — carries the type name for error messages.
     Opaque(&'static str),
+    /// A registered extern-type value (extern-types X1), cloned into the seam via
+    /// [`crate::ExternValue::clone_box`]. Extern arguments are never a hot path (their producers
+    /// are host/IO-shaped), so by-value marshalling matches the rest of this view.
+    Extern(crate::ExternBox),
 }
 
 /// A backend-agnostic **result** the backend materializes into its own `Value`.
@@ -99,6 +103,10 @@ pub enum NativeOut {
     None,
     /// `Option::Some(x)` — a present optional value.
     Some(Box<NativeOut>),
+    /// A registered extern-type value (extern-types X1) — the general form of what
+    /// [`NativeOut::FileHandle`] does for its one hardcoded type. Each backend wraps it in its
+    /// single extern hosting variant.
+    Extern(crate::ExternBox),
 }
 
 /// noeta-stdlib's small signature vocabulary. noeta-stdlib cannot depend on `noeta_types::Type` (that
@@ -199,11 +207,45 @@ pub struct ExtModule {
     pub deep_marshal: bool,
 }
 
-/// A bundle of native modules (and, later, types) registered into the language. Core implements
-/// this once as [`StdExtension`]; a third-party crate implements it to contribute its own modules.
+/// A type's method dispatch (extern-types X1): given the receiver, the method name, the host
+/// seam, and the projected arguments, run the method and return a neutral result. ONE signature
+/// covers the whole {pure, mutable} × {host-free, effectful} matrix — a pure method simply does
+/// not mutate `recv` or touch `host` (`Uuid.version()`), an effectful one does both
+/// (`FileHandle.read_line(host)`).
+pub type TypeDispatch = fn(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError>;
+
+/// A first-class value type contributed by an extension (extern-types X1): a reserved type name,
+/// its instance-method signatures, their shared dispatch, and the key capability the checker
+/// reads. The value behavior itself (equality, ordering, hash, display) lives on the
+/// [`crate::ExternValue`] impl the type's constructors box up.
+#[derive(Debug, Clone, Copy)]
+pub struct ExtType {
+    /// The surface type name (`Uuid`). Reserved: a user declaration of this name is E0049.
+    pub name: &'static str,
+    /// Instance-method signatures — same vocabulary as module functions.
+    pub methods: &'static [ExtFn],
+    pub dispatch: TypeDispatch,
+    /// Whether values may key a `Map` / member a `Set`. Declaring `true` promises: no mutating
+    /// methods, [`crate::ExternValue::cmp_value`] is a total order over the kind, and
+    /// [`crate::ExternValue::hash_value`] is stable and content-derived.
+    pub key_capable: bool,
+}
+
+/// A bundle of native modules and types registered into the language. Core implements this once
+/// as [`StdExtension`]; a third-party crate implements it to contribute its own modules/types.
 pub trait Extension: Sync {
     fn name(&self) -> &'static str;
     fn modules(&self) -> &'static [ExtModule];
+    /// The extension's first-class value types. Default empty — a modules-only extension does
+    /// not change.
+    fn types(&self) -> &'static [ExtType] {
+        &[]
+    }
 }
 
 /// Core's "std" extension — the dogfood. Registers the Ring 2 modules through the same API a
@@ -244,6 +286,40 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
         .functions
         .iter()
         .find(|f| f.name == func)
+}
+
+/// Find a registered extern type by name (extern-types X1).
+pub fn find_type(name: &str) -> Option<&'static ExtType> {
+    extensions()
+        .iter()
+        .flat_map(|e| e.types())
+        .find(|t| t.name == name)
+}
+
+/// Find a registered extern type's method signature.
+pub fn find_type_method(type_name: &str, method: &str) -> Option<&'static ExtFn> {
+    find_type(type_name)?
+        .methods
+        .iter()
+        .find(|m| m.name == method)
+}
+
+/// Dispatch a method on an extern receiver through its registered [`ExtType`]. Returns the
+/// canonical "no such method" error for an unknown method, mirroring [`dispatch`] for modules.
+pub fn dispatch_method(
+    recv: &mut dyn crate::ExternValue,
+    method: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    let type_name = recv.type_name();
+    let Some(ext) = find_type(type_name) else {
+        return Err(StdError {
+            kind: crate::ErrorKind::UnknownName,
+            message: format!("`{type_name}` is not a registered type"),
+        });
+    };
+    (ext.dispatch)(recv, method, host, args)
 }
 
 /// The **virtual** std modules (prelude-redesign P2): importable module names whose functions are
@@ -347,6 +423,7 @@ fn native_type_name(value: &NativeValue) -> &str {
         NativeValue::List(_) => "list",
         NativeValue::Map(_) => "map",
         NativeValue::Object { type_name, .. } | NativeValue::Opaque(type_name) => type_name,
+        NativeValue::Extern(e) => e.type_name(),
     }
 }
 
@@ -365,7 +442,8 @@ fn to_arg(value: &NativeValue) -> Arg<'_> {
         | NativeValue::List(_)
         | NativeValue::Map(_)
         | NativeValue::Object { .. }
-        | NativeValue::Opaque(_) => Arg::Other,
+        | NativeValue::Opaque(_)
+        | NativeValue::Extern(_) => Arg::Other,
     }
 }
 

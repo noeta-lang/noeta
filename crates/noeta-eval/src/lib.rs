@@ -2181,6 +2181,12 @@ impl Interpreter {
             let handle = Rc::clone(handle);
             return self.call_file_handle_method(method, &handle, name, &args, span);
         }
+        // Extern-type methods (extern-types X1): every registry-contributed type routes through
+        // its registered `ExtType`'s one shared dispatch. Mirrors the VM's `call_extern_method`.
+        if let Value::Extern(cell) = &receiver {
+            let cell = Rc::clone(cell);
+            return self.call_extern_method(&cell, name, &args, span);
+        }
         // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender, `rx.recv()`
         // on a receiver. `send`/`recv` return leaf futures (enqueue/dequeue when polled); `close` is
         // synchronous. Endpoint validity was checked statically, so an unknown method here is a
@@ -2979,6 +2985,32 @@ impl Interpreter {
                     }
                 }
             }
+        }
+    }
+
+    /// Dispatch a method on an extern-type receiver (extern-types X1) through its registered
+    /// [`noeta_stdlib::ExtType`]'s shared dispatch — project the arguments, run the one shared
+    /// body (host threaded in, receiver borrowed mutably), materialize the result. Mirrors the
+    /// VM's `call_extern_method`, so the two backends agree by construction.
+    fn call_extern_method(
+        &mut self,
+        cell: &Rc<RefCell<noeta_stdlib::ExternBox>>,
+        name: &str,
+        args: &[Value],
+        span: Span,
+    ) -> Eval<Value> {
+        let nargs: Vec<noeta_stdlib::NativeValue> = args.iter().map(marshal_native_arg).collect();
+        // `cell` is an independent `Rc`, so borrowing it and `self.host` at once is fine (the
+        // FileHandle discipline).
+        let result = noeta_stdlib::registry::dispatch_method(
+            &mut **cell.borrow_mut(),
+            name,
+            &mut *self.host,
+            &nargs,
+        );
+        match result {
+            Ok(out) => Ok(materialize_native(out)),
+            Err(error) => Err(self.runtime_error(std_error_code(error.kind), span, error.message)),
         }
     }
 
@@ -4611,6 +4643,9 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Class(o.def.name().to_string(), Vec::new())),
+        // An extern-type value reflects as its registered nominal type (`Uuid`), mirroring the
+        // checker's `Type::Named` for it.
+        Value::Extern(e) => TypeRepr::Named(e.borrow().type_name().to_string(), Vec::new()),
         // A type value, module, file handle, iterator, or enum-type has no nameable lattice type → top.
         Value::EnumType(_)
         | Value::Type(_)
@@ -4806,10 +4841,12 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
                 "Enum" => matches!(value, Value::Enum(_)),
                 "Struct" => matches!(value, Value::Object(o) if o.def.is_struct),
                 "Class" => matches!(value, Value::Object(o) if !o.def.is_struct),
-                // `Option`/`Result` are enums whose shape name is the type name, like a user enum.
+                // `Option`/`Result` are enums whose shape name is the type name, like a user
+                // enum; an extern-type value matches its registered type name (`x is Uuid`).
                 other => match value {
                     Value::Object(object) => object.def.name() == other,
                     Value::Enum(enum_value) => enum_value.enum_name == other,
+                    Value::Extern(e) => e.borrow().type_name() == other,
                     _ => false,
                 },
             };
@@ -4844,6 +4881,9 @@ fn marshal_native_arg(value: &Value) -> noeta_stdlib::NativeValue {
         Value::Bool(b) => NativeValue::Scalar(Scalar::Bool(*b)),
         Value::Str(s) => NativeValue::Str(s.clone()),
         Value::Bytes(b) => NativeValue::Bytes((**b).clone()),
+        // An extern-type argument crosses by value (`clone_box`); extern producers are host/IO
+        // shaped, never a hot path. Mirrors the VM-side projection.
+        Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),
         // An object with all-scalar fields (e.g. a `Vec3`) projects to its field scalars in slot
         // order; anything with a non-scalar field is opaque (a dispatch that wanted an object will
         // report the type error). Mirrors the prior `read_vec3`.
@@ -4934,6 +4974,8 @@ fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .collect(),
         )),
         NativeOut::FileHandle(handle) => Value::FileHandle(Rc::new(RefCell::new(handle))),
+        // An extern-type value: host the box in the shared cell (extern-types X1).
+        NativeOut::Extern(e) => Value::Extern(Rc::new(RefCell::new(e))),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
         // function's `RetTy` + arguments) and never reach here.
         NativeOut::Object(_) => {
@@ -5081,6 +5123,9 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
         | Value::BoundMethod(..) => NativeValue::Str("<fn>".to_string()),
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
+        // An extern-type value marshals as itself; the shared serializer renders its display
+        // form as a JSON string (a `Uuid` is its canonical string).
+        Value::Extern(e) => NativeValue::Extern(e.borrow().clone()),
         // An iterator has no JSON analog — its opaque display form, like the VM.
         Value::Iter(_) => NativeValue::Str("<iterator>".to_string()),
         Value::Future(_)
@@ -5107,6 +5152,9 @@ pub(crate) fn compare_primitive(left: &Value, right: &Value) -> Option<std::cmp:
     match (left, right) {
         (Value::Int(a), Value::Int(b)) => Some(a.cmp(b)),
         (Value::Str(a), Value::Str(b)) => Some(a.cmp(b)),
+        // Extern-type values order through their contract (extern-types X1) — a total order per
+        // key-capable kind; `None` for unordered kinds. Mirrors the VM's `compare_primitive`.
+        (Value::Extern(a), Value::Extern(b)) => a.borrow().cmp_value(&**b.borrow()),
         _ => {
             let num = |v: &Value| match v {
                 Value::Int(i) => Some(*i as f64),

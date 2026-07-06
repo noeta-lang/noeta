@@ -69,6 +69,8 @@ pub enum IterAbort<E> {
 pub enum HeapKind {
     Str,
     Bytes,
+    /// A registered extern-type value (extern-types X1).
+    Extern,
     Int,
     Closure,
     Cell,
@@ -795,6 +797,31 @@ impl Value {
     /// caller must have checked [`Value::is_file_handle`].
     pub fn with_file_handle_mut<R>(self, f: impl FnOnce(&mut FileHandle) -> R) -> R {
         heap::with_file_handle_mut(self, f)
+    }
+
+    /// A registered extern-type value (extern-types X1) — the general form of
+    /// [`Value::file_handle`]. A GC leaf (the contract owns no child values).
+    pub fn extern_value(value: noeta_stdlib::ExternBox) -> Value {
+        heap::alloc(Payload::Extern(value))
+    }
+
+    /// Whether this is an extern-type value.
+    pub fn is_extern(self) -> bool {
+        self.is_pointer() && heap::with_payload(self, |p| matches!(p, Payload::Extern(_)))
+    }
+
+    /// Read this extern value under a closure. The caller must have checked [`Value::is_extern`].
+    pub fn with_extern<R>(self, f: impl FnOnce(&dyn noeta_stdlib::ExternValue) -> R) -> R {
+        heap::with_extern(self, f)
+    }
+
+    /// Mutate this extern value under a closure (the receiver of a mutating method). The caller
+    /// must have checked [`Value::is_extern`].
+    pub fn with_extern_mut<R>(
+        self,
+        f: impl FnOnce(&mut dyn noeta_stdlib::ExternValue) -> R,
+    ) -> R {
+        heap::with_extern_mut(self, f)
     }
 
     /// A lazy iterator value (Track I.1a) cursoring over `list` from the start. The iterator owns one
@@ -2218,6 +2245,8 @@ impl Value {
                 Payload::NativeModule(name) => format!("<module {name}>"),
                 // `<file "path" (mode)>`, rendered by the shared handle so both backends match.
                 Payload::FileHandle(handle) => handle.display(),
+                // An extern-type value renders through its contract, identically on both backends.
+                Payload::Extern(e) => e.display_string(),
                 // An iterator is an opaque reference value (like a file handle).
                 Payload::Iter { .. } => "<iterator>".to_string(),
                 // A future — step, leaf timer, task handle, async-read, or channel op — is an opaque
@@ -2283,6 +2312,9 @@ impl Value {
                 // A byte buffer has no JSON representation (it is the *binary* alternative): a length
                 // summary string, so `json.stringify` never panics.
                 Payload::Bytes(b) => NativeValue::Str(format!("<{} bytes>", b.len())),
+                // An extern-type value marshals as itself; the shared serializer renders its
+                // display form as a JSON string (a `Uuid` is its canonical string).
+                Payload::Extern(e) => NativeValue::Extern(e.clone()),
                 Payload::Int(i) => NativeValue::Scalar(Scalar::Int(*i)),
                 // Lists, tuples, and sets all serialize as a JSON array (JSON has neither tuple nor
                 // set), so they marshal to one neutral list.
@@ -2368,6 +2400,7 @@ impl Value {
         Some(heap::with_payload(self, |p| match p {
             Payload::Str(_) => HeapKind::Str,
             Payload::Bytes(_) => HeapKind::Bytes,
+            Payload::Extern(_) => HeapKind::Extern,
             Payload::Int(_) => HeapKind::Int,
             Payload::Closure { .. } => HeapKind::Closure,
             Payload::Cell(_) => HeapKind::Cell,
@@ -2451,6 +2484,9 @@ impl Value {
                 }
             } else if self.is_bytes() {
                 "bytes"
+            } else if self.is_extern() {
+                // The registered extern type's own name (`Uuid`), from the value contract.
+                self.with_extern(|e| e.type_name())
             } else {
                 "string"
             }

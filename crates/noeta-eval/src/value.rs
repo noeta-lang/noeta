@@ -90,6 +90,12 @@ pub enum Value {
     /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
     /// same shared type both backends advance, so behavior is identical by construction.
     FileHandle(Rc<RefCell<FileHandle>>),
+    /// A registered extern-type value (extern-types X1) — the ONE hosting variant every
+    /// registry-contributed type shares; the tree-walker twin of the VM's `Payload::Extern`.
+    /// `Rc<RefCell<…>>` gives the shared, interior-mutable cell a mutating method needs
+    /// (reference semantics, the FileHandle discipline generalized); a pure type never borrows
+    /// mutably.
+    Extern(Rc<RefCell<noeta_stdlib::ExternBox>>),
     /// A lazy iterator (Track I.1a): a reference-semantic cursor over a list value — the tree-walker
     /// twin of the VM's `Payload::Iter`. `Rc<RefCell<…>>` gives the shared interior-mutable cursor so
     /// every alias advances the same iterator, exactly like a file handle.
@@ -733,6 +739,8 @@ impl Value {
             Value::NativeModule(module) => format!("<module {module}>"),
             // `<file "path" (mode)>`, rendered by the shared handle so the VM matches exactly.
             Value::FileHandle(handle) => handle.borrow().display(),
+            // An extern-type value renders through its contract, identically on both backends.
+            Value::Extern(e) => e.borrow().display_string(),
             Value::Iter(_) => "<iterator>".to_string(),
             Value::Future(_)
             | Value::Timer(_)
@@ -781,6 +789,8 @@ impl Value {
             Value::Object(_) => "object",
             Value::NativeModule(_) => "module",
             Value::FileHandle(_) => "file handle",
+            // The registered extern type's own name (`Uuid`), from the value contract.
+            Value::Extern(e) => e.borrow().type_name(),
             Value::Iter(_) => "iterator",
             Value::Future(_)
             | Value::Timer(_)
@@ -827,6 +837,7 @@ impl fmt::Debug for Value {
             Value::Object(object) => write!(f, "Object({})", object.display()),
             Value::NativeModule(module) => write!(f, "NativeModule({module})"),
             Value::FileHandle(handle) => write!(f, "FileHandle({})", handle.borrow().display()),
+            Value::Extern(e) => write!(f, "Extern({})", e.borrow().display_string()),
             Value::Iter(state) => write!(f, "Iter({:?})", state.borrow()),
             Value::Future(thunk) => write!(f, "Future({thunk:?})"),
             Value::Timer(deadline) => write!(f, "Timer({deadline})"),

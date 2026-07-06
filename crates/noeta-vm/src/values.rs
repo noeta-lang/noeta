@@ -34,6 +34,10 @@ pub(crate) fn marshal_native_arg(value: Value) -> noeta_stdlib::NativeValue {
         NativeValue::Str(s)
     } else if let Some(b) = value.bytes_data() {
         NativeValue::Bytes(b)
+    } else if value.is_extern() {
+        // An extern-type argument crosses by value (`clone_box`); extern producers are host/IO
+        // shaped, never a hot path. Mirrors the tree-walker's projection.
+        NativeValue::Extern(value.with_extern(|e| noeta_stdlib::ExternBox(e.clone_box())))
     } else if value.is_object() {
         // An object with all-scalar fields (e.g. a `Vec3`) projects to its field scalars in slot
         // order; anything with a non-scalar field is opaque (a dispatch that wanted an object will
@@ -126,6 +130,8 @@ pub(crate) fn materialize_native(out: noeta_stdlib::NativeOut) -> Value {
                 .collect(),
         ),
         NativeOut::FileHandle(handle) => Value::file_handle(handle),
+        // An extern-type value: host the box in the VM's single extern payload (extern-types X1).
+        NativeOut::Extern(e) => Value::extern_value(e),
         // Object results carry no shape, so they are built by `materialize_ext` (which has the
         // function's `RetTy` + arguments) and never reach here.
         NativeOut::Object(_) => {
@@ -454,9 +460,10 @@ pub(crate) fn materialize_recipe(out: noeta_stdlib::NativeOut) -> Value {
                 .collect();
             Value::object(shape, values)
         }
-        // `Object` (shape-from-argument) and `FileHandle` are never produced by a recipe decode.
-        NativeOut::Object(_) | NativeOut::FileHandle(_) => {
-            unreachable!("json.parse recipe decode never yields an Object/FileHandle result")
+        // `Object` (shape-from-argument), `FileHandle`, and extern values are never produced by
+        // a recipe decode (a `TypeRecipe` names only JSON shapes).
+        NativeOut::Object(_) | NativeOut::FileHandle(_) | NativeOut::Extern(_) => {
+            unreachable!("json.parse recipe decode never yields an Object/FileHandle/Extern result")
         }
     }
 }

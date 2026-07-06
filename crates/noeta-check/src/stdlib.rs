@@ -44,6 +44,14 @@ pub(super) const COMPUTED: &str = "Computed";
 /// `Effect` (no type argument — it produces no value); `.dispose()` unsubscribes it.
 pub(super) const EFFECT: &str = "Effect";
 
+/// Every checker-native reserved type name (extern-types X1): the `Named` types whose method
+/// tables live in THIS file because their values are backend builtins coupled to the executor or
+/// reactive graph. Together with the registry's extern types (`registry::find_type`) these form
+/// the E0049 reservation set — a user declaration of any of them is rejected.
+pub(super) const NATIVE_TYPE_NAMES: &[&str] = &[
+    FILE_HANDLE, ITERATOR, FUTURE, SENDER, RECEIVER, SIGNAL, COMPUTED, EFFECT,
+];
+
 /// Whether `name` binds a Ring 2 stdlib module via `use std.{…}`. Every module — `json` included
 /// (B4) — comes from the native-extension registry now; only the `vec` bulk `*_all` kernels keep a
 /// small per-backend fallback in `module_params`/`module_return`.
@@ -131,6 +139,16 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
             computed_method(name, args.first().unwrap_or(&Type::Dyn))
         }
         Type::Named(n, _) if n == EFFECT => effect_method(name),
+        // A registered extern type's methods come from its `ExtType` signature table
+        // (extern-types X1) — the registry is the single source, so a new native type never
+        // edits this file.
+        Type::Named(n, _) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method(n, name)?;
+            Some(match sig.ret {
+                registry::RetTy::Concrete(s) => sig_to_type(&s),
+                _ => Type::Dyn,
+            })
+        }
         _ => None,
     }
 }
@@ -400,6 +418,12 @@ pub(super) fn method_params(receiver: &Type, name: &str) -> Option<Vec<Type>> {
             "dispose" => vec![],
             _ => return None,
         }),
+        // A registered extern type's method parameters come from its `ExtType` signature table
+        // (extern-types X1), like `method_return`.
+        Type::Named(n, _) if registry::find_type(n).is_some() => {
+            let sig = registry::find_type_method(n, name)?;
+            Some(sig.params.iter().map(sig_to_type).collect())
+        }
         _ => None,
     }
 }

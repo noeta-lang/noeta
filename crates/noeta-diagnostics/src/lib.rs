@@ -196,6 +196,11 @@ pub enum DiagnosticCode {
     /// function (never touches `self`) called on a value (`x.new(...)`). The distinction is DERIVED
     /// from the body — zero runtime cost — and enforced statically.
     InvalidReceiver,
+    /// A declaration binds a **reserved native type name** (extern-types X1) — a registered
+    /// extern type (`Uuid`) or a checker-native type (`FileHandle`, `Iterator`, `Future`,
+    /// `Sender`, `Receiver`, `Signal`, `Computed`, `Effect`). Shadowing one would make the
+    /// name's method tables ambiguous, so it is rejected statically.
+    ReservedTypeName,
 }
 
 impl DiagnosticCode {
@@ -249,6 +254,7 @@ impl DiagnosticCode {
         DiagnosticCode::ReactiveCycle,
         DiagnosticCode::ReservedName,
         DiagnosticCode::InvalidReceiver,
+        DiagnosticCode::ReservedTypeName,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -302,6 +308,9 @@ impl DiagnosticCode {
             DiagnosticCode::ReactiveCycle => "E0045",
             DiagnosticCode::ReservedName => "E0046",
             DiagnosticCode::InvalidReceiver => "E0047",
+            // E0048 is claimed by the debug-adapter branch's `MissingReturn` (unmerged); this
+            // arc deliberately skips to E0049 so the two merge cleanly.
+            DiagnosticCode::ReservedTypeName => "E0049",
         }
     }
 

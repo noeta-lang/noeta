@@ -267,6 +267,11 @@ pub fn compare_primitive(left: Value, right: Value) -> Option<Ordering> {
     if let (Some(a), Some(b)) = (left.as_string(), right.as_string()) {
         return Some(a.cmp(&b));
     }
+    // Extern-type values order through their contract (extern-types X1): a total order per
+    // key-capable kind (set canonicalization, `x.compare(y)`); `None` for unordered kinds.
+    if left.is_extern() && right.is_extern() {
+        return left.with_extern(|a| right.with_extern(|b| a.cmp_value(b)));
+    }
     let num = |v: Value| {
         v.as_float()
             .or_else(|| v.as_f32().map(|f| f as f64))
@@ -443,6 +448,11 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some((ra, ma)), Some((rb, mb))) = (left.bound_method_parts(), right.bound_method_parts())
     {
         return ma == mb && values_equal(ra, rb);
+    }
+    // Extern-type values compare through their contract (extern-types X1) — appended LAST so
+    // every pre-existing kind's comparison path is untouched.
+    if left.is_extern() && right.is_extern() {
+        return left.with_extern(|a| right.with_extern(|b| a.eq_value(b)));
     }
     false
 }

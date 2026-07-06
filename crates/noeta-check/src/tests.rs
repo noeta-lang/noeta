@@ -1075,6 +1075,18 @@ fn every_reserved_prelude_name_rejects_binding() {
 }
 
 #[test]
+fn reserved_native_type_names_reject_type_declarations() {
+    // E0049 (extern-types X1): the checker-native type names — and any registered extern type —
+    // cannot be re-declared; their method tables dispatch by name, so a same-name user type
+    // would be silently shadowed.
+    assert_eq!(codes("struct FileHandle { x: int }\n"), ["E0049"]);
+    assert_eq!(codes("class Iterator { x: int }\n"), ["E0049"]);
+    assert_eq!(codes("enum Future { A }\n"), ["E0049"]);
+    // An unreserved name stays declarable.
+    assert_eq!(codes("struct Handle2 { x: int }\n"), Vec::<String>::new());
+}
+
+#[test]
 fn reserved_names_reject_every_declaration_form() {
     // The reservation is uniform across declaration forms, not just plain bindings.
     assert_eq!(codes("mut some = 1;\n"), ["E0046"]); // mut binding

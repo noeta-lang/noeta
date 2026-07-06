@@ -728,6 +728,24 @@ impl Checker {
     /// shadow as a fresh local, so allowing a binding meant the backends diverged. Rejecting it
     /// statically closes that divergence by construction. Methods and enum variants are exempt —
     /// they are always receiver-/type-qualified, so a bare prelude name never resolves to them.
+    /// Reject a type declaration that binds a **reserved native type name** (extern-types X1,
+    /// E0049): a registered extern type (`Uuid`) or a checker-native type (`FileHandle`,
+    /// `Iterator`, …). Their method tables come from the registry/checker, so a same-name user
+    /// type would be silently shadowed by name-match dispatch — reserve the names instead.
+    fn check_reserved_type_name(&mut self, name: &str, span: Span) {
+        let native = stdlib::NATIVE_TYPE_NAMES.contains(&name);
+        if native || noeta_stdlib::registry::find_type(name).is_some() {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::ReservedTypeName,
+                    span,
+                    format!("cannot declare `{name}`: it is a reserved native type name"),
+                )
+                .with_help("rename the type — native type names cannot be shadowed"),
+            );
+        }
+    }
+
     fn check_reserved_name(&mut self, name: &str, span: Span) {
         const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
         if RESERVED_PRELUDE.contains(&name) {
@@ -1780,14 +1798,17 @@ impl Checker {
             }
             Stmt::Struct(r) => {
                 self.check_reserved_name(&r.name, r.name_span);
+                self.check_reserved_type_name(&r.name, r.name_span);
                 self.check_struct(r, env)
             }
             Stmt::Class(c) => {
                 self.check_reserved_name(&c.name, c.name_span);
+                self.check_reserved_type_name(&c.name, c.name_span);
                 self.check_class(c, env)
             }
             Stmt::Enum(e) => {
                 self.check_reserved_name(&e.name, e.name_span);
+                self.check_reserved_type_name(&e.name, e.name_span);
                 self.check_enum(e, env)
             }
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
@@ -2436,6 +2457,8 @@ impl Checker {
                     && !PRELUDE_TYPES.contains(&name.as_str())
                     && !self.type_params.contains_key(name)
                     && !self.types.contains(name)
+                    // A registered extern type (`Uuid`, extern-types X1) is a valid annotation.
+                    && noeta_stdlib::registry::find_type(name).is_none()
                 {
                     self.error(
                         DiagnosticCode::UnknownType,

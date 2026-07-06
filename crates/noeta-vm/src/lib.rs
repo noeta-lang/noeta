@@ -1238,7 +1238,14 @@ fn narrow_matches(v: Value, target: &NarrowTarget) -> bool {
         NarrowTarget::Tuple => "tuple",
         NarrowTarget::Fn => "function",
         NarrowTarget::Dyn => return true,
-        NarrowTarget::Named(name) => return v.shape().is_some_and(|s| &s.name == name),
+        NarrowTarget::Named(name) => {
+            // An extern-type value matches its registered type name (`x is Uuid`, extern-types
+            // X1); user objects/enums match their shape name.
+            if v.is_extern() {
+                return v.with_extern(|e| e.type_name() == name);
+            }
+            return v.shape().is_some_and(|s| &s.name == name);
+        }
         NarrowTarget::AnyOf(members) => return members.iter().any(|m| narrow_matches(v, m)),
         // Abstract kind-types match any value of that declaration kind, by the value's shape kind.
         NarrowTarget::AnyEnum => {
@@ -5009,6 +5016,11 @@ impl<'m> Vm<'m> {
             && let Some(handle_method) = noeta_stdlib::FileHandleMethod::from_name(method)
         {
             return self.call_file_handle_method(v, handle_method, method, args, span);
+        }
+        // Extern-type methods (extern-types X1): every registry-contributed type routes through
+        // its registered `ExtType`'s one shared dispatch.
+        if hk == Some(HeapKind::Extern) {
+            return self.call_extern_method(v, method, args, span);
         }
         // Channel endpoint methods (isolates I.1): `tx.send(v)`/`tx.close()` on a sender,
         // `rx.recv()` on a receiver. `send`/`recv` yield leaf futures (enqueue/dequeue when
