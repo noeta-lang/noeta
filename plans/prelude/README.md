@@ -1,7 +1,15 @@
 # Prelude-redesign arc — shrink the always-global prelude, fix the builtin-shadowing divergence
 
-**Status: PLANNED (started 2026-07-05). Design signed off with user; slices not yet begun.**
-Branch: TBD (new branch off current work). Standard commit trailers. Differential-green + leak-0 per slice.
+**Status: CORE ARC COMPLETE (P0–P4 + MH.1/MH.2 + P1.3); the EX closing track remains.**
+Branch `worktree-prelude-redesign` (worktree off main). Commits: P0 `88494b7` (selective import),
+P1.1 `f5e5663` (eager methods + len), MH.1 `2181ad0` (user-type handles), MH.2 `890b3c4` (dispatch
+refactor, perf-gated) + `28e0cdd` (built-in handles), P1.2 `337b277` (free fns removed), P2a
+`691cccf` (std.reactive + virtual modules), P2b `4692b62` (std.task — named `task` not `async`:
+keyword; + import-bound globals now ship into real isolates via new Wire variants), P2c `0aedcd4`
+(std.id + bytecode Builtin::NextId), P3 `ebc5b5f` (**E0046 ReservedName — the divergence is
+closed**; bare `none` in match-pattern position stays legal, it is the Option constructor pattern),
+P1.3 `f78fb66` (collection `count`→`len` complete; iterators keep `count`). The deferred.md row is
+struck. Method handles: `plans/prelude/method-handles.md`.
 
 ## Why this exists
 

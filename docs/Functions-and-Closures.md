@@ -78,7 +78,7 @@ apply: (int) -> int = fn(x) => x + 1
 fn run(f: (int) -> int, x: int): int { return f(x) }
 ```
 
-The prelude builtins (`len`, `sum`, `map`, `filter`) are themselves first-class values you can pass around.
+Collection methods are passable as values via **unbound method handles**: `list.len`, `string.upper`, `Stack.size` — each a callable taking the receiver as its first argument (`xss.map(list.len)`).
 
 ## The pipe operator
 

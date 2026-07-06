@@ -144,7 +144,7 @@ own; these are additive capabilities.
 
 | Item | Source | Trigger / note |
 |---|---|---|
-| **Shadowing a prelude builtin name with a local binding** (`sum = 5`, `map = x`, …) diverges: the **tree-walker** pre-declares prelude names as immutable bindings, so `sum = …` is rejected at runtime with **E0006 ImmutableAssignment**, while the **VM** lets the local shadow the builtin and runs fine. | found during reactivity S5 hardening (a test accidentally named a variable `sum`) | Latent — no corpus case binds a prelude name, so the differential's `0 skipped`/agreement gate still holds. Fix is a **language-design call** (is shadowing a builtin allowed?) independent of any milestone: either make the tree-walker allow a local to shadow a prelude name (match the VM) or make both reject it statically (a new name-collision diagnostic). Not a reactivity concern. |
+| ~~**Shadowing a prelude builtin name with a local binding** (`sum = 5`, `map = x`, …) diverges between the backends~~ | found during reactivity S5 hardening | **Done (prelude-redesign arc, `plans/prelude/`)** — fixed from both sides: the prelude SHRANK to `Ok`/`Err`/`some`/`none`/`panic`/`assert` (`len`/`map`/`filter`/`sum` are collection methods; `signal`/`sleep`/`next_id`/… are `use std.reactive`/`std.task`/`std.id` imports), so `sum = 5` is an ordinary legal binding (pinned by `bindings/shadow_former_prelude.noe` under the differential); the 6 remaining names are statically RESERVED (**E0046 ReservedName**, every declaration form), so neither backend reaches the divergent runtime paths. |
 
 ## Notes
 
