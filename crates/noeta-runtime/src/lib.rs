@@ -24,7 +24,9 @@
 pub mod executor;
 pub use executor::RealExecutor;
 
-use noeta_stdlib::{Clock, Env, ErrorKind, FileReader, FileSystem, ReadSource, Rng, StdError};
+use noeta_stdlib::{
+    Clock, Entropy, Env, ErrorKind, FileReader, FileSystem, ReadSource, Rng, StdError,
+};
 use std::collections::HashMap;
 use tokio::fs::File;
 use tokio::io::BufReader;
@@ -37,9 +39,12 @@ pub struct RealHost {
     /// One `current_thread` runtime per host/isolate; disk IO is driven on it and
     /// blocked-on at the call boundary (no async surface yet).
     runtime: Runtime,
-    /// PRNG and clock stay deterministic (seeded / logical) even on the real host —
-    /// host *IO* is what `RealHost` makes real; real time/entropy is a later, deliberate
-    /// choice, not a side effect of this slice.
+    /// The user-facing PRNG and the monotonic clock stay deterministic (seeded / logical)
+    /// even on the real host: `random.seed(n)` must make `random.*` a pure function of `n`
+    /// everywhere, and `monotonic` is an ordering device, not wall time. Real time and real
+    /// entropy are the *separate* capabilities added by id-entropy U1 — `clock_unix_ms`
+    /// (`SystemTime`) and `Entropy` (OS entropy) — so ids get real randomness without
+    /// making the user's seeded stream lie.
     rng: u64,
     clock: u64,
     /// Open lazy read streams (P-LAZY), keyed by the id handed to the file handle. A read handle
@@ -234,6 +239,24 @@ impl Clock for RealHost {
     fn clock_sleep(&mut self, ms: i64) {
         self.clock = self.clock.saturating_add(ms.max(0) as u64);
     }
+
+    fn clock_unix_ms(&mut self) -> u64 {
+        // A clock before 1970 would need a deliberately broken host; saturate to 0 rather
+        // than panic in that case.
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+    }
+}
+
+impl Entropy for RealHost {
+    fn entropy_u64(&mut self) -> u64 {
+        // OS entropy. `getrandom` only fails on platforms/configurations with no entropy
+        // source at all — an environment where ids (and TLS, and everything else) cannot
+        // work; failing loudly beats silently degrading to a guessable stream.
+        getrandom::u64().expect("the OS entropy source is unavailable")
+    }
 }
 
 impl Env for RealHost {
@@ -303,6 +326,21 @@ mod tests {
         assert!(!host.fs_is_dir(&format!("{root}/logs/a.txt")));
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn real_host_entropy_is_real_and_time_is_wall_time() {
+        let mut host = RealHost::new().unwrap();
+        // OS entropy: two draws colliding is a 2^-64 event — a failure here means the
+        // capability is wired to something constant, not that we got unlucky.
+        assert_ne!(host.entropy_u64(), host.entropy_u64());
+        // Real wall time: past the sandbox's fixed 2026-01-01 epoch, and non-decreasing.
+        let first = host.clock_unix_ms();
+        assert!(first > noeta_stdlib::host::SANDBOX_EPOCH_MS);
+        assert!(host.clock_unix_ms() >= first);
+        // Unlike the sandbox, drawing entropy or reading wall time never touches the
+        // deterministic monotonic counter.
+        assert_eq!(host.clock_monotonic(), 0);
     }
 
     #[test]

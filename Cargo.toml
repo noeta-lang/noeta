@@ -53,6 +53,9 @@ noeta-lsp = { path = "crates/noeta-lsp" }
 logos = "0.16"
 salsa = "0.27"
 tokio = { version = "1", features = ["rt", "fs", "io-util", "time"] }
+# OS entropy for RealHost's `Entropy` capability (id-entropy U1): UUID v4/v7 random bits must be
+# real entropy on the real host (the sandbox uses its own seeded SplitMix64 stream instead).
+getrandom = "0.3"
 chumsky = { version = "1.0.0-alpha.8", features = ["pratt"] }
 ariadne = "0.6"
 clap = { version = "4", features = ["derive"] }

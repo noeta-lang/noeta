@@ -1350,6 +1350,7 @@ name = "noeta-runtime"
 version = "0.0.0"
 dependencies = [
  "criterion",
+ "getrandom 0.3.4",
  "noeta-stdlib",
  "tokio",
 ]
