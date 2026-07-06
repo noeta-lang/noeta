@@ -120,6 +120,27 @@ impl VmBackend {
         )
     }
 
+    /// Execute a module against a real host + executor **with the JIT unarmed** — the debugger's run
+    /// path (`noeta dap`). A debug session pins tier-0 so every frame stays interpreter-executed and
+    /// therefore observable (a JIT'd region has no readable pc or register file mid-execution); tier-0
+    /// is held observably identical to tier-1 by the JIT's bail-before-mutate contract, so turning the
+    /// perf tier off changes speed, not behavior. Single-isolate/cooperative (real OS-thread isolate
+    /// debugging is a later milestone); the differential never calls this, so it is out-of-oracle.
+    pub fn run_module_with_host_and_executor_no_jit(
+        &self,
+        module: &Module,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+    ) -> RunResult {
+        execute_with_collector(
+            module,
+            host,
+            executor,
+            noeta_value::CollectorMode::Trace,
+            false,
+        )
+    }
+
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
     /// `module` is an `Arc` (the compiled module is `Send + Sync`) so worker threads can own it; each
     /// `isolate f(args)` with `Send`, channel-free arguments runs on its own thread with a fresh VM +

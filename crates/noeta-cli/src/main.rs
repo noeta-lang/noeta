@@ -117,6 +117,10 @@ enum Command {
     /// VS Code extension); speaks JSON-RPC on stdin/stdout. Provides live diagnostics, hover
     /// types, and navigation over the compiler's incremental query graph.
     Lsp,
+    /// Run the Noeta debug adapter over stdio (DAP). Started by an editor's debug UI; speaks the
+    /// Debug Adapter Protocol on stdin/stdout. Runs a program under the production VM (JIT unarmed
+    /// for full introspection) with breakpoints, stepping, and variable inspection.
+    Dap,
 }
 
 fn main() -> ExitCode {
@@ -146,12 +150,19 @@ fn main() -> ExitCode {
         } => cmd_dump(&file, &tier, &profile),
         Command::Repl => cmd_repl(),
         Command::Lsp => cmd_lsp(),
+        Command::Dap => cmd_dap(),
     }
 }
 
 /// Start the Noeta language server over stdio, blocking until the editor client disconnects.
 fn cmd_lsp() -> ExitCode {
     noeta_lsp::run_stdio();
+    ExitCode::SUCCESS
+}
+
+/// Start the Noeta debug adapter over stdio, blocking until the editor client disconnects.
+fn cmd_dap() -> ExitCode {
+    noeta_dap::run_stdio();
     ExitCode::SUCCESS
 }
 
