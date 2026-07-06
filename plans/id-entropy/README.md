@@ -1,7 +1,12 @@
 # UUIDs via the deterministic host seam — `std.id` grows up
 
-**Status: PLANNED (started 2026-07-06).** Branch `uuid-host-seam` (worktree off main). The follow-on
-track the prelude-redesign arc recorded: UUIDs belong in `std.id`, and they must flow through the
+**Status: ARC COMPLETE (2026-07-06).** Branch `uuid-host-seam` (worktree off main). U1 = seam
+(`Entropy` + `clock_unix_ms`), U2 = `id` de-virtualized (Host `Ids` counter; registry
+`next_id`/`uuid`/`uuid_v7`; `IdGen`/`Vm.next_id`/`Op::NextId`/`Builtin::NextId` all deleted — see
+the U2 deviation note below), U3 = exact-value sandbox conformance (`std/id_uuid.noe` pins the
+UUIDs byte-identically across backends, incl. `random.seed` independence and `time.sleep`
+advancing v7) + real-host CLI shape test + wiki `id` section. The follow-on track the
+prelude-redesign arc recorded: UUIDs belong in `std.id`, and they must flow through the
 deterministic Host seam or v4 (random) / v7 (time-based) would break the differential.
 
 ## What the survey found

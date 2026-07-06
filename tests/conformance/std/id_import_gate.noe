@@ -1,6 +1,6 @@
 // `next_id` is a `use std.id` import, not a prelude name (prelude-redesign P2c). It stays the
-// deterministic seeded counter (1, 2, 3, …); UUIDs are a planned follow-on through the
-// deterministic Host seam. Both import forms work.
+// deterministic counter (1, 2, 3, …) — host-owned since the id-entropy arc, so both import forms
+// read the SAME counter through one registry dispatch (see `id_uuid.noe` for the UUID surface).
 // expect: stdout "1"
 // expect: stdout "2"
 // expect: stdout "3"
