@@ -7,7 +7,7 @@
 
 use noeta_diagnostics::DiagnosticCode;
 use noeta_span::Span;
-use noeta_value::Value;
+use noeta_value::{CompactString, Value};
 
 use crate::*;
 
@@ -1065,22 +1065,29 @@ impl<'m> Vm<'m> {
         }
     }
 
-    /// Extract the owned `String` key for an in-place map `set`/`remove`. When `consume_key` is set
-    /// (the compiler proved the key is a single-use temporary) and the key value is a sole-owned
-    /// string, **move** its buffer out instead of cloning it — the register still holds the value
-    /// (now an empty string, freed later), and a single-use temp is never read again. Otherwise clone
-    /// (and raise the type error for a non-string), exactly as before.
+    /// Extract the owned key for an in-place map `set`/`remove`, in the map's own
+    /// [`CompactString`] representation. When `consume_key` is set (the compiler proved the key
+    /// is a single-use temporary) and the key value is a sole-owned string, **move** its buffer
+    /// out instead of cloning it — the register still holds the value (now an empty string,
+    /// freed later), and a single-use temp is never read again. Otherwise clone — allocation-free
+    /// for inline (≤ 24-byte) content, which map keys overwhelmingly are (P-SSO). A non-string
+    /// key raises the type error through `stdlib_string`, exactly as before.
     fn map_update_key(
         &mut self,
         consume_key: bool,
         key: Value,
         name: &str,
         span: Span,
-    ) -> Result<String, Abort> {
+    ) -> Result<CompactString, Abort> {
         if consume_key && key.is_string() && key.refcount() == 1 {
             Ok(key.take_string_in_place())
+        } else if let Some(k) = key.as_compact_string() {
+            Ok(k)
         } else {
-            self.stdlib_string(name, key, span)
+            // Not a string: surface the same type error the clone path always raised.
+            Err(self
+                .stdlib_string(name, key, span)
+                .expect_err("non-string key must be a type error"))
         }
     }
 

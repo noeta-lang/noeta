@@ -39,6 +39,7 @@ pub fn reference_run(
     ext_call_sites: HashMap<Span, noeta_stdlib::TypeRecipe>,
     for_stream_sites: HashSet<Span>,
     width_sites: HashMap<Span, (bool, u8)>,
+    f32_literal_sites: HashSet<Span>,
     construction_sites: HashMap<Span, TypeRepr>,
     handle_sites: HashMap<Span, (String, String, bool)>,
     bound_handle_sites: HashSet<Span>,
@@ -58,6 +59,7 @@ pub fn reference_run(
             construction_sites: &construction_sites,
             handle_sites: &handle_sites,
             bound_handle_sites: &bound_handle_sites,
+            f32_literal_sites: &f32_literal_sites,
         },
     )
     .expect(

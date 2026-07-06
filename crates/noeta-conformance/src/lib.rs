@@ -100,6 +100,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
         let mut ext_call_sites = std::collections::HashMap::new();
         let mut for_stream_sites = std::collections::HashSet::new();
         let mut width_sites = std::collections::HashMap::new();
+        let mut f32_literal_sites = std::collections::HashSet::new();
         let mut construction_sites = std::collections::HashMap::new();
         let mut handle_sites = std::collections::HashMap::new();
         let mut bound_handle_sites = std::collections::HashSet::new();
@@ -113,6 +114,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
             ext_call_sites = checked.ext_call_sites;
             for_stream_sites = checked.for_stream_sites;
             width_sites = checked.width_sites;
+            f32_literal_sites = checked.f32_literal_sites;
             construction_sites = checked.construction_sites;
             handle_sites = checked.handle_sites;
             bound_handle_sites = checked.bound_handle_sites;
@@ -131,6 +133,7 @@ fn run_source(name: &str, text: &str, stage: Stage) -> Outcome {
                 ext_call_sites,
                 for_stream_sites,
                 width_sites,
+                f32_literal_sites,
                 construction_sites,
                 handle_sites,
                 bound_handle_sites,
@@ -308,6 +311,7 @@ fn run_linked(entry: &Path, stage: Stage) -> Outcome {
         checked.ext_call_sites,
         checked.for_stream_sites,
         checked.width_sites,
+        checked.f32_literal_sites,
         checked.construction_sites,
         checked.handle_sites,
         checked.bound_handle_sites,

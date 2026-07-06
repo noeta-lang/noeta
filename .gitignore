@@ -9,6 +9,10 @@
 .DS_Store
 *.swp
 
+# Claude Code local state (keep shared .claude/settings.json trackable if desired)
+.claude/worktrees/
+.claude/settings.local.json
+
 # Scratch outputs written by fs/async corpus programs when run from the repo root
 # (e.g. `noeta run tests/conformance/std/fs_lines.noe` on the real host).
 /a.txt
@@ -18,3 +22,7 @@
 /log.txt
 /scratch.txt
 /data.bin
+
+# VS Code extension build artifacts
+editors/vscode-noeta/*.vsix
+editors/vscode-noeta/node_modules/

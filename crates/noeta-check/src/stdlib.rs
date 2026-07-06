@@ -106,9 +106,9 @@ pub(super) fn method_return(receiver: &Type, name: &str) -> Option<Type> {
         // A fixed-width integer exposes the same method surface as `int` (Tier W4): both are erased
         // to the i64 word at runtime, so the bit intrinsics and conversions apply uniformly.
         Type::Int | Type::IntN { .. } => int_method(name),
-        // `float` (f64) and `f32` carry only the numeric conversion tower (S0): `to_int`/`to_i8`…,
-        // `to_float`/`to_f64`, `to_f32` — each a total, 0-arity cast.
-        Type::Float | Type::F32 => float_conversion_return(name),
+        // `float`, `f32`, and the strict `f64` carry only the numeric conversion tower (S0):
+        // `to_int`/`to_i8`…, `to_float`/`to_f64`, `to_f32` — each a total, 0-arity cast.
+        Type::Float | Type::F32 | Type::F64 => float_conversion_return(name),
         Type::String => string_method(name),
         Type::List(elem) => list_method(name, elem),
         Type::Set(elem) => set_method(name, elem),
@@ -242,7 +242,8 @@ fn int_method(name: &str) -> Option<Type> {
 fn int_conversion_return(name: &str) -> Option<Type> {
     // Cross-domain destinations (S0): an integer converts to a float too.
     match name {
-        "to_float" | "to_f64" => return Some(Type::Float),
+        "to_float" => return Some(Type::Float),
+        "to_f64" => return Some(Type::F64),
         "to_f32" => return Some(Type::F32),
         _ => {}
     }
@@ -255,13 +256,14 @@ fn int_conversion_return(name: &str) -> Option<Type> {
 }
 
 /// The destination type of a conversion method on a `float`/`f32` receiver (S0). The full tower:
-/// `to_int` → `int`, `to_i8`/`to_u32`/… → the fixed-width type, `to_float`/`to_f64` → `float`,
+/// `to_int` → `int`, `to_i8`/`to_u32`/… → the fixed-width type, `to_float` → `float`, `to_f64` → `f64`,
 /// `to_f32` → `f32`. `None` if `name` is not a conversion. (`int_conversion_return` already covers
 /// the same spellings on an integer receiver — this is its float-receiver twin, differing only in
 /// that a float receiver may also convert *to* an integer.)
 fn float_conversion_return(name: &str) -> Option<Type> {
     match name {
-        "to_float" | "to_f64" => Some(Type::Float),
+        "to_float" => Some(Type::Float),
+        "to_f64" => Some(Type::F64),
         "to_f32" => Some(Type::F32),
         "to_int" => Some(Type::Int),
         _ => {

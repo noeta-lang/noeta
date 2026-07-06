@@ -52,11 +52,12 @@ pub fn apply_binary(op: BinaryOp, left: Value, right: Value) -> Result<Value, Op
                 right_boxed.release();
                 Ok(out)
             } else {
-                Ok(Value::string(&format!(
-                    "{}{}",
-                    left.display(),
-                    right.display()
-                )))
+                // Render both operands straight into one payload-representation buffer (P-SSO):
+                // no `format!` machinery, no second copy, and a short result stays inline.
+                let mut out = crate::CompactString::default();
+                left.display_into(&mut out);
+                right.display_into(&mut out);
+                Ok(Value::from_string(out))
             }
         }
         BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Rem => {

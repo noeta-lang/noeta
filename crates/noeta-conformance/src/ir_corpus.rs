@@ -155,6 +155,7 @@ fn run(program: &noeta_ast::Program, checked: &noeta_db::Checked, report: &mut I
                 checked.ext_call_sites.clone(),
                 checked.for_stream_sites.clone(),
                 checked.width_sites.clone(),
+                checked.f32_literal_sites.clone(),
                 checked.construction_sites.clone(),
                 checked.handle_sites.clone(),
         checked.bound_handle_sites.clone(),

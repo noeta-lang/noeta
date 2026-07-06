@@ -41,8 +41,8 @@ use noeta_span::{Source, Span};
 
 mod literals;
 use literals::{
-    parse_f32_literal, parse_float_literal, parse_int_literal, parse_intn_literal,
-    parse_raw_string, parse_string_literal, parse_template_string,
+    parse_f32_literal, parse_f64_literal, parse_float_literal, parse_int_literal,
+    parse_intn_literal, parse_raw_string, parse_string_literal, parse_template_string,
 };
 
 /// A `.`-then-keyword postfix operator, folded into one pratt entry: `receiver.as<T>()` (checked
@@ -1091,6 +1091,13 @@ where
                 span,
             }
         });
+        let f64_lit = just(T::F64Lit).map_with(move |_, e| {
+            let span = ctx.to_span(e.span());
+            Expr::F64 {
+                value: parse_f64_literal(ctx.source.slice(span)),
+                span,
+            }
+        });
         let intn_lit = just(T::IntNLit).map_with(move |_, e| {
             let span = ctx.to_span(e.span());
             let text = ctx.source.slice(span);
@@ -1484,6 +1491,7 @@ where
         let atom = choice((
             int,
             f32_lit,
+            f64_lit,
             intn_lit,
             float,
             string,

@@ -1,0 +1,12 @@
+# Generated parser artifacts — reproduce with `tree-sitter generate`.
+src/parser.c
+src/grammar.json
+src/node-types.json
+src/tree_sitter/
+
+# Build output and deps.
+build/
+node_modules/
+*.wasm
+*.so
+*.dylib

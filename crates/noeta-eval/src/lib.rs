@@ -94,6 +94,7 @@ impl Backend for TreeWalkBackend {
                 construction_sites: &checked.construction_sites,
                 handle_sites: &checked.handle_sites,
                 bound_handle_sites: &checked.bound_handle_sites,
+                f32_literal_sites: &checked.f32_literal_sites,
             },
         )
         .expect("Core-IR lowering is total over the parsed language");

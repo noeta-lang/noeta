@@ -113,6 +113,10 @@ enum Command {
     },
     /// Start an interactive REPL.
     Repl,
+    /// Run the Noeta language server over stdio (LSP). Started by an editor client (e.g. the
+    /// VS Code extension); speaks JSON-RPC on stdin/stdout. Provides live diagnostics, hover
+    /// types, and navigation over the compiler's incremental query graph.
+    Lsp,
 }
 
 fn main() -> ExitCode {
@@ -141,7 +145,14 @@ fn main() -> ExitCode {
             profile,
         } => cmd_dump(&file, &tier, &profile),
         Command::Repl => cmd_repl(),
+        Command::Lsp => cmd_lsp(),
     }
+}
+
+/// Start the Noeta language server over stdio, blocking until the editor client disconnects.
+fn cmd_lsp() -> ExitCode {
+    noeta_lsp::run_stdio();
+    ExitCode::SUCCESS
 }
 
 /// For a tier runner: whether its `tier` is live under `--profile`. `Ok(true)` when no profile was
@@ -210,6 +221,7 @@ fn compile_real(
         checked.ext_call_sites.clone(),
         checked.for_stream_sites.clone(),
         checked.width_sites.clone(),
+        checked.f32_literal_sites.clone(),
         checked.construction_sites.clone(),
         checked.handle_sites.clone(),
         checked.bound_handle_sites.clone(),

@@ -249,7 +249,8 @@ impl std::hash::Hasher for FxHasher {
 
 /// The map store: a `HashMap` with the fast [`FxHasher`] (see above), so get/insert/remove are O(1)
 /// and cheap. Aliased so the type appears in exactly one place.
-pub(crate) type MapStore = HashMap<String, Value, std::hash::BuildHasherDefault<FxHasher>>;
+pub(crate) type MapStore =
+    HashMap<compact_str::CompactString, Value, std::hash::BuildHasherDefault<FxHasher>>;
 
 /// The live-object registry set — a `HashSet<u64>` (NaN-boxed object words) with the fast
 /// [`FxHasher`] instead of SipHash, since it is touched on every alloc and free.
@@ -258,7 +259,7 @@ type RegistrySet = HashSet<u64, std::hash::BuildHasherDefault<FxHasher>>;
 /// are its field values in the shape's declared order; an `Enum`'s slots are its variant's
 /// positional data. Freeing either releases its slots first (see [`free`]).
 pub(crate) enum Payload {
-    Str(String),
+    Str(compact_str::CompactString),
     /// A raw immutable byte buffer (`bytes`, P-PACK 4.4) — a GC leaf like `Str`; owns no child
     /// references, freeing it just drops the `Vec<u8>`.
     Bytes(Vec<u8>),
@@ -867,7 +868,7 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         // are immediates — e.g. every entry in an int-valued map — are excluded by `push`, so this
         // sort only runs for maps that actually hold destructor-reachable references).
         Payload::Map(entries) => {
-            let mut kv: Vec<(&String, &Value)> = entries.iter().collect();
+            let mut kv: Vec<(&compact_str::CompactString, &Value)> = entries.iter().collect();
             kv.sort_unstable_by(|a, b| a.0.cmp(b.0));
             kv.into_iter().for_each(|(_, &v)| push(v));
         }
@@ -1138,9 +1139,12 @@ impl SharedRegion {
                 Payload::List(items) => PromoteJob::List(items.clone()),
                 Payload::Tuple(items) => PromoteJob::Tuple(items.clone()),
                 Payload::Set(items) => PromoteJob::Set(items.clone()),
-                Payload::Map(entries) => {
-                    PromoteJob::Map(entries.iter().map(|(k, &v)| (k.clone(), v)).collect())
-                }
+                Payload::Map(entries) => PromoteJob::Map(
+                    entries
+                        .iter()
+                        .map(|(k, &v)| (k.as_str().to_owned(), v))
+                        .collect(),
+                ),
                 Payload::Object { shape, slots } => {
                     PromoteJob::Object(Rc::clone(shape), slots.clone())
                 }
@@ -1159,7 +1163,7 @@ impl SharedRegion {
             PromoteJob::Map(entries) => Payload::Map(
                 entries
                     .into_iter()
-                    .map(|(k, v)| (k, self.promote_value(v, memo)))
+                    .map(|(k, v)| (k.into(), self.promote_value(v, memo)))
                     .collect(),
             ),
             PromoteJob::Object(shape, slots) => Payload::Object {

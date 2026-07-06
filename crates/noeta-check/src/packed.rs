@@ -101,6 +101,52 @@ impl Checker {
         self.report_intn_mismatch(op, lt, rt, "comparison", span);
     }
 
+    /// Type a strict fixed-width **float** `+ - * / %` (P-NUM-SYM). Both operands must be the same
+    /// fixed float (`f32`/`f64`); the result is that type. Unlike `IntN` there is no masking —
+    /// `f32`/`f64` arithmetic is native — so nothing is recorded in `width_sites`, and at runtime an
+    /// `f64` op is just a `float` op. Mixed (`f32`+`f64`, or a fixed float with `int`/`float`) needs
+    /// an explicit conversion → E0044; a `dyn`/hole defers. Only called with at least one fixed float.
+    pub(crate) fn synth_fixed_float_arith(
+        &mut self,
+        op: BinaryOp,
+        lt: &Type,
+        rt: &Type,
+        span: Span,
+    ) -> Type {
+        let concrete = if matches!(lt, Type::F32 | Type::F64) {
+            lt
+        } else {
+            rt
+        };
+        if lt.defers_to_runtime() || rt.defers_to_runtime() {
+            return concrete.clone();
+        }
+        if lt == rt && matches!(lt, Type::F32 | Type::F64) {
+            return lt.clone();
+        }
+        self.report_intn_mismatch(op, lt, rt, "arithmetic", span);
+        concrete.clone()
+    }
+
+    /// Type a strict fixed-width **float** ordering comparison `< <= > >=` (P-NUM-SYM). Both operands
+    /// must be the same fixed float; the result is `bool` (the caller sets it). Mixed → E0044; a
+    /// `dyn`/hole defers. Only called with at least one fixed float.
+    pub(crate) fn synth_fixed_float_compare(
+        &mut self,
+        op: BinaryOp,
+        lt: &Type,
+        rt: &Type,
+        span: Span,
+    ) {
+        if lt.defers_to_runtime() || rt.defers_to_runtime() {
+            return;
+        }
+        if lt == rt && matches!(lt, Type::F32 | Type::F64) {
+            return;
+        }
+        self.report_intn_mismatch(op, lt, rt, "comparison", span);
+    }
+
     /// Type a fixed-width symmetric bitwise op `& | ^` (Tier W5). Both operands must be the **same**
     /// `IntN` and the result is that type; unlike shifts and arithmetic, the erased `& | ^` of two
     /// correctly-extended words is already correctly extended, so **no mask** (and no `width_sites`

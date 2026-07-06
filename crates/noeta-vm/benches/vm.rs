@@ -505,6 +505,16 @@ fn map_rmw_src(n: usize) -> String {
     )
 }
 
+/// The wordcount histogram via `get_or` — the built-in-method dispatch shape. Unlike
+/// `map_rmw_src` (whose `m[k] = …` write takes the reuse fast path, the first rung of the
+/// `CallMethod` dispatch), `m.get_or(k, 0)` is an ordinary built-in method call and pays the
+/// full receiver-classification dispatch on every iteration. Gauges the dispatch cost itself.
+fn map_get_or_src(n: usize) -> String {
+    format!(
+        "fn build(): int {{\n    mut m: Map<string, int> = {{}};\n    mut i = 0;\n    while i < {n} {{\n        k = \"w${{i % 500}}\";\n        m[k] = m.get_or(k, 0) + 1;\n        i = i + 1;\n    }}\n    return m.count();\n}}\necho build();\n"
+    )
+}
+
 /// A function-local list index-write accumulator: build an n-element list once, then overwrite every
 /// slot via `xs[i] = …` (desugaring to `xs = xs.set(i, …)`) n times. Was O(n²) (each `set` copied the
 /// whole list); the in-place reuse (the receiver register is consumed and the uniquely-owned backing
@@ -686,6 +696,15 @@ fn vm_hot_paths(c: &mut Criterion) {
         });
     }
     maprmw.finish();
+
+    let mut mapgetor = c.benchmark_group("vm_map_get_or");
+    for &n in LOOP_SIZES {
+        let module = compile(&map_get_or_src(n));
+        mapgetor.bench_with_input(BenchmarkId::from_parameter(n), &module, |b, module| {
+            b.iter(|| black_box(VmBackend::new().run_module(black_box(module))));
+        });
+    }
+    mapgetor.finish();
 
     let mut listidx = c.benchmark_group("vm_list_index_write");
     for &n in LOOP_SIZES {
