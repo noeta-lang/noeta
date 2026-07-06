@@ -522,6 +522,11 @@ struct Checker {
     /// `impl`-block methods so a method call on a user object resolves to a real type, with the
     /// owning class's generic parameters erased to `dyn` (they accept any argument).
     methods: HashMap<(String, String), FnSig>,
+    /// Whether each `(type, method)` is an **instance** method (its body references `self`) or an
+    /// associated function (never touches `self`) — DERIVED at collection time (prelude-redesign
+    /// EX.2; well-defined because member access is explicit, EX.1). Drives the wrong-way-call check
+    /// (E0047) and the associated-vs-instance shape of a `Type.method` handle.
+    method_instance: HashMap<(String, String), bool>,
     /// Which built-in traits each user type satisfies: type name → set of trait names it `@derive`s
     /// or `impl`s. The basis (with the built-in-type table in [`Self::satisfies`]) for enforcing a
     /// generic call's trait bounds (S4.2).
@@ -999,6 +1004,52 @@ impl Checker {
                         r.name.clone(),
                         r.type_params.iter().map(|p| p.name.clone()).collect(),
                     );
+                    // Record each struct method's signature + instance classification, exactly as
+                    // for a class (this closed a long-standing gap: struct associated calls —
+                    // `B.new(1)` — previously typed as a hole because struct methods were never
+                    // registered; prelude-redesign EX.2 needs the classification for all kinds).
+                    let tps: HashSet<String> =
+                        r.type_params.iter().map(|p| p.name.clone()).collect();
+                    let struct_generics: Vec<(String, Vec<String>)> = r
+                        .type_params
+                        .iter()
+                        .map(|p| (p.name.clone(), p.bounds.clone()))
+                        .collect();
+                    let methods = r
+                        .methods
+                        .iter()
+                        .chain(r.impls.iter().flat_map(|b| b.methods.iter()));
+                    for m in methods {
+                        self.method_instance.insert(
+                            (r.name.clone(), m.name.clone()),
+                            m.body.iter().any(|s| s.mentions("self")),
+                        );
+                        let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
+                        let raw_ret = async_return(
+                            m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
+                            m.is_async,
+                        );
+                        let params = raw_params
+                            .iter()
+                            .cloned()
+                            .map(|t| erase_type_params(t, &tps))
+                            .collect();
+                        let ret = erase_type_params(raw_ret.clone(), &tps);
+                        let generic = (!struct_generics.is_empty()).then(|| GenericInfo {
+                            params: struct_generics.clone(),
+                            raw_params,
+                            raw_ret,
+                        });
+                        self.methods.insert(
+                            (r.name.clone(), m.name.clone()),
+                            FnSig {
+                                params,
+                                ret,
+                                required: required_params(&m.params),
+                                generic,
+                            },
+                        );
+                    }
                 }
                 Stmt::Class(c) => {
                     let fields = c
@@ -1082,6 +1133,10 @@ impl Checker {
                         .iter()
                         .chain(c.impls.iter().flat_map(|b| b.methods.iter()));
                     for m in methods {
+                        self.method_instance.insert(
+                            (c.name.clone(), m.name.clone()),
+                            m.body.iter().any(|s| s.mentions("self")),
+                        );
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
                         let raw_ret = async_return(
                             m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
@@ -1160,6 +1215,10 @@ impl Checker {
                         .map(|p| (p.name.clone(), p.bounds.clone()))
                         .collect();
                     for m in &e.methods {
+                        self.method_instance.insert(
+                            (e.name.clone(), m.name.clone()),
+                            m.body.iter().any(|s| s.mentions("self")),
+                        );
                         let raw_params: Vec<Type> = m.params.iter().map(param_type).collect();
                         let raw_ret = async_return(
                             m.ret.as_ref().map(Type::from_ref).unwrap_or(Type::Unknown),
@@ -3913,6 +3972,28 @@ impl Checker {
                     && self.types.contains(tn)
                     && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string())).cloned()
                 {
+                    // An INSTANCE method (its body references `self`) cannot be called
+                    // associated-style — there is no receiver to become `self` (E0047,
+                    // prelude-redesign EX.2). The classification is derived from the body.
+                    if self
+                        .method_instance
+                        .get(&(tn.clone(), name.to_string()))
+                        .copied()
+                        .unwrap_or(false)
+                    {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::InvalidReceiver,
+                                span,
+                                format!("`{name}` is an instance method of `{tn}`"),
+                            )
+                            .with_help(format!(
+                                "call it on a value (`x.{name}(...)`), or pass `{tn}.{name}` \
+                                 as a handle"
+                            )),
+                        );
+                        return sig.ret.clone();
+                    }
                     // A static call: the type arguments are not known from a bare type name, so the
                     // method's own arguments instantiate any parameters (`Box.new(1)` infers `int`).
                     return self.call_user_method(name, &sig, args, span, &[]);
@@ -3927,6 +4008,24 @@ impl Checker {
                 if let Type::Named(n, recv_args) = &recv
                     && let Some(sig) = self.methods.get(&(n.clone(), name.to_string())).cloned()
                 {
+                    // An ASSOCIATED function (never touches `self`) is not callable on a value —
+                    // the receiver would be silently discarded (E0047, prelude-redesign EX.2).
+                    if !self
+                        .method_instance
+                        .get(&(n.clone(), name.to_string()))
+                        .copied()
+                        .unwrap_or(true)
+                    {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::InvalidReceiver,
+                                span,
+                                format!("`{name}` is an associated function of `{n}`"),
+                            )
+                            .with_help(format!("call it on the type: `{n}.{name}(...)`")),
+                        );
+                        return sig.ret.clone();
+                    }
                     return self.call_user_method(name, &sig, args, span, recv_args);
                 }
                 self.check_method_args(&recv, name, args, span);
@@ -4554,13 +4653,24 @@ impl Checker {
             && lookup(env, tn).is_none()
             && let Some(sig) = self.methods.get(&(tn.clone(), name.to_string()))
         {
+            // The handle's shape follows the derived classification (EX.2): an INSTANCE method's
+            // handle takes the receiver as its first argument (`Fn(T, ...params) -> ret`); an
+            // ASSOCIATED function's handle is the function itself (`Fn(params) -> ret`) — e.g.
+            // `ctor = Stack.new`.
+            let instance = self
+                .method_instance
+                .get(&(tn.clone(), name.to_string()))
+                .copied()
+                .unwrap_or(true);
             let mut params = Vec::with_capacity(sig.params.len() + 1);
-            params.push(Type::Named(tn.clone(), Vec::new()));
+            if instance {
+                params.push(Type::Named(tn.clone(), Vec::new()));
+            }
             params.extend(sig.params.iter().cloned());
             let ret = sig.ret.clone();
             self.sites
                 .handle_sites
-                .insert(member_span, (tn.clone(), name.to_string(), false));
+                .insert(member_span, (tn.clone(), name.to_string(), !instance));
             return Type::Fn {
                 params,
                 ret: Box::new(ret),

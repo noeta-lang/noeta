@@ -191,6 +191,11 @@ pub enum DiagnosticCode {
     /// shadowing binding used to cause (the tree-walker pre-declares prelude names as immutable
     /// globals; the VM resolved a shadow as a fresh local).
     ReservedName,
+    /// A method called through the wrong receiver kind (prelude-redesign EX.2): an instance method
+    /// (its body references `self`) called associated-style (`Type.m(...)`), or an associated
+    /// function (never touches `self`) called on a value (`x.new(...)`). The distinction is DERIVED
+    /// from the body — zero runtime cost — and enforced statically.
+    InvalidReceiver,
 }
 
 impl DiagnosticCode {
@@ -243,6 +248,7 @@ impl DiagnosticCode {
         DiagnosticCode::FixedWidthOutOfRange,
         DiagnosticCode::ReactiveCycle,
         DiagnosticCode::ReservedName,
+        DiagnosticCode::InvalidReceiver,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -295,6 +301,7 @@ impl DiagnosticCode {
             DiagnosticCode::FixedWidthOutOfRange => "E0044",
             DiagnosticCode::ReactiveCycle => "E0045",
             DiagnosticCode::ReservedName => "E0046",
+            DiagnosticCode::InvalidReceiver => "E0047",
         }
     }
 

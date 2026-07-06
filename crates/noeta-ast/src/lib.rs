@@ -959,6 +959,58 @@ pub enum StrPart {
     Hole(Expr),
 }
 
+
+impl Stmt {
+    /// Whether any statement (or nested body/expression) mentions the bare identifier `name` —
+    /// the statement-level companion of [`Expr::mentions`], and exactly as conservative (a
+    /// block-bodied closure counts as mentioning). Declarations (`use`, type decls, nested `fn`s'
+    /// signatures) do not mention; a nested `fn`'s BODY is scanned (conservative for the
+    /// instance-classification use: mentioning `self` anywhere keeps the enclosing method
+    /// instance-classified).
+    pub fn mentions(&self, name: &str) -> bool {
+        let stmts = |body: &[Stmt]| body.iter().any(|s| s.mentions(name));
+        match self {
+            Stmt::Echo { value, .. }
+            | Stmt::Yield { value, .. }
+            | Stmt::Expr { expr: value, .. }
+            | Stmt::Binding { value, .. }
+            | Stmt::Destructure { value, .. } => value.mentions(name),
+            Stmt::Return { value, .. } => value.as_ref().is_some_and(|v| v.mentions(name)),
+            Stmt::If {
+                cond,
+                then_body,
+                else_body,
+                ..
+            } => {
+                cond.mentions(name)
+                    || stmts(then_body)
+                    || else_body.as_ref().is_some_and(|b| stmts(b))
+            }
+            Stmt::For {
+                iterable, body, ..
+            } => iterable.mentions(name) || stmts(body),
+            Stmt::While { cond, body, .. } => cond.mentions(name) || stmts(body),
+            Stmt::Concurrent { body, .. } => stmts(body),
+            Stmt::TierBlock { items, .. } => stmts(items),
+            Stmt::Fn(decl) => {
+                stmts(&decl.body)
+                    || decl
+                        .params
+                        .iter()
+                        .any(|p| p.default.as_ref().is_some_and(|d| d.mentions(name)))
+            }
+            Stmt::Enum(_)
+            | Stmt::Struct(_)
+            | Stmt::Class(_)
+            | Stmt::Impl(_)
+            | Stmt::Namespace { .. }
+            | Stmt::Use { .. }
+            | Stmt::Break { .. }
+            | Stmt::Continue { .. } => false,
+        }
+    }
+}
+
 impl Expr {
     pub fn span(&self) -> Span {
         match self {

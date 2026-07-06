@@ -5208,15 +5208,59 @@ impl<'m> Vm<'m> {
         args: Vec<Value>,
         span: Span,
     ) -> Result<Value, Abort> {
+        // An ASSOCIATED handle (`ctor = Stack.new`, prelude-redesign EX.2) calls the function
+        // directly — no receiver; the prototype's register 0 (`self`) stays unit, exactly as the
+        // opcode's associated dispatch leaves it.
         if associated {
-            for a in args {
-                release(a);
+            let Some(&proto) = self.methods.get(&(ty.to_string(), method.to_string())) else {
+                for a in args {
+                    release(a);
+                }
+                return Err(self.error(
+                    DiagnosticCode::UnknownName,
+                    span,
+                    format!("type `{ty}` has no associated function `{method}`"),
+                ));
+            };
+            let chunk = &self.module.protos[proto as usize];
+            // Register 0 is the (unit) receiver slot, so declared arity is one more than the args.
+            let total = chunk.num_params as usize - 1;
+            let required = total - chunk.defaults.len();
+            if args.len() < required || args.len() > total {
+                let supplied = args.len();
+                for a in args {
+                    release(a);
+                }
+                return Err(self.error(
+                    DiagnosticCode::TypeMismatch,
+                    span,
+                    arity_message("associated function", required, total, supplied),
+                ));
             }
-            return Err(self.error(
-                DiagnosticCode::TypeMismatch,
-                span,
-                format!("associated method handle `{ty}.{method}` is not callable"),
-            ));
+            let filled = args.len() + 1;
+            let num_registers = chunk.num_registers as usize;
+            let defaults = chunk.defaults.clone();
+            let mut regs = vec![Value::unit(); num_registers];
+            for (i, v) in args.into_iter().enumerate() {
+                regs[i + 1] = v;
+            }
+            for (reg, dproto) in &defaults {
+                if *reg as usize >= filled {
+                    let value = self.run_thunk(*dproto, &[])?;
+                    regs[*reg as usize] = value;
+                }
+            }
+            return self.run(
+                vec![Frame {
+                    proto,
+                    base: 0,
+                    pc: 0,
+                    ret_dst: 0,
+                    ret_transform: RetTransform::None,
+                    upvalues: Vec::new(),
+                }],
+                regs,
+            );
         }
         // The receiver's runtime type names the method table entry, so a subtype dispatches to its
         // own method; fall back to the handle's declared type if the receiver has no shape.

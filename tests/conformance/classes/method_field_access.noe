@@ -14,7 +14,9 @@ class Counter {
     pub mut n: int
     fn new(): Counter { return Counter { n: 10 }; }
 
-    // A bare name is a local; the field is untouched and unread.
+    // A bare name is a local; the field is untouched and unread. NOTE: because this body never
+    // references `self`, the classification derives it as an ASSOCIATED function (EX.2) — it is
+    // called on the type, not on a value.
     fn shadow(): int {
         n = 99;
         return n;
@@ -35,7 +37,7 @@ class Counter {
 }
 
 mut c = Counter.new();
-echo c.shadow();          // 99 (the local)
+echo Counter.shadow();    // 99 (the local; associated by derivation — no self use)
 echo c.n;                 // 10 (field untouched by the bare write)
 echo c.set_then_read();   // 5 (live field after self.n = 5)
 echo c.alias_then_read(); // 7 (live field after the alias mutated the shared instance)

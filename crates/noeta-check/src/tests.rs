@@ -1095,7 +1095,7 @@ fn indexing_is_typed() {
 
 #[test]
 fn user_method_returns_are_typed() {
-    let src = "class C {\n  x: int\n  fn label(): string { return \"c\"; }\n}\n\
+    let src = "class C {\n  x: int\n  fn label(): string { return \"c${self.x}\"; }\n}\n\
                fn f(c: C): int { return c.label(); }\n";
     assert_eq!(codes(src), ["E0007"]); // label() -> string, not int
 }
@@ -1162,7 +1162,7 @@ fn argument_types_are_checked() {
 #[test]
 fn generic_method_arguments_are_not_false_positives() {
     // A generic parameter is erased to `dyn`, so any concrete argument is accepted.
-    let src = "class Box<T> {\n  value: T\n  fn set(v: T): void { value = v; }\n}\n\
+    let src = "class Box<T> {\n  mut value: T\n  fn set(v: T): void { self.value = v; }\n}\n\
                fn f(b: Box<int>): void { b.set(5); }\n";
     assert!(codes(src).is_empty());
 }
