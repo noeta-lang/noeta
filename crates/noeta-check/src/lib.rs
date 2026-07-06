@@ -4750,15 +4750,28 @@ impl Checker {
         // wrong-way shape) and built-in receivers (`xs.len`, `s.upper`).
         if let Type::Named(n, _) = &recv
             && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
-            && self
+        {
+            let instance = self
                 .method_instance
                 .get(&(n.clone(), name.to_string()))
                 .copied()
-                .unwrap_or(true)
-        {
+                .unwrap_or(true);
+            // Binding an ASSOCIATED function through a value is the wrong-way shape (E0047) —
+            // there is no receiver to capture; bind it off the type instead.
+            if !instance {
+                self.diags.push(
+                    Diagnostic::error(
+                        DiagnosticCode::InvalidReceiver,
+                        member_span,
+                        format!("`{name}` is an associated function of `{n}`"),
+                    )
+                    .with_help(format!("bind it off the type: `{n}.{name}`")),
+                );
+            } else {
+                self.sites.bound_handle_sites.insert(member_span);
+            }
             let params = sig.params.clone();
             let ret = sig.ret.clone();
-            self.sites.bound_handle_sites.insert(member_span);
             return Type::Fn {
                 params,
                 ret: Box::new(ret),
