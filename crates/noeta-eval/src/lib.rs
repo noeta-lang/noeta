@@ -2345,21 +2345,14 @@ impl Interpreter {
             return self.call_builtin(builtin, builtin_args, span);
         }
         let arity_ok = args.is_empty();
-        // `count()` is the length of a collection; `len()` is the same operation under its new,
-        // preferred name (prelude-redesign P1 — `count` stays only on lazy iterators, where it is a
-        // consuming terminal). Both names are accepted here during the migration.
+        // `len()` is the length of a collection (P1.3 — `count` is iterator-only, a consuming
+        // terminal; a collection `count` is an unknown method like any other).
         let result = match (name, &receiver) {
-            ("count" | "len", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
-            ("count" | "len", Value::Set(items, _)) if arity_ok => {
-                Some(Value::Int(items.len() as i64))
-            }
-            ("count" | "len", Value::Map(entries, _)) if arity_ok => {
-                Some(Value::Int(entries.len() as i64))
-            }
-            ("count" | "len", Value::Str(s)) if arity_ok => {
-                Some(Value::Int(s.chars().count() as i64))
-            }
-            ("count" | "len", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
+            ("len", Value::List(items)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("len", Value::Set(items, _)) if arity_ok => Some(Value::Int(items.len() as i64)),
+            ("len", Value::Map(entries, _)) if arity_ok => Some(Value::Int(entries.len() as i64)),
+            ("len", Value::Str(s)) if arity_ok => Some(Value::Int(s.chars().count() as i64)),
+            ("len", Value::Bytes(b)) if arity_ok => Some(Value::Int(b.len() as i64)),
             // `.enumerate()` yields a list of `(index, value)` **tuples** (object-model slice 4b —
             // tuples are the positional-pair type), destructured by a `for (i, x) in …` pattern.
             ("enumerate", Value::List(items)) if arity_ok => {
@@ -2380,7 +2373,7 @@ impl Interpreter {
             // always `UnknownName` regardless of arity. (Without this guard, `xs.map(f)` — `map` is a
             // free function, not a method — reported `TypeMismatch` here while the VM reported
             // `UnknownName`; the guard makes both backends agree.)
-            None if !arity_ok && (name == "count" || name == "len" || name == "enumerate") => {
+            None if !arity_ok && (name == "len" || name == "enumerate") => {
                 Err(self.runtime_error(
                     DiagnosticCode::TypeMismatch,
                     span,
@@ -5639,7 +5632,7 @@ mod tests {
     fn list_and_map_literals_and_len() {
         assert_eq!(run("echo [1, 2, 3];").stdout, "[1, 2, 3]\n");
         assert_eq!(run("echo [1, 2, 3].len();").stdout, "3\n");
-        assert_eq!(run("echo {\"a\": 1, \"b\": 2}.count();").stdout, "2\n");
+        assert_eq!(run("echo {\"a\": 1, \"b\": 2}.len();").stdout, "2\n");
     }
 
     #[test]

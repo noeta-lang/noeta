@@ -178,7 +178,7 @@ fn packed_producer_src(n: usize, packed: bool, op: &str) -> String {
          data = [{elems}]\n\
          result = {op}\n\
          mut sum = 0.0\n\
-         for i in 0..result.count() {{\n    \
+         for i in 0..result.len() {{\n    \
             sum = sum + result[i].x\n\
          }}\n\
          echo sum\n"
@@ -199,9 +199,9 @@ fn serialize_src(n: usize, binary: bool) -> String {
         elems.push_str("V3 { x: 1.0f32, y: 2.0f32, z: 3.0f32 }");
     }
     let op = if binary {
-        "data.to_bytes().count()"
+        "data.to_bytes().len()"
     } else {
-        "json.stringify(data).count()"
+        "json.stringify(data).len()"
     };
     format!(
         "use std.{{json}}\n\
@@ -233,7 +233,7 @@ fn vec_add_all_src(n: usize, packed: bool) -> String {
          xs = [{elems}]\n\
          ys = [{elems}]\n\
          r = vec.add_all(xs, ys)\n\
-         echo r.count()\n"
+         echo r.len()\n"
     )
 }
 
@@ -261,7 +261,7 @@ fn iter_take_pipeline_src(n: usize, lazy: bool) -> String {
         "xs.iter().map(fn(v) => v * 2).filter(fn(v) => v % 2 == 0).take(10).collect().count()"
             .to_string()
     } else {
-        "filter(map(xs, fn(v) => v * 2), fn(v) => v % 2 == 0).slice(0, 10).count()".to_string()
+        "xs.map(fn(v) => v * 2).filter(fn(v) => v % 2 == 0).slice(0, 10).len()".to_string()
     };
     format!("xs = 0..{n}\necho {pipeline}\n")
 }
@@ -415,7 +415,7 @@ fn interp_single_hole_src(n: usize) -> String {
         "fn build(): int {{\n    \
             mut total = 0;\n    \
             for i in 0..{n} {{\n        \
-                total = total + \"word${{i}}\".count();\n    \
+                total = total + \"word${{i}}\".len();\n    \
             }}\n    \
             return total;\n\
          }}\n\
@@ -428,7 +428,7 @@ fn interp_multi_hole_src(n: usize) -> String {
         "fn build(): int {{\n    \
             mut total = 0;\n    \
             for i in 0..{n} {{\n        \
-                total = total + \"${{i}}-${{i}}-${{i}}\".count();\n    \
+                total = total + \"${{i}}-${{i}}-${{i}}\".len();\n    \
             }}\n    \
             return total;\n\
          }}\n\
@@ -477,7 +477,7 @@ fn accumulate_src(n: usize) -> String {
          for i in 0..{n} {{\n    \
             acc ~= [i];\n\
          }}\n\
-         echo acc.count();\n"
+         echo acc.len();\n"
     )
 }
 

@@ -5146,13 +5146,11 @@ impl<'m> Vm<'m> {
             arg_vals.extend_from_slice(args);
             return self.call_builtin(builtin, &arg_vals, span);
         }
-        // Built-in zero-argument methods on lists/maps/strings. `count()` is the length
-        // of a collection; `len()` is the same under its new preferred name
-        // (prelude-redesign P1 — `count` stays only on lazy iterators). Both accepted
-        // during the migration.
+        // Built-in zero-argument methods on lists/maps/strings. `len()` is the collection
+        // length (P1.3 — `count` is iterator-only, a consuming terminal).
         let result = if !args.is_empty() {
             None
-        } else if method == "count" || method == "len" {
+        } else if method == "len" {
             v.list_len()
                 .or_else(|| v.set_len())
                 .or_else(|| v.map_len())
@@ -5180,8 +5178,7 @@ impl<'m> Vm<'m> {
         };
         match result {
             Some(value) => Ok(value),
-            None if !args.is_empty()
-                && (method == "count" || method == "len" || method == "enumerate") =>
+            None if !args.is_empty() && (method == "len" || method == "enumerate") =>
             {
                 Err(self.error(
                     DiagnosticCode::TypeMismatch,
@@ -6667,7 +6664,7 @@ mod tests {
         // A monotonically-growing accumulator of **heap** elements (records — ints would be immediate
         // and never counted). Peak ≈ n live objects at the end: the genuinely-live structure prompt
         // reclamation cannot shrink, but whose transient cost reuse/COW keeps O(n) not O(n²).
-        let accumulate = "class Pair { a: int b: int }\nmut acc = [];\nfor i in 0..4000 { acc ~= [Pair { a: i, b: i }]; }\necho acc.count();\n";
+        let accumulate = "class Pair { a: int b: int }\nmut acc = [];\nfor i in 0..4000 { acc ~= [Pair { a: i, b: i }]; }\necho acc.len();\n";
         let accumulate_peak = peak_residency(accumulate);
 
         // (Deep-nested teardown is benched separately on the optimized bench profile — its recursive
@@ -6820,7 +6817,7 @@ mod tests {
         // at the pre-update value. String values exercise the slot retain/release accounting; run under
         // miri to validate refcounts (no UAF / double free).
         let r = run(
-            "fn build(): string {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = \"v${i}\"; }\n  m[\"k0\"] = \"x\";\n  m = m.remove(\"k1\");\n  return \"${m.values()} ${m.count()}\";\n}\necho build();\nmut acc = { \"a\": \"1\" };\nsnap = acc;\nacc[\"a\"] = \"9\";\nacc[\"b\"] = \"2\";\necho acc.values();\necho snap.values();\n",
+            "fn build(): string {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = \"v${i}\"; }\n  m[\"k0\"] = \"x\";\n  m = m.remove(\"k1\");\n  return \"${m.values()} ${m.len()}\";\n}\necho build();\nmut acc = { \"a\": \"1\" };\nsnap = acc;\nacc[\"a\"] = \"9\";\nacc[\"b\"] = \"2\";\necho acc.values();\necho snap.values();\n",
         );
         assert_eq!(r.stdout, "[\"x\", \"v2\"] 2\n[\"9\", \"2\"]\n[\"1\"]\n");
         assert_eq!(r.exit_code, 0);
@@ -6848,7 +6845,7 @@ mod tests {
         // fallback — an aliased accumulator (`snap = t`) keeps its value. String elements exercise the
         // element retain/release accounting; run under miri (no UAF / double free).
         let r = run(
-            "fn build(): string {\n  mut s = #{};\n  for i in 0..3 { s = s.add(\"v${i}\"); }\n  s = s.add(\"v0\");\n  s = s.remove(\"v1\");\n  return \"${s.count()}\";\n}\necho build();\nmut t = #{\"a\", \"b\"};\nsnap = t;\nt = t.add(\"c\");\nt = t.remove(\"a\");\necho t;\necho snap;\n",
+            "fn build(): string {\n  mut s = #{};\n  for i in 0..3 { s = s.add(\"v${i}\"); }\n  s = s.add(\"v0\");\n  s = s.remove(\"v1\");\n  return \"${s.len()}\";\n}\necho build();\nmut t = #{\"a\", \"b\"};\nsnap = t;\nt = t.add(\"c\");\nt = t.remove(\"a\");\necho t;\necho snap;\n",
         );
         assert_eq!(r.stdout, "2\n{\"b\", \"c\"}\n{\"a\", \"b\"}\n");
         assert_eq!(r.exit_code, 0);
@@ -7600,7 +7597,7 @@ mod tests {
 
     #[test]
     fn maps_display_in_sorted_key_order() {
-        let r = run("echo {\"b\": 2, \"a\": 1};\necho {\"a\": 1, \"b\": 2}.count();\n");
+        let r = run("echo {\"b\": 2, \"a\": 1};\necho {\"a\": 1, \"b\": 2}.len();\n");
         assert_eq!(r.stdout, "{\"a\": 1, \"b\": 2}\n2\n");
         assert_eq!(r.exit_code, 0);
     }
@@ -7831,7 +7828,7 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.noe",
-            "fn build(): Map<string, int> {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = i; }\n  return m;\n}\necho build().count();\n",
+            "fn build(): Map<string, int> {\n  mut m = {};\n  for i in 0..3 { m[\"k${i}\"] = i; }\n  return m;\n}\necho build().len();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

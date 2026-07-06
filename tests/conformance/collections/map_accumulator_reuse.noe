@@ -25,5 +25,5 @@ echo acc.keys();
 echo acc.values();
 
 m = build();
-echo m.values().count();
+echo m.values().len();
 echo snap.values();

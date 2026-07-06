@@ -85,7 +85,7 @@ fn total(items: List<Item>): float {
 }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
-    if items.count() == 0 {
+    if items.len() == 0 {
         return Err(OrderError.Empty);
     }
     for (i, item) in items.enumerate() {

@@ -1057,7 +1057,7 @@ fn string_and_list_methods_are_typed() {
     ); // sorted -> List<int>
     assert_eq!(codes("fn f(): int { return [1].first(); }\n"), ["E0007"]); // first -> Option<int>
     // Chaining flows the type through: split -> List<string>, count -> int.
-    assert!(codes("fn f(): int { return \"a b\".split(\" \").count(); }\n").is_empty());
+    assert!(codes("fn f(): int { return \"a b\".split(\" \").len(); }\n").is_empty());
 }
 
 #[test]
@@ -1592,7 +1592,7 @@ fn packed_list_literal_is_recorded() {
     let layouts = packed_layouts(
         "@packed struct Vec3 { x: float; y: float; z: float }\n\
          xs = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
-         echo xs.count()\n",
+         echo xs.len()\n",
     );
     assert_eq!(layouts.len(), 1);
     let l = &layouts[0];
@@ -1612,7 +1612,7 @@ fn packed_list_with_annotation_is_recorded() {
     let layouts = packed_layouts(
         "@packed struct Vec3 { x: float; y: float; z: float }\n\
          xs: List<Vec3> = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
-         echo xs.count()\n",
+         echo xs.len()\n",
     );
     assert_eq!(layouts.len(), 1);
     assert_eq!(layouts[0].type_name, "Vec3");
@@ -1625,7 +1625,7 @@ fn nested_packed_list_flattens() {
          @packed struct Segment { start: Vec3; end: Vec3 }\n\
          v = Vec3 { x: 1.0, y: 2.0, z: 3.0 }\n\
          xs = [Segment { start: v, end: v }]\n\
-         echo xs.count()\n",
+         echo xs.len()\n",
     );
     assert_eq!(layouts.len(), 1);
     let l = &layouts[0];
@@ -1641,7 +1641,7 @@ fn packed_list_with_int_and_bool_kinds() {
     let layouts = packed_layouts(
         "@packed struct Cell { n: int; on: bool }\n\
          xs = [Cell { n: 1, on: true }]\n\
-         echo xs.count()\n",
+         echo xs.len()\n",
     );
     assert_eq!(layouts.len(), 1);
     assert_eq!(layouts[0].fields[0].kind, PackedKind::Int);
@@ -1654,14 +1654,14 @@ fn non_packed_struct_list_is_not_recorded() {
     let layouts = packed_layouts(
         "struct Vec3 { x: float; y: float; z: float }\n\
          xs = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
-         echo xs.count()\n",
+         echo xs.len()\n",
     );
     assert!(layouts.is_empty());
 }
 
 #[test]
 fn primitive_list_is_not_recorded() {
-    assert!(packed_layouts("xs = [1, 2, 3]\necho xs.count()\n").is_empty());
+    assert!(packed_layouts("xs = [1, 2, 3]\necho xs.len()\n").is_empty());
 }
 
 // --- P-PACK 2.5+: fused `list[i].field` site channel (`Checked::index_field_sites`) ---
@@ -1745,7 +1745,7 @@ fn map_to_packed_struct_is_recorded() {
     let n = map_packed_count(
         "@packed struct Vec3 { x: float; y: float; z: float }\n\
          ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
-         echo ps.map(fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z }).count()\n",
+         echo ps.map(fn(v) => Vec3 { x: v.x + 1.0, y: v.y, z: v.z }).len()\n",
     );
     assert_eq!(n, 1);
 }
@@ -1756,7 +1756,7 @@ fn map_to_primitive_is_not_recorded() {
     let n = map_packed_count(
         "@packed struct Vec3 { x: float; y: float; z: float }\n\
          ps = [Vec3 { x: 1.0, y: 2.0, z: 3.0 }]\n\
-         echo ps.map(fn(v) => v.x).count()\n",
+         echo ps.map(fn(v) => v.x).len()\n",
     );
     assert_eq!(n, 0);
 }
@@ -1766,7 +1766,7 @@ fn map_to_non_packed_struct_is_not_recorded() {
     let n = map_packed_count(
         "struct P { x: int; y: int }\n\
          ps = [P { x: 1, y: 2 }]\n\
-         echo ps.map(fn(v) => P { x: v.x + 1, y: v.y }).count()\n",
+         echo ps.map(fn(v) => P { x: v.x + 1, y: v.y }).len()\n",
     );
     assert_eq!(n, 0);
 }

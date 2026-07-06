@@ -28,7 +28,7 @@ A result is either `Ok(x)` or `Err(e)`. Use `Ok()` (no argument) for `Result<voi
 enum OrderError { Empty; NegativePrice(index: int) }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
-    if items.count() == 0 { return Err(OrderError.Empty) }
+    if items.len() == 0 { return Err(OrderError.Empty) }
     return Ok()
 }
 

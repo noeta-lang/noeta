@@ -20,7 +20,7 @@ Semantics are Unicode-scalar-based; a wrong arity or argument type is E0007.
 | `split` | `split(sep: string) -> List<string>` | `"a,b,c".split(",")` → `["a", "b", "c"]` |
 | `replace` | `replace(from: string, to: string) -> string` | `"a.b".replace(".", "/")` → `a/b` |
 | `repeat` | `repeat(n: int) -> string` | `"ab".repeat(3)` → `ababab` |
-| `count` | `count() -> int` | `"héllo".count()` → `5` |
+| `len` | `len() -> int` | `"héllo".len()` → `5` |
 
 Splitting on `""` yields characters. Also: index `s[i]` returns the i-th character (out of bounds is E0016), `s.len()` counts scalars, `"…${e}…"` interpolates, and `a ~ b` concatenates (display-concatenating non-strings).
 
@@ -47,8 +47,7 @@ xs[1] = 20             // sugar for  xs = xs.set(1, 20)  (needs a mut binding)
 | `last` | `last() -> ?T` | `[1,2].last()` → `some(2)` |
 | `to_set` | `to_set() -> Set<T>` | `[3,1,2,1].to_set()` → `{1, 2, 3}` |
 | `set` | `set(i: int, v: T) -> List<T>` | `[1,2,3].set(2, 30)` → `[1, 2, 30]` |
-| `len` | `len() -> int` | `[1,2,3].len()` → `3` (preferred; `count` is the legacy alias) |
-| `count` | `count() -> int` | `[1,2,3].count()` → `3` |
+| `len` | `len() -> int` | `[1,2,3].len()` → `3` |
 | `enumerate` | `enumerate() -> List<(int, T)>` | `["a","b"].enumerate()` → `[(0, "a"), (1, "b")]` |
 | `iter` | `iter() -> Iterator<T>` | see [Iterators](#iterators) |
 
@@ -85,7 +84,7 @@ echo { host, scheme } // shorthand: { "host": host, "scheme": scheme }
 | `get_or` | `get_or(key: string, default: V) -> V` | `{"a":1}.get_or("z", 0)` → `0` — one probe where `if m.has(k) then m[k] else d` costs two |
 | `set` | `set(key: string, v: V) -> Map<string, V>` | new map with the entry added/updated |
 | `remove` | `remove(key: string) -> Map<string, V>` | new map without the key |
-| `count` | `count() -> int` | number of entries |
+| `len` | `len() -> int` | number of entries |
 | `iter` | `iter() -> Iterator<V>` | iterates the values |
 
 Iterating a map (`for v in m`) yields values; equality is structural (order-independent).
@@ -107,7 +106,7 @@ echo s.contains(2)    // true
 | `intersection` | `intersection(other: Set<T>) -> Set<T>` | `#{1,2,3}.intersection(#{2,3,4})` → `{2, 3}` |
 | `add` | `add(x: T) -> Set<T>` | `#{1,2}.add(5)` → `{1, 2, 5}` |
 | `remove` | `remove(x: T) -> Set<T>` | new set without the element |
-| `count` | `count() -> int` | `#{7,7,9}.count()` → `2` |
+| `len` | `len() -> int` | `#{7,7,9}.len()` → `2` |
 | `iter` | `iter() -> Iterator<T>` | sorted iteration |
 
 ## Option and Result

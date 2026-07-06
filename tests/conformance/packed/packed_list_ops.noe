@@ -16,7 +16,7 @@
 @packed struct V { x: int; y: int }
 ps = [V { x: 3, y: 1 }, V { x: 1, y: 2 }, V { x: 2, y: 3 }]
 echo ps.map(fn(v) => v.x)
-echo ps.filter(fn(v) => v.x > 1).count()
+echo ps.filter(fn(v) => v.x > 1).len()
 echo ps.first()
 echo ps.last()
 echo ps.slice(0, 2)

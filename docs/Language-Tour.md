@@ -299,7 +299,7 @@ The `?` operator propagates a failure, early-returning it from the current funct
 
 ```noeta ignore
 fn validate(items: List<Item>): Result<void, OrderError> {
-    if items.count() == 0 { return Err(OrderError.Empty) }
+    if items.len() == 0 { return Err(OrderError.Empty) }
     return Ok()
 }
 
@@ -422,7 +422,7 @@ fn total(items: List<Item>): float {
 }
 
 fn validate(items: List<Item>): Result<void, OrderError> {
-    if items.count() == 0 { return Err(OrderError.Empty) }
+    if items.len() == 0 { return Err(OrderError.Empty) }
     for (i, item) in items.enumerate() {
         if item.price < 0 { return Err(OrderError.NegativePrice(index: i)) }
     }

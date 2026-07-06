@@ -128,10 +128,10 @@ fn producer_vec3_src(n: usize, packed: bool, op: &str) -> String {
          data = [{elems}]\n\
          result = {op}\n\
          mut sum = 0.0\n\
-         for i in 0..result.count() {{\n    \
+         for i in 0..result.len() {{\n    \
             sum = sum + result[i].x\n\
          }}\n\
-         echo data.count()\n\
+         echo data.len()\n\
          echo sum\n"
     )
 }
@@ -146,7 +146,7 @@ fn packed_producers_keep_the_list_flat() {
     const N: usize = 2_000;
     let cases = [
         ("reverse", "data.reverse()"),
-        ("slice", "data.slice(0, data.count())"),
+        ("slice", "data.slice(0, data.len())"),
         ("filter", "data.filter(fn(v) => v.x > 0.0)"),
         ("set", "data.set(0, Vec3 { x: 9.0, y: 9.0, z: 9.0 })"),
         // `map` to a packed struct keeps the result flat too (P-PACK 2.6 category B): each mapped
@@ -201,7 +201,7 @@ fn vec3_typed_src(n: usize, f32_fields: bool) -> String {
          data = [{elems}]\n\
          mut sum = 0.0{}\n\
          for i in 0..{n} {{\n    sum = sum + data[i].x\n}}\n\
-         echo data.count()\n",
+         echo data.len()\n",
         if f32_fields { "f32" } else { "" }
     )
 }
@@ -219,7 +219,7 @@ fn flags8_src(n: usize, bool_fields: bool) -> String {
     format!(
         "@packed struct F8 {{ {} }}\n\
          data = [{elems}]\n\
-         echo data.count()\n",
+         echo data.len()\n",
         decl.join("; ")
     )
 }

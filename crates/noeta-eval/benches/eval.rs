@@ -46,7 +46,7 @@ fn accumulate_src(n: usize) -> String {
          for i in 0..{n} {{\n    \
             acc ~= [i];\n\
          }}\n\
-         echo acc.count();\n"
+         echo acc.len();\n"
     )
 }
 
