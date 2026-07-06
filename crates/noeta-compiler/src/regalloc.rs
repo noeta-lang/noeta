@@ -176,7 +176,7 @@ pub fn hoist_loop_invariant_consts(chunk: &mut Chunk) {
     // The debug line table is pc-keyed, so it moves with the code (empty in a non-debug compile, so
     // this is then a no-op). Every original pc is retained — a hoisted load keeps its entry, now at
     // its pre-header position — so remapping each entry through `remap` keeps the table accurate.
-    for entry in &mut chunk.debug_lines {
+    for entry in &mut chunk.line_table {
         entry.pc = remap[entry.pc as usize];
     }
     chunk.code = new_code;
@@ -1100,10 +1100,10 @@ mod tests {
             num_registers,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
-            debug_name: None,
+            name: None,
             def_span: None,
             debug_locals: Vec::new(),
-            debug_lines: Vec::new(),
+            line_table: Vec::new(),
         }
     }
 

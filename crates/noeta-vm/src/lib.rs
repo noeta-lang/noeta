@@ -131,19 +131,18 @@ pub struct DebugFrame<'a> {
 }
 
 impl<'a> DebugFrame<'a> {
-    /// The function's debug name (`"main"`, `"Point.mag"`, …). `None` if the program was compiled
-    /// without debug info (a non-debug build), where the frame carries no name.
+    /// The function's name (`"main"`, `"Point.mag"`, …). `None` for an anonymous closure/thunk.
     pub fn name(&self) -> Option<&'a str> {
-        self.chunk.debug_name.as_deref()
+        self.chunk.name.as_deref()
     }
 
     /// The source span whose line is this frame's current line: the instruction about to execute for
     /// the innermost frame, or the call op for a caller frame (see [`DebugView::frame`]).
     ///
-    /// Resolved through the debug **line table** ([`Chunk::debug_lines`]), so *every* instruction maps
-    /// to a line — including one whose own op is spanless (a bare `return x`, a post-call store) — by
+    /// Resolved through the **line table** ([`Chunk::line_table`]), so *every* instruction maps to a
+    /// line — including one whose own op is spanless (a bare `return x`, a post-call store) — by
     /// taking the span of the statement covering this pc. `None` before the first statement (a
-    /// spanless prologue) or in a debug-info-less build (the table is empty).
+    /// spanless prologue).
     pub fn line_span(&self) -> Option<Span> {
         self.chunk.line_span(self.pc)
     }

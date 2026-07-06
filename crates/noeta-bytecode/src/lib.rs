@@ -1038,27 +1038,31 @@ pub struct Chunk {
     /// argument count is `num_params - defaults.len()` (less the receiver for a method).
     pub defaults: Vec<(u16, u32)>,
     /// This prototype's human-readable name (`"main"`, a free function's name, `"Type.method"`, or
-    /// `"Type::destruct"`), for a debugger's stack trace. `None` for anonymous closures/thunks and
-    /// for every prototype in a non-debug compile — debug info is emitted only when the compiler runs
-    /// in debug mode (`compile_with_sites(..., debug = true)`), so a production `Module` carries none.
-    pub debug_name: Option<String>,
+    /// `"Type::destruct"`), for stack traces — the debugger's and the production panic traceback's.
+    /// `None` for anonymous closures/thunks. **Line-info tier**: always emitted (pure cold metadata,
+    /// never read by the dispatch loop).
+    pub name: Option<String>,
     /// The source span of this prototype's defining construct (the `fn`/method, or the whole program
-    /// for `main`), for mapping a stack frame to its declaration. `None` outside a debug compile.
+    /// for `main`), for mapping a stack frame to its declaration. Line-info tier: always emitted.
     pub def_span: Option<Span>,
     /// The frame's **source** locals: which register holds each named variable, with its declaring
     /// span — the debugger's `reg → name` map for the Variables view. Only the source bindings appear
-    /// (ANF temporaries are nameless and omitted). Emitted only in a debug compile, where named-local
-    /// registers are pinned through coalescing (see `frame_locals`) so this stays a clean 1:1 map;
-    /// [`crate`]'s coalescing pass rewrites each `reg` alongside the code. Empty otherwise.
+    /// (ANF temporaries are nameless and omitted). **Full-debug tier**: emitted only in a debug
+    /// compile (`compile_with_sites(..., debug = true)`, i.e. `noeta dap`), because its 1:1 contract
+    /// requires pinning named-local registers through coalescing (see `frame_locals`) — a codegen
+    /// change production does not pay. [`crate`]'s coalescing pass rewrites each `reg` alongside the
+    /// code. Empty otherwise.
     pub debug_locals: Vec<LocalDebug>,
     /// The **line table**: `(pc, span)` at the first instruction of each source statement, in `pc`
     /// order, so *every* instruction maps to a source line — the line for a `pc` is the span of the
     /// greatest entry with `entry.pc <= pc` (see [`Chunk::line_span`]). This is what lets the debugger
     /// break on / step to a line whose statement compiled to only spanless ops (e.g. `return x`, whose
-    /// lone `Op::Return` carries no span of its own). Emitted only in a debug compile; a hoisting pass
-    /// that moves instructions rewrites each `pc` alongside the code (like `debug_locals`' registers).
-    /// Empty otherwise, so a production `Module` carries none and its bytecode is byte-identical.
-    pub debug_lines: Vec<LineEntry>,
+    /// lone `Op::Return` carries no span of its own), and what a production panic traceback resolves
+    /// caller frames through. **Line-info tier**: always emitted — pure cold metadata (~16 bytes per
+    /// statement) the dispatch loop never touches, so codegen and hot paths are unaffected. A hoisting
+    /// pass that moves instructions rewrites each `pc` alongside the code (like `debug_locals`'
+    /// registers).
+    pub line_table: Vec<LineEntry>,
 }
 
 /// One source variable's debug record: its name, the register it lives in for this frame, and the
@@ -1071,7 +1075,7 @@ pub struct LocalDebug {
 }
 
 /// One line-table entry: the first instruction (`pc`) of a source statement and that statement's
-/// `span`. See [`Chunk::debug_lines`].
+/// `span`. See [`Chunk::line_table`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LineEntry {
     pub pc: u32,
@@ -1090,24 +1094,24 @@ impl Chunk {
             num_registers: 0,
             defaults: Vec::new(),
             frame_locals: Vec::new(),
-            debug_name: None,
+            name: None,
             def_span: None,
             debug_locals: Vec::new(),
-            debug_lines: Vec::new(),
+            line_table: Vec::new(),
         }
     }
 
-    /// The source span whose statement covers instruction `pc`: the greatest [`debug_lines`] entry
+    /// The source span whose statement covers instruction `pc`: the greatest [`line_table`] entry
     /// with `entry.pc <= pc`. `None` for a `pc` before the first entry (a prototype's spanless
-    /// prologue) or a non-debug compile (the table is empty). This maps *any* instruction to a source
-    /// line, including one whose own op is spanless.
+    /// prologue). This maps *any* instruction to a source line, including one whose own op is
+    /// spanless.
     ///
-    /// [`debug_lines`]: Chunk::debug_lines
+    /// [`line_table`]: Chunk::line_table
     pub fn line_span(&self, pc: usize) -> Option<Span> {
         let pc = pc as u32;
         // Entries are in ascending `pc` order, so binary-search for the last one at or before `pc`.
-        let idx = self.debug_lines.partition_point(|e| e.pc <= pc);
-        (idx > 0).then(|| self.debug_lines[idx - 1].span)
+        let idx = self.line_table.partition_point(|e| e.pc <= pc);
+        (idx > 0).then(|| self.line_table[idx - 1].span)
     }
 
     /// Render the chunk as stable, human-readable disassembly for snapshot tests. `names` is the

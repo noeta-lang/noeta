@@ -734,7 +734,7 @@ impl ModuleCompiler {
         Ok(())
     }
 
-    /// Compile one IR [`Func`] (function/closure/method/`destruct` body) into a [`Chunk`]. `debug_name`
+    /// Compile one IR [`Func`] (function/closure/method/`destruct` body) into a [`Chunk`]. `name`
     /// is the name a debugger shows for this prototype (`None` for an anonymous closure); it and the
     /// func's span are recorded on the chunk only in a debug compile.
     fn compile_func(
@@ -743,7 +743,7 @@ impl ModuleCompiler {
         method: Option<MethodCtx>,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
-        debug_name: Option<String>,
+        name: Option<String>,
     ) -> Result<Chunk, Unsupported> {
         self.compile_chunk(
             &func.params,
@@ -753,7 +753,7 @@ impl ModuleCompiler {
             method,
             upvalues,
             enclosing_locals,
-            debug_name,
+            name,
             Some(func.span),
         )
     }
@@ -776,7 +776,7 @@ impl ModuleCompiler {
         method: Option<MethodCtx>,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
-        debug_name: Option<String>,
+        name: Option<String>,
         def_span: Option<Span>,
     ) -> Result<Chunk, Unsupported> {
         let is_method = method.is_some();
@@ -861,19 +861,19 @@ impl ModuleCompiler {
         }
         fc.code.push(Op::Halt);
         let num_params = params.len() as u16 + if is_method { 1 } else { 0 };
-        Ok(fc.into_chunk(num_params, default_pairs, debug_name, def_span))
+        Ok(fc.into_chunk(num_params, default_pairs, name, def_span))
     }
 
-    /// Compile an IR [`Func`] into a fresh prototype and return its index. `debug_name` is the name a
+    /// Compile an IR [`Func`] into a fresh prototype and return its index. `name` is the name a
     /// debugger shows for it — the binding's name for a named `fn`, `None` for an anonymous closure.
     fn add_function(
         &mut self,
         func: &Func,
         upvalues: Vec<(String, bool)>,
         enclosing_locals: Vec<HashSet<String>>,
-        debug_name: Option<String>,
+        name: Option<String>,
     ) -> Result<u32, Unsupported> {
-        let chunk = self.compile_func(func, None, upvalues, enclosing_locals, debug_name)?;
+        let chunk = self.compile_func(func, None, upvalues, enclosing_locals, name)?;
         let idx = self.protos.len() as u32;
         self.protos.push(chunk);
         Ok(idx)
@@ -1032,11 +1032,11 @@ struct FnCompiler<'m> {
     /// when the compile is in debug mode. Moved onto the `Chunk` (and register-remapped by coalescing)
     /// at [`Self::into_chunk`]. Always empty in a non-debug compile.
     debug_locals: Vec<LocalDebug>,
-    /// The debugger's line table (`Chunk::debug_lines`): one `(pc, span)` per source statement, pushed
-    /// at the start of [`Self::stmt`] in a debug compile so every instruction resolves to a line.
-    /// Moved onto the `Chunk` (and pc-remapped by the hoisting pass) at [`Self::into_chunk`]. Always
-    /// empty in a non-debug compile.
-    debug_lines: Vec<LineEntry>,
+    /// The line table (`Chunk::line_table`): one `(pc, span)` per source statement, pushed at the
+    /// start of [`Self::stmt`] so every instruction resolves to a line — for the debugger's
+    /// breakpoints/stepping and for production stack traces. Always emitted (line-info tier). Moved
+    /// onto the `Chunk` (and pc-remapped by the hoisting pass) at [`Self::into_chunk`].
+    line_table: Vec<LineEntry>,
 }
 
 /// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
@@ -1153,7 +1153,7 @@ impl<'m> FnCompiler<'m> {
             loops: Vec::new(),
             frame_locals: Vec::new(),
             debug_locals: Vec::new(),
-            debug_lines: Vec::new(),
+            line_table: Vec::new(),
         }
     }
 
@@ -1190,7 +1190,7 @@ impl<'m> FnCompiler<'m> {
         self,
         num_params: u16,
         defaults: Vec<(u16, u32)>,
-        debug_name: Option<String>,
+        name: Option<String>,
         def_span: Option<Span>,
     ) -> Chunk {
         // The panic-teardown list, in construction order: parameters (registers `0..num_params`, live
@@ -1211,11 +1211,15 @@ impl<'m> FnCompiler<'m> {
             }
             locals
         };
-        let (debug_name, def_span, debug_locals, debug_lines) = if debug {
-            (debug_name, def_span, self.debug_locals, self.debug_lines)
-        } else {
-            (None, None, Vec::new(), Vec::new())
-        };
+        // Two tiers of debug info (the `-g1` vs `-g` split native toolchains use). The **line-info
+        // tier** — `name`, `def_span`, and the pc→line `line_table` — is *always* emitted: it is pure
+        // cold metadata (the dispatch loop never reads it) that production stack traces resolve
+        // frames through, and it cannot perturb codegen by construction. The **full-debug tier** —
+        // `debug_locals`, whose 1:1 `reg → name` contract requires pinning named locals through
+        // coalescing and keeping them past their last-use drop — *does* change generated code, so it
+        // stays gated on the debug compile (`noeta dap`) that opts into that trade.
+        let debug_locals = if debug { self.debug_locals } else { Vec::new() };
+        let line_table = self.line_table;
         let mut chunk = Chunk {
             code: self.code,
             consts: self.consts,
@@ -1224,10 +1228,10 @@ impl<'m> FnCompiler<'m> {
             num_registers: self.next_reg,
             defaults,
             frame_locals,
-            debug_name,
+            name,
             def_span,
             debug_locals,
-            debug_lines,
+            line_table,
         };
         // Coalescing reuses a dead local's slot for a later one; but a destructor-bearing local that
         // dies only at an *unreachable* drop (a dead store before a `panic`, whose scope-exit drop the
@@ -1349,15 +1353,17 @@ impl<'m> FnCompiler<'m> {
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
-        // Debug line table: record `(this statement's first pc, its span)` before emitting it, so the
-        // debugger can map every instruction to a source line — including a statement (like a bare
-        // `return x`) that compiles to only spanless ops. Real source statements only; a synthetic
-        // reclamation `Drop`/`DropVar`, a scope marker, or a nested declaration is skipped so it
-        // cannot inject a *backward* line (a last-use drop sits at a later pc but an earlier line) and
-        // is instead covered by the preceding real statement's entry. Coalescing keeps pcs; the
-        // hoisting pass remaps them.
-        if let Some(span) = line_entry_span(stmt).filter(|_| self.module.debug) {
-            self.debug_lines.push(LineEntry {
+        // Line table: record `(this statement's first pc, its span)` before emitting it, so any
+        // instruction maps to a source line — including a statement (like a bare `return x`) that
+        // compiles to only spanless ops. Always emitted (the line-info tier): the debugger breaks and
+        // steps through it, and production stack traces resolve caller frames through it. Pure
+        // metadata — never read by the dispatch loop, and it cannot affect codegen. Real source
+        // statements only; a synthetic reclamation `Drop`/`DropVar`, a scope marker, or a nested
+        // declaration is skipped so it cannot inject a *backward* line (a last-use drop sits at a
+        // later pc but an earlier line) and is instead covered by the preceding real statement's
+        // entry. Coalescing keeps pcs; the hoisting pass remaps them.
+        if let Some(span) = line_entry_span(stmt) {
+            self.line_table.push(LineEntry {
                 pc: self.code.len() as u32,
                 span,
             });
@@ -4082,7 +4088,7 @@ mod tests {
     fn main_carries_its_name_and_defining_span() {
         let m = compile_dbg("echo \"hi\";\n");
         let main = m.main();
-        assert_eq!(main.debug_name.as_deref(), Some("main"));
+        assert_eq!(main.name.as_deref(), Some("main"));
         assert!(main.def_span.is_some());
     }
 
@@ -4096,7 +4102,7 @@ mod tests {
         let f = m
             .protos
             .iter()
-            .find(|c| c.debug_name.as_deref() == Some("f"))
+            .find(|c| c.name.as_deref() == Some("f"))
             .expect("a proto named f");
         let names: std::collections::HashSet<&str> =
             f.debug_locals.iter().map(|l| l.name.as_str()).collect();
@@ -4125,7 +4131,7 @@ mod tests {
         let f = m
             .protos
             .iter()
-            .find(|c| c.debug_name.as_deref() == Some("f"))
+            .find(|c| c.name.as_deref() == Some("f"))
             .expect("a proto named f");
         let regs: Vec<u16> = f.debug_locals.iter().map(|l| l.reg).collect();
         let distinct: std::collections::HashSet<u16> = regs.iter().copied().collect();
@@ -4145,17 +4151,18 @@ mod tests {
         assert!(
             m.protos
                 .iter()
-                .any(|c| c.debug_name.as_deref() == Some("Point.mag")),
+                .any(|c| c.name.as_deref() == Some("Point.mag")),
             "expected a proto named Point.mag; names: {:?}",
-            m.protos
-                .iter()
-                .map(|c| c.debug_name.clone())
-                .collect::<Vec<_>>()
+            m.protos.iter().map(|c| c.name.clone()).collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn a_non_debug_compile_carries_no_debug_info() {
+    fn a_non_debug_compile_carries_line_info_but_no_full_debug_info() {
+        // The two debug-info tiers: **line info** (names, defining spans, the pc→line table) is
+        // always emitted — production stack traces resolve frames through it, and it is pure cold
+        // metadata that cannot affect codegen. **Full debug** (`debug_locals`, whose contract pins
+        // registers through coalescing) is a codegen trade only the `noeta dap` debug compile makes.
         let source = Source::new(
             SourceId::FIRST,
             "test.noe",
@@ -4165,12 +4172,19 @@ mod tests {
         let parsed = parse(&source, &lexed.tokens);
         assert!(parsed.diagnostics.is_empty());
         let m = compile(&parsed.program).expect("compiles");
+        // Line-info tier: present without the debug flag.
+        let f = m
+            .protos
+            .iter()
+            .find(|c| c.name.as_deref() == Some("f"))
+            .expect("f is named off-debug");
+        assert!(f.def_span.is_some(), "expected a def_span off-debug");
+        assert!(
+            !f.line_table.is_empty(),
+            "expected a line table off-debug (stack traces resolve through it)"
+        );
+        // Full-debug tier: absent without the debug flag.
         for chunk in &m.protos {
-            assert!(
-                chunk.debug_name.is_none(),
-                "unexpected debug_name off-debug"
-            );
-            assert!(chunk.def_span.is_none(), "unexpected def_span off-debug");
             assert!(
                 chunk.debug_locals.is_empty(),
                 "unexpected debug_locals off-debug"

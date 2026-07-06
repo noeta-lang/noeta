@@ -2,7 +2,7 @@
 //! turns editor `(file, line)` requests into the instruction positions it stops at.
 //!
 //! The VM knows only prototypes and program counters; the editor speaks files and lines. The compiler's
-//! debug **line table** (`Chunk::debug_lines`, one `(pc, span)` per source statement) bridges them:
+//! debug **line table** (`Chunk::line_table`, one `(pc, span)` per source statement) bridges them:
 //! resolution maps each requested breakpoint line to the first statement's pc per prototype, and at run
 //! time the line table also gives the *current* line for any pc (so stepping and the stack trace resolve
 //! a line even for an instruction whose own op is spanless, like a bare `return x`). [`DapDebugger::before_op`]
@@ -93,7 +93,7 @@ pub struct VarInfo {
 
 /// Resolve editor breakpoint requests (`path → 1-based lines`) against the compiled program into the
 /// set of `(proto, pc)` instruction positions the VM should stop at: the first instruction of each
-/// requested line, per prototype. Driven off the debug **line table** (`Chunk::debug_lines`, one entry
+/// requested line, per prototype. Driven off the debug **line table** (`Chunk::line_table`, one entry
 /// per source statement in `pc` order), so a line resolves even when its statement compiled to only
 /// spanless ops (a bare `return x`). A line with no entry simply yields nothing (the breakpoint is
 /// unverifiable — it lands on a blank/comment line or code that compiled away).
@@ -107,7 +107,7 @@ pub fn resolve_breakpoints(
         // Entries are in `pc` order, so the first entry for a (file, line) is where that line's
         // execution begins in this prototype.
         let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        for entry in &chunk.debug_lines {
+        for entry in &chunk.line_table {
             let source = sources.source(entry.span.source);
             let line = source.line_col(entry.span.start).line;
             if !line_requested(requested, source.name(), line) {
