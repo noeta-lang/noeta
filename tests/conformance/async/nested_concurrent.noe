@@ -14,6 +14,7 @@
 // expect: stdout "s=3"
 // expect: stdout "outer done"
 // expect: exit 0
+use std.task.{sleep}
 async fn slow(): int {
     echo "slow start"
     sleep(3).await

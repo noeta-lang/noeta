@@ -385,6 +385,7 @@ echo json.stringify([1, 2, 3])   // [1,2,3]
 `async fn`, `.await`, and a structured `concurrent { }` scope; `spawn` for concurrent tasks, `isolate` for true-parallel ones, and typed channels for message passing:
 
 ```noeta
+use std.task.{sleep, all}
 async fn work(name: string, ms: int): int {
     echo "${name} start"
     sleep(ms).await

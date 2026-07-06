@@ -429,12 +429,9 @@ impl Builtin {
         Builtin::MakeSome,
         Builtin::Panic,
         Builtin::Assert,
-        Builtin::Sleep,
-        Builtin::All,
-        Builtin::Race,
-        Builtin::MapBounded,
-        // `Signal`/`Computed`/`Effect` left the prelude (prelude-redesign P2a): they are
-        // `use std.reactive` imports now, bound by `declare_use` as first-class builtin values.
+        // `Signal`/`Computed`/`Effect` left the prelude (P2a) for `use std.reactive`, and
+        // `Sleep`/`All`/`Race`/`MapBounded` (P2b) for `use std.task` — all bound by
+        // `declare_use` as first-class builtin values when imported.
     ];
 }
 

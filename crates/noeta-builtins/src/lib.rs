@@ -51,12 +51,8 @@ pub const PRELUDE_NAMES: &[&str] = &[
     "none",
     "panic",
     "assert",
-    "sleep",
-    "all",
-    "race",
-    "map_bounded",
-    // `signal`/`computed`/`effect` left the prelude (prelude-redesign P2a): they are
-    // `use std.reactive` imports now (`registry::VIRTUAL_MODULES`).
+    // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
+    // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` (`registry::VIRTUAL_MODULES`).
 ];
 
 #[cfg(test)]

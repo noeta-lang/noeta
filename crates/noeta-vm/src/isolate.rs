@@ -23,6 +23,7 @@ use noeta_object::Shape;
 use noeta_value::{ChannelId, Value};
 
 use crate::Channel;
+use noeta_bytecode::Builtin;
 
 /// A bounded, cross-thread channel (isolates I.4c): the `Shared` backing behind [`Channel::Shared`].
 /// A `Mutex`-guarded FIFO of `Wire` messages reachable by `Arc` from every isolate holding an endpoint
@@ -149,6 +150,16 @@ pub enum Wire {
     /// A top-level function value (empty upvalues): its prototype index. Lets a marshalled global
     /// function be reconstructed on the worker so an isolate body can call it.
     Function(u32),
+    /// A first-class builtin (`use std.task.{sleep}` binds one, prelude-redesign P2) — plain `Send`
+    /// data, so an import-bound global reaches the worker and the isolate body can call it.
+    NativeFn(Builtin),
+    /// A Ring 2 native module binding (`use std.{math}`), by surface name — plain data; the worker's
+    /// own registry/host serve its calls.
+    NativeModule(String),
+    /// A selectively-imported module function (`use std.math.sqrt`) — the `(module, func)` pair.
+    ModuleFn(String, String),
+    /// An unbound method handle (`Type.method` as a value, MH) — `(ty, method, associated)`.
+    MethodHandle(String, String, bool),
     /// A channel sender endpoint (isolates I.4c): the shared cross-thread channel it names. Shipping an
     /// endpoint into an isolate clones the `Arc`, so both isolates operate on one queue.
     Sender(Arc<ChannelCore>),
@@ -249,6 +260,21 @@ pub fn marshal(value: Value, shapes: &[Rc<Shape>], channels: &[Channel]) -> Resu
         }
         return Err("closure with captures".to_string());
     }
+    // Import-bound callables (prelude-redesign P2/MH) are plain `Send` data: a first-class builtin,
+    // a native-module binding, a selectively-imported module function, or a method handle. Shipping
+    // them keeps `use`-bound globals usable inside a real isolate body.
+    if let Some(builtin) = value.as_native_fn() {
+        return Ok(Wire::NativeFn(builtin));
+    }
+    if let Some(name) = value.native_module_name() {
+        return Ok(Wire::NativeModule(name));
+    }
+    if let Some((module, func)) = value.module_fn_parts() {
+        return Ok(Wire::ModuleFn(module, func));
+    }
+    if let Some((ty, method, associated)) = value.method_handle_parts() {
+        return Ok(Wire::MethodHandle(ty, method, associated));
+    }
     Err(format!(
         "value of type `{}` is not shippable",
         value.type_name()
@@ -299,6 +325,10 @@ pub fn rebuild(wire: &Wire, shapes: &[Rc<Shape>], channels: &mut Vec<Channel>) -
             rebuild_each(data, shapes, channels),
         ),
         Wire::Function(proto) => Value::closure(*proto, Vec::new()),
+        Wire::NativeFn(builtin) => Value::native_fn(*builtin),
+        Wire::NativeModule(name) => Value::native_module(name),
+        Wire::ModuleFn(module, func) => Value::module_fn(module, func),
+        Wire::MethodHandle(ty, method, associated) => Value::method_handle(ty, method, *associated),
         Wire::Sender(core) => {
             let id = ChannelId::from_index(channels.len());
             channels.push(Channel::Shared(Arc::clone(core)));

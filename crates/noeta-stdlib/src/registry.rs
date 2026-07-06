@@ -253,8 +253,12 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
 /// binds the named builtin as a first-class value, and a qualified call (`reactive.signal(0)`)
 /// intercepts in each backend's `call_native_module` *ahead of* registry dispatch — the same
 /// pattern `fs.*_async` uses.
-pub const VIRTUAL_MODULES: &[(&str, &[&str])] =
-    &[("reactive", &["signal", "computed", "effect"])];
+/// (`task` is named `task` rather than `async` because `async` is a keyword — `use std.async.…`
+/// would not parse; decided with the user at P2b.)
+pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
+    ("reactive", &["signal", "computed", "effect"]),
+    ("task", &["sleep", "all", "race", "map_bounded"]),
+];
 
 /// Whether `name` is a virtual std module (importable, but not registry-backed).
 pub fn is_virtual_module(name: &str) -> bool {

@@ -2,5 +2,6 @@
 // (no `block_on` bridge): poll → `Pending` → advance to the deadline → ready.
 // expect: stdout "tick"
 // expect: exit 0
+use std.task.{sleep}
 sleep(5).await
 echo "tick"

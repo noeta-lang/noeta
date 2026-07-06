@@ -540,26 +540,9 @@ pub(super) fn prelude_return(name: &str, args: &[Type]) -> Option<Type> {
         "panic" => Type::Unknown,
         // `assert(cond)` / `assert(cond, msg)` — checked for effect, yields nothing.
         "assert" => Type::Unit,
-        // `sleep(ms)` — a leaf timer future (Track A.2). Returns `Future<void>`, so `sleep(ms).await`
-        // yields `void`; awaiting it suspends until the executor clock reaches the deadline.
-        "sleep" => Type::Named(FUTURE.to_string(), vec![Type::Unit]),
-        // `signal`/`computed`/`effect` left the prelude (prelude-redesign P2a): they are
-        // `use std.reactive` imports now — typed in `module_return` under the `reactive` module.
-        // `all(List<Future<T>>) -> List<T>` — await every future, results in order (Track A.9).
-        "all" => list(future_elem(args.first())),
-        // `race(List<Future<T>>) -> T` — the first result; the losers are cancelled (Track A.9).
-        "race" => future_elem(args.first()),
-        // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (Track A.9). The element type is
-        // the closure's return future's `B`.
-        "map_bounded" => match args.get(2) {
-            Some(Type::Fn { ret, .. }) => match ret.as_ref() {
-                Type::Named(n, targs) if n == FUTURE => {
-                    list(targs.first().cloned().unwrap_or(Type::Unknown))
-                }
-                _ => list(Type::Unknown),
-            },
-            _ => list(Type::Unknown),
-        },
+        // `signal`/`computed`/`effect` left the prelude (P2a) for `use std.reactive`, and
+        // `sleep`/`all`/`race`/`map_bounded` (P2b) for `use std.task` — both typed in
+        // `module_return` under their virtual modules.
         _ => return None,
     })
 }
@@ -595,6 +578,28 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
                 }],
             )),
             "effect" => Some(Type::Named(EFFECT.to_string(), vec![])),
+            _ => None,
+        };
+    }
+    // The virtual `task` module (prelude-redesign P2b): the concurrency combinators.
+    // `sleep(ms) -> Future<void>` (Track A.2) — awaiting it suspends until the executor clock
+    // reaches the deadline; `all(List<Future<T>>) -> List<T>` (results in order);
+    // `race(List<Future<T>>) -> T` (first result, losers cancelled);
+    // `map_bounded(List<A>, int, Fn(A) -> Future<B>) -> List<B>` (≤n in flight). (Track A.9.)
+    if module == "task" {
+        return match name {
+            "sleep" => Some(Type::Named(FUTURE.to_string(), vec![Type::Unit])),
+            "all" => Some(list(future_elem(args.first()))),
+            "race" => Some(future_elem(args.first())),
+            "map_bounded" => Some(match args.get(2) {
+                Some(Type::Fn { ret, .. }) => match ret.as_ref() {
+                    Type::Named(n, targs) if n == FUTURE => {
+                        list(targs.first().cloned().unwrap_or(Type::Unknown))
+                    }
+                    _ => list(Type::Unknown),
+                },
+                _ => list(Type::Unknown),
+            }),
             _ => None,
         };
     }

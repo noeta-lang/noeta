@@ -14,6 +14,7 @@
 // expect: stdout "end 5"
 // expect: stdout "result=2,4,6,8,10"
 // expect: exit 0
+use std.task.{sleep, map_bounded}
 async fn dbl(n: int): int {
     echo "start " ~ n
     sleep(1).await

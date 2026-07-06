@@ -51,7 +51,7 @@ A logical monotonic clock — no wall-clock, so programs stay deterministic.
 | `monotonic` | `monotonic() -> int` | Reads then advances one tick; first call → `0`. |
 | `sleep` | `sleep(ms: int) -> void` | Advances the logical clock by `ms` without blocking. |
 
-(The async `sleep(ms).await` used in [Concurrency](Concurrency) is the prelude future form.)
+(The async `sleep(ms).await` used in [Concurrency](Concurrency) is the `use std.task` future form.)
 
 ## `env` and `args`
 
