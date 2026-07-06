@@ -1821,3 +1821,39 @@ fn plain_field_read_is_not_fusable() {
     );
     assert_eq!(n, 0);
 }
+
+#[test]
+fn non_void_function_that_can_fall_through_is_e0048() {
+    // Falls off the end: the body's last statement is a bare expression, not a `return`, so the
+    // function would implicitly yield `unit` where `int` was promised.
+    assert_eq!(codes("fn f(n: int): int { n + 1 }\n"), ["E0048"]);
+    // An `if` without an `else` leaves the false path open to the end.
+    assert_eq!(
+        codes("fn g(n: int): int { if n > 0 { return 1 } }\n"),
+        ["E0048"]
+    );
+    // Only one arm of an `if`/`else` returns.
+    assert_eq!(
+        codes("fn h(n: int): int { if n > 0 { return 1 } else { echo \"no\" } }\n"),
+        ["E0048"]
+    );
+    // Methods are checked the same way.
+    assert_eq!(
+        codes("class Box { mut v: int\n  fn get(): int { echo \"peek\" } }\n"),
+        ["E0048"]
+    );
+}
+
+#[test]
+fn function_returning_or_diverging_on_every_path_is_clean() {
+    // An explicit `return`, or an `if`/`else` where both arms return.
+    assert!(codes("fn r(n: int): int { return n + 1 }\n").is_empty());
+    assert!(codes("fn c(n: int): int { if n > 0 { return 1 } else { return 2 } }\n").is_empty());
+    // A `void` function may fall off the end (only `void` may).
+    assert!(codes("fn v(n: int): void { echo \"hi\" }\n").is_empty());
+    // `panic` never returns; an infinite `while true` (no `break`) never falls through.
+    assert!(codes("fn p(n: int): int { panic(\"no\") }\n").is_empty());
+    assert!(codes("fn w(n: int): int { while true { if n > 0 { return 1 } } }\n").is_empty());
+    // `dyn` admits `unit`, so falling through is well-typed and not flagged.
+    assert!(codes("fn d(n: int): dyn { echo \"hi\" }\n").is_empty());
+}

@@ -1883,6 +1883,14 @@ impl Checker {
         } else {
             None
         };
+        // E0048 inputs, captured before `ret` is moved into `current_ret` below. A function must
+        // produce its declared return on every path; only a type that *admits* `unit` — `void`
+        // itself, `dyn`, or a union containing `void` — may fall off the end (falling through returns
+        // `unit`). A generator produces its `Iterator<T>` through `yield`s and exhaustion, not a value
+        // return, so it is exempt; an unannotated return is already `E0022`, so `Unknown` is skipped.
+        let must_return_value =
+            !is_generator && !matches!(ret, Type::Unknown) && !Type::subtype(&Type::Unit, &ret);
+        let declared_ret = ret.clone();
         let saved_yield = std::mem::replace(&mut self.current_yield, yield_elem);
         // An `async fn` body is an async context: its `.await`s are legal (Track A). `current_ret`
         // stays the *inner* declared type `T` (the body writes `return t`); a call site sees the
@@ -1907,6 +1915,24 @@ impl Checker {
         }
         for stmt in &decl.body {
             self.check_stmt(stmt, env);
+        }
+        // E0048: a non-`void` function must return a value on every path. If control can reach the end
+        // of the body — it falls off the end, or an `if` without an `else` leaves a path open — the
+        // function would implicitly return `unit` where its signature promised another type, and a
+        // caller would silently bind that type to `unit`. (`return`s inside are already checked
+        // against the declared type above; this is the complementary "did every path return" check.)
+        if must_return_value && !block_diverges(&decl.body) {
+            self.error(
+                DiagnosticCode::MissingReturn,
+                decl.name_span,
+                format!(
+                    "function `{}` can reach the end of its body without returning `{declared_ret}`",
+                    decl.name
+                ),
+            )
+            .help(
+                "every path must `return` a value; only a `void` function may fall off the end",
+            );
         }
         // An `async fn` body compiles to the async state machine (Track A.3a), which supports `.await`
         // only in statement position. Reject an `.await` buried in a sub-expression (E0040) rather than
@@ -4139,7 +4165,6 @@ impl Checker {
                         return sig.ret.clone();
                     }
                     return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
-                    return self.call_user_method(name, &sig, args, arg_exprs, span, recv_args);
                 }
                 self.check_method_args(&recv, name, args, arg_exprs, span);
                 // A bit intrinsic on a fixed-width receiver (Tier W5) must act within the width, not
@@ -5506,6 +5531,78 @@ fn join_closure_returns(stmts: &[Stmt], mut types: Vec<Type>) -> Type {
         }
     }
     acc
+}
+
+/// Whether a block of statements **definitely diverges** — every path through it returns from the
+/// enclosing function, panics, or loops forever, so control cannot fall off the block's end. Drives
+/// the non-`void` "must return a value" check (E0048). Conservative in the sound direction: any
+/// construct not recognized as diverging is treated as *falling through*, so the analysis can only
+/// ever *miss* a diverging path (a false negative), never invent one — it cannot reject a valid
+/// function. A block diverges as soon as *one* of its statements does: everything after an
+/// unconditional divergence is unreachable, so the block's end is too.
+fn block_diverges(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_diverges)
+}
+
+/// Whether a single statement unconditionally transfers control away and never falls through to the
+/// statement after it.
+fn stmt_diverges(stmt: &Stmt) -> bool {
+    match stmt {
+        // `return` leaves the function. (`yield` does not — a generator resumes after it.)
+        Stmt::Return { .. } => true,
+        // An `if` diverges only with an `else` where *both* arms diverge; a missing or falling-through
+        // arm reaches the end.
+        Stmt::If {
+            then_body,
+            else_body: Some(else_body),
+            ..
+        } => block_diverges(then_body) && block_diverges(else_body),
+        // `while true { … }` with no `break` targeting this loop never exits normally.
+        Stmt::While { cond, body, .. } => {
+            matches!(cond, Expr::Bool { value: true, .. }) && !body_breaks(body)
+        }
+        // A structured-concurrency scope is a transparent block for control flow: a `return` inside it
+        // still leaves the function.
+        Stmt::Concurrent { body, .. } => block_diverges(body),
+        // A bare `panic(...)` (or a `match` all of whose arms diverge) never returns.
+        Stmt::Expr { expr, .. } => expr_diverges(expr),
+        _ => false,
+    }
+}
+
+/// Whether an expression in statement position unconditionally diverges: a `panic(...)` call, or a
+/// `match` whose (non-empty) arms *all* diverge — an arm body is an expression, so it diverges only by
+/// itself being a `panic`/all-diverging `match`, never by a `return` (a statement can't sit there).
+fn expr_diverges(expr: &Expr) -> bool {
+    match expr {
+        Expr::Call { callee, .. } => {
+            matches!(callee.as_ref(), Expr::Ident { name, .. } if name == "panic")
+        }
+        Expr::Match { arms, .. } => !arms.is_empty() && arms.iter().all(|a| expr_diverges(&a.body)),
+        _ => false,
+    }
+}
+
+/// Whether a loop body contains a `break` that targets *this* loop — a `break` not nested inside an
+/// inner `for`/`while` (which it would target instead). Distinguishes an infinite `while true` that
+/// diverges from one that can exit.
+fn body_breaks(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(stmt_breaks)
+}
+
+fn stmt_breaks(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::Break { .. } => true,
+        // A `break` inside a nested loop targets *that* loop, not ours — do not descend.
+        Stmt::For { .. } | Stmt::While { .. } => false,
+        Stmt::If {
+            then_body,
+            else_body,
+            ..
+        } => body_breaks(then_body) || else_body.as_ref().is_some_and(|b| body_breaks(b)),
+        Stmt::Concurrent { body, .. } => body_breaks(body),
+        _ => false,
+    }
 }
 
 fn unify_element(acc: &Type, next: &Type) -> Option<Type> {

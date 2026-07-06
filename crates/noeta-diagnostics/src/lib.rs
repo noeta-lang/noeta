@@ -196,6 +196,11 @@ pub enum DiagnosticCode {
     /// function (never touches `self`) called on a value (`x.new(...)`). The distinction is DERIVED
     /// from the body — zero runtime cost — and enforced statically.
     InvalidReceiver,
+    /// A function with a non-`void` declared return type can reach the end of its body without
+    /// returning a value (it falls off the end, or an `if` without an `else` leaves a path open). Only
+    /// a `void` function may fall through; any other declared type must be produced on every path, or
+    /// the caller binds the promised type to a `unit` value. Enforced statically at the definition.
+    MissingReturn,
 }
 
 impl DiagnosticCode {
@@ -249,6 +254,7 @@ impl DiagnosticCode {
         DiagnosticCode::ReactiveCycle,
         DiagnosticCode::ReservedName,
         DiagnosticCode::InvalidReceiver,
+        DiagnosticCode::MissingReturn,
     ];
 
     /// The stable wire form, e.g. `"E0001"`. Used by the conformance corpus and
@@ -302,6 +308,7 @@ impl DiagnosticCode {
             DiagnosticCode::ReactiveCycle => "E0045",
             DiagnosticCode::ReservedName => "E0046",
             DiagnosticCode::InvalidReceiver => "E0047",
+            DiagnosticCode::MissingReturn => "E0048",
         }
     }
 

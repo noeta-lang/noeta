@@ -1,0 +1,11 @@
+// A non-`void` function must produce its declared return type on every path (E0048). This one
+// declares `: int` but its body ends in a bare expression, so control falls off the end and the
+// function would implicitly return `unit` where `int` was promised — a soundness hole rejected
+// statically, before either backend runs. Only a `void` function may fall off the end. The error
+// points at the function name.
+// expect: error E0048 at 8:4
+// expect: exit 1
+fn double(n: int): int {
+    n + n
+}
+echo double(21)
