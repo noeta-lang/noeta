@@ -1013,61 +1013,6 @@ pub enum Op {
     Halt,
 }
 
-impl Op {
-    /// The source span this instruction is attributed to, if it carries one. Most executable ops
-    /// (calls, field/index access, arithmetic, branches, …) do — they need it to raise a runtime
-    /// diagnostic; pure register housekeeping (`Move`, `LoadConst`, `Jump`, …) does not. A debugger
-    /// maps a program counter to a source line through this (falling back to a nearby spanned op for
-    /// the span-less ones).
-    pub fn span(&self) -> Option<Span> {
-        match self {
-            Op::LoadGlobal { span, .. }
-            | Op::TakeGlobal { span, .. }
-            | Op::ConcatInPlace { span, .. }
-            | Op::PackedListPush { span, .. }
-            | Op::TupleIndex { span, .. }
-            | Op::MakeRange { span, .. }
-            | Op::RequireMapKey { span, .. }
-            | Op::IterSnapshot { span, .. }
-            | Op::ListLen { span, .. }
-            | Op::IterForNext { span, .. }
-            | Op::CallBuiltin { span, .. }
-            | Op::CallMethod { span, .. }
-            | Op::Index { span, .. }
-            | Op::IndexField { span, .. }
-            | Op::MakeStruct { span, .. }
-            | Op::MakeStructInPlace { span, .. }
-            | Op::EnumFromStr { span, .. }
-            | Op::LoadField { span, .. }
-            | Op::SetField { span, .. }
-            | Op::Panic { span, .. }
-            | Op::TryUnwrap { span, .. }
-            | Op::Coalesce { span, .. }
-            | Op::RunFuture { span, .. }
-            | Op::PollFuture { span, .. }
-            | Op::Spawn { span, .. }
-            | Op::SpawnIsolate { span, .. }
-            | Op::ScopeEnd { span, .. }
-            | Op::MakeChannel { span, .. }
-            | Op::FromBytes { span, .. }
-            | Op::Invoke { span, .. }
-            | Op::ExtCall { span, .. }
-            | Op::MatchFail { span, .. }
-            | Op::Call { span, .. }
-            | Op::CallGlobal { span, .. }
-            | Op::Unary { span, .. }
-            | Op::WideInt { span, .. }
-            | Op::WidthIntMethod { span, .. }
-            | Op::Binary { span, .. }
-            | Op::RequireBool { span, .. }
-            | Op::RequireCondBool { span, .. }
-            | Op::CondBranch { span, .. }
-            | Op::Stringify { span, .. } => Some(*span),
-            _ => None,
-        }
-    }
-}
-
 /// A compiled function prototype: instructions, the constant pool, the precomputed raise
 /// diagnostics, the parameter count, and the number of registers the frame needs. The
 /// top-level program is just the prototype at index 0 (`num_params == 0`); every `fn` and
@@ -1106,6 +1051,14 @@ pub struct Chunk {
     /// registers are pinned through coalescing (see `frame_locals`) so this stays a clean 1:1 map;
     /// [`crate`]'s coalescing pass rewrites each `reg` alongside the code. Empty otherwise.
     pub debug_locals: Vec<LocalDebug>,
+    /// The **line table**: `(pc, span)` at the first instruction of each source statement, in `pc`
+    /// order, so *every* instruction maps to a source line — the line for a `pc` is the span of the
+    /// greatest entry with `entry.pc <= pc` (see [`Chunk::line_span`]). This is what lets the debugger
+    /// break on / step to a line whose statement compiled to only spanless ops (e.g. `return x`, whose
+    /// lone `Op::Return` carries no span of its own). Emitted only in a debug compile; a hoisting pass
+    /// that moves instructions rewrites each `pc` alongside the code (like `debug_locals`' registers).
+    /// Empty otherwise, so a production `Module` carries none and its bytecode is byte-identical.
+    pub debug_lines: Vec<LineEntry>,
 }
 
 /// One source variable's debug record: its name, the register it lives in for this frame, and the
@@ -1115,6 +1068,14 @@ pub struct LocalDebug {
     pub name: String,
     pub reg: u16,
     pub def_span: Span,
+}
+
+/// One line-table entry: the first instruction (`pc`) of a source statement and that statement's
+/// `span`. See [`Chunk::debug_lines`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LineEntry {
+    pub pc: u32,
+    pub span: Span,
 }
 
 impl Chunk {
@@ -1132,7 +1093,21 @@ impl Chunk {
             debug_name: None,
             def_span: None,
             debug_locals: Vec::new(),
+            debug_lines: Vec::new(),
         }
+    }
+
+    /// The source span whose statement covers instruction `pc`: the greatest [`debug_lines`] entry
+    /// with `entry.pc <= pc`. `None` for a `pc` before the first entry (a prototype's spanless
+    /// prologue) or a non-debug compile (the table is empty). This maps *any* instruction to a source
+    /// line, including one whose own op is spanless.
+    ///
+    /// [`debug_lines`]: Chunk::debug_lines
+    pub fn line_span(&self, pc: usize) -> Option<Span> {
+        let pc = pc as u32;
+        // Entries are in ascending `pc` order, so binary-search for the last one at or before `pc`.
+        let idx = self.debug_lines.partition_point(|e| e.pc <= pc);
+        (idx > 0).then(|| self.debug_lines[idx - 1].span)
     }
 
     /// Render the chunk as stable, human-readable disassembly for snapshot tests. `names` is the

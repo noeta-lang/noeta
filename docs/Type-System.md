@@ -41,7 +41,7 @@ echo head([]) ?? -1     // -1
 
 A union is a **closed** dynamic: a value is *one of* a known, finite set of types.
 
-```noeta
+```noeta ignore
 fn parse(s: string): int | string {
     // returns the number, or the original string on failure
 }

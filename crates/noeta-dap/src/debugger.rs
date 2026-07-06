@@ -1,12 +1,13 @@
 //! The [`Debugger`] the VM consults before each instruction, plus the breakpoint resolution that
 //! turns editor `(file, line)` requests into the instruction positions it stops at.
 //!
-//! The VM knows only prototypes and program counters; the editor speaks files and lines. Resolution
-//! bridges them once, up front: for every instruction that carries a source span, map it to a
-//! `(file, line)` (via the [`SourceMap`]) and, when that line is a requested breakpoint, record the
-//! **first** such instruction per prototype as a stop position. At run time [`DapDebugger::before_op`]
-//! is then a cheap set membership test; when it hits (or on stop-on-entry) it emits a `stopped` event
-//! and blocks the run thread on a resume channel until the adapter says continue or terminate.
+//! The VM knows only prototypes and program counters; the editor speaks files and lines. The compiler's
+//! debug **line table** (`Chunk::debug_lines`, one `(pc, span)` per source statement) bridges them:
+//! resolution maps each requested breakpoint line to the first statement's pc per prototype, and at run
+//! time the line table also gives the *current* line for any pc (so stepping and the stack trace resolve
+//! a line even for an instruction whose own op is spanless, like a bare `return x`). [`DapDebugger::before_op`]
+//! is then a cheap check per instruction; on a hit (breakpoint, stop-on-entry, or a landed step) it emits
+//! a `stopped` event and blocks the run thread on a resume channel until the adapter says continue/step/terminate.
 
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
@@ -91,9 +92,11 @@ pub struct VarInfo {
 }
 
 /// Resolve editor breakpoint requests (`path → 1-based lines`) against the compiled program into the
-/// set of `(proto, pc)` instruction positions the VM should stop at: the first spanned instruction of
-/// each requested line, per prototype. A line with no matching instruction simply yields nothing (the
-/// breakpoint is unverifiable — it lands on a blank/comment line or code that compiled away).
+/// set of `(proto, pc)` instruction positions the VM should stop at: the first instruction of each
+/// requested line, per prototype. Driven off the debug **line table** (`Chunk::debug_lines`, one entry
+/// per source statement in `pc` order), so a line resolves even when its statement compiled to only
+/// spanless ops (a bare `return x`). A line with no entry simply yields nothing (the breakpoint is
+/// unverifiable — it lands on a blank/comment line or code that compiled away).
 pub fn resolve_breakpoints(
     module: &Module,
     sources: &SourceMap,
@@ -101,18 +104,17 @@ pub fn resolve_breakpoints(
 ) -> HashSet<(u32, usize)> {
     let mut stops = HashSet::new();
     for (proto_idx, chunk) in module.protos.iter().enumerate() {
-        // First spanned pc per (file, line) within this prototype — a line's instructions are
-        // contiguous, so the lowest pc is where the line's execution begins.
+        // Entries are in `pc` order, so the first entry for a (file, line) is where that line's
+        // execution begins in this prototype.
         let mut seen: HashSet<(u32, u32)> = HashSet::new();
-        for (pc, op) in chunk.code.iter().enumerate() {
-            let Some(span) = op.span() else { continue };
-            let source = sources.source(span.source);
-            let line = source.line_col(span.start).line;
+        for entry in &chunk.debug_lines {
+            let source = sources.source(entry.span.source);
+            let line = source.line_col(entry.span.start).line;
             if !line_requested(requested, source.name(), line) {
                 continue;
             }
-            if seen.insert((span.source.0, line)) {
-                stops.insert((proto_idx as u32, pc));
+            if seen.insert((entry.span.source.0, line)) {
+                stops.insert((proto_idx as u32, entry.pc as usize));
             }
         }
     }
@@ -278,10 +280,11 @@ impl Debugger for DapDebugger {
     }
 }
 
-/// The innermost (currently executing) frame's `(source, line)`, or `None` for a spanless op. The
-/// identity a step is measured against.
+/// The innermost (currently executing) frame's `(source, line)`, or `None` before the first statement.
+/// The identity a step is measured against — via the line table, so it is defined at every real
+/// instruction (a step lands only where this is `Some`).
 fn top_line(view: &DebugView, sources: &SourceMap) -> Option<(u32, u32)> {
-    let span = view.frame(view.depth() - 1).op_span()?;
+    let span = view.frame(view.depth() - 1).line_span()?;
     Some((
         span.source.0,
         sources.source(span.source).line_col(span.start).line,
@@ -297,8 +300,8 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
     let mut frames = Vec::with_capacity(view.depth());
     for i in (0..view.depth()).rev() {
         let frame = view.frame(i);
-        let op_span = frame.op_span();
-        let (path, line, column) = match op_span {
+        let line_span = frame.line_span();
+        let (path, line, column) = match line_span {
             Some(span) => {
                 let source = sources.source(span.source);
                 let lc = source.line_col(span.start);
@@ -308,7 +311,7 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
         };
         let locals = frame
             .locals()
-            .filter(|(_, def_span, _)| match op_span {
+            .filter(|(_, def_span, _)| match line_span {
                 // In scope iff its binding begins strictly before the paused instruction. Strict, so a
                 // local being introduced by the very instruction we're stopped before isn't shown as
                 // bound yet.

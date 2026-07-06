@@ -851,16 +851,23 @@ mod tests {
             vec![("add".into(), 2), ("main".into(), 6)],
             "stepIn should enter `add`"
         );
-        // `stepOut` runs `add` to completion and lands back in `main` past the call (line 7).
-        assert_eq!(
-            session.step("stepOut"),
-            vec![("main".into(), 7)],
-            "stepOut should return to the caller"
-        );
-        // `next` advances one line within `main`.
+        // `next` advances one line *within* `add` — onto `return s` (line 3), which the line table
+        // makes reachable even though its lone `Op::Return` is spanless.
         assert_eq!(
             session.step("next"),
-            vec![("main".into(), 8)],
+            vec![("add".into(), 3), ("main".into(), 6)],
+            "next should reach the return line inside `add`"
+        );
+        // `stepOut` runs `add` to completion and lands back in `main` on the call line (6).
+        assert_eq!(
+            session.step("stepOut"),
+            vec![("main".into(), 6)],
+            "stepOut should return to the caller's call line"
+        );
+        // `next` then advances one line within `main`.
+        assert_eq!(
+            session.step("next"),
+            vec![("main".into(), 7)],
             "next should advance one line"
         );
 
@@ -897,6 +904,47 @@ mod tests {
 
         // Step over the `add(x, 2)` call: it must land on line 6 in `main`, never inside `add`.
         assert_eq!(session.step("next"), vec![("main".into(), 6)]);
+
+        session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
+        session.disconnect_and_join();
+    }
+
+    #[test]
+    fn a_breakpoint_binds_on_a_bare_return_line() {
+        // `return s` compiles to a lone spanless `Op::Return`; only the debug line table gives it a
+        // line, so a breakpoint there binds and fires — the whole point of this slice.
+        let path = fixture(
+            "retbp",
+            "fn add(a: int, b: int): int {\n    \
+             mut s = a + b\n    \
+             return s\n}\n\
+             mut y = add(1, 2)\n\
+             echo y\n",
+        );
+        let program = path.to_str().unwrap().to_string();
+
+        let mut session = Session::start();
+        session.send("initialize", json!({}));
+        session.response("initialize");
+        session.send("launch", json!({ "program": program }));
+        session.response("launch");
+        session.send(
+            "setBreakpoints",
+            json!({ "source": { "path": program }, "breakpoints": [ { "line": 3 } ] }),
+        );
+        // The breakpoint on the `return` line verifies (it resolved to an instruction).
+        let bps = session.response("setBreakpoints");
+        assert_eq!(bps["body"]["breakpoints"][0]["verified"], true);
+        session.send("configurationDone", json!({}));
+        session.response("configurationDone");
+
+        // It actually stops there, inside `add`, at line 3.
+        assert_eq!(session.wait_stopped()["body"]["reason"], "breakpoint");
+        session.send("stackTrace", json!({ "threadId": MAIN_THREAD_ID }));
+        let frames = session.response("stackTrace");
+        let top = &frames["body"]["stackFrames"][0];
+        assert_eq!(top["name"], "add");
+        assert_eq!(top["line"], 3);
 
         session.send("continue", json!({ "threadId": MAIN_THREAD_ID }));
         session.disconnect_and_join();

@@ -51,8 +51,8 @@ use std::collections::{HashMap, HashSet};
 use noeta_ast::{BinaryOp, Program, TypeRef};
 use noeta_builtins::PRELUDE_NAMES;
 use noeta_bytecode::{
-    BoolSide, Builtin, CaptureFrom, Chunk, Const, GlobalId, LocalDebug, MethodEntry, Module,
-    NameId, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
+    BoolSide, Builtin, CaptureFrom, Chunk, Const, GlobalId, LineEntry, LocalDebug, MethodEntry,
+    Module, NameId, NarrowTarget, Op, Reg, ReuseCheck, StrPart,
 };
 use noeta_ir::{
     Atom, Block, Const as IrConst, Decl, ForPattern, Func, InterpPart, Pattern, Rvalue, Stmt, Temp,
@@ -1032,6 +1032,11 @@ struct FnCompiler<'m> {
     /// when the compile is in debug mode. Moved onto the `Chunk` (and register-remapped by coalescing)
     /// at [`Self::into_chunk`]. Always empty in a non-debug compile.
     debug_locals: Vec<LocalDebug>,
+    /// The debugger's line table (`Chunk::debug_lines`): one `(pc, span)` per source statement, pushed
+    /// at the start of [`Self::stmt`] in a debug compile so every instruction resolves to a line.
+    /// Moved onto the `Chunk` (and pc-remapped by the hoisting pass) at [`Self::into_chunk`]. Always
+    /// empty in a non-debug compile.
+    debug_lines: Vec<LineEntry>,
 }
 
 /// Pending forward jumps from `break`/`continue` inside one loop, patched at the loop's end.
@@ -1047,6 +1052,34 @@ struct LoopCtx {
     /// iterator destructor-aware itself (running a generator's captured destructor). `None` for `while`
     /// loops and for-loops over a named/snapshotted iterable (whose value is dropped elsewhere).
     stream_iter: Option<Reg>,
+}
+
+/// The span to record in the debug line table for `stmt`, or `None` for a statement that is **not** a
+/// source line the debugger should stop on: a synthetic reclamation `Drop`/`DropVar`, a concurrency
+/// scope marker, or a nested declaration. Skipping those keeps the line table monotonic in `pc → line`
+/// (a last-use `DropVar` would otherwise map a later `pc` to an earlier line) — the excluded ops are
+/// covered by the preceding real statement's entry.
+fn line_entry_span(stmt: &Stmt) -> Option<Span> {
+    match stmt {
+        Stmt::Let { span, .. }
+        | Stmt::Eval { span, .. }
+        | Stmt::Bind { span, .. }
+        | Stmt::Echo { span, .. }
+        | Stmt::Return { span, .. }
+        | Stmt::Break { span, .. }
+        | Stmt::Continue { span, .. }
+        | Stmt::If { span, .. }
+        | Stmt::While { span, .. }
+        | Stmt::For { span, .. }
+        | Stmt::Match { span, .. }
+        | Stmt::Logical { span, .. }
+        | Stmt::Coalesce { span, .. } => Some(*span),
+        Stmt::Drop(_)
+        | Stmt::DropVar { .. }
+        | Stmt::ScopeBegin { .. }
+        | Stmt::ScopeEnd { .. }
+        | Stmt::Decl(_) => None,
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1120,6 +1153,7 @@ impl<'m> FnCompiler<'m> {
             loops: Vec::new(),
             frame_locals: Vec::new(),
             debug_locals: Vec::new(),
+            debug_lines: Vec::new(),
         }
     }
 
@@ -1177,10 +1211,10 @@ impl<'m> FnCompiler<'m> {
             }
             locals
         };
-        let (debug_name, def_span, debug_locals) = if debug {
-            (debug_name, def_span, self.debug_locals)
+        let (debug_name, def_span, debug_locals, debug_lines) = if debug {
+            (debug_name, def_span, self.debug_locals, self.debug_lines)
         } else {
-            (None, None, Vec::new())
+            (None, None, Vec::new(), Vec::new())
         };
         let mut chunk = Chunk {
             code: self.code,
@@ -1193,6 +1227,7 @@ impl<'m> FnCompiler<'m> {
             debug_name,
             def_span,
             debug_locals,
+            debug_lines,
         };
         // Coalescing reuses a dead local's slot for a later one; but a destructor-bearing local that
         // dies only at an *unreachable* drop (a dead store before a `panic`, whose scope-exit drop the
@@ -1314,6 +1349,19 @@ impl<'m> FnCompiler<'m> {
     }
 
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), Unsupported> {
+        // Debug line table: record `(this statement's first pc, its span)` before emitting it, so the
+        // debugger can map every instruction to a source line — including a statement (like a bare
+        // `return x`) that compiles to only spanless ops. Real source statements only; a synthetic
+        // reclamation `Drop`/`DropVar`, a scope marker, or a nested declaration is skipped so it
+        // cannot inject a *backward* line (a last-use drop sits at a later pc but an earlier line) and
+        // is instead covered by the preceding real statement's entry. Coalescing keeps pcs; the
+        // hoisting pass remaps them.
+        if let Some(span) = line_entry_span(stmt).filter(|_| self.module.debug) {
+            self.debug_lines.push(LineEntry {
+                pc: self.code.len() as u32,
+                span,
+            });
+        }
         match stmt {
             // `let t = rvalue` — bind the operation's result to its frame temporary's register.
             Stmt::Let { dst, rvalue, .. } => {
@@ -4013,7 +4061,7 @@ mod tests {
         // A **production** compile keeps that drop (prompt reclamation, unchanged). A **debug** compile
         // skips it so a debugger paused at `b` can still read `a` — the whole point of D2. All values
         // here are non-destructor immediates, so this is pure promptness, invisible to behaviour.
-        let src = "fn f(): int {\n  mut a = 10;\n  mut b = a + 1;\n  b\n}\nf();\n";
+        let src = "fn f(): int {\n  mut a = 10;\n  mut b = a + 1;\n  return b\n}\nf();\n";
         let drops = |m: &Module| {
             m.protos
                 .iter()
@@ -4042,7 +4090,9 @@ mod tests {
     fn a_functions_locals_and_params_are_recorded_by_register() {
         // `x`/`y` are locals (declare_local); `p` is a parameter — all should appear, each with a
         // register. Top-level `mut` binds a *global*, so the names live inside a function.
-        let m = compile_dbg("fn f(p: int): int {\n  mut x = p;\n  mut y = 2;\n  x + y\n}\nf(1);\n");
+        let m = compile_dbg(
+            "fn f(p: int): int {\n  mut x = p;\n  mut y = 2;\n  return x + y\n}\nf(1);\n",
+        );
         let f = m
             .protos
             .iter()
@@ -4070,7 +4120,7 @@ mod tests {
         // distinct slot: the 1:1 `reg → name` the Variables view depends on. (Without pinning `a` and
         // `b` would share a register and the distinct-count check below would fail.)
         let m = compile_dbg(
-            "fn f(): int {\n  mut a = 1;\n  mut r = a;\n  mut b = 2;\n  r = r + b;\n  r\n}\nf();\n",
+            "fn f(): int {\n  mut a = 1;\n  mut r = a;\n  mut b = 2;\n  r = r + b;\n  return r\n}\nf();\n",
         );
         let f = m
             .protos
@@ -4090,7 +4140,7 @@ mod tests {
     #[test]
     fn a_method_proto_is_named_type_dot_method() {
         let m = compile_dbg(
-            "struct Point { x: int\n  fn mag(): int { self.x }\n}\nmut p = Point { x: 3 };\np.mag();\n",
+            "struct Point { x: int\n  fn mag(): int { return self.x }\n}\nmut p = Point { x: 3 };\np.mag();\n",
         );
         assert!(
             m.protos

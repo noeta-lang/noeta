@@ -138,10 +138,14 @@ impl<'a> DebugFrame<'a> {
     }
 
     /// The source span whose line is this frame's current line: the instruction about to execute for
-    /// the innermost frame, or the call op for a caller frame (see [`DebugView::frame`]). `None` for a
-    /// spanless op (rare) or a debug-info-less build.
-    pub fn op_span(&self) -> Option<Span> {
-        self.chunk.code.get(self.pc).and_then(Op::span)
+    /// the innermost frame, or the call op for a caller frame (see [`DebugView::frame`]).
+    ///
+    /// Resolved through the debug **line table** ([`Chunk::debug_lines`]), so *every* instruction maps
+    /// to a line — including one whose own op is spanless (a bare `return x`, a post-call store) — by
+    /// taking the span of the statement covering this pc. `None` before the first statement (a
+    /// spanless prologue) or in a debug-info-less build (the table is empty).
+    pub fn line_span(&self) -> Option<Span> {
+        self.chunk.line_span(self.pc)
     }
 
     /// Each named local in declaration order: its name, the span of its binding, and its current
