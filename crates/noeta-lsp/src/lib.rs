@@ -32,7 +32,6 @@
 //! Positions are converted encoding-aware (see [`offsets`]).
 
 mod completion;
-mod hover;
 mod offsets;
 mod resolve;
 mod semtokens;
@@ -1056,7 +1055,9 @@ impl LanguageServer for Backend {
         Ok(found.map(|(repr, range)| Hover {
             contents: HoverContents::Markup(MarkupContent {
                 kind: MarkupKind::Markdown,
-                value: format!("```noeta\n{}\n```", hover::render_type(&repr)),
+                // `TypeRepr` displays as its Noeta surface spelling (`impl Display` in
+                // `noeta_ast::reflect`) — the same rendering the debugger's Variables view uses.
+                value: format!("```noeta\n{repr}\n```"),
             }),
             range: Some(range),
         }))
@@ -1501,7 +1502,7 @@ mod tests {
                     },
                     Encoding::Utf8,
                 )
-                .map(|(repr, _range)| hover::render_type(&repr))
+                .map(|(repr, _range)| repr.to_string())
         };
         assert_eq!(at(7).as_deref(), Some("List<int>")); // the `[1, 2, 3]` literal
         assert_eq!(at(8).as_deref(), Some("int")); // the `1` element

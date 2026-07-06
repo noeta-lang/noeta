@@ -458,6 +458,60 @@ impl TypeRepr {
     }
 }
 
+/// A [`TypeRepr`] displays as its **Noeta surface spelling** — the source form a developer
+/// recognizes: scalars by keyword (`int`, `string`, `void`), containers as `List<T>` / `Map<K, V>`,
+/// optionals as `?T`, unions as `A | B`, function types as `(A, B) -> R`, and nominal types by name
+/// with `<…>` type arguments. Shared by every human-facing surface (LSP hover, the debugger's
+/// Variables view) so a type reads the same everywhere.
+impl std::fmt::Display for TypeRepr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TypeRepr::Int => f.write_str("int"),
+            TypeRepr::Float => f.write_str("float"),
+            TypeRepr::F32 => f.write_str("f32"),
+            TypeRepr::Bool => f.write_str("bool"),
+            TypeRepr::Str => f.write_str("string"),
+            TypeRepr::Bytes => f.write_str("bytes"),
+            TypeRepr::Unit => f.write_str("void"),
+            TypeRepr::Dyn => f.write_str("dyn"),
+            TypeRepr::List(t) => write!(f, "List<{t}>"),
+            TypeRepr::Set(t) => write!(f, "Set<{t}>"),
+            TypeRepr::Option(t) => write!(f, "?{t}"),
+            TypeRepr::Map(k, v) => write!(f, "Map<{k}, {v}>"),
+            TypeRepr::Result(o, e) => write!(f, "Result<{o}, {e}>"),
+            TypeRepr::Enum(name, args)
+            | TypeRepr::Struct(name, args)
+            | TypeRepr::Class(name, args)
+            | TypeRepr::Named(name, args) => {
+                f.write_str(name)?;
+                if !args.is_empty() {
+                    write!(f, "<{}>", join_types(args))?;
+                }
+                Ok(())
+            }
+            TypeRepr::Fn(params, ret) => write!(f, "({}) -> {ret}", join_types(params)),
+            TypeRepr::Union(members) => {
+                for (i, m) in members.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(" | ")?;
+                    }
+                    write!(f, "{m}")?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+/// Comma-join a type list for `<…>` arguments and `(…)` parameters.
+fn join_types(types: &[TypeRepr]) -> String {
+    types
+        .iter()
+        .map(TypeRepr::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 /// Project a surface [`TypeRef`] onto a reflection [`TypeRepr`], **without kind information** (runtime
 /// type-argument reflection, R3): a declared `struct`/`class`/`enum` maps to [`TypeRepr::Named`]
 /// (the R3 matcher keys on the name, not the kind, so `Named("Box")` matches a value tagged
@@ -683,5 +737,62 @@ impl PackedLayout {
                 PackedKind::Struct(inner) => inner.byte_size(),
             })
             .sum()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn boxed(t: TypeRepr) -> Box<TypeRepr> {
+        Box::new(t)
+    }
+
+    #[test]
+    fn scalars_display_as_keywords() {
+        assert_eq!(TypeRepr::Int.to_string(), "int");
+        assert_eq!(TypeRepr::Str.to_string(), "string");
+        assert_eq!(TypeRepr::Unit.to_string(), "void");
+        assert_eq!(TypeRepr::Dyn.to_string(), "dyn");
+    }
+
+    #[test]
+    fn containers_nest() {
+        assert_eq!(
+            TypeRepr::List(boxed(TypeRepr::Int)).to_string(),
+            "List<int>"
+        );
+        assert_eq!(
+            TypeRepr::Map(boxed(TypeRepr::Str), boxed(TypeRepr::Int)).to_string(),
+            "Map<string, int>"
+        );
+        assert_eq!(
+            TypeRepr::List(boxed(TypeRepr::Option(boxed(TypeRepr::Int)))).to_string(),
+            "List<?int>"
+        );
+    }
+
+    #[test]
+    fn nominal_with_and_without_args() {
+        assert_eq!(
+            TypeRepr::Struct("Point".to_string(), vec![]).to_string(),
+            "Point"
+        );
+        assert_eq!(
+            TypeRepr::Class("Box".to_string(), vec![TypeRepr::Int]).to_string(),
+            "Box<int>"
+        );
+    }
+
+    #[test]
+    fn function_and_union() {
+        assert_eq!(
+            TypeRepr::Fn(vec![TypeRepr::Int, TypeRepr::Str], boxed(TypeRepr::Bool)).to_string(),
+            "(int, string) -> bool"
+        );
+        assert_eq!(
+            TypeRepr::Union(vec![TypeRepr::Int, TypeRepr::Str]).to_string(),
+            "int | string"
+        );
     }
 }

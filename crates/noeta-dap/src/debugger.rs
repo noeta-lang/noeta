@@ -322,7 +322,13 @@ fn capture(view: &DebugView, sources: &SourceMap) -> PausedState {
             .map(|(name, _, value)| VarInfo {
                 name: name.to_string(),
                 value: value.display(),
-                ty: value.type_name().to_string(),
+                // Prefer the value's reified type tag rendered as surface syntax (`List<int>`,
+                // `Box<int>` — the same spelling LSP hover shows), falling back to the coarse
+                // kind name (`int`, `string`) for untagged primitives.
+                ty: value
+                    .reflect()
+                    .map(|t| t.to_string())
+                    .unwrap_or_else(|| value.type_name().to_string()),
             })
             .collect();
         frames.push(FrameInfo {
