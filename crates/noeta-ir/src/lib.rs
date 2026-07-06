@@ -257,6 +257,14 @@ pub enum Rvalue {
         associated: bool,
         span: Span,
     },
+    /// A **bound** method handle: `value.method` used as a value (prelude-redesign EX.2b). The
+    /// receiver is evaluated and captured into the handle (one owned reference); calling the handle
+    /// dispatches `method` on it.
+    BoundHandle {
+        recv: Atom,
+        method: String,
+        span: Span,
+    },
     /// In-place field assignment: `receiver.name = value` (Phase 5.2). Evaluates to the updated
     /// object. Both backends set the field **in place when the object is uniquely owned** (the
     /// reuse pass's `reuse` token, gated on the runtime refcount `== 1`) and **copy-first when

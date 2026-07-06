@@ -83,6 +83,9 @@ pub enum Value {
     /// it dispatches by name — on its first argument (instance) or as an associated call
     /// (`associated`). The VM twin is `Payload::MethodHandle`, so the backends agree by construction.
     MethodHandle(String, String, bool),
+    /// A **bound** method handle (`value.method`, EX.2b): the receiver captured at bind time.
+    /// Calling it dispatches the method on the captured receiver. VM twin: `Payload::BoundMethod`.
+    BoundMethod(Box<Value>, String),
     /// An `fs.open` file handle (M2.5): a mutable cursor. `Rc<RefCell<…>>` gives the shared,
     /// interior-mutable state the VM gets from its heap object; the `FileHandle` itself is the
     /// same shared type both backends advance, so behavior is identical by construction.
@@ -721,7 +724,7 @@ impl Value {
             Value::Function(_) => "<fn>".to_string(),
             // A selectively-imported module function renders as a function (matching the VM's
             // `Payload::ModuleFn` → `<fn>`), not with the module's `<module …>` form.
-            Value::ModuleFn(..) | Value::MethodHandle(..) => "<fn>".to_string(),
+            Value::ModuleFn(..) | Value::MethodHandle(..) | Value::BoundMethod(..) => "<fn>".to_string(),
             Value::Builtin(b) => format!("<builtin {}>", b.name()),
             Value::EnumType(def) => format!("<enum {}>", def.name()),
             Value::Enum(value) => value.display(),
@@ -767,9 +770,11 @@ impl Value {
             Value::Tuple(_) => "tuple",
             Value::Set(..) => "set",
             Value::Map(..) => "map",
-            Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) | Value::MethodHandle(..) => {
-                "function"
-            }
+            Value::Function(_)
+            | Value::Builtin(_)
+            | Value::ModuleFn(..)
+            | Value::MethodHandle(..)
+            | Value::BoundMethod(..) => "function",
             Value::EnumType(_) => "enum type",
             Value::Enum(_) => "enum",
             Value::Type(_) => "type",
@@ -814,6 +819,7 @@ impl fmt::Debug for Value {
             Value::MethodHandle(ty, method, associated) => {
                 write!(f, "MethodHandle({ty}.{method}{})", if *associated { " assoc" } else { "" })
             }
+            Value::BoundMethod(recv, method) => write!(f, "BoundMethod({recv:?}.{method})"),
             Value::Builtin(b) => write!(f, "Builtin({})", b.name()),
             Value::EnumType(def) => write!(f, "EnumType({})", def.name()),
             Value::Enum(value) => write!(f, "Enum({})", value.display()),
@@ -861,6 +867,8 @@ impl PartialEq for Value {
             (Value::MethodHandle(at, am, aa), Value::MethodHandle(bt, bm, ba)) => {
                 at == bt && am == bm && aa == ba
             }
+            // A bound handle compares by method name + receiver equality.
+            (Value::BoundMethod(ra, ma), Value::BoundMethod(rb, mb)) => ma == mb && ra == rb,
             // File handles compare by their full shared state, matching the VM by construction.
             (Value::FileHandle(a), Value::FileHandle(b)) => *a.borrow() == *b.borrow(),
             // Functions and types are not structurally comparable.

@@ -347,6 +347,13 @@ pub enum Op {
         dst: Reg,
         func: Builtin,
     },
+    /// `dst = <recv>.method` — build a **bound** method handle (prelude-redesign EX.2b): captures
+    /// one retained reference to the receiver; calling the handle dispatches `method` on it.
+    BindMethod {
+        dst: Reg,
+        recv: Reg,
+        method: NameId,
+    },
     /// `dst = [items...]` — build a heap list, retaining each element into it.
     MakeList {
         dst: Reg,
@@ -1344,6 +1351,9 @@ fn op_repr(
             captures.len()
         ),
         Op::LoadNativeFn { dst, func } => format!("LoadNativeFn r{dst} <- {}", func.name()),
+        Op::BindMethod { dst, recv, method } => {
+            format!("BindMethod  r{dst} <- r{recv}.{}", n(method))
+        }
         Op::MakeCell { dst, src } => format!("MakeCell    r{dst} <- cell(r{src})"),
         Op::CellGet { dst, cell } => format!("CellGet     r{dst} <- *r{cell}"),
         Op::CellSet { cell, src } => format!("CellSet     *r{cell} <- r{src}"),

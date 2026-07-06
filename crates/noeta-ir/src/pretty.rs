@@ -279,6 +279,9 @@ impl Printer<'_> {
                 "handle {ty}.{method}{}",
                 if *associated { " (assoc)" } else { "" }
             ),
+            Rvalue::BoundHandle { recv, method, .. } => {
+                format!("bind {}.{method}", atom(recv))
+            }
             Rvalue::SetField {
                 receiver,
                 name,

@@ -326,6 +326,12 @@ pub(crate) enum Payload {
         method: String,
         associated: bool,
     },
+    /// A **bound** method handle (`value.method` as a value, prelude-redesign EX.2b): the receiver
+    /// is captured at bind time (one owned reference — for a `class` the shared instance, so later
+    /// mutations are visible through the handle; for a value type a value-semantic copy). Calling it
+    /// dispatches `method` on the captured receiver. NOT a leaf: `recv` is a child value (traversed
+    /// by the cycle collector, released with the handle).
+    BoundMethod { recv: Value, method: String },
     /// An `fs.open` file handle (M2.5): a mutable cursor over a content snapshot (read) or a
     /// pending write buffer. The whole state machine lives in `noeta_stdlib::FileHandle` so it is
     /// byte-identical to the tree-walker's. Holds no child `Value`s (only owned `String`s), so it
@@ -688,6 +694,8 @@ pub(crate) fn free(value: Value) {
         Payload::Future(step) => release_child(*step),
         // A channel-send future owns the message it is queuing until it is enqueued or dropped.
         Payload::ChannelSend(_, value) => release_child(*value),
+        // A bound method handle owns its captured receiver.
+        Payload::BoundMethod { recv, .. } => release_child(*recv),
         // A packed list (P-PACK 2.4) owns only primitive words — no child references — so freeing it
         // just drops the buffer (and its shared `Rc<PackedSchema>`), like any other leaf.
         Payload::Str(_)
@@ -871,6 +879,8 @@ pub(crate) fn children(value: Value) -> Vec<Value> {
         Payload::Future(step) => push(*step),
         // A channel-send future owns one reference to the message it is queuing.
         Payload::ChannelSend(_, value) => push(*value),
+        // A bound method handle owns one reference to its captured receiver.
+        Payload::BoundMethod { recv, .. } => push(*recv),
         // A packed list holds only primitive words (no child references) — a GC leaf; a timer holds
         // only its integer deadline.
         Payload::Str(_)

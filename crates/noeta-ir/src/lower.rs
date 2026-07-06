@@ -94,6 +94,9 @@ pub struct LoweringSites<'a> {
     /// Unbound method-handle sites (`Type.method` in value position) → the resolved
     /// `(ty, method, associated)`, emitted as an [`Rvalue::MethodHandle`] instead of a field load.
     pub handle_sites: &'a HashMap<Span, (String, String, bool)>,
+    /// **Bound**-handle sites (`value.method` in value position, EX.2b) → emitted as an
+    /// [`Rvalue::BoundHandle`] (the receiver captured) instead of a field load.
+    pub bound_handle_sites: &'a HashSet<Span>,
 }
 
 /// Lower a whole parsed program to the Core IR, or report the first construct outside the
@@ -109,6 +112,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
     let width = HashMap::new();
     let construction = HashMap::new();
     let handles = HashMap::new();
+    let bound = HashSet::new();
     lower_with_sites(
         program,
         LoweringSites {
@@ -119,6 +123,7 @@ pub fn lower(program: &AstProgram) -> Result<Program, Unsupported> {
             width_sites: &width,
             construction_sites: &construction,
             handle_sites: &handles,
+            bound_handle_sites: &bound,
         },
     )
 }
@@ -1014,6 +1019,19 @@ impl Lowerer<'_> {
                             ty: ty.clone(),
                             method: method.clone(),
                             associated: *associated,
+                            span: *span,
+                        },
+                        *span,
+                    ));
+                }
+                // `value.method` in value position (EX.2b) → a bound handle capturing the receiver.
+                if self.sites.bound_handle_sites.contains(span) {
+                    let recv = self.lower_expr(receiver, out)?;
+                    return Ok(self.emit(
+                        out,
+                        Rvalue::BoundHandle {
+                            recv,
+                            method: name.clone(),
                             span: *span,
                         },
                         *span,

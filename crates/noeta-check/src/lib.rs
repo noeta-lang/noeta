@@ -131,6 +131,9 @@ pub struct Checked {
     /// Unbound method-handle sites (`Type.method` in value position) → the resolved
     /// `(ty, method, associated)`. Lowering emits an [`Rvalue::MethodHandle`] at these spans.
     pub handle_sites: HashMap<Span, (String, String, bool)>,
+    /// Bound-handle sites (`value.method` in value position, EX.2b) → lowered to
+    /// [`Rvalue::BoundHandle`] (the receiver captured into the handle).
+    pub bound_handle_sites: HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b) — the input the drop-insertion pass reads to
     /// mark each `DropVar`'s `relevant` bit. A pure function of the program, like `type_of_sites`,
     /// so both backends derive identical annotations.
@@ -160,6 +163,7 @@ pub fn check_all(program: &Program) -> Checked {
         for_stream_sites: checker.sites.for_stream_sites,
         width_sites: checker.sites.width_sites,
         handle_sites: checker.sites.handle_sites,
+        bound_handle_sites: checker.sites.bound_handle_sites,
         destructor_relevance: checker.relevance,
     }
 }
@@ -484,6 +488,9 @@ struct SiteMaps {
     /// resolved `(ty, method, associated)`. Lowering reads this (via [`Checked::handle_sites`]) to
     /// emit an [`Rvalue::MethodHandle`] instead of a field load. A pure function of the program.
     handle_sites: HashMap<Span, (String, String, bool)>,
+    /// **Bound**-handle sites (`value.method` in value position, EX.2b): spans whose `Member`
+    /// lowers to an [`Rvalue::BoundHandle`] (receiver captured) instead of a field load.
+    bound_handle_sites: HashSet<Span>,
 }
 
 #[derive(Default)]
@@ -4735,6 +4742,37 @@ impl Checker {
                 .filter(|p| !self.type_params.contains_key(p))
                 .collect();
             return erase_type_params(apply_subst(&ty, &subst), &pset);
+        }
+        // `value.method` in value position — a **bound** method handle (EX.2b): the receiver is
+        // captured at bind time; the handle is `Fn(params) -> ret` (no receiver parameter). Checked
+        // AFTER the field path, so a same-named field keeps winning member access. Covers user
+        // types (instance methods only — binding an associated fn through a value is the E0047
+        // wrong-way shape) and built-in receivers (`xs.len`, `s.upper`).
+        if let Type::Named(n, _) = &recv
+            && let Some(sig) = self.methods.get(&(n.clone(), name.to_string()))
+            && self
+                .method_instance
+                .get(&(n.clone(), name.to_string()))
+                .copied()
+                .unwrap_or(true)
+        {
+            let params = sig.params.clone();
+            let ret = sig.ret.clone();
+            self.sites.bound_handle_sites.insert(member_span);
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
+        }
+        if !matches!(recv, Type::Unknown | Type::Dyn)
+            && let Some(ret) = stdlib::method_return(&recv, name)
+        {
+            let params = stdlib::method_params(&recv, name).unwrap_or_default();
+            self.sites.bound_handle_sites.insert(member_span);
+            return Type::Fn {
+                params,
+                ret: Box::new(ret),
+            };
         }
         // A field/member access on a `dyn` (or hole) receiver stays deferred.
         if recv.defers_to_runtime() {

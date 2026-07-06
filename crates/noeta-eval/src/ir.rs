@@ -1120,6 +1120,11 @@ impl Interpreter {
                 associated,
                 ..
             } => Ok(Value::MethodHandle(ty.clone(), method.clone(), *associated)),
+            // A bound method handle (`value.method`, EX.2b): evaluate and capture the receiver.
+            noeta_ir::Rvalue::BoundHandle { recv, method, .. } => {
+                let recv = self.eval_ir_atom(recv, frame)?;
+                Ok(Value::BoundMethod(Box::new(recv), method.clone()))
+            }
             noeta_ir::Rvalue::IndexField {
                 receiver,
                 index,

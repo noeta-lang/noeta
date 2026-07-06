@@ -157,6 +157,7 @@ fn run(program: &noeta_ast::Program, checked: &noeta_db::Checked, report: &mut I
                 checked.width_sites.clone(),
                 checked.construction_sites.clone(),
                 checked.handle_sites.clone(),
+        checked.bound_handle_sites.clone(),
                 &checked.destructor_relevance,
             );
             report.ran += 1;

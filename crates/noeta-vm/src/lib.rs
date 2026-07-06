@@ -2437,6 +2437,15 @@ impl<'m> Vm<'m> {
                         set_reg(regs, fbase, *dst, Value::native_fn(*func));
                         pc += 1;
                     }
+                    Op::BindMethod { dst, recv, method } => {
+                        // A bound method handle (`value.method`, EX.2b): capture one retained
+                        // reference to the receiver.
+                        let recv_val = regs[fbase + *recv as usize];
+                        retain(recv_val);
+                        let handle = Value::bound_method(recv_val, module.name(*method));
+                        set_reg(regs, fbase, *dst, handle);
+                        pc += 1;
+                    }
                     Op::MakeList {
                         dst,
                         items,
@@ -4832,17 +4841,28 @@ impl<'m> Vm<'m> {
                         Some((ty, method, associated)) => {
                             self.run_method_handle(&ty, &method, associated, args, span)
                         }
-                        None => {
-                            let type_name = callee.type_name();
-                            for a in args {
-                                release(a);
+                        // A bound handle: prepend the captured receiver (retained — the instance
+                        // dispatch consumes owned arguments) and run as an instance handle.
+                        None => match callee.bound_method_parts() {
+                            Some((recv, method)) => {
+                                retain(recv);
+                                let mut owned = Vec::with_capacity(args.len() + 1);
+                                owned.push(recv);
+                                owned.extend(args);
+                                self.run_method_handle("", &method, false, owned, span)
                             }
-                            Err(self.error(
-                                DiagnosticCode::TypeMismatch,
-                                span,
-                                format!("{type_name} is not callable"),
-                            ))
-                        }
+                            None => {
+                                let type_name = callee.type_name();
+                                for a in args {
+                                    release(a);
+                                }
+                                Err(self.error(
+                                    DiagnosticCode::TypeMismatch,
+                                    span,
+                                    format!("{type_name} is not callable"),
+                                ))
+                            }
+                        },
                     },
                 },
             },
@@ -5553,11 +5573,28 @@ impl<'m> Vm<'m> {
                             set_reg(regs, caller_base, dst, result);
                             Ok(false)
                         }
-                        None => Err(self.error(
-                            DiagnosticCode::TypeMismatch,
-                            span,
-                            format!("{} is not callable", callee_val.type_name()),
-                        )),
+                        // A bound handle: captured receiver first, then the call's arguments.
+                        None => match callee_val.bound_method_parts() {
+                            Some((recv, method)) => {
+                                retain(recv);
+                                let mut owned = Vec::with_capacity(arg_regs.len() + 1);
+                                owned.push(recv);
+                                for &r in arg_regs {
+                                    let v = regs[caller_base + r as usize];
+                                    retain(v);
+                                    owned.push(v);
+                                }
+                                let result =
+                                    self.run_method_handle("", &method, false, owned, span)?;
+                                set_reg(regs, caller_base, dst, result);
+                                Ok(false)
+                            }
+                            None => Err(self.error(
+                                DiagnosticCode::TypeMismatch,
+                                span,
+                                format!("{} is not callable", callee_val.type_name()),
+                            )),
+                        },
                     },
                 },
             },

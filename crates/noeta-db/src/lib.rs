@@ -128,6 +128,8 @@ pub struct Checked {
     /// `(ty, method, associated)`, carried here for the same reason as the other site maps: lowering
     /// emits an `Rvalue::MethodHandle` at these spans on both backends.
     pub handle_sites: std::collections::HashMap<Span, (String, String, bool)>,
+    /// Bound-handle sites (`value.method`, EX.2b), carried like the other site maps.
+    pub bound_handle_sites: std::collections::HashSet<Span>,
     /// Per-binding destructor-relevance (Phase 3.2b), threaded into the compiler so the drop pass
     /// annotates each `DropVar` — carried here for the same reason as `type_of_sites` (compute the
     /// checker's result once, reuse it without a second run).
@@ -215,6 +217,7 @@ pub fn checked(db: &dyn salsa::Database, src: SourceProgram) -> Checked {
         width_sites: out.width_sites,
         construction_sites: out.construction_sites,
         handle_sites: out.handle_sites,
+        bound_handle_sites: out.bound_handle_sites,
         destructor_relevance: out.destructor_relevance,
     }
 }
@@ -244,6 +247,7 @@ pub fn bytecode(db: &dyn salsa::Database, src: SourceProgram) -> Bytecode {
         checked.width_sites.clone(),
         checked.construction_sites.clone(),
         checked.handle_sites.clone(),
+        checked.bound_handle_sites.clone(),
         &checked.destructor_relevance,
         false,
     ))
@@ -350,6 +354,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
                 width_sites: out.width_sites,
                 construction_sites: out.construction_sites,
                 handle_sites: out.handle_sites,
+        bound_handle_sites: out.bound_handle_sites,
                 destructor_relevance: out.destructor_relevance,
             }
         }
@@ -364,6 +369,7 @@ pub fn linked_checked(db: &dyn salsa::Database, ws: Workspace) -> Checked {
             width_sites: std::collections::HashMap::new(),
             construction_sites: std::collections::HashMap::new(),
             handle_sites: std::collections::HashMap::new(),
+            bound_handle_sites: std::collections::HashSet::new(),
             destructor_relevance: noeta_check::DestructorRelevance::default(),
         },
     }
@@ -394,6 +400,7 @@ pub fn linked_bytecode(db: &dyn salsa::Database, ws: Workspace) -> Bytecode {
                 checked.width_sites.clone(),
                 checked.construction_sites.clone(),
                 checked.handle_sites.clone(),
+                checked.bound_handle_sites.clone(),
                 &checked.destructor_relevance,
                 false,
             ))

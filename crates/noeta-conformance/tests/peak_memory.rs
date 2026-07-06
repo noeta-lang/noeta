@@ -95,6 +95,7 @@ fn eval_runner(program: noeta_ast::Program) -> impl FnOnce() -> noeta_backend::R
             width_sites: &checked.width_sites,
             construction_sites: &checked.construction_sites,
             handle_sites: &checked.handle_sites,
+            bound_handle_sites: &checked.bound_handle_sites,
         },
     )
     .expect("Core-IR lowering is total over the parsed language");

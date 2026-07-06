@@ -93,6 +93,7 @@ impl Backend for TreeWalkBackend {
                 width_sites: &checked.width_sites,
                 construction_sites: &checked.construction_sites,
                 handle_sites: &checked.handle_sites,
+                bound_handle_sites: &checked.bound_handle_sites,
             },
         )
         .expect("Core-IR lowering is total over the parsed language");
@@ -1331,6 +1332,8 @@ impl Interpreter {
             // closure/future/iterator's cells). Container-before-contained, deferring to the true last
             // reference of each capture.
             Value::Function(c) => self.destroy_closure(c),
+            // A bound handle owns its captured receiver — destroy it with the handle.
+            Value::BoundMethod(recv, _) => self.destroy_value(*recv),
             Value::Future(inner) => self.destroy_boxed(inner),
             Value::Iter(state) => self.destroy_iter(state),
             // Scalars/types/handles bear no destructor; their `Rc`/value drops here, reclaiming memory.
@@ -3356,6 +3359,8 @@ impl Interpreter {
                     self.call_method(recv, &method, args, span)
                 }
             }
+            // A bound handle (`f = x.method`, EX.2b): dispatch the method on the captured receiver.
+            Value::BoundMethod(recv, method) => self.call_method(*recv, &method, args, span),
             Value::Function(closure) => self.call_closure(&closure, args, span),
             other => Err(self.runtime_error(
                 DiagnosticCode::TypeMismatch,
@@ -4598,9 +4603,11 @@ fn eval_type_repr(value: &Value) -> noeta_ast::reflect::TypeRepr {
             .as_ref()
             .map(|r| (**r).clone())
             .unwrap_or_else(|| TypeRepr::Map(dyn_(), dyn_())),
-        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) | Value::MethodHandle(..) => {
-            TypeRepr::Fn(Vec::new(), dyn_())
-        }
+        Value::Function(_)
+        | Value::Builtin(_)
+        | Value::ModuleFn(..)
+        | Value::MethodHandle(..)
+        | Value::BoundMethod(..) => TypeRepr::Fn(Vec::new(), dyn_()),
         // A generic enum instance carrying a reflected type tag (R2b.2) reports its precise type;
         // otherwise the head-only classification (`Option`/`Result` by name, else the enum name with
         // empty args). Mirrors `vm_type_repr`'s node-tag consultation.
@@ -4796,7 +4803,11 @@ fn runtime_matches(value: &Value, ty: &TypeRef) -> bool {
         // matching the VM's `NarrowTarget::Fn` (type_name `"function"`).
         TypeRef::Fn { .. } => matches!(
             value,
-            Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) | Value::MethodHandle(..)
+            Value::Function(_)
+                | Value::Builtin(_)
+                | Value::ModuleFn(..)
+                | Value::MethodHandle(..)
+                | Value::BoundMethod(..)
         ),
         TypeRef::Named { name, args, .. } => {
             let head_ok = match name.as_str() {
@@ -5084,9 +5095,11 @@ fn value_to_native_deep(value: &Value) -> noeta_stdlib::NativeValue {
             )
         }
         Value::Enum(e) => NativeValue::Str(e.variant.clone()),
-        Value::Function(_) | Value::Builtin(_) | Value::ModuleFn(..) | Value::MethodHandle(..) => {
-            NativeValue::Str("<fn>".to_string())
-        }
+        Value::Function(_)
+        | Value::Builtin(_)
+        | Value::ModuleFn(..)
+        | Value::MethodHandle(..)
+        | Value::BoundMethod(..) => NativeValue::Str("<fn>".to_string()),
         Value::NativeModule(module) => NativeValue::Str(format!("<module {module}>")),
         Value::FileHandle(handle) => NativeValue::Str(handle.borrow().display()),
         // An iterator has no JSON analog — its opaque display form, like the VM.

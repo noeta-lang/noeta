@@ -438,6 +438,11 @@ fn values_equal(left: Value, right: Value) -> bool {
     if let (Some(a), Some(b)) = (left.method_handle_parts(), right.method_handle_parts()) {
         return a == b;
     }
+    // Bound handles compare by method name + receiver value equality.
+    if let (Some((ra, ma)), Some((rb, mb))) = (left.bound_method_parts(), right.bound_method_parts())
+    {
+        return ma == mb && values_equal(ra, rb);
+    }
     false
 }
 

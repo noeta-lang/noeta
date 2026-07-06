@@ -160,6 +160,8 @@ pub enum Wire {
     ModuleFn(String, String),
     /// An unbound method handle (`Type.method` as a value, MH) — `(ty, method, associated)`.
     MethodHandle(String, String, bool),
+    /// A bound method handle (`value.method`, EX.2b) — the captured receiver ships recursively.
+    BoundMethod(Box<Wire>, String),
     /// A channel sender endpoint (isolates I.4c): the shared cross-thread channel it names. Shipping an
     /// endpoint into an isolate clones the `Arc`, so both isolates operate on one queue.
     Sender(Arc<ChannelCore>),
@@ -275,6 +277,12 @@ pub fn marshal(value: Value, shapes: &[Rc<Shape>], channels: &[Channel]) -> Resu
     if let Some((ty, method, associated)) = value.method_handle_parts() {
         return Ok(Wire::MethodHandle(ty, method, associated));
     }
+    if let Some((recv, method)) = value.bound_method_parts() {
+        return Ok(Wire::BoundMethod(
+            Box::new(marshal(recv, shapes, channels)?),
+            method,
+        ));
+    }
     Err(format!(
         "value of type `{}` is not shippable",
         value.type_name()
@@ -329,6 +337,9 @@ pub fn rebuild(wire: &Wire, shapes: &[Rc<Shape>], channels: &mut Vec<Channel>) -
         Wire::NativeModule(name) => Value::native_module(name),
         Wire::ModuleFn(module, func) => Value::module_fn(module, func),
         Wire::MethodHandle(ty, method, associated) => Value::method_handle(ty, method, *associated),
+        Wire::BoundMethod(recv, method) => {
+            Value::bound_method(rebuild(recv, shapes, channels), method)
+        }
         Wire::Sender(core) => {
             let id = ChannelId::from_index(channels.len());
             channels.push(Channel::Shared(Arc::clone(core)));
