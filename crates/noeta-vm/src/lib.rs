@@ -57,6 +57,28 @@ pub(crate) use values::*;
 mod methods;
 mod scheduler;
 
+/// A debugger observing tier-0 execution (the `noeta dap` server implements it). The VM consults it
+/// **before each instruction**, passing the executing prototype and program counter; the
+/// implementation maps that to a source line, decides whether to pause (breakpoint / step / entry),
+/// and — when it pauses — blocks the run thread until the user resumes. Returning
+/// [`DebugAction::Terminate`] unwinds the run cleanly (as an abort), which is how a `disconnect` while
+/// paused stops the program. Only installed on the debug run path (JIT unarmed), so it never sees a
+/// JIT'd frame; a production/differential run leaves it `None` and pays one predicted branch per op.
+pub trait Debugger: Send {
+    /// Called with the instruction about to execute (`proto` is its prototype index, `pc` its offset
+    /// in that prototype's code). May block until the user resumes.
+    fn before_op(&mut self, proto: u32, pc: usize) -> DebugAction;
+}
+
+/// What the VM does after consulting the [`Debugger`] for an instruction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DebugAction {
+    /// Execute the instruction and continue.
+    Continue,
+    /// Abandon the run (clean teardown, as an abort) — e.g. the client disconnected while paused.
+    Terminate,
+}
+
 /// The bytecode-VM backend.
 #[derive(Debug, Clone, Default)]
 pub struct VmBackend;
@@ -132,13 +154,25 @@ impl VmBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> RunResult {
-        execute_with_collector(
-            module,
-            host,
-            executor,
-            noeta_value::CollectorMode::Trace,
-            false,
-        )
+        self.run_module_debug(module, host, executor, None)
+    }
+
+    /// Like [`VmBackend::run_module_with_host_and_executor_no_jit`], but with a [`Debugger`] attached
+    /// (the `noeta dap` run path). Tier-0 throughout so every frame is interpreter-executed and the
+    /// debugger's `before_op` sees a real pc; the JIT is never armed. `debugger = None` is exactly the
+    /// plain no-JIT run.
+    pub fn run_module_debug(
+        &self,
+        module: &Module,
+        host: Box<dyn noeta_stdlib::Host>,
+        executor: Box<dyn noeta_stdlib::Executor>,
+        debugger: Option<Box<dyn Debugger>>,
+    ) -> RunResult {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let mut vm = Vm::load(module, host, executor);
+        vm.debugger = debugger;
+        run_and_teardown(&mut vm, mode)
     }
 
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
@@ -473,6 +507,9 @@ struct Vm<'m> {
     /// `Vm`'s lifetime; the `Jit` and its generated code are dropped with the same `Vm`).
     #[cfg(feature = "jit")]
     jit_frame_template: Option<Box<Frame>>,
+    /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
+    /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
+    debugger: Option<Box<dyn Debugger>>,
 }
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
@@ -1434,6 +1471,7 @@ impl<'m> Vm<'m> {
             jit_cache_pins: Vec::new(),
             #[cfg(feature = "jit")]
             jit_frame_template: None,
+            debugger: None,
         }
     }
 
@@ -2250,6 +2288,17 @@ impl<'m> Vm<'m> {
                 };
             }
             loop {
+                // Debugger seam (`noeta dap`): before each instruction, let the attached debugger map
+                // `(proto, pc)` to a source line and pause if a breakpoint/step/entry condition holds.
+                // `None` on every non-debug run — one predicted branch. The frame's `pc` is synced
+                // first so a paused stack trace reads the instruction about to run. `Terminate` (a
+                // disconnect while paused) unwinds cleanly, releasing the stack like any abort.
+                if let Some(debugger) = self.debugger.as_deref_mut() {
+                    frames[top].pc = pc;
+                    if debugger.before_op(proto as u32, pc) == DebugAction::Terminate {
+                        return Err(Abort);
+                    }
+                }
                 // Every prototype ends with `Halt`, so `pc` never runs off the end — index directly
                 // instead of the `.get()` guard the pre-S3 loop used. A call keeps `fbase` on the
                 // *caller* until `continue 'reload`, so a call op reads its arguments first.

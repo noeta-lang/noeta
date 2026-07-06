@@ -1,38 +1,44 @@
 //! `noeta dap` — the Debug Adapter Protocol server.
 //!
 //! A stdio adapter, sibling to `noeta lsp`, that lets an editor's debug UI run a `.noe` program under
-//! the *production* bytecode VM. This D0 slice stands up the skeleton: the DAP framing and lifecycle
-//! (`initialize` → `launch` → `configurationDone`), and a run that executes the program to completion
-//! with the JIT unarmed (tier-0), streaming its stdout back as `output` events and reporting the exit
-//! code. Breakpoints, stepping, stack frames, and variables arrive in later slices (D1+).
+//! the *production* bytecode VM (JIT unarmed, so every frame is tier-0 and inspectable). This slice
+//! adds **breakpoints** and **stop-on-entry** on top of the D0 skeleton: the program compiles with
+//! debug info, a [`debugger::DapDebugger`] is attached to the run, and it pauses at resolved
+//! breakpoints (emitting `stopped`) until the client sends `continue`.
 //!
 //! ## Threading
 //!
-//! Three roles, decoupled by a channel so a running (and, later, paused) program never blocks the
-//! protocol loop:
+//! Three roles, decoupled by channels so a paused program never blocks the protocol loop:
 //! - the **reader** (this thread) decodes requests from stdin and dispatches them;
-//! - a **run worker** executes the program and emits its events;
+//! - a **run worker** compiles + executes the program and emits its events (including `stopped` while
+//!   paused, from the attached debugger);
 //! - a single **writer** thread owns stdout, serializing every response and event through one
 //!   [`protocol::Writer`] (and the outgoing `seq` counter).
 //!
-//! All outgoing messages — from the reader and from workers alike — are sent over one `mpsc` channel
-//! to the writer, so writes never interleave and sequence numbers stay monotonic.
+//! All outgoing messages funnel through one `mpsc` channel to the writer. A second channel carries
+//! resume commands from the reader to a paused worker; an `AtomicBool` lets the reader abandon a
+//! *running* (not paused) worker on disconnect.
 
+mod debugger;
 mod protocol;
 mod session;
 
+use std::collections::HashMap;
 use std::io::{self, BufRead, BufReader, Write};
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::thread::{self, JoinHandle};
 
 use serde_json::{Value, json};
 
+use debugger::{DapDebugger, Resume, resolve_breakpoints};
 use protocol::{Writer, command_of, error_response, event, read_message, response};
 
 /// The debuggee is a single logical thread of execution; the DAP UI still needs a thread id to hang
 /// stack frames and stepping off, so we expose one fixed "main" thread.
-const MAIN_THREAD_ID: i64 = 1;
+pub(crate) const MAIN_THREAD_ID: i64 = 1;
 
 /// Serve the debug adapter over the process's stdin/stdout, blocking until the client disconnects or
 /// closes the stream.
@@ -55,6 +61,13 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
     });
 
     let mut program: Option<PathBuf> = None;
+    let mut stop_on_entry = false;
+    // Requested breakpoints, keyed by the editor's source path → 1-based lines.
+    let mut breakpoints: HashMap<String, Vec<u32>> = HashMap::new();
+    // Present once a run is launched: `resume_tx` unblocks a paused worker; `terminate` abandons a
+    // running one. Both target the current run's debugger.
+    let mut resume_tx: Option<Sender<Resume>> = None;
+    let mut terminate: Option<Arc<AtomicBool>> = None;
     let mut workers: Vec<JoinHandle<()>> = Vec::new();
 
     while let Ok(Some(request)) = read_message(&mut reader) {
@@ -66,11 +79,19 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
             }
             "launch" => {
                 program = launch_program(&request);
+                stop_on_entry = launch_flag(&request, "stopOnEntry");
                 let _ = tx.send(response(&request, json!({})));
             }
-            // Breakpoints arrive in D1; for now acknowledge and register none so the client proceeds.
             "setBreakpoints" => {
-                let _ = tx.send(response(&request, json!({ "breakpoints": [] })));
+                let (path, lines) = parse_breakpoints(&request);
+                let verified: Vec<Value> = lines
+                    .iter()
+                    .map(|line| json!({ "verified": true, "line": line }))
+                    .collect();
+                if let Some(path) = path {
+                    breakpoints.insert(path, lines);
+                }
+                let _ = tx.send(response(&request, json!({ "breakpoints": verified })));
             }
             "setExceptionBreakpoints" => {
                 let _ = tx.send(response(&request, json!({})));
@@ -81,11 +102,24 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     json!({ "threads": [ { "id": MAIN_THREAD_ID, "name": "main" } ] }),
                 ));
             }
-            // The client has finished configuring; start the program.
+            // The client has finished configuring; compile + start the program under the debugger.
             "configurationDone" => {
                 let _ = tx.send(response(&request, json!({})));
                 match program.clone() {
-                    Some(path) => workers.push(spawn_run(path, tx.clone())),
+                    Some(path) => {
+                        let (r_tx, r_rx) = mpsc::channel::<Resume>();
+                        let term = Arc::new(AtomicBool::new(false));
+                        resume_tx = Some(r_tx);
+                        terminate = Some(Arc::clone(&term));
+                        workers.push(spawn_run(
+                            path,
+                            breakpoints.clone(),
+                            stop_on_entry,
+                            term,
+                            r_rx,
+                            tx.clone(),
+                        ));
+                    }
                     None => {
                         let _ = tx.send(output_event("stderr", "noeta: no program to launch\n"));
                         let _ = tx.send(exited_event(1));
@@ -93,7 +127,14 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
                     }
                 }
             }
+            "continue" => {
+                if let Some(resume) = &resume_tx {
+                    let _ = resume.send(Resume::Continue);
+                }
+                let _ = tx.send(response(&request, json!({ "allThreadsContinued": true })));
+            }
             "disconnect" => {
+                signal_terminate(&terminate, &resume_tx);
                 let _ = tx.send(response(&request, json!({})));
                 break;
             }
@@ -106,7 +147,11 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
         }
     }
 
-    // Let an in-flight run finish so its events are written, then close the channel and drain.
+    // Drop the resume sender: a *paused* worker's `recv` then errors and it terminates, so the join
+    // below cannot hang. A *running* worker isn't receiving, so this leaves it to finish naturally —
+    // stdin-EOF must not abort a program that is still producing output (only an explicit `disconnect`
+    // does, via `signal_terminate` above).
+    drop(resume_tx);
     for worker in workers {
         let _ = worker.join();
     }
@@ -114,15 +159,38 @@ fn serve<R: BufRead, W: Write + Send + 'static>(mut reader: R, out: W) {
     let _ = writer.join();
 }
 
-/// Spawn the worker that runs `path` to completion and emits its DAP events: a `thread` started
-/// notice, one `output` event per captured chunk, then `thread` exited, `exited`, and `terminated`.
-fn spawn_run(path: PathBuf, out: Sender<Value>) -> JoinHandle<()> {
+/// Compile + run `path` under a debugger on a worker thread, emitting its DAP events: a `thread`
+/// started notice, `stopped` while paused (from the debugger), one `output` event per captured chunk,
+/// then `thread` exited, `exited`, and `terminated`.
+#[allow(clippy::too_many_arguments)]
+fn spawn_run(
+    path: PathBuf,
+    breakpoints: HashMap<String, Vec<u32>>,
+    stop_on_entry: bool,
+    terminate: Arc<AtomicBool>,
+    resume: mpsc::Receiver<Resume>,
+    out: Sender<Value>,
+) -> JoinHandle<()> {
     thread::spawn(move || {
         let _ = out.send(event(
             "thread",
             json!({ "reason": "started", "threadId": MAIN_THREAD_ID }),
         ));
-        let run = session::run_file(&path);
+        let run = match session::compile_file(&path) {
+            Ok(compiled) => {
+                let stops = resolve_breakpoints(&compiled.module, &compiled.sources, &breakpoints);
+                let hook = Box::new(DapDebugger::new(
+                    stops,
+                    stop_on_entry,
+                    terminate,
+                    out.clone(),
+                    resume,
+                ));
+                session::run_compiled(&compiled, Some(hook))
+            }
+            // A load/check/compile failure never started the VM — replay it as a stderr chunk.
+            Err(failure) => failure,
+        };
         for chunk in run.chunks {
             let _ = out.send(output_event(chunk.category, &chunk.text));
         }
@@ -135,8 +203,19 @@ fn spawn_run(path: PathBuf, out: Sender<Value>) -> JoinHandle<()> {
     })
 }
 
-/// The adapter's advertised capabilities. D0 supports the configuration handshake; feature flags for
-/// breakpoints/stepping are added as those slices land.
+/// Abandon the current run: set the terminate flag (for a *running* worker) and send a terminate
+/// resume (to unblock a *paused* one). No-op when no run is active.
+fn signal_terminate(terminate: &Option<Arc<AtomicBool>>, resume_tx: &Option<Sender<Resume>>) {
+    if let Some(flag) = terminate {
+        flag.store(true, Ordering::Relaxed);
+    }
+    if let Some(resume) = resume_tx {
+        let _ = resume.send(Resume::Terminate);
+    }
+}
+
+/// The adapter's advertised capabilities. Supports the configuration handshake (so the client sends
+/// breakpoints before the run starts); stepping/variable flags are added as those slices land.
 fn capabilities() -> Value {
     json!({
         "supportsConfigurationDoneRequest": true,
@@ -150,6 +229,47 @@ fn launch_program(request: &Value) -> Option<PathBuf> {
         .get("program")?
         .as_str()
         .map(PathBuf::from)
+}
+
+/// A boolean `launch` argument (e.g. `stopOnEntry`), defaulting to false.
+fn launch_flag(request: &Value, key: &str) -> bool {
+    request
+        .get("arguments")
+        .and_then(|a| a.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+/// The `(source.path, [line])` of a `setBreakpoints` request. Lines come from `breakpoints[].line`
+/// (the current form) or `lines[]` (the legacy form); the path may be absent for an unnamed buffer.
+fn parse_breakpoints(request: &Value) -> (Option<String>, Vec<u32>) {
+    let args = request.get("arguments");
+    let path = args
+        .and_then(|a| a.get("source"))
+        .and_then(|s| s.get("path"))
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let lines = args
+        .and_then(|a| a.get("breakpoints"))
+        .and_then(Value::as_array)
+        .map(|bps| {
+            bps.iter()
+                .filter_map(|b| b.get("line").and_then(Value::as_u64))
+                .map(|l| l as u32)
+                .collect::<Vec<_>>()
+        })
+        .or_else(|| {
+            args.and_then(|a| a.get("lines"))
+                .and_then(Value::as_array)
+                .map(|ls| {
+                    ls.iter()
+                        .filter_map(Value::as_u64)
+                        .map(|l| l as u32)
+                        .collect()
+                })
+        })
+        .unwrap_or_default();
+    (path, lines)
 }
 
 fn output_event(category: &str, text: &str) -> Value {
@@ -242,6 +362,14 @@ mod tests {
             .find(|m| m["type"] == "response" && m["command"] == command)
     }
 
+    fn stdout_of(messages: &[Value]) -> String {
+        events(messages, "output")
+            .iter()
+            .filter(|e| e["body"]["category"] == "stdout")
+            .map(|e| e["body"]["output"].as_str().unwrap_or(""))
+            .collect()
+    }
+
     #[test]
     fn initialize_advertises_capabilities_and_signals_initialized() {
         let messages = drive(&[request(1, "initialize", json!({}))]);
@@ -275,17 +403,7 @@ mod tests {
         ]);
 
         assert_eq!(response_to(&messages, "launch").unwrap()["success"], true);
-        assert_eq!(
-            response_to(&messages, "configurationDone").unwrap()["success"],
-            true
-        );
-
-        let stdout: String = events(&messages, "output")
-            .iter()
-            .filter(|e| e["body"]["category"] == "stdout")
-            .map(|e| e["body"]["output"].as_str().unwrap_or(""))
-            .collect();
-        assert!(stdout.contains("hello from noeta"), "stdout was {stdout:?}");
+        assert!(stdout_of(&messages).contains("hello from noeta"));
 
         let exited = events(&messages, "exited");
         assert_eq!(exited.len(), 1);
@@ -313,7 +431,6 @@ mod tests {
         let exited = events(&messages, "exited");
         assert_eq!(exited.len(), 1);
         assert_ne!(exited[0]["body"]["exitCode"], 0);
-        assert_eq!(events(&messages, "terminated").len(), 1);
     }
 
     #[test]
@@ -326,6 +443,65 @@ mod tests {
             response_to(&messages, "disconnect").unwrap()["success"],
             true
         );
+    }
+
+    #[test]
+    fn stop_on_entry_pauses_then_continue_runs_to_completion() {
+        let path = fixture("entry", "echo \"after entry\";\n");
+        let messages = drive(&[
+            request(1, "initialize", json!({})),
+            request(
+                2,
+                "launch",
+                json!({ "program": path.to_str().unwrap(), "stopOnEntry": true }),
+            ),
+            request(3, "configurationDone", json!({})),
+            // Buffered: the worker recvs it the moment it pauses at entry.
+            request(4, "continue", json!({ "threadId": MAIN_THREAD_ID })),
+        ]);
+
+        let stopped = events(&messages, "stopped");
+        assert_eq!(stopped.len(), 1, "expected one entry stop");
+        assert_eq!(stopped[0]["body"]["reason"], "entry");
+        // After continuing, the program finished and printed.
+        assert!(stdout_of(&messages).contains("after entry"));
+        assert_eq!(events(&messages, "terminated").len(), 1);
+    }
+
+    #[test]
+    fn a_line_breakpoint_pauses_then_continue_finishes() {
+        let path = fixture("bp", "echo \"one\";\necho \"two\";\necho \"three\";\n");
+        let program = path.to_str().unwrap().to_string();
+        let messages = drive(&[
+            request(1, "initialize", json!({})),
+            request(2, "launch", json!({ "program": program })),
+            request(
+                3,
+                "setBreakpoints",
+                json!({
+                    "source": { "path": program },
+                    "breakpoints": [ { "line": 2 } ],
+                }),
+            ),
+            request(4, "configurationDone", json!({})),
+            request(5, "continue", json!({ "threadId": MAIN_THREAD_ID })),
+        ]);
+
+        // The breakpoint verified and paused once.
+        assert_eq!(
+            response_to(&messages, "setBreakpoints").unwrap()["body"]["breakpoints"][0]["verified"],
+            true
+        );
+        let stopped = events(&messages, "stopped");
+        assert_eq!(stopped.len(), 1, "expected one breakpoint stop");
+        assert_eq!(stopped[0]["body"]["reason"], "breakpoint");
+        // Continuing ran it to completion — all three lines printed.
+        let out = stdout_of(&messages);
+        assert!(
+            out.contains("one") && out.contains("two") && out.contains("three"),
+            "out={out:?}"
+        );
+        assert_eq!(events(&messages, "terminated").len(), 1);
     }
 
     #[test]

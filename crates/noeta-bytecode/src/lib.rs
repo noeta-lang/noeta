@@ -989,6 +989,61 @@ pub enum Op {
     Halt,
 }
 
+impl Op {
+    /// The source span this instruction is attributed to, if it carries one. Most executable ops
+    /// (calls, field/index access, arithmetic, branches, …) do — they need it to raise a runtime
+    /// diagnostic; pure register housekeeping (`Move`, `LoadConst`, `Jump`, …) does not. A debugger
+    /// maps a program counter to a source line through this (falling back to a nearby spanned op for
+    /// the span-less ones).
+    pub fn span(&self) -> Option<Span> {
+        match self {
+            Op::LoadGlobal { span, .. }
+            | Op::TakeGlobal { span, .. }
+            | Op::ConcatInPlace { span, .. }
+            | Op::PackedListPush { span, .. }
+            | Op::TupleIndex { span, .. }
+            | Op::MakeRange { span, .. }
+            | Op::RequireMapKey { span, .. }
+            | Op::IterSnapshot { span, .. }
+            | Op::ListLen { span, .. }
+            | Op::IterForNext { span, .. }
+            | Op::CallBuiltin { span, .. }
+            | Op::CallMethod { span, .. }
+            | Op::Index { span, .. }
+            | Op::IndexField { span, .. }
+            | Op::MakeStruct { span, .. }
+            | Op::MakeStructInPlace { span, .. }
+            | Op::EnumFromStr { span, .. }
+            | Op::LoadField { span, .. }
+            | Op::SetField { span, .. }
+            | Op::Panic { span, .. }
+            | Op::TryUnwrap { span, .. }
+            | Op::Coalesce { span, .. }
+            | Op::RunFuture { span, .. }
+            | Op::PollFuture { span, .. }
+            | Op::Spawn { span, .. }
+            | Op::SpawnIsolate { span, .. }
+            | Op::ScopeEnd { span, .. }
+            | Op::MakeChannel { span, .. }
+            | Op::FromBytes { span, .. }
+            | Op::Invoke { span, .. }
+            | Op::ExtCall { span, .. }
+            | Op::MatchFail { span, .. }
+            | Op::Call { span, .. }
+            | Op::CallGlobal { span, .. }
+            | Op::Unary { span, .. }
+            | Op::WideInt { span, .. }
+            | Op::WidthIntMethod { span, .. }
+            | Op::Binary { span, .. }
+            | Op::RequireBool { span, .. }
+            | Op::RequireCondBool { span, .. }
+            | Op::CondBranch { span, .. }
+            | Op::Stringify { span, .. } => Some(*span),
+            _ => None,
+        }
+    }
+}
+
 /// A compiled function prototype: instructions, the constant pool, the precomputed raise
 /// diagnostics, the parameter count, and the number of registers the frame needs. The
 /// top-level program is just the prototype at index 0 (`num_params == 0`); every `fn` and
