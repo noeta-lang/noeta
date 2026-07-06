@@ -669,6 +669,30 @@ impl Checker {
         self.diags.last_mut().expect("just pushed a diagnostic")
     }
 
+    /// Reject a declaration that binds a **reserved prelude name** (E0046, prelude-redesign P3).
+    /// The always-global prelude is deliberately tiny — `Ok`/`Err`/`some`/`none`/`panic`/`assert` —
+    /// and those names cannot be bound by ANY form (binding, `mut`, param, `fn`, type, `for`/match
+    /// binder): the tree-walker pre-declares them as immutable globals while the VM would resolve a
+    /// shadow as a fresh local, so allowing a binding meant the backends diverged. Rejecting it
+    /// statically closes that divergence by construction. Methods and enum variants are exempt —
+    /// they are always receiver-/type-qualified, so a bare prelude name never resolves to them.
+    fn check_reserved_name(&mut self, name: &str, span: Span) {
+        const RESERVED_PRELUDE: &[&str] = &["Ok", "Err", "some", "none", "panic", "assert"];
+        if RESERVED_PRELUDE.contains(&name) {
+            self.diags.push(
+                Diagnostic::error(
+                    DiagnosticCode::ReservedName,
+                    span,
+                    format!("cannot bind `{name}`: it is a reserved prelude name"),
+                )
+                .with_help(
+                    "rename the binding — the prelude's `Ok`/`Err`/`some`/`none`/`panic`/`assert` \
+                     cannot be shadowed",
+                ),
+            );
+        }
+    }
+
     /// Register built-in prelude types the checker must know regardless of the program. Run before
     /// `collect` so a user declaration of the same name shadows it (matching the backends, which
     /// register `Ordering` the same way). `Attributed<T> { target: string, value: T }` is the
@@ -1400,6 +1424,7 @@ impl Checker {
                 value,
                 ..
             } => {
+                self.check_reserved_name(name, *name_span);
                 // An annotated binding (`x: T = …`) is checked against `T` and bound at `T`; the
                 // annotation is the boundary the value must satisfy and the way to fix an otherwise
                 // un-inferable value. Un-annotated bindings stay inference-only (open expectation).
@@ -1491,6 +1516,7 @@ impl Checker {
                     }
                 };
                 for ((name, name_span), t) in targets.iter().zip(elem_types) {
+                    self.check_reserved_name(name, *name_span);
                     if self.type_relevant(&t) {
                         self.relevance.locals.insert(*name_span);
                     }
@@ -1642,10 +1668,22 @@ impl Checker {
                     );
                 }
             }
-            Stmt::Fn(decl) => self.check_fn(decl, env, &[], TargetKind::Function),
-            Stmt::Struct(r) => self.check_struct(r, env),
-            Stmt::Class(c) => self.check_class(c, env),
-            Stmt::Enum(e) => self.check_enum(e, env),
+            Stmt::Fn(decl) => {
+                self.check_reserved_name(&decl.name, decl.name_span);
+                self.check_fn(decl, env, &[], TargetKind::Function)
+            }
+            Stmt::Struct(r) => {
+                self.check_reserved_name(&r.name, r.name_span);
+                self.check_struct(r, env)
+            }
+            Stmt::Class(c) => {
+                self.check_reserved_name(&c.name, c.name_span);
+                self.check_class(c, env)
+            }
+            Stmt::Enum(e) => {
+                self.check_reserved_name(&e.name, e.name_span);
+                self.check_enum(e, env)
+            }
             Stmt::Impl(decl) => self.check_standalone_impl(decl),
             Stmt::Namespace { .. } | Stmt::Use { .. } => {}
             // A dev-tier block reaching the checker is an *inactive* residual (object-model
@@ -1758,6 +1796,7 @@ impl Checker {
             bind(env, name, ty.clone());
         }
         for p in &decl.params {
+            self.check_reserved_name(&p.name, p.name_span);
             bind(env, &p.name, param_type(p));
         }
         for stmt in &decl.body {
@@ -2632,6 +2671,7 @@ impl Checker {
                 self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
                 for (i, p) in params.iter().enumerate() {
+                    self.check_reserved_name(&p.name, p.name_span);
                     let pty = p.ty.as_ref().map(Type::from_ref).unwrap_or_else(|| {
                         expected_params.get(i).cloned().unwrap_or(Type::Unknown)
                     });
@@ -2842,6 +2882,7 @@ impl Checker {
                 self.validate_param_defaults(params, env);
                 env.push(HashMap::new());
                 for p in params {
+                    self.check_reserved_name(&p.name, p.name_span);
                     bind(env, &p.name, param_type(p));
                 }
                 // With an explicit return annotation, check the body against it (and adopt it as the
@@ -4685,7 +4726,10 @@ impl Checker {
             _ => Type::Unknown,
         };
         match pattern {
-            ForPattern::Single { name, .. } => bind(env, name, elem),
+            ForPattern::Single { name, name_span } => {
+                self.check_reserved_name(name, *name_span);
+                bind(env, name, elem)
+            }
             // `for (a, b, …) in …` destructures each iterated **tuple** element positionally
             // (object-model slice 4b — `.enumerate()` yields `(int, T)` tuples). Each name binds to
             // its element type when the element is a known tuple, else `dyn`.
@@ -4709,7 +4753,15 @@ impl Checker {
             | Pattern::Bool { .. }
             // `is T` binds no name here — `synth_match` narrows the scrutinee identifier instead.
             | Pattern::IsType { .. } => {}
-            Pattern::Binding { name, .. } => bind(env, name, ty.clone()),
+            Pattern::Binding { name, span } => {
+                // A bare `none` in pattern position is the Option-none CONSTRUCTOR pattern (it is
+                // represented as a binding but matched by name), not a fresh binding — exempt it
+                // from the reserved-name rule so `match o { some(v) => …, none => … }` stays legal.
+                if name != "none" {
+                    self.check_reserved_name(name, *span);
+                }
+                bind(env, name, ty.clone())
+            }
             Pattern::Variant {
                 variant, bindings, ..
             } => {
