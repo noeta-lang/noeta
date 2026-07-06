@@ -14,7 +14,6 @@ use std::rc::{Rc, Weak};
 
 use noeta_ast::reflect::TypeRepr;
 use noeta_ast::{BinaryOp, ForPattern, Pattern, Program, Stmt, TypeRef, UnaryOp};
-use noeta_builtins::IdGen;
 use noeta_diagnostics::{Diagnostic, DiagnosticCode};
 use noeta_span::Span;
 
@@ -35,23 +34,15 @@ use value::{PackedList, PackedSchema, PackedSlot, SlotKind};
 // `noeta_eval::{Backend, RunResult}` users keep working.
 pub use noeta_backend::{Backend, RunResult};
 
-/// The default seed for the deterministic id source, so output is reproducible.
-const DEFAULT_SEED: u64 = 1;
-
 /// The M0 tree-walking interpreter, exposed as a [`Backend`].
+/// (The id-source seed field left with `IdGen` — sequential ids are host-owned now, so the
+/// deterministic counter is the sandbox host's, not this backend's.)
 #[derive(Debug, Clone)]
-pub struct TreeWalkBackend {
-    seed: u64,
-}
+pub struct TreeWalkBackend {}
 
 impl TreeWalkBackend {
     pub fn new() -> TreeWalkBackend {
-        TreeWalkBackend { seed: DEFAULT_SEED }
-    }
-
-    /// Use a specific seed for the id source (tests pin this for reproducibility).
-    pub fn with_seed(seed: u64) -> TreeWalkBackend {
-        TreeWalkBackend { seed }
+        TreeWalkBackend {}
     }
 
     // The AST-walk entry points (`run_with_host`, `run_with_sites`, `run_with_host_sites`) were
@@ -151,7 +142,7 @@ impl std::fmt::Debug for Session {
 
 impl Session {
     pub fn new() -> Session {
-        let interp = Interpreter::new(DEFAULT_SEED);
+        let interp = Interpreter::new();
         let prelude = interp.scope.names().into_iter().collect();
         Session { interp, prelude }
     }
@@ -222,7 +213,7 @@ impl Session {
 
     /// Reset to a fresh session: a new global scope, id counter, and reflection — `:reset`.
     pub fn reset(&mut self) {
-        self.interp = Interpreter::new(DEFAULT_SEED);
+        self.interp = Interpreter::new();
         self.prelude = self.interp.scope.names().into_iter().collect();
     }
 
@@ -335,8 +326,6 @@ pub struct SessionOutput {
 /// A built-in (native) function from the prelude.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Builtin {
-    /// `next_id()` — a deterministic, seeded counter.
-    NextId,
     /// `len(x)` — element/character count of a list, map, or string.
     Len,
     /// `map(list, fn)` — a new list with `fn` applied to each element.
@@ -383,7 +372,6 @@ pub enum Builtin {
 impl Builtin {
     pub fn name(self) -> &'static str {
         match self {
-            Builtin::NextId => "next_id",
             Builtin::Len => "len",
             Builtin::Map => "map",
             Builtin::Filter => "filter",
@@ -415,7 +403,6 @@ impl Builtin {
             "all" => Some(Builtin::All),
             "race" => Some(Builtin::Race),
             "map_bounded" => Some(Builtin::MapBounded),
-            "next_id" => Some(Builtin::NextId),
             _ => None,
         }
     }
@@ -423,7 +410,6 @@ impl Builtin {
     /// The prelude functions registered in every program's global scope. `none` is a
     /// prelude *value* (not a function), so it is bound separately in [`Interpreter::new`].
     const PRELUDE: &'static [Builtin] = &[
-        // `NextId` left the prelude (P2c) for `use std.id` — like the P2a/P2b names below.
         // `Len`/`Map`/`Filter`/`Sum` left the prelude (prelude-redesign P1.2): the collection
         // METHOD forms route to the same impls; `list.len`-style handles cover value use.
         Builtin::MakeOk,
@@ -1092,7 +1078,6 @@ struct Channel {
 struct Interpreter {
     stdout: String,
     diagnostics: Vec<Diagnostic>,
-    ids: IdGen,
     scope: Rc<Scope>,
     /// The root (global) scope, held so a field-default thunk can be run in the type's **definition
     /// scope** (object-model slice 5) — types are top-level, so their defaults resolve globals only,
@@ -1141,16 +1126,15 @@ struct Interpreter {
 }
 
 impl Interpreter {
-    fn new(seed: u64) -> Interpreter {
-        Interpreter::with_host(seed, Box::new(noeta_stdlib::SandboxHost::new()))
+    fn new() -> Interpreter {
+        Interpreter::with_host(Box::new(noeta_stdlib::SandboxHost::new()))
     }
 
     /// Build an interpreter against a caller-provided [`noeta_stdlib::Host`] (M2.3), keeping the
     /// default deterministic executor. `new` uses the deterministic sandbox (what the differential
     /// needs); the CLI/REPL pass a real host here.
-    fn with_host(seed: u64, host: Box<dyn noeta_stdlib::Host>) -> Interpreter {
+    fn with_host(host: Box<dyn noeta_stdlib::Host>) -> Interpreter {
         Interpreter::with_host_and_executor(
-            seed,
             host,
             Box::new(noeta_stdlib::SandboxExecutor::new()),
         )
@@ -1159,7 +1143,6 @@ impl Interpreter {
     /// Build an interpreter against caller-provided host *and* executor (Track A.4). The CLI pairs a
     /// real host with a real wall-clock executor; the differential always uses the sandbox pair.
     fn with_host_and_executor(
-        seed: u64,
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> Interpreter {
@@ -1195,7 +1178,6 @@ impl Interpreter {
         Interpreter {
             stdout: String::new(),
             diagnostics: Vec::new(),
-            ids: IdGen::new(seed),
             globals: Rc::clone(&global),
             scope: global,
             host,
@@ -3572,10 +3554,6 @@ impl Interpreter {
 
     fn call_builtin(&mut self, builtin: Builtin, args: Vec<Value>, span: Span) -> Eval<Value> {
         match builtin {
-            Builtin::NextId => {
-                self.expect_arity(builtin, &args, 0, span)?;
-                Ok(Value::Int(self.ids.next_id() as i64))
-            }
             Builtin::Len => {
                 self.expect_arity(builtin, &args, 1, span)?;
                 match &args[0] {

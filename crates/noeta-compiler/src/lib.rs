@@ -2861,10 +2861,6 @@ impl<'m> FnCompiler<'m> {
                 "Err" => self.make_result_option("Result", "Err", args, dst),
                 "some" => self.make_result_option("Option", "some", args, dst),
                 "panic" => self.make_panic(args, span),
-                "next_id" if args.is_empty() => {
-                    self.code.push(Op::NextId { dst });
-                    Ok(())
-                }
                 _ => unsupported("prelude function not in the VM subset"),
             };
         }

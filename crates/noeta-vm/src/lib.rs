@@ -367,8 +367,6 @@ struct Vm<'m> {
     /// are destroyed at program end in reverse binding order (the deterministic "program order" the
     /// spec requires) — the same order the pre-slot name-keyed `global_order` produced.
     global_order: Vec<u32>,
-    /// The deterministic `next_id()` counter, seeded at 1 (matching the M0 `IdGen`).
-    next_id: u64,
     /// All host-coupled effects (filesystem, seeded PRNG, logical clock) behind the M2.1
     /// [`noeta_stdlib::Host`] seam. The conformance harness constructs a deterministic
     /// [`noeta_stdlib::SandboxHost`]; a real host (later M2 slices) swaps in without touching
@@ -1385,7 +1383,6 @@ impl<'m> Vm<'m> {
             tojson_derives,
             globals: vec![Value::unbound(); module.global_names.len()],
             global_order: Vec::new(),
-            next_id: 1,
             host,
             executor,
             scopes: Vec::new(),
@@ -3769,12 +3766,6 @@ impl<'m> Vm<'m> {
                         }
                         pc += 1;
                     }
-                    Op::NextId { dst } => {
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        set_reg(regs, fbase, *dst, Value::int(id as i64));
-                        pc += 1;
-                    }
                     Op::Panic { msg, span } => {
                         let message = regs[fbase + *msg as usize].display();
                         return Err(self.error(
@@ -5736,14 +5727,6 @@ impl<'m> Vm<'m> {
         span: Span,
     ) -> Result<Value, Abort> {
         match builtin {
-            // `next_id()` as a first-class value (`use std.id.{next_id}`, P2c) — direct calls
-            // compile to the dedicated `Op::NextId`; an indirect call reads the same counter.
-            Builtin::NextId => {
-                self.check_arity(builtin, args, 0, span)?;
-                let id = self.next_id;
-                self.next_id += 1;
-                Ok(Value::int(id as i64))
-            }
             Builtin::Len => {
                 self.check_arity(builtin, args, 1, span)?;
                 let v = args[0];

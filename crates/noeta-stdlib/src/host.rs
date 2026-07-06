@@ -88,6 +88,14 @@ pub trait Entropy {
     fn entropy_u64(&mut self) -> u64;
 }
 
+/// **Sequential ids** capability (id-entropy U2) — the counter behind `id.next_id()`: 1, 2, 3, ….
+/// Host-owned so both backends share one dispatch (`next_id` agreement is by-construction, like
+/// every registry module) and so REPL continuity rides the session's host. Deterministic on every
+/// host — sequential ids are an ordering device, not entropy.
+pub trait Ids {
+    fn id_next(&mut self) -> u64;
+}
+
 /// **Host introspection** capability (M2.2). `env_keys` is sorted. The sandbox presents a fixed
 /// fixture; a real host reads the real environment/args.
 pub trait Env {
@@ -97,16 +105,17 @@ pub trait Env {
 }
 
 /// Every host-coupled effect the interpreters perform, behind one swappable seam — the union of the
-/// five capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`]). Backends hold a
-/// `Box<dyn Host>` and reach any capability through it; a consumer that needs only one (a read handle
-/// → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on that trait instead, so a partial host
-/// (e.g. a read-only test double) implements exactly what it supports rather than stubbing the rest.
+/// six capability traits ([`FileSystem`], [`Rng`], [`Clock`], [`Env`], [`Entropy`], [`Ids`]).
+/// Backends hold a `Box<dyn Host>` and reach any capability through it; a consumer that needs only
+/// one (a read handle → [`FileReader`], the RNG dispatch → [`Rng`], …) depends on that trait
+/// instead, so a partial host (e.g. a read-only test double) implements exactly what it supports
+/// rather than stubbing the rest.
 ///
 /// Object-safe on purpose (IO is never a hot path, so the dynamic dispatch is immaterial). The
-/// blanket impl means any type providing all five capabilities *is* a `Host` automatically — there is
+/// blanket impl means any type providing all six capabilities *is* a `Host` automatically — there is
 /// nothing extra to implement.
-pub trait Host: FileSystem + Rng + Clock + Env + Entropy {}
-impl<T: FileSystem + Rng + Clock + Env + Entropy> Host for T {}
+pub trait Host: FileSystem + Rng + Clock + Env + Entropy + Ids {}
+impl<T: FileSystem + Rng + Clock + Env + Entropy + Ids> Host for T {}
 
 /// The sandbox's fixed wall-clock epoch: 2026-01-01T00:00:00Z in unix milliseconds.
 /// `clock_unix_ms` on the sandbox is `SANDBOX_EPOCH_MS + logical clock`, so wall-time reads (and the
@@ -127,6 +136,8 @@ pub struct SandboxHost {
     rng: u64,
     /// The entropy stream's SplitMix64 state — independent of `rng` (see [`Entropy`]).
     entropy: u64,
+    /// The next sequential id `id_next` hands out (see [`Ids`]).
+    ids: u64,
     clock: u64,
     env: BTreeMap<String, String>,
     args: Vec<String>,
@@ -141,6 +152,7 @@ impl SandboxHost {
             fs: Vfs::new(),
             rng: random::DEFAULT_SEED,
             entropy: SANDBOX_ENTROPY_SEED,
+            ids: 1,
             clock: 0,
             env: env::sandbox_vars(),
             args: env::sandbox_args(),
@@ -257,6 +269,14 @@ impl Entropy for SandboxHost {
         let (next_state, value) = random::next(self.entropy);
         self.entropy = next_state;
         value
+    }
+}
+
+impl Ids for SandboxHost {
+    fn id_next(&mut self) -> u64 {
+        let id = self.ids;
+        self.ids += 1;
+        id
     }
 }
 

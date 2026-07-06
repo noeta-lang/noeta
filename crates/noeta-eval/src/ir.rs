@@ -103,7 +103,7 @@ impl TreeWalkBackend {
         ir: &noeta_ir::Program,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
-        Interpreter::new(self.seed).run_ir(ast, ir, type_of_sites)
+        Interpreter::new().run_ir(ast, ir, type_of_sites)
     }
 
     /// As [`TreeWalkBackend::run_ir`], but against a caller-provided [`noeta_stdlib::Host`]
@@ -118,7 +118,7 @@ impl TreeWalkBackend {
         host: Box<dyn noeta_stdlib::Host>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
-        Interpreter::with_host(self.seed, host).run_ir(ast, ir, type_of_sites)
+        Interpreter::with_host(host).run_ir(ast, ir, type_of_sites)
     }
 
     /// As [`TreeWalkBackend::run_ir_with_host`], but also swapping the async executor (Track A.4).
@@ -133,7 +133,7 @@ impl TreeWalkBackend {
         executor: Box<dyn noeta_stdlib::Executor>,
         type_of_sites: std::collections::HashMap<Span, noeta_ast::reflect::TypeRepr>,
     ) -> RunResult {
-        Interpreter::with_host_and_executor(self.seed, host, executor).run_ir(
+        Interpreter::with_host_and_executor(host, executor).run_ir(
             ast,
             ir,
             type_of_sites,

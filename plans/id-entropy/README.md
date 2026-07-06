@@ -45,9 +45,13 @@ selling point — time-ordered keys — deserves an explicit opt-in).
 - **U1 — seam extension.** `Entropy` capability (`entropy_u64()`) + `clock_unix_ms()` on `Clock`;
   SandboxHost: independent fixed-seed SplitMix64 + `FIXED_EPOCH_MS + logical_ms`; RealHost: OS
   entropy (`getrandom`) + `SystemTime`. `Host` = the five capabilities.
-- **U2 — the id module de-virtualized.** Host id counter; registry `id` module (`next_id`, `uuid`,
-  `uuid_v7`); drop `("id", …)` from `VIRTUAL_MODULES`; `Op::NextId` + `Builtin::NextId` read the
-  host counter (direct-call fast path preserved); delete the per-backend counters.
+- **U2 — the id module de-virtualized.** Host id counter (`Ids` capability — the sixth); registry
+  `id` module (`next_id`, `uuid`, `uuid_v7`); drop `("id", …)` from `VIRTUAL_MODULES`; delete the
+  per-backend counters (eval `IdGen` + the seed threading feeding it, `Vm.next_id`).
+  *Deviation from plan:* `Op::NextId`/`Builtin::NextId` were DELETED, not repointed — the opcode's
+  only emitter sat behind a `Resolved::Prelude` check that stopped matching when P2c removed
+  `next_id` from `PRELUDE_NAMES`, so the "direct-call fast path" this plan wanted preserved was
+  already dead code; every live call was dispatching through the virtual intercept.
 - **U3 — tests + docs.** Conformance: exact-value UUID expectations under the sandbox (differential
   holds by shared dispatch); CLI real-host test (format, uniqueness, v7 time-ordering); wiki `id`
   section; memory.

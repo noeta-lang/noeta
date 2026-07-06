@@ -255,10 +255,12 @@ pub fn find_function(module: &str, func: &str) -> Option<&'static ExtFn> {
 /// pattern `fs.*_async` uses.
 /// (`task` is named `task` rather than `async` because `async` is a keyword — `use std.async.…`
 /// would not parse; decided with the user at P2b.)
+/// (`id` was virtual at P2c; the id-entropy arc de-virtualized it — the counter moved into the
+/// Host's [`crate::host::Ids`] capability, so `next_id`/`uuid`/`uuid_v7` are ordinary registry
+/// functions and both backends share one dispatch.)
 pub const VIRTUAL_MODULES: &[(&str, &[&str])] = &[
     ("reactive", &["signal", "computed", "effect"]),
     ("task", &["sleep", "all", "race", "map_bounded"]),
-    ("id", &["next_id"]),
 ];
 
 /// Whether `name` is a virtual std module (importable, but not registry-backed).
@@ -437,6 +439,36 @@ fn time_dispatch(
             Ok(NativeOut::Unit)
         }
         _ => Err(no_function_error("time", func)),
+    }
+}
+
+// --- `id`: sequential ids + UUIDs (id-entropy U2) ------------------------------------------------
+
+fn id_dispatch(
+    func: &str,
+    host: &mut dyn Host,
+    args: &[NativeValue],
+) -> Result<NativeOut, StdError> {
+    match func {
+        "next_id" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Scalar(Scalar::Int(host.id_next() as i64)))
+        }
+        "uuid" => {
+            want_arity(func, args, 0)?;
+            Ok(NativeOut::Str(crate::id::v4(
+                host.entropy_u64(),
+                host.entropy_u64(),
+            )))
+        }
+        "uuid_v7" => {
+            want_arity(func, args, 0)?;
+            let ms = host.clock_unix_ms();
+            let ra = host.entropy_u64();
+            let rb = host.entropy_u64();
+            Ok(NativeOut::Str(crate::id::v7(ms, ra, rb)))
+        }
+        _ => Err(no_function_error("id", func)),
     }
 }
 
@@ -891,6 +923,26 @@ const TIME_FNS: &[ExtFn] = &[
     },
 ];
 
+const ID_FNS: &[ExtFn] = &[
+    ExtFn {
+        name: "next_id",
+        params: &[],
+        ret: Concrete(Int),
+    },
+    // `uuid()` is v4 — the "just give me a UUID" default; `uuid_v7()` (time-ordered keys) is the
+    // explicit opt-in. Both render canonical hyphenated lowercase.
+    ExtFn {
+        name: "uuid",
+        params: &[],
+        ret: Concrete(Str),
+    },
+    ExtFn {
+        name: "uuid_v7",
+        params: &[],
+        ret: Concrete(Str),
+    },
+];
+
 const ENV_FNS: &[ExtFn] = &[
     ExtFn {
         name: "get",
@@ -1166,6 +1218,12 @@ const STD_MODULES: &[ExtModule] = &[
         deep_marshal: false,
     },
     ExtModule {
+        name: "id",
+        functions: ID_FNS,
+        dispatch: id_dispatch,
+        deep_marshal: false,
+    },
+    ExtModule {
         name: "env",
         functions: ENV_FNS,
         dispatch: env_dispatch,
@@ -1312,6 +1370,33 @@ mod tests {
             &[NativeValue::Scalar(Scalar::Int(1))],
         );
         assert!(matches!(out, Err(e) if e.kind == crate::ErrorKind::Arity));
+    }
+
+    #[test]
+    fn id_module_is_registry_backed_and_sandbox_deterministic() {
+        // `next_id` reads the host's counter: 1, 2, 3 — one dispatch shared by both backends.
+        let mut h = host();
+        for want in 1..=3 {
+            let out = dispatch("id", "next_id", &mut h, &[]);
+            assert_eq!(out, Ok(NativeOut::Scalar(Scalar::Int(want))));
+        }
+        // UUIDs draw from the sandbox entropy/wall-time streams, so a fresh sandbox reproduces
+        // them exactly (what lets conformance pin exact values) — and consecutive draws differ.
+        let a = dispatch("id", "uuid", &mut h, &[]).unwrap();
+        let b = dispatch("id", "uuid", &mut h, &[]).unwrap();
+        assert_ne!(a, b);
+        let mut fresh = host();
+        assert_eq!(dispatch("id", "uuid", &mut fresh, &[]), Ok(a));
+        // v7: version nibble 7, and the sandbox epoch in the leading 48 bits.
+        let Ok(NativeOut::Str(v7)) = dispatch("id", "uuid_v7", &mut h, &[]) else {
+            panic!("uuid_v7 should produce a string");
+        };
+        assert_eq!(&v7[14..15], "7");
+        let ms = u64::from_str_radix(&v7[..13].replace('-', ""), 16).unwrap();
+        assert_eq!(ms, crate::host::SANDBOX_EPOCH_MS);
+        // `id` left the virtual table — it is an ordinary registry module now.
+        assert!(!is_virtual_module("id"));
+        assert!(find_function("id", "uuid_v7").is_some());
     }
 
     #[test]

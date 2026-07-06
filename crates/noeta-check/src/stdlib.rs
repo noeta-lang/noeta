@@ -582,14 +582,8 @@ pub(super) fn module_return(module: &str, name: &str, args: &[Type]) -> Option<T
             _ => None,
         };
     }
-    // The virtual `id` module (prelude-redesign P2c): `next_id() -> int`, the deterministic
-    // seeded counter (UUIDs are a planned follow-on through the deterministic Host seam).
-    if module == "id" {
-        return match name {
-            "next_id" => Some(Type::Int),
-            _ => None,
-        };
-    }
+    // (`id` was virtual here until the id-entropy arc de-virtualized it — `next_id`/`uuid`/
+    // `uuid_v7` now type through the registry fallback below like any migrated module.)
     // The virtual `task` module (prelude-redesign P2b): the concurrency combinators.
     // `sleep(ms) -> Future<void>` (Track A.2) — awaiting it suspends until the executor clock
     // reaches the deadline; `all(List<Future<T>>) -> List<T>` (results in order);

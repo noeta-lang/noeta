@@ -25,7 +25,7 @@ pub mod executor;
 pub use executor::RealExecutor;
 
 use noeta_stdlib::{
-    Clock, Entropy, Env, ErrorKind, FileReader, FileSystem, ReadSource, Rng, StdError,
+    Clock, Entropy, Env, ErrorKind, FileReader, FileSystem, Ids, ReadSource, Rng, StdError,
 };
 use std::collections::HashMap;
 use tokio::fs::File;
@@ -47,6 +47,9 @@ pub struct RealHost {
     /// making the user's seeded stream lie.
     rng: u64,
     clock: u64,
+    /// The next `id.next_id()` value — deterministic and sequential on every host (see
+    /// [`noeta_stdlib::host::Ids`]).
+    ids: u64,
     /// Open lazy read streams (P-LAZY), keyed by the id handed to the file handle. A read handle
     /// pulls a line at a time via `fs_read_more` rather than buffering the whole file at open. An
     /// entry is dropped at EOF; any handle closed before EOF leaves its stream here until the host
@@ -65,6 +68,7 @@ impl RealHost {
             runtime,
             rng: noeta_stdlib::random::DEFAULT_SEED,
             clock: 0,
+            ids: 1,
             readers: HashMap::new(),
             next_reader_id: 0,
         })
@@ -247,6 +251,14 @@ impl Clock for RealHost {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as u64)
             .unwrap_or(0)
+    }
+}
+
+impl Ids for RealHost {
+    fn id_next(&mut self) -> u64 {
+        let id = self.ids;
+        self.ids += 1;
+        id
     }
 }
 
