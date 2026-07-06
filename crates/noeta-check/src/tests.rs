@@ -1061,6 +1061,46 @@ fn string_and_list_methods_are_typed() {
 }
 
 #[test]
+fn every_reserved_prelude_name_rejects_binding() {
+    // P3's guard, name by name: each of the six reserved prelude names is E0046 in a plain
+    // binding. (The runtime divergence this closes: the tree-walker pre-declared these as
+    // immutable globals while the VM shadowed them as fresh locals.)
+    for name in ["Ok", "Err", "some", "none", "panic", "assert"] {
+        assert_eq!(
+            codes(&format!("{name} = 5;\n")),
+            ["E0046"],
+            "binding `{name}` must be reserved"
+        );
+    }
+}
+
+#[test]
+fn reserved_names_reject_every_declaration_form() {
+    // The reservation is uniform across declaration forms, not just plain bindings.
+    assert_eq!(codes("mut some = 1;\n"), ["E0046"]); // mut binding
+    assert_eq!(codes("(Ok, b) = (1, 2);\necho b;\n"), ["E0046"]); // tuple destructuring
+    assert_eq!(codes("fn panic(): void { return; }\n"), ["E0046"]); // fn name
+    assert_eq!(
+        codes("fn f(assert: int): int { return assert; }\necho f(1);\n"),
+        ["E0046"]
+    ); // parameter
+    assert_eq!(codes("for none in [1] { echo 1; }\n"), ["E0046"]); // for binder
+    assert_eq!(codes("struct Ok { x: int }\n"), ["E0046"]); // type name
+    assert_eq!(
+        codes("f = fn(Err: int) => Err;\necho f(1);\n"),
+        ["E0046"]
+    ); // closure parameter
+}
+
+#[test]
+fn none_in_match_pattern_position_stays_legal() {
+    // The one exemption: bare `none` in a match arm is the Option-none CONSTRUCTOR pattern
+    // (represented as a binding, matched by name), not a fresh binding.
+    let src = "x = some(1);\necho match x { some(v) => v, none => 0 };\n";
+    assert!(codes(src).is_empty(), "none-pattern must stay legal");
+}
+
+#[test]
 fn prelude_functions_are_typed() {
     // `len`/`sum` left the prelude (P1.2) — they are collection methods now, typed as such.
     assert!(codes("fn f(): int { return [1, 2, 3].len(); }\n").is_empty()); // len -> int
