@@ -16,7 +16,7 @@ class R {
     }
 
     destruct {
-        echo "close ${name}";
+        echo "close ${self.name}";
     }
 }
 

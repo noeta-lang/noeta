@@ -14,7 +14,7 @@ class Point {
 
     impl Display {
         fn to_string(): string {
-            return "Point(${x}, ${y})";
+            return "Point(${self.x}, ${self.y})";
         }
     }
 }

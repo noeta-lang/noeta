@@ -12,8 +12,8 @@
 class R {
     name: string
     fn new(name: string): R { return R { name: name }; }
-    fn use_it(): void { echo "use ${name}"; }
-    destruct { echo "close ${name}"; }
+    fn use_it(): void { echo "use ${self.name}"; }
+    destruct { echo "close ${self.name}"; }
 }
 
 fn check(c: bool): Result<int, string> {

@@ -8,8 +8,8 @@
 class Stack {
     items: list
     fn new(items: list): Stack { return Stack { items: items } }
-    fn size(): int { return items.len() }
-    fn scaled(factor: int): int { return items.len() * factor }
+    fn size(): int { return self.items.len() }
+    fn scaled(factor: int): int { return self.items.len() * factor }
 }
 
 stacks = [Stack.new([1, 2, 3]), Stack.new([4, 5])]

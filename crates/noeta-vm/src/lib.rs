@@ -6589,7 +6589,7 @@ mod tests {
         // captured `Res`'s `destruct` (its last reference died with the cycle). So `drop 7` prints at
         // program-exit collection, after `make()`'s own `7`.
         let r = run(
-            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\nfn make(): int {\n  r = Res.new(7);\n  fn rec(n: int): int { if n <= 0 { return r.id; } return rec(n - 1); }\n  return rec(2);\n}\necho make();\n",
+            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\nfn make(): int {\n  r = Res.new(7);\n  fn rec(n: int): int { if n <= 0 { return r.id; } return rec(n - 1); }\n  return rec(2);\n}\necho make();\n",
         );
         assert_eq!(r.stdout, "7\ndrop 7\n");
         assert_eq!(r.exit_code, 0);
@@ -6636,7 +6636,7 @@ mod tests {
         // A reassigned destructor-bearing object exercises the VM's `release_value` last-reference
         // free — the path that must defer a *buffered* object rather than free it shallowly (the bug
         // that segfaulted before `free_shallow` became the universal deferral point).
-        let destructed = "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { x = id + 1; }\n}\nmut r = Res.new(0);\nfor i in 0..3 { r = Res.new(i); }\necho r.id;\n";
+        let destructed = "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { x = self.id + 1; }\n}\nmut r = Res.new(0);\nfor i in 0..3 { r = Res.new(i); }\necho r.id;\n";
         for src in [cyclic, acyclic, destructed] {
             let before = noeta_value::live_count();
             let r = run_with_collector(src, noeta_value::CollectorMode::TrialDeletion);
@@ -6727,7 +6727,7 @@ mod tests {
         // `WrapOk` frame transform); an unknown name / arity mismatch builds `Result.Err`. Exercises
         // the new type-handle value, the `Op::Invoke` dispatch, and the refcount handoff on return.
         let r = run(
-            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
+            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return self.v * 2; }\n}\nhit = match invoke(Box.new(21), \"doubled\", []) { Ok(v) => \"${v}\", Err(e) => \"err ${e}\" };\necho hit;\nmade = match invoke(Box, \"new\", [7]) { Ok(b) => match invoke(b, \"doubled\", []) { Ok(d) => \"${d}\", Err(_) => \"x\" }, Err(_) => \"x\" };\necho made;\nmiss = match invoke(Box.new(1), \"nope\", []) { Ok(_) => \"ok\", Err(_) => \"miss\" };\necho miss;\n",
         );
         assert_eq!(r.stdout, "42\n14\nmiss\n");
         assert_eq!(r.exit_code, 0);
@@ -6802,7 +6802,7 @@ mod tests {
         // the pre-update value (the runtime refcount > 1 forces the copy). Heap fields exercise the
         // slot retain/release accounting; run under miri to validate refcounts (no UAF/double free).
         let r = run(
-            "class Point {\n  x: int\n  tag: string\n  fn show(): string { return \"${x} ${tag}\"; }\n}\nmut acc = Point { x: -1, tag: \"k\" };\nfor i in 0..4 {\n  acc = Point { ...acc, x: i };\n}\necho acc.show();\nmut p = Point { x: 1, tag: \"a\" };\nsnap = p;\np = Point { ...p, x: 9 };\necho p.show();\necho snap.show();\n",
+            "class Point {\n  x: int\n  tag: string\n  fn show(): string { return \"${self.x} ${self.tag}\"; }\n}\nmut acc = Point { x: -1, tag: \"k\" };\nfor i in 0..4 {\n  acc = Point { ...acc, x: i };\n}\necho acc.show();\nmut p = Point { x: 1, tag: \"a\" };\nsnap = p;\np = Point { ...p, x: 9 };\necho p.show();\necho snap.show();\n",
         );
         assert_eq!(r.stdout, "3 k\n9 a\n1 a\n");
         assert_eq!(r.exit_code, 0);
@@ -6889,7 +6889,7 @@ mod tests {
         // leak oracle to confirm residency 0.
         let before = noeta_value::live_count();
         let r = run(
-            "class Node {\n  mut next: ?Node\n  id: int\n  fn new(id: int): Node { return Node { next: none, id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\na = Node.new(1);\nb = Node.new(2);\na.next = some(b);\nb.next = some(a);\necho \"linked\";\n",
+            "class Node {\n  mut next: ?Node\n  id: int\n  fn new(id: int): Node { return Node { next: none, id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\na = Node.new(1);\nb = Node.new(2);\na.next = some(b);\nb.next = some(a);\necho \"linked\";\n",
         );
         assert_eq!(r.stdout, "linked\ndrop 2\ndrop 1\n");
         assert_eq!(r.exit_code, 0);
@@ -6909,7 +6909,7 @@ mod tests {
         // step), while an aliased reassignment (`snap = q`) copies to preserve `snap`. Run under miri to
         // validate the all-slot overwrite's retain/release accounting (no UAF / double free).
         let r = run(
-            "class P {\n  n: int\n  tag: string\n  fn show(): string { return \"${n} ${tag}\"; }\n}\nfn build(): string {\n  mut p = P { n: 0, tag: \"a\" };\n  for i in 0..3 { p = P { n: i, tag: \"t${i}\" }; }\n  return p.show();\n}\necho build();\nmut q = P { n: 1, tag: \"x\" };\nsnap = q;\nq = P { n: 9, tag: \"y\" };\necho q.show();\necho snap.show();\n",
+            "class P {\n  n: int\n  tag: string\n  fn show(): string { return \"${self.n} ${self.tag}\"; }\n}\nfn build(): string {\n  mut p = P { n: 0, tag: \"a\" };\n  for i in 0..3 { p = P { n: i, tag: \"t${i}\" }; }\n  return p.show();\n}\necho build();\nmut q = P { n: 1, tag: \"x\" };\nsnap = q;\nq = P { n: 9, tag: \"y\" };\necho q.show();\necho snap.show();\n",
         );
         assert_eq!(r.stdout, "2 t2\n9 y\n1 x\n");
         assert_eq!(r.exit_code, 0);
@@ -6924,7 +6924,7 @@ mod tests {
         // field carried across each in-place update. Run under miri to validate the `Drop` does not
         // double-free the receiver and the carried heap field's refcount stays balanced.
         let r = run(
-            "class Point {\n  x: int\n  label: string\n  fn show(): string { return \"${x} ${label}\"; }\n}\nfn run(n: int): string {\n  mut acc = Point { x: 0, label: \"p\" };\n  for i in 0..n {\n    acc = Point { ...acc, x: acc.x + 2 };\n  }\n  return acc.show();\n}\necho run(5);\n",
+            "class Point {\n  x: int\n  label: string\n  fn show(): string { return \"${self.x} ${self.label}\"; }\n}\nfn run(n: int): string {\n  mut acc = Point { x: 0, label: \"p\" };\n  for i in 0..n {\n    acc = Point { ...acc, x: acc.x + 2 };\n  }\n  return acc.show();\n}\necho run(5);\n",
         );
         assert_eq!(r.stdout, "10 p\n");
         assert_eq!(r.exit_code, 0);
@@ -6938,7 +6938,7 @@ mod tests {
         // displaced field is released exactly once (no UAF / double-free) and the carried field `n`
         // stays balanced.
         let r = run(
-            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; }\n}\nclass Box {\n  r: Res\n  n: int\n}\nfn run(): void {\n  mut acc = Box { r: Res.new(0), n: 7 };\n  acc = Box { ...acc, r: Res.new(1) };\n  echo \"n=${acc.n}\";\n}\nrun();\n",
+            "class Res {\n  id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; }\n}\nclass Box {\n  r: Res\n  n: int\n}\nfn run(): void {\n  mut acc = Box { r: Res.new(0), n: 7 };\n  acc = Box { ...acc, r: Res.new(1) };\n  echo \"n=${acc.n}\";\n}\nrun();\n",
         );
         assert_eq!(r.stdout, "drop 0\nn=7\ndrop 1\n");
         assert_eq!(r.exit_code, 0);
@@ -7072,7 +7072,7 @@ mod tests {
     #[test]
     fn destructors_run_at_program_end_in_reverse_declaration_order() {
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\na = R.new(\"a\");\nb = R.new(\"b\");\necho \"body\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\na = R.new(\"a\");\nb = R.new(\"b\");\necho \"body\";\n",
         );
         // Globals destroyed in reverse declaration order: b before a.
         assert_eq!(r.stdout, "body\nclose b\nclose a\n");
@@ -7086,7 +7086,7 @@ mod tests {
         // The bare `compile` path marks every drop conservatively relevant, so the local's
         // `Op::Drop` routes through `release_value` and fires the destructor.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn announce(): void { echo \"here ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\nfn scope(): void {\n  r = R.new(\"x\");\n  r.announce();\n  echo \"after\";\n}\necho \"start\";\nscope();\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn announce(): void { echo \"here ${self.name}\"; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn scope(): void {\n  r = R.new(\"x\");\n  r.announce();\n  echo \"after\";\n}\necho \"start\";\nscope();\necho \"end\";\n",
         );
         // `r`'s last use is `r.announce()`; the destructor fires right after it returns, before
         // "after" — and definitely before program end ("end").
@@ -7097,7 +7097,7 @@ mod tests {
     #[test]
     fn reassigning_a_binding_destroys_the_displaced_value() {
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nmut x = R.new(\"first\");\nx = R.new(\"second\");\necho \"mid\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\nmut x = R.new(\"first\");\nx = R.new(\"second\");\necho \"mid\";\n",
         );
         // "first" is destroyed at the reassignment; "second" at program end.
         assert_eq!(r.stdout, "close first\nmid\nclose second\n");
@@ -7110,7 +7110,7 @@ mod tests {
         // (`set_reg`'s plain release would not fire the destructor), and its surviving value via the
         // function-body scope-exit drop. "first" closes between the two reads; "second" before return.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\nfn go(): void {\n  mut r = R.new(\"first\");\n  r.use_it();\n  r = R.new(\"second\");\n  r.use_it();\n}\necho \"start\";\ngo();\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${self.name}\"; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn go(): void {\n  mut r = R.new(\"first\");\n  r.use_it();\n  r = R.new(\"second\");\n  r.use_it();\n}\necho \"start\";\ngo();\necho \"end\";\n",
         );
         assert_eq!(
             r.stdout,
@@ -7125,7 +7125,7 @@ mod tests {
         // unwinding (the `on_error` drops the compiler attaches to `Op::TryUnwrap`). `r` is live past
         // the `?`, so `close r` fires on the error path, before the caller prints the propagated Err.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nfn check(c: bool): Result<int, string> {\n  if c { return Ok(1); }\n  return Err(\"bad\");\n}\nfn go(c: bool): Result<int, string> {\n  r = R.new(\"r\");\n  x = check(c)?;\n  return Ok(x);\n}\necho \"start\";\necho go(false);\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn check(c: bool): Result<int, string> {\n  if c { return Ok(1); }\n  return Err(\"bad\");\n}\nfn go(c: bool): Result<int, string> {\n  r = R.new(\"r\");\n  x = check(c)?;\n  return Ok(x);\n}\necho \"start\";\necho go(false);\necho \"end\";\n",
         );
         assert_eq!(r.stdout, "start\nclose r\nErr(bad)\nend\n");
         assert_eq!(r.exit_code, 0);
@@ -7138,7 +7138,7 @@ mod tests {
         // destroyed — `b` before `a` — before the program exits 1. They are never read, so they live
         // undropped to the panic; the panic-aware `coalesce` pinning keeps them in distinct registers.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${name}\"; }\n}\nfn go(): void {\n  a = R.new(\"a\");\n  b = R.new(\"b\");\n  echo \"made\";\n  panic(\"boom\");\n}\necho \"start\";\ngo();\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  destruct { echo \"close ${self.name}\"; }\n}\nfn go(): void {\n  a = R.new(\"a\");\n  b = R.new(\"b\");\n  echo \"made\";\n  panic(\"boom\");\n}\necho \"start\";\ngo();\n",
         );
         assert_eq!(r.stdout, "start\nmade\nclose b\nclose a\n");
         assert_eq!(r.exit_code, 1);
@@ -7152,7 +7152,7 @@ mod tests {
         // struct holds the sole reference — the construction-temp release makes refcount 1 here), and
         // `o` is a dead-store dropped at scope exit: `outer`, then `a`, then `b` (declared order).
         let r = run(
-            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${tag}\"; }\n}\nclass Outer {\n  label: string\n  a: Leaf\n  b: Leaf\n  fn new(): Outer { return Outer { label: \"o\", a: Leaf.new(\"a\"), b: Leaf.new(\"b\") }; }\n  destruct { echo \"drop outer ${label}\"; }\n}\nfn go(): void {\n  o = Outer.new();\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
+            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${self.tag}\"; }\n}\nclass Outer {\n  label: string\n  a: Leaf\n  b: Leaf\n  fn new(): Outer { return Outer { label: \"o\", a: Leaf.new(\"a\"), b: Leaf.new(\"b\") }; }\n  destruct { echo \"drop outer ${self.label}\"; }\n}\nfn go(): void {\n  o = Outer.new();\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
         );
         assert_eq!(
             r.stdout,
@@ -7167,7 +7167,7 @@ mod tests {
         // `destruct`; its contained `Leaf`s do, and fire a, b, c (index order) when the list dies. The
         // construction-temp releases make the list the sole owner, so each element is at refcount 1.
         let r = run(
-            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${tag}\"; }\n}\nfn go(): void {\n  items = [Leaf.new(\"a\"), Leaf.new(\"b\"), Leaf.new(\"c\")];\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
+            "class Leaf {\n  tag: string\n  fn new(tag: string): Leaf { return Leaf { tag: tag }; }\n  destruct { echo \"drop ${self.tag}\"; }\n}\nfn go(): void {\n  items = [Leaf.new(\"a\"), Leaf.new(\"b\"), Leaf.new(\"c\")];\n  echo \"built\";\n}\necho \"start\";\ngo();\necho \"end\";\n",
         );
         assert_eq!(r.stdout, "start\nbuilt\ndrop a\ndrop b\ndrop c\nend\n");
         assert_eq!(r.exit_code, 0);
@@ -7181,7 +7181,7 @@ mod tests {
         // statement). The compiler emits a destructor-aware `Op::Drop` of the receiver / discarded
         // register where there was none before.
         let r = run(
-            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${name}\"; }\n  destruct { echo \"close ${name}\"; }\n}\necho \"start\";\nR.new(\"a\").use_it();\nR.new(\"b\");\necho \"end\";\n",
+            "class R {\n  name: string\n  fn new(name: string): R { return R { name: name }; }\n  fn use_it(): void { echo \"use ${self.name}\"; }\n  destruct { echo \"close ${self.name}\"; }\n}\necho \"start\";\nR.new(\"a\").use_it();\nR.new(\"b\");\necho \"end\";\n",
         );
         assert_eq!(r.stdout, "start\nuse a\nclose a\nclose b\nend\n");
         assert_eq!(r.exit_code, 0);
@@ -7223,7 +7223,7 @@ mod tests {
     #[test]
     fn class_constructor_method_and_field_access() {
         let r = run(
-            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return v * 2; }\n}\nb = Box.new(21);\necho b.doubled();\necho b.v;\n",
+            "class Box {\n  v: int\n  fn new(v: int): Box { return Box { v: v }; }\n  fn doubled(): int { return self.v * 2; }\n}\nb = Box.new(21);\necho b.doubled();\necho b.v;\n",
         );
         assert_eq!(r.stdout, "42\n21\n");
         assert_eq!(r.exit_code, 0);
@@ -7232,7 +7232,7 @@ mod tests {
     #[test]
     fn method_takes_arguments_alongside_fields() {
         let r = run(
-            "class Counter {\n  base: int\n  fn new(base: int): Counter { return Counter { base: base }; }\n  fn plus(n: int): int { return base + n; }\n}\nc = Counter.new(10);\necho c.plus(5);\n",
+            "class Counter {\n  base: int\n  fn new(base: int): Counter { return Counter { base: base }; }\n  fn plus(n: int): int { return self.base + n; }\n}\nc = Counter.new(10);\necho c.plus(5);\n",
         );
         assert_eq!(r.stdout, "15\n");
     }
@@ -7249,7 +7249,7 @@ mod tests {
     fn operator_trait_overloads_plus() {
         // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8).
         let r = run(
-            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: amount + other.amount, currency: currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
+            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
         );
         assert_eq!(r.stdout, "8\nUSD\n");
         assert_eq!(r.exit_code, 0);
@@ -7267,7 +7267,7 @@ mod tests {
         // `impl Equatable` routes `==`/`!=` to `eq`; `eq` here ignores `tag`, and `!=` negates the
         // returned bool through the frame's return transform.
         let r = run(
-            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
+            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return self.amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
         );
         assert_eq!(r.stdout, "true\nfalse\nfalse\n");
         assert_eq!(r.exit_code, 0);
@@ -7278,7 +7278,7 @@ mod tests {
         // `impl Comparable` routes `< <= > >=` to `compare`; the returned `Ordering` is mapped to
         // each operator's bool via the frame's return transform.
         let r = run(
-            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
+            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return self.amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
         );
         assert_eq!(r.stdout, "true\nfalse\ntrue\nfalse\n");
         assert_eq!(r.exit_code, 0);
@@ -7337,7 +7337,7 @@ mod tests {
     fn index_dispatches_to_index_trait() {
         // `inv[i]` routes to the class's `Index::get`, pushing a call frame `[recv, index]`.
         let r = run(
-            "class Inv {\n  items: list\n  fn new(items: list): Inv { return Inv { items: items }; }\n  impl Index {\n    fn get(i: int): int { return items[i]; }\n  }\n}\necho Inv.new([7, 8, 9])[2];\n",
+            "class Inv {\n  items: list\n  fn new(items: list): Inv { return Inv { items: items }; }\n  impl Index {\n    fn get(i: int): int { return self.items[i]; }\n  }\n}\necho Inv.new([7, 8, 9])[2];\n",
         );
         assert_eq!(r.stdout, "9\n");
         assert_eq!(r.exit_code, 0);
@@ -7392,7 +7392,7 @@ mod tests {
     fn len_dispatches_to_length_trait() {
         // `len(o)` routes to the class's `Length::len`, pushing a receiver-only call frame.
         let r = run(
-            "class Stack {\n  items: list\n  fn new(items: list): Stack { return Stack { items: items }; }\n  impl Length {\n    fn len(): int { return items.len(); }\n  }\n}\necho Stack.new([1, 2, 3]).len();\n",
+            "class Stack {\n  items: list\n  fn new(items: list): Stack { return Stack { items: items }; }\n  impl Length {\n    fn len(): int { return self.items.len(); }\n  }\n}\necho Stack.new([1, 2, 3]).len();\n",
         );
         assert_eq!(r.stdout, "3\n");
         assert_eq!(r.exit_code, 0);
@@ -7402,7 +7402,7 @@ mod tests {
     fn echo_dispatches_to_display_trait() {
         // `echo o` and `"{o}"` route to the class's `Display::to_string` (the `Stringify` op).
         let r = run(
-            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#${n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is ${p}\";\n",
+            "class P {\n  n: int\n  fn new(n: int): P { return P { n: n }; }\n  impl Display {\n    fn to_string(): string { return \"P#${self.n}\"; }\n  }\n}\np = P.new(7);\necho p;\necho \"it is ${p}\";\n",
         );
         assert_eq!(r.stdout, "P#7\nit is P#7\n");
         assert_eq!(r.exit_code, 0);
@@ -7458,7 +7458,7 @@ mod tests {
     fn for_dispatches_to_iterable_trait() {
         // `for x in o` routes to the class's `Iterable::iter`, iterating its returned list.
         let r = run(
-            "class Bag {\n  items: list\n  fn new(items: list): Bag { return Bag { items: items }; }\n  impl Iterable {\n    fn iter(): list { return items; }\n  }\n}\nmut total = 0;\nfor x in Bag.new([1, 2, 3]) { total = total + x; }\necho total;\n",
+            "class Bag {\n  items: list\n  fn new(items: list): Bag { return Bag { items: items }; }\n  impl Iterable {\n    fn iter(): list { return self.items; }\n  }\n}\nmut total = 0;\nfor x in Bag.new([1, 2, 3]) { total = total + x; }\necho total;\n",
         );
         assert_eq!(r.stdout, "6\n");
         assert_eq!(r.exit_code, 0);
@@ -7575,7 +7575,7 @@ mod tests {
         // The `fn(it) => it.price * it.qty` closure captures nothing enclosing, so it compiles
         // even though it is defined inside a method (true upvalue capture stays unsupported).
         let r = run(
-            "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return items.map(fn(it) => it.price * it.qty).sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
+            "struct Item { price: float qty: int }\nclass Cart {\n  items: List<Item>\n  fn new(items: List<Item>): Cart { return Cart { items: items }; }\n  fn total(): float { return self.items.map(fn(it) => it.price * it.qty).sum(); }\n}\nc = Cart.new([Item { price: 2.5, qty: 4 }, Item { price: 1.0, qty: 3 }]);\necho c.total();\n",
         );
         assert_eq!(r.stdout, "13.0\n");
         assert_eq!(r.exit_code, 0);
@@ -7767,7 +7767,7 @@ mod tests {
         let source = Source::new(
             SourceId::FIRST,
             "t.noe",
-            "enum Status { Pending; Paid; }\nclass Order {\n  id: int\n  mut status: Status\n  fn new(id: int): Order { return Order { id: id, status: Status.Pending }; }\n  fn tag(): int { return id; }\n}\no = Order.new(7);\necho o.tag();\n",
+            "enum Status { Pending; Paid; }\nclass Order {\n  id: int\n  mut status: Status\n  fn new(id: int): Order { return Order { id: id, status: Status.Pending }; }\n  fn tag(): int { return self.id; }\n}\no = Order.new(7);\necho o.tag();\n",
         );
         let lexed = lex(&source);
         let parsed = parse(&source, &lexed.tokens);

@@ -12,7 +12,7 @@
 // expect: exit 0
 class Counter {
     pub n: int
-    destruct { echo "drop counter ${n}"; }
+    destruct { echo "drop counter ${self.n}"; }
 }
 
 fn run(): void {

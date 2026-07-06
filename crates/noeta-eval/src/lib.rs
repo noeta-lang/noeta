@@ -1273,12 +1273,7 @@ impl Interpreter {
         for obj in &survivors {
             if let Some(body) = obj.def.destructor.clone() {
                 let scope = Scope::child(&self.scope);
-                {
-                    let slots = obj.slots.borrow();
-                    for (spec, field) in obj.def.fields.iter().zip(slots.iter()) {
-                        scope.declare(spec.name.clone(), field.clone(), false);
-                    }
-                }
+                // Only `self` is in scope (EX.1 — member access is explicit: `self.field`).
                 scope.declare("self".to_string(), Value::Object(obj.clone()), false);
                 let saved = std::mem::replace(&mut self.scope, scope);
                 let _ = self.exec_ir_fn_body(&body);
@@ -1415,14 +1410,7 @@ impl Interpreter {
         //    part of any expression's value, so they are swallowed at this boundary.
         if let Some(body) = obj.def.destructor.clone() {
             let scope = Scope::child(&self.scope);
-            {
-                // Bind the fields into the destructor scope, then release the borrow before running
-                // the body (which may re-enter and read/mutate the same instance via `self`).
-                let slots = obj.slots.borrow();
-                for (spec, field) in obj.def.fields.iter().zip(slots.iter()) {
-                    scope.declare(spec.name.clone(), field.clone(), false);
-                }
-            }
+            // Only `self` is in scope (EX.1 — member access is explicit: `self.field`).
             scope.declare("self".to_string(), Value::Object(obj.clone()), false);
             let saved = std::mem::replace(&mut self.scope, scope);
             let _ = self.exec_ir_fn_body(&body);
@@ -5380,7 +5368,7 @@ mod tests {
         // `a + b` on a class implementing `Add` dispatches to its `add` method (M1.8); the VM
         // reproduces this identically (see noeta-vm), guarded by the differential oracle.
         let out = run(
-            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: amount + other.amount, currency: currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
+            "class Money {\n  amount: int\n  currency: string\n  fn new(a: int, c: string): Money { return Money { amount: a, currency: c }; }\n  impl Add {\n    fn add(other: Money): Money { return Money { amount: self.amount + other.amount, currency: self.currency }; }\n  }\n}\na = Money.new(5, \"USD\");\nb = Money.new(3, \"USD\");\nt = a + b;\necho t.amount;\necho t.currency;\n",
         );
         assert_eq!(out.stdout, "8\nUSD\n");
         assert_eq!(out.exit_code, 0);
@@ -5391,7 +5379,7 @@ mod tests {
         // `impl Equatable` routes `==`/`!=` to `eq` (here ignoring `tag`); `!=` negates. The VM
         // reproduces this identically (see noeta-vm), guarded by the differential oracle.
         let out = run(
-            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
+            "class M {\n  amount: int\n  tag: int\n  fn new(a: int, t: int): M { return M { amount: a, tag: t }; }\n  impl Equatable {\n    fn eq(other: M): bool { return self.amount == other.amount; }\n  }\n}\na = M.new(5, 1);\nb = M.new(5, 2);\necho a == b;\necho a != b;\necho a == M.new(9, 1);\n",
         );
         assert_eq!(out.stdout, "true\nfalse\nfalse\n");
         assert_eq!(out.exit_code, 0);
@@ -5402,7 +5390,7 @@ mod tests {
         // `impl Comparable` routes `< <= > >=` to `compare` (delegating to the built-in primitive
         // `.compare()`); the returned `Ordering` is mapped to each operator's bool.
         let out = run(
-            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
+            "class M {\n  amount: int\n  fn new(a: int): M { return M { amount: a }; }\n  impl Comparable {\n    fn compare(other: M): Ordering { return self.amount.compare(other.amount); }\n  }\n}\na = M.new(5);\nb = M.new(8);\necho a < b;\necho a > b;\necho a <= b;\necho a >= b;\n",
         );
         assert_eq!(out.stdout, "true\nfalse\ntrue\nfalse\n");
         assert_eq!(out.exit_code, 0);
@@ -5491,7 +5479,7 @@ mod tests {
         // last-use semantics `lang run` has, which the superseded AST-walk session never produced.
         let mut session = Session::new();
         session.eval(&program_of(
-            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; } }",
         ));
         let out = session.eval(&program_of(
             "fn use_it(): void { mut r = Res.new(1); echo \"using\"; }\nuse_it();",
@@ -5503,7 +5491,7 @@ mod tests {
     fn session_meta_commands_drop_type_bindings_reset() {
         let mut session = Session::new();
         session.eval(&program_of(
-            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; } }",
         ));
         session.eval(&program_of("mut r = Res.new(7);"));
         session.eval(&program_of("x = 42;"));
@@ -5550,7 +5538,7 @@ mod tests {
         // `:drop` of the same object would see refcount > 1 and skip its destructor.
         let mut session = Session::new();
         session.eval(&program_of(
-            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${id}\"; } }",
+            "class Res { id: int\n  fn new(id: int): Res { return Res { id: id }; }\n  destruct { echo \"drop ${self.id}\"; } }",
         ));
         session.eval(&program_of("mut a = Res.new(1);"));
         // Type it (and, separately, echo it) — both go through the sentinel.
@@ -5815,13 +5803,13 @@ mod tests {
 
     #[test]
     fn class_constructor_and_instance_method() {
-        let src = "class Box { v: int fn new(v: int): Box { return Box { v: v }; } fn doubled(): int { return v * 2; } } b = Box.new(21); echo b.doubled(); echo b.v;";
+        let src = "class Box { v: int fn new(v: int): Box { return Box { v: v }; } fn doubled(): int { return self.v * 2; } } b = Box.new(21); echo b.doubled(); echo b.v;";
         assert_eq!(run(src).stdout, "42\n21\n");
     }
 
     #[test]
     fn method_takes_arguments_alongside_fields() {
-        let src = "class Counter { base: int fn new(base: int): Counter { return Counter { base: base }; } fn plus(n: int): int { return base + n; } } c = Counter.new(10); echo c.plus(5);";
+        let src = "class Counter { base: int fn new(base: int): Counter { return Counter { base: base }; } fn plus(n: int): int { return self.base + n; } } c = Counter.new(10); echo c.plus(5);";
         assert_eq!(run(src).stdout, "15\n");
     }
 
@@ -5842,13 +5830,13 @@ mod tests {
     fn destructors_run_in_reverse_declaration_order_at_program_end() {
         // A `destruct` block runs when the last reference to an instance drops; top-level
         // bindings are destroyed at program end in reverse declaration order.
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } a = R.new(\"a\"); b = R.new(\"b\"); echo \"body\";";
         assert_eq!(run(src).stdout, "body\nclose b\nclose a\n");
     }
 
     #[test]
     fn reassignment_destroys_the_displaced_instance() {
-        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
+        let src = "class R { name: string fn new(name: string): R { return R { name: name }; } destruct { echo \"close ${self.name}\"; } } mut x = R.new(\"first\"); x = R.new(\"second\"); echo \"mid\";";
         assert_eq!(run(src).stdout, "close first\nmid\nclose second\n");
     }
 

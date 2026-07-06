@@ -727,15 +727,9 @@ impl Interpreter {
             noeta_ir::Atom::Var { name, span } => match self.scope.lookup(name) {
                 Some(value) => Ok(value),
                 None => {
-                    // Not a local: resolve a bare field read live off the current method's `self`,
-                    // mirroring the VM (fields are read off the receiver, not a scope snapshot). A
-                    // bare *write* never reaches here — it declares a local — so field mutation stays
-                    // the explicit `self.f = v`.
-                    if let Some(Value::Object(object)) = self.scope.lookup("self")
-                        && let Some(value) = object.field(name)
-                    {
-                        return Ok(value);
-                    }
+                    // Not a local. A bare name inside a method NEVER resolves to a field
+                    // (prelude-redesign EX.1 — member access is explicit: `self.field`), so a miss
+                    // here is a plain unknown name, exactly as the VM reports it.
                     self.diagnostics.push(Diagnostic::error(
                         DiagnosticCode::UnknownName,
                         *span,

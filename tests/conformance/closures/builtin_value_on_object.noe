@@ -14,7 +14,7 @@ class Stack {
 
     impl Length {
         fn len(): int {
-            return items.len();
+            return self.items.len();
         }
     }
 }

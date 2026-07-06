@@ -1020,7 +1020,6 @@ enum Resolved {
     /// The method receiver (`self`) — register 0 in a method body.
     SelfRecv,
     /// A field of the method receiver, loaded via `LoadField` from register 0.
-    Field,
     /// An upvalue captured from an enclosing function (read via its index). Reassignment goes
     /// through `binding`, which checks the upvalue's mutability separately.
     Upvalue(u16),
@@ -1178,13 +1177,12 @@ impl<'m> FnCompiler<'m> {
         // Inside a method, `self` and the class's fields resolve against the receiver. Locals
         // (parameters) are checked first, so a parameter shadows a same-named field — matching
         // the tree-walker, which binds fields, then `self`, then parameters (last wins).
-        if let Some(ctx) = &self.method {
+        if let Some(_ctx) = &self.method {
             if name == "self" {
                 return Resolved::SelfRecv;
             }
-            if ctx.fields.contains(name) {
-                return Resolved::Field;
-            }
+            // A bare name inside a method NEVER resolves to a field (prelude-redesign EX.1 —
+            // member access is explicit): `self.field` reads it; a bare name is a local/global.
         }
         // A name captured from an enclosing function resolves to an upvalue cell. Checked before
         // globals/prelude: the tree-walker captures the nearest lexical binding, so a same-named
@@ -2128,19 +2126,6 @@ impl<'m> FnCompiler<'m> {
             Resolved::Upvalue(index) => {
                 let dst = self.alloc_reg();
                 self.code.push(Op::UpvalueGet { dst, index });
-                Ok(dst)
-            }
-            Resolved::Field => {
-                let dst = self.alloc_reg();
-                let cache = self.module.next_cache_slot();
-                let field = self.module.intern_name(name);
-                self.code.push(Op::LoadField {
-                    dst,
-                    obj: 0,
-                    field,
-                    span,
-                    cache,
-                });
                 Ok(dst)
             }
             Resolved::Global => {

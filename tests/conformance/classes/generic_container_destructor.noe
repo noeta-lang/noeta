@@ -14,7 +14,7 @@
 class Res {
     pub id: int
     fn new(n: int): Res { return Res { id: n } }
-    destruct { echo "drop ${id}" }
+    destruct { echo "drop ${self.id}" }
 }
 
 struct Box<T> { value: T }

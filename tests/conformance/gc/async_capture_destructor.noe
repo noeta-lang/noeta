@@ -11,7 +11,7 @@ use std.task.{sleep}
 class Res {
     pub tag: string
     fn new(t: string): Res { return Res { tag: t } }
-    destruct { echo "drop ${tag}" }
+    destruct { echo "drop ${self.tag}" }
 }
 async fn work(): int {
     r = Res.new("async")

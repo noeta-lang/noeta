@@ -16,7 +16,7 @@ class Money {
 
     impl Equatable {
         fn eq(other: Money): bool {
-            return amount == other.amount;
+            return self.amount == other.amount;
         }
     }
 }

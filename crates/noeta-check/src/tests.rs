@@ -174,7 +174,7 @@ fn imported_type_annotation_is_not_flagged() {
 fn generic_parameter_is_a_legal_type() {
     // A class's `<T>` is an in-scope type within its own field and method annotations, but is
     // erased — unknown outside the declaration.
-    let src = "class Box<T> {\n  value: T\n  fn get(): T { return value; }\n}\n";
+    let src = "class Box<T> {\n  value: T\n  fn get(): T { return self.value; }\n}\n";
     assert!(codes(src).is_empty());
 }
 
@@ -242,7 +242,7 @@ fn literal_infers_its_type_arguments_from_fields() {
 fn instance_keeps_its_type_argument() {
     // `Box<int>` tracks its element type through the instance: `b.get()` is `int` (passes where an
     // `int` is wanted), while `Box<string>.get()` is `string` (a mismatch against `int`).
-    let cls = "class Box<T> { value: T\n  fn new(v: T): Box<T> { return Box { value: v }; }\n  fn get(): T { return value; } }\n\
+    let cls = "class Box<T> { value: T\n  fn new(v: T): Box<T> { return Box { value: v }; }\n  fn get(): T { return self.value; } }\n\
                fn need_int(n: int): int { return n; }\n";
     let ok = format!("{cls}b = Box.new(1);\necho need_int(b.get());\n");
     assert!(codes(&ok).is_empty());
@@ -692,7 +692,7 @@ fn structured_attribute_arg_struct_field_mismatch() {
 fn invoke_checks_clean_and_yields_a_result() {
     // `invoke(recv, name, args)` synthesizes `Result<dyn, dyn>`, so its value matches `Ok`/`Err`
     // arms without diagnostics. The name/args are runtime-checked (no static constraint here).
-    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return w; }\n}\nr = invoke(Shape.new(2), \"area\", []);\necho match r { Ok(_) => \"y\", Err(_) => \"n\" };\n";
+    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return self.w; }\n}\nr = invoke(Shape.new(2), \"area\", []);\necho match r { Ok(_) => \"y\", Err(_) => \"n\" };\n";
     assert!(codes(src).is_empty());
 }
 
@@ -700,7 +700,7 @@ fn invoke_checks_clean_and_yields_a_result() {
 fn invoke_result_is_a_concrete_result_not_a_hole() {
     // The result is a concrete `Result<dyn, dyn>`, not a deferring hole, so passing it where an
     // `int` is expected is a static error (E0007) — proof the synth is precise, not gradual.
-    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return w; }\n}\nfn need_int(n: int): int { return n; }\necho need_int(invoke(Shape.new(1), \"area\", []));\n";
+    let src = "class Shape {\n  w: int\n  fn new(w: int): Shape { return Shape { w: w }; }\n  fn area(): int { return self.w; }\n}\nfn need_int(n: int): int { return n; }\necho need_int(invoke(Shape.new(1), \"area\", []));\n";
     assert_eq!(codes(src), ["E0007"]);
 }
 
@@ -1472,7 +1472,7 @@ fn call_above_maximum_arity_is_rejected() {
 fn method_default_omitted_at_call_is_clean() {
     // An instance method may carry a default; omitting it at the call site is well-typed.
     let src = "class C {\n  start: int\n  fn from(start: int): C { return C { start: start }; }\n  \
-               fn bump(by: int = 1): int { return start + by; }\n}\n\
+               fn bump(by: int = 1): int { return self.start + by; }\n}\n\
                d = C.from(10);\necho d.bump();\necho d.bump(5);\n";
     assert!(codes(src).is_empty());
 }

@@ -2145,13 +2145,11 @@ impl Checker {
 
     fn check_struct(&mut self, r: &StructDecl, env: &mut Env) {
         let saved = self.enter_type_params(&r.type_params);
-        let mut fields: Vec<(String, Type)> = r
-            .fields
-            .iter()
-            .map(|f| (f.name.clone(), field_type(&f.ty)))
-            .collect();
-        // Bind `self` too, so an explicit `self.field` types as precisely as a bare `field` read.
-        fields.push(("self".to_string(), self_type(&r.name, &r.type_params)));
+        // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
+        // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
+        // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
+        let fields: Vec<(String, Type)> =
+            vec![("self".to_string(), self_type(&r.name, &r.type_params))];
         for f in &r.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
@@ -2184,13 +2182,11 @@ impl Checker {
 
     fn check_class(&mut self, c: &ClassDecl, env: &mut Env) {
         let saved = self.enter_type_params(&c.type_params);
-        let mut fields: Vec<(String, Type)> = c
-            .fields
-            .iter()
-            .map(|f| (f.name.clone(), field_type(&f.ty)))
-            .collect();
-        // Bind `self` too, so an explicit `self.field` types as precisely as a bare `field` read.
-        fields.push(("self".to_string(), self_type(&c.name, &c.type_params)));
+        // Only `self` is bound in a method body (prelude-redesign EX.1 — member access is
+        // explicit): `self.field` types through `synth_member`; a bare field name is an unknown
+        // name with a targeted hint (see the `Expr::Ident` fallback in `synth`).
+        let fields: Vec<(String, Type)> =
+            vec![("self".to_string(), self_type(&c.name, &c.type_params))];
         for f in &c.fields {
             self.check_type_opt(&f.ty);
             self.check_attrs(&f.attrs, TargetKind::Field);
@@ -2795,7 +2791,7 @@ impl Checker {
                 }
                 Type::String
             }
-            Expr::Ident { name, .. } => lookup(env, name)
+            Expr::Ident { name, span } => match lookup(env, name)
                 .or_else(|| {
                     self.functions.get(name).map(|sig| Type::Fn {
                         params: Vec::new(),
@@ -2808,8 +2804,33 @@ impl Checker {
                         params: Vec::new(),
                         ret: Box::new(Type::Dyn),
                     })
-                })
-                .unwrap_or(Type::Unknown),
+                }) {
+                Some(t) => t,
+                None => {
+                    // A bare name inside a type's own body that names one of its FIELDS is a
+                    // targeted static error (prelude-redesign EX.1): member access is explicit, so
+                    // the field is only reachable as `self.name`. Any other unknown ident stays
+                    // tolerated here (deferred to the runtime E0005, as before).
+                    if let Some(ct) = self.current_type.clone()
+                        && self
+                            .records
+                            .get(&ct)
+                            .is_some_and(|fs| fs.iter().any(|(f, _)| f == name))
+                    {
+                        self.diags.push(
+                            Diagnostic::error(
+                                DiagnosticCode::UnknownName,
+                                *span,
+                                format!("cannot find `{name}` in this scope"),
+                            )
+                            .with_help(format!(
+                                "member access is explicit — the field is `self.{name}`"
+                            )),
+                        );
+                    }
+                    Type::Unknown
+                }
+            },
             Expr::Unary { op, operand, span } => {
                 // A negated fixed-width literal (`-128i8`, `-1i32`): check against the *signed*
                 // negative range here, so the inner literal's positive-range check does not fire a
@@ -4595,7 +4616,14 @@ impl Checker {
                 .cloned()
                 .zip(recv_args.iter().cloned())
                 .collect();
-            let pset: HashSet<String> = params.into_iter().collect();
+            // Inside the generic type's OWN body (`self.value` in a method of `Box<T>`), `T` is in
+            // scope and must stay `T` — erasing it to `dyn` would break `fn get(): T { return
+            // self.value }` (prelude-redesign EX.1: this path now serves what the retired bare
+            // field read did). Only parameters NOT in scope erase.
+            let pset: HashSet<String> = params
+                .into_iter()
+                .filter(|p| !self.type_params.contains_key(p))
+                .collect();
             return erase_type_params(apply_subst(&ty, &subst), &pset);
         }
         // A field/member access on a `dyn` (or hole) receiver stays deferred.

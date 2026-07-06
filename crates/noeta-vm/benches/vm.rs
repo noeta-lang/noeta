@@ -512,7 +512,7 @@ fn map_rmw_src(n: usize) -> String {
 /// n. Parameterized over n so the scaling is visible.
 fn list_index_write_src(n: usize) -> String {
     format!(
-        "fn build(): int {{\n    mut xs = 0..{n};\n    for i in 0..{n} {{\n        xs[i] = i * 2;\n    }}\n    return xs.count();\n}}\necho build();\n"
+        "fn build(): int {{\n    mut xs = 0..{n};\n    for i in 0..{n} {{\n        xs[i] = i * 2;\n    }}\n    return xs.len();\n}}\necho build();\n"
     )
 }
 
@@ -522,7 +522,7 @@ fn list_index_write_src(n: usize) -> String {
 /// O(n). Parameterized over n so the scaling is visible.
 fn set_accumulate_src(n: usize) -> String {
     format!(
-        "fn build(): int {{\n    mut s = #{{}};\n    for i in 0..{n} {{\n        s = s.add(i);\n    }}\n    return s.count();\n}}\necho build();\n"
+        "fn build(): int {{\n    mut s = #{{}};\n    for i in 0..{n} {{\n        s = s.add(i);\n    }}\n    return s.len();\n}}\necho build();\n"
     )
 }
 
@@ -553,7 +553,7 @@ fn set_accumulate_global_src(n: usize) -> String {
 fn member_dispatch_src(n: usize) -> String {
     format!(
         "class Counter {{\n    n: int\n    \
-            fn bump(): int {{ return n + 1; }}\n\
+            fn bump(): int {{ return self.n + 1; }}\n\
          }}\n\
          mut total = 0;\n\
          c = Counter {{ n: 1 }};\n\

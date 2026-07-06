@@ -10,7 +10,7 @@ Type parameters `<T>`, `<A, B>` go on functions, structs, classes, and enums. Th
 class Box<T> {
     pub value: T
     fn new(v: T): Box<T> { return Box { value: v } }
-    fn get(): T { return value }
+    fn get(): T { return self.value }
 }
 
 struct Pair<A, B> { first: A  second: B }
@@ -66,10 +66,10 @@ class Money {
     amount: int
     fn new(a: int): Money { return Money { amount: a } }
     impl Add {
-        fn add(other: Money): Money { return Money { amount: amount + other.amount } }
+        fn add(other: Money): Money { return Money { amount: self.amount + other.amount } }
     }
     impl Comparable {
-        fn compare(other: Money): Ordering { return amount.compare(other.amount) }
+        fn compare(other: Money): Ordering { return self.amount.compare(other.amount) }
     }
 }
 echo (Money.new(3) < Money.new(5))   // true

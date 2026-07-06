@@ -21,13 +21,13 @@ class Order {
     }
 
     fn total(): float {
-        return items.map(fn(it) => it.price * it.qty).sum();
+        return self.items.map(fn(it) => it.price * it.qty).sum();
     }
 
     fn label(): string {
-        return match status {
-            Status.Pending => "Order #${id} awaiting payment",
-            Status.Paid => "Order #${id} paid",
+        return match self.status {
+            Status.Pending => "Order #${self.id} awaiting payment",
+            Status.Paid => "Order #${self.id} paid",
         };
     }
 }
