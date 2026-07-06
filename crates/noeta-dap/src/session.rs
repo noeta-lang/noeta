@@ -103,7 +103,8 @@ pub fn run_compiled(compiled: &Compiled, debugger: Option<Box<dyn Debugger>>) ->
         Err(err) => return RunOutput::failed(format!("noeta: cannot start executor: {err}\n"), 2),
     };
 
-    let result = VmBackend::new().run_module_debug(&compiled.module, host, executor, debugger);
+    let (result, trace) =
+        VmBackend::new().run_module_debug(&compiled.module, host, executor, debugger);
 
     let mut chunks = Vec::new();
     if !result.stdout.is_empty() {
@@ -116,6 +117,14 @@ pub fn run_compiled(compiled: &Compiled, debugger: Option<Box<dyn Debugger>>) ->
         chunks.push(OutputChunk {
             category: "stderr",
             text: render_all(&compiled.sources, result.diagnostics.iter()),
+        });
+    }
+    // The abort's stack trace, after the diagnostic it belongs to (same rendering + same "only when
+    // there is a call chain" rule as `noeta run`).
+    if trace.len() >= 2 {
+        chunks.push(OutputChunk {
+            category: "stderr",
+            text: noeta_vm::render_trace(&trace, &compiled.sources),
         });
     }
     RunOutput {

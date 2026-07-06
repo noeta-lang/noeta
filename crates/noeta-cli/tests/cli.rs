@@ -1027,3 +1027,37 @@ fn repl_recovers_from_a_bad_entry() {
         .stdout(predicate::str::contains("ok"))
         .stderr(predicate::str::contains("E0003"));
 }
+
+// --- abort stack traces -----------------------------------------------------------
+
+#[test]
+fn a_nested_panic_prints_a_stack_trace() {
+    let file = temp_program(
+        "trace_nested",
+        "fn inner(): int {\n    panic(\"boom\")\n}\nfn outer(): int {\n    return inner()\n}\nmut r = outer()\necho r\n",
+    );
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains(
+            "stack trace (most recent call first):",
+        ))
+        .stderr(predicate::str::contains("at inner (").and(predicate::str::contains(":2)")))
+        .stderr(predicate::str::contains("at outer (").and(predicate::str::contains(":5)")))
+        .stderr(predicate::str::contains("at main (").and(predicate::str::contains(":7)")));
+}
+
+#[test]
+fn a_top_level_panic_prints_no_stack_trace() {
+    // A single-frame abort's trace would only repeat the diagnostic's own location — omitted.
+    let file = temp_program("trace_top", "echo \"before\"\npanic(\"top\")\n");
+    lang()
+        .arg("run")
+        .arg(&file)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("panic: top"))
+        .stderr(predicate::str::contains("stack trace").not());
+}

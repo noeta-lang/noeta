@@ -197,10 +197,15 @@ fn run_program(program: &noeta_ast::Program, sources: &SourceMap) -> i32 {
     }
 
     match execute_real_host(program, &checked) {
-        Ok(result) => {
+        Ok((result, trace)) => {
             print!("{}", result.stdout);
             let _ = io::stdout().flush();
             emit_diagnostics_mapped(sources, result.diagnostics.iter());
+            // An abort's stack trace, after the diagnostic it belongs to. Only when there is a call
+            // chain to show — a single-frame trace repeats what the diagnostic's span already says.
+            if trace.len() >= 2 {
+                eprint!("{}", noeta_vm::render_trace(&trace, sources));
+            }
             result.exit_code
         }
         Err(err) => {
@@ -264,7 +269,7 @@ fn compile_real(
 fn execute_real_host(
     program: &noeta_ast::Program,
     checked: &noeta_check::Checked,
-) -> Result<noeta_backend::RunResult, String> {
+) -> Result<(noeta_backend::RunResult, Vec<noeta_vm::TraceFrame>), String> {
     let module = std::sync::Arc::new(compile_real(program, checked)?);
     // A factory that mints a fresh real host + wall-clock executor per isolate (isolates I.4b): the
     // main program gets one, and each real-thread `isolate f(args)` gets its own so a worker's disk /
@@ -837,7 +842,8 @@ fn run_one_test(setup: &[Stmt], case: &TestCase, span: Span) -> TestOutcome {
     }
 
     match execute_real_host(&program, &checked) {
-        Ok(result) => {
+        // The `@test` runner reports the failing diagnostic; the trace is a `noeta run` affordance.
+        Ok((result, _trace)) => {
             let passed = result.exit_code == 0 && result.diagnostics.is_empty();
             let message = (!passed).then(|| {
                 result

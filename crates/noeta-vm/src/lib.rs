@@ -32,6 +32,7 @@
 //! recursion over the shared `globals`/`stdout`/`diagnostics`.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -189,6 +190,21 @@ impl VmBackend {
         execute(module, Box::new(noeta_stdlib::SandboxHost::new()), false)
     }
 
+    /// [`VmBackend::run_module`] plus the abort traceback (empty for a clean run) — the sandboxed,
+    /// deterministic entry the traceback's own tests drive.
+    pub fn run_module_traced(&self, module: &Module) -> (RunResult, Vec<TraceFrame>) {
+        let mode = noeta_value::CollectorMode::Trace;
+        noeta_value::set_collector_mode(mode);
+        let mut vm = Vm::load(
+            module,
+            Box::new(noeta_stdlib::SandboxHost::new()),
+            Box::new(noeta_stdlib::SandboxExecutor::new()),
+        );
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
+    }
+
     /// Execute a module against a caller-provided [`noeta_stdlib::Host`] (M2.3). The CLI/REPL pass
     /// a real host here; the conformance harness keeps using the sandbox default via
     /// [`VmBackend::run_module`], so the differential stays deterministic.
@@ -233,7 +249,7 @@ impl VmBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
     ) -> RunResult {
-        self.run_module_debug(module, host, executor, None)
+        self.run_module_debug(module, host, executor, None).0
     }
 
     /// Like [`VmBackend::run_module_with_host_and_executor_no_jit`], but with a [`Debugger`] attached
@@ -246,12 +262,14 @@ impl VmBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
         debugger: Option<Box<dyn Debugger>>,
-    ) -> RunResult {
+    ) -> (RunResult, Vec<TraceFrame>) {
         let mode = noeta_value::CollectorMode::Trace;
         noeta_value::set_collector_mode(mode);
         let mut vm = Vm::load(module, host, executor);
         vm.debugger = debugger;
-        run_and_teardown(&mut vm, mode)
+        let result = run_and_teardown(&mut vm, mode);
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
     }
 
     /// Execute a module with **real OS-thread isolates** (isolates I.4b), CLI-only / out-of-oracle.
@@ -266,7 +284,7 @@ impl VmBackend {
         host: Box<dyn noeta_stdlib::Host>,
         executor: Box<dyn noeta_stdlib::Executor>,
         factory: IsolateFactory,
-    ) -> RunResult {
+    ) -> (RunResult, Vec<TraceFrame>) {
         noeta_value::set_collector_mode(noeta_value::CollectorMode::Trace);
         let mut vm = Vm::load(&module, host, executor);
         vm.parallel_isolates = true;
@@ -276,7 +294,12 @@ impl VmBackend {
         // isolates load through `Vm::load` and stay tier-0 (Cranelift's `JITModule` is `!Send`).
         #[cfg(feature = "jit")]
         vm.init_jit();
-        run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace)
+        let result = run_and_teardown(&mut vm, noeta_value::CollectorMode::Trace);
+        // The abort traceback (empty for a clean run) rides beside the result — `RunResult` itself
+        // stays the differential's compared unit, which the trace is deliberately not part of (yet):
+        // the oracle grows its own traceback first.
+        let trace = std::mem::take(&mut vm.abort_trace);
+        (result, trace)
     }
 
     /// Execute under an explicit cycle-collector mode (Phase 6.4 benchmark seam). Production paths
@@ -590,6 +613,51 @@ struct Vm<'m> {
     /// The attached debugger (`noeta dap`), consulted before every instruction. `None` on every
     /// non-debug run (production, differential, salsa), where it costs one predicted branch per op.
     debugger: Option<Box<dyn Debugger>>,
+    /// The **abort traceback**: the call stack captured as a fatal abort unwinds, innermost frame
+    /// first. Appended by [`Vm::run`]'s error path — each (possibly re-entrant) run contributes its
+    /// own frame stack as the abort climbs — and handed out by the host-facing entry points for the
+    /// CLI / debug adapter to render. Written **only after** an abort, so it costs the hot path
+    /// nothing; empty for a run that completes.
+    abort_trace: Vec<TraceFrame>,
+}
+
+/// One frame of an abort traceback: the function's name (`None` for an anonymous closure/thunk) and
+/// the source location it was at — the failing instruction for the innermost frame, the call site
+/// for each caller (resolved through the always-present line table). `span` is `None` where no
+/// location is known: a caller that re-entered the VM through a native call, or a frame paused in
+/// its spanless prologue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TraceFrame {
+    pub name: Option<String>,
+    pub span: Option<Span>,
+}
+
+/// Render an abort traceback for human consumption, resolving each frame's span against `sources` —
+/// the same rendering the CLI prints after a panic diagnostic and the debug adapter forwards as
+/// error output. Innermost frame first. Deep stacks (runaway recursion) are capped, with the elided
+/// count noted.
+pub fn render_trace(trace: &[TraceFrame], sources: &noeta_span::SourceMap) -> String {
+    /// The most frames a rendered traceback shows — enough for any legitimate stack, while a
+    /// stack-overflow abort with thousands of identical frames stays readable.
+    const MAX_FRAMES: usize = 64;
+    let mut out = String::from("stack trace (most recent call first):\n");
+    for frame in trace.iter().take(MAX_FRAMES) {
+        let name = frame.name.as_deref().unwrap_or("<anonymous>");
+        match frame.span {
+            Some(span) => {
+                let source = sources.source(span.source);
+                let line = source.line_col(span.start).line;
+                let _ = writeln!(out, "  at {name} ({}:{line})", source.name());
+            }
+            None => {
+                let _ = writeln!(out, "  at {name}");
+            }
+        }
+    }
+    if trace.len() > MAX_FRAMES {
+        let _ = writeln!(out, "  … and {} more frames", trace.len() - MAX_FRAMES);
+    }
+    out
 }
 
 /// Tier-1 promotion threshold: a prototype interprets until it has been entered this many times,
@@ -1552,6 +1620,7 @@ impl<'m> Vm<'m> {
             #[cfg(feature = "jit")]
             jit_frame_template: None,
             debugger: None,
+            abort_trace: Vec::new(),
         }
     }
 
@@ -2253,6 +2322,32 @@ impl<'m> Vm<'m> {
         regs.reserve(8192usize.saturating_sub(regs.len()));
         let result = self.dispatch(&mut frames, &mut regs);
         if result.is_err() {
+            // Capture this stack segment for the abort traceback, innermost frame first, before the
+            // teardown below reclaims anything. Costs nothing until an abort actually happens.
+            //
+            // Locations: a **caller** frame's saved `pc` is its resume point (a call saves `pc + 1`),
+            // so `pc - 1` is the call op and the line table resolves it to the call site. The
+            // **innermost** frame's saved `pc` is stale (it is only synced at calls), so its location
+            // comes from the abort's just-recorded diagnostic — but only for the *first* captured
+            // segment: when the abort climbs out of a re-entrant run (a closure called from inside a
+            // builtin), the outer segment's top frame has no known abort site, and a stale line would
+            // mislead; it gets `None` (name only).
+            let first_segment = self.abort_trace.is_empty();
+            for (fi, frame) in frames.iter().enumerate().rev() {
+                let chunk = &self.module.protos[frame.proto as usize];
+                let innermost = fi + 1 == frames.len();
+                let span = if innermost {
+                    first_segment
+                        .then(|| self.diagnostics.last().map(|d| d.span))
+                        .flatten()
+                } else {
+                    chunk.line_span(frame.pc.saturating_sub(1))
+                };
+                self.abort_trace.push(TraceFrame {
+                    name: chunk.name.clone(),
+                    span,
+                });
+            }
             // Phase 4.2c-ii: a panic unwinds the live frames. Before reclaiming their memory, fire
             // the `destruct` of every live destructor-bearing frame local — innermost frame first,
             // reverse-construction within each (the `frame_locals` list reversed) — so an aborting
@@ -6521,6 +6616,41 @@ mod tests {
         VmBackend::new()
             .try_run(&parsed.program)
             .expect("program should be in the M1.0 subset")
+    }
+
+    /// Run a source program through the sandboxed traced entry, returning the result + traceback.
+    fn run_traced(src: &str) -> (RunResult, Vec<TraceFrame>) {
+        let source = Source::new(SourceId::FIRST, "test.noe", src);
+        let lexed = lex(&source);
+        let parsed = parse(&source, &lexed.tokens);
+        let module = compile(&parsed.program).expect("program should compile");
+        VmBackend::new().run_module_traced(&module)
+    }
+
+    #[test]
+    fn an_abort_captures_a_stack_trace_and_a_clean_run_captures_none() {
+        // A panic three calls deep: the trace walks inner ← outer ← main, innermost first, with the
+        // failing line on the innermost frame and each caller at its call site.
+        let (result, trace) = run_traced(
+            "fn inner(): int {\n  panic(\"boom\");\n}\nfn outer(): int {\n  return inner();\n}\nouter();\n",
+        );
+        assert_eq!(result.exit_code, 1);
+        let names: Vec<Option<&str>> = trace.iter().map(|f| f.name.as_deref()).collect();
+        assert_eq!(
+            names,
+            vec![Some("inner"), Some("outer"), Some("main")],
+            "trace should be innermost-first: {trace:?}"
+        );
+        // Every frame resolved a source location (top-level programs have full line tables).
+        assert!(
+            trace.iter().all(|f| f.span.is_some()),
+            "all frames should carry spans: {trace:?}"
+        );
+
+        // A clean run leaves no trace behind.
+        let (result, trace) = run_traced("fn f(): int {\n  return 1;\n}\necho f();\n");
+        assert_eq!(result.exit_code, 0);
+        assert!(trace.is_empty(), "clean run must not trace: {trace:?}");
     }
 
     /// Compile a source program to a [`Module`] (or panic if it's outside the VM subset), for the
